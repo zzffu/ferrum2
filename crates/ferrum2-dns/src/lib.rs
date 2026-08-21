@@ -18,6 +18,7 @@ pub use application::{
     ApplicationResolveObserver, ApplicationResolveOutcome, ApplicationResolveRequest,
     ApplicationResolver, ApplicationResolverMode, DnsStrategy, DnsStrategyParseError,
     MAX_APPLICATION_RESOLVED_CANDIDATES, SystemApplicationResolveBackend,
+    TaggedServerApplicationResolveBackend,
 };
 pub use cache::{
     DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheError, DnsCacheKey, DnsCacheLookup,

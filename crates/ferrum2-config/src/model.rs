@@ -63,21 +63,31 @@ pub enum ClientOutboundConfig {
         server: SocketAddr,
         psk: Arc<MethodPsk>,
     },
-    Direct,
+    Direct {
+        domain_resolver: DirectDomainResolver,
+    },
 }
 
 impl ClientOutboundConfig {
     pub const fn server(&self) -> Option<SocketAddr> {
         match self {
             Self::Shadowsocks { server, .. } => Some(*server),
-            Self::Direct => None,
+            Self::Direct { .. } => None,
         }
     }
 
     pub fn method(&self) -> Option<TcpMethodProfile> {
         match self {
             Self::Shadowsocks { psk, .. } => Some(psk.profile()),
-            Self::Direct => None,
+            Self::Direct { .. } => None,
+        }
+    }
+
+    /// Returns the fixed resolver identity captured by one Direct outbound.
+    pub const fn direct_domain_resolver(&self) -> Option<DirectDomainResolver> {
+        match self {
+            Self::Direct { domain_resolver } => Some(*domain_resolver),
+            Self::Shadowsocks { .. } => None,
         }
     }
 }
@@ -86,7 +96,7 @@ impl std::fmt::Debug for ClientOutboundConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Shadowsocks { .. } => "ClientOutboundConfig::Shadowsocks([redacted])",
-            Self::Direct => "ClientOutboundConfig::Direct",
+            Self::Direct { .. } => "ClientOutboundConfig::Direct([redacted])",
         })
     }
 }
@@ -124,7 +134,26 @@ pub struct ServerInboundConfig {
 
 /// One validated direct server outbound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ServerOutboundConfig;
+pub struct ServerOutboundConfig {
+    pub domain_resolver: DirectDomainResolver,
+}
+
+/// Explicit fixed-endpoint resolver; `System` is never an implicit fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolverRef {
+    System,
+    DnsServer(usize),
+}
+
+/// Resolver mode captured by one Direct outbound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectDomainResolver {
+    System,
+    DnsServer {
+        server: usize,
+        strategy: DnsStrategy,
+    },
+}
 
 /// Explicit supported configuration versions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -636,10 +665,25 @@ pub struct DnsInboundConfig {
 /// One validated tagged DNS upstream.
 pub struct DnsServerConfig {
     pub transport: DnsTransport,
-    pub address: SocketAddr,
+    pub target: TargetAddr,
+    /// Ordered sockets produced by explicit bootstrap resolution.
+    /// Empty for numeric and deferred-domain endpoints.
+    pub resolved_targets: Box<[SocketAddr]>,
+    pub endpoint_mode: DnsEndpointMode,
     pub server_name: Option<Box<str>>,
     pub path: Option<Box<str>>,
     pub detour: Option<EgressPlanHandle>,
+}
+
+/// Closed resolution mode retained after a DNS upstream is materialized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsEndpointMode {
+    Numeric,
+    ClientResolved {
+        resolver: ResolverRef,
+        strategy: DnsStrategy,
+    },
+    DeferredToDetour,
 }
 
 /// Closed DNS upstream transports.

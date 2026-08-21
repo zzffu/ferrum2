@@ -2,22 +2,28 @@ use std::future::Future;
 use std::io;
 #[cfg(test)]
 use std::net::Ipv4Addr;
+#[cfg(test)]
 use std::net::SocketAddr;
 #[cfg(test)]
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ferrum2_config::{DnsQueryType, DnsServerConfig, DnsTransport};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
+#[cfg(test)]
 use ferrum2_dns::{
-    ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveRequest,
+    ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveRequest, DnsError,
+    DnsProxy,
+};
+use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsError, DnsIoFuture, DnsProxy, DnsTaskRegistrar, DnsUpstreamSpec,
-    DnsUpstreamTransport,
+    DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
@@ -27,7 +33,7 @@ use tokio::sync::mpsc;
 use super::egress::{ClientEgressEngine, ClientRequestOrigin, ClientUdpAssociation};
 use super::tokio_io::TokioFramed;
 
-type Packet = (Vec<u8>, SocketAddr);
+type Packet = Vec<u8>;
 type ReserveFuture = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>> + Send>,
 >;
@@ -36,16 +42,19 @@ type DnsUdpPool = Arc<Mutex<Vec<IdleDnsUdp>>>;
 /// Configured application resolver backend bound to the one prepared client
 /// DNS proxy graph. Absence or shutdown is terminal and never reaches system
 /// DNS.
+#[cfg(test)]
 pub(super) struct ClientConfiguredApplicationBackend {
     proxy: Arc<OnceLock<Arc<DnsProxy>>>,
 }
 
+#[cfg(test)]
 impl ClientConfiguredApplicationBackend {
     pub(super) fn new(proxy: Arc<OnceLock<Arc<DnsProxy>>>) -> Self {
         Self { proxy }
     }
 }
 
+#[cfg(test)]
 impl ApplicationResolveBackend for ClientConfiguredApplicationBackend {
     fn resolve<'a>(
         &'a self,
@@ -81,7 +90,8 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
             };
             DnsUpstreamSpec {
                 transport,
-                address: server.address,
+                target: server.target.clone(),
+                resolved_targets: server.resolved_targets.clone(),
                 detour: server.detour.clone(),
             }
         })
@@ -125,6 +135,7 @@ impl ClientDnsEgress {
 #[derive(Eq, PartialEq)]
 struct DnsUdpPoolKey {
     plan: Option<EgressPlanSnapshot>,
+    target: TargetAddr,
 }
 
 struct IdleDnsUdp {
@@ -147,15 +158,16 @@ impl PooledDnsUdp {
         &mut self,
         engine: &ClientEgressEngine,
         plan: Option<&EgressPlanSnapshot>,
-        destination: SocketAddr,
+        destination: TargetAddr,
         packet: Vec<u8>,
         responses: &mpsc::Sender<Packet>,
     ) -> io::Result<bool> {
         self.begin_request();
-        let (response, fully_reusable) = self
-            .idle
-            .as_mut()
-            .expect("pooled DNS UDP owner")
+        let idle = self.idle.as_mut().expect("pooled DNS UDP owner");
+        if idle.key.target != destination {
+            return Err(invalid_target());
+        }
+        let (response, fully_reusable) = idle
             .association
             .relay(engine, plan, destination, packet)
             .await?;
@@ -196,14 +208,13 @@ fn take_dns_udp(
 impl DnsEgress for ClientDnsEgress {
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
         let engine = Arc::clone(&self.engine);
         Box::pin(async move {
-            let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
             let queue = tasks.own(DnsEgressResourceKind::Queue);
             let buffer = tasks.own(DnsEgressResourceKind::Buffer);
             let (client, mut bridge_front) = tokio::io::duplex(2_048);
@@ -235,15 +246,17 @@ impl DnsEgress for ClientDnsEgress {
 
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         let engine = Arc::clone(&self.engine);
         let pool = Arc::clone(&self.udp_pool);
         Box::pin(async move {
-            let target = TargetAddr::ip(target).map_err(|_| invalid_target())?;
-            let key = DnsUdpPoolKey { plan: plan.clone() };
+            let key = DnsUdpPoolKey {
+                plan: plan.clone(),
+                target: target.clone(),
+            };
             let (idle, stale) = take_dns_udp(&pool, &key)?;
             let reusable = idle.is_some();
             drop(stale);
@@ -280,10 +293,8 @@ impl DnsEgress for ClientDnsEgress {
                     response_queue,
                     buffer,
                 );
-                while let Some((packet, destination)) = outbound.recv().await {
-                    if destination != target.as_socket_addr().expect("numeric DNS target")
-                        || session_requests.send((packet, destination)).await.is_err()
-                    {
+                while let Some(packet) = outbound.recv().await {
+                    if session_requests.send(packet).await.is_err() {
                         break;
                     }
                     let Some(response) = responses.recv().await else {
@@ -295,12 +306,12 @@ impl DnsEgress for ClientDnsEgress {
                 }
             });
             tasks.spawn(DnsEgressTaskKind::Session, async move {
-                while let Some((packet, destination)) = requests.recv().await {
+                while let Some(packet) = requests.recv().await {
                     let reusable = prepared
                         .relay_request(
                             &engine,
                             plan.as_ref(),
-                            destination,
+                            target.clone(),
                             packet,
                             &session_responses,
                         )
@@ -329,18 +340,14 @@ struct ClientDnsDatagram {
 }
 
 impl DnsDatagramIo for ClientDnsDatagram {
-    fn poll_recv_from(
-        &self,
-        context: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+    fn poll_recv(&self, context: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>> {
         let Ok(mut incoming) = self.incoming.lock() else {
             return Poll::Ready(Err(io::Error::other("DNS UDP receive lock")));
         };
         match incoming.poll_recv(context) {
-            Poll::Ready(Some((packet, source))) if packet.len() <= buffer.len() => {
+            Poll::Ready(Some(packet)) if packet.len() <= buffer.len() => {
                 buffer[..packet.len()].copy_from_slice(&packet);
-                Poll::Ready(Ok((packet.len(), source)))
+                Poll::Ready(Ok(packet.len()))
             }
             Poll::Ready(Some(_)) => Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -351,12 +358,7 @@ impl DnsDatagramIo for ClientDnsDatagram {
         }
     }
 
-    fn poll_send_to(
-        &self,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-        target: SocketAddr,
-    ) -> Poll<io::Result<usize>> {
+    fn poll_send(&self, context: &mut Context<'_>, buffer: &[u8]) -> Poll<io::Result<usize>> {
         if buffer.len() > MAX_UDP_WIRE_LEN {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -377,7 +379,7 @@ impl DnsDatagramIo for ClientDnsDatagram {
         {
             Poll::Ready(Ok(permit)) => {
                 reserve.take();
-                permit.send((buffer.to_vec(), target));
+                permit.send(buffer.to_vec());
                 Poll::Ready(Ok(buffer.len()))
             }
             Poll::Ready(Err(_)) => {
@@ -477,7 +479,10 @@ mod tests {
             .map(
                 |(index, &(transport, port, server_name, path, detoured))| DnsServerConfig {
                     transport,
-                    address: SocketAddr::from(([192, 0, 2, 53], port)),
+                    target: TargetAddr::ip(SocketAddr::from(([192, 0, 2, 53], port)))
+                        .expect("numeric DNS target"),
+                    resolved_targets: Box::new([]),
+                    endpoint_mode: ferrum2_config::DnsEndpointMode::Numeric,
                     server_name: server_name.map(Into::into),
                     path: path.map(Into::into),
                     detour: detoured.then(|| EgressPlanHandle::direct(index)),
@@ -503,7 +508,11 @@ mod tests {
             .zip(configured_plan_ptrs)
             .enumerate()
         {
-            assert_eq!(spec.address, SocketAddr::from(([192, 0, 2, 53], port)));
+            assert_eq!(
+                spec.target,
+                TargetAddr::ip(SocketAddr::from(([192, 0, 2, 53], port)))
+                    .expect("numeric DNS target")
+            );
             match (detoured, spec.detour.as_ref()) {
                 (true, Some(detour)) => {
                     let converted = detour.snapshot_owned();
@@ -838,20 +847,41 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 "equal snapshot",
                 DnsUdpPoolKey {
                     plan: Some(selected.clone()),
+                    target: target.clone(),
                 },
                 true,
             ),
-            ("absent plan", DnsUdpPoolKey { plan: None }, false),
+            (
+                "absent plan",
+                DnsUdpPoolKey {
+                    plan: None,
+                    target: target.clone(),
+                },
+                false,
+            ),
             (
                 "different hop order",
                 DnsUdpPoolKey {
                     plan: Some(reversed),
+                    target: target.clone(),
                 },
                 false,
             ),
             (
                 "selector switched plan",
-                DnsUdpPoolKey { plan: Some(later) },
+                DnsUdpPoolKey {
+                    plan: Some(later),
+                    target: target.clone(),
+                },
+                false,
+            ),
+            (
+                "different logical target",
+                DnsUdpPoolKey {
+                    plan: Some(selected.clone()),
+                    target: TargetAddr::domain("other-pool.test", 53)
+                        .expect("different pool target"),
+                },
                 false,
             ),
         ];
@@ -887,6 +917,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .await
             .expect("mutation DNS upstream");
         let destination = upstream.local_addr().expect("mutation upstream address");
+        let numeric_target = TargetAddr::ip(destination).expect("numeric DNS target");
         let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk()));
         let protocol_server = UdpServer::new(&keys).expect("mutation protocol server");
         let clock = SystemClock::new();
@@ -901,6 +932,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
                 key: DnsUdpPoolKey {
                     plan: Some(selected.clone()),
+                    target: target.clone(),
                 },
                 association,
             }]));
@@ -915,6 +947,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             "send-io",
             "receive-io",
             "authentication",
+            "binding",
             "cancel",
             "saturation",
         ] {
@@ -935,6 +968,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 idle: Some(IdleDnsUdp {
                     key: DnsUdpPoolKey {
                         plan: Some(plan.clone()),
+                        target: numeric_target.clone(),
                     },
                     association,
                 }),
@@ -963,24 +997,27 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 pooled.relay_request(
                     &context.egress,
                     Some(&plan),
-                    destination,
+                    numeric_target.clone(),
                     payload.clone(),
                     &session_responses,
                 ),
                 relay_dns_udp_hop_once(
                     &server,
                     &protocol_server,
-                    destination,
+                    DnsUdpHopTarget {
+                        logical: numeric_target.clone(),
+                        upstream: destination,
+                    },
                     &clock,
                     &random,
                     &mut scratch,
-                    false,
+                    DnsUdpResponsePrefix::None,
                 ),
                 echo,
             );
             let fully_reusable = reusable.expect("healthy mutation relay");
-            let (response, source) = responses.try_recv().expect("healthy mutation response");
-            assert_eq!((response, source), (payload, destination), "{case}");
+            let response = responses.try_recv().expect("healthy mutation response");
+            assert_eq!(response, payload, "{case}");
             assert!(fully_reusable, "{case} healthy mutation tainted");
             drop(pooled);
             assert_eq!(pool.lock().expect("healthy mutation pool").len(), 1);
@@ -993,6 +1030,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             );
             let key = DnsUdpPoolKey {
                 plan: Some(plan.clone()),
+                target: numeric_target.clone(),
             };
             let (matched, stale) = take_dns_udp(&pool, &key).expect("mutation exact reuse");
             assert!(stale.is_none(), "{case} healthy exact key was discarded");
@@ -1022,7 +1060,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                             .relay_request(
                                 &context.egress,
                                 Some(&plan),
-                                destination,
+                                numeric_target.clone(),
                                 vec![0x21],
                                 &session_responses,
                             )
@@ -1038,7 +1076,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                             .expect("receive-io request");
                     }
                 }
-                "authentication" => {
+                "authentication" | "binding" => {
                     let echo = async {
                         let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
                         let (length, peer) = upstream
@@ -1051,35 +1089,43 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                             .expect("authentication upstream response");
                     };
                     let payload = vec![0x22];
+                    let prefix = if case == "authentication" {
+                        DnsUdpResponsePrefix::Unauthenticated
+                    } else {
+                        DnsUdpResponsePrefix::AuthenticatedTarget(
+                            TargetAddr::ip(SocketAddr::from(([192, 0, 2, 99], destination.port())))
+                                .expect("wrong numeric response target"),
+                        )
+                    };
                     let (result, (), ()) = tokio::join!(
                         pooled.relay_request(
                             &context.egress,
                             Some(&plan),
-                            destination,
+                            numeric_target.clone(),
                             payload.clone(),
                             &session_responses,
                         ),
                         relay_dns_udp_hop_once(
                             &server,
                             &protocol_server,
-                            destination,
+                            DnsUdpHopTarget {
+                                logical: numeric_target.clone(),
+                                upstream: destination,
+                            },
                             &clock,
                             &random,
                             &mut scratch,
-                            true,
+                            prefix,
                         ),
                         echo,
                     );
                     let fully_reusable =
                         result.expect("valid response after authentication discard");
-                    let (response, source) = responses
+                    let response = responses
                         .try_recv()
                         .expect("valid response after authentication discard");
-                    assert_eq!((response, source), (payload, destination));
-                    assert!(
-                        !fully_reusable,
-                        "authentication discard left association reusable"
-                    );
+                    assert_eq!(response, payload);
+                    assert!(!fully_reusable, "{case} discard left association reusable");
                 }
                 "cancel" => {
                     assert!(
@@ -1088,7 +1134,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                             pooled.relay_request(
                                 &context.egress,
                                 Some(&plan),
-                                destination,
+                                numeric_target.clone(),
                                 vec![0x23],
                                 &session_responses,
                             ),
@@ -1134,6 +1180,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             let mut initial = Some(IdleDnsUdp {
                 key: DnsUdpPoolKey {
                     plan: Some(plan.clone()),
+                    target: numeric_target.clone(),
                 },
                 association,
             });
@@ -1143,6 +1190,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     None => {
                         let key = DnsUdpPoolKey {
                             plan: Some(plan.clone()),
+                            target: numeric_target.clone(),
                         };
                         let (matched, stale) = take_dns_udp(&pool, &key).expect("healthy reuse");
                         assert!(stale.is_none(), "healthy exact key was discarded");
@@ -1170,24 +1218,27 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     healthy.relay_request(
                         &context.egress,
                         Some(&plan),
-                        destination,
+                        numeric_target.clone(),
                         payload.clone(),
                         &session_responses,
                     ),
                     relay_dns_udp_hop_once(
                         &server,
                         &protocol_server,
-                        destination,
+                        DnsUdpHopTarget {
+                            logical: numeric_target.clone(),
+                            upstream: destination,
+                        },
                         &clock,
                         &random,
                         &mut scratch,
-                        false,
+                        DnsUdpResponsePrefix::None,
                     ),
                     echo,
                 );
                 let fully_reusable = reusable.expect("following valid relay");
-                let (response, source) = responses.try_recv().expect("following valid response");
-                assert_eq!((response, source), (payload, destination), "{case}");
+                let response = responses.try_recv().expect("following valid response");
+                assert_eq!(response, payload, "{case}");
                 assert!(fully_reusable, "{case} healthy association tainted");
                 drop(healthy);
                 assert_eq!(pool.lock().expect("healthy pool").len(), 1, "{case}");
@@ -1264,14 +1315,25 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         )
     }
 
-    pub(in crate::run) async fn relay_dns_udp_hop_once(
+    enum DnsUdpResponsePrefix {
+        None,
+        Unauthenticated,
+        AuthenticatedTarget(TargetAddr),
+    }
+
+    struct DnsUdpHopTarget {
+        logical: TargetAddr,
+        upstream: SocketAddr,
+    }
+
+    async fn relay_dns_udp_hop_once(
         socket: &UdpSocket,
         server: &UdpServer,
-        upstream_address: SocketAddr,
+        target: DnsUdpHopTarget,
         clock: &SystemClock,
         random: &SystemRandom,
         scratch: &mut UdpPacketScratch,
-        invalid_first: bool,
+        prefix: DnsUdpResponsePrefix,
     ) {
         let mut wire = vec![0_u8; MAX_UDP_WIRE_LEN];
         let mut plain = [0_u8; 4096];
@@ -1279,7 +1341,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .recv_from(&mut wire)
             .await
             .expect("encrypted DNS query");
-        if invalid_first {
+        if matches!(&prefix, DnsUdpResponsePrefix::Unauthenticated) {
             socket
                 .send_to(b"bad", peer)
                 .await
@@ -1288,31 +1350,45 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let pending = server
             .prepare_request(clock, &wire[..length], scratch)
             .expect("authenticated DNS query");
-        assert_eq!(
-            pending.datagram().target().as_socket_addr(),
-            Some(upstream_address)
-        );
+        assert_eq!(pending.datagram().target(), &target.logical);
         let request = pending.datagram().payload().to_vec();
         let (_, commit) = pending.into_parts();
         let accepted = server
             .commit_request(commit, peer, clock.monotonic_now(), random)
             .expect("commit DNS query");
         socket
-            .send_to(&request, upstream_address)
+            .send_to(&request, target.upstream)
             .await
             .expect("forward plain DNS query");
         let (length, source) = socket
             .recv_from(&mut plain)
             .await
             .expect("plain DNS response");
-        assert_eq!(source, upstream_address);
+        assert_eq!(source, target.upstream);
+        if let DnsUdpResponsePrefix::AuthenticatedTarget(target) = prefix {
+            let response = server
+                .encode_response(
+                    accepted.capability(),
+                    clock,
+                    random,
+                    &test_datagram(target, &plain[..length]),
+                    0,
+                    &mut wire,
+                    scratch,
+                )
+                .expect("encrypt prefixed DNS response");
+            socket
+                .send_to(&wire[..response.wire_len()], peer)
+                .await
+                .expect("send prefixed DNS response");
+        }
         let response = server
             .encode_response(
                 accepted.capability(),
                 clock,
                 random,
                 &test_datagram(
-                    TargetAddr::ip(upstream_address).expect("numeric DNS target"),
+                    TargetAddr::ip(target.upstream).expect("numeric DNS target"),
                     &plain[..length],
                 ),
                 0,
@@ -1388,7 +1464,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             }],
             servers: vec![ferrum2_config::DnsServerConfig {
                 transport: ferrum2_config::DnsTransport::Tcp,
-                address: upstream_address,
+                target: TargetAddr::ip(upstream_address).expect("numeric DNS target"),
+                resolved_targets: Box::new([]),
+                endpoint_mode: ferrum2_config::DnsEndpointMode::Numeric,
                 server_name: None,
                 path: None,
                 detour: Some(dns_roots.remove(0)),
@@ -1876,6 +1954,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .await
             .expect("detoured DNS upstream");
         let upstream_address = upstream.local_addr().expect("detoured upstream address");
+        let upstream_target =
+            TargetAddr::domain("deferred-dns.example.test", upstream_address.port())
+                .expect("deferred DNS target");
         let (path, mut config) = client_test_config(socks, shadowsocks);
         config.udp = None;
         config.dns = Some(ferrum2_config::DnsConfig {
@@ -1884,7 +1965,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             }],
             servers: vec![ferrum2_config::DnsServerConfig {
                 transport: ferrum2_config::DnsTransport::Udp,
-                address: upstream_address,
+                target: upstream_target.clone(),
+                resolved_targets: Box::new([]),
+                endpoint_mode: ferrum2_config::DnsEndpointMode::DeferredToDetour,
                 server_name: None,
                 path: None,
                 detour: Some(ferrum2_core::route::EgressPlanHandle::direct(0)),
@@ -1931,22 +2014,31 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             let clock = SystemClock::new();
             let random = SystemRandom;
             let mut scratch = UdpPacketScratch::new();
-            for _ in 0..2 {
+            for prefix in [
+                DnsUdpResponsePrefix::AuthenticatedTarget(
+                    TargetAddr::domain("wrong-dns.example.test", upstream_address.port())
+                        .expect("wrong deferred response target"),
+                ),
+                DnsUdpResponsePrefix::None,
+            ] {
                 relay_dns_udp_hop_once(
                     &shadowsocks_socket,
                     &server,
-                    upstream_address,
+                    DnsUdpHopTarget {
+                        logical: upstream_target.clone(),
+                        upstream: upstream_address,
+                    },
                     &clock,
                     &random,
                     &mut scratch,
-                    false,
+                    prefix,
                 )
                 .await;
             }
             assert_eq!(
                 server.session_count().expect("DNS UDP session count"),
-                1,
-                "sequential DNS queries must reuse one SIP022 UDP session"
+                2,
+                "a wrong authenticated target must taint the SIP022 UDP session"
             );
         });
 
@@ -2094,7 +2186,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 .collect(),
             servers: vec![ferrum2_config::DnsServerConfig {
                 transport: ferrum2_config::DnsTransport::Udp,
-                address: upstream_address,
+                target: TargetAddr::ip(upstream_address).expect("numeric DNS target"),
+                resolved_targets: Box::new([]),
+                endpoint_mode: ferrum2_config::DnsEndpointMode::Numeric,
                 server_name: None,
                 path: None,
                 detour: Some(ferrum2_core::route::EgressPlanHandle::direct(0)),

@@ -1266,12 +1266,25 @@ pub fn write_tagged_dns_server_matrix_config(
     };
     let mut config = format!(
         "schema_version = 2\n\
-         [[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
-         [[outbounds]]\ntag = \"app-direct\"\n\
-         [[outbounds]]\ntag = \"dns-direct\"\n\
-         [route]\nfinal = \"app-direct\"\n\
-         [dns]\ntimeout_ms = {timeout_ms}\nmax_inflight = {max_inflight}\n"
+         [[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n"
     );
+    for (tag, _) in servers {
+        config.push_str(&format!(
+            "[[outbounds]]\ntag = \"app-{tag}\"\ndomain_resolver = \"{tag}\"\n"
+        ));
+    }
+    config.push_str(&format!(
+        "[[outbounds]]\ntag = \"dns-direct\"\n\
+         [route]\nfinal = \"app-{final_server}\"\n"
+    ));
+    for (name, port, server) in rules {
+        config.push_str(&format!(
+            "[[route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ndomain = \"{name}\"\nport = {port}\noutbound = \"app-{server}\"\n"
+        ));
+    }
+    config.push_str(&format!(
+        "[dns]\ntimeout_ms = {timeout_ms}\nmax_inflight = {max_inflight}\n"
+    ));
     for (tag, address) in servers {
         config.push_str(&format!(
             "[[dns.servers]]\ntag = \"{tag}\"\ntransport = \"udp\"\naddress = \"{address}\"\ndetour = \"dns-direct\"\n"

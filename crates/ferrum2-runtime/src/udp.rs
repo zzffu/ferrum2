@@ -1156,6 +1156,51 @@ where
     where
         C: FnOnce() -> Result<(), E>,
     {
+        self.commit_session_with_resolver_arc(
+            admission,
+            datagram,
+            now,
+            Arc::clone(&self.resolver),
+            protocol_commit,
+        )
+    }
+
+    /// Atomically commits one session with a resolver fixed for that session.
+    ///
+    /// This is used when the selected direct outbound owns its resolver policy.
+    /// Later changes to routing or another outbound cannot change the resolver
+    /// used by the already-committed UDP generation.
+    pub fn commit_session_with_resolver<E, C>(
+        &mut self,
+        admission: DirectUdpSessionAdmission<F::Socket>,
+        datagram: Datagram,
+        now: Instant,
+        resolver: R,
+        protocol_commit: C,
+    ) -> Result<UdpSessionHandle, UdpCommitError<E>>
+    where
+        C: FnOnce() -> Result<(), E>,
+    {
+        self.commit_session_with_resolver_arc(
+            admission,
+            datagram,
+            now,
+            Arc::new(resolver),
+            protocol_commit,
+        )
+    }
+
+    fn commit_session_with_resolver_arc<E, C>(
+        &mut self,
+        admission: DirectUdpSessionAdmission<F::Socket>,
+        datagram: Datagram,
+        now: Instant,
+        resolver: Arc<R>,
+        protocol_commit: C,
+    ) -> Result<UdpSessionHandle, UdpCommitError<E>>
+    where
+        C: FnOnce() -> Result<(), E>,
+    {
         let DirectUdpSessionAdmission {
             session,
             first_datagram,
@@ -1165,7 +1210,6 @@ where
         } = admission;
         let handle = session.commit_with(first_datagram, datagram, now, protocol_commit)?;
         let manager = self.manager.clone();
-        let resolver = Arc::clone(&self.resolver);
         let handler = Arc::clone(&self.handler);
         let connect_timeout = self.connect_timeout;
         let registry = self.registry.clone();

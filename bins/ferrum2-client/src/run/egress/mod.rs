@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferrum2_core::route::EgressPlanSnapshot;
-use ferrum2_core::{Connector, LocalEndpoint, TargetAddr};
+use ferrum2_core::{ConnectErrorKind, Connector, LocalEndpoint, TargetAddr, TargetHostRef};
 use ferrum2_crypto::{Clock, MethodSinglePskProvider, SecureRandom};
 #[cfg(test)]
 use ferrum2_dns::{ApplicationResolver, DnsStrategy};
-use ferrum2_runtime::ApplicationResolverAdapter;
+use ferrum2_runtime::{ApplicationResolverAdapter, MAX_RESOLVED_CANDIDATES, TcpResolver};
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 use ferrum2_shadowsocks::{MethodKeyAdapter, ShadowsocksError, TransportIo};
@@ -38,11 +38,12 @@ pub(super) enum ClientRequestOrigin {
     Socks,
     Tun,
     Dns,
+    RuleSet,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SelectedEgress {
-    Direct,
+    Direct { outbound: Option<usize> },
     Shadowsocks { first_server: SocketAddr },
 }
 
@@ -56,12 +57,24 @@ enum TcpBinding {
 }
 
 #[cfg(any(windows, test))]
-const fn direct_tcp_binding(origin: ClientRequestOrigin, auto_route: bool) -> TcpBinding {
+fn direct_tcp_binding(
+    origin: ClientRequestOrigin,
+    auto_route: bool,
+    application_target: &TargetAddr,
+) -> TcpBinding {
     match (origin, auto_route) {
         (ClientRequestOrigin::Tun, _) => TcpBinding::DefaultIpv4Only,
-        (ClientRequestOrigin::Dns, true) => TcpBinding::Fixed,
-        (ClientRequestOrigin::Socks, true) => TcpBinding::DefaultIfIpv4,
-        (ClientRequestOrigin::Socks | ClientRequestOrigin::Dns, false) => TcpBinding::None,
+        (ClientRequestOrigin::Dns, true) if application_target.as_socket_addr().is_some() => {
+            TcpBinding::Fixed
+        }
+        (ClientRequestOrigin::Dns, true) => TcpBinding::DefaultIpv4Only,
+        (ClientRequestOrigin::Socks | ClientRequestOrigin::RuleSet, true) => {
+            TcpBinding::DefaultIfIpv4
+        }
+        (
+            ClientRequestOrigin::Socks | ClientRequestOrigin::Dns | ClientRequestOrigin::RuleSet,
+            false,
+        ) => TcpBinding::None,
     }
 }
 
@@ -252,7 +265,9 @@ pub(super) fn prepare_client_outbounds(
                         keys: MethodKeyAdapter::new(MethodSinglePskProvider::from_shared(psk)),
                     })
                 }
-                ferrum2_config::ClientOutboundConfig::Direct => ClientOutboundContext::Direct,
+                ferrum2_config::ClientOutboundConfig::Direct { .. } => {
+                    ClientOutboundContext::Direct
+                }
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -271,6 +286,7 @@ pub(super) struct ClientEgressEngine<
     phase_deadlines: (Duration, Duration),
     pub(super) udp: Option<ClientUdpContext>,
     pub(super) application_resolver: ApplicationResolverAdapter,
+    direct_resolvers: Arc<[Option<ApplicationResolverAdapter>]>,
     underlay: ferrum2_tun::UnderlayPublisher,
     auto_route: bool,
     #[cfg(all(windows, test))]
@@ -307,6 +323,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn new_with_application_resolver(
         outbounds: Arc<[ClientOutboundContext]>,
         connector: C,
@@ -317,6 +334,41 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         application_resolver: ApplicationResolverAdapter,
         #[cfg(test)] udp_id_random: Option<Arc<dyn SecureRandom>>,
     ) -> Self {
+        let direct_resolvers = outbounds
+            .iter()
+            .map(|outbound| {
+                matches!(outbound, ClientOutboundContext::Direct)
+                    .then(|| application_resolver.clone())
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Self::new_with_direct_resolvers(
+            outbounds,
+            connector,
+            clock,
+            random,
+            phase_deadlines,
+            udp,
+            application_resolver,
+            direct_resolvers,
+            #[cfg(test)]
+            udp_id_random,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_direct_resolvers(
+        outbounds: Arc<[ClientOutboundContext]>,
+        connector: C,
+        clock: T,
+        random: R,
+        phase_deadlines: (Duration, Duration),
+        udp: Option<ClientUdpContext>,
+        application_resolver: ApplicationResolverAdapter,
+        direct_resolvers: Arc<[Option<ApplicationResolverAdapter>]>,
+        #[cfg(test)] udp_id_random: Option<Arc<dyn SecureRandom>>,
+    ) -> Self {
+        debug_assert_eq!(outbounds.len(), direct_resolvers.len());
         Self {
             outbounds,
             connector,
@@ -325,6 +377,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             phase_deadlines,
             udp,
             application_resolver,
+            direct_resolvers,
             underlay: ferrum2_tun::UnderlayPublisher::new(),
             auto_route: false,
             #[cfg(all(windows, test))]
@@ -398,8 +451,12 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             return Err(ClientPlanFailure::Invalid);
         }
         let Some(plan) = plan else {
-            return if origin == ClientRequestOrigin::Dns {
-                Ok(SelectedEgress::Direct)
+            return if matches!(
+                origin,
+                ClientRequestOrigin::Dns | ClientRequestOrigin::RuleSet
+            ) && target.and_then(TargetAddr::as_socket_addr).is_some()
+            {
+                Ok(SelectedEgress::Direct { outbound: None })
             } else {
                 Err(ClientPlanFailure::Invalid)
             };
@@ -425,7 +482,9 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             {
                 return Err(ClientPlanFailure::DirectIpv6Unsupported);
             }
-            return Ok(SelectedEgress::Direct);
+            return Ok(SelectedEgress::Direct {
+                outbound: Some(hops[0]),
+            });
         }
         if direct != 0 {
             return Err(ClientPlanFailure::Invalid);
@@ -482,27 +541,75 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let selected = self
             .classify_selected(origin, plan.as_ref(), Some(application_target))
             .map_err(ClientOpenFailure::Plan)?;
-        if selected == SelectedEgress::Direct {
+        if let SelectedEgress::Direct { outbound } = selected {
             let deadline = timeout_limit
                 .unwrap_or(self.phase_deadlines.0)
                 .min(self.phase_deadlines.0);
-            #[cfg(any(windows, test))]
-            let connect = TCP_BINDING.scope(
-                direct_tcp_binding(origin, self.auto_route),
-                self.application_resolver
-                    .scope_ingress(ingress, self.connector.connect(application_target)),
-            );
-            #[cfg(not(any(windows, test)))]
-            let connect = self
-                .application_resolver
-                .scope_ingress(ingress, self.connector.connect(application_target));
-            return match tokio::time::timeout(deadline, connect).await {
-                Ok(Ok(stream)) => Ok(tcp::ClientTcpFlow::Direct(stream)),
-                Ok(Err(error)) => Err(ClientOpenFailure::Connect(error.kind())),
-                Err(_) => Err(ClientOpenFailure::Connect(
-                    ferrum2_core::ConnectErrorKind::Timeout,
-                )),
+            let deadline = tokio::time::Instant::now() + deadline;
+            let candidates = match application_target.host() {
+                TargetHostRef::Ip(_) => vec![application_target.clone()],
+                TargetHostRef::Domain(host) => {
+                    let resolver = match outbound {
+                        Some(outbound) => self
+                            .direct_resolvers
+                            .get(outbound)
+                            .and_then(Option::as_ref)
+                            .ok_or(ClientOpenFailure::Connect(
+                                ConnectErrorKind::HostUnreachable,
+                            ))?,
+                        None => &self.application_resolver,
+                    }
+                    .for_ingress(ingress);
+                    let resolved = match tokio::time::timeout_at(
+                        deadline,
+                        TcpResolver::resolve(&resolver, host, application_target.port().get()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(resolved)) => resolved,
+                        Ok(Err(_)) => {
+                            return Err(ClientOpenFailure::Connect(
+                                ConnectErrorKind::HostUnreachable,
+                            ));
+                        }
+                        Err(_) => {
+                            return Err(ClientOpenFailure::Connect(ConnectErrorKind::Timeout));
+                        }
+                    };
+                    resolved
+                        .into_iter()
+                        .take(MAX_RESOLVED_CANDIDATES)
+                        .filter_map(|candidate| TargetAddr::ip(candidate).ok())
+                        .collect()
+                }
             };
+            let mut attempted = false;
+            let mut last = ConnectErrorKind::HostUnreachable;
+            for target in candidates {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(ClientOpenFailure::Connect(ConnectErrorKind::Timeout));
+                }
+                attempted = true;
+                #[cfg(any(windows, test))]
+                let connect = TCP_BINDING.scope(
+                    direct_tcp_binding(origin, self.auto_route, application_target),
+                    self.connector.connect(&target),
+                );
+                #[cfg(not(any(windows, test)))]
+                let connect = self.connector.connect(&target);
+                match tokio::time::timeout_at(deadline, connect).await {
+                    Ok(Ok(stream)) => return Ok(tcp::ClientTcpFlow::Direct(stream)),
+                    Ok(Err(error)) => last = error.kind(),
+                    Err(_) => {
+                        return Err(ClientOpenFailure::Connect(ConnectErrorKind::Timeout));
+                    }
+                }
+            }
+            return Err(ClientOpenFailure::Connect(if attempted {
+                last
+            } else {
+                ConnectErrorKind::HostUnreachable
+            }));
         }
         let plan = plan.expect("classified proxy plan has a snapshot");
         let deadlines = timeout_limit.map_or(self.phase_deadlines, |limit| {
@@ -757,6 +864,78 @@ mod m16_tests {
                     .ok_or(ferrum2_dns::DnsError::Timeout)
             })
         }
+    }
+
+    #[tokio::test]
+    async fn missing_exact_direct_resolver_fails_closed_for_tcp_and_udp() {
+        let backend = Arc::new(RoutedApplicationBackend {
+            routes: vec![
+                ApplicationRoute {
+                    ingress: 0,
+                    network: ferrum2_core::route::Network::Tcp,
+                    endpoint: "127.0.0.1:9".parse().unwrap(),
+                },
+                ApplicationRoute {
+                    ingress: 0,
+                    network: ferrum2_core::route::Network::Udp,
+                    endpoint: "127.0.0.1:9".parse().unwrap(),
+                },
+            ],
+            observed: Mutex::new(Vec::new()),
+        });
+        let ambient = ApplicationResolverAdapter::new(
+            Arc::new(ApplicationResolver::configured(backend.clone())),
+            0,
+            DnsStrategy::PreferIpv4,
+        );
+        let connector =
+            TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
+                ferrum2_runtime::SystemSocketInspector,
+                ferrum2_runtime::SystemTcpDialer,
+                ambient.clone(),
+                Duration::from_secs(1),
+            ));
+        let engine = ClientEgressEngine::new_with_direct_resolvers(
+            vec![ClientOutboundContext::Direct].into(),
+            connector,
+            SystemClock::new(),
+            SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            ambient,
+            vec![None].into(),
+            None,
+        );
+        let target = TargetAddr::domain("missing-exact-resolver.invalid", 443).unwrap();
+        let direct = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+
+        assert!(matches!(
+            engine
+                .open_tcp(
+                    ClientRequestOrigin::Socks,
+                    Some(direct.clone()),
+                    &target,
+                    None,
+                    None,
+                )
+                .await,
+            Err(ClientOpenFailure::Connect(
+                ConnectErrorKind::HostUnreachable
+            ))
+        ));
+        assert!(matches!(
+            engine
+                .prepare_udp(ClientRequestOrigin::Socks, Some(direct), Some(&target),)
+                .await,
+            Err(ClientUdpPrepareFailure::Unavailable)
+        ));
+        assert!(
+            backend.observed.lock().unwrap().is_empty(),
+            "malformed exact resolver table must never use the ambient resolver"
+        );
     }
 
     #[tokio::test]
@@ -1086,6 +1265,109 @@ mod m16_tests {
             ["socket-v4", "bind-fixed", "connect"]
         );
 
+        let deferred_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let deferred_endpoint = deferred_listener.local_addr().unwrap();
+        let deferred_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let deferred_dialer = RecordedTcpDialer {
+            events: deferred_events.clone(),
+            fail_binding: false,
+        };
+        let deferred_backend = Arc::new(RoutedApplicationBackend {
+            routes: vec![ApplicationRoute {
+                ingress: 0,
+                network: ferrum2_core::route::Network::Tcp,
+                endpoint: deferred_endpoint,
+            }],
+            observed: Mutex::new(Vec::new()),
+        });
+        let deferred_resolver = ApplicationResolverAdapter::new(
+            Arc::new(ApplicationResolver::configured(deferred_backend)),
+            0,
+            DnsStrategy::PreferIpv4,
+        );
+        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
+            ferrum2_runtime::SystemSocketInspector,
+            deferred_dialer,
+            Duration::from_secs(1),
+        ));
+        let engine = ClientEgressEngine::new_with_application_resolver(
+            vec![ClientOutboundContext::Direct].into(),
+            connector,
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            None,
+            deferred_resolver,
+            None,
+        )
+        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
+        let deferred_accept =
+            tokio::spawn(async move { deferred_listener.accept().await.unwrap() });
+        let deferred_target =
+            TargetAddr::domain("deferred-dns.invalid", deferred_endpoint.port()).unwrap();
+        let direct = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+        let flow = engine
+            .open_tcp(
+                ClientRequestOrigin::Dns,
+                Some(direct),
+                &deferred_target,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        drop(flow);
+        drop(deferred_accept.await.unwrap());
+        assert_eq!(
+            *deferred_events.lock().unwrap(),
+            ["socket-v4", "bind-default", "connect"]
+        );
+
+        let ruleset_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ruleset_endpoint = ruleset_listener.local_addr().unwrap();
+        let ruleset_target = TargetAddr::ip(ruleset_endpoint).unwrap();
+        let ruleset_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ruleset_dialer = RecordedTcpDialer {
+            events: ruleset_events.clone(),
+            fail_binding: false,
+        };
+        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
+            ferrum2_runtime::SystemSocketInspector,
+            ruleset_dialer,
+            Duration::from_secs(1),
+        ));
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            connector,
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            None,
+            None,
+        )
+        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
+        let ruleset_accept = tokio::spawn(async move { ruleset_listener.accept().await.unwrap() });
+        let flow = engine
+            .open_tcp(
+                ClientRequestOrigin::RuleSet,
+                None,
+                &ruleset_target,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        drop(flow);
+        drop(ruleset_accept.await.unwrap());
+        assert_eq!(
+            *ruleset_events.lock().unwrap(),
+            ["socket-v4", "bind-default", "connect"]
+        );
+
         let failed_events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let failed = RecordedTcpDialer {
             events: failed_events.clone(),
@@ -1125,23 +1407,33 @@ mod m16_tests {
 
     #[test]
     fn dns_direct_fixed_binding_maps_actual_bootstrap_as_fixed() {
+        let numeric = TargetAddr::ip("198.51.100.8:53".parse().unwrap()).unwrap();
+        let domain = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
         assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Dns, true),
+            direct_tcp_binding(ClientRequestOrigin::Dns, true, &numeric),
             TcpBinding::Fixed
         );
         assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Dns, false),
+            direct_tcp_binding(ClientRequestOrigin::Dns, false, &numeric),
             TcpBinding::None
+        );
+        assert_eq!(
+            direct_tcp_binding(ClientRequestOrigin::Dns, true, &domain),
+            TcpBinding::DefaultIpv4Only
         );
         assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
         assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
         assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Socks, true),
+            direct_tcp_binding(ClientRequestOrigin::Socks, true, &numeric),
             TcpBinding::DefaultIfIpv4
         );
         assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Tun, false),
+            direct_tcp_binding(ClientRequestOrigin::Tun, false, &numeric),
             TcpBinding::DefaultIpv4Only
+        );
+        assert_eq!(
+            direct_tcp_binding(ClientRequestOrigin::RuleSet, true, &numeric),
+            TcpBinding::DefaultIfIpv4
         );
     }
 
@@ -1198,8 +1490,12 @@ mod m16_tests {
             RunError::StartupProtocol
         );
         let outbounds = prepare_client_outbounds(vec![
-            ferrum2_config::ClientOutboundConfig::Direct,
-            ferrum2_config::ClientOutboundConfig::Direct,
+            ferrum2_config::ClientOutboundConfig::Direct {
+                domain_resolver: ferrum2_config::DirectDomainResolver::System,
+            },
+            ferrum2_config::ClientOutboundConfig::Direct {
+                domain_resolver: ferrum2_config::DirectDomainResolver::System,
+            },
             proxy(),
         ])
         .expect("closed outbound catalog");
@@ -1303,8 +1599,10 @@ mod m16_tests {
         let packet_registry = OwnerRegistry::new();
         let packet_live_ids = Arc::new(Mutex::new(HashSet::new()));
         let packet_engine = ClientEgressEngine::new(
-            prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct])
-                .expect("packet direct outbound"),
+            prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct {
+                domain_resolver: ferrum2_config::DirectDomainResolver::System,
+            }])
+            .expect("packet direct outbound"),
             TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
             ferrum2_crypto::SystemClock::new(),
             ferrum2_crypto::SystemRandom,
@@ -1347,11 +1645,12 @@ mod m16_tests {
                 .is_empty()
         );
 
+        let dns_connect_target = TargetAddr::ip("192.0.2.53:53".parse().unwrap()).unwrap();
         let connect_kind = match engine
             .open_tcp(
                 ClientRequestOrigin::Dns,
                 Some(direct),
-                &dns_target,
+                &dns_connect_target,
                 None,
                 None,
             )
@@ -1414,20 +1713,21 @@ mod m16_tests {
 
         #[cfg(windows)]
         {
+            let numeric = TargetAddr::ip("198.51.100.8:53".parse().unwrap()).unwrap();
             assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Socks, true),
+                direct_tcp_binding(ClientRequestOrigin::Socks, true, &numeric),
                 TcpBinding::DefaultIfIpv4
             );
             assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Tun, false),
+                direct_tcp_binding(ClientRequestOrigin::Tun, false, &numeric),
                 TcpBinding::DefaultIpv4Only
             );
             assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Dns, true),
+                direct_tcp_binding(ClientRequestOrigin::Dns, true, &numeric),
                 TcpBinding::Fixed
             );
             assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Dns, false),
+                direct_tcp_binding(ClientRequestOrigin::Dns, false, &numeric),
                 TcpBinding::None
             );
             assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);

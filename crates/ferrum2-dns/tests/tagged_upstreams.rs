@@ -1,13 +1,16 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
+use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot, Network};
+use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
-    BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsError, DnsIoFuture, DnsTaskRegistrar,
-    DnsUpstreamSpec, DnsUpstreamTransport, SystemDnsEgress, TaggedResolver,
+    ApplicationResolveBackend, ApplicationResolveContext, ApplicationResolveRequest,
+    BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsError, DnsIoFuture, DnsStrategy,
+    DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport, SystemDnsEgress, TaggedResolver,
+    TaggedServerApplicationResolveBackend,
 };
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, NS, SOA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
@@ -38,7 +41,7 @@ async fn bind_paired_sockets() -> (SocketAddr, UdpSocket, TcpListener) {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EgressCall {
     network: &'static str,
-    target: SocketAddr,
+    target: TargetAddr,
     plan: Option<Vec<usize>>,
 }
 
@@ -46,6 +49,7 @@ struct EgressCall {
 struct RecordingEgress {
     calls: Mutex<Vec<EgressCall>>,
     plan_ptrs: Mutex<Vec<usize>>,
+    dial_override: Option<SocketAddr>,
 }
 
 impl RecordingEgress {
@@ -60,7 +64,19 @@ impl RecordingEgress {
             .clone()
     }
 
-    fn record(&self, network: &'static str, target: SocketAddr, plan: &Option<EgressPlanSnapshot>) {
+    fn with_dial_override(dial_override: SocketAddr) -> Self {
+        Self {
+            dial_override: Some(dial_override),
+            ..Self::default()
+        }
+    }
+
+    fn record(
+        &self,
+        network: &'static str,
+        target: &TargetAddr,
+        plan: &Option<EgressPlanSnapshot>,
+    ) {
         if let Some(plan) = plan {
             self.plan_ptrs
                 .lock()
@@ -72,32 +88,39 @@ impl RecordingEgress {
             .expect("egress calls poisoned")
             .push(EgressCall {
                 network,
-                target,
+                target: target.clone(),
                 plan: plan.as_ref().map(|plan| plan.hops().to_vec()),
             });
+    }
+
+    fn dial_target(&self, logical: &TargetAddr) -> TargetAddr {
+        match self.dial_override {
+            Some(address) => TargetAddr::ip(address).expect("non-zero fixture target"),
+            None => logical.clone(),
+        }
     }
 }
 
 impl DnsEgress for RecordingEgress {
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
-        self.record("tcp", target, &plan);
-        SystemDnsEgress.connect_tcp(target, None, timeout, tasks)
+        self.record("tcp", &target, &plan);
+        SystemDnsEgress.connect_tcp(self.dial_target(&target), None, timeout, tasks)
     }
 
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
-        self.record("udp", target, &plan);
-        SystemDnsEgress.bind_udp(target, None, tasks)
+        self.record("udp", &target, &plan);
+        SystemDnsEgress.bind_udp(self.dial_target(&target), None, tasks)
     }
 }
 
@@ -211,9 +234,14 @@ fn configured_server(
 ) -> DnsUpstreamSpec {
     DnsUpstreamSpec {
         transport,
-        address,
+        target: TargetAddr::ip(address).expect("non-zero fixture target"),
+        resolved_targets: Box::new([]),
         detour: detoured.then(|| EgressPlanHandle::direct(0)),
     }
+}
+
+fn numeric_target(address: SocketAddr) -> TargetAddr {
+    TargetAddr::ip(address).expect("non-zero fixture target")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -315,13 +343,19 @@ async fn udp_tcp_exact_server_plan_and_negative_semantics() {
     let calls = egress.calls();
     assert!(calls.iter().any(|call| {
         call.network == "udp"
-            && call.target == fixture.address
+            && call.target == numeric_target(fixture.address)
             && call.plan.as_deref() == Some(&[0][..])
     }));
     assert!(calls.iter().any(|call| {
-        call.network == "tcp" && call.target == fixture.address && call.plan.is_none()
+        call.network == "tcp"
+            && call.target == numeric_target(fixture.address)
+            && call.plan.is_none()
     }));
-    assert!(calls.iter().all(|call| call.target == fixture.address));
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.target == numeric_target(fixture.address))
+    );
 
     drop(resolver);
     assert_eq!(
@@ -336,6 +370,463 @@ async fn udp_tcp_exact_server_plan_and_negative_semantics() {
     fixture.shutdown().await;
     assert!(UdpSocket::bind(address).await.is_ok());
     assert!(TcpListener::bind(address).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_resolved_upstream_tries_all_candidates_under_one_deadline() {
+    let _network = TEST_NETWORK.lock().await;
+    let fixture = PlainFixture::start().await;
+    let unreachable = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2), fixture.address.port()));
+    let logical = TargetAddr::domain("bootstrap.resolver.test", fixture.address.port())
+        .expect("logical upstream target");
+    let egress = Arc::new(RecordingEgress::default());
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            target: logical,
+            resolved_targets: vec![unreachable, fixture.address].into_boxed_slice(),
+            detour: None,
+        }],
+        Duration::from_millis(600),
+        NonZeroU16::new(1).expect("one root query"),
+        egress.clone(),
+    )
+    .expect("candidate resolver");
+    owner.ready().await.expect("candidate resolver ready");
+
+    let lookup = resolver
+        .lookup(
+            0,
+            Name::from_ascii("answer.resolver.test.").expect("candidate query"),
+            RecordType::A,
+        )
+        .await
+        .expect("second candidate succeeds");
+    assert!(
+        lookup
+            .answers()
+            .iter()
+            .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 41))))
+    );
+    assert_eq!(
+        egress
+            .calls()
+            .into_iter()
+            .map(|call| call.target)
+            .collect::<Vec<_>>(),
+        vec![numeric_target(unreachable), numeric_target(fixture.address)]
+    );
+
+    drop(resolver);
+    owner.shutdown().await.expect("candidate resolver shutdown");
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tagged_application_backend_queries_only_its_explicit_server_and_family() {
+    let _network = TEST_NETWORK.lock().await;
+    let fixture = PlainFixture::start().await;
+    let egress = Arc::new(RecordingEgress::default());
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![configured_server(
+            fixture.address,
+            DnsUpstreamTransport::Udp,
+            false,
+        )],
+        Duration::from_secs(1),
+        NonZeroU16::new(2).expect("nonzero admission"),
+        egress.clone(),
+    )
+    .expect("start application resolver");
+    owner.ready().await.expect("application resolver ready");
+    let resolver = Arc::new(resolver);
+    let slot = Arc::new(OnceLock::new());
+    slot.set(Arc::downgrade(&resolver))
+        .map_err(|_| ())
+        .expect("initialize tagged resolver slot");
+    let backend = TaggedServerApplicationResolveBackend::new(Arc::clone(&slot), 0);
+    let domain = CanonicalDomain::new("answer.resolver.test").expect("application domain");
+
+    assert_eq!(
+        backend
+            .resolve(ApplicationResolveRequest::new(
+                ApplicationResolveContext::new(7, Network::Tcp),
+                &domain,
+                NonZeroU16::new(443).expect("application port"),
+                DnsStrategy::Ipv6Only,
+            ))
+            .await,
+        Ok(vec![SocketAddr::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 41).into(),
+            443,
+        )])
+    );
+    assert_eq!(
+        egress.calls(),
+        vec![EgressCall {
+            network: "udp",
+            target: numeric_target(fixture.address),
+            plan: None,
+        }]
+    );
+
+    drop(backend);
+    drop(slot);
+    drop(resolver);
+    owner
+        .shutdown()
+        .await
+        .expect("application resolver shutdown");
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn independent_dependency_lookup_obeys_aggregate_admission() {
+    let _network = TEST_NETWORK.lock().await;
+    let fixture = PlainFixture::start().await;
+    let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("silent upstream bind");
+    let silent_address = silent.local_addr().expect("silent upstream address");
+    let egress = Arc::new(RecordingEgress::default());
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![
+            configured_server(silent_address, DnsUpstreamTransport::Udp, false),
+            configured_server(fixture.address, DnsUpstreamTransport::Udp, false),
+        ],
+        Duration::from_millis(600),
+        NonZeroU16::new(1).expect("one aggregate admission permit"),
+        egress.clone(),
+    )
+    .expect("nested resolver");
+    owner.ready().await.expect("nested resolver ready");
+    let resolver = Arc::new(resolver);
+    let root_resolver = Arc::clone(&resolver);
+    let root = tokio::spawn(async move {
+        root_resolver
+            .lookup(
+                0,
+                Name::from_ascii("blocked.resolver.test.").expect("blocked root name"),
+                RecordType::A,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while egress.calls().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("root query reached its silent upstream");
+
+    let slot = Arc::new(OnceLock::new());
+    slot.set(Arc::downgrade(&resolver))
+        .map_err(|_| ())
+        .expect("initialize nested resolver slot");
+    let backend = TaggedServerApplicationResolveBackend::new(slot, 1);
+    let domain = CanonicalDomain::new("answer.resolver.test").expect("nested domain");
+    assert_eq!(
+        backend
+            .resolve(ApplicationResolveRequest::new(
+                ApplicationResolveContext::new(1, Network::Tcp),
+                &domain,
+                NonZeroU16::new(443).expect("nested target port"),
+                DnsStrategy::Ipv4Only,
+            ))
+            .await,
+        Err(DnsError::Busy)
+    );
+    assert_eq!(root.await.expect("root query join"), Err(DnsError::Timeout));
+
+    drop(backend);
+    drop(resolver);
+    owner.shutdown().await.expect("nested resolver shutdown");
+    fixture.shutdown().await;
+}
+
+struct CrossResolverEgress {
+    resolver: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
+    observed: Arc<Mutex<Option<DnsError>>>,
+}
+
+impl DnsEgress for CrossResolverEgress {
+    fn connect_tcp(
+        &self,
+        target: TargetAddr,
+        _plan: Option<EgressPlanSnapshot>,
+        timeout: Duration,
+        tasks: DnsTaskRegistrar,
+    ) -> DnsIoFuture<BoxedDnsTcpIo> {
+        SystemDnsEgress.connect_tcp(target, None, timeout, tasks)
+    }
+
+    fn bind_udp(
+        &self,
+        _target: TargetAddr,
+        _plan: Option<EgressPlanSnapshot>,
+        _tasks: DnsTaskRegistrar,
+    ) -> DnsIoFuture<BoxedDnsDatagramIo> {
+        let resolver = Arc::clone(&self.resolver);
+        let observed = Arc::clone(&self.observed);
+        Box::pin(async move {
+            let backend = TaggedServerApplicationResolveBackend::new(resolver, 0);
+            let domain =
+                CanonicalDomain::new("answer.resolver.test").expect("cross-owner resolver domain");
+            let error = backend
+                .resolve(ApplicationResolveRequest::new(
+                    ApplicationResolveContext::new(3, Network::Udp),
+                    &domain,
+                    NonZeroU16::new(53).expect("cross-owner resolver port"),
+                    DnsStrategy::Ipv4Only,
+                ))
+                .await
+                .expect_err("saturated foreign resolver must reject the dependency");
+            *observed.lock().expect("cross-owner observation") = Some(error);
+            Err(std::io::Error::other(
+                "cross-owner dependency remained independently saturated",
+            ))
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dependency_scope_never_bypasses_another_resolver_admission() {
+    let _network = TEST_NETWORK.lock().await;
+    let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("foreign silent upstream bind");
+    let silent_address = silent.local_addr().expect("foreign silent address");
+    let foreign_egress = Arc::new(RecordingEgress::default());
+    let (foreign, mut foreign_owner) = TaggedResolver::new(
+        vec![configured_server(
+            silent_address,
+            DnsUpstreamTransport::Udp,
+            false,
+        )],
+        Duration::from_millis(500),
+        NonZeroU16::new(1).expect("foreign aggregate admission"),
+        foreign_egress.clone(),
+    )
+    .expect("foreign resolver");
+    foreign_owner.ready().await.expect("foreign resolver ready");
+    let foreign = Arc::new(foreign);
+    let blocked_foreign = Arc::clone(&foreign);
+    let blocked = tokio::spawn(async move {
+        blocked_foreign
+            .lookup(
+                0,
+                Name::from_ascii("blocked.resolver.test.").expect("blocked foreign name"),
+                RecordType::A,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while foreign_egress.calls().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("foreign resolver admission occupied");
+    assert_eq!(foreign.stats().queries, 1);
+
+    let foreign_slot = Arc::new(OnceLock::new());
+    foreign_slot
+        .set(Arc::downgrade(&foreign))
+        .map_err(|_| ())
+        .expect("install foreign resolver");
+    let observed = Arc::new(Mutex::new(None));
+    let egress = Arc::new(CrossResolverEgress {
+        resolver: foreign_slot,
+        observed: Arc::clone(&observed),
+    });
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            target: TargetAddr::domain("cross-owner.resolver.test", silent_address.port())
+                .expect("cross-owner target"),
+            resolved_targets: Box::new([]),
+            detour: Some(EgressPlanHandle::direct(0)),
+        }],
+        Duration::from_millis(300),
+        NonZeroU16::new(1).expect("local aggregate admission"),
+        egress,
+    )
+    .expect("local resolver");
+    owner.ready().await.expect("local resolver ready");
+
+    assert_eq!(
+        resolver
+            .lookup(
+                0,
+                Name::from_ascii("answer.resolver.test.").expect("local query name"),
+                RecordType::A,
+            )
+            .await,
+        Err(DnsError::Protocol)
+    );
+    assert_eq!(
+        *observed.lock().expect("cross-owner observation"),
+        Some(DnsError::Busy)
+    );
+    assert_eq!(foreign.stats().queries, 1);
+    assert_eq!(
+        blocked.await.expect("foreign query join"),
+        Err(DnsError::Timeout)
+    );
+
+    drop(resolver);
+    owner.shutdown().await.expect("local resolver shutdown");
+    drop(foreign);
+    foreign_owner
+        .shutdown()
+        .await
+        .expect("foreign resolver shutdown");
+}
+
+struct NestedResolverEgress {
+    resolver: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
+    fixture: SocketAddr,
+    max_query_chains: Arc<AtomicUsize>,
+    binds: Arc<AtomicUsize>,
+}
+
+impl DnsEgress for NestedResolverEgress {
+    fn connect_tcp(
+        &self,
+        target: TargetAddr,
+        _plan: Option<EgressPlanSnapshot>,
+        timeout: Duration,
+        tasks: DnsTaskRegistrar,
+    ) -> DnsIoFuture<BoxedDnsTcpIo> {
+        SystemDnsEgress.connect_tcp(target, None, timeout, tasks)
+    }
+
+    fn bind_udp(
+        &self,
+        target: TargetAddr,
+        _plan: Option<EgressPlanSnapshot>,
+        tasks: DnsTaskRegistrar,
+    ) -> DnsIoFuture<BoxedDnsDatagramIo> {
+        let resolver = Arc::clone(&self.resolver);
+        let fixture = self.fixture;
+        let max_query_chains = Arc::clone(&self.max_query_chains);
+        let binds = Arc::clone(&self.binds);
+        Box::pin(async move {
+            binds.fetch_add(1, Ordering::AcqRel);
+            if let Some(active) = resolver
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .map(|resolver| resolver.stats().queries)
+            {
+                max_query_chains.fetch_max(active, Ordering::AcqRel);
+            }
+            let nested_server = match target.canonical_domain().map(|domain| domain.as_str()) {
+                Some("outer-0.resolver.test") => Some(1),
+                Some("outer-1.resolver.test") => Some(2),
+                _ => None,
+            };
+            let dial_target = if let Some(nested_server) = nested_server {
+                let backend = TaggedServerApplicationResolveBackend::new(resolver, nested_server);
+                let domain =
+                    CanonicalDomain::new("answer.resolver.test").expect("nested resolver domain");
+                backend
+                    .resolve(ApplicationResolveRequest::new(
+                        ApplicationResolveContext::new(1, Network::Udp),
+                        &domain,
+                        NonZeroU16::new(53).expect("nested resolver port"),
+                        DnsStrategy::Ipv4Only,
+                    ))
+                    .await
+                    .map_err(|_| std::io::Error::other("nested DNS resolution failed"))?;
+                TargetAddr::ip(fixture).expect("fixture target")
+            } else {
+                target
+            };
+            SystemDnsEgress.bind_udp(dial_target, None, tasks).await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_dependency_chain_shares_one_aggregate_admission() {
+    let _network = TEST_NETWORK.lock().await;
+    let fixture = PlainFixture::start().await;
+    let slot = Arc::new(OnceLock::new());
+    let max_query_chains = Arc::new(AtomicUsize::new(0));
+    let binds = Arc::new(AtomicUsize::new(0));
+    let egress = Arc::new(NestedResolverEgress {
+        resolver: Arc::clone(&slot),
+        fixture: fixture.address,
+        max_query_chains: Arc::clone(&max_query_chains),
+        binds: Arc::clone(&binds),
+    });
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![
+            DnsUpstreamSpec {
+                transport: DnsUpstreamTransport::Udp,
+                target: TargetAddr::domain("outer-0.resolver.test", fixture.address.port())
+                    .expect("first outer domain target"),
+                resolved_targets: Box::new([]),
+                detour: Some(EgressPlanHandle::direct(0)),
+            },
+            DnsUpstreamSpec {
+                transport: DnsUpstreamTransport::Udp,
+                target: TargetAddr::domain("outer-1.resolver.test", fixture.address.port())
+                    .expect("second outer domain target"),
+                resolved_targets: Box::new([]),
+                detour: Some(EgressPlanHandle::direct(1)),
+            },
+            configured_server(fixture.address, DnsUpstreamTransport::Udp, false),
+        ],
+        Duration::from_millis(700),
+        NonZeroU16::new(1).expect("one aggregate admission permit"),
+        egress,
+    )
+    .expect("nested dependency resolver");
+    owner
+        .ready()
+        .await
+        .expect("nested dependency resolver ready");
+    let resolver = Arc::new(resolver);
+    slot.set(Arc::downgrade(&resolver))
+        .map_err(|_| ())
+        .expect("install nested resolver");
+
+    let lookup = resolver
+        .lookup(
+            0,
+            Name::from_ascii("answer.resolver.test.").expect("outer query"),
+            RecordType::A,
+        )
+        .await
+        .expect("nested dependency chain completes with one admission");
+    assert!(
+        lookup
+            .answers()
+            .iter()
+            .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 41))))
+    );
+    assert_eq!(max_query_chains.load(Ordering::Acquire), 1);
+    assert_eq!(binds.load(Ordering::Acquire), 3);
+    assert_eq!(resolver.stats().queries, 0);
+
+    drop(resolver);
+    owner.shutdown().await.expect("nested resolver shutdown");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn tagged_application_backend_has_no_uninitialized_fallback() {
+    let backend = TaggedServerApplicationResolveBackend::new(Arc::new(OnceLock::new()), 0);
+    let domain = CanonicalDomain::new("no-fallback.resolver.test").expect("application domain");
+    let request = ApplicationResolveRequest::new(
+        ApplicationResolveContext::new(1, Network::Udp),
+        &domain,
+        NonZeroU16::new(53).expect("application port"),
+        DnsStrategy::PreferIpv4,
+    );
+
+    assert_eq!(backend.resolve(request).await, Err(DnsError::Runtime));
 }
 
 fn answer(request: &hickory_proto::op::Message) -> hickory_proto::op::Message {
@@ -384,6 +875,73 @@ async fn tc_fixture() -> (SocketAddr, Vec<tokio::task::JoinHandle<()>>) {
         stream.write_all(&response).await.expect("answer bytes");
     });
     (address, vec![udp_task, tcp_task])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn domain_target_and_plan_survive_udp_truncation_tcp_upgrade() {
+    let _network = TEST_NETWORK.lock().await;
+    let (address, tasks) = tc_fixture().await;
+    let logical_target = TargetAddr::domain("deferred-upstream.resolver.test", address.port())
+        .expect("valid logical DNS target");
+    let server = DnsUpstreamSpec {
+        transport: DnsUpstreamTransport::Udp,
+        target: logical_target.clone(),
+        resolved_targets: Box::new([]),
+        detour: Some(EgressPlanHandle::direct(0)),
+    };
+    let plan_ptr = server
+        .detour
+        .as_ref()
+        .expect("configured domain detour")
+        .snapshot_owned()
+        .hops()
+        .as_ptr() as usize;
+    let egress = Arc::new(RecordingEgress::with_dial_override(address));
+    let (resolver, mut owner) = TaggedResolver::new(
+        vec![server],
+        Duration::from_millis(250),
+        NonZeroU16::new(1).expect("nonzero admission"),
+        egress.clone(),
+    )
+    .expect("start domain resolver");
+    owner.ready().await.expect("domain resolver ready");
+
+    let lookup = resolver
+        .lookup(
+            0,
+            Name::from_ascii("tc.resolver.test.").expect("TC name"),
+            RecordType::A,
+        )
+        .await
+        .expect("domain target TC lookup");
+    assert!(
+        lookup
+            .answers()
+            .iter()
+            .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 44))))
+    );
+    assert_eq!(
+        egress.calls(),
+        vec![
+            EgressCall {
+                network: "udp",
+                target: logical_target.clone(),
+                plan: Some(vec![0]),
+            },
+            EgressCall {
+                network: "tcp",
+                target: logical_target,
+                plan: Some(vec![0]),
+            },
+        ]
+    );
+    assert_eq!(egress.plan_ptrs(), vec![plan_ptr; 2]);
+
+    drop(resolver);
+    owner.shutdown().await.expect("domain resolver shutdown");
+    for task in tasks {
+        task.await.expect("domain TC fixture join");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -525,12 +1083,12 @@ async fn address_lookup_shares_one_deadline_admission_plan_and_owner() {
         vec![
             EgressCall {
                 network: "udp",
-                target: address,
+                target: numeric_target(address),
                 plan: Some(vec![0]),
             },
             EgressCall {
                 network: "udp",
-                target: address,
+                target: numeric_target(address),
                 plan: Some(vec![0]),
             },
         ]
@@ -613,12 +1171,12 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
         vec![
             EgressCall {
                 network: "udp",
-                target: address,
+                target: numeric_target(address),
                 plan: Some(vec![0])
             },
             EgressCall {
                 network: "tcp",
-                target: address,
+                target: numeric_target(address),
                 plan: Some(vec![0])
             },
         ]
@@ -660,7 +1218,7 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
             egress.calls(),
             vec![EgressCall {
                 network: "udp",
-                target: address,
+                target: numeric_target(address),
                 plan: Some(vec![0])
             }]
         );
@@ -693,7 +1251,7 @@ async fn truncation_and_invalid_wire_inputs_never_change_plan_or_transport() {
         egress.calls(),
         vec![EgressCall {
             network: "tcp",
-            target: address,
+            target: numeric_target(address),
             plan: Some(vec![0])
         }]
     );

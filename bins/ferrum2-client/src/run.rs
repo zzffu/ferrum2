@@ -2,7 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use ferrum2_config::{DnsConfig, DnsIngressId, PreparedClientV2, ValidatedClientConfig};
+use ferrum2_config::{
+    ClientOutboundConfig, DirectDomainResolver, DnsConfig, DnsIngressId, PreparedClientV2,
+    ValidatedClientConfig,
+};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::Network;
 #[cfg(test)]
@@ -15,6 +18,7 @@ use ferrum2_dns::{
     DnsPolicyCompileError, DnsPolicyMatchResult, DnsPolicyMatchSource, DnsPolicyMatchType,
     DnsPolicyObservation, DnsPolicyObserver, DnsPolicyProgram, DnsPolicyStage, DnsProxy,
     DnsProxySockets, DnsStrategy, ProxyIngress, ProxyTransport, ResolverGeneration, TaggedResolver,
+    TaggedServerApplicationResolveBackend,
 };
 use ferrum2_observability::{
     Metrics, Role, RuleMatchResult, RuleMatchType, RuleProgram, RuleProgramMode, RuleSource,
@@ -962,10 +966,12 @@ where
         let tun_config = config.tun;
         let tun_auto_route = tun_config.as_ref().is_some_and(|tun| tun.auto_route);
         let tun_direct = tun_config.is_some()
-            && config
-                .outbounds
-                .iter()
-                .any(|outbound| matches!(outbound, ferrum2_config::ClientOutboundConfig::Direct));
+            && config.outbounds.iter().any(|outbound| {
+                matches!(
+                    outbound,
+                    ferrum2_config::ClientOutboundConfig::Direct { .. }
+                )
+            });
         let underlay = materialized_underlay.unwrap_or_default();
         let mut dns = match (config.dns, config.dns_route, dns_specs) {
             (
@@ -997,9 +1003,6 @@ where
             (None, None, None) => None,
             _ => return Err(RunError::StartupProtocol),
         };
-        let application_dns_strategy = dns.as_ref().map_or(DnsStrategy::PreferIpv4, |dns| {
-            dns_strategy(dns.6.strategy())
-        });
         let dns_proxy_runtime = dns
             .as_mut()
             .map(|dns| {
@@ -1015,20 +1018,18 @@ where
             dns.3 = None;
         }
         let ordinary_dns = dns.as_ref().map(|_| Arc::new(std::sync::OnceLock::new()));
-        let application_resolver = match ordinary_dns.as_ref() {
-            Some(proxy) => ApplicationResolver::configured(Arc::new(
-                dns_egress::ClientConfiguredApplicationBackend::new(Arc::clone(proxy)),
-            )),
-            None => ApplicationResolver::system_default(),
-        };
+        let tagged_dns = Arc::new(std::sync::OnceLock::new());
+        let application_resolver = ApplicationResolver::system_default();
         let application_resolver = ApplicationResolverAdapter::new(
             Arc::new(observed_application_resolver(
                 application_resolver,
                 &metrics,
             )),
             0,
-            application_dns_strategy,
+            DnsStrategy::PreferIpv4,
         );
+        let direct_resolvers =
+            client_direct_resolvers(&config.outbounds, Arc::clone(&tagged_dns), &metrics);
         metrics.set_udp_sessions_active(Role::Client, 0);
         metrics.set_udp_buffered_bytes(Role::Client, 0);
         let configured_udp = config.udp;
@@ -1101,7 +1102,7 @@ where
                 config.runtime.connect_timeout,
             ));
         let egress = Arc::new(
-            ClientEgressEngine::new_with_application_resolver(
+            ClientEgressEngine::new_with_direct_resolvers(
                 Arc::clone(&outbounds),
                 connector,
                 SystemClock::new(),
@@ -1112,6 +1113,7 @@ where
                 ),
                 udp,
                 application_resolver,
+                direct_resolvers,
                 #[cfg(test)]
                 _udp_id_random,
             )
@@ -1190,6 +1192,7 @@ where
         }
         if let Some((inbounds, servers, route, policy, timeout, max_inflight, _, _)) = dns {
             let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");
+            let tagged_dns = Arc::clone(&tagged_dns);
             let addresses = inbounds.into_iter().map(|inbound| inbound.listen).collect();
             let route = Arc::new(route);
             roots.push(
@@ -1209,6 +1212,9 @@ where
                         TaggedResolver::new(servers, timeout, max_inflight, egress)
                             .map_err(|_| RunError::StartupProtocol)?;
                     let resolver = Arc::new(resolver);
+                    tagged_dns
+                        .set(Arc::downgrade(&resolver))
+                        .map_err(|_| RunError::StartupProtocol)?;
                     #[cfg(test)]
                     if let Some(observer) = dns_observer.take() {
                         let _ = observer.send((Arc::clone(&dns_context), Arc::clone(&resolver)));
@@ -1346,6 +1352,37 @@ const fn dns_strategy(strategy: ferrum2_config::DnsStrategy) -> DnsStrategy {
         ferrum2_config::DnsStrategy::Ipv4Only => DnsStrategy::Ipv4Only,
         ferrum2_config::DnsStrategy::Ipv6Only => DnsStrategy::Ipv6Only,
     }
+}
+
+fn client_direct_resolvers(
+    outbounds: &[ClientOutboundConfig],
+    tagged: Arc<std::sync::OnceLock<std::sync::Weak<TaggedResolver>>>,
+    metrics: &Arc<Metrics>,
+) -> Arc<[Option<ApplicationResolverAdapter>]> {
+    let system = Arc::new(observed_application_resolver(
+        ApplicationResolver::system_default(),
+        metrics,
+    ));
+    outbounds
+        .iter()
+        .map(|outbound| {
+            let mode = outbound.direct_domain_resolver()?;
+            let (resolver, strategy) = match mode {
+                DirectDomainResolver::System => (Arc::clone(&system), DnsStrategy::PreferIpv4),
+                DirectDomainResolver::DnsServer { server, strategy } => {
+                    let resolver = ApplicationResolver::configured(Arc::new(
+                        TaggedServerApplicationResolveBackend::new(Arc::clone(&tagged), server),
+                    ));
+                    (
+                        Arc::new(observed_application_resolver(resolver, metrics)),
+                        dns_strategy(strategy),
+                    )
+                }
+            };
+            Some(ApplicationResolverAdapter::new(resolver, 0, strategy))
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn observed_application_resolver(

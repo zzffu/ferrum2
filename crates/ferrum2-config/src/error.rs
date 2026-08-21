@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::dependency::DependencyNode;
+
 /// Stable operator-facing configuration error category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigErrorKind {
@@ -28,7 +30,7 @@ impl ConfigErrorKind {
             Self::RuleAllocation => "rule.allocation",
             Self::DnsResolverRequired => "dns.resolver_required",
             Self::DnsReservedResolverName => "dns.reserved_resolver_name",
-            Self::DnsDependencyCycle => "dns.dependency_cycle",
+            Self::DnsDependencyCycle => "config.dependency_cycle",
             Self::ResourceMaterialization => "config.resource_materialization",
         }
     }
@@ -300,29 +302,30 @@ impl ConfigField {
             Self::DnsRouteRulesAction => "dns.route.rules.action",
             Self::DnsRouteRulesStrategy => "dns.route.rules.strategy",
             Self::DnsRouteFinal => "dns.route.final",
-            Self::DnsDependencyCycle => "dns.dependency_cycle",
+            Self::DnsDependencyCycle => "config.dependency_cycle",
             Self::ResourceMaterialization => "config.resource_materialization",
         }
     }
 }
 
 /// A redacted configuration error that never retains a parser or I/O source.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigError {
     kind: ConfigErrorKind,
     field: ConfigField,
+    dependency_cycle: Option<Vec<DependencyNode>>,
 }
 
 impl ConfigError {
-    pub const fn kind(self) -> ConfigErrorKind {
+    pub const fn kind(&self) -> ConfigErrorKind {
         self.kind
     }
 
-    pub const fn code(self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         self.kind.code()
     }
 
-    pub const fn field(self) -> ConfigField {
+    pub const fn field(&self) -> ConfigField {
         self.field
     }
 
@@ -335,7 +338,24 @@ impl ConfigError {
     }
 
     pub(super) const fn new(kind: ConfigErrorKind, field: ConfigField) -> Self {
-        Self { kind, field }
+        Self {
+            kind,
+            field,
+            dependency_cycle: None,
+        }
+    }
+
+    /// Retains only the closed resource categories and stable list indices from
+    /// one complete dependency cycle. Configuration tags, endpoints, URLs, and
+    /// resolver names never enter this diagnostic.
+    pub(crate) fn dependency_cycle(path: Vec<DependencyNode>) -> Self {
+        debug_assert!(path.len() >= 2);
+        debug_assert_eq!(path.first(), path.last());
+        Self {
+            kind: ConfigErrorKind::DnsDependencyCycle,
+            field: ConfigField::DnsDependencyCycle,
+            dependency_cycle: Some(path),
+        }
     }
 
     pub(super) const fn semantic(field: ConfigField) -> Self {
@@ -404,7 +424,9 @@ impl fmt::Display for ConfigError {
             ConfigErrorKind::RuleAllocation => "rule allocation failed",
             ConfigErrorKind::DnsResolverRequired => "an explicit resolver is required",
             ConfigErrorKind::DnsReservedResolverName => "the resolver name is reserved",
-            ConfigErrorKind::DnsDependencyCycle => "the resolver dependency graph contains a cycle",
+            ConfigErrorKind::DnsDependencyCycle => {
+                "the configuration dependency graph contains a cycle"
+            }
             ConfigErrorKind::ResourceMaterialization => "supplied resources are invalid",
         };
         write!(
@@ -412,7 +434,17 @@ impl fmt::Display for ConfigError {
             "error[{}] {}: {message}",
             self.kind.code(),
             self.field.as_str()
-        )
+        )?;
+        if let Some(path) = &self.dependency_cycle {
+            formatter.write_str(": ")?;
+            for (index, node) in path.iter().enumerate() {
+                if index != 0 {
+                    formatter.write_str(" -> ")?;
+                }
+                node.fmt(formatter)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -421,6 +453,8 @@ impl Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use ferrum2_rule::RuleCompileError;
+
+    use crate::dependency::DependencyNode;
 
     use super::{ConfigError, ConfigErrorKind, ConfigField};
 
@@ -469,11 +503,34 @@ mod tests {
         assert_eq!(reserved.code(), "dns.reserved_resolver_name");
         assert_eq!(
             ConfigError::semantic(ConfigField::DnsDependencyCycle).code(),
-            "dns.dependency_cycle"
+            "config.dependency_cycle"
         );
         assert_eq!(
             ConfigError::resource_materialization().code(),
             "config.resource_materialization"
         );
+    }
+
+    #[test]
+    fn dependency_cycle_display_retains_only_closed_resource_nodes() {
+        let error = ConfigError::dependency_cycle(vec![
+            DependencyNode::DnsServer(0),
+            DependencyNode::RuleSet(1),
+            DependencyNode::Selector(2),
+            DependencyNode::Chain(3),
+            DependencyNode::Outbound(4),
+            DependencyNode::DnsServer(0),
+        ]);
+
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "error[config.dependency_cycle] config.dependency_cycle: ",
+                "the configuration dependency graph contains a cycle: ",
+                "dns-server[0] -> rule-set[1] -> selector[2] -> chain[3] -> ",
+                "outbound[4] -> dns-server[0]"
+            )
+        );
+        assert_eq!(error.clone(), error);
     }
 }

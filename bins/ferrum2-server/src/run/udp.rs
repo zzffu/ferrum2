@@ -55,6 +55,7 @@ struct UdpMappingState {
 struct BoundUdpSession {
     handle: UdpSessionHandle,
     inbound: usize,
+    outbound: usize,
 }
 
 pub(super) struct UdpMappings {
@@ -111,6 +112,7 @@ impl UdpMappings {
         capability: ServerResponseCapability,
         handle: UdpSessionHandle,
         inbound: usize,
+        outbound: usize,
     ) -> Option<ServerResponseCapability> {
         let mut state = self.state.lock().expect("UDP mapping lock poisoned");
         if let Some(old) = state.by_capability.remove(&capability) {
@@ -135,9 +137,14 @@ impl UdpMappings {
         } else {
             None
         };
-        state
-            .by_capability
-            .insert(capability, BoundUdpSession { handle, inbound });
+        state.by_capability.insert(
+            capability,
+            BoundUdpSession {
+                handle,
+                inbound,
+                outbound,
+            },
+        );
         state.by_handle.insert(handle, capability);
         drop(state);
         self.published.notify_waiters();
@@ -472,6 +479,7 @@ where
     config: UdpConfig,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
+    direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
     runtime: ServerUdpRuntime<L, F>,
     mappings: Arc<UdpMappings>,
     admission: Arc<tokio::sync::Mutex<()>>,
@@ -493,7 +501,7 @@ pub(super) struct ServerUdpShared {
     pub(super) mappings: Arc<UdpMappings>,
     pub(super) admission: Arc<tokio::sync::Mutex<()>>,
     pub(super) connect_timeout: std::time::Duration,
-    pub(super) dns: dns_egress::ServerDnsResolver,
+    pub(super) direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
     pub(super) registry: OwnerRegistry,
     pub(super) metrics: Arc<Metrics>,
 }
@@ -528,7 +536,7 @@ where
         mappings,
         admission,
         connect_timeout,
-        dns,
+        direct_resolvers,
         registry,
         metrics,
     } = shared;
@@ -543,10 +551,14 @@ where
         codec: Arc::clone(&response_codec),
         metrics: Arc::clone(&metrics),
     };
+    let default_resolver = direct_resolvers
+        .first()
+        .cloned()
+        .ok_or(RunError::StartupProtocol)?;
     let runtime = DirectUdpRuntime::with_shared_adapters(
         sessions,
         connect_timeout,
-        dns.for_inbound(inbound),
+        default_resolver.for_inbound(inbound),
         socket_factory,
         handler,
         registry.clone(),
@@ -575,6 +587,7 @@ where
         config,
         registry,
         metrics,
+        direct_resolvers,
         runtime,
         mappings,
         admission,
@@ -623,6 +636,7 @@ where
             config,
             registry,
             metrics,
+            direct_resolvers,
             mut runtime,
             mappings,
             admission,
@@ -785,8 +799,30 @@ where
                     record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
                     continue;
                 }
+                let ServerTerminalRoute::Direct(outbound) = terminal else {
+                    unreachable!("rejected UDP route returned before direct session reuse")
+                };
+                if binding.outbound != outbound {
+                    let (_datagram, commit) = pending.into_parts();
+                    match protocol.commit_request(
+                        commit,
+                        peer,
+                        clock.monotonic_now(),
+                        &SystemRandom,
+                    ) {
+                        Ok(accepted) if accepted.capability() == capability => {
+                            metrics.udp_datagram(
+                                Role::Server,
+                                Direction::ClientToTarget,
+                                Outcome::Rejected,
+                            );
+                        }
+                        Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
+                        Err(error) => record_udp_protocol_failure(&metrics, error),
+                    }
+                    continue;
+                }
                 let handle = binding.handle;
-                debug_assert_eq!(terminal, ServerTerminalRoute::Direct);
                 let reserved =
                     runtime.reserve_datagram(handle, pending.datagram().allocated_capacity());
                 match reserved {
@@ -831,7 +867,18 @@ where
             }
 
             drop(admission_guard);
-            debug_assert_eq!(terminal, ServerTerminalRoute::Direct);
+            let ServerTerminalRoute::Direct(outbound) = terminal else {
+                unreachable!("rejected UDP route returned before direct session admission")
+            };
+            let Some(session_resolver) = direct_resolvers.get(outbound).cloned() else {
+                record_udp_failure(
+                    &metrics,
+                    Stage::Config,
+                    Reason::ConfigSemantic,
+                    Outcome::Failed,
+                );
+                continue;
+            };
             let provisional = tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
@@ -877,6 +924,31 @@ where
                     .map(|binding| (capability, binding))
             }) {
                 debug_assert_eq!(binding.inbound, inbound);
+                if binding.outbound != outbound {
+                    // The winning generation fixed a different Direct while this
+                    // packet's socket was opening. Roll back the losing provisional
+                    // resources, advance the authenticated protocol state, and fail
+                    // this packet closed instead of crossing resolver identities.
+                    drop(provisional);
+                    let (_datagram, commit) = pending.into_parts();
+                    match protocol.commit_request(
+                        commit,
+                        peer,
+                        clock.monotonic_now(),
+                        &SystemRandom,
+                    ) {
+                        Ok(accepted) if accepted.capability() == capability => {
+                            metrics.udp_datagram(
+                                Role::Server,
+                                Direction::ClientToTarget,
+                                Outcome::Rejected,
+                            );
+                        }
+                        Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
+                        Err(error) => record_udp_protocol_failure(&metrics, error),
+                    }
+                    continue;
+                }
                 match runtime
                     .reserve_datagram(binding.handle, pending.datagram().allocated_capacity())
                 {
@@ -938,10 +1010,11 @@ where
             }
             let (datagram, commit) = pending.into_parts();
             let mut committed_capability = None;
-            let committed = runtime.commit_session_with(
+            let committed = runtime.commit_session_with_resolver(
                 provisional,
                 datagram,
                 tokio::time::Instant::now(),
+                session_resolver.for_inbound(inbound),
                 || {
                     // QA-M2-T02-N01: new protocol state is created only inside
                     // T03's reserved session/bytes/queue commit transition.
@@ -962,7 +1035,10 @@ where
                         record_udp_protocol_failure(&metrics, UdpPacketError::Generation);
                         break Err(RunError::RuntimeRoot);
                     };
-                    if mappings.publish(capability, handle, inbound).is_some() {
+                    if mappings
+                        .publish(capability, handle, inbound, outbound)
+                        .is_some()
+                    {
                         mappings.prune_protocol(&protocol, clock.monotonic_now());
                     }
                     record_udp_request_accepted(&metrics, wire_len);
@@ -1617,7 +1693,7 @@ mod tests {
                 mappings: Arc::new(UdpMappings::new(config.udp.max_sessions)),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: dns_egress::ServerDnsResolver::new(None),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },
@@ -1718,7 +1794,7 @@ mod tests {
             mappings,
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            dns: dns_egress::ServerDnsResolver::new(None),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics,
         };
@@ -1834,7 +1910,7 @@ mod tests {
             mappings: Arc::clone(&mappings),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            dns: dns_egress::ServerDnsResolver::new(None),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         };
@@ -1957,7 +2033,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: dns_egress::ServerDnsResolver::new(None),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
                 registry: registry.clone(),
                 metrics: Arc::new(Metrics::new()),
             },
@@ -2044,7 +2120,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::clone(&admission),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: dns_egress::ServerDnsResolver::new(None),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },
@@ -2178,7 +2254,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: dns_egress::ServerDnsResolver::new(None),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
                 registry: registry.clone(),
                 metrics: Arc::new(Metrics::new()),
             },
@@ -2216,7 +2292,7 @@ mod tests {
                 .expect("replacement seed queue")
                 .expect("replacement seed datagram"),
         );
-        assert_eq!(mappings.publish(capability, replacement_handle, 0), None);
+        assert_eq!(mappings.publish(capability, replacement_handle, 0, 0), None);
         socket_factory.open_gate.add_permits(1);
 
         let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
@@ -2315,7 +2391,7 @@ mod tests {
                 mappings,
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: dns_egress::ServerDnsResolver::new(None),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             };
@@ -2439,7 +2515,7 @@ mod tests {
             })
             .expect("commit lifecycle generation");
         let capability = capability.expect("lifecycle capability");
-        assert_eq!(mappings.publish(capability, handle, 0), None);
+        assert_eq!(mappings.publish(capability, handle, 0, 0), None);
         drop(
             manager
                 .pop(handle, UdpDirection::ToTarget)
@@ -2503,7 +2579,7 @@ mod tests {
                 mappings: Arc::clone(&mappings),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                dns: dns_egress::ServerDnsResolver::new(None),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },
@@ -2774,6 +2850,118 @@ mod tests {
         );
         assert_eq!(manager_registry.snapshot().udp_sessions, 0);
         assert_eq!(manager_registry.snapshot().udp_buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn udp_mapping_pins_first_direct_and_rejects_later_outbound() {
+        let listen = reserve_address();
+        let first_target = udp_loopback().await;
+        let second_target = udp_loopback().await;
+        let first_address = first_target.local_addr().expect("first target address");
+        let second_address = second_target.local_addr().expect("second target address");
+        let source = format!(
+            r#"schema_version = 2
+[[inbounds]]
+tag = "i0"
+listen = "{listen}"
+
+[[outbounds]]
+tag = "o0"
+
+[[outbounds]]
+tag = "o1"
+
+[route]
+final = "o0"
+
+[[route.rules]]
+network = "udp"
+port = {}
+action = "route"
+outbound = "o1"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+
+[runtime]
+shutdown_grace_ms = 0
+
+[udp]
+enabled = true
+max_sessions = 1
+"#,
+            second_address.port()
+        );
+        let (path, config) = server_test_config_source("udp-direct-pin", &source);
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let (stop, mut server) = spawn_test_server(config, &registry);
+        wait_until_bound(&mut server, listen).await;
+
+        let keys = aes_keys();
+        let clock = SystemClock::new();
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
+        let socket = udp_loopback().await;
+        let first = encoded_udp_request(
+            &mut client,
+            &clock,
+            TargetAddr::ip(first_address).expect("first target"),
+            b"first outbound",
+        );
+        socket
+            .send_to(&first, listen)
+            .await
+            .expect("send first outbound request");
+        let mut received = [0_u8; 64];
+        let (length, _) = tokio::time::timeout(
+            Duration::from_secs(1),
+            first_target.recv_from(&mut received),
+        )
+        .await
+        .expect("first outbound receive deadline")
+        .expect("first outbound receive");
+        assert_eq!(&received[..length], b"first outbound");
+
+        let mismatched = encoded_udp_request(
+            &mut client,
+            &clock,
+            TargetAddr::ip(second_address).expect("second target"),
+            b"mismatched outbound",
+        );
+        socket
+            .send_to(&mismatched, listen)
+            .await
+            .expect("send mismatched outbound request");
+        let pinned = encoded_udp_request(
+            &mut client,
+            &clock,
+            TargetAddr::ip(first_address).expect("pinned target"),
+            b"pinned outbound",
+        );
+        socket
+            .send_to(&pinned, listen)
+            .await
+            .expect("send pinned outbound request");
+        let (length, _) = tokio::time::timeout(
+            Duration::from_secs(1),
+            first_target.recv_from(&mut received),
+        )
+        .await
+        .expect("pinned outbound receive deadline")
+        .expect("pinned outbound receive");
+        assert_eq!(&received[..length], b"pinned outbound");
+        assert_pending(
+            second_target.recv_from(&mut received),
+            "mismatched Direct outbound crossed the pinned UDP mapping",
+        )
+        .await;
+
+        stop.send(()).expect("stop pinned UDP server");
+        assert_eq!(server.await.expect("pinned UDP server task"), Ok(()));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).expect("remove pinned UDP config");
     }
 
     #[tokio::test]

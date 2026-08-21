@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferrum2_config::{
-    ClientV2Resources, CompiledRuleSetResource, DnsIngressId, ResolvedDnsEndpoint,
-    ResolvedOutboundEndpoint, RouteAction, finish_client_v2, prepare_client_v2,
+    ClientV2Resources, CompiledRuleSetResource, DnsIngressId, ResolvedOutboundEndpoint,
+    RouteAction, finish_client_v2, prepare_client_v2,
 };
 use ferrum2_core::TargetAddr;
 use ferrum2_rule::srs::decode_srs;
@@ -29,10 +29,7 @@ fn resources() -> ClientV2Resources {
         })
         .collect();
     ClientV2Resources::new(
-        vec![ResolvedDnsEndpoint::new(
-            1,
-            "198.51.100.53:443".parse().expect("DNS endpoint"),
-        )],
+        vec![],
         vec![ResolvedOutboundEndpoint::new(
             2,
             "198.51.100.10:8388".parse().expect("outbound endpoint"),

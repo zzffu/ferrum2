@@ -4,12 +4,14 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use ferrum2_config::{DnsRuntimeConfig, DnsServerConfig, DnsTransport, ServerDnsRoute};
-use ferrum2_core::TargetAddr;
+use ferrum2_config::{
+    DirectDomainResolver, DnsRuntimeConfig, DnsServerConfig, DnsTransport, ServerDnsRoute,
+};
 use ferrum2_core::route::{EgressPlanSnapshot, Network};
+use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_dns::{
     ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveOutcome,
     ApplicationResolveRequest, ApplicationResolver, ApplicationResolverMode, BoxedDnsDatagramIo,
@@ -18,7 +20,7 @@ use ferrum2_dns::{
     DnsPolicyMatchSource, DnsPolicyMatchType, DnsPolicyObservation, DnsPolicyObserver,
     DnsPolicyProgram, DnsPolicyStage, DnsProxy, DnsServerId, DnsStrategy, DnsTaskRegistrar,
     DnsUpstreamSpec, DnsUpstreamTransport, FixedEndpointLookup, ResolverGeneration,
-    SystemDnsEgress, TaggedResolver,
+    SystemDnsEgress, TaggedResolver, TaggedServerApplicationResolveBackend,
 };
 use ferrum2_observability::{
     DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics, RuleMatchResult, RuleMatchType,
@@ -28,6 +30,7 @@ use ferrum2_rule::{ActionTable, RuleCompileError, RuleEngineRegistry, RuleEvalua
 use ferrum2_runtime::{
     ApplicationResolverAdapter, MAX_RESOLVED_CANDIDATES, TcpResolver, UdpResolver,
 };
+use tokio::time::Instant as TokioInstant;
 
 pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamSpec> {
     servers
@@ -52,13 +55,15 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
             };
             DnsUpstreamSpec {
                 transport,
-                address: server.address,
+                target: server.target.clone(),
+                resolved_targets: server.resolved_targets.clone(),
                 detour: server.detour.clone(),
             }
         })
         .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct ServerDnsState {
     route: ActionTable<usize>,
     policy: Option<ServerDnsRoute>,
@@ -82,6 +87,7 @@ struct ServerProxyRuntime {
     generation: ResolverGeneration,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 struct InstalledServerDns {
     resolver: Arc<TaggedResolver>,
     proxy: Option<Arc<DnsProxy>>,
@@ -104,6 +110,7 @@ impl From<RuleCompileError> for ServerDnsStateBuildError {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ServerDnsState {
     pub(super) fn try_new(
         route: ActionTable<usize>,
@@ -320,6 +327,7 @@ pub(super) struct ServerDnsResolver {
     adapter: ApplicationResolverAdapter,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ServerDnsResolver {
     #[cfg(test)]
     pub(super) fn new(state: Option<Arc<ServerDnsState>>) -> Self {
@@ -328,6 +336,21 @@ impl ServerDnsResolver {
 
     pub(super) fn new_observed(state: Option<Arc<ServerDnsState>>, metrics: Arc<Metrics>) -> Self {
         Self::new_inner(state, Some(metrics))
+    }
+
+    pub(super) fn for_direct(
+        mode: DirectDomainResolver,
+        tagged: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
+    ) -> Self {
+        Self::for_direct_inner(mode, tagged, None)
+    }
+
+    pub(super) fn for_direct_observed(
+        mode: DirectDomainResolver,
+        tagged: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self::for_direct_inner(mode, tagged, Some(metrics))
     }
 
     fn new_inner(state: Option<Arc<ServerDnsState>>, metrics: Option<Arc<Metrics>>) -> Self {
@@ -341,6 +364,31 @@ impl ServerDnsResolver {
                 }))
             }
             None => ApplicationResolver::system_default(),
+        };
+        if let Some(metrics) = metrics {
+            resolver = observed_application_resolver(resolver, metrics);
+        }
+        Self {
+            adapter: ApplicationResolverAdapter::new(Arc::new(resolver), 0, strategy),
+        }
+    }
+
+    fn for_direct_inner(
+        mode: DirectDomainResolver,
+        tagged: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
+        metrics: Option<Arc<Metrics>>,
+    ) -> Self {
+        let (mut resolver, strategy) = match mode {
+            DirectDomainResolver::System => (
+                ApplicationResolver::system_default(),
+                DnsStrategy::PreferIpv4,
+            ),
+            DirectDomainResolver::DnsServer { server, strategy } => (
+                ApplicationResolver::configured(Arc::new(
+                    TaggedServerApplicationResolveBackend::new(tagged, server),
+                )),
+                dns_strategy(strategy),
+            ),
         };
         if let Some(metrics) = metrics {
             resolver = observed_application_resolver(resolver, metrics);
@@ -463,6 +511,7 @@ impl UdpResolver for ServerDnsResolver {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 struct ServerConfiguredApplicationBackend {
     state: Arc<ServerDnsState>,
 }
@@ -524,18 +573,28 @@ const fn dns_strategy(strategy: ferrum2_config::DnsStrategy) -> DnsStrategy {
 
 pub(super) struct ServerDnsEgress {
     outbound_count: usize,
+    outbound_resolvers: Arc<[Option<ServerDnsResolver>]>,
 }
 
 impl ServerDnsEgress {
     pub(super) fn new(outbound_count: usize) -> Self {
-        Self { outbound_count }
+        Self {
+            outbound_count,
+            outbound_resolvers: vec![None; outbound_count].into(),
+        }
     }
 
-    fn validate(&self, plan: &Option<EgressPlanSnapshot>) -> io::Result<()> {
+    pub(super) fn with_outbound_resolvers(mut self, resolvers: Vec<ServerDnsResolver>) -> Self {
+        debug_assert_eq!(resolvers.len(), self.outbound_count);
+        self.outbound_resolvers = resolvers.into_iter().map(Some).collect();
+        self
+    }
+
+    fn selected_outbound(&self, plan: &Option<EgressPlanSnapshot>) -> io::Result<Option<usize>> {
         match plan {
-            None => Ok(()),
+            None => Ok(None),
             Some(plan) if matches!(plan.hops(), [outbound] if *outbound < self.outbound_count) => {
-                Ok(())
+                Ok(Some(plan.hops()[0]))
             }
             Some(_) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -543,32 +602,132 @@ impl ServerDnsEgress {
             )),
         }
     }
+
+    fn resolver(&self, outbound: usize) -> io::Result<ServerDnsResolver> {
+        self.outbound_resolvers
+            .get(outbound)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "server Direct resolver is unavailable",
+                )
+            })
+    }
 }
 
 impl DnsEgress for ServerDnsEgress {
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
-        if let Err(error) = self.validate(&plan) {
-            return Box::pin(async move { Err(error) });
-        }
-        SystemDnsEgress.connect_tcp(target, None, timeout, tasks)
+        let outbound = match self.selected_outbound(&plan) {
+            Ok(outbound) => outbound,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let TargetHostRef::Domain(host) = target.host() else {
+            return SystemDnsEgress.connect_tcp(target, None, timeout, tasks);
+        };
+        let Some(outbound) = outbound else {
+            return Box::pin(async {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "server DNS domain target requires a Direct detour",
+                ))
+            });
+        };
+        let resolver = match self.resolver(outbound) {
+            Ok(resolver) => resolver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let host = host.to_owned();
+        let port = target.port().get();
+        Box::pin(async move {
+            let deadline = TokioInstant::now() + timeout;
+            let candidates =
+                tokio::time::timeout_at(deadline, TcpResolver::resolve(&resolver, &host, port))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "server DNS resolve timeout")
+                    })??;
+            let mut last_error = None;
+            for candidate in candidates {
+                let remaining = deadline.saturating_duration_since(TokioInstant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "server DNS connect timeout",
+                    ));
+                }
+                let candidate = TargetAddr::ip(candidate).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid resolved DNS target")
+                })?;
+                let connect =
+                    SystemDnsEgress.connect_tcp(candidate, None, remaining, tasks.clone());
+                match tokio::time::timeout_at(deadline, connect).await {
+                    Ok(Ok(stream)) => return Ok(stream),
+                    Ok(Err(error)) => last_error = Some(error),
+                    Err(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "server DNS connect timeout",
+                        ));
+                    }
+                }
+            }
+            Err(last_error.unwrap_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "server Direct resolver returned no candidates",
+                )
+            }))
+        })
     }
 
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
-        if let Err(error) = self.validate(&plan) {
-            return Box::pin(async move { Err(error) });
-        }
-        SystemDnsEgress.bind_udp(target, None, tasks)
+        let outbound = match self.selected_outbound(&plan) {
+            Ok(outbound) => outbound,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let TargetHostRef::Domain(host) = target.host() else {
+            return SystemDnsEgress.bind_udp(target, None, tasks);
+        };
+        let Some(outbound) = outbound else {
+            return Box::pin(async {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "server DNS domain target requires a Direct detour",
+                ))
+            });
+        };
+        let resolver = match self.resolver(outbound) {
+            Ok(resolver) => resolver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let host = host.to_owned();
+        let port = target.port().get();
+        Box::pin(async move {
+            let candidates = UdpResolver::resolve(&resolver, &host, port).await?;
+            let candidate = candidates.into_iter().next().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "server Direct resolver returned no candidates",
+                )
+            })?;
+            let candidate = TargetAddr::ip(candidate).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid resolved DNS target")
+            })?;
+            SystemDnsEgress.bind_udp(candidate, None, tasks).await
+        })
     }
 }
 
@@ -577,13 +736,16 @@ mod tests {
     use super::*;
 
     use ferrum2_config::{
-        CompiledRuleSetResource, ServerV2Resources, finish_server_v2, prepare_server_v2,
+        CompiledRuleSetResource, DnsEndpointMode, ServerV2Resources, finish_server_v2,
+        prepare_server_v2,
     };
     use ferrum2_core::route::EgressPlanHandle;
     use ferrum2_rule::MatchSetBuilder;
     use hickory_proto::op::{Message, MessageType, OpCode};
     use hickory_proto::rr::rdata::A;
     use hickory_proto::rr::{DNSClass, RData, Record, RecordType};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use crate::run::test_support::{
         Ipv4Addr, UdpSocket, assert_pending, recv_udp, reserve_address, server_test_config_source,
@@ -812,7 +974,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .map(
                 |(index, &(transport, port, server_name, path, detoured))| DnsServerConfig {
                     transport,
-                    address: SocketAddr::from(([192, 0, 2, 53], port)),
+                    target: TargetAddr::ip(SocketAddr::from(([192, 0, 2, 53], port)))
+                        .expect("non-zero DNS target"),
+                    resolved_targets: Box::new([]),
+                    endpoint_mode: DnsEndpointMode::Numeric,
                     server_name: server_name.map(Into::into),
                     path: path.map(Into::into),
                     detour: detoured.then(|| EgressPlanHandle::direct(index)),
@@ -838,7 +1003,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .zip(configured_plan_ptrs)
             .enumerate()
         {
-            assert_eq!(spec.address, SocketAddr::from(([192, 0, 2, 53], port)));
+            assert_eq!(
+                spec.target,
+                TargetAddr::ip(SocketAddr::from(([192, 0, 2, 53], port)))
+                    .expect("non-zero DNS target")
+            );
             match (detoured, spec.detour.as_ref()) {
                 (true, Some(detour)) => {
                     let converted = detour.snapshot_owned();
@@ -898,6 +1067,332 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .send_to(&response.to_vec().expect("DNS response encode"), peer)
             .await
             .expect("DNS response send");
+    }
+
+    fn a_response(request: &Message, addresses: &[Ipv4Addr]) -> Vec<u8> {
+        let [query] = request.queries.as_slice() else {
+            panic!("one DNS query");
+        };
+        let mut response = Message::response(request.id, OpCode::Query);
+        response.metadata.recursion_available = true;
+        response.add_query(query.clone());
+        for &address in addresses {
+            response.add_answer(Record::from_rdata(
+                query.name().clone(),
+                60,
+                RData::A(A(address)),
+            ));
+        }
+        response.to_vec().expect("DNS response encode")
+    }
+
+    async fn answer_udp_queries(
+        socket: UdpSocket,
+        expected: &'static str,
+        answer_sets: Vec<Vec<Ipv4Addr>>,
+    ) {
+        let mut wire = [0_u8; 4096];
+        for addresses in answer_sets {
+            let (length, peer) = recv_udp(&socket, &mut wire).await;
+            let request = Message::from_vec(&wire[..length]).expect("UDP DNS query decode");
+            assert_eq!(request.queries[0].name().to_ascii(), expected);
+            assert_eq!(request.queries[0].query_type(), RecordType::A);
+            socket
+                .send_to(&a_response(&request, &addresses), peer)
+                .await
+                .expect("UDP DNS response");
+        }
+    }
+
+    async fn answer_tcp_query(
+        listener: TcpListener,
+        expected: &'static str,
+        addresses: Vec<Ipv4Addr>,
+    ) {
+        let (mut stream, _) = listener.accept().await.expect("TCP DNS accept");
+        let length = stream.read_u16().await.expect("TCP DNS length");
+        let mut wire = vec![0_u8; usize::from(length)];
+        stream.read_exact(&mut wire).await.expect("TCP DNS query");
+        let request = Message::from_vec(&wire).expect("TCP DNS query decode");
+        assert_eq!(request.queries[0].name().to_ascii(), expected);
+        assert_eq!(request.queries[0].query_type(), RecordType::A);
+        let response = a_response(&request, &addresses);
+        stream
+            .write_u16(u16::try_from(response.len()).expect("bounded DNS response"))
+            .await
+            .expect("TCP DNS response length");
+        stream.write_all(&response).await.expect("TCP DNS response");
+    }
+
+    async fn paired_upstream() -> (SocketAddr, UdpSocket, TcpListener) {
+        loop {
+            let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("paired TCP bind");
+            let address = tcp.local_addr().expect("paired address");
+            if let Ok(udp) = UdpSocket::bind(address).await {
+                return (address, udp, tcp);
+            }
+        }
+    }
+
+    fn upstream_spec(
+        target: TargetAddr,
+        transport: DnsUpstreamTransport,
+        detoured: bool,
+    ) -> DnsUpstreamSpec {
+        DnsUpstreamSpec {
+            transport,
+            target,
+            resolved_targets: Box::new([]),
+            detour: detoured.then(|| EgressPlanHandle::direct(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_exact_server_resolves_domain_tcp_and_udp_without_policy_fallback() {
+        let bootstrap = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bootstrap DNS bind");
+        let bootstrap_address = bootstrap.local_addr().expect("bootstrap DNS address");
+        let bootstrap_task = tokio::spawn(answer_udp_queries(
+            bootstrap,
+            "exact-upstream.test.",
+            vec![
+                vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(127, 0, 0, 2)],
+                vec![Ipv4Addr::LOCALHOST],
+            ],
+        ));
+        let (upstream_address, udp, tcp) = paired_upstream().await;
+        let udp_task = tokio::spawn(answer_udp_queries(
+            udp,
+            "payload.test.",
+            vec![vec![Ipv4Addr::new(192, 0, 2, 81)]],
+        ));
+        let tcp_task = tokio::spawn(answer_tcp_query(
+            tcp,
+            "payload.test.",
+            vec![Ipv4Addr::new(192, 0, 2, 82)],
+        ));
+
+        let tagged = Arc::new(OnceLock::new());
+        let direct = ServerDnsResolver::for_direct(
+            DirectDomainResolver::DnsServer {
+                server: 0,
+                strategy: ferrum2_config::DnsStrategy::Ipv4Only,
+            },
+            Arc::clone(&tagged),
+        );
+        let logical = TargetAddr::domain("exact-upstream.test", upstream_address.port())
+            .expect("logical upstream");
+        let egress = Arc::new(ServerDnsEgress::new(1).with_outbound_resolvers(vec![direct]));
+        let (resolver, mut owner) = TaggedResolver::new(
+            vec![
+                upstream_spec(
+                    TargetAddr::ip(bootstrap_address).expect("numeric bootstrap target"),
+                    DnsUpstreamTransport::Udp,
+                    false,
+                ),
+                upstream_spec(logical.clone(), DnsUpstreamTransport::Tcp, true),
+                upstream_spec(logical, DnsUpstreamTransport::Udp, true),
+            ],
+            Duration::from_secs(1),
+            std::num::NonZeroU16::new(4).expect("nested query admission"),
+            egress,
+        )
+        .expect("domain upstream resolver");
+        owner.ready().await.expect("domain upstream ready");
+        let resolver = Arc::new(resolver);
+        tagged
+            .set(Arc::downgrade(&resolver))
+            .map_err(|_| ())
+            .expect("install shared exact resolver");
+
+        let tcp_lookup = resolver
+            .lookup(
+                1,
+                "payload.test.".parse().expect("TCP payload query name"),
+                RecordType::A,
+            )
+            .await
+            .expect("exact-server TCP lookup");
+        assert!(
+            tcp_lookup
+                .answers()
+                .iter()
+                .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 82))))
+        );
+        let udp_lookup = resolver
+            .lookup(
+                2,
+                "payload.test.".parse().expect("UDP payload query name"),
+                RecordType::A,
+            )
+            .await
+            .expect("exact-server UDP lookup");
+        assert!(
+            udp_lookup
+                .answers()
+                .iter()
+                .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 81))))
+        );
+
+        bootstrap_task.await.expect("bootstrap DNS join");
+        tcp_task.await.expect("TCP upstream join");
+        udp_task.await.expect("UDP upstream join");
+        drop(resolver);
+        owner.shutdown().await.expect("domain upstream shutdown");
+        drop(tagged);
+    }
+
+    #[tokio::test]
+    async fn direct_system_resolver_connects_domain_tcp() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("system target bind");
+        let address = listener.local_addr().expect("system target address");
+        let upstream = tokio::spawn(answer_tcp_query(
+            listener,
+            "system-payload.test.",
+            vec![Ipv4Addr::new(192, 0, 2, 83)],
+        ));
+        let unavailable = ServerDnsResolver::for_direct(
+            DirectDomainResolver::DnsServer {
+                server: 0,
+                strategy: ferrum2_config::DnsStrategy::Ipv4Only,
+            },
+            Arc::new(OnceLock::new()),
+        );
+        let system =
+            ServerDnsResolver::for_direct(DirectDomainResolver::System, Arc::new(OnceLock::new()));
+        let egress =
+            Arc::new(ServerDnsEgress::new(2).with_outbound_resolvers(vec![unavailable, system]));
+        let (resolver, mut owner) = TaggedResolver::new(
+            vec![DnsUpstreamSpec {
+                target: TargetAddr::domain("localhost", address.port()).expect("localhost target"),
+                transport: DnsUpstreamTransport::Tcp,
+                resolved_targets: Box::new([]),
+                detour: Some(EgressPlanHandle::direct(1)),
+            }],
+            Duration::from_secs(1),
+            std::num::NonZeroU16::new(1).expect("query admission"),
+            egress,
+        )
+        .expect("system domain resolver");
+        owner.ready().await.expect("system domain ready");
+
+        let lookup = resolver
+            .lookup(
+                0,
+                "system-payload.test.".parse().expect("system payload name"),
+                RecordType::A,
+            )
+            .await
+            .expect("system-resolved TCP lookup");
+        assert!(
+            lookup
+                .answers()
+                .iter()
+                .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 83))))
+        );
+        upstream.await.expect("system upstream join");
+        drop(resolver);
+        owner.shutdown().await.expect("system domain shutdown");
+    }
+
+    #[tokio::test]
+    async fn numeric_target_bypasses_uninitialized_exact_resolver() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("numeric target bind");
+        let address = listener.local_addr().expect("numeric target address");
+        let upstream = tokio::spawn(answer_tcp_query(
+            listener,
+            "numeric-payload.test.",
+            vec![Ipv4Addr::new(192, 0, 2, 84)],
+        ));
+        let direct = ServerDnsResolver::for_direct(
+            DirectDomainResolver::DnsServer {
+                server: 0,
+                strategy: ferrum2_config::DnsStrategy::Ipv4Only,
+            },
+            Arc::new(OnceLock::new()),
+        );
+        let egress = Arc::new(ServerDnsEgress::new(1).with_outbound_resolvers(vec![direct]));
+        let (resolver, mut owner) = TaggedResolver::new(
+            vec![upstream_spec(
+                TargetAddr::ip(address).expect("numeric target"),
+                DnsUpstreamTransport::Tcp,
+                true,
+            )],
+            Duration::from_secs(1),
+            std::num::NonZeroU16::new(1).expect("query admission"),
+            egress,
+        )
+        .expect("numeric resolver");
+        owner.ready().await.expect("numeric resolver ready");
+
+        let lookup = resolver
+            .lookup(
+                0,
+                "numeric-payload.test."
+                    .parse()
+                    .expect("numeric payload name"),
+                RecordType::A,
+            )
+            .await
+            .expect("numeric lookup");
+        assert!(
+            lookup
+                .answers()
+                .iter()
+                .any(|record| record.data == RData::A(A(Ipv4Addr::new(192, 0, 2, 84))))
+        );
+        upstream.await.expect("numeric upstream join");
+        drop(resolver);
+        owner.shutdown().await.expect("numeric resolver shutdown");
+    }
+
+    #[tokio::test]
+    async fn domain_target_without_plan_fails_closed_before_connect() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("no-plan target bind");
+        let address = listener.local_addr().expect("no-plan target address");
+        let direct =
+            ServerDnsResolver::for_direct(DirectDomainResolver::System, Arc::new(OnceLock::new()));
+        let egress = Arc::new(ServerDnsEgress::new(1).with_outbound_resolvers(vec![direct]));
+        let (resolver, mut owner) = TaggedResolver::new(
+            vec![upstream_spec(
+                TargetAddr::domain("localhost", address.port()).expect("no-plan domain target"),
+                DnsUpstreamTransport::Tcp,
+                false,
+            )],
+            Duration::from_millis(100),
+            std::num::NonZeroU16::new(1).expect("query admission"),
+            egress,
+        )
+        .expect("no-plan resolver");
+        owner.ready().await.expect("no-plan resolver ready");
+
+        assert!(
+            resolver
+                .lookup(
+                    0,
+                    "no-plan.test.".parse().expect("no-plan query name"),
+                    RecordType::A,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "domain target connected without a detour plan"
+        );
+        drop(resolver);
+        owner.shutdown().await.expect("no-plan resolver shutdown");
     }
 
     #[tokio::test]

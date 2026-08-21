@@ -23,9 +23,9 @@ ferrum2-server --config PATH
 - `--check-config` performs bounded TOML parsing, static reference validation,
   endpoint classification, and complete dependency-cycle detection. It does no
   DNS, HTTP, socket, cache-directory, or listener I/O.
-- Adding `--materialize` resolves fixed domain endpoints through their explicit
-  resolver, loads and strictly compiles every RuleSet, and builds one immutable
-  rule snapshot without starting listeners.
+- Adding `--materialize` resolves client-resolved fixed endpoints, preserves
+  deferred domain targets for their detours, loads and strictly compiles every
+  RuleSet, and builds one immutable rule snapshot without starting listeners.
 - A normal start completes the same materialization before it prepares any
   listener.
 
@@ -38,10 +38,11 @@ any listener is prepared. This keeps `ferrum2-config` and `ferrum2-dns` as
 independent dependants of `ferrum2-rule` and prevents a configuration-to-DNS or
 DNS-to-configuration dependency edge.
 
-Existing V1 and V2 configurations without the new fields keep their prior
-behavior. New fields are rejected under V1.
+V1 continues to reject the new fields. In V2, an unconfigured Direct now has
+the explicit, stable system-resolver behavior described below instead of
+implicitly following the presence of `[dns]`.
 
-## Explicit resolution
+## Domain resolution and detours
 
 A fixed domain endpoint must state how it is bootstrapped:
 
@@ -51,28 +52,48 @@ domain_resolver = "local"
 domain_strategy = "ipv4_only"
 ```
 
-`domain_resolver = "system"` is an explicit request to use the operating-system
-resolver. Omitting the resolver is an error; Ferrum2 never infers the default
-DNS server, route final, detour DNS, or system resolver. Numeric endpoints must
-omit both `domain_resolver` and `domain_strategy`.
+For fixed Shadowsocks endpoints, `domain_resolver = "system"` explicitly uses
+the operating-system resolver; a DNS server tag selects that tagged server.
+Numeric endpoints must omit both resolver fields.
 
-The same rule applies to a domain-valued `dns.servers.address`. Its connection
-IP is resolved first, while `server_name` and the DoH path continue to supply
-TLS SNI, certificate identity, and HTTP authority. Direct outbounds do not
-accept resolver fields.
+A domain-valued `dns.servers.address` has two valid modes. With an explicit
+`domain_resolver`, Ferrum2 resolves the address during materialization, retains
+all bounded ordered IP candidates, and tries them sequentially under one
+absolute query deadline. Without one, `detour` is required and the original
+domain target is passed to that detour at query time. The detour must accept
+domain targets. In both cases,
+`server_name` and the DoH path independently supply TLS SNI, certificate
+identity, HTTP authority, and request path; they are never inferred from the
+dial target.
 
-After `[dns]` is configured, application domains from Direct TCP, Direct UDP,
-and server egress use the configured DNS policy. A configured resolver error is
-terminal and cannot fall back to system DNS. With no `[dns]` section, application
-resolution deliberately uses system DNS.
+Direct outbounds may name one DNS server with `domain_resolver` and may pair it
+with `domain_strategy`. Such a Direct resolves its application domains by
+calling that exact tagged server, bypassing `dns.route`. When those fields are
+omitted, Direct always uses the operating-system resolver, whether or not a
+`[dns]` section exists. An explicit resolution failure is terminal and never
+falls back to another resolver or detour.
+
+Every referenced egress has a prepared domain-target capability. Shadowsocks
+and Direct accept domains; a selector accepts them only when all members do; a
+chain uses its terminal hop's capability. Static validation applies this rule
+before any DNS, HTTP, socket, listener, or TUN I/O.
+
+`dns.max_inflight` remains one aggregate limit on independent query chains.
+When a DNS egress uses another tagged server through an explicit Direct
+resolver, the acyclic child lookup shares its parent's admission and absolute
+deadline; a lookup into a different resolver owner must acquire that owner's
+own admission.
 
 ## RuleSets
 
 RuleSet declarations live under `[[route.rule_set]]` and are shared by ordinary
 Route and DNS Route rules. The current implementation accepts HTTPS remote
-binary sing-box SRS files. `download_resolver` is mandatory and is either
-`system` or a DNS server tag; `download_detour` may name an outbound, selector,
-or chain.
+binary sing-box SRS files. `download_resolver`, when present, is either `system`
+or a DNS server tag and resolves every URL host locally before dialing.
+Alternatively, omit it and provide a domain-capable `download_detour`; Ferrum2
+then passes each URL's domain and port unchanged to that fixed detour. Omitting
+both fields is invalid. `download_detour` may name an outbound, selector, or
+chain.
 
 The strict decoder supports exact domains, domain suffixes, domain keywords,
 and IPv4/IPv6 CIDRs. It rejects unknown versions, malformed or trailing data,
@@ -97,10 +118,14 @@ same server-scoped response.
 Each remote declaration uses `<tag>.srs` and `<tag>.meta` below
 `rule_set_loader.cache_dir`. Metadata binds the URL, validators, digest, SRS
 version, matcher capabilities, and generation. Downloads use one absolute
-deadline, the configured resolver and detour on every redirect, conditional
-ETag/Last-Modified requests, a temporary file, fsync, strict decode/compile, and
-an atomic replacement. A valid cache may serve an offline start. A corrupt or
-partial cache never does. Refresh failures retain the old complete snapshot.
+deadline, the selected resolution mode, and one fixed detour snapshot on every
+redirect, plus conditional ETag/Last-Modified requests, a temporary file,
+fsync, strict decode/compile, and an atomic replacement. Each redirect validates
+its new HTTPS URL and uses that URL's host for the dial target, TLS SNI,
+certificate identity, and HTTP authority. Deferred downloads perform no hidden
+system or configured DNS lookup. A valid cache may serve an offline start. A
+corrupt or partial cache never does. Refresh failures retain the old complete
+snapshot.
 The exact matcher-capability shape is part of snapshot compatibility: a
 refresh that adds or removes domain/keyword/CIDR categories cannot bypass the
 policy checks compiled at materialization, and leaves both cache and live
@@ -118,7 +143,9 @@ TTL cache.
 ## Observability
 
 Rule, DNS, cache, load, refresh, and resolver metrics use only closed bounded
-labels. `route_match_total` describes matcher categories configured by the rule
+labels. DNS upstream and RuleSet download observations distinguish numeric,
+system-resolved, configured-resolved, and deferred-to-detour targets without
+recording an identity. `route_match_total` describes matcher categories configured by the rule
 selected in an evaluation step: each category is reported as `matched` or
 `missed`; a final fallback with no selected rule emits neither, so Ferrum2 never
 fabricates attribution from rejected candidates. RuleSet tags, DNS server tags,
@@ -140,7 +167,7 @@ URLs, keys, or other configuration values.
 | DNS policy | `dns.strategy`, `dns.cache.*`, `dns.route.rules.domain_keyword`, `.rule_set`, `.action`, `.strategy`, `.server` | `config.semantic` |
 | Fixed endpoints | `outbounds.domain_resolver`, `outbounds.domain_strategy`, `dns.servers.domain_resolver`, `dns.servers.domain_strategy` | `config.semantic`, `dns.resolver_required` |
 | Reserved DNS resolver name | `dns.servers.tag` | `dns.reserved_resolver_name` |
-| Dependency graph | `dns.dependency_cycle` | `dns.dependency_cycle` |
+| Dependency graph | `config.dependency_cycle` | `config.dependency_cycle` |
 | Supplied resources | `config.resource_materialization` | `config.resource_materialization` |
 
 Materialized startup and `--check-config --materialize` expose the closed
@@ -150,3 +177,8 @@ Materialized startup and `--check-config --materialize` expose the closed
 the affected tag, domain, URL, endpoint, or configuration value. Logs and
 metrics likewise contain only bounded enums and never use those identities as
 labels.
+
+Dependency-cycle diagnostics include the complete closed resource path using
+only resource kinds and declaration indices (for example, `dns-server[0] ->
+outbound[1] -> dns-server[0]`); configured tags and endpoint values remain
+redacted.

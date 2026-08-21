@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use ferrum2_config::{CompiledRoute, RouteAction, RouteProtocol, RuntimeConfig, Sniffers};
 use ferrum2_core::route::Network;
-use ferrum2_core::{DomainName, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr};
+use ferrum2_core::{
+    ConnectErrorKind, DomainName, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
+};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, RuleMatchResult,
@@ -105,7 +107,7 @@ impl Drop for RouteProgramObservation<'_> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ServerTerminalRoute {
-    Direct,
+    Direct(usize),
     Reject,
 }
 
@@ -127,8 +129,9 @@ impl ServerRouting {
         network: Network,
         target: &TargetAddr,
     ) -> ServerTerminalRoute {
-        if self.legacy.select(inbound, network, target) < self.outbound_count {
-            ServerTerminalRoute::Direct
+        let outbound = self.legacy.select(inbound, network, target);
+        if outbound < self.outbound_count {
+            ServerTerminalRoute::Direct(outbound)
         } else {
             ServerTerminalRoute::Reject
         }
@@ -137,7 +140,9 @@ impl ServerRouting {
     pub(super) fn terminal(&self, action: &RouteAction) -> ServerTerminalRoute {
         match action {
             RouteAction::Route(handle) => match handle.snapshot().hops() {
-                [outbound] if *outbound < self.outbound_count => ServerTerminalRoute::Direct,
+                [outbound] if *outbound < self.outbound_count => {
+                    ServerTerminalRoute::Direct(*outbound)
+                }
                 _ => ServerTerminalRoute::Reject,
             },
             RouteAction::Sniff(_) | RouteAction::HijackDns | RouteAction::Reject => {
@@ -296,7 +301,7 @@ pub(super) struct ServerContext {
     pub(super) random: SystemRandom,
     pub(super) replay: Arc<TcpReplayStore>,
     pub(super) runtime: RuntimeConfig,
-    pub(super) dns: dns_egress::ServerDnsResolver,
+    pub(super) direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
     pub(super) registry: OwnerRegistry,
     pub(super) metrics: Arc<Metrics>,
 }
@@ -586,17 +591,30 @@ async fn server_connection(
             return;
         }
     };
-    if selection.terminal == ServerTerminalRoute::Reject {
+    let ServerTerminalRoute::Direct(outbound) = selection.terminal else {
         context
             .metrics
             .active_connections_dec(Role::Server, Inbound::Shadowsocks);
         return;
-    }
+    };
+    let Some(resolver) = context.direct_resolvers.get(outbound).cloned() else {
+        record_failure(
+            &context,
+            Stage::Config,
+            Reason::ConfigSemantic,
+            Outcome::Failed,
+        );
+        let _ = reply.failed(ConnectErrorKind::PolicyDenied).await;
+        context
+            .metrics
+            .active_connections_dec(Role::Server, Inbound::Shadowsocks);
+        return;
+    };
     let prefix = selection.prefix;
     let direct = DirectOutbound::new(TcpConnector::with_resolution_adapters(
         SystemSocketInspector,
         SystemTcpDialer,
-        context.dns.clone(),
+        resolver.for_inbound(context.inbound),
         context.runtime.connect_timeout,
     ));
     let opened = open_and_prefix(

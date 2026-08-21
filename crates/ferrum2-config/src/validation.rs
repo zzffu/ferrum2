@@ -17,11 +17,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
 use crate::model::{
-    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, DnsCacheConfig, DnsConfig,
-    DnsInboundConfig, DnsRuntimeConfig, DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig,
-    LoggingLevel, MetricsConfig, ReplayConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute,
-    ServerInboundConfig, ServerOutboundConfig, TunConfig, UdpConfig, ValidatedClientConfig,
-    ValidatedServerConfig,
+    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, DirectDomainResolver,
+    DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsRuntimeConfig,
+    DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig,
+    ReplayConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig,
+    ServerOutboundConfig, TunConfig, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClient, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging,
@@ -235,7 +235,10 @@ fn validate_dns(
         });
         servers.push(DnsServerConfig {
             transport,
-            address,
+            target: TargetAddr::ip(address)
+                .map_err(|_| ConfigError::semantic(ConfigField::DnsServersAddress))?,
+            resolved_targets: Box::new([]),
+            endpoint_mode: DnsEndpointMode::Numeric,
             server_name,
             path,
             detour,
@@ -348,6 +351,36 @@ fn validate_dns_runtime(raw: &RawDns) -> Result<DnsRuntimeConfig, ConfigError> {
         },
     )?;
     Ok(DnsRuntimeConfig::new(strategy, cache))
+}
+
+pub(super) fn validate_direct_domain_resolver(
+    resolver: Option<&str>,
+    strategy: Option<&str>,
+    dns: Option<&RawDns>,
+    default_strategy: DnsStrategy,
+) -> Result<DirectDomainResolver, ConfigError> {
+    let Some(resolver) = resolver else {
+        if strategy.is_some() {
+            return Err(ConfigError::semantic(ConfigField::OutboundsDomainStrategy));
+        }
+        return Ok(DirectDomainResolver::System);
+    };
+    validate_tag(resolver, ConfigField::OutboundsDomainResolver)?;
+    let server = dns
+        .and_then(|dns| dns.servers.as_deref())
+        .unwrap_or(&[])
+        .iter()
+        .position(|candidate| candidate.tag == resolver)
+        .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsDomainResolver))?;
+    let strategy = match strategy {
+        None => default_strategy,
+        Some("prefer_ipv4") => DnsStrategy::PreferIpv4,
+        Some("prefer_ipv6") => DnsStrategy::PreferIpv6,
+        Some("ipv4_only") => DnsStrategy::Ipv4Only,
+        Some("ipv6_only") => DnsStrategy::Ipv6Only,
+        Some(_) => return Err(ConfigError::semantic(ConfigField::OutboundsDomainStrategy)),
+    };
+    Ok(DirectDomainResolver::DnsServer { server, strategy })
 }
 
 fn validate_network(
@@ -684,10 +717,28 @@ fn validate_tun_targets(
                     .expect("validated detour physical plan")
             };
             if direct {
-                match server.address {
-                    SocketAddr::V4(server) => tun.physical_endpoints.push(server),
-                    SocketAddr::V6(_) => {
+                if server.resolved_targets.is_empty() {
+                    let Some(address) = server.target.as_socket_addr() else {
+                        continue;
+                    };
+                    match address {
+                        SocketAddr::V4(address) => tun.physical_endpoints.push(address),
+                        SocketAddr::V6(_) => {
+                            return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
+                        }
+                    }
+                } else {
+                    if server
+                        .resolved_targets
+                        .first()
+                        .is_some_and(SocketAddr::is_ipv6)
+                    {
                         return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
+                    }
+                    for address in &server.resolved_targets {
+                        if let SocketAddr::V4(address) = address {
+                            tun.physical_endpoints.push(*address);
+                        }
                     }
                 }
             }
@@ -695,6 +746,9 @@ fn validate_tun_targets(
     }
     tun.physical_endpoints.sort_unstable();
     tun.physical_endpoints.dedup();
+    if tun.physical_endpoints.len() > 256 {
+        return Err(ConfigError::semantic(ConfigField::TunAutoRoute));
+    }
     if tun
         .physical_endpoints
         .iter()
@@ -725,6 +779,7 @@ pub(super) fn finish_client_tun_targets(
 
 pub(super) fn validate_finished_client_endpoints(
     config: &ValidatedClientConfig,
+    direct_detours: &[bool],
 ) -> Result<(), ConfigError> {
     for server in config
         .outbounds
@@ -752,15 +807,32 @@ pub(super) fn validate_finished_client_endpoints(
             return Err(ConfigError::semantic(ConfigField::DnsInboundsListen));
         }
     }
+    let mut direct_detours = direct_detours.iter();
     for server in &dns.servers {
-        if server.detour.is_none()
-            && dns
-                .inbounds
-                .iter()
-                .any(|inbound| sockets_alias(inbound.listen, server.address))
-        {
-            return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
+        let may_dial_direct = if server.detour.is_none() {
+            true
+        } else {
+            *direct_detours
+                .next()
+                .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?
+        };
+        if may_dial_direct {
+            let aliases_listener = server.target.as_socket_addr().is_some_and(|address| {
+                dns.inbounds
+                    .iter()
+                    .any(|inbound| sockets_alias(inbound.listen, address))
+            }) || server.resolved_targets.iter().any(|address| {
+                dns.inbounds
+                    .iter()
+                    .any(|inbound| sockets_alias(inbound.listen, *address))
+            });
+            if aliases_listener {
+                return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
+            }
         }
+    }
+    if direct_detours.next().is_some() {
+        return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
     }
     Ok(())
 }
@@ -834,6 +906,30 @@ fn validate_client_inner(
             raw.outbounds.as_deref(),
         )?;
     }
+    let default_direct_strategy = raw
+        .dns
+        .as_ref()
+        .map(validate_dns_runtime)
+        .transpose()?
+        .map_or(DnsStrategy::PreferIpv4, DnsRuntimeConfig::strategy);
+    let direct_domain_resolvers = raw
+        .outbounds
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|outbound| {
+            (outbound.outbound_type.as_deref() == Some("direct"))
+                .then(|| {
+                    validate_direct_domain_resolver(
+                        outbound.domain_resolver.as_deref(),
+                        outbound.domain_strategy.as_deref(),
+                        raw.dns.as_ref(),
+                        default_direct_strategy,
+                    )
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let global_tags = client_global_tags(&raw);
     let socks_inbound_count = raw.inbounds.as_deref().map_or(0, <[RawClientInbound]>::len);
     let mut tun = raw.tun.take().map(validate_tun).transpose()?;
@@ -892,6 +988,7 @@ fn validate_client_inner(
             raw.chains,
             raw.selectors,
             graph_route,
+            &direct_domain_resolvers,
             GraphValidation {
                 route_roots: &route_roots,
                 detour_tags: &detour_tags,
@@ -1042,7 +1139,37 @@ fn validate_server_inner(
             raw.rule_set_loader.is_some(),
             None,
         )?;
+        if let Some(outbounds) = raw.outbounds.as_deref() {
+            for outbound in outbounds {
+                if outbound.domain_resolver.is_some() {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsDomainResolver));
+                }
+                if outbound.domain_strategy.is_some() {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsDomainStrategy));
+                }
+            }
+        }
     }
+    let default_direct_strategy = raw
+        .dns
+        .as_ref()
+        .map(validate_dns_runtime)
+        .transpose()?
+        .map_or(DnsStrategy::PreferIpv4, DnsRuntimeConfig::strategy);
+    let direct_domain_resolvers = raw
+        .outbounds
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|outbound| {
+            validate_direct_domain_resolver(
+                outbound.domain_resolver.as_deref(),
+                outbound.domain_strategy.as_deref(),
+                raw.dns.as_ref(),
+                default_direct_strategy,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let global_tags = server_global_tags(&raw);
     let context_inbounds = raw
         .inbounds
@@ -1089,6 +1216,7 @@ fn validate_server_inner(
         raw.outbounds,
         raw.selectors,
         graph_route,
+        &direct_domain_resolvers,
         GraphValidation {
             route_roots: &route_roots,
             detour_tags: &detour_tags,
@@ -1195,6 +1323,7 @@ fn validate_client_graph(
     chains: Option<Vec<RawChain>>,
     selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
+    direct_domain_resolvers: &[Option<DirectDomainResolver>],
     validation: GraphValidation<'_>,
 ) -> Result<ValidatedClientGraph, ConfigError> {
     let GraphValidation {
@@ -1305,7 +1434,14 @@ fn validate_client_graph(
                         if outbound.psk.is_some() {
                             return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
                         }
-                        validated_outbounds.push(ClientOutboundConfig::Direct);
+                        let domain_resolver = direct_domain_resolvers
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .ok_or_else(|| {
+                                ConfigError::semantic(ConfigField::ResourceMaterialization)
+                            })?;
+                        validated_outbounds.push(ClientOutboundConfig::Direct { domain_resolver });
                     }
                     "shadowsocks" => {
                         global.as_ref().ok_or_else(|| {
@@ -1463,7 +1599,10 @@ fn validate_client_graph(
                 .iter()
                 .map(|tag| {
                     first_hops(tag).iter().any(|index| {
-                        matches!(validated_outbounds[*index], ClientOutboundConfig::Direct)
+                        matches!(
+                            validated_outbounds[*index],
+                            ClientOutboundConfig::Direct { .. }
+                        )
                     })
                 })
                 .collect();
@@ -1543,7 +1682,10 @@ fn validate_chains<'a>(
                 .iter()
                 .position(|outbound| outbound.tag == *outbound_tag)
                 .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?;
-            if matches!(validated_outbounds[outbound], ClientOutboundConfig::Direct) {
+            if matches!(
+                validated_outbounds[outbound],
+                ClientOutboundConfig::Direct { .. }
+            ) {
                 return Err(ConfigError::semantic(ConfigField::ChainsHops));
             }
             hops.push(outbound);
@@ -1567,6 +1709,7 @@ fn validate_server_graph(
     tagged_outbounds: Option<Vec<RawServerOutbound>>,
     selectors: Option<Vec<RawSelector>>,
     route: Option<RawRoute>,
+    direct_domain_resolvers: &[DirectDomainResolver],
     validation: GraphValidation<'_>,
 ) -> Result<ValidatedServerGraph, ConfigError> {
     let GraphValidation {
@@ -1591,7 +1734,9 @@ fn validate_server_graph(
             Ok((
                 listen,
                 vec![ServerInboundConfig { listen }],
-                vec![ServerOutboundConfig],
+                vec![ServerOutboundConfig {
+                    domain_resolver: DirectDomainResolver::System,
+                }],
                 RouteTable::static_bindings(vec![0])
                     .ok_or_else(|| ConfigError::semantic(ConfigField::Inbounds))?,
                 if route_roots.is_empty() && detour_tags.is_empty() {
@@ -1682,7 +1827,11 @@ fn validate_server_graph(
             Ok((
                 validated_inbounds[0].listen,
                 validated_inbounds,
-                vec![ServerOutboundConfig; outbounds.len()],
+                direct_domain_resolvers
+                    .iter()
+                    .copied()
+                    .map(|domain_resolver| ServerOutboundConfig { domain_resolver })
+                    .collect(),
                 route,
                 detours,
             ))

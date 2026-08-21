@@ -8,7 +8,7 @@ pub(in crate::run) use std::task::Context;
 pub(in crate::run) use std::time::Duration;
 
 pub(in crate::run) use ferrum2_config::ValidatedServerConfig;
-pub(in crate::run) use ferrum2_core::{ConnectErrorKind, Datagram, TargetAddr};
+pub(in crate::run) use ferrum2_core::{Datagram, TargetAddr};
 pub(in crate::run) use ferrum2_crypto::{
     Clock, MethodProfile, MethodPsk, MethodSinglePskProvider, SystemClock, SystemRandom,
 };
@@ -162,7 +162,9 @@ pub(in crate::run) fn tagged_server_test_config<const N: usize>(
     config.runtime.max_connections = 1.try_into().expect("one connection");
     config.udp.max_sessions = 1;
     if selector {
-        config.outbounds.push(ferrum2_config::ServerOutboundConfig);
+        config.outbounds.push(ferrum2_config::ServerOutboundConfig {
+            domain_resolver: ferrum2_config::DirectDomainResolver::System,
+        });
         let (route, _) = compile_selector_route(
             &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],
             &[TaggedOutbound::new("o0", 0), TaggedOutbound::new("o1", 1)],

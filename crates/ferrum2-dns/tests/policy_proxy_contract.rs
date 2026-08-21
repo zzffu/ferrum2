@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ferrum2_core::CanonicalDomain;
 use ferrum2_core::route::Network;
+use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
     ApplicationResolveContext, ApplicationResolveRequest, DnsCache, DnsCacheAnswer, DnsCacheKey,
     DnsCacheQtype, DnsError, DnsPolicyAction, DnsPolicyMatcher, DnsPolicyObservation,
@@ -75,7 +75,9 @@ fn policy(
 fn udp_server(socket: &UdpSocket) -> DnsUpstreamSpec {
     DnsUpstreamSpec {
         transport: DnsUpstreamTransport::Udp,
-        address: socket.local_addr().expect("upstream address"),
+        target: TargetAddr::ip(socket.local_addr().expect("upstream address"))
+            .expect("non-zero upstream target"),
+        resolved_targets: Box::new([]),
         detour: None,
     }
 }

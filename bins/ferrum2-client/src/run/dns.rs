@@ -101,7 +101,8 @@ mod tests {
         let (resolver, owner) = TaggedResolver::new(
             vec![ferrum2_dns::DnsUpstreamSpec {
                 transport: ferrum2_dns::DnsUpstreamTransport::Udp,
-                address: upstream_address,
+                target: ferrum2_core::TargetAddr::ip(upstream_address).expect("numeric upstream"),
+                resolved_targets: Box::new([]),
                 detour: None,
             }],
             Duration::from_secs(1),

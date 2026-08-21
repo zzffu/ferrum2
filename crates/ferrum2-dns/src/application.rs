@@ -3,12 +3,14 @@ use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use ferrum2_core::CanonicalDomain;
 use ferrum2_core::route::Network;
+use hickory_proto::rr::{Name, RecordType};
 
 use crate::DnsError;
+use crate::runtime_owner::TaggedResolver;
 
 /// Maximum number of ordered socket candidates returned by the system backend.
 pub const MAX_APPLICATION_RESOLVED_CANDIDATES: usize = 16;
@@ -354,6 +356,108 @@ impl ApplicationResolveBackend for SystemApplicationResolveBackend {
             let mut candidates = request
                 .strategy()
                 .socket_candidates(request.port(), &ipv4, &ipv6);
+            candidates.truncate(MAX_APPLICATION_RESOLVED_CANDIDATES);
+            if candidates.is_empty() {
+                Err(DnsError::NoData)
+            } else {
+                Ok(candidates)
+            }
+        })
+    }
+}
+
+/// Configured application resolver bound to one explicit tagged DNS server.
+///
+/// The shared slot permits composition code to construct Direct descriptors
+/// before the exclusive [`TaggedResolver`] runtime is ready. Resolution is
+/// terminal when the slot is uninitialized, the selected server fails, or the
+/// requested family has no records; this backend never consults DNS policy or
+/// the operating-system resolver.
+#[derive(Clone)]
+pub struct TaggedServerApplicationResolveBackend {
+    resolver: Arc<OnceLock<Weak<TaggedResolver>>>,
+    server: usize,
+}
+
+impl TaggedServerApplicationResolveBackend {
+    /// Binds every request to one explicit selected-server index.
+    pub fn new(resolver: Arc<OnceLock<Weak<TaggedResolver>>>, server: usize) -> Self {
+        Self { resolver, server }
+    }
+
+    /// Returns the immutable selected-server index.
+    pub const fn server(&self) -> usize {
+        self.server
+    }
+}
+
+impl fmt::Debug for TaggedServerApplicationResolveBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaggedServerApplicationResolveBackend")
+            .field(
+                "resolver_ready",
+                &self.resolver.get().and_then(Weak::upgrade).is_some(),
+            )
+            .field("server", &self.server)
+            .finish()
+    }
+}
+
+impl ApplicationResolveBackend for TaggedServerApplicationResolveBackend {
+    fn resolve<'a>(
+        &'a self,
+        request: ApplicationResolveRequest<'a>,
+    ) -> ApplicationResolveFuture<'a> {
+        let resolver = self.resolver.get().and_then(Weak::upgrade);
+        let server = self.server;
+        let domain = request.domain().clone();
+        let port = request.port();
+        let strategy = request.strategy();
+        Box::pin(async move {
+            let resolver = resolver.ok_or(DnsError::Runtime)?;
+            let mut name: Name = domain.as_str().parse().map_err(|_| DnsError::Protocol)?;
+            name.set_fqdn(true);
+
+            let addresses = match strategy {
+                DnsStrategy::Ipv4Only => resolver
+                    .lookup_dependency(server, name, RecordType::A)
+                    .await?
+                    .answers()
+                    .iter()
+                    .filter_map(|record| record.data.ip_addr())
+                    .collect(),
+                DnsStrategy::Ipv6Only => resolver
+                    .lookup_dependency(server, name, RecordType::AAAA)
+                    .await?
+                    .answers()
+                    .iter()
+                    .filter_map(|record| record.data.ip_addr())
+                    .collect(),
+                DnsStrategy::PreferIpv4 | DnsStrategy::PreferIpv6 => {
+                    resolver.lookup_ips_dependency(server, name).await?
+                }
+            };
+            let mut ipv4 = Vec::new();
+            let mut ipv6 = Vec::new();
+            for address in addresses {
+                match address {
+                    std::net::IpAddr::V4(address)
+                        if ipv4.len() < MAX_APPLICATION_RESOLVED_CANDIDATES
+                            && !ipv4.contains(&address) =>
+                    {
+                        ipv4.push(address);
+                    }
+                    std::net::IpAddr::V6(address)
+                        if ipv6.len() < MAX_APPLICATION_RESOLVED_CANDIDATES
+                            && !ipv6.contains(&address) =>
+                    {
+                        ipv6.push(address);
+                    }
+                    _ => {}
+                }
+            }
+            let mut candidates = strategy.socket_candidates(port, &ipv4, &ipv6);
             candidates.truncate(MAX_APPLICATION_RESOLVED_CANDIDATES);
             if candidates.is_empty() {
                 Err(DnsError::NoData)

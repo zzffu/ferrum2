@@ -11,21 +11,22 @@ use hickory_proto::op::Message;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::lookup::Lookup;
 use tokio::runtime::Builder;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::error::DnsError;
 use crate::resolver::{self, DnsUpstreamSpec, SelectedServer};
 use crate::runtime_provider::{
-    DnsEgress, FerrumRuntimeProvider, QueryGuard, RuntimeCounters, SystemDnsEgress, TaskSet,
+    DNS_QUERY_SCOPE, DnsEgress, DnsQueryContext, FerrumRuntimeProvider, RuntimeCounters,
+    SystemDnsEgress, TaskSet,
 };
 use crate::{DnsAddressRecords, DnsCacheQtype, FixedEndpointLookup};
 
 /// Current bounded DNS owner counts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeStats {
-    /// Logical queries admitted and not yet terminal.
+    /// Independent query chains admitted and not yet terminal.
     pub queries: usize,
     /// Hickory background tasks registered through its runtime handle.
     pub tasks: usize,
@@ -59,21 +60,21 @@ enum Command {
         record_type: RecordType,
         deadline: Instant,
         reply: oneshot::Sender<Result<Lookup, DnsError>>,
-        permit: OwnedSemaphorePermit,
+        context: DnsQueryContext,
     },
     LookupIps {
         server: usize,
         name: Name,
         deadline: Instant,
         reply: oneshot::Sender<Result<Vec<IpAddr>, DnsError>>,
-        permit: OwnedSemaphorePermit,
+        context: DnsQueryContext,
     },
     Query {
         server: usize,
         request: Message,
         deadline: Instant,
         reply: oneshot::Sender<Result<Message, DnsError>>,
-        permit: OwnedSemaphorePermit,
+        context: DnsQueryContext,
     },
 }
 
@@ -126,7 +127,10 @@ impl TaggedResolver {
         egress: Arc<dyn DnsEgress>,
     ) -> Result<(Self, TaggedResolverOwner), DnsError> {
         Self::start(
-            servers.into_iter().map(SelectedServer::from_spec).collect(),
+            servers
+                .into_iter()
+                .map(SelectedServer::from_spec)
+                .collect::<Result<Vec<_>, _>>()?,
             timeout,
             max_inflight,
             egress,
@@ -143,8 +147,10 @@ impl TaggedResolver {
         Self::start(
             servers
                 .into_iter()
-                .map(|(server, tls)| SelectedServer::from_spec(server).with_tls(tls))
-                .collect(),
+                .map(|(server, tls)| {
+                    SelectedServer::from_spec(server).map(|server| server.with_tls(tls))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             timeout,
             max_inflight,
             egress,
@@ -222,6 +228,7 @@ impl TaggedResolver {
         let server_count = self.server_count;
         let timeout = self.timeout;
         let admission = Arc::clone(&self.admission);
+        let counters = Arc::clone(&self.counters);
         let sender = self.sender.clone();
         async move {
             if server >= server_count {
@@ -229,6 +236,7 @@ impl TaggedResolver {
             }
             let deadline = Instant::now() + timeout;
             let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+            let context = DnsQueryContext::root(permit, counters, deadline);
             let (reply, response) = oneshot::channel();
             let command = Command::Lookup {
                 server,
@@ -236,7 +244,52 @@ impl TaggedResolver {
                 record_type,
                 deadline,
                 reply,
-                permit,
+                context,
+            };
+            tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
+                .await
+                .map_err(|_| DnsError::Timeout)?
+                .map_err(|_| DnsError::Shutdown)?;
+            response.await.map_err(|_| DnsError::Shutdown)?
+        }
+    }
+
+    pub(crate) fn lookup_dependency(
+        &self,
+        server: usize,
+        name: Name,
+        record_type: RecordType,
+    ) -> impl std::future::Future<Output = Result<Lookup, DnsError>> + Send + 'static {
+        let server_count = self.server_count;
+        let timeout = self.timeout;
+        let inherited = DNS_QUERY_SCOPE
+            .try_with(Clone::clone)
+            .ok()
+            .filter(|scope| scope.belongs_to(&self.counters));
+        let admission = Arc::clone(&self.admission);
+        let counters = Arc::clone(&self.counters);
+        let sender = self.sender.clone();
+        async move {
+            if server >= server_count {
+                return Err(DnsError::InvalidServer);
+            }
+            let context = match inherited {
+                Some(scope) => scope.child(server_count).ok_or(DnsError::InvalidServer)?,
+                None => {
+                    let deadline = Instant::now() + timeout;
+                    let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+                    DnsQueryContext::root(permit, counters, deadline)
+                }
+            };
+            let deadline = context.deadline();
+            let (reply, response) = oneshot::channel();
+            let command = Command::Lookup {
+                server,
+                name,
+                record_type,
+                deadline,
+                reply,
+                context,
             };
             tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
                 .await
@@ -255,6 +308,7 @@ impl TaggedResolver {
         let server_count = self.server_count;
         let timeout = self.timeout;
         let admission = Arc::clone(&self.admission);
+        let counters = Arc::clone(&self.counters);
         let sender = self.sender.clone();
         async move {
             if server >= server_count {
@@ -262,13 +316,57 @@ impl TaggedResolver {
             }
             let deadline = Instant::now() + timeout;
             let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+            let context = DnsQueryContext::root(permit, counters, deadline);
             let (reply, response) = oneshot::channel();
             let command = Command::LookupIps {
                 server,
                 name,
                 deadline,
                 reply,
-                permit,
+                context,
+            };
+            tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
+                .await
+                .map_err(|_| DnsError::Timeout)?
+                .map_err(|_| DnsError::Shutdown)?;
+            response.await.map_err(|_| DnsError::Shutdown)?
+        }
+    }
+
+    pub(crate) fn lookup_ips_dependency(
+        &self,
+        server: usize,
+        name: Name,
+    ) -> impl std::future::Future<Output = Result<Vec<IpAddr>, DnsError>> + Send + 'static {
+        let server_count = self.server_count;
+        let timeout = self.timeout;
+        let inherited = DNS_QUERY_SCOPE
+            .try_with(Clone::clone)
+            .ok()
+            .filter(|scope| scope.belongs_to(&self.counters));
+        let admission = Arc::clone(&self.admission);
+        let counters = Arc::clone(&self.counters);
+        let sender = self.sender.clone();
+        async move {
+            if server >= server_count {
+                return Err(DnsError::InvalidServer);
+            }
+            let context = match inherited {
+                Some(scope) => scope.child(server_count).ok_or(DnsError::InvalidServer)?,
+                None => {
+                    let deadline = Instant::now() + timeout;
+                    let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+                    DnsQueryContext::root(permit, counters, deadline)
+                }
+            };
+            let deadline = context.deadline();
+            let (reply, response) = oneshot::channel();
+            let command = Command::LookupIps {
+                server,
+                name,
+                deadline,
+                reply,
+                context,
             };
             tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
                 .await
@@ -412,6 +510,7 @@ impl TaggedResolver {
         let server_count = self.server_count;
         let timeout = self.timeout;
         let admission = Arc::clone(&self.admission);
+        let counters = Arc::clone(&self.counters);
         let sender = self.sender.clone();
         async move {
             if server >= server_count {
@@ -419,13 +518,14 @@ impl TaggedResolver {
             }
             let deadline = Instant::now() + timeout;
             let permit = admission.try_acquire_owned().map_err(|_| DnsError::Busy)?;
+            let context = DnsQueryContext::root(permit, counters, deadline);
             let (reply, response) = oneshot::channel();
             let command = Command::Query {
                 server,
                 request,
                 deadline,
                 reply,
-                permit,
+                context,
             };
             tokio::time::timeout_at(deadline, sender.ok_or(DnsError::Shutdown)?.send(command))
                 .await
@@ -518,7 +618,8 @@ async fn run_commands(
                 let _ = completed;
             }
             command = receiver.recv() => match command {
-                Some(Command::Lookup { server, name, record_type, deadline, mut reply, permit }) => {
+                Some(Command::Lookup { server, name, record_type, deadline, mut reply, context }) => {
+                    let target = servers[server].first_target_snapshot();
                     let plan = servers[server].plan_snapshot();
                     let servers = Arc::clone(&servers);
                     let egress = Arc::clone(&egress);
@@ -526,31 +627,40 @@ async fn run_commands(
                     let tasks = TaskSet::default();
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
+                    let query_scope = context.scope();
                     queries.spawn(async move {
-                        let guard = QueryGuard::new(Arc::clone(&counters));
-                        let provider = FerrumRuntimeProvider::new(
-                            egress, plan, deadline, tasks, counters,
-                        );
-                        let result = tokio::select! {
-                            _ = cancelled.changed() => Err(DnsError::Shutdown),
-                            _ = reply.closed() => Err(DnsError::Shutdown),
-                            result = resolver::lookup(
-                                &servers[server],
-                                name,
-                                record_type,
+                        let provider_scope = query_scope.clone();
+                        let result = DNS_QUERY_SCOPE.scope(query_scope, async {
+                            let provider = FerrumRuntimeProvider::new(
+                                Arc::clone(&egress),
+                                target.clone(),
+                                plan.clone(),
                                 deadline,
-                                provider,
-                            ) => result,
-                        };
+                                tasks.clone(),
+                                Arc::clone(&counters),
+                                provider_scope.clone(),
+                            );
+                            tokio::select! {
+                                _ = cancelled.changed() => Err(DnsError::Shutdown),
+                                _ = reply.closed() => Err(DnsError::Shutdown),
+                                result = resolver::lookup(
+                                    &servers[server],
+                                    name.clone(),
+                                    record_type,
+                                    deadline,
+                                    provider,
+                                ) => result,
+                            }
+                        }).await;
                         query_tasks.abort_and_join().await;
-                        drop(permit);
-                        drop(guard);
+                        drop(context);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
                     });
                 }
-                Some(Command::LookupIps { server, name, deadline, mut reply, permit }) => {
+                Some(Command::LookupIps { server, name, deadline, mut reply, context }) => {
+                    let target = servers[server].first_target_snapshot();
                     let plan = servers[server].plan_snapshot();
                     let servers = Arc::clone(&servers);
                     let egress = Arc::clone(&egress);
@@ -558,30 +668,39 @@ async fn run_commands(
                     let tasks = TaskSet::default();
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
+                    let query_scope = context.scope();
                     queries.spawn(async move {
-                        let guard = QueryGuard::new(Arc::clone(&counters));
-                        let provider = FerrumRuntimeProvider::new(
-                            egress, plan, deadline, tasks, counters,
-                        );
-                        let result = tokio::select! {
-                            _ = cancelled.changed() => Err(DnsError::Shutdown),
-                            _ = reply.closed() => Err(DnsError::Shutdown),
-                            result = resolver::lookup_ips(
-                                &servers[server],
-                                name,
+                        let provider_scope = query_scope.clone();
+                        let result = DNS_QUERY_SCOPE.scope(query_scope, async {
+                            let provider = FerrumRuntimeProvider::new(
+                                Arc::clone(&egress),
+                                target.clone(),
+                                plan.clone(),
                                 deadline,
-                                provider,
-                            ) => result,
-                        };
+                                tasks.clone(),
+                                Arc::clone(&counters),
+                                provider_scope.clone(),
+                            );
+                            tokio::select! {
+                                _ = cancelled.changed() => Err(DnsError::Shutdown),
+                                _ = reply.closed() => Err(DnsError::Shutdown),
+                                result = resolver::lookup_ips(
+                                    &servers[server],
+                                    name.clone(),
+                                    deadline,
+                                    provider,
+                                ) => result,
+                            }
+                        }).await;
                         query_tasks.abort_and_join().await;
-                        drop(permit);
-                        drop(guard);
+                        drop(context);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
                     });
                 }
-                Some(Command::Query { server, request, deadline, mut reply, permit }) => {
+                Some(Command::Query { server, request, deadline, mut reply, context }) => {
+                    let target = servers[server].first_target_snapshot();
                     let plan = servers[server].plan_snapshot();
                     let servers = Arc::clone(&servers);
                     let egress = Arc::clone(&egress);
@@ -589,24 +708,32 @@ async fn run_commands(
                     let tasks = TaskSet::default();
                     let query_tasks = tasks.clone();
                     let mut cancelled = cancel_rx.clone();
+                    let query_scope = context.scope();
                     queries.spawn(async move {
-                        let guard = QueryGuard::new(Arc::clone(&counters));
-                        let provider = FerrumRuntimeProvider::new(
-                            egress, plan, deadline, tasks, counters,
-                        );
-                        let result = tokio::select! {
-                            _ = cancelled.changed() => Err(DnsError::Shutdown),
-                            _ = reply.closed() => Err(DnsError::Shutdown),
-                            result = resolver::query(
-                                &servers[server],
-                                request,
+                        let provider_scope = query_scope.clone();
+                        let result = DNS_QUERY_SCOPE.scope(query_scope, async {
+                            let provider = FerrumRuntimeProvider::new(
+                                Arc::clone(&egress),
+                                target.clone(),
+                                plan.clone(),
                                 deadline,
-                                provider,
-                            ) => result,
-                        };
+                                tasks.clone(),
+                                Arc::clone(&counters),
+                                provider_scope.clone(),
+                            );
+                            tokio::select! {
+                                _ = cancelled.changed() => Err(DnsError::Shutdown),
+                                _ = reply.closed() => Err(DnsError::Shutdown),
+                                result = resolver::query(
+                                    &servers[server],
+                                    request.clone(),
+                                    deadline,
+                                    provider,
+                                ) => result,
+                            }
+                        }).await;
                         query_tasks.abort_and_join().await;
-                        drop(permit);
-                        drop(guard);
+                        drop(context);
                         if !reply.is_closed() {
                             let _ = reply.send(result);
                         }
@@ -621,16 +748,16 @@ async fn run_commands(
     let _ = cancel.send(true);
     while let Ok(command) = receiver.try_recv() {
         match command {
-            Command::Lookup { reply, permit, .. } => {
-                drop(permit);
+            Command::Lookup { reply, context, .. } => {
+                drop(context);
                 let _ = reply.send(Err(DnsError::Shutdown));
             }
-            Command::LookupIps { reply, permit, .. } => {
-                drop(permit);
+            Command::LookupIps { reply, context, .. } => {
+                drop(context);
                 let _ = reply.send(Err(DnsError::Shutdown));
             }
-            Command::Query { reply, permit, .. } => {
-                drop(permit);
+            Command::Query { reply, context, .. } => {
+                drop(context);
                 let _ = reply.send(Err(DnsError::Shutdown));
             }
         }
@@ -670,6 +797,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    use ferrum2_core::TargetAddr;
     use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
     use hickory_proto::rr::rdata::{A, AAAA, CNAME, NS, SOA};
     use hickory_proto::rr::{LowerName, RData, Record};
@@ -843,7 +971,8 @@ mod tests {
         };
         DnsUpstreamSpec {
             transport,
-            address,
+            target: TargetAddr::ip(address).expect("non-zero encrypted endpoint"),
+            resolved_targets: Box::new([]),
             detour: None,
         }
     }
@@ -970,7 +1099,7 @@ mod tests {
     impl DnsEgress for ScriptedTlsDetour {
         fn connect_tcp(
             &self,
-            target: SocketAddr,
+            target: TargetAddr,
             plan: Option<EgressPlanSnapshot>,
             timeout: Duration,
             tasks: crate::runtime_provider::DnsTaskRegistrar,
@@ -982,6 +1111,9 @@ mod tests {
             }
             self.attempts.fetch_add(1, Ordering::AcqRel);
             Box::pin(async move {
+                let target = target
+                    .as_socket_addr()
+                    .expect("scripted TLS fixture target is numeric");
                 let upstream = tokio::time::timeout(timeout, TcpStream::connect(target))
                     .await
                     .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
@@ -1008,7 +1140,7 @@ mod tests {
 
         fn bind_udp(
             &self,
-            _target: SocketAddr,
+            _target: TargetAddr,
             _plan: Option<EgressPlanSnapshot>,
             _tasks: crate::runtime_provider::DnsTaskRegistrar,
         ) -> crate::runtime_provider::DnsIoFuture<crate::runtime_provider::BoxedDnsDatagramIo>

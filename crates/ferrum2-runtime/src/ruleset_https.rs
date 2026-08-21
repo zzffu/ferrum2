@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use ferrum2_core::CanonicalDomain;
 use ferrum2_core::route::EgressPlanSnapshot;
+use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
     DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheKey, DnsCacheQtype, DnsStrategy,
     FixedEndpointLookup, ResolverGeneration, TaggedResolver,
@@ -34,7 +34,8 @@ use url::{Host, Url};
 
 use crate::{
     MAX_RESOLVED_CANDIDATES, RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadFuture,
-    RuleSetDownloadRequest, RuleSetDownloadResolver, RuleSetDownloadResponse, RuleSetDownloader,
+    RuleSetDownloadMode, RuleSetDownloadRequest, RuleSetDownloadResolver, RuleSetDownloadResponse,
+    RuleSetDownloader,
 };
 
 const HTTPS_PORT: u16 = 443;
@@ -80,15 +81,33 @@ where
     }
 }
 
-/// Connects resolved IP candidates through the supplied immutable detour. The
-/// URL hostname is deliberately absent from this API, preventing a dialer from
-/// performing a second implicit resolution.
+/// One closed set of targets selected for a RuleSet HTTPS connection.
+#[derive(Clone, Eq, PartialEq)]
+pub enum RuleSetDialTargets {
+    /// Bounded client-resolved candidates attempted in order under one deadline.
+    Resolved(Box<[SocketAddr]>),
+    /// A URL domain preserved for resolution by the supplied detour.
+    Domain(TargetAddr),
+}
+
+impl fmt::Debug for RuleSetDialTargets {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resolved(_) => formatter.write_str("RuleSetDialTargets::Resolved([redacted])"),
+            Self::Domain(_) => formatter.write_str("RuleSetDialTargets::Domain([redacted])"),
+        }
+    }
+}
+
+/// Connects one explicit target set through the supplied immutable detour.
+/// Implementations must not reinterpret a domain target as permission to use
+/// an unrelated resolver or detour.
 pub trait RuleSetDialer: Send + Sync {
     type Io: AsyncRead + AsyncWrite + Send + Unpin + 'static;
 
     fn connect(
         &self,
-        candidates: &[SocketAddr],
+        targets: &RuleSetDialTargets,
         detour: Option<&EgressPlanSnapshot>,
         deadline: Instant,
     ) -> impl Future<Output = Result<Self::Io, RuleSetDownloadError>> + Send;
@@ -338,13 +357,19 @@ impl RuleSetDialer for SystemRuleSetDialer {
 
     fn connect(
         &self,
-        candidates: &[SocketAddr],
+        targets: &RuleSetDialTargets,
         detour: Option<&EgressPlanSnapshot>,
         deadline: Instant,
     ) -> impl Future<Output = Result<Self::Io, RuleSetDownloadError>> + Send {
-        let candidates = candidates.to_vec();
+        let candidates = match targets {
+            RuleSetDialTargets::Resolved(candidates) => Some(candidates.clone()),
+            RuleSetDialTargets::Domain(_) => None,
+        };
         let has_detour = detour.is_some();
         async move {
+            let Some(candidates) = candidates else {
+                return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect));
+            };
             if has_detour {
                 return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect));
             }
@@ -366,8 +391,8 @@ impl RuleSetDialer for SystemRuleSetDialer {
 }
 
 /// Minimal HTTPS/1.1 client built on explicitly injected resolution and dialing.
-/// Redirects repeat both operations for the new hostname while preserving the
-/// configured resolver and detour.
+/// Redirects apply the same resolution mode to each new hostname while
+/// preserving the immutable detour and absolute deadline.
 pub struct HttpsRuleSetDownloader<R, D> {
     resolver: R,
     dialer: D,
@@ -477,13 +502,22 @@ where
         let canonical = CanonicalDomain::new(host)
             .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Redirect))?;
         let port = url.port_or_known_default().unwrap_or(HTTPS_PORT);
-        let candidates = self
-            .resolver
-            .resolve(request.resolver(), &canonical, port, request.deadline())
-            .await?;
+        let targets = match request.mode() {
+            RuleSetDownloadMode::ClientResolved(resolver) => {
+                let candidates = self
+                    .resolver
+                    .resolve(resolver, &canonical, port, request.deadline())
+                    .await?;
+                RuleSetDialTargets::Resolved(candidates.into_boxed_slice())
+            }
+            RuleSetDownloadMode::DeferredToDetour => RuleSetDialTargets::Domain(
+                TargetAddr::domain(host, port)
+                    .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Redirect))?,
+            ),
+        };
         let io = self
             .dialer
-            .connect(&candidates, request.detour(), request.deadline())
+            .connect(&targets, request.detour(), request.deadline())
             .await?;
         let server_name = ServerName::try_from(host.to_owned())
             .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Tls))?;

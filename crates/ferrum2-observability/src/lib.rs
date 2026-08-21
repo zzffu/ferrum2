@@ -750,6 +750,45 @@ impl DnsQueryType {
     }
 }
 
+/// Closed components whose dial targets may be resolved in different places.
+/// Concrete DNS server, RuleSet, domain, and URL identities are excluded.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TargetResolutionComponent {
+    DnsUpstream,
+    RuleSetDownload,
+}
+
+impl TargetResolutionComponent {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DnsUpstream => "dns_upstream",
+            Self::RuleSetDownload => "ruleset_download",
+        }
+    }
+}
+
+/// Closed locations at which a DNS upstream or RuleSet target is resolved.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TargetResolutionMode {
+    Numeric,
+    ClientResolvedSystem,
+    ClientResolvedConfigured,
+    DeferredToDetour,
+}
+
+impl TargetResolutionMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Numeric => "numeric",
+            Self::ClientResolvedSystem => "client_resolved_system",
+            Self::ClientResolvedConfigured => "client_resolved_configured",
+            Self::DeferredToDetour => "deferred_to_detour",
+        }
+    }
+}
+
 impl Direction {
     const fn as_str(self) -> &'static str {
         match self {
@@ -774,6 +813,8 @@ impl_closed_display!(DnsResolverKind);
 impl_closed_display!(DnsResolvePurpose);
 impl_closed_display!(DnsResolveResult);
 impl_closed_display!(DnsQueryType);
+impl_closed_display!(TargetResolutionComponent);
+impl_closed_display!(TargetResolutionMode);
 
 macro_rules! impl_label_value {
     ($type:ty) => {
@@ -805,6 +846,8 @@ impl_label_value!(DnsResolverKind);
 impl_label_value!(DnsResolvePurpose);
 impl_label_value!(DnsResolveResult);
 impl_label_value!(DnsQueryType);
+impl_label_value!(TargetResolutionComponent);
+impl_label_value!(TargetResolutionMode);
 
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ConnectionLabels {
@@ -913,6 +956,12 @@ struct DnsQueryTypeLabels {
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct DnsResolvePurposeLabels {
     purpose: DnsResolvePurpose,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct TargetResolutionLabels {
+    component: TargetResolutionComponent,
+    mode: TargetResolutionMode,
 }
 
 const ROLES: &[Role] = &[Role::Client, Role::Server];
@@ -1043,6 +1092,16 @@ const DNS_RESOLVE_RESULTS: &[DnsResolveResult] =
     &[DnsResolveResult::Success, DnsResolveResult::Failure];
 const DNS_QUERY_TYPES: &[DnsQueryType] =
     &[DnsQueryType::A, DnsQueryType::Aaaa, DnsQueryType::Other];
+const TARGET_RESOLUTION_COMPONENTS: &[TargetResolutionComponent] = &[
+    TargetResolutionComponent::DnsUpstream,
+    TargetResolutionComponent::RuleSetDownload,
+];
+const TARGET_RESOLUTION_MODES: &[TargetResolutionMode] = &[
+    TargetResolutionMode::Numeric,
+    TargetResolutionMode::ClientResolvedSystem,
+    TargetResolutionMode::ClientResolvedConfigured,
+    TargetResolutionMode::DeferredToDetour,
+];
 
 const RULE_PROGRAM_CANDIDATE_BUCKETS: &[f64] = &[
     0.0, 1.0, 4.0, 16.0, 64.0, 256.0, 1_024.0, 4_096.0, 16_384.0, 65_536.0,
@@ -1082,6 +1141,8 @@ const DNS_RESOLVE_SERIES: usize =
     DNS_RESOLVER_KINDS.len() * DNS_RESOLVE_PURPOSES.len() * DNS_RESOLVE_RESULTS.len();
 const DNS_QUERY_TYPE_SERIES: usize = DNS_QUERY_TYPES.len();
 const DNS_RESOLVE_PURPOSE_SERIES: usize = DNS_RESOLVE_PURPOSES.len();
+const TARGET_RESOLUTION_SERIES: usize =
+    TARGET_RESOLUTION_COMPONENTS.len() * TARGET_RESOLUTION_MODES.len();
 
 #[derive(Debug, Default)]
 struct CachedCounter {
@@ -1393,6 +1454,8 @@ type DnsQueryTypeFamily =
     SharedClosedFamily<DnsQueryTypeLabels, CachedCounter, DNS_QUERY_TYPE_SERIES>;
 type DnsResolvePurposeFamily =
     SharedClosedFamily<DnsResolvePurposeLabels, CachedCounter, DNS_RESOLVE_PURPOSE_SERIES>;
+type TargetResolutionFamily =
+    SharedClosedFamily<TargetResolutionLabels, CachedCounter, TARGET_RESOLUTION_SERIES>;
 
 fn record_rule_match(
     family: &RuleMatchFamily,
@@ -1463,6 +1526,7 @@ pub struct Metrics {
     dns_cache_misses: DnsQueryTypeFamily,
     dns_explicit_system_resolves: DnsResolvePurposeFamily,
     dns_implicit_system_fallbacks: Counter,
+    target_resolutions: TargetResolutionFamily,
 }
 
 impl Metrics {
@@ -1622,6 +1686,11 @@ impl Metrics {
                 DnsResolvePurposeLabels { purpose }
             }));
         let dns_implicit_system_fallbacks = Counter::default();
+        let target_resolutions = TargetResolutionFamily::new(pair_labels(
+            TARGET_RESOLUTION_COMPONENTS,
+            TARGET_RESOLUTION_MODES,
+            |component, mode| TargetResolutionLabels { component, mode },
+        ));
 
         let mut registry = Registry::default();
         registry.register(
@@ -1794,6 +1863,11 @@ impl Metrics {
             "Invariant violations that attempted an implicit system DNS fallback",
             dns_implicit_system_fallbacks.clone(),
         );
+        registry.register(
+            "ferrum2_target_resolution",
+            "Target resolution locations by closed component and mode",
+            target_resolutions.clone(),
+        );
 
         Self {
             registry,
@@ -1831,6 +1905,7 @@ impl Metrics {
             dns_cache_misses,
             dns_explicit_system_resolves,
             dns_implicit_system_fallbacks,
+            target_resolutions,
         }
     }
 
@@ -1996,6 +2071,24 @@ impl Metrics {
     /// counter. Normal resolution and explicit-system APIs leave it at zero.
     pub fn record_dns_implicit_system_fallback_violation(&self) {
         self.dns_implicit_system_fallbacks.inc();
+    }
+
+    /// Records where a DNS upstream or RuleSet dial target is resolved.
+    ///
+    /// The closed component and mode enums prevent target, resolver, detour,
+    /// domain, URL, or configured-tag identities from becoming labels.
+    pub fn target_resolution(
+        &self,
+        component: TargetResolutionComponent,
+        mode: TargetResolutionMode,
+    ) {
+        self.target_resolutions
+            .metric(pair_index(
+                component as usize,
+                mode as usize,
+                TARGET_RESOLUTION_MODES.len(),
+            ))
+            .inc();
     }
 
     /// Records one packet that passed the shared TUN ingress validator.

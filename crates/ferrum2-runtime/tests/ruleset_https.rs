@@ -3,21 +3,21 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use ferrum2_core::CanonicalDomain;
 use ferrum2_core::route::EgressPlanHandle;
+use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{DnsServerId, DnsStrategy};
 use ferrum2_runtime::{
-    ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, RuleSetCacheName, RuleSetDialer,
-    RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadResolver,
-    RuleSetHostResolveOutcome, RuleSetHostResolver, RuleSetHostResolverKind,
-    RuleSetLoadDisposition, RuleSetLoader, RuleSetLoaderConfig, RuleSetRemoteSource,
-    SystemRuleSetDialer,
+    ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, RuleSetCacheName, RuleSetDialTargets,
+    RuleSetDialer, RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadMode,
+    RuleSetDownloadResolver, RuleSetHostResolveOutcome, RuleSetHostResolver,
+    RuleSetHostResolverKind, RuleSetLoadDisposition, RuleSetLoader, RuleSetLoaderConfig,
+    RuleSetRemoteSource, SystemRuleSetDialer,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 
@@ -43,6 +43,43 @@ impl RuleSetHostResolver for RecordingResolver {
         let endpoint = self.endpoint;
         lock(&self.calls).push((host.as_str().to_owned(), resolver));
         async move { Ok(vec![endpoint]) }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SeenDial {
+    targets: RuleSetDialTargets,
+    detour_hops: Option<Vec<usize>>,
+    deadline: Instant,
+}
+
+#[derive(Clone)]
+struct RecordingDialer {
+    endpoint: SocketAddr,
+    calls: Arc<Mutex<Vec<SeenDial>>>,
+}
+
+impl RuleSetDialer for RecordingDialer {
+    type Io = TcpStream;
+
+    fn connect(
+        &self,
+        targets: &RuleSetDialTargets,
+        detour: Option<&ferrum2_core::route::EgressPlanSnapshot>,
+        deadline: Instant,
+    ) -> impl Future<Output = Result<Self::Io, RuleSetDownloadError>> + Send {
+        lock(&self.calls).push(SeenDial {
+            targets: targets.clone(),
+            detour_hops: detour.map(|plan| plan.hops().to_vec()),
+            deadline,
+        });
+        let endpoint = self.endpoint;
+        async move {
+            tokio::time::timeout_at(deadline, TcpStream::connect(endpoint))
+                .await
+                .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout))?
+                .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect))
+        }
     }
 }
 
@@ -76,13 +113,15 @@ fn client_tls() -> ClientConfig {
         .with_no_client_auth()
 }
 
-async fn fixture_server() -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+async fn fixture_server(
+    request_count: usize,
+) -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let endpoint = listener.local_addr().expect("local endpoint");
     let acceptor = TlsAcceptor::from(Arc::new(server_tls()));
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..request_count {
             let (stream, _) = listener.accept().await.expect("accept");
             let mut stream = acceptor.accept(stream).await.expect("TLS accept");
             let mut bytes = Vec::new();
@@ -98,10 +137,10 @@ async fn fixture_server() -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) 
             let request = String::from_utf8(bytes).expect("ASCII request");
             let first_line = request.lines().next().expect("request line").to_owned();
             requests.push(request.clone());
-            if first_line.contains(" /redirect ") {
+            if first_line.contains(" /redirect?source=one ") {
                 stream
                     .write_all(
-                        b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        b"HTTP/1.1 302 Found\r\nLocation: /final?target=two\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     )
                     .await
                     .expect("redirect");
@@ -132,15 +171,19 @@ async fn fixture_server() -> (SocketAddr, tokio::task::JoinHandle<Vec<String>>) 
 
 #[tokio::test]
 async fn https_redirects_and_conditionals_reuse_only_the_explicit_resolver() {
-    let (endpoint, server) = fixture_server().await;
+    let (endpoint, server) = fixture_server(4).await;
     let calls = Arc::new(Mutex::new(Vec::new()));
+    let dial_calls = Arc::new(Mutex::new(Vec::new()));
     let resolver = RecordingResolver {
         endpoint,
         calls: Arc::clone(&calls),
     };
     let downloader = HttpsRuleSetDownloader::with_tls_config(
         resolver,
-        SystemRuleSetDialer,
+        RecordingDialer {
+            endpoint,
+            calls: Arc::clone(&dial_calls),
+        },
         Arc::new(client_tls()),
     );
     let cache = TempDir::new().expect("cache");
@@ -151,8 +194,13 @@ async fn https_redirects_and_conditionals_reuse_only_the_explicit_resolver() {
     );
     let source = RuleSetRemoteSource::new(
         RuleSetCacheName::new("ai").expect("cache name"),
-        &format!("https://resolver.test:{}/redirect", endpoint.port()),
-        RuleSetDownloadResolver::DnsServer(DnsServerId::new(9)),
+        &format!(
+            "https://resolver.test:{}/redirect?source=one",
+            endpoint.port()
+        ),
+        RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::DnsServer(DnsServerId::new(
+            9,
+        ))),
         None,
         None,
     )
@@ -184,12 +232,96 @@ async fn https_redirects_and_conditionals_reuse_only_the_explicit_resolver() {
             ),
         ]
     );
+    {
+        let dial_calls = lock(&dial_calls);
+        assert_eq!(dial_calls.len(), 4);
+        for call in dial_calls.iter() {
+            assert_eq!(
+                call.targets,
+                RuleSetDialTargets::Resolved(vec![endpoint].into_boxed_slice())
+            );
+            assert_eq!(call.detour_hops, None);
+        }
+        assert_eq!(dial_calls[0].deadline, dial_calls[1].deadline);
+        assert_eq!(dial_calls[2].deadline, dial_calls[3].deadline);
+    }
     let requests = server.await.expect("server join");
     assert_eq!(requests.len(), 4);
-    assert!(requests[0].starts_with("GET /redirect HTTP/1.1"));
-    assert!(requests[1].starts_with("GET /final HTTP/1.1"));
+    assert!(requests[0].starts_with("GET /redirect?source=one HTTP/1.1"));
+    assert!(requests[1].starts_with("GET /final?target=two HTTP/1.1"));
+    for request in &requests {
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("host: resolver.test:{}\r\n", endpoint.port()))
+        );
+    }
     assert!(!requests[1].to_ascii_lowercase().contains("if-none-match:"));
     assert!(requests[3].to_ascii_lowercase().contains("if-none-match:"));
+}
+
+#[tokio::test]
+async fn deferred_redirects_never_resolve_and_keep_domain_identity_and_detour_snapshot() {
+    let (endpoint, server) = fixture_server(2).await;
+    let resolver_calls = Arc::new(Mutex::new(Vec::new()));
+    let dial_calls = Arc::new(Mutex::new(Vec::new()));
+    let downloader = HttpsRuleSetDownloader::with_tls_config(
+        RecordingResolver {
+            endpoint,
+            calls: Arc::clone(&resolver_calls),
+        },
+        RecordingDialer {
+            endpoint,
+            calls: Arc::clone(&dial_calls),
+        },
+        Arc::new(client_tls()),
+    );
+    let cache = TempDir::new().expect("cache");
+    let loader = RuleSetLoader::new(
+        RuleSetLoaderConfig::new(cache.path().to_path_buf(), Duration::from_secs(5), 2)
+            .expect("config"),
+        downloader,
+    );
+    let source = RuleSetRemoteSource::new(
+        RuleSetCacheName::new("deferred").expect("cache name"),
+        &format!(
+            "https://resolver.test:{}/redirect?source=one",
+            endpoint.port()
+        ),
+        RuleSetDownloadMode::DeferredToDetour,
+        Some(EgressPlanHandle::direct(7)),
+        None,
+    )
+    .expect("deferred source");
+
+    let loaded = loader.load(&source, 1).await.expect("deferred download");
+    assert_eq!(loaded.disposition(), RuleSetLoadDisposition::Downloaded);
+    assert!(lock(&resolver_calls).is_empty());
+
+    let expected_target = TargetAddr::domain("resolver.test", endpoint.port()).expect("target");
+    {
+        let dial_calls = lock(&dial_calls);
+        assert_eq!(dial_calls.len(), 2);
+        for call in dial_calls.iter() {
+            assert_eq!(
+                call.targets,
+                RuleSetDialTargets::Domain(expected_target.clone())
+            );
+            assert_eq!(call.detour_hops.as_deref(), Some([7].as_slice()));
+            assert_eq!(call.deadline, dial_calls[0].deadline);
+        }
+    }
+
+    let requests = server.await.expect("server join");
+    assert!(requests[0].starts_with("GET /redirect?source=one HTTP/1.1"));
+    assert!(requests[1].starts_with("GET /final?target=two HTTP/1.1"));
+    for request in requests {
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("host: resolver.test:{}\r\n", endpoint.port()))
+        );
+    }
 }
 
 #[tokio::test]
@@ -261,13 +393,28 @@ async fn explicit_system_lookup_reports_one_identity_free_success() {
 #[tokio::test]
 async fn system_dialer_rejects_a_configured_detour_instead_of_bypassing_it() {
     let detour = EgressPlanHandle::direct(0).snapshot_owned();
+    let targets = RuleSetDialTargets::Resolved(
+        vec!["127.0.0.1:9".parse().expect("candidate")].into_boxed_slice(),
+    );
     let error = SystemRuleSetDialer
         .connect(
-            &["127.0.0.1:9".parse().expect("candidate")],
+            &targets,
             Some(&detour),
             Instant::now() + Duration::from_secs(1),
         )
         .await
         .expect_err("direct dialer must not bypass detour");
+    assert_eq!(error.kind(), RuleSetDownloadErrorKind::Connect);
+}
+
+#[tokio::test]
+async fn system_dialer_rejects_domain_targets_without_implicit_resolution() {
+    let targets = RuleSetDialTargets::Domain(
+        TargetAddr::domain("must-not-resolve.invalid", 443).expect("domain target"),
+    );
+    let error = SystemRuleSetDialer
+        .connect(&targets, None, Instant::now() + Duration::from_secs(1))
+        .await
+        .expect_err("system dialer must not resolve a deferred target");
     assert_eq!(error.kind(), RuleSetDownloadErrorKind::Connect);
 }

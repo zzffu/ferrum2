@@ -171,6 +171,8 @@ pub(super) struct RawServerInbound {
 #[serde(deny_unknown_fields)]
 pub(super) struct RawServerOutbound {
     pub(super) tag: String,
+    pub(super) domain_resolver: Option<String>,
+    pub(super) domain_strategy: Option<String>,
 }
 
 #[derive(Deserialize)]

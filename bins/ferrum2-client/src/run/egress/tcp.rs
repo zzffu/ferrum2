@@ -208,10 +208,11 @@ mod tests {
     use crate::run::test_support::*;
 
     #[tokio::test]
-    async fn direct_tcp_socks_uses_the_original_target_and_raw_half_close() {
+    async fn direct_tcp_socks_uses_the_numeric_target_and_raw_half_close() {
         let aborts = Arc::new(AtomicUsize::new(0));
         let (stream, mut peer) = tokio::io::duplex(1_024);
-        let target = TargetAddr::domain("direct-target.invalid", 443).expect("target");
+        let target =
+            TargetAddr::ip("192.0.2.44:443".parse().expect("numeric target")).expect("target");
         let engine = ClientEgressEngine::new(
             vec![ClientOutboundContext::Direct].into(),
             DeadlineConnector {

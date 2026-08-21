@@ -9,6 +9,8 @@ listen = "127.0.0.1:1080"
 [[outbounds]]
 tag = "direct-out"
 type = "direct"
+domain_resolver = "local"
+domain_strategy = "ipv4_only"
 
 [[outbounds]]
 tag = "ss-ip"
@@ -54,8 +56,6 @@ address = "192.0.2.53:53"
 tag = "google"
 transport = "doh"
 address = "dns.google:443"
-domain_resolver = "local"
-domain_strategy = "ipv4_only"
 server_name = "dns.google"
 path = "/dns-query"
 detour = "MY"
@@ -111,7 +111,6 @@ tag = "ads"
 type = "remote"
 format = "binary"
 url = "https://raw.githubusercontent.com/DustinWin/ruleset_geodata/c1a9c12f6883814efc8aab387cdde75cd9e11297/ads.srs"
-download_resolver = "local"
 download_detour = "MY"
 update_interval_seconds = 86400
 

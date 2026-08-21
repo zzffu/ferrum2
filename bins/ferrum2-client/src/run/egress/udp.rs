@@ -208,16 +208,17 @@ fn managed_udp_binding(
             Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
         }
         SelectedEgress::Shadowsocks { .. } => Ok(None),
-        SelectedEgress::Direct if auto_route && origin == ClientRequestOrigin::Dns => {
-            let Some(SocketAddr::V4(endpoint)) = target.and_then(TargetAddr::as_socket_addr) else {
-                return Err(());
-            };
-            Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
+        SelectedEgress::Direct { .. } if auto_route && origin == ClientRequestOrigin::Dns => {
+            match target.and_then(TargetAddr::as_socket_addr) {
+                Some(SocketAddr::V4(endpoint)) => Ok(Some(ManagedUdpBinding::Fixed(endpoint))),
+                Some(SocketAddr::V6(_)) => Err(()),
+                None => Ok(Some(ManagedUdpBinding::Default)),
+            }
         }
-        SelectedEgress::Direct if auto_route || origin == ClientRequestOrigin::Tun => {
+        SelectedEgress::Direct { .. } if auto_route || origin == ClientRequestOrigin::Tun => {
             Ok(Some(ManagedUdpBinding::Default))
         }
-        SelectedEgress::Direct => Ok(None),
+        SelectedEgress::Direct { .. } => Ok(None),
     }
 }
 
@@ -898,9 +899,9 @@ impl ClientUdpAssociation {
         &mut self,
         engine: &ClientEgressEngine<C, T, R>,
         plan: Option<&EgressPlanSnapshot>,
-        destination: SocketAddr,
+        destination: TargetAddr,
         packet: Vec<u8>,
-    ) -> io::Result<((Vec<u8>, SocketAddr), bool)>
+    ) -> io::Result<(Vec<u8>, bool)>
     where
         T: Clock,
         R: SecureRandom,
@@ -914,13 +915,13 @@ impl ClientUdpAssociation {
         if self.plan.as_ref() != plan {
             return Err(invalid_dns_target());
         }
-        let target = TargetAddr::ip(destination).map_err(|_| invalid_dns_target())?;
+        let expected_response_target = destination.clone();
         self.activate(engine).map_err(|_| runtime_error(()))?;
         let wire_len = self
             .prepare_owned_application_request(
                 engine,
                 &engine.outbounds,
-                target,
+                destination,
                 bytes::Bytes::from(packet).into(),
                 Instant::now(),
             )
@@ -943,15 +944,34 @@ impl ClientUdpAssociation {
                         continue;
                     }
                 };
-            let source = response
-                .datagram()
-                .target()
-                .as_socket_addr()
-                .ok_or_else(invalid_dns_target)?;
+            if !dns_response_target_matches(&expected_response_target, response.datagram().target())
+            {
+                reusable = false;
+                self.recycle_application_response(response);
+                continue;
+            }
             let payload = response.datagram().payload().to_vec();
             self.recycle_application_response(response);
-            return Ok(((payload, source), reusable));
+            return Ok((payload, reusable));
         }
+    }
+}
+
+/// Binds connected DNS UDP responses to the logical target selected for the
+/// query. A numeric target is exact. A deferred domain may be returned either
+/// verbatim or as the IP selected by the authenticated remote resolver, but it
+/// must retain the requested port.
+fn dns_response_target_matches(expected: &TargetAddr, actual: &TargetAddr) -> bool {
+    if expected.port() != actual.port() {
+        return false;
+    }
+    match (expected.host(), actual.host()) {
+        (TargetHostRef::Ip(expected), TargetHostRef::Ip(actual)) => expected == actual,
+        (TargetHostRef::Domain(expected), TargetHostRef::Domain(actual)) => {
+            expected.eq_ignore_ascii_case(actual)
+        }
+        (TargetHostRef::Domain(_), TargetHostRef::Ip(_)) => true,
+        (TargetHostRef::Ip(_), TargetHostRef::Domain(_)) => false,
     }
 }
 
@@ -1030,6 +1050,19 @@ where
     #[cfg(not(windows))]
     let _ = (origin, target);
     let udp = egress.udp.as_ref().ok_or(())?;
+    let direct_resolver = match selected {
+        SelectedEgress::Direct {
+            outbound: Some(outbound),
+        } => egress
+            .direct_resolvers
+            .get(outbound)
+            .and_then(Option::as_ref)
+            .ok_or(())?
+            .for_ingress(ingress),
+        SelectedEgress::Direct { outbound: None } | SelectedEgress::Shadowsocks { .. } => {
+            egress.application_resolver.for_ingress(ingress)
+        }
+    };
     let pending_session = udp
         .manager
         .reserve_session(Instant::now())
@@ -1037,13 +1070,13 @@ where
     let handle = pending_session.handle();
     let budget = udp.manager.buffer_budget();
     let fixed_buffer_count = match selected {
-        SelectedEgress::Direct => 1,
+        SelectedEgress::Direct { .. } => 1,
         SelectedEgress::Shadowsocks { .. } => 3,
     };
     let mut fixed_capacity = Vec::with_capacity(fixed_buffer_count);
     for _ in 0..fixed_buffer_count {
         let capacity = match selected {
-            SelectedEgress::Direct => MAX_UDP_WIRE_DATAGRAM_BYTES,
+            SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
             SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
         };
         fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
@@ -1056,7 +1089,7 @@ where
         matches!(selected, SelectedEgress::Shadowsocks { .. }).then(UdpPacketScratch::new);
     let first_server = match selected {
         SelectedEgress::Shadowsocks { first_server } => Some(first_server),
-        SelectedEgress::Direct => None,
+        SelectedEgress::Direct { .. } => None,
     };
     let upstream = match selected {
         SelectedEgress::Shadowsocks { first_server } => {
@@ -1095,7 +1128,7 @@ where
             };
             ClientUdpUpstream::Shadowsocks(upstream)
         }
-        SelectedEgress::Direct => {
+        SelectedEgress::Direct { .. } => {
             #[cfg(windows)]
             if let Some(binding) = managed_binding {
                 let ipv4 = open_managed_udp(
@@ -1141,10 +1174,10 @@ where
         direct_target: None,
         direct_peers: VecDeque::with_capacity(UDP_SESSION_QUEUE_DEPTH),
         direct_candidate_hints: DirectUdpCandidateHints::default(),
-        direct_resolver: egress.application_resolver.for_ingress(ingress),
+        direct_resolver,
         direct_timeout: egress.phase_deadlines.0,
         pending_direct_response: None,
-        direct_wire: matches!(selected, SelectedEgress::Direct)
+        direct_wire: matches!(selected, SelectedEgress::Direct { .. })
             .then(|| BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES)),
         inner_wire,
         upstream_wire,
@@ -1550,10 +1583,11 @@ mod tests {
     fn dns_direct_fixed_binding_uses_the_numeric_bootstrap() {
         let endpoint = "198.51.100.8:53".parse().unwrap();
         let target = TargetAddr::ip(SocketAddr::V4(endpoint)).unwrap();
+        let deferred = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
         assert_eq!(
             managed_udp_binding(
                 ClientRequestOrigin::Dns,
-                SelectedEgress::Direct,
+                SelectedEgress::Direct { outbound: None },
                 true,
                 Some(&target),
             ),
@@ -1562,7 +1596,7 @@ mod tests {
         assert_eq!(
             managed_udp_binding(
                 ClientRequestOrigin::Dns,
-                SelectedEgress::Direct,
+                SelectedEgress::Direct { outbound: None },
                 false,
                 Some(&target),
             ),
@@ -1570,8 +1604,26 @@ mod tests {
         );
         assert_eq!(
             managed_udp_binding(
+                ClientRequestOrigin::Dns,
+                SelectedEgress::Direct { outbound: Some(0) },
+                true,
+                Some(&deferred),
+            ),
+            Ok(Some(ManagedUdpBinding::Default))
+        );
+        assert_eq!(
+            managed_udp_binding(
+                ClientRequestOrigin::RuleSet,
+                SelectedEgress::Direct { outbound: Some(0) },
+                true,
+                Some(&target),
+            ),
+            Ok(Some(ManagedUdpBinding::Default))
+        );
+        assert_eq!(
+            managed_udp_binding(
                 ClientRequestOrigin::Tun,
-                SelectedEgress::Direct,
+                SelectedEgress::Direct { outbound: None },
                 false,
                 Some(&target),
             ),
@@ -1580,7 +1632,7 @@ mod tests {
         assert_eq!(
             managed_udp_binding(
                 ClientRequestOrigin::Socks,
-                SelectedEgress::Direct,
+                SelectedEgress::Direct { outbound: None },
                 true,
                 Some(&target),
             ),
@@ -1597,6 +1649,42 @@ mod tests {
             ),
             Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
         );
+    }
+
+    #[test]
+    fn dns_connected_response_binding_is_exact_or_a_port_preserving_remote_resolution() {
+        let numeric = TargetAddr::ip("192.0.2.53:53".parse().unwrap()).unwrap();
+        assert!(dns_response_target_matches(&numeric, &numeric));
+        assert!(!dns_response_target_matches(
+            &numeric,
+            &TargetAddr::ip("192.0.2.54:53".parse().unwrap()).unwrap()
+        ));
+        assert!(!dns_response_target_matches(
+            &numeric,
+            &TargetAddr::ip("192.0.2.53:5353".parse().unwrap()).unwrap()
+        ));
+        assert!(!dns_response_target_matches(
+            &numeric,
+            &TargetAddr::domain("dns.example.test", 53).unwrap()
+        ));
+
+        let deferred = TargetAddr::domain("dns.example.test", 53).unwrap();
+        assert!(dns_response_target_matches(
+            &deferred,
+            &TargetAddr::domain("DNS.EXAMPLE.TEST", 53).unwrap()
+        ));
+        assert!(dns_response_target_matches(
+            &deferred,
+            &TargetAddr::ip("198.51.100.53:53".parse().unwrap()).unwrap()
+        ));
+        assert!(!dns_response_target_matches(
+            &deferred,
+            &TargetAddr::ip("198.51.100.53:5353".parse().unwrap()).unwrap()
+        ));
+        assert!(!dns_response_target_matches(
+            &deferred,
+            &TargetAddr::domain("other.example.test", 53).unwrap()
+        ));
     }
 
     #[cfg(windows)]
@@ -1632,6 +1720,22 @@ mod tests {
                 ManagedUdpEvent::OpenV4,
                 ManagedUdpEvent::BindFixed(endpoint)
             ]
+        );
+        drop(association);
+
+        let deferred = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
+        let deferred_engine = make_engine(true);
+        let association = deferred_engine
+            .prepare_udp(
+                ClientRequestOrigin::Dns,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                Some(&deferred),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            deferred_engine.managed_udp_events(),
+            [ManagedUdpEvent::OpenV4, ManagedUdpEvent::BindDefault]
         );
         drop(association);
 

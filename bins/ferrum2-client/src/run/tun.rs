@@ -595,7 +595,9 @@ mod tests {
         let registry = OwnerRegistry::new();
         let live_ids = Arc::new(Mutex::new(HashSet::new()));
         let outbounds = prepare_client_outbounds(vec![
-            ferrum2_config::ClientOutboundConfig::Direct,
+            ferrum2_config::ClientOutboundConfig::Direct {
+                domain_resolver: ferrum2_config::DirectDomainResolver::System,
+            },
             ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: "192.0.2.77:8388".parse().unwrap(),
                 psk: Arc::new(default_test_psk()),
@@ -870,7 +872,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let (resolver, mut resolver_owner) = TaggedResolver::direct(
             vec![DnsUpstreamSpec {
                 transport: DnsUpstreamTransport::Udp,
-                address: dns_address,
+                target: TargetAddr::ip(dns_address).expect("numeric DNS target"),
+                resolved_targets: Box::new([]),
                 detour: None,
             }],
             Duration::from_secs(1),
@@ -959,8 +962,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let direct_target = direct_listener.local_addr().expect("direct TUN target");
         let direct_registry = OwnerRegistry::new();
         let direct_outbounds =
-            prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct])
-                .expect("direct TUN outbound");
+            prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct {
+                domain_resolver: ferrum2_config::DirectDomainResolver::System,
+            }])
+            .expect("direct TUN outbound");
         let direct_routing = Arc::new(ClientRouting {
             legacy: ferrum2_rule::RouteTable::static_bindings(vec![0]).expect("direct TUN route"),
             program: None,

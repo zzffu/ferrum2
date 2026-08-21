@@ -567,7 +567,7 @@ fn tagged_dns_tcp_resolution_uses_detour_and_reaps() {
     let selected_name = "selected.test.";
     let final_name = "final.test.";
     let wrong_name = "wrong-id-sentinel.test.";
-    let empty_name = "localhost";
+    let empty_name = "empty-sentinel.test.";
     let timeout_name = "timeout-sentinel.test.";
     let many_name = "many-sentinel.test.";
     let delayed_name = "delayed-sentinel.test.";

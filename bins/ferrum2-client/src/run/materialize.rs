@@ -1,13 +1,16 @@
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ferrum2_config::{
     ClientV2MaterializeFuture, ClientV2Resources, CompiledRuleSetResource, DialEndpoint,
-    PreparedClientOutboundKind, PreparedClientV2, PreparedFixedEndpointTarget, ResolvedDnsEndpoint,
+    DirectDomainResolver, PreparedClientOutboundKind, PreparedClientV2, PreparedDnsEndpoint,
+    PreparedDnsEndpointMode, PreparedFixedEndpointTarget, ResolvedDnsEndpoint,
     ResolvedOutboundEndpoint, ResolverRef,
 };
 use ferrum2_core::TargetAddr;
@@ -19,24 +22,27 @@ use ferrum2_dns::{
     FixedEndpointLookup, FixedEndpointMaterializeError, FixedEndpointPlanEntry,
     FixedEndpointResolveBackend, FixedEndpointResolveFuture, FixedEndpointResolveRequest,
     FixedEndpointSpec, MAX_APPLICATION_RESOLVED_CANDIDATES, MaterializedFixedEndpoint,
-    ResolverGeneration, TaggedResolver, TaggedResolverOwner, materialize_fixed_endpoints,
+    ResolverGeneration, TaggedResolver, TaggedResolverOwner, TaggedServerApplicationResolveBackend,
+    materialize_fixed_endpoints,
 };
 use ferrum2_observability::{
-    CompiledMatchType, DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics, RuleSetResult,
+    CompiledMatchType, DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics,
+    RuleSetResult, TargetResolutionComponent, TargetResolutionMode,
 };
 use ferrum2_rule::{RuleEngineRegistry, RuleEngineSnapshot, RuleSetId};
 use ferrum2_runtime::{
     ApplicationResolverAdapter, ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, OwnerRegistry,
-    PreparedProcessRoot, ProcessCancellation, ProcessFuture, RuleSetCacheName, RuleSetDialer,
-    RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadResolver, RuleSetDownloader,
-    RuleSetHostResolveObserver, RuleSetHostResolveOutcome, RuleSetHostResolverKind,
-    RuleSetLoadDisposition, RuleSetLoadError, RuleSetLoadErrorKind, RuleSetLoader,
-    RuleSetLoaderConfig, RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRemoteSource,
-    UdpRuntimeLimits, UdpSessionManager, materialize_rule_set_snapshot,
+    PreparedProcessRoot, ProcessCancellation, ProcessFuture, RuleSetCacheName, RuleSetDialTargets,
+    RuleSetDialer, RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadMode,
+    RuleSetDownloadResolver, RuleSetDownloader, RuleSetHostResolveObserver,
+    RuleSetHostResolveOutcome, RuleSetHostResolverKind, RuleSetLoadDisposition, RuleSetLoadError,
+    RuleSetLoadErrorKind, RuleSetLoader, RuleSetLoaderConfig, RuleSetRefreshOutcome,
+    RuleSetRefreshService, RuleSetRemoteSource, UdpRuntimeLimits, UdpSessionManager,
+    materialize_rule_set_snapshot,
 };
 use ferrum2_shadowsocks::MethodKeyAdapter;
-use tokio::io::DuplexStream;
-use tokio::task::JoinHandle;
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
 use super::dns_egress::ClientDnsEgress;
@@ -126,6 +132,7 @@ impl ClientV2MaterializeContext {
         if self.used.swap(true, Ordering::AcqRel) {
             return Err(RunError::StartupProtocol);
         }
+        record_target_resolution_modes(prepared, &self.metrics);
 
         let blueprint = Arc::new(BootstrapBlueprint::new(prepared)?);
         let (plan, targets) = fixed_endpoint_plan(prepared)?;
@@ -159,10 +166,17 @@ impl ClientV2MaterializeContext {
         }
 
         let loader_config = runtime_loader_config(prepared)?;
-        let needs_tagged = prepared
-            .rule_sets()
-            .iter()
-            .any(|rule_set| matches!(rule_set.download_resolver(), ResolverRef::DnsServer(_)));
+        let needs_tagged = prepared.rule_sets().iter().any(|rule_set| {
+            matches!(
+                rule_set.download_resolver(),
+                Some(ResolverRef::DnsServer(_))
+            )
+        }) || (0..prepared.outbound_count()).any(|index| {
+            prepared
+                .outbound(u32::try_from(index).expect("validated outbound count"))
+                .and_then(|outbound| outbound.domain_resolver())
+                .is_some_and(|resolver| matches!(resolver, DirectDomainResolver::DnsServer { .. }))
+        });
         let addresses = backend.addresses();
         let pending_transport = match self.downloader.as_ref() {
             Some(downloader) => PendingRuleSetTransport::Injected {
@@ -385,14 +399,14 @@ impl ProductionRuleSetTransport {
         let (tagged, owner) = if self.needs_tagged {
             let (resolver, mut owner) = self
                 .blueprint
-                .tagged_resolver_with_addresses(Arc::clone(&engine), &self.addresses)?;
+                .tagged_resolver_with_addresses(&engine, &self.addresses)?;
             if owner.ready().await.is_err() {
                 drop(resolver);
                 let _ = owner.shutdown().await;
                 bridges.shutdown().await;
                 return Err(RunError::StartupProtocol);
             }
-            (Some(Arc::new(resolver)), Some(owner))
+            (Some(resolver), Some(owner))
         } else {
             (None, None)
         };
@@ -405,7 +419,7 @@ impl ProductionRuleSetTransport {
         }
         resolver = resolver.with_observer(rule_set_host_resolve_observer(&self.metrics));
         let dialer = ClientRuleSetDialer {
-            engine,
+            engine: Arc::clone(&engine.engine),
             bridges: Arc::clone(&bridges),
         };
         let downloader: Arc<dyn RuleSetDownloader> =
@@ -518,7 +532,9 @@ impl PreparedProcessRoot<RunError> for ClientV2RuntimeRoot {
 
 #[derive(Clone)]
 enum BootstrapOutbound {
-    Direct,
+    Direct {
+        domain_resolver: DirectDomainResolver,
+    },
     Shadowsocks {
         psk: Arc<MethodPsk>,
         endpoint: DialEndpoint,
@@ -531,7 +547,7 @@ struct BootstrapDnsServer {
     server_name: Option<Box<str>>,
     path: Option<Box<str>>,
     detour: Option<EgressPlanHandle>,
-    endpoint: DialEndpoint,
+    endpoint: PreparedDnsEndpoint,
 }
 
 struct BootstrapBlueprint {
@@ -541,6 +557,11 @@ struct BootstrapBlueprint {
     dns_max_inflight: std::num::NonZeroU16,
     dns_strategy: DnsStrategy,
     runtime: ferrum2_config::RuntimeConfig,
+}
+
+struct BootstrapEngine {
+    engine: Arc<ClientEgressEngine>,
+    tagged: Arc<std::sync::OnceLock<std::sync::Weak<TaggedResolver>>>,
 }
 
 impl BootstrapBlueprint {
@@ -554,7 +575,11 @@ impl BootstrapBlueprint {
                 .outbound(u32::try_from(index).map_err(|_| RunError::StartupProtocol)?)
                 .ok_or(RunError::StartupProtocol)?;
             outbounds.push(match descriptor.kind() {
-                PreparedClientOutboundKind::Direct => BootstrapOutbound::Direct,
+                PreparedClientOutboundKind::Direct => BootstrapOutbound::Direct {
+                    domain_resolver: descriptor
+                        .domain_resolver()
+                        .ok_or(RunError::StartupProtocol)?,
+                },
                 PreparedClientOutboundKind::Shadowsocks => BootstrapOutbound::Shadowsocks {
                     psk: Arc::clone(descriptor.psk().ok_or(RunError::StartupProtocol)?),
                     endpoint: descriptor
@@ -609,7 +634,7 @@ impl BootstrapBlueprint {
             .map_err(|_| RunError::RuleAllocation)?;
         for (index, outbound) in self.outbounds.iter().enumerate() {
             outbounds.push(match outbound {
-                BootstrapOutbound::Direct => ClientOutboundContext::Direct,
+                BootstrapOutbound::Direct { .. } => ClientOutboundContext::Direct,
                 BootstrapOutbound::Shadowsocks { psk, endpoint } => {
                     let address = addresses.outbounds[index]
                         .or_else(|| endpoint_address(endpoint))
@@ -633,13 +658,44 @@ impl BootstrapBlueprint {
         addresses: &BootstrapAddresses,
         underlay: ferrum2_tun::UnderlayPublisher,
         auto_route: bool,
-    ) -> Result<Arc<ClientEgressEngine>, RunError> {
+    ) -> Result<BootstrapEngine, RunError> {
         let outbounds = self.build_outbounds(addresses)?;
+        let tagged = Arc::new(std::sync::OnceLock::new());
         let application_resolver = ApplicationResolverAdapter::new(
             Arc::new(ApplicationResolver::system_default()),
             0,
-            self.dns_strategy,
+            DnsStrategy::PreferIpv4,
         );
+        let direct_resolvers = self
+            .outbounds
+            .iter()
+            .map(|outbound| match outbound {
+                BootstrapOutbound::Direct { domain_resolver } => {
+                    let (resolver, strategy) = match *domain_resolver {
+                        DirectDomainResolver::System => (
+                            ApplicationResolver::system_default(),
+                            DnsStrategy::PreferIpv4,
+                        ),
+                        DirectDomainResolver::DnsServer { server, strategy } => (
+                            ApplicationResolver::configured(Arc::new(
+                                TaggedServerApplicationResolveBackend::new(
+                                    Arc::clone(&tagged),
+                                    server,
+                                ),
+                            )),
+                            dns_strategy(strategy),
+                        ),
+                    };
+                    Some(ApplicationResolverAdapter::new(
+                        Arc::new(resolver),
+                        0,
+                        strategy,
+                    ))
+                }
+                BootstrapOutbound::Shadowsocks { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .into();
         #[cfg(all(windows, not(test)))]
         let connector =
             TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
@@ -660,8 +716,8 @@ impl BootstrapBlueprint {
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
             live_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         };
-        Ok(Arc::new(
-            ClientEgressEngine::new_with_application_resolver(
+        let engine = Arc::new(
+            ClientEgressEngine::new_with_direct_resolvers(
                 outbounds,
                 connector,
                 SystemClock::new(),
@@ -669,11 +725,13 @@ impl BootstrapBlueprint {
                 (self.runtime.connect_timeout, self.runtime.handshake_timeout),
                 Some(udp),
                 application_resolver,
+                direct_resolvers,
                 #[cfg(test)]
                 None,
             )
             .with_underlay(underlay, auto_route),
-        ))
+        );
+        Ok(BootstrapEngine { engine, tagged })
     }
 
     fn dns_specs(&self, addresses: &BootstrapAddresses) -> Vec<DnsUpstreamSpec> {
@@ -698,9 +756,11 @@ impl BootstrapBlueprint {
                         path: server.path.clone().expect("validated bootstrap DoH path"),
                     },
                 },
-                address: addresses.dns[index]
-                    .or_else(|| endpoint_address(&server.endpoint))
-                    .unwrap_or(UNRESOLVED_ENDPOINT),
+                target: bootstrap_dns_target(&server.endpoint, addresses.dns[index].as_deref()),
+                resolved_targets: bootstrap_dns_resolved_targets(
+                    &server.endpoint,
+                    addresses.dns[index].as_deref(),
+                ),
                 detour: server.detour.clone(),
             })
             .collect()
@@ -708,16 +768,22 @@ impl BootstrapBlueprint {
 
     fn tagged_resolver_with_addresses(
         &self,
-        engine: Arc<ClientEgressEngine>,
+        engine: &BootstrapEngine,
         addresses: &BootstrapAddresses,
-    ) -> Result<(TaggedResolver, TaggedResolverOwner), RunError> {
-        TaggedResolver::new(
+    ) -> Result<(Arc<TaggedResolver>, TaggedResolverOwner), RunError> {
+        let (resolver, owner) = TaggedResolver::new(
             self.dns_specs(addresses),
             self.dns_timeout,
             self.dns_max_inflight,
-            Arc::new(ClientDnsEgress::new(engine)),
+            Arc::new(ClientDnsEgress::new(Arc::clone(&engine.engine))),
         )
-        .map_err(|_| RunError::StartupProtocol)
+        .map_err(|_| RunError::StartupProtocol)?;
+        let resolver = Arc::new(resolver);
+        engine
+            .tagged
+            .set(Arc::downgrade(&resolver))
+            .map_err(|_| RunError::StartupProtocol)?;
+        Ok((resolver, owner))
     }
 
     fn initial_addresses(&self) -> BootstrapAddresses {
@@ -725,13 +791,19 @@ impl BootstrapBlueprint {
             dns: self
                 .dns_servers
                 .iter()
-                .map(|server| endpoint_address(&server.endpoint))
+                .map(|server| {
+                    server
+                        .endpoint
+                        .target()
+                        .as_socket_addr()
+                        .map(|address| Arc::<[SocketAddr]>::from([address]))
+                })
                 .collect(),
             outbounds: self
                 .outbounds
                 .iter()
                 .map(|outbound| match outbound {
-                    BootstrapOutbound::Direct => None,
+                    BootstrapOutbound::Direct { .. } => None,
                     BootstrapOutbound::Shadowsocks { endpoint, .. } => endpoint_address(endpoint),
                 })
                 .collect(),
@@ -741,7 +813,7 @@ impl BootstrapBlueprint {
 
 #[derive(Clone)]
 struct BootstrapAddresses {
-    dns: Vec<Option<SocketAddr>>,
+    dns: Vec<Option<Arc<[SocketAddr]>>>,
     outbounds: Vec<Option<SocketAddr>>,
 }
 
@@ -783,10 +855,17 @@ impl BootstrapEndpointBackend {
         let addresses = self.addresses();
         let mut dns = Vec::new();
         for (index, endpoint) in prepared.dns_endpoints().iter().enumerate() {
-            if endpoint.is_domain() {
-                dns.push(ResolvedDnsEndpoint::new(
+            if matches!(
+                endpoint.mode(),
+                PreparedDnsEndpointMode::ClientResolved { .. }
+            ) {
+                dns.push(ResolvedDnsEndpoint::from_candidates(
                     u32::try_from(index).map_err(|_| RunError::StartupProtocol)?,
-                    addresses.dns[index].ok_or(RunError::StartupProtocol)?,
+                    addresses.dns[index]
+                        .as_deref()
+                        .ok_or(RunError::StartupProtocol)?
+                        .to_vec()
+                        .into_boxed_slice(),
                 ));
             }
         }
@@ -843,9 +922,8 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
                 .map_err(|_| DnsError::Runtime)?;
             let (tagged, mut owner) = self
                 .blueprint
-                .tagged_resolver_with_addresses(engine, &addresses)
+                .tagged_resolver_with_addresses(&engine, &addresses)
                 .map_err(|_| DnsError::Runtime)?;
-            let tagged = Arc::new(tagged);
             let result = match owner.ready().await {
                 Ok(()) => {
                     tagged
@@ -883,22 +961,27 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
             .targets
             .get(position)
             .ok_or(FixedEndpointMaterializeError::InvalidDependencyOrder)?;
-        let address = *endpoint
-            .candidates()
-            .first()
-            .ok_or(FixedEndpointMaterializeError::NoCandidates)?;
         let mut addresses = self
             .addresses
             .lock()
             .map_err(|_| FixedEndpointMaterializeError::Allocation)?;
         match *target {
             PreparedFixedEndpointTarget::DnsServer(index) => {
+                let candidates = Arc::<[SocketAddr]>::from(endpoint.candidates());
+                if candidates.is_empty() {
+                    return Err(FixedEndpointMaterializeError::NoCandidates);
+                }
                 *addresses
                     .dns
                     .get_mut(index as usize)
-                    .ok_or(FixedEndpointMaterializeError::InvalidDependencyOrder)? = Some(address);
+                    .ok_or(FixedEndpointMaterializeError::InvalidDependencyOrder)? =
+                    Some(candidates);
             }
             PreparedFixedEndpointTarget::Outbound(index) => {
+                let address = *endpoint
+                    .candidates()
+                    .first()
+                    .ok_or(FixedEndpointMaterializeError::NoCandidates)?;
                 *addresses
                     .outbounds
                     .get_mut(index as usize)
@@ -1023,6 +1106,38 @@ fn endpoint_address(endpoint: &DialEndpoint) -> Option<SocketAddr> {
     match endpoint {
         DialEndpoint::Ip(address) => Some(*address),
         DialEndpoint::Domain { .. } => None,
+    }
+}
+
+fn bootstrap_dns_target(
+    endpoint: &PreparedDnsEndpoint,
+    materialized: Option<&[SocketAddr]>,
+) -> TargetAddr {
+    match endpoint.mode() {
+        PreparedDnsEndpointMode::Numeric | PreparedDnsEndpointMode::DeferredToDetour => {
+            endpoint.target().clone()
+        }
+        PreparedDnsEndpointMode::ClientResolved { .. } if materialized.is_some() => {
+            endpoint.target().clone()
+        }
+        PreparedDnsEndpointMode::ClientResolved { .. } => {
+            TargetAddr::ip(UNRESOLVED_ENDPOINT).expect("non-zero bootstrap placeholder")
+        }
+    }
+}
+
+fn bootstrap_dns_resolved_targets(
+    endpoint: &PreparedDnsEndpoint,
+    materialized: Option<&[SocketAddr]>,
+) -> Box<[SocketAddr]> {
+    match endpoint.mode() {
+        PreparedDnsEndpointMode::ClientResolved { .. } => materialized.map_or_else(
+            || Vec::new().into_boxed_slice(),
+            |addresses| addresses.to_vec().into_boxed_slice(),
+        ),
+        PreparedDnsEndpointMode::Numeric | PreparedDnsEndpointMode::DeferredToDetour => {
+            Vec::new().into_boxed_slice()
+        }
     }
 }
 
@@ -1170,17 +1285,26 @@ fn rule_set_sources(prepared: &PreparedClientV2) -> Result<Vec<RuleSetRemoteSour
         .try_reserve_exact(prepared.rule_sets().len())
         .map_err(|_| RunError::RuleAllocation)?;
     for (index, rule_set) in prepared.rule_sets().iter().enumerate() {
-        let resolver = match rule_set.download_resolver() {
-            ResolverRef::System => RuleSetDownloadResolver::System,
-            ResolverRef::DnsServer(server) => RuleSetDownloadResolver::DnsServer(DnsServerId::new(
-                u32::try_from(server).map_err(|_| RunError::StartupProtocol)?,
-            )),
+        let mode = match rule_set.download_mode() {
+            ferrum2_config::PreparedRuleSetDownloadMode::ClientResolved { resolver } => {
+                RuleSetDownloadMode::ClientResolved(match resolver {
+                    ResolverRef::System => RuleSetDownloadResolver::System,
+                    ResolverRef::DnsServer(server) => {
+                        RuleSetDownloadResolver::DnsServer(DnsServerId::new(
+                            u32::try_from(server).map_err(|_| RunError::StartupProtocol)?,
+                        ))
+                    }
+                })
+            }
+            ferrum2_config::PreparedRuleSetDownloadMode::DeferredToDetour => {
+                RuleSetDownloadMode::DeferredToDetour
+            }
         };
         sources.push(
             RuleSetRemoteSource::new(
                 RuleSetCacheName::new(rule_set.tag()).map_err(|_| RunError::StartupProtocol)?,
                 rule_set.url(),
-                resolver,
+                mode,
                 prepared.download_detour_plan(index).cloned(),
                 rule_set.update_interval(),
             )
@@ -1188,6 +1312,38 @@ fn rule_set_sources(prepared: &PreparedClientV2) -> Result<Vec<RuleSetRemoteSour
         );
     }
     Ok(sources)
+}
+
+fn record_target_resolution_modes(prepared: &PreparedClientV2, metrics: &Metrics) {
+    for endpoint in prepared.dns_endpoints() {
+        let mode = match endpoint.mode() {
+            PreparedDnsEndpointMode::Numeric => TargetResolutionMode::Numeric,
+            PreparedDnsEndpointMode::ClientResolved {
+                resolver: ResolverRef::System,
+                ..
+            } => TargetResolutionMode::ClientResolvedSystem,
+            PreparedDnsEndpointMode::ClientResolved {
+                resolver: ResolverRef::DnsServer(_),
+                ..
+            } => TargetResolutionMode::ClientResolvedConfigured,
+            PreparedDnsEndpointMode::DeferredToDetour => TargetResolutionMode::DeferredToDetour,
+        };
+        metrics.target_resolution(TargetResolutionComponent::DnsUpstream, mode);
+    }
+    for rule_set in prepared.rule_sets() {
+        let mode = match rule_set.download_mode() {
+            ferrum2_config::PreparedRuleSetDownloadMode::ClientResolved {
+                resolver: ResolverRef::System,
+            } => TargetResolutionMode::ClientResolvedSystem,
+            ferrum2_config::PreparedRuleSetDownloadMode::ClientResolved {
+                resolver: ResolverRef::DnsServer(_),
+            } => TargetResolutionMode::ClientResolvedConfigured,
+            ferrum2_config::PreparedRuleSetDownloadMode::DeferredToDetour => {
+                TargetResolutionMode::DeferredToDetour
+            }
+        };
+        metrics.target_resolution(TargetResolutionComponent::RuleSetDownload, mode);
+    }
 }
 
 struct RuleSetBridgeTasks {
@@ -1205,25 +1361,16 @@ impl Default for RuleSetBridgeTasks {
 }
 
 impl RuleSetBridgeTasks {
-    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Result<(), ()> {
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Result<AbortHandle, ()> {
+        let mut tasks = self.tasks.lock().map_err(|_| ())?;
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(());
-        }
-        let handle = tokio::spawn(task);
-        let mut tasks = match self.tasks.lock() {
-            Ok(tasks) => tasks,
-            Err(_) => {
-                handle.abort();
-                return Err(());
-            }
-        };
-        if !self.accepting.load(Ordering::Acquire) {
-            handle.abort();
             return Err(());
         }
         tasks.retain(|task| !task.is_finished());
+        let handle = tokio::spawn(task);
+        let abort = handle.abort_handle();
         tasks.push(handle);
-        Ok(())
+        Ok(abort)
     }
 
     async fn shutdown(&self) {
@@ -1238,6 +1385,28 @@ impl RuleSetBridgeTasks {
         }
         for task in tasks {
             let _ = task.await;
+        }
+    }
+}
+
+struct AbortRuleSetBridge(Option<AbortHandle>);
+
+impl AbortRuleSetBridge {
+    fn new(handle: AbortHandle) -> Self {
+        Self(Some(handle))
+    }
+
+    fn into_handle(mut self) -> AbortHandle {
+        self.0
+            .take()
+            .expect("rule-set bridge guard always contains its handle")
+    }
+}
+
+impl Drop for AbortRuleSetBridge {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
         }
     }
 }
@@ -1257,36 +1426,83 @@ struct ClientRuleSetDialer {
     bridges: Arc<RuleSetBridgeTasks>,
 }
 
+struct RuleSetBridgeIo {
+    inner: DuplexStream,
+    bridge: AbortHandle,
+}
+
+impl AsyncRead for RuleSetBridgeIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for RuleSetBridgeIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl Drop for RuleSetBridgeIo {
+    fn drop(&mut self) {
+        self.bridge.abort();
+    }
+}
+
 impl RuleSetDialer for ClientRuleSetDialer {
-    type Io = DuplexStream;
+    type Io = RuleSetBridgeIo;
 
     fn connect(
         &self,
-        candidates: &[SocketAddr],
+        targets: &RuleSetDialTargets,
         detour: Option<&EgressPlanSnapshot>,
         deadline: Instant,
     ) -> impl Future<Output = Result<Self::Io, RuleSetDownloadError>> + Send {
-        let candidates = candidates.to_vec();
+        let targets = match targets {
+            RuleSetDialTargets::Resolved(candidates) => candidates
+                .iter()
+                .filter_map(|candidate| TargetAddr::ip(*candidate).ok())
+                .collect::<Vec<_>>(),
+            RuleSetDialTargets::Domain(target) => vec![target.clone()],
+        };
         let detour = detour.cloned();
         let engine = Arc::clone(&self.engine);
         let bridges = Arc::clone(&self.bridges);
         async move {
-            for candidate in candidates {
+            for target in targets {
                 if Instant::now() >= deadline {
                     return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout));
                 }
-                let target = TargetAddr::ip(candidate)
-                    .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect))?;
-                let remaining = deadline.saturating_duration_since(Instant::now());
                 let (client, mut bridge) = tokio::io::duplex(8 * 1024);
                 let (ready, opened) = tokio::sync::oneshot::channel();
                 let attempt_engine = Arc::clone(&engine);
                 let attempt_detour = detour.clone();
-                bridges
+                let abort = bridges
                     .spawn(async move {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            let _ = ready.send(Err(()));
+                            return;
+                        }
                         let flow = attempt_engine
                             .open_tcp(
-                                ClientRequestOrigin::Dns,
+                                ClientRequestOrigin::RuleSet,
                                 attempt_detour,
                                 &target,
                                 Some(remaining),
@@ -1302,11 +1518,21 @@ impl RuleSetDialer for ClientRuleSetDialer {
                             return;
                         }
                         let mut flow = TokioFramed::new(flow);
-                        let _ = tokio::io::copy_bidirectional(&mut bridge, &mut flow).await;
+                        let _ = tokio::time::timeout_at(
+                            deadline,
+                            tokio::io::copy_bidirectional(&mut bridge, &mut flow),
+                        )
+                        .await;
                     })
                     .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect))?;
+                let abort = AbortRuleSetBridge::new(abort);
                 match tokio::time::timeout_at(deadline, opened).await {
-                    Ok(Ok(Ok(()))) => return Ok(client),
+                    Ok(Ok(Ok(()))) => {
+                        return Ok(RuleSetBridgeIo {
+                            inner: client,
+                            bridge: abort.into_handle(),
+                        });
+                    }
                     Ok(Ok(Err(())) | Err(_)) => {}
                     Err(_) => {
                         return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout));
@@ -1417,7 +1643,7 @@ pub(super) async fn materialize_prepared(
     })
 }
 
-const fn classify_config_materialization_error(error: ferrum2_config::ConfigError) -> RunError {
+fn classify_config_materialization_error(error: ferrum2_config::ConfigError) -> RunError {
     match error.kind() {
         ferrum2_config::ConfigErrorKind::RuleCompile => RunError::RuleCompile,
         ferrum2_config::ConfigErrorKind::RuleAllocation => RunError::RuleAllocation,
@@ -1530,8 +1756,8 @@ mod tests {
     use ferrum2_dns::{DnsPolicyQuery, DnsPolicyStep};
     use ferrum2_rule::{Network, RouteMetadata, RouteProgramAction};
     use ferrum2_runtime::{
-        RuleSetDownloadFuture, RuleSetDownloadRequest, RuleSetDownloadResolver,
-        RuleSetDownloadResponse,
+        RuleSetDownloadFuture, RuleSetDownloadMode, RuleSetDownloadRequest,
+        RuleSetDownloadResolver, RuleSetDownloadResponse,
     };
     use hickory_proto::op::{Message, MessageType, OpCode};
     use hickory_proto::rr::rdata::A;
@@ -1550,7 +1776,7 @@ mod tests {
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct SeenDownload {
-        resolver: RuleSetDownloadResolver,
+        mode: RuleSetDownloadMode,
         detour: Option<Vec<usize>>,
     }
 
@@ -1610,7 +1836,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(SeenDownload {
-                    resolver: request.resolver(),
+                    mode: request.mode(),
                     detour: request.detour().map(|plan| plan.hops().to_vec()),
                 });
             let fail = self.fail;
@@ -1863,10 +2089,20 @@ final = "resolved"
             .dns
             .as_ref()
             .expect("materialized DNS");
-        assert_eq!(dns.servers[0].address, bootstrap_address);
         assert_eq!(
-            dns.servers[1].address,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), resolved_upstream.port())
+            dns.servers[0].target.as_socket_addr(),
+            Some(bootstrap_address)
+        );
+        assert_eq!(
+            dns.servers[1].target.canonical_domain().unwrap().as_str(),
+            "upstream.test"
+        );
+        assert_eq!(
+            dns.servers[1].resolved_targets.as_ref(),
+            &[SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                resolved_upstream.port()
+            )]
         );
         assert_eq!(
             *observed
@@ -2399,7 +2635,7 @@ max_redirects = 0
         assert_eq!(
             downloader.seen(),
             [SeenDownload {
-                resolver: RuleSetDownloadResolver::System,
+                mode: RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
                 detour: Some(vec![0]),
             }]
         );
@@ -2425,11 +2661,11 @@ max_redirects = 0
             downloader.seen(),
             [
                 SeenDownload {
-                    resolver: RuleSetDownloadResolver::System,
+                    mode: RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
                     detour: Some(vec![0]),
                 },
                 SeenDownload {
-                    resolver: RuleSetDownloadResolver::System,
+                    mode: RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
                     detour: Some(vec![1]),
                 },
             ]
@@ -2567,12 +2803,9 @@ max_redirects = 0
             .await
             .expect("one strict four-RuleSet snapshot");
         assert_eq!(downloader.seen().len(), 4);
-        assert!(
-            downloader
-                .seen()
-                .iter()
-                .all(|request| request.resolver == RuleSetDownloadResolver::System)
-        );
+        assert!(downloader.seen().iter().all(|request| {
+            request.mode == RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System)
+        }));
         let registry = materialized
             .config()
             .route_program
@@ -2834,7 +3067,7 @@ max_redirects = 0
         let bridges = RuleSetBridgeTasks::default();
         let running = Arc::new(AtomicBool::new(false));
         let task_running = Arc::clone(&running);
-        bridges
+        let _abort = bridges
             .spawn(async move {
                 task_running.store(true, Ordering::Release);
                 let _guard = RunningGuard(Arc::clone(&task_running));
@@ -2855,5 +3088,79 @@ max_redirects = 0
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_ruleset_attempt_aborts_its_bridge_immediately() {
+        struct RunningGuard(Arc<AtomicBool>);
+
+        impl Drop for RunningGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        let bridges = RuleSetBridgeTasks::default();
+        let running = Arc::new(AtomicBool::new(false));
+        let task_running = Arc::clone(&running);
+        let abort = bridges
+            .spawn(async move {
+                task_running.store(true, Ordering::Release);
+                let _guard = RunningGuard(Arc::clone(&task_running));
+                std::future::pending::<()>().await;
+            })
+            .expect("attempt bridge accepted");
+        while !running.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        drop(AbortRuleSetBridge::new(abort));
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while running.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled attempt bridge stopped");
+        bridges.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_open_ruleset_stream_aborts_its_bridge_immediately() {
+        struct RunningGuard(Arc<AtomicBool>);
+
+        impl Drop for RunningGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        let bridges = RuleSetBridgeTasks::default();
+        let running = Arc::new(AtomicBool::new(false));
+        let task_running = Arc::clone(&running);
+        let abort = bridges
+            .spawn(async move {
+                task_running.store(true, Ordering::Release);
+                let _guard = RunningGuard(Arc::clone(&task_running));
+                std::future::pending::<()>().await;
+            })
+            .expect("open bridge accepted");
+        while !running.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        let (inner, _peer) = tokio::io::duplex(64);
+        drop(RuleSetBridgeIo {
+            inner,
+            bridge: abort,
+        });
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while running.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped open stream stopped its bridge");
+        bridges.shutdown().await;
     }
 }

@@ -155,7 +155,18 @@ fn write_direct_client_config(
     name: &str,
     listen: SocketAddrV4,
     dns: Option<(SocketAddrV4, SocketAddrV4)>,
+    configured_direct_resolver: bool,
 ) -> PathBuf {
+    assert!(
+        !configured_direct_resolver || dns.is_some(),
+        "configured Direct resolver requires a DNS server"
+    );
+    let direct_resolver = if configured_direct_resolver {
+        "domain_resolver = \"application-upstream\"\n\
+         domain_strategy = \"ipv4_only\"\n"
+    } else {
+        ""
+    };
     let dns = dns.map_or_else(String::new, |(dns_listen, upstream)| {
         format!(
             "[dns]\n\
@@ -185,6 +196,7 @@ fn write_direct_client_config(
          [[outbounds]]\n\
          tag = \"direct\"\n\
          type = \"direct\"\n\
+         {direct_resolver}\
          {dns}\
          [udp]\n\
          enabled = true\n\
@@ -412,6 +424,7 @@ fn v2_client_direct_application_resolution_obeys_configured_and_system_modes() {
         "configured-success",
         client_address,
         Some((dns_listen, dns_address)),
+        true,
     );
     let spawn_guard = hold_process_spawns_at_or_below(0);
     let mut client = ChildGuard::spawn_while_holding("ferrum2-client", &config, &spawn_guard);
@@ -459,8 +472,9 @@ fn v2_client_direct_application_resolution_obeys_configured_and_system_modes() {
     drop(UdpSocket::bind(target_address).expect("configured target UDP exact rebind"));
     drop(UdpSocket::bind(dns_address).expect("configured upstream exact rebind"));
 
-    // NODATA from a configured resolver is terminal. `localhost` would be
-    // resolvable by the OS, so any implicit fallback would reach these sentinels.
+    // NODATA from a configured resolver is terminal. A reserved `.test` name
+    // forces an upstream query instead of Hickory's local `localhost` answer.
+    let failed_name = "client-resolver-nodata.test";
     let (failed_tcp_target, failed_udp_target, failed_target_address) = paired_loopback_target();
     failed_tcp_target
         .set_nonblocking(true)
@@ -483,6 +497,7 @@ fn v2_client_direct_application_resolution_obeys_configured_and_system_modes() {
         "configured-nodata",
         failed_client_address,
         Some((failed_dns_listen, failed_dns_address)),
+        true,
     );
     let spawn_guard = hold_process_spawns_at_or_below(0);
     let mut failed_client =
@@ -492,7 +507,7 @@ fn v2_client_direct_application_resolution_obeys_configured_and_system_modes() {
     drop(spawn_guard);
     assert_tcp_domain_failure(
         failed_client_address,
-        "localhost",
+        failed_name,
         failed_target_address.port(),
     );
     failed_dns.wait_for_query(RecordType::A);
@@ -505,7 +520,7 @@ fn v2_client_direct_application_resolution_obeys_configured_and_system_modes() {
     );
     let (failed_control, failed_application, failed_relay) = udp_associate(failed_client_address);
     let failed_request = socks_udp_datagram(
-        "localhost",
+        failed_name,
         failed_target_address.port(),
         b"must-not-arrive",
     );
@@ -545,19 +560,105 @@ fn v2_client_direct_application_resolution_obeys_configured_and_system_modes() {
         failed_client_address,
         Some(failed_dns_listen),
         failed_relay,
-        &["localhost", "application-upstream", "must-not-arrive"],
+        &[failed_name, "application-upstream", "must-not-arrive"],
     );
     drop(bind_loopback_listener(failed_target_address).expect("failed target TCP exact rebind"));
     drop(UdpSocket::bind(failed_target_address).expect("failed target UDP exact rebind"));
     drop(UdpSocket::bind(failed_dns_address).expect("failed upstream exact rebind"));
 
-    // With no `[dns]`, application resolution explicitly uses the OS resolver.
+    // A Direct without an explicit resolver uses the OS even when `[dns]`
+    // exists. The configured DNS server is a sentinel and must receive no
+    // application lookup for either TCP or UDP.
+    let (system_with_dns_tcp_target, system_with_dns_udp_target, system_with_dns_target_address) =
+        paired_loopback_target();
+    let system_with_dns_tcp_echo =
+        start_tcp_echo(system_with_dns_tcp_target, system_with_dns_target_address);
+    let system_with_dns_udp_echo =
+        start_udp_echo(system_with_dns_udp_target, system_with_dns_target_address);
+    let system_with_dns_spy = start_dns_script(vec![DnsStep {
+        record_type: RecordType::A,
+        reply: DnsReply::NoData,
+    }]);
+    let system_with_dns_spy_address = system_with_dns_spy.address();
+    let system_with_dns_client_address = unused_loopback();
+    let system_with_dns_listen = unused_tcp_udp_loopback();
+    let system_with_dns_config = write_direct_client_config(
+        directory.path(),
+        "system-mode-with-dns",
+        system_with_dns_client_address,
+        Some((system_with_dns_listen, system_with_dns_spy_address)),
+        false,
+    );
+    let spawn_guard = hold_process_spawns_at_or_below(0);
+    let mut system_with_dns_client =
+        ChildGuard::spawn_while_holding("ferrum2-client", &system_with_dns_config, &spawn_guard);
+    wait_for_bound(&mut system_with_dns_client, system_with_dns_client_address);
+    wait_for_tcp_udp_bound(&mut system_with_dns_client, system_with_dns_listen);
+    drop(spawn_guard);
+    let system_with_dns_tcp_payload = b"system-with-dns-tcp";
+    tcp_domain_round_trip(
+        system_with_dns_client_address,
+        "localhost",
+        system_with_dns_target_address.port(),
+        system_with_dns_tcp_payload,
+    );
+    let (system_with_dns_control, system_with_dns_application, system_with_dns_relay) =
+        udp_associate(system_with_dns_client_address);
+    let system_with_dns_udp_payload = b"system-with-dns-udp";
+    udp_domain_round_trip(
+        &system_with_dns_application,
+        system_with_dns_relay,
+        "localhost",
+        system_with_dns_target_address,
+        system_with_dns_udp_payload,
+    );
+    assert_eq!(
+        system_with_dns_tcp_echo.join(),
+        system_with_dns_tcp_payload,
+        "system-with-DNS TCP target"
+    );
+    assert_eq!(
+        system_with_dns_udp_echo.join(),
+        system_with_dns_udp_payload,
+        "system-with-DNS UDP target"
+    );
+    drop((system_with_dns_control, system_with_dns_application));
+    assert!(
+        system_with_dns_spy.join().is_empty(),
+        "unconfigured Direct entered dns.route instead of the OS resolver"
+    );
+    stop_client_and_rebind(
+        system_with_dns_client,
+        system_with_dns_client_address,
+        Some(system_with_dns_listen),
+        system_with_dns_relay,
+        &["localhost", "application-upstream", "system-with-dns"],
+    );
+    drop(
+        bind_loopback_listener(system_with_dns_target_address)
+            .expect("system-with-DNS target TCP exact rebind"),
+    );
+    drop(
+        UdpSocket::bind(system_with_dns_target_address)
+            .expect("system-with-DNS target UDP exact rebind"),
+    );
+    drop(
+        UdpSocket::bind(system_with_dns_spy_address)
+            .expect("unused configured DNS upstream exact rebind"),
+    );
+
+    // With no `[dns]`, application resolution also explicitly uses the OS resolver.
     let (system_tcp_target, system_udp_target, system_target_address) = paired_loopback_target();
     let system_tcp_echo = start_tcp_echo(system_tcp_target, system_target_address);
     let system_udp_echo = start_udp_echo(system_udp_target, system_target_address);
     let system_client_address = unused_loopback();
-    let system_config =
-        write_direct_client_config(directory.path(), "system-mode", system_client_address, None);
+    let system_config = write_direct_client_config(
+        directory.path(),
+        "system-mode",
+        system_client_address,
+        None,
+        false,
+    );
     let spawn_guard = hold_process_spawns_at_or_below(0);
     let mut system_client =
         ChildGuard::spawn_while_holding("ferrum2-client", &system_config, &spawn_guard);

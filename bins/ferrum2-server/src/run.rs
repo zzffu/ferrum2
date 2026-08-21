@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, OnceLock};
 
 use ferrum2_config::{DnsConfig, PreparedServerV2, ValidatedServerConfig};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
@@ -24,7 +24,7 @@ mod tcp;
 mod tokio_io;
 mod udp;
 
-use dns::ServerDnsRoot;
+use dns::{ServerDnsDependentRoot, ServerDnsDrain, ServerDnsRoot};
 use observation::{ServerMetricsRoot, log_level};
 use tcp::{ServerContext, ServerRouting, ServerTcpListeners, ServerTcpRoot};
 use tokio_io::{bind_listener, shutdown_signal};
@@ -310,6 +310,7 @@ where
             (None, None, None) => None,
             _ => return Err(RunError::StartupProtocol),
         };
+        let dns_drain = dns.as_ref().map(|_| ServerDnsDrain::new());
         let replay = Arc::new(
             TcpReplayStore::new(config.replay.capacity).map_err(|_| RunError::StartupProtocol)?,
         );
@@ -339,6 +340,19 @@ where
         let _ = routing
             .route_scratch()
             .map_err(run_error_for_rule_compile)?;
+        let tagged_dns = Arc::new(OnceLock::new());
+        let direct_resolvers: Arc<[dns_egress::ServerDnsResolver]> = config
+            .outbounds
+            .iter()
+            .map(|outbound| {
+                dns_egress::ServerDnsResolver::for_direct_observed(
+                    outbound.domain_resolver,
+                    Arc::clone(&tagged_dns),
+                    Arc::clone(&metrics),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into();
         let mut roots = Vec::with_capacity(
             config.inbounds.len() * usize::from(config.udp.enabled)
                 + 1
@@ -346,7 +360,7 @@ where
                 + usize::from(config.metrics.is_some())
                 + usize::from(materialization_root.is_some()),
         );
-        let dns = match dns {
+        let _dns = match dns {
             Some((servers, route, policy, timeout, max_inflight, runtime)) => {
                 let state = if materialized {
                     dns_egress::ServerDnsState::try_new_with_cache(
@@ -363,18 +377,33 @@ where
                 let state = Arc::new(state);
                 let root_state = Arc::clone(&state);
                 let outbound_count = routing.outbound_count;
+                let root_direct_resolvers = Arc::clone(&direct_resolvers);
+                let root_tagged_dns = Arc::clone(&tagged_dns);
+                let root_dns_drain = dns_drain
+                    .as_ref()
+                    .cloned()
+                    .ok_or(RunError::StartupProtocol)?;
                 roots.push(ProcessRoot::new(move || async move {
-                    let egress = Arc::new(dns_egress::ServerDnsEgress::new(outbound_count));
+                    let egress = Arc::new(
+                        dns_egress::ServerDnsEgress::new(outbound_count).with_outbound_resolvers(
+                            root_direct_resolvers.iter().cloned().collect(),
+                        ),
+                    );
                     let (resolver, mut owner) =
                         TaggedResolver::new(servers, timeout, max_inflight, egress)
                             .map_err(|_| RunError::StartupProtocol)?;
                     owner.ready().await.map_err(|_| RunError::StartupProtocol)?;
+                    let resolver = Arc::new(resolver);
+                    root_tagged_dns
+                        .set(Arc::downgrade(&resolver))
+                        .map_err(|_| RunError::StartupProtocol)?;
                     root_state
-                        .install(Arc::new(resolver))
+                        .install(resolver)
                         .map_err(|_| RunError::StartupProtocol)?;
                     Ok(ServerDnsRoot {
                         state: root_state,
                         owner,
+                        drain: root_dns_drain,
                     })
                 }));
                 Some(state)
@@ -382,10 +411,6 @@ where
             None if materialized_cache.is_none() => None,
             None => return Err(RunError::StartupProtocol),
         };
-        let application_dns = dns_egress::ServerDnsResolver::new_observed(
-            dns.as_ref().map(Arc::clone),
-            Arc::clone(&metrics),
-        );
         let mut tcp_listens = Vec::with_capacity(config.inbounds.len());
         let mut tcp_contexts = Vec::with_capacity(config.inbounds.len());
         for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
@@ -399,13 +424,14 @@ where
                 random: SystemRandom,
                 replay: Arc::clone(&replay),
                 runtime: config.runtime,
-                dns: application_dns.for_inbound(inbound_id),
+                direct_resolvers: Arc::clone(&direct_resolvers),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             });
             tcp_contexts.push(context);
         }
         let tcp_registry = registry.clone();
+        let tcp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
         roots.push(ProcessRoot::new(move || async move {
             let mut listeners = Vec::with_capacity(tcp_listens.len());
             for listen in tcp_listens {
@@ -421,10 +447,13 @@ where
                 tcp_registry,
             )
             .map_err(|_| RunError::StartupProtocol)?;
-            Ok(ServerTcpRoot {
-                supervisor: Some(supervisor),
-                contexts: Arc::new(tcp_contexts),
-            })
+            Ok(ServerDnsDependentRoot::new(
+                ServerTcpRoot {
+                    supervisor: Some(supervisor),
+                    contexts: Arc::new(tcp_contexts),
+                },
+                tcp_dns_lease,
+            ))
         }));
         if let Some(protocol) = udp_protocol {
             let limits = udp_runtime_limits(&udp_config).ok_or(RunError::StartupProtocol)?;
@@ -440,13 +469,14 @@ where
                 mappings,
                 admission,
                 connect_timeout,
-                dns: application_dns.clone(),
+                direct_resolvers: Arc::clone(&direct_resolvers),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             };
             for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
                 let listen = inbound.listen;
                 let shared = shared.clone();
+                let udp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
                 roots.push(ProcessRoot::new(move || async move {
                     let listener = Arc::new(
                         UdpSocket::bind(SocketAddr::V4(listen))
@@ -454,6 +484,7 @@ where
                             .map_err(|_| RunError::StartupBind)?,
                     );
                     prepare_udp_server(inbound_id, listener, shared)
+                        .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
                 }));
             }
         }

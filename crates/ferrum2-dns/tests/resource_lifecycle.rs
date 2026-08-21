@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
 use ferrum2_dns::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
@@ -91,7 +92,7 @@ impl Drop for CancelProbe {
 impl DnsEgress for GatedEgress {
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
@@ -101,7 +102,7 @@ impl DnsEgress for GatedEgress {
 
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
@@ -144,7 +145,7 @@ impl ScriptedDetour {
 impl DnsEgress for ScriptedDetour {
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
@@ -152,6 +153,9 @@ impl DnsEgress for ScriptedDetour {
         let Some(plan) = plan else {
             return SystemDnsEgress.connect_tcp(target, None, timeout, tasks);
         };
+        let target = target
+            .as_socket_addr()
+            .expect("scripted detour fixture target is numeric");
         self.plan_debug
             .lock()
             .expect("plan debug lock")
@@ -191,13 +195,16 @@ impl DnsEgress for ScriptedDetour {
 
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
         let Some(plan) = plan else {
             return SystemDnsEgress.bind_udp(target, None, tasks);
         };
+        let target = target
+            .as_socket_addr()
+            .expect("scripted detour fixture target is numeric");
         self.plan_debug
             .lock()
             .expect("plan debug lock")
@@ -218,8 +225,8 @@ impl DnsEgress for ScriptedDetour {
                 std::future::pending().await
             });
             let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-            let (outgoing, mut outbound) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1);
-            let (inbound, incoming) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1);
+            let (outgoing, mut outbound) = mpsc::channel::<Vec<u8>>(1);
+            let (inbound, incoming) = mpsc::channel::<Vec<u8>>(1);
             let outbound_queue = tasks.own(DnsEgressResourceKind::Queue);
             let inbound_queue = tasks.own(DnsEgressResourceKind::Queue);
             let buffer = tasks.own(DnsEgressResourceKind::Buffer);
@@ -227,18 +234,17 @@ impl DnsEgress for ScriptedDetour {
                 let (_outbound_queue, _inbound_queue, _buffer) =
                     (outbound_queue, inbound_queue, buffer);
                 let mut receive = [0_u8; 4_096];
-                while let Some((packet, destination)) = outbound.recv().await {
-                    if socket.send_to(&packet, destination).await.is_err() {
+                while let Some(packet) = outbound.recv().await {
+                    if socket.send_to(&packet, target).await.is_err() {
                         break;
                     }
                     let Ok((length, source)) = socket.recv_from(&mut receive).await else {
                         break;
                     };
-                    if inbound
-                        .send((receive[..length].to_vec(), source))
-                        .await
-                        .is_err()
-                    {
+                    if source != target {
+                        continue;
+                    }
+                    if inbound.send(receive[..length].to_vec()).await.is_err() {
                         break;
                     }
                 }
@@ -252,21 +258,21 @@ impl DnsEgress for ScriptedDetour {
 }
 
 struct ScriptedDatagram {
-    outgoing: mpsc::Sender<(Vec<u8>, SocketAddr)>,
-    incoming: Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>,
+    outgoing: mpsc::Sender<Vec<u8>>,
+    incoming: Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
 impl DnsDatagramIo for ScriptedDatagram {
-    fn poll_recv_from(
+    fn poll_recv(
         &self,
         context: &mut Context<'_>,
         buffer: &mut [u8],
-    ) -> Poll<std::io::Result<(usize, SocketAddr)>> {
+    ) -> Poll<std::io::Result<usize>> {
         let mut incoming = self.incoming.lock().expect("scripted UDP receive lock");
         match incoming.poll_recv(context) {
-            Poll::Ready(Some((packet, source))) if packet.len() <= buffer.len() => {
+            Poll::Ready(Some(packet)) if packet.len() <= buffer.len() => {
                 buffer[..packet.len()].copy_from_slice(&packet);
-                Poll::Ready(Ok((packet.len(), source)))
+                Poll::Ready(Ok(packet.len()))
             }
             Poll::Ready(Some(_)) => {
                 Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::InvalidData)))
@@ -278,13 +284,8 @@ impl DnsDatagramIo for ScriptedDatagram {
         }
     }
 
-    fn poll_send_to(
-        &self,
-        _context: &mut Context<'_>,
-        buffer: &[u8],
-        target: SocketAddr,
-    ) -> Poll<std::io::Result<usize>> {
-        match self.outgoing.try_send((buffer.to_vec(), target)) {
+    fn poll_send(&self, _context: &mut Context<'_>, buffer: &[u8]) -> Poll<std::io::Result<usize>> {
+        match self.outgoing.try_send(buffer.to_vec()) {
             Ok(()) => Poll::Ready(Ok(buffer.len())),
             Err(mpsc::error::TrySendError::Full(_)) => Poll::Pending,
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -391,7 +392,8 @@ impl ControlledUdp {
 fn direct_udp(address: SocketAddr) -> DnsUpstreamSpec {
     DnsUpstreamSpec {
         transport: DnsUpstreamTransport::Udp,
-        address,
+        target: TargetAddr::ip(address).expect("non-zero fixture target"),
+        resolved_targets: Box::new([]),
         detour: None,
     }
 }
@@ -399,7 +401,8 @@ fn direct_udp(address: SocketAddr) -> DnsUpstreamSpec {
 fn direct_tcp(address: SocketAddr) -> DnsUpstreamSpec {
     DnsUpstreamSpec {
         transport: DnsUpstreamTransport::Tcp,
-        address,
+        target: TargetAddr::ip(address).expect("non-zero fixture target"),
+        resolved_targets: Box::new([]),
         detour: None,
     }
 }
@@ -411,7 +414,8 @@ fn detoured_tcp(address: SocketAddr) -> DnsUpstreamSpec {
 fn detoured_server(address: SocketAddr, transport: DnsUpstreamTransport) -> DnsUpstreamSpec {
     DnsUpstreamSpec {
         transport,
-        address,
+        target: TargetAddr::ip(address).expect("non-zero fixture target"),
+        resolved_targets: Box::new([]),
         detour: Some(EgressPlanHandle::direct(0)),
     }
 }

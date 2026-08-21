@@ -407,19 +407,24 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     wait_for_tcp_udp_bound(&mut server, server_address);
     let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
     wait_for_listener(&mut client, client_address);
-    let (control, application, relay) = udp_associate(client_address);
+    let (selected_control, selected_application, selected_relay) = udp_associate(client_address);
 
     dns_udp_round_trip(
-        &application,
-        relay,
+        &selected_application,
+        selected_relay,
         selected_name,
         selected_address,
         b"selected",
     );
+    drop((selected_application, selected_control));
+    let (control, application, relay) = udp_associate(client_address);
     dns_udp_round_trip(&application, relay, final_name, final_address, b"final");
     let failed = {
         let mut request = vec![0, 0, 0];
-        request.extend_from_slice(&domain_target("localhost", failed_address.port()));
+        request.extend_from_slice(&domain_target(
+            "failure-sentinel.test",
+            failed_address.port(),
+        ));
         request.extend_from_slice(b"must-not-arrive");
         request
     };
@@ -437,7 +442,7 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
         .expect("no-fallback target timeout");
     for (socket, message) in [
         (&application, "configured DNS failure emitted a response"),
-        (&failed_target, "configured DNS failure reached localhost"),
+        (&failed_target, "configured DNS failure reached the target"),
     ] {
         assert!(
             matches!(
@@ -474,7 +479,7 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
             "final",
             "dns-direct",
             "app-direct",
-            "localhost",
+            "failure-sentinel.test",
             "must-not-arrive",
         ]);
     }
@@ -482,6 +487,7 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     drop(bind_loopback_listener(client_address).expect("client exact rebind"));
     drop(bind_loopback_listener(server_address).expect("server TCP exact rebind"));
     drop(UdpSocket::bind(server_address).expect("server UDP exact rebind"));
+    drop(UdpSocket::bind(selected_relay).expect("selected client relay exact rebind"));
     drop(UdpSocket::bind(relay).expect("client relay exact rebind"));
     drop(UdpSocket::bind(dns_addresses[0]).expect("selected DNS exact rebind"));
     drop(UdpSocket::bind(dns_addresses[1]).expect("final DNS exact rebind"));

@@ -141,6 +141,10 @@ impl DependencyCycle {
     pub(crate) fn path(&self) -> &[DependencyNode] {
         &self.path
     }
+
+    pub(crate) fn into_path(self) -> Vec<DependencyNode> {
+        self.path
+    }
 }
 
 impl fmt::Display for DependencyCycle {
@@ -173,6 +177,7 @@ pub(crate) enum DependencyGraphError {
 }
 
 impl DependencyGraphError {
+    #[cfg(test)]
     pub(crate) fn cycle(&self) -> Option<&DependencyCycle> {
         match self {
             Self::Cycle(cycle) => Some(cycle),

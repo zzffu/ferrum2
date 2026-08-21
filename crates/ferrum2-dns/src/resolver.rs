@@ -2,6 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{EgressPlanHandle, EgressPlanSnapshot};
 use hickory_proto::op::{DnsRequest, DnsRequestOptions, Message};
 use hickory_proto::rr::{Name, RecordType};
@@ -15,7 +16,7 @@ use hickory_resolver::{ConnectionProvider, PoolContext, Resolver, TlsConfig};
 use tokio::time::Instant;
 
 use crate::error::DnsError;
-use crate::runtime_provider::FerrumRuntimeProvider;
+use crate::runtime_provider::{FerrumRuntimeProvider, hickory_placeholder};
 
 /// Closed transport values for one validated DNS upstream.
 #[derive(Clone, Eq, PartialEq)]
@@ -36,23 +37,44 @@ pub enum DnsUpstreamTransport {
 /// Validated runtime values for one DNS upstream.
 pub struct DnsUpstreamSpec {
     pub transport: DnsUpstreamTransport,
-    pub address: SocketAddr,
+    /// Logical target retained for deferred-domain routing and endpoint identity.
+    pub target: TargetAddr,
+    /// Ordered client-resolved sockets. Empty means `target` is dialed directly.
+    pub resolved_targets: Box<[SocketAddr]>,
     pub detour: Option<EgressPlanHandle>,
 }
 
 pub(crate) struct SelectedServer {
     spec: DnsUpstreamSpec,
+    targets: Box<[TargetAddr]>,
     #[cfg(test)]
     tls: Option<rustls::ClientConfig>,
 }
 
 impl SelectedServer {
-    pub(crate) fn from_spec(spec: DnsUpstreamSpec) -> Self {
-        Self {
+    pub(crate) fn from_spec(spec: DnsUpstreamSpec) -> Result<Self, DnsError> {
+        if spec.resolved_targets.len() > crate::MAX_APPLICATION_RESOLVED_CANDIDATES {
+            return Err(DnsError::InvalidServer);
+        }
+        let targets = if spec.resolved_targets.is_empty() {
+            vec![spec.target.clone()].into_boxed_slice()
+        } else {
+            let expected_port = spec.target.port().get();
+            let mut targets = Vec::with_capacity(spec.resolved_targets.len());
+            for &address in &spec.resolved_targets {
+                if address.port() != expected_port {
+                    return Err(DnsError::InvalidServer);
+                }
+                targets.push(TargetAddr::ip(address).map_err(|_| DnsError::InvalidServer)?);
+            }
+            targets.into_boxed_slice()
+        };
+        Ok(Self {
             spec,
+            targets,
             #[cfg(test)]
             tls: None,
-        }
+        })
     }
 
     #[cfg(test)]
@@ -67,10 +89,84 @@ impl SelectedServer {
             .as_ref()
             .map(EgressPlanHandle::snapshot_owned)
     }
+
+    pub(crate) fn first_target_snapshot(&self) -> TargetAddr {
+        self.targets
+            .first()
+            .expect("validated DNS upstream has a target")
+            .clone()
+    }
+
+    fn target_snapshots(&self) -> Box<[TargetAddr]> {
+        self.targets.clone()
+    }
 }
 
 pub(crate) async fn lookup(
     server: &SelectedServer,
+    name: Name,
+    record_type: RecordType,
+    deadline: Instant,
+    provider: FerrumRuntimeProvider,
+) -> Result<Lookup, DnsError> {
+    let targets = server.target_snapshots();
+    let mut last_error = DnsError::Timeout;
+    for (index, target) in targets.iter().enumerate() {
+        let attempt_deadline = candidate_deadline(deadline, targets.len() - index)?;
+        let attempt_provider = provider.for_target(target.clone(), attempt_deadline);
+        match lookup_one(
+            server,
+            target,
+            name.clone(),
+            record_type,
+            attempt_deadline,
+            attempt_provider,
+        )
+        .await
+        {
+            Ok(lookup) => return Ok(lookup),
+            Err(error) if retryable_candidate_error(error) && index + 1 < targets.len() => {
+                last_error = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error)
+}
+
+pub(crate) async fn lookup_ips(
+    server: &SelectedServer,
+    name: Name,
+    deadline: Instant,
+    provider: FerrumRuntimeProvider,
+) -> Result<Vec<IpAddr>, DnsError> {
+    let targets = server.target_snapshots();
+    let mut last_error = DnsError::Timeout;
+    for (index, target) in targets.iter().enumerate() {
+        let attempt_deadline = candidate_deadline(deadline, targets.len() - index)?;
+        let attempt_provider = provider.for_target(target.clone(), attempt_deadline);
+        match lookup_ips_one(
+            server,
+            target,
+            name.clone(),
+            attempt_deadline,
+            attempt_provider,
+        )
+        .await
+        {
+            Ok(addresses) => return Ok(addresses),
+            Err(error) if retryable_candidate_error(error) && index + 1 < targets.len() => {
+                last_error = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error)
+}
+
+async fn lookup_one(
+    server: &SelectedServer,
+    target: &TargetAddr,
     name: Name,
     record_type: RecordType,
     deadline: Instant,
@@ -81,14 +177,12 @@ pub(crate) async fn lookup(
         return Err(DnsError::Timeout);
     }
 
-    let name_server = name_server_config(server)?;
-
-    let options = exact_options(remaining);
+    let name_server = name_server_config(server, target)?;
     let builder = Resolver::builder_with_config(
         ResolverConfig::from_parts(None, Vec::new(), vec![name_server]),
         provider,
     )
-    .with_options(options);
+    .with_options(exact_options(remaining));
     #[cfg(feature = "__interop-test-root")]
     let builder = builder.with_tls_config(interop_test_tls()?);
     #[cfg(test)]
@@ -97,15 +191,15 @@ pub(crate) async fn lookup(
         None => builder,
     };
     let resolver = builder.build().map_err(|_| DnsError::Protocol)?;
-
     tokio::time::timeout_at(deadline, resolver.lookup(name, record_type))
         .await
         .map_err(|_| DnsError::Timeout)?
         .map_err(map_error)
 }
 
-pub(crate) async fn lookup_ips(
+async fn lookup_ips_one(
     server: &SelectedServer,
+    target: &TargetAddr,
     name: Name,
     deadline: Instant,
     provider: FerrumRuntimeProvider,
@@ -115,7 +209,7 @@ pub(crate) async fn lookup_ips(
         return Err(DnsError::Timeout);
     }
 
-    let name_server = name_server_config(server)?;
+    let name_server = name_server_config(server, target)?;
     let builder = Resolver::builder_with_config(
         ResolverConfig::from_parts(None, Vec::new(), vec![name_server]),
         provider,
@@ -155,12 +249,43 @@ pub(crate) async fn query(
     deadline: Instant,
     provider: FerrumRuntimeProvider,
 ) -> Result<Message, DnsError> {
+    let targets = server.target_snapshots();
+    let mut last_error = DnsError::Timeout;
+    for (index, target) in targets.iter().enumerate() {
+        let attempt_deadline = candidate_deadline(deadline, targets.len() - index)?;
+        let attempt_provider = provider.for_target(target.clone(), attempt_deadline);
+        match query_one(
+            server,
+            target,
+            request.clone(),
+            attempt_deadline,
+            attempt_provider,
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(error) if retryable_candidate_error(error) && index + 1 < targets.len() => {
+                last_error = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error)
+}
+
+async fn query_one(
+    server: &SelectedServer,
+    target: &TargetAddr,
+    request: Message,
+    deadline: Instant,
+    provider: FerrumRuntimeProvider,
+) -> Result<Message, DnsError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(DnsError::Timeout);
     }
 
-    let name_server = name_server_config(server)?;
+    let name_server = name_server_config(server, target)?;
     #[cfg(not(feature = "__interop-test-root"))]
     let tls = TlsConfig::new().map_err(map_error)?;
     #[cfg(feature = "__interop-test-root")]
@@ -241,23 +366,44 @@ async fn send_query(
     .map(|response| response.into_message())
 }
 
-fn name_server_config(server: &SelectedServer) -> Result<NameServerConfig, DnsError> {
+fn name_server_config(
+    server: &SelectedServer,
+    target: &TargetAddr,
+) -> Result<NameServerConfig, DnsError> {
+    let placeholder = hickory_placeholder(target.port());
     let mut name_server = match &server.spec.transport {
-        DnsUpstreamTransport::Udp => NameServerConfig::udp_and_tcp(server.spec.address.ip()),
-        DnsUpstreamTransport::Tcp => NameServerConfig::tcp(server.spec.address.ip()),
+        DnsUpstreamTransport::Udp => NameServerConfig::udp_and_tcp(placeholder.ip()),
+        DnsUpstreamTransport::Tcp => NameServerConfig::tcp(placeholder.ip()),
         DnsUpstreamTransport::Dot { server_name } => {
-            NameServerConfig::tls(server.spec.address.ip(), Arc::from(server_name.as_ref()))
+            NameServerConfig::tls(placeholder.ip(), Arc::from(server_name.as_ref()))
         }
         DnsUpstreamTransport::Doh { server_name, path } => NameServerConfig::https(
-            server.spec.address.ip(),
+            placeholder.ip(),
             Arc::from(server_name.as_ref()),
             Some(Arc::from(path.as_ref())),
         ),
     };
     for connection in &mut name_server.connections {
-        connection.port = server.spec.address.port();
+        connection.port = placeholder.port();
     }
     Ok(name_server)
+}
+
+fn candidate_deadline(deadline: Instant, candidates_left: usize) -> Result<Instant, DnsError> {
+    let now = Instant::now();
+    let remaining = deadline.saturating_duration_since(now);
+    if remaining.is_zero() || candidates_left == 0 {
+        return Err(DnsError::Timeout);
+    }
+    let divisor = u32::try_from(candidates_left).map_err(|_| DnsError::InvalidServer)?;
+    Ok(now + remaining / divisor)
+}
+
+const fn retryable_candidate_error(error: DnsError) -> bool {
+    matches!(
+        error,
+        DnsError::Timeout | DnsError::Transport | DnsError::Protocol | DnsError::Runtime
+    )
 }
 
 fn map_error(error: NetError) -> DnsError {

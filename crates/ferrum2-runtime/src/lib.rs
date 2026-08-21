@@ -38,17 +38,17 @@ pub use relay::{
 };
 pub use ruleset::{
     BoxedRuleSetBody, LoadedRuleSet, PreparedRuleSetRefreshRoot, RuleSetBody, RuleSetCacheName,
-    RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadFuture, RuleSetDownloadRequest,
-    RuleSetDownloadResolver, RuleSetDownloadResponse, RuleSetDownloadStatus, RuleSetDownloader,
-    RuleSetLoadDisposition, RuleSetLoadError, RuleSetLoadErrorKind, RuleSetLoader,
-    RuleSetLoaderConfig, RuleSetRefreshObserver, RuleSetRefreshOutcome, RuleSetRefreshService,
-    RuleSetRemoteSource, RuleSetSnapshotMaterialization, RuleSetSnapshotParts,
-    materialize_rule_set_snapshot,
+    RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadFuture, RuleSetDownloadMode,
+    RuleSetDownloadRequest, RuleSetDownloadResolver, RuleSetDownloadResponse,
+    RuleSetDownloadStatus, RuleSetDownloader, RuleSetLoadDisposition, RuleSetLoadError,
+    RuleSetLoadErrorKind, RuleSetLoader, RuleSetLoaderConfig, RuleSetRefreshObserver,
+    RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRemoteSource,
+    RuleSetSnapshotMaterialization, RuleSetSnapshotParts, materialize_rule_set_snapshot,
 };
 pub use ruleset_https::{
-    ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, RuleSetDialer, RuleSetHostResolveObserver,
-    RuleSetHostResolveOutcome, RuleSetHostResolver, RuleSetHostResolverKind, SystemRuleSetDialer,
-    SystemRuleSetHostResolver,
+    ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, RuleSetDialTargets, RuleSetDialer,
+    RuleSetHostResolveObserver, RuleSetHostResolveOutcome, RuleSetHostResolver,
+    RuleSetHostResolverKind, SystemRuleSetDialer, SystemRuleSetHostResolver,
 };
 pub use sniff::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
 pub use supervisor::{

@@ -36,21 +36,23 @@ mod validation;
 pub use error::{ConfigError, ConfigErrorKind, ConfigField};
 pub use load::{load_client, load_server};
 pub use model::{
-    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DnsCacheConfig,
-    DnsConfig, DnsInboundConfig, DnsIngressId, DnsPolicyBlueprintBinding, DnsQueryType,
-    DnsRuntimeConfig, DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel,
-    MetricsConfig, ReplayConfig, RouteAction, RouteProtocol, RouteSniffConfig, RuntimeConfig,
-    SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig,
-    UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DirectDomainResolver,
+    DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsIngressId,
+    DnsPolicyBlueprintBinding, DnsQueryType, DnsRuntimeConfig, DnsServerConfig, DnsStrategy,
+    DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, ReplayConfig, ResolverRef,
+    RouteAction, RouteProtocol, RouteSniffConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute,
+    ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig, UdpConfig,
+    ValidatedClientConfig, ValidatedServerConfig,
 };
 pub use prepared::{
     ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,
     CompiledRuleSetResource, DialEndpoint, PreparedClientConfig, PreparedClientOutboundDescriptor,
     PreparedClientOutboundKind, PreparedClientV2, PreparedDependencyNode, PreparedDnsAction,
-    PreparedDnsRule, PreparedDnsServerDescriptor, PreparedEgressRef,
-    PreparedFixedEndpointDescriptor, PreparedFixedEndpointTarget, PreparedRouteRuleSets,
-    PreparedRuleSet, PreparedServerConfig, PreparedServerV2, ResolvedDnsEndpoint,
-    ResolvedOutboundEndpoint, ResolverRef, RuleSetLoaderConfig, ServerV2MaterializeContext,
+    PreparedDnsEndpoint, PreparedDnsEndpointMode, PreparedDnsRule, PreparedDnsServerDescriptor,
+    PreparedEgressRef, PreparedFixedEndpointDescriptor, PreparedFixedEndpointTarget,
+    PreparedRouteRuleSets, PreparedRuleSet, PreparedRuleSetDownloadMode, PreparedServerConfig,
+    PreparedServerOutboundDescriptor, PreparedServerV2, ResolvedDnsEndpoint,
+    ResolvedOutboundEndpoint, RuleSetLoaderConfig, ServerV2MaterializeContext,
     ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2,
     materialize_client_v2, materialize_server_v2, prepare_client, prepare_client_v2,
     prepare_server, prepare_server_v2,

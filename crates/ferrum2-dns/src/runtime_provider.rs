@@ -1,19 +1,32 @@
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroU16;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
 use hickory_resolver::net::runtime::iocompat::AsyncIoTokioAsStd;
 use hickory_resolver::net::runtime::{DnsUdpSocket, RuntimeProvider, Spawn, TokioTime};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
+
+const HICKORY_PLACEHOLDER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
+tokio::task_local! {
+    pub(crate) static DNS_QUERY_SCOPE: DnsQueryScope;
+}
+
+pub(crate) fn hickory_placeholder(port: NonZeroU16) -> SocketAddr {
+    SocketAddr::new(HICKORY_PLACEHOLDER_IP.into(), port.get())
+}
 
 /// Owned future returned by a DNS egress adapter.
 pub type DnsIoFuture<T> = Pin<Box<dyn Future<Output = io::Result<T>> + Send + 'static>>;
@@ -26,22 +39,13 @@ impl<T> DnsTcpIo for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin + '
 /// Boxed TCP I/O returned by [`DnsEgress`].
 pub type BoxedDnsTcpIo = Box<dyn DnsTcpIo>;
 
-/// Unconnected datagram I/O supplied to Hickory.
+/// Datagram I/O connected to the logical target selected for one DNS query.
 pub trait DnsDatagramIo: Send + Sync + Unpin + 'static {
-    /// Polls one datagram and its authenticated socket source.
-    fn poll_recv_from(
-        &self,
-        context: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<io::Result<(usize, SocketAddr)>>;
+    /// Polls one datagram received from the selected logical target.
+    fn poll_recv(&self, context: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>>;
 
-    /// Polls one complete datagram send.
-    fn poll_send_to(
-        &self,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-        target: SocketAddr,
-    ) -> Poll<io::Result<usize>>;
+    /// Polls one complete datagram send to the selected logical target.
+    fn poll_send(&self, context: &mut Context<'_>, buffer: &[u8]) -> Poll<io::Result<usize>>;
 }
 
 /// Boxed UDP I/O returned by [`DnsEgress`].
@@ -49,19 +53,19 @@ pub type BoxedDnsDatagramIo = Box<dyn DnsDatagramIo>;
 
 /// Runtime-neutral selected egress for one DNS connection or socket.
 pub trait DnsEgress: Send + Sync + 'static {
-    /// Connects to the validated numeric target through the optional concrete plan.
+    /// Connects to the validated logical target through the optional concrete plan.
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo>;
 
-    /// Binds one unconnected socket for the validated numeric target and optional plan.
+    /// Binds datagram I/O for the validated logical target and optional plan.
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo>;
@@ -74,7 +78,7 @@ pub struct SystemDnsEgress;
 impl DnsEgress for SystemDnsEgress {
     fn connect_tcp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
         _tasks: DnsTaskRegistrar,
@@ -86,6 +90,12 @@ impl DnsEgress for SystemDnsEgress {
                     "detoured DNS egress requires an adapter",
                 ));
             }
+            let target = target.as_socket_addr().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "system DNS egress requires a numeric target",
+                )
+            })?;
             let stream = tokio::time::timeout(timeout, TcpStream::connect(target))
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DNS connect timeout"))??;
@@ -96,7 +106,7 @@ impl DnsEgress for SystemDnsEgress {
 
     fn bind_udp(
         &self,
-        target: SocketAddr,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         _tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsDatagramIo> {
@@ -107,11 +117,19 @@ impl DnsEgress for SystemDnsEgress {
                     "detoured DNS egress requires an adapter",
                 ));
             }
+            let target = target.as_socket_addr().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "system DNS egress requires a numeric target",
+                )
+            })?;
             let local = match target.ip() {
                 IpAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
                 IpAddr::V6(_) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
             };
-            Ok(Box::new(SystemDnsDatagram(UdpSocket::bind(local).await?)) as BoxedDnsDatagramIo)
+            let socket = UdpSocket::bind(local).await?;
+            socket.connect(target).await?;
+            Ok(Box::new(SystemDnsDatagram(socket)) as BoxedDnsDatagramIo)
         })
     }
 }
@@ -119,23 +137,14 @@ impl DnsEgress for SystemDnsEgress {
 struct SystemDnsDatagram(UdpSocket);
 
 impl DnsDatagramIo for SystemDnsDatagram {
-    fn poll_recv_from(
-        &self,
-        context: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+    fn poll_recv(&self, context: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>> {
         let mut read = ReadBuf::new(buffer);
-        let source = ready!(self.0.poll_recv_from(context, &mut read))?;
-        Poll::Ready(Ok((read.filled().len(), source)))
+        ready!(self.0.poll_recv(context, &mut read))?;
+        Poll::Ready(Ok(read.filled().len()))
     }
 
-    fn poll_send_to(
-        &self,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-        target: SocketAddr,
-    ) -> Poll<io::Result<usize>> {
-        self.0.poll_send_to(context, buffer, target)
+    fn poll_send(&self, context: &mut Context<'_>, buffer: &[u8]) -> Poll<io::Result<usize>> {
+        self.0.poll_send(context, buffer)
     }
 }
 
@@ -149,6 +158,83 @@ pub(crate) struct RuntimeCounters {
     pub(crate) sessions: AtomicUsize,
     pub(crate) queues: AtomicUsize,
     pub(crate) buffers: AtomicUsize,
+}
+
+struct QueryAdmission {
+    permit: Option<OwnedSemaphorePermit>,
+    counters: Arc<RuntimeCounters>,
+}
+
+impl Drop for QueryAdmission {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.counters.queries.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// One aggregate admission shared by every query in a validated dependency chain.
+pub(crate) struct DnsQueryContext {
+    admission: Arc<QueryAdmission>,
+    dependency_depth: usize,
+    deadline: Instant,
+}
+
+impl DnsQueryContext {
+    pub(crate) fn root(
+        permit: OwnedSemaphorePermit,
+        counters: Arc<RuntimeCounters>,
+        deadline: Instant,
+    ) -> Self {
+        counters.queries.fetch_add(1, Ordering::AcqRel);
+        Self {
+            admission: Arc::new(QueryAdmission {
+                permit: Some(permit),
+                counters,
+            }),
+            dependency_depth: 0,
+            deadline,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> DnsQueryScope {
+        DnsQueryScope {
+            admission: Arc::downgrade(&self.admission),
+            owner: Arc::downgrade(&self.admission.counters),
+            dependency_depth: self.dependency_depth,
+            deadline: self.deadline,
+        }
+    }
+
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.deadline
+    }
+}
+
+/// Weak task-local view that propagates chain identity without extending admission.
+#[derive(Clone)]
+pub(crate) struct DnsQueryScope {
+    admission: std::sync::Weak<QueryAdmission>,
+    owner: std::sync::Weak<RuntimeCounters>,
+    dependency_depth: usize,
+    deadline: Instant,
+}
+
+impl DnsQueryScope {
+    pub(crate) fn belongs_to(&self, counters: &Arc<RuntimeCounters>) -> bool {
+        std::sync::Weak::ptr_eq(&self.owner, &Arc::downgrade(counters))
+    }
+
+    pub(crate) fn child(&self, server_count: usize) -> Option<DnsQueryContext> {
+        let dependency_depth = self.dependency_depth.checked_add(1)?;
+        if dependency_depth >= server_count {
+            return None;
+        }
+        Some(DnsQueryContext {
+            admission: self.admission.upgrade()?,
+            dependency_depth,
+            deadline: self.deadline,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -241,11 +327,16 @@ impl std::fmt::Debug for DnsResourceGuard {
 pub struct DnsTaskRegistrar {
     tasks: TaskSet,
     counters: Arc<RuntimeCounters>,
+    query_scope: DnsQueryScope,
 }
 
 impl DnsTaskRegistrar {
-    fn new(tasks: TaskSet, counters: Arc<RuntimeCounters>) -> Self {
-        Self { tasks, counters }
+    fn new(tasks: TaskSet, counters: Arc<RuntimeCounters>, query_scope: DnsQueryScope) -> Self {
+        Self {
+            tasks,
+            counters,
+            query_scope,
+        }
     }
 
     /// Spawns one bridge or session task on the exclusive DNS runtime.
@@ -258,8 +349,11 @@ impl DnsTaskRegistrar {
             DnsEgressTaskKind::Bridge => CounterKind::Bridge,
             DnsEgressTaskKind::Session => CounterKind::Session,
         };
-        self.tasks
-            .spawn_counted(Arc::clone(&self.counters), kind, future);
+        self.tasks.spawn_counted(
+            Arc::clone(&self.counters),
+            kind,
+            DNS_QUERY_SCOPE.scope(self.query_scope.clone(), future),
+        );
     }
 
     /// Registers one bounded queue or buffer until the returned guard is dropped.
@@ -280,12 +374,16 @@ impl DnsTaskRegistrar {
 pub(crate) struct TrackedHandle {
     tasks: TaskSet,
     counters: Arc<RuntimeCounters>,
+    query_scope: DnsQueryScope,
 }
 
 impl Spawn for TrackedHandle {
     fn spawn_bg(&mut self, future: impl Future<Output = ()> + Send + 'static) {
-        self.tasks
-            .spawn_counted(Arc::clone(&self.counters), CounterKind::Hickory, future);
+        self.tasks.spawn_counted(
+            Arc::clone(&self.counters),
+            CounterKind::Hickory,
+            DNS_QUERY_SCOPE.scope(self.query_scope.clone(), future),
+        );
     }
 }
 
@@ -324,47 +422,52 @@ impl Drop for CounterGuard {
     }
 }
 
-pub(crate) struct QueryGuard {
-    counters: Arc<RuntimeCounters>,
-}
-
-impl QueryGuard {
-    pub(crate) fn new(counters: Arc<RuntimeCounters>) -> Self {
-        counters.queries.fetch_add(1, Ordering::AcqRel);
-        Self { counters }
-    }
-}
-
-impl Drop for QueryGuard {
-    fn drop(&mut self) {
-        self.counters.queries.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 /// Hickory runtime provider bound to one target, deadline, and plan snapshot.
 #[derive(Clone)]
 pub(crate) struct FerrumRuntimeProvider {
     egress: Arc<dyn DnsEgress>,
+    target: TargetAddr,
+    placeholder: SocketAddr,
     plan: Option<EgressPlanSnapshot>,
     deadline: Instant,
     tasks: TaskSet,
     counters: Arc<RuntimeCounters>,
+    query_scope: DnsQueryScope,
 }
 
 impl FerrumRuntimeProvider {
     pub(crate) fn new(
         egress: Arc<dyn DnsEgress>,
+        target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         deadline: Instant,
         tasks: TaskSet,
         counters: Arc<RuntimeCounters>,
+        query_scope: DnsQueryScope,
     ) -> Self {
+        let placeholder = hickory_placeholder(target.port());
         Self {
             egress,
+            target,
+            placeholder,
             plan,
             deadline,
             tasks,
             counters,
+            query_scope,
+        }
+    }
+
+    pub(crate) fn for_target(&self, target: TargetAddr, deadline: Instant) -> Self {
+        Self {
+            placeholder: hickory_placeholder(target.port()),
+            target,
+            deadline,
+            egress: Arc::clone(&self.egress),
+            plan: self.plan.clone(),
+            tasks: self.tasks.clone(),
+            counters: Arc::clone(&self.counters),
+            query_scope: self.query_scope.clone(),
         }
     }
 }
@@ -379,22 +482,27 @@ impl RuntimeProvider for FerrumRuntimeProvider {
         TrackedHandle {
             tasks: self.tasks.clone(),
             counters: Arc::clone(&self.counters),
+            query_scope: self.query_scope.clone(),
         }
     }
 
     fn connect_tcp(
         &self,
-        server_addr: SocketAddr,
+        _server_addr: SocketAddr,
         _bind_addr: Option<SocketAddr>,
         timeout: Option<Duration>,
     ) -> DnsIoFuture<Self::Tcp> {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         let timeout = timeout.map_or(remaining, |timeout| timeout.min(remaining));
         let future = self.egress.connect_tcp(
-            server_addr,
+            self.target.clone(),
             self.plan.clone(),
             timeout,
-            DnsTaskRegistrar::new(self.tasks.clone(), Arc::clone(&self.counters)),
+            DnsTaskRegistrar::new(
+                self.tasks.clone(),
+                Arc::clone(&self.counters),
+                self.query_scope.clone(),
+            ),
         );
         let counters = Arc::clone(&self.counters);
         let deadline = self.deadline;
@@ -407,20 +515,33 @@ impl RuntimeProvider for FerrumRuntimeProvider {
         })
     }
 
-    fn bind_udp(&self, _local_addr: SocketAddr, server_addr: SocketAddr) -> DnsIoFuture<Self::Udp> {
+    fn bind_udp(
+        &self,
+        _local_addr: SocketAddr,
+        _server_addr: SocketAddr,
+    ) -> DnsIoFuture<Self::Udp> {
         let future = self.egress.bind_udp(
-            server_addr,
+            self.target.clone(),
             self.plan.clone(),
-            DnsTaskRegistrar::new(self.tasks.clone(), Arc::clone(&self.counters)),
+            DnsTaskRegistrar::new(
+                self.tasks.clone(),
+                Arc::clone(&self.counters),
+                self.query_scope.clone(),
+            ),
         );
         let counters = Arc::clone(&self.counters);
+        let placeholder = self.placeholder;
         let deadline = self.deadline;
         Box::pin(async move {
             let inner = tokio::time::timeout_at(deadline, future)
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DNS bind timeout"))??;
             counters.udp_sockets.fetch_add(1, Ordering::AcqRel);
-            Ok(CountedUdp { inner, counters })
+            Ok(CountedUdp {
+                inner,
+                counters,
+                placeholder,
+            })
         })
     }
 }
@@ -467,6 +588,7 @@ impl Drop for CountedTcp {
 pub(crate) struct CountedUdp {
     inner: BoxedDnsDatagramIo,
     counters: Arc<RuntimeCounters>,
+    placeholder: SocketAddr,
 }
 
 impl DnsUdpSocket for CountedUdp {
@@ -477,16 +599,18 @@ impl DnsUdpSocket for CountedUdp {
         context: &mut Context<'_>,
         buffer: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
-        self.inner.poll_recv_from(context, buffer)
+        self.inner
+            .poll_recv(context, buffer)
+            .map_ok(|length| (length, self.placeholder))
     }
 
     fn poll_send_to(
         &self,
         context: &mut Context<'_>,
         buffer: &[u8],
-        target: SocketAddr,
+        _target: SocketAddr,
     ) -> Poll<io::Result<usize>> {
-        self.inner.poll_send_to(context, buffer, target)
+        self.inner.poll_send(context, buffer)
     }
 }
 
@@ -540,10 +664,19 @@ mod tests {
         for _ in 0..100 {
             let tasks = TaskSet::default();
             let counters = Arc::new(RuntimeCounters::default());
-            let registrar = DnsTaskRegistrar::new(tasks.clone(), Arc::clone(&counters));
+            let admission = Arc::new(tokio::sync::Semaphore::new(1));
+            let context = DnsQueryContext::root(
+                admission.try_acquire_owned().expect("test query admission"),
+                Arc::clone(&counters),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let query_scope = context.scope();
+            let registrar =
+                DnsTaskRegistrar::new(tasks.clone(), Arc::clone(&counters), query_scope.clone());
             let mut handle = TrackedHandle {
                 tasks: tasks.clone(),
                 counters: Arc::clone(&counters),
+                query_scope,
             };
             let mut polled = Vec::new();
             for spawn in [DnsEgressTaskKind::Bridge, DnsEgressTaskKind::Session] {

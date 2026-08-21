@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use ferrum2_core::CanonicalDomain;
-use ferrum2_core::route::compile_egress_plans_with_roots;
+use ferrum2_core::route::{EgressPlanHandle, compile_egress_plans_with_roots};
 use ferrum2_core::selector::{SelectorDefinition, TaggedInbound, TaggedOutbound};
 use ferrum2_dns::DnsServerId;
 use ferrum2_rule::RuleEngineRegistry;
 use ferrum2_runtime::{
     RuleSetCacheName, RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadFuture,
-    RuleSetDownloadRequest, RuleSetDownloadResolver, RuleSetDownloadResponse, RuleSetDownloader,
-    RuleSetLoadDisposition, RuleSetLoadErrorKind, RuleSetLoader, RuleSetLoaderConfig,
-    RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRemoteSource,
+    RuleSetDownloadMode, RuleSetDownloadRequest, RuleSetDownloadResolver, RuleSetDownloadResponse,
+    RuleSetDownloader, RuleSetLoadDisposition, RuleSetLoadErrorKind, RuleSetLoader,
+    RuleSetLoaderConfig, RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRemoteSource,
     materialize_rule_set_snapshot,
 };
 use tempfile::TempDir;
@@ -26,7 +26,7 @@ const CNIP_SRS: &[u8] = include_bytes!("../../../tests/fixtures/srs/cnip.srs");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SeenRequest {
-    resolver: RuleSetDownloadResolver,
+    mode: RuleSetDownloadMode,
     conditional: bool,
     max_redirects: u8,
     detour_hops: Option<Vec<usize>>,
@@ -61,7 +61,7 @@ impl RuleSetDownloader for FakeDownloader {
     fn fetch(&self, request: RuleSetDownloadRequest) -> RuleSetDownloadFuture<'_> {
         let result = lock(&self.results).pop_front().expect("fake result");
         lock(&self.seen).push(SeenRequest {
-            resolver: request.resolver(),
+            mode: request.mode(),
             conditional: request.if_none_match().is_some() || request.if_modified_since().is_some(),
             max_redirects: request.max_redirects(),
             detour_hops: request.detour().map(|detour| detour.hops().to_vec()),
@@ -102,7 +102,9 @@ fn source() -> ferrum2_runtime::RuleSetRemoteSource {
     RuleSetRemoteSource::new(
         RuleSetCacheName::new("ai").expect("cache name"),
         "https://rules.example/ai.srs",
-        RuleSetDownloadResolver::DnsServer(DnsServerId::new(7)),
+        RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::DnsServer(DnsServerId::new(
+            7,
+        ))),
         None,
         Some(Duration::from_secs(60)),
     )
@@ -133,13 +135,17 @@ async fn first_download_is_strictly_compiled_cached_and_conditionally_reused() {
         downloader.seen(),
         vec![
             SeenRequest {
-                resolver: RuleSetDownloadResolver::DnsServer(DnsServerId::new(7)),
+                mode: RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::DnsServer(
+                    DnsServerId::new(7),
+                )),
                 conditional: false,
                 max_redirects: 4,
                 detour_hops: None,
             },
             SeenRequest {
-                resolver: RuleSetDownloadResolver::DnsServer(DnsServerId::new(7)),
+                mode: RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::DnsServer(
+                    DnsServerId::new(7),
+                )),
                 conditional: true,
                 max_redirects: 4,
                 detour_hops: None,
@@ -173,7 +179,7 @@ async fn each_download_captures_the_current_selector_detour_snapshot() {
     let source = RuleSetRemoteSource::new(
         RuleSetCacheName::new("dynamic").expect("cache name"),
         "https://rules.example/dynamic.srs",
-        RuleSetDownloadResolver::System,
+        RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
         Some(roots.remove(0)),
         None,
     )
@@ -207,7 +213,7 @@ async fn four_pinned_binary_rule_sets_load_into_one_publishable_snapshot() {
             RuleSetRemoteSource::new(
                 RuleSetCacheName::new(name).expect("cache name"),
                 &format!("https://rules.example/{name}.srs"),
-                RuleSetDownloadResolver::System,
+                RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
                 None,
                 None,
             )
@@ -508,7 +514,7 @@ fn source_and_cache_paths_reject_implicit_or_unsafe_inputs() {
             RuleSetRemoteSource::new(
                 name.clone(),
                 url,
-                RuleSetDownloadResolver::System,
+                RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
                 None,
                 None,
             )
@@ -517,6 +523,26 @@ fn source_and_cache_paths_reject_implicit_or_unsafe_inputs() {
             RuleSetLoadErrorKind::InvalidSource
         );
     }
+    assert_eq!(
+        RuleSetRemoteSource::new(
+            name.clone(),
+            "https://rules.example/a.srs",
+            RuleSetDownloadMode::DeferredToDetour,
+            None,
+            None,
+        )
+        .expect_err("deferred source without a detour")
+        .kind(),
+        RuleSetLoadErrorKind::InvalidSource
+    );
+    RuleSetRemoteSource::new(
+        name,
+        "https://rules.example/a.srs",
+        RuleSetDownloadMode::DeferredToDetour,
+        Some(EgressPlanHandle::direct(0)),
+        None,
+    )
+    .expect("deferred source with an explicit detour");
     assert_eq!(
         RuleSetLoaderConfig::new(PathBuf::new(), Duration::from_secs(1), 1)
             .expect_err("empty cache path")

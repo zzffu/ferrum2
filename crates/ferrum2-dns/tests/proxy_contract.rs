@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ferrum2_core::CanonicalDomain;
 use ferrum2_core::route::Network;
+use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
     ApplicationResolveContext, ApplicationResolveRequest, DnsError, DnsProxy, DnsProxyListeners,
     DnsStrategy, DnsUpstreamSpec, DnsUpstreamTransport, ProxyIngress, ProxyTransport,
@@ -60,7 +60,8 @@ async fn application_resolution_uses_qtype_policy_strategy_and_no_system_fallbac
     let (resolver, mut owner) = TaggedResolver::direct(
         vec![DnsUpstreamSpec {
             transport: DnsUpstreamTransport::Udp,
-            address: upstream_address,
+            target: TargetAddr::ip(upstream_address).expect("non-zero upstream target"),
+            resolved_targets: Box::new([]),
             detour: None,
         }],
         Duration::from_secs(1),
@@ -212,7 +213,8 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     });
     let server = DnsUpstreamSpec {
         transport: DnsUpstreamTransport::Udp,
-        address: upstream_address,
+        target: TargetAddr::ip(upstream_address).expect("non-zero upstream target"),
+        resolved_targets: Box::new([]),
         detour: None,
     };
     let (resolver, mut owner) = TaggedResolver::direct(
@@ -390,7 +392,9 @@ async fn udp_proxy_drops_malformed_and_rejects_shape_without_upstream_work() {
         .expect("unused upstream bind");
     let server = DnsUpstreamSpec {
         transport: DnsUpstreamTransport::Udp,
-        address: upstream.local_addr().expect("unused upstream address"),
+        target: TargetAddr::ip(upstream.local_addr().expect("unused upstream address"))
+            .expect("non-zero upstream target"),
+        resolved_targets: Box::new([]),
         detour: None,
     };
     let (resolver, mut owner) = TaggedResolver::direct(
@@ -517,7 +521,9 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
         .expect("timeout upstream");
     let server = DnsUpstreamSpec {
         transport: DnsUpstreamTransport::Udp,
-        address: upstream.local_addr().expect("timeout upstream address"),
+        target: TargetAddr::ip(upstream.local_addr().expect("timeout upstream address"))
+            .expect("non-zero upstream target"),
+        resolved_targets: Box::new([]),
         detour: None,
     };
     let (resolver, mut owner) = TaggedResolver::direct(
@@ -627,7 +633,8 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     let (resolver, mut owner) = TaggedResolver::direct(
         vec![DnsUpstreamSpec {
             transport: DnsUpstreamTransport::Tcp,
-            address,
+            target: TargetAddr::ip(address).expect("non-zero upstream target"),
+            resolved_targets: Box::new([]),
             detour: None,
         }],
         Duration::from_secs(1),
@@ -717,7 +724,8 @@ async fn udp_tc_retries_tcp_on_the_same_selected_server() {
     let (resolver, mut owner) = TaggedResolver::direct(
         vec![DnsUpstreamSpec {
             transport: DnsUpstreamTransport::Udp,
-            address,
+            target: TargetAddr::ip(address).expect("non-zero upstream target"),
+            resolved_targets: Box::new([]),
             detour: None,
         }],
         Duration::from_secs(1),
@@ -791,7 +799,8 @@ async fn tcp_listener_handles_multi_query_frames_bounds_and_clean_eof() {
     let (resolver, mut owner) = TaggedResolver::direct(
         vec![DnsUpstreamSpec {
             transport: DnsUpstreamTransport::Udp,
-            address: upstream_address,
+            target: TargetAddr::ip(upstream_address).expect("non-zero upstream target"),
+            resolved_targets: Box::new([]),
             detour: None,
         }],
         Duration::from_secs(1),

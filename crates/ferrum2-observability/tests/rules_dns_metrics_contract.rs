@@ -5,6 +5,7 @@ use std::thread;
 use ferrum2_observability::{
     CompiledMatchType, DnsQueryType, DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics,
     RuleMatchResult, RuleMatchType, RuleProgram, RuleProgramMode, RuleSetResult, RuleSource,
+    TargetResolutionComponent, TargetResolutionMode,
 };
 
 fn sample_value<'a>(output: &'a str, identity: &str) -> &'a str {
@@ -65,6 +66,10 @@ fn rules_and_dns_families_encode_closed_low_cardinality_labels() {
     metrics.dns_cache_hit(DnsQueryType::A);
     metrics.dns_cache_miss(DnsQueryType::Aaaa);
     metrics.dns_explicit_system_resolve(DnsResolvePurpose::RuleSetDownload);
+    metrics.target_resolution(
+        TargetResolutionComponent::RuleSetDownload,
+        TargetResolutionMode::DeferredToDetour,
+    );
 
     let output = metrics.encode_text().expect("encode rules and DNS metrics");
     for expected in [
@@ -84,6 +89,7 @@ fn rules_and_dns_families_encode_closed_low_cardinality_labels() {
         "ferrum2_dns_cache_miss_total{qtype=\"aaaa\"} 1",
         "ferrum2_dns_explicit_system_resolve_total{purpose=\"ruleset_download\"} 1",
         "ferrum2_dns_implicit_system_fallback_total 0",
+        "ferrum2_target_resolution_total{component=\"ruleset_download\",mode=\"deferred_to_detour\"} 1",
     ] {
         assert!(output.contains(expected), "missing `{expected}`\n{output}");
     }
@@ -140,6 +146,10 @@ fn new_family_names_and_types_are_stable_additions() {
     metrics.dns_cache_hit(DnsQueryType::A);
     metrics.dns_cache_miss(DnsQueryType::A);
     metrics.dns_explicit_system_resolve(DnsResolvePurpose::Application);
+    metrics.target_resolution(
+        TargetResolutionComponent::DnsUpstream,
+        TargetResolutionMode::ClientResolvedConfigured,
+    );
     let output = metrics.encode_text().expect("encode stable metrics");
     let types = output
         .lines()
@@ -153,6 +163,7 @@ fn new_family_names_and_types_are_stable_additions() {
         "ferrum2_dns_resolve counter",
         "ferrum2_dns_rule_query_match counter",
         "ferrum2_dns_rule_response_match counter",
+        "ferrum2_target_resolution counter",
         "ferrum2_route_match counter",
         "ferrum2_rule_program_candidate_count histogram",
         "ferrum2_rule_program_match_ns histogram",
@@ -172,6 +183,94 @@ fn new_family_names_and_types_are_stable_additions() {
     assert_eq!(
         sample_value(&output, "ferrum2_dns_implicit_system_fallback_total"),
         "0"
+    );
+}
+
+#[test]
+fn target_resolution_family_encodes_the_closed_grid_and_registers_once() {
+    let components = [
+        TargetResolutionComponent::DnsUpstream,
+        TargetResolutionComponent::RuleSetDownload,
+    ];
+    let modes = [
+        TargetResolutionMode::Numeric,
+        TargetResolutionMode::ClientResolvedSystem,
+        TargetResolutionMode::ClientResolvedConfigured,
+        TargetResolutionMode::DeferredToDetour,
+    ];
+    let metrics = Metrics::new();
+    for component in components {
+        for mode in modes {
+            metrics.target_resolution(component, mode);
+        }
+    }
+    metrics.target_resolution(
+        TargetResolutionComponent::DnsUpstream,
+        TargetResolutionMode::Numeric,
+    );
+
+    let output = metrics
+        .encode_text()
+        .expect("encode target resolution grid");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("# HELP ferrum2_target_resolution "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line == &"# TYPE ferrum2_target_resolution counter")
+            .count(),
+        1
+    );
+    let samples = output
+        .lines()
+        .filter(|line| line.starts_with("ferrum2_target_resolution_total{"))
+        .collect::<Vec<_>>();
+    assert_eq!(samples.len(), 8);
+    assert_eq!(
+        sample_value(
+            &output,
+            "ferrum2_target_resolution_total{component=\"dns_upstream\",mode=\"numeric\"}"
+        ),
+        "2"
+    );
+    for component in components {
+        for mode in modes {
+            let expected = format!(
+                "ferrum2_target_resolution_total{{component=\"{component}\",mode=\"{mode}\"}}"
+            );
+            assert!(
+                samples.iter().any(|sample| sample.starts_with(&expected)),
+                "missing `{expected}`\n{output}"
+            );
+        }
+    }
+
+    let second = Metrics::new();
+    second.target_resolution(
+        TargetResolutionComponent::RuleSetDownload,
+        TargetResolutionMode::ClientResolvedSystem,
+    );
+    let second_output = second
+        .encode_text()
+        .expect("encode second isolated target resolution registry");
+    assert_eq!(
+        second_output
+            .lines()
+            .filter(|line| line.starts_with("# HELP ferrum2_target_resolution "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_output
+            .lines()
+            .filter(|line| line.starts_with("ferrum2_target_resolution_total{"))
+            .count(),
+        1
     );
 }
 
@@ -269,6 +368,10 @@ fn identities_and_sensitive_inputs_cannot_create_metric_labels() {
     for _sentinel in SENTINELS {
         metrics.ruleset_load(RuleSetResult::Failure);
         metrics.dns_cache_miss(DnsQueryType::A);
+        metrics.target_resolution(
+            TargetResolutionComponent::RuleSetDownload,
+            TargetResolutionMode::DeferredToDetour,
+        );
         metrics.route_match(
             RuleSource::RuleSet,
             RuleMatchType::Domain,
@@ -291,6 +394,13 @@ fn identities_and_sensitive_inputs_cannot_create_metric_labels() {
         output
             .lines()
             .filter(|line| line.starts_with("ferrum2_dns_cache_miss_total{"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("ferrum2_target_resolution_total{"))
             .count(),
         1
     );

@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrum2_core::{CanonicalDomain, DomainName, TargetHostRef};
+use ferrum2_core::{CanonicalDomain, DomainName, TargetAddr, TargetHostRef};
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 use ferrum2_rule::{
     CompiledMatchSet, DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, DnsPolicyBlueprint,
@@ -21,9 +21,9 @@ use crate::dependency::{DependencyGraph, DependencyGraphError, DependencyNode, D
 use crate::error::{ConfigError, ConfigField};
 use crate::load::{parse_toml, read_bounded_utf8};
 use crate::model::{
-    ClientOutboundConfig, DnsCacheConfig, DnsQueryType, DnsRuntimeConfig, DnsStrategy,
-    DnsTransport, RuntimeConfig, SchemaVersion, UdpConfig, ValidatedClientConfig,
-    ValidatedServerConfig,
+    ClientOutboundConfig, DirectDomainResolver, DnsCacheConfig, DnsEndpointMode, DnsQueryType,
+    DnsRuntimeConfig, DnsStrategy, DnsTransport, ResolverRef, RuntimeConfig, SchemaVersion,
+    UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClientOutbound, RawClientRoot, RawDns, RawDnsRouteRule, RawRoute, RawRuleSet,
@@ -32,8 +32,8 @@ use crate::raw::{
 use crate::validation::v2::validate_version;
 use crate::validation::{
     finish_client_tun_targets, validate_client, validate_client_prepared,
-    validate_finished_client_endpoints, validate_route_target, validate_server,
-    validate_server_prepared, validate_tag,
+    validate_direct_domain_resolver, validate_finished_client_endpoints, validate_route_target,
+    validate_server, validate_server_prepared, validate_tag,
 };
 
 const DEFAULT_RULE_SET_CACHE_DIR: &str = "./rule-set-cache";
@@ -41,13 +41,7 @@ const DEFAULT_RULE_SET_DOWNLOAD_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_RULE_SET_MAX_REDIRECTS: u8 = 5;
 const PLACEHOLDER_ENDPOINT: &str = "192.0.2.254:9";
 const PLACEHOLDER_DOMAIN: &str = "prepared.invalid";
-
-/// Explicit fixed-endpoint resolver; `System` is never an implicit fallback.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResolverRef {
-    System,
-    DnsServer(usize),
-}
+const MAX_RESOLVED_DNS_CANDIDATES: usize = 16;
 
 /// Validated fixed endpoint retained without performing DNS I/O.
 #[derive(Clone, Eq, PartialEq)]
@@ -87,6 +81,67 @@ impl std::fmt::Debug for DialEndpoint {
             Self::Ip(_) => "DialEndpoint::Ip([redacted])",
             Self::Domain { .. } => "DialEndpoint::Domain([redacted])",
         })
+    }
+}
+
+/// Closed preparation mode for one DNS upstream target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedDnsEndpointMode {
+    Numeric,
+    ClientResolved {
+        resolver: ResolverRef,
+        strategy: DnsStrategy,
+    },
+    DeferredToDetour,
+}
+
+/// Validated DNS upstream target retained without performing DNS I/O.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PreparedDnsEndpoint {
+    target: TargetAddr,
+    mode: PreparedDnsEndpointMode,
+    fixed_endpoint: Option<DialEndpoint>,
+}
+
+impl PreparedDnsEndpoint {
+    pub fn target(&self) -> &TargetAddr {
+        &self.target
+    }
+
+    pub const fn mode(&self) -> PreparedDnsEndpointMode {
+        self.mode
+    }
+
+    pub const fn resolver(&self) -> Option<ResolverRef> {
+        match self.mode {
+            PreparedDnsEndpointMode::ClientResolved { resolver, .. } => Some(resolver),
+            PreparedDnsEndpointMode::Numeric | PreparedDnsEndpointMode::DeferredToDetour => None,
+        }
+    }
+
+    pub const fn strategy(&self) -> Option<DnsStrategy> {
+        match self.mode {
+            PreparedDnsEndpointMode::ClientResolved { strategy, .. } => Some(strategy),
+            PreparedDnsEndpointMode::Numeric | PreparedDnsEndpointMode::DeferredToDetour => None,
+        }
+    }
+
+    pub const fn is_domain(&self) -> bool {
+        !matches!(self.mode, PreparedDnsEndpointMode::Numeric)
+    }
+
+    const fn fixed_endpoint(&self) -> Option<&DialEndpoint> {
+        self.fixed_endpoint.as_ref()
+    }
+}
+
+impl std::fmt::Debug for PreparedDnsEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedDnsEndpoint")
+            .field("mode", &self.mode)
+            .field("target", &"[redacted]")
+            .finish()
     }
 }
 
@@ -136,7 +191,7 @@ pub struct PreparedDnsServerDescriptor<'a> {
     server_name: Option<&'a str>,
     path: Option<&'a str>,
     detour: Option<&'a EgressPlanHandle>,
-    endpoint: &'a DialEndpoint,
+    endpoint: &'a PreparedDnsEndpoint,
 }
 
 impl<'a> PreparedDnsServerDescriptor<'a> {
@@ -160,7 +215,7 @@ impl<'a> PreparedDnsServerDescriptor<'a> {
         self.detour
     }
 
-    pub const fn endpoint(self) -> &'a DialEndpoint {
+    pub const fn endpoint(self) -> &'a PreparedDnsEndpoint {
         self.endpoint
     }
 }
@@ -194,6 +249,7 @@ pub struct PreparedClientOutboundDescriptor<'a> {
     method: Option<TcpMethodProfile>,
     psk: Option<&'a Arc<MethodPsk>>,
     endpoint: Option<&'a DialEndpoint>,
+    domain_resolver: Option<DirectDomainResolver>,
 }
 
 impl<'a> PreparedClientOutboundDescriptor<'a> {
@@ -217,6 +273,10 @@ impl<'a> PreparedClientOutboundDescriptor<'a> {
     pub const fn endpoint(self) -> Option<&'a DialEndpoint> {
         self.endpoint
     }
+
+    pub const fn domain_resolver(self) -> Option<DirectDomainResolver> {
+        self.domain_resolver
+    }
 }
 
 impl std::fmt::Debug for PreparedClientOutboundDescriptor<'_> {
@@ -228,7 +288,25 @@ impl std::fmt::Debug for PreparedClientOutboundDescriptor<'_> {
             .field("method", &self.method)
             .field("psk", &self.psk.map(|_| "[redacted]"))
             .field("endpoint", &self.endpoint.map(|_| "[redacted]"))
+            .field("domain_resolver", &self.domain_resolver)
             .finish()
+    }
+}
+
+/// Redacted bootstrap description of one server Direct outbound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedServerOutboundDescriptor {
+    index: u32,
+    domain_resolver: DirectDomainResolver,
+}
+
+impl PreparedServerOutboundDescriptor {
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    pub const fn domain_resolver(self) -> DirectDomainResolver {
+        self.domain_resolver
     }
 }
 
@@ -259,6 +337,24 @@ pub enum PreparedEgressRef {
     Chain(usize),
 }
 
+#[derive(Default)]
+struct PreparedEgressCapabilities {
+    outbounds: Vec<bool>,
+    selectors: Vec<bool>,
+    chains: Vec<bool>,
+}
+
+impl PreparedEgressCapabilities {
+    fn get(&self, egress: PreparedEgressRef) -> Option<bool> {
+        match egress {
+            PreparedEgressRef::Outbound(index) => self.outbounds.get(index),
+            PreparedEgressRef::Selector(index) => self.selectors.get(index),
+            PreparedEgressRef::Chain(index) => self.chains.get(index),
+        }
+        .copied()
+    }
+}
+
 /// Redacted, stable materialization step returned in dependency-first order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PreparedDependencyNode {
@@ -284,10 +380,17 @@ impl From<DependencyNode> for PreparedDependencyNode {
 }
 
 /// One statically validated remote binary RuleSet declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedRuleSetDownloadMode {
+    ClientResolved { resolver: ResolverRef },
+    DeferredToDetour,
+}
+
+/// One statically validated remote binary RuleSet declaration.
 pub struct PreparedRuleSet {
     tag: Box<str>,
     url: Box<str>,
-    download_resolver: ResolverRef,
+    download_mode: PreparedRuleSetDownloadMode,
     download_detour: Option<PreparedEgressRef>,
     update_interval: Option<Duration>,
 }
@@ -301,8 +404,15 @@ impl PreparedRuleSet {
         &self.url
     }
 
-    pub const fn download_resolver(&self) -> ResolverRef {
-        self.download_resolver
+    pub const fn download_mode(&self) -> PreparedRuleSetDownloadMode {
+        self.download_mode
+    }
+
+    pub const fn download_resolver(&self) -> Option<ResolverRef> {
+        match self.download_mode {
+            PreparedRuleSetDownloadMode::ClientResolved { resolver } => Some(resolver),
+            PreparedRuleSetDownloadMode::DeferredToDetour => None,
+        }
     }
 
     pub const fn download_detour(&self) -> Option<PreparedEgressRef> {
@@ -361,24 +471,35 @@ impl std::fmt::Debug for PreparedDnsRule {
     }
 }
 
-/// One selected IP endpoint for a prepared domain-valued DNS server.
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// Ordered selected IP endpoints for a prepared domain-valued DNS server.
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResolvedDnsEndpoint {
     server: u32,
-    address: SocketAddr,
+    addresses: Box<[SocketAddr]>,
 }
 
 impl ResolvedDnsEndpoint {
-    pub const fn new(server: u32, address: SocketAddr) -> Self {
-        Self { server, address }
+    pub fn new(server: u32, address: SocketAddr) -> Self {
+        Self {
+            server,
+            addresses: Box::new([address]),
+        }
+    }
+
+    pub fn from_candidates(server: u32, addresses: Box<[SocketAddr]>) -> Self {
+        Self { server, addresses }
     }
 
     pub const fn server(&self) -> u32 {
         self.server
     }
 
-    pub const fn address(&self) -> SocketAddr {
-        self.address
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.addresses
+    }
+
+    pub fn address(&self) -> Option<SocketAddr> {
+        self.addresses.first().copied()
     }
 }
 
@@ -579,7 +700,8 @@ pub struct PreparedClientV2 {
     dns_strategy: Option<DnsStrategy>,
     dns_cache: Option<DnsCacheConfig>,
     outbound_endpoints: Vec<Option<DialEndpoint>>,
-    dns_endpoints: Vec<DialEndpoint>,
+    dns_endpoints: Vec<PreparedDnsEndpoint>,
+    egress_domain_capabilities: PreparedEgressCapabilities,
     dependency_order: Vec<PreparedDependencyNode>,
 }
 
@@ -596,7 +718,8 @@ pub struct PreparedServerV2 {
     dns_final_server: Option<usize>,
     dns_strategy: Option<DnsStrategy>,
     dns_cache: Option<DnsCacheConfig>,
-    dns_endpoints: Vec<DialEndpoint>,
+    dns_endpoints: Vec<PreparedDnsEndpoint>,
+    egress_domain_capabilities: PreparedEgressCapabilities,
     dependency_order: Vec<PreparedDependencyNode>,
 }
 
@@ -639,8 +762,13 @@ macro_rules! prepared_accessors {
                 self.dns_cache
             }
 
-            pub fn dns_endpoints(&self) -> &[DialEndpoint] {
+            pub fn dns_endpoints(&self) -> &[PreparedDnsEndpoint] {
                 &self.dns_endpoints
+            }
+
+            /// Reports the statically aggregated domain-target capability.
+            pub fn accepts_domain_target(&self, egress: PreparedEgressRef) -> Option<bool> {
+                self.egress_domain_capabilities.get(egress)
             }
 
             pub fn dns_runtime(&self) -> Option<DnsRuntimeConfig> {
@@ -750,7 +878,7 @@ impl PreparedClientV2 {
         let outbound = self.validated.outbounds.get(index_usize)?;
         let endpoint = self.outbound_endpoints.get(index_usize)?.as_ref();
         let (kind, psk) = match outbound {
-            ClientOutboundConfig::Direct => (PreparedClientOutboundKind::Direct, None),
+            ClientOutboundConfig::Direct { .. } => (PreparedClientOutboundKind::Direct, None),
             ClientOutboundConfig::Shadowsocks { psk, .. } => {
                 (PreparedClientOutboundKind::Shadowsocks, Some(psk))
             }
@@ -761,6 +889,7 @@ impl PreparedClientV2 {
             method: outbound.method(),
             psk,
             endpoint,
+            domain_resolver: outbound.direct_domain_resolver(),
         })
     }
 
@@ -772,6 +901,7 @@ impl PreparedClientV2 {
             PreparedDependencyNode::DnsServer(index) => self
                 .dns_endpoints
                 .get(usize::try_from(index).ok()?)
+                .and_then(PreparedDnsEndpoint::fixed_endpoint)
                 .map(|endpoint| {
                     PreparedFixedEndpointDescriptor::new(
                         PreparedFixedEndpointTarget::DnsServer(index),
@@ -798,6 +928,18 @@ impl PreparedServerV2 {
         self.validated.udp
     }
 
+    pub fn outbound_count(&self) -> usize {
+        self.validated.outbounds.len()
+    }
+
+    pub fn outbound(&self, index: u32) -> Option<PreparedServerOutboundDescriptor> {
+        let outbound = self.validated.outbounds.get(usize::try_from(index).ok()?)?;
+        Some(PreparedServerOutboundDescriptor {
+            index,
+            domain_resolver: outbound.domain_resolver,
+        })
+    }
+
     pub fn fixed_endpoint_for_node(
         &self,
         node: PreparedDependencyNode,
@@ -807,6 +949,7 @@ impl PreparedServerV2 {
         };
         self.dns_endpoints
             .get(usize::try_from(index).ok()?)
+            .and_then(PreparedDnsEndpoint::fixed_endpoint)
             .map(|endpoint| {
                 PreparedFixedEndpointDescriptor::new(
                     PreparedFixedEndpointTarget::DnsServer(index),
@@ -911,7 +1054,7 @@ pub fn finish_client_v2(
         &prepared.dns_endpoints,
         &resources.dns_endpoints,
     )?;
-    validate_finished_client_endpoints(&prepared.validated)?;
+    validate_finished_client_endpoints(&prepared.validated, &prepared.direct_detours)?;
     let registry = build_rule_registry(&prepared.rule_sets, resources.rule_sets)?;
     attach_rule_registry(&mut prepared.validated, registry.clone())?;
     attach_client_dns_blueprint(
@@ -1171,7 +1314,7 @@ fn apply_outbound_resources(
     let mut resources = resources.iter();
     for (index, (validated, expected)) in validated.iter_mut().zip(expected).enumerate() {
         match (validated, expected) {
-            (ClientOutboundConfig::Direct, None) => {}
+            (ClientOutboundConfig::Direct { .. }, None) => {}
             (
                 ClientOutboundConfig::Shadowsocks { server, .. },
                 Some(DialEndpoint::Ip(expected)),
@@ -1200,7 +1343,7 @@ fn apply_outbound_resources(
 
 fn apply_dns_resources(
     validated: Option<&mut crate::model::DnsConfig>,
-    expected: &[DialEndpoint],
+    expected: &[PreparedDnsEndpoint],
     resources: &[ResolvedDnsEndpoint],
 ) -> Result<(), ConfigError> {
     let validated = match (validated, expected.is_empty()) {
@@ -1219,26 +1362,56 @@ fn apply_dns_resources(
         || resources.len()
             != expected
                 .iter()
-                .filter(|endpoint| endpoint.is_domain())
+                .filter(|endpoint| {
+                    matches!(
+                        endpoint.mode(),
+                        PreparedDnsEndpointMode::ClientResolved { .. }
+                    )
+                })
                 .count()
     {
         return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
     }
     let mut resources = resources.iter();
     for (index, (validated, expected)) in validated.servers.iter_mut().zip(expected).enumerate() {
-        match expected {
-            DialEndpoint::Ip(expected) if validated.address == *expected => {}
-            endpoint @ DialEndpoint::Domain { .. } => {
+        match expected.mode() {
+            PreparedDnsEndpointMode::Numeric if validated.target == *expected.target() => {
+                validated.resolved_targets = Box::new([]);
+                validated.endpoint_mode = DnsEndpointMode::Numeric;
+            }
+            PreparedDnsEndpointMode::ClientResolved { .. } => {
                 let resource = resources
                     .next()
                     .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
                 if resource.server != checked_u32(index)? {
                     return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
                 }
-                validate_selected_endpoint(endpoint, resource.address)?;
-                validated.address = resource.address;
+                let fixed_endpoint = expected
+                    .fixed_endpoint()
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+                if resource.addresses.is_empty()
+                    || resource.addresses.len() > MAX_RESOLVED_DNS_CANDIDATES
+                {
+                    return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
+                }
+                for &address in &resource.addresses {
+                    validate_selected_endpoint(fixed_endpoint, address)?;
+                }
+                validated.target = expected.target().clone();
+                validated.resolved_targets = resource.addresses.clone();
+                let PreparedDnsEndpointMode::ClientResolved { resolver, strategy } =
+                    expected.mode()
+                else {
+                    unreachable!("matched client-resolved DNS endpoint")
+                };
+                validated.endpoint_mode = DnsEndpointMode::ClientResolved { resolver, strategy };
             }
-            DialEndpoint::Ip(_) => {
+            PreparedDnsEndpointMode::DeferredToDetour => {
+                validated.target = expected.target().clone();
+                validated.resolved_targets = Box::new([]);
+                validated.endpoint_mode = DnsEndpointMode::DeferredToDetour;
+            }
+            PreparedDnsEndpointMode::Numeric => {
                 return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
             }
         }
@@ -1273,7 +1446,7 @@ struct PreparedCommon {
     dns_final_server: Option<usize>,
     dns_strategy: Option<DnsStrategy>,
     dns_cache: Option<DnsCacheConfig>,
-    dns_endpoints: Vec<DialEndpoint>,
+    dns_endpoints: Vec<PreparedDnsEndpoint>,
     dependency_order: Vec<PreparedDependencyNode>,
 }
 
@@ -1333,21 +1506,36 @@ fn prepared_dependency_egress<'a>(
 }
 
 fn prepared_dependency_dns_servers(
-    dns_endpoints: &[DialEndpoint],
+    dns_endpoints: &[PreparedDnsEndpoint],
     outbound_endpoints: &[Option<DialEndpoint>],
+    direct_domain_resolvers: &[Option<DirectDomainResolver>],
     rule_sets: &[PreparedRuleSet],
 ) -> Result<Vec<usize>, ConfigError> {
     let mut servers = Vec::new();
     let candidates = dns_endpoints
         .iter()
-        .filter_map(DialEndpoint::resolver)
+        .filter_map(PreparedDnsEndpoint::resolver)
         .chain(
             outbound_endpoints
                 .iter()
                 .filter_map(Option::as_ref)
                 .filter_map(DialEndpoint::resolver),
         )
-        .chain(rule_sets.iter().map(PreparedRuleSet::download_resolver));
+        .chain(
+            direct_domain_resolvers
+                .iter()
+                .filter_map(|resolver| match resolver {
+                    Some(DirectDomainResolver::DnsServer { server, .. }) => {
+                        Some(ResolverRef::DnsServer(*server))
+                    }
+                    Some(DirectDomainResolver::System) | None => None,
+                }),
+        )
+        .chain(
+            rule_sets
+                .iter()
+                .filter_map(PreparedRuleSet::download_resolver),
+        );
     for resolver in candidates {
         let ResolverRef::DnsServer(server) = resolver else {
             continue;
@@ -1386,6 +1574,13 @@ fn prepare_client_inner(
         .collect::<Vec<_>>();
     let selectors = raw.selectors.as_deref().unwrap_or(&[]);
     let chains = raw.chains.as_deref().unwrap_or(&[]);
+    let direct_domain_resolvers = prepare_client_direct_domain_resolvers(
+        raw.outbounds.as_deref().unwrap_or(&[]),
+        raw.dns.as_ref(),
+        dns.strategy,
+    )?;
+    let egress_domain_capabilities =
+        prepare_egress_capabilities(&outbound_tags, selectors, chains)?;
     let mut common = prepare_common(
         raw.rule_set_loader.as_ref(),
         raw.route.as_ref(),
@@ -1394,6 +1589,8 @@ fn prepare_client_inner(
         selectors,
         chains,
         outbound_endpoints.as_slice(),
+        &direct_domain_resolvers,
+        &egress_domain_capabilities,
         dns,
     )?;
     let ordinary_inbounds = raw
@@ -1420,6 +1617,7 @@ fn prepare_client_inner(
     let dependency_dns_servers = prepared_dependency_dns_servers(
         &common.dns_endpoints,
         &outbound_endpoints,
+        &direct_domain_resolvers,
         &common.rule_sets,
     )?;
     sanitize_client(&mut compatibility);
@@ -1451,6 +1649,7 @@ fn prepare_client_inner(
         dns_cache: common.dns_cache,
         outbound_endpoints,
         dns_endpoints: common.dns_endpoints,
+        egress_domain_capabilities,
         dependency_order: common.dependency_order,
     })
 }
@@ -1470,6 +1669,12 @@ fn prepare_server_inner(
         .map(|outbound| outbound.tag.as_str())
         .collect::<Vec<_>>();
     let selectors = raw.selectors.as_deref().unwrap_or(&[]);
+    let direct_domain_resolvers = prepare_server_direct_domain_resolvers(
+        raw.outbounds.as_deref().unwrap_or(&[]),
+        raw.dns.as_ref(),
+        dns.strategy,
+    )?;
+    let egress_domain_capabilities = prepare_egress_capabilities(&outbound_tags, selectors, &[])?;
     let mut common = prepare_common(
         raw.rule_set_loader.as_ref(),
         raw.route.as_ref(),
@@ -1478,6 +1683,8 @@ fn prepare_server_inner(
         selectors,
         &[],
         &[],
+        &direct_domain_resolvers,
+        &egress_domain_capabilities,
         dns,
     )?;
     let ordinary_inbounds = raw
@@ -1500,8 +1707,12 @@ fn prepare_server_inner(
     let rule_set_tags = prepared_rule_set_tags(&common.rule_sets)?;
     let dependency_egress =
         prepared_dependency_egress(&common.rule_sets, &outbound_tags, selectors, &[])?;
-    let dependency_dns_servers =
-        prepared_dependency_dns_servers(&common.dns_endpoints, &[], &common.rule_sets)?;
+    let dependency_dns_servers = prepared_dependency_dns_servers(
+        &common.dns_endpoints,
+        &[],
+        &direct_domain_resolvers,
+        &common.rule_sets,
+    )?;
     sanitize_server(&mut compatibility);
     let validation = validate_server_prepared(
         compatibility,
@@ -1528,6 +1739,7 @@ fn prepare_server_inner(
         dns_strategy: common.dns_strategy,
         dns_cache: common.dns_cache,
         dns_endpoints: common.dns_endpoints,
+        egress_domain_capabilities,
         dependency_order: common.dependency_order,
     })
 }
@@ -1542,7 +1754,7 @@ fn require_v2(version: u32) -> Result<(), ConfigError> {
 struct PreparedDnsDraft {
     strategy: Option<DnsStrategy>,
     cache: Option<DnsCacheConfig>,
-    endpoints: Vec<DialEndpoint>,
+    endpoints: Vec<PreparedDnsEndpoint>,
 }
 
 fn prepare_dns(raw: Option<&RawDns>) -> Result<PreparedDnsDraft, ConfigError> {
@@ -1586,15 +1798,13 @@ fn prepare_dns(raw: Option<&RawDns>) -> Result<PreparedDnsDraft, ConfigError> {
         .try_reserve_exact(servers.len())
         .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
     for server in servers {
-        endpoints.push(parse_endpoint(
+        endpoints.push(parse_dns_endpoint(
             &server.address,
             server.domain_resolver.as_deref(),
             server.domain_strategy.as_deref(),
+            server.detour.is_some(),
             strategy,
             servers,
-            ConfigField::DnsServersAddress,
-            ConfigField::DnsServersDomainResolver,
-            ConfigField::DnsServersDomainStrategy,
         )?);
     }
     Ok(PreparedDnsDraft {
@@ -1618,12 +1828,6 @@ fn prepare_client_outbounds(
     for outbound in outbounds {
         match outbound.outbound_type.as_deref().unwrap_or("shadowsocks") {
             "direct" => {
-                if outbound.domain_resolver.is_some() {
-                    return Err(ConfigError::semantic(ConfigField::OutboundsDomainResolver));
-                }
-                if outbound.domain_strategy.is_some() {
-                    return Err(ConfigError::semantic(ConfigField::OutboundsDomainStrategy));
-                }
                 endpoints.push(None);
             }
             "shadowsocks" => {
@@ -1646,6 +1850,49 @@ fn prepare_client_outbounds(
         }
     }
     Ok(endpoints)
+}
+
+fn prepare_client_direct_domain_resolvers(
+    outbounds: &[RawClientOutbound],
+    dns: Option<&RawDns>,
+    default_strategy: Option<DnsStrategy>,
+) -> Result<Vec<Option<DirectDomainResolver>>, ConfigError> {
+    let default_strategy = default_strategy.unwrap_or(DnsStrategy::PreferIpv4);
+    outbounds
+        .iter()
+        .map(|outbound| {
+            if outbound.outbound_type.as_deref() != Some("direct") {
+                return Ok(None);
+            }
+            validate_direct_domain_resolver(
+                outbound.domain_resolver.as_deref(),
+                outbound.domain_strategy.as_deref(),
+                dns,
+                default_strategy,
+            )
+            .map(Some)
+        })
+        .collect()
+}
+
+fn prepare_server_direct_domain_resolvers(
+    outbounds: &[crate::raw::RawServerOutbound],
+    dns: Option<&RawDns>,
+    default_strategy: Option<DnsStrategy>,
+) -> Result<Vec<Option<DirectDomainResolver>>, ConfigError> {
+    let default_strategy = default_strategy.unwrap_or(DnsStrategy::PreferIpv4);
+    outbounds
+        .iter()
+        .map(|outbound| {
+            validate_direct_domain_resolver(
+                outbound.domain_resolver.as_deref(),
+                outbound.domain_strategy.as_deref(),
+                dns,
+                default_strategy,
+            )
+            .map(Some)
+        })
+        .collect()
 }
 
 fn prepare_compatibility_client_outbound(
@@ -1674,6 +1921,85 @@ fn prepare_compatibility_client_outbound(
     Ok(endpoints)
 }
 
+fn parse_dns_endpoint(
+    value: &str,
+    resolver: Option<&str>,
+    strategy: Option<&str>,
+    has_detour: bool,
+    default_strategy: DnsStrategy,
+    dns_servers: &[crate::raw::RawDnsServer],
+) -> Result<PreparedDnsEndpoint, ConfigError> {
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        if address.port() == 0 {
+            return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
+        }
+        if resolver.is_some() {
+            return Err(ConfigError::semantic(ConfigField::DnsServersDomainResolver));
+        }
+        if strategy.is_some() {
+            return Err(ConfigError::semantic(ConfigField::DnsServersDomainStrategy));
+        }
+        return Ok(PreparedDnsEndpoint {
+            target: TargetAddr::ip(address)
+                .map_err(|_| ConfigError::semantic(ConfigField::DnsServersAddress))?,
+            mode: PreparedDnsEndpointMode::Numeric,
+            fixed_endpoint: Some(DialEndpoint::Ip(address)),
+        });
+    }
+    let (host, port) = parse_domain_endpoint(value, ConfigField::DnsServersAddress)?;
+    let target = TargetAddr::domain(host.as_str(), port.get())
+        .map_err(|_| ConfigError::semantic(ConfigField::DnsServersAddress))?;
+    let Some(resolver) = resolver else {
+        if strategy.is_some() {
+            return Err(ConfigError::semantic(ConfigField::DnsServersDomainStrategy));
+        }
+        if !has_detour {
+            return Err(ConfigError::dns_resolver_required(
+                ConfigField::DnsServersDomainResolver,
+            ));
+        }
+        return Ok(PreparedDnsEndpoint {
+            target,
+            mode: PreparedDnsEndpointMode::DeferredToDetour,
+            fixed_endpoint: None,
+        });
+    };
+    let resolver = parse_resolver(resolver, dns_servers, ConfigField::DnsServersDomainResolver)?;
+    let strategy = strategy.map_or(Ok(default_strategy), |strategy| {
+        parse_strategy(Some(strategy), ConfigField::DnsServersDomainStrategy)
+    })?;
+    Ok(PreparedDnsEndpoint {
+        target,
+        mode: PreparedDnsEndpointMode::ClientResolved { resolver, strategy },
+        fixed_endpoint: Some(DialEndpoint::Domain {
+            host,
+            port,
+            resolver,
+            strategy,
+        }),
+    })
+}
+
+fn parse_domain_endpoint(
+    value: &str,
+    field: ConfigField,
+) -> Result<(CanonicalDomain, NonZeroU16), ConfigError> {
+    let (host, port) = value
+        .rsplit_once(':')
+        .filter(|(host, _)| !host.is_empty() && !host.contains(':'))
+        .ok_or_else(|| ConfigError::semantic(field))?;
+    let port = port
+        .parse::<u16>()
+        .ok()
+        .and_then(NonZeroU16::new)
+        .ok_or_else(|| ConfigError::semantic(field))?;
+    if host.parse::<IpAddr>().is_ok() || !valid_domain(host) {
+        return Err(ConfigError::semantic(field));
+    }
+    let host = CanonicalDomain::new(host).map_err(|_| ConfigError::semantic(field))?;
+    Ok((host, port))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_endpoint(
     value: &str,
@@ -1697,19 +2023,7 @@ fn parse_endpoint(
         }
         return Ok(DialEndpoint::Ip(address));
     }
-    let (host, port) = value
-        .rsplit_once(':')
-        .filter(|(host, _)| !host.is_empty() && !host.contains(':'))
-        .ok_or_else(|| ConfigError::semantic(endpoint_field))?;
-    let port = port
-        .parse::<u16>()
-        .ok()
-        .and_then(NonZeroU16::new)
-        .ok_or_else(|| ConfigError::semantic(endpoint_field))?;
-    if host.parse::<IpAddr>().is_ok() || !valid_domain(host) {
-        return Err(ConfigError::semantic(endpoint_field));
-    }
-    let host = CanonicalDomain::new(host).map_err(|_| ConfigError::semantic(endpoint_field))?;
+    let (host, port) = parse_domain_endpoint(value, endpoint_field)?;
     let resolver = parse_resolver(
         resolver.ok_or_else(|| ConfigError::dns_resolver_required(resolver_field))?,
         dns_servers,
@@ -1816,17 +2130,28 @@ fn prepare_common(
     selectors: &[RawSelector],
     chains: &[RawChain],
     outbound_endpoints: &[Option<DialEndpoint>],
+    direct_domain_resolvers: &[Option<DirectDomainResolver>],
+    egress_domain_capabilities: &PreparedEgressCapabilities,
     dns_draft: PreparedDnsDraft,
 ) -> Result<PreparedCommon, ConfigError> {
     let loader = prepare_rule_set_loader(loader)?;
     let dns_servers = dns.and_then(|dns| dns.servers.as_deref()).unwrap_or(&[]);
     let raw_rule_sets = route.map(|route| route.rule_set.as_slice()).unwrap_or(&[]);
+    validate_deferred_dns_detours(
+        dns,
+        &dns_draft.endpoints,
+        &outbound_tags,
+        selectors,
+        chains,
+        egress_domain_capabilities,
+    )?;
     let rule_sets = prepare_rule_sets(
         raw_rule_sets,
         dns_servers,
         &outbound_tags,
         selectors,
         chains,
+        egress_domain_capabilities,
     )?;
     let route_rule_sets = prepare_route_rule_sets(route, &rule_sets)?;
     let raw_dependency_order = build_dependency_order(
@@ -1834,6 +2159,7 @@ fn prepare_common(
         &dns_draft.endpoints,
         &outbound_tags,
         outbound_endpoints,
+        direct_domain_resolvers,
         selectors,
         chains,
         &rule_sets,
@@ -1866,6 +2192,7 @@ fn prepare_rule_sets(
     outbound_tags: &[&str],
     selectors: &[RawSelector],
     chains: &[RawChain],
+    capabilities: &PreparedEgressCapabilities,
 ) -> Result<Vec<PreparedRuleSet>, ConfigError> {
     let mut prepared = Vec::new();
     prepared
@@ -1901,13 +2228,6 @@ fn prepare_rule_sets(
             .as_deref()
             .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRuleSetUrl))?;
         validate_https_srs_url(url, raw.format.is_none())?;
-        let download_resolver = parse_resolver(
-            raw.download_resolver.as_deref().ok_or_else(|| {
-                ConfigError::dns_resolver_required(ConfigField::RouteRuleSetDownloadResolver)
-            })?,
-            dns_servers,
-            ConfigField::RouteRuleSetDownloadResolver,
-        )?;
         let download_detour = raw
             .download_detour
             .as_deref()
@@ -1921,6 +2241,28 @@ fn prepare_rule_sets(
                 )
             })
             .transpose()?;
+        let download_mode = match raw.download_resolver.as_deref() {
+            Some(resolver) => PreparedRuleSetDownloadMode::ClientResolved {
+                resolver: parse_resolver(
+                    resolver,
+                    dns_servers,
+                    ConfigField::RouteRuleSetDownloadResolver,
+                )?,
+            },
+            None if download_detour.is_some() => PreparedRuleSetDownloadMode::DeferredToDetour,
+            None => {
+                return Err(ConfigError::dns_resolver_required(
+                    ConfigField::RouteRuleSetDownloadResolver,
+                ));
+            }
+        };
+        if download_mode == PreparedRuleSetDownloadMode::DeferredToDetour
+            && download_detour.and_then(|detour| capabilities.get(detour)) != Some(true)
+        {
+            return Err(ConfigError::semantic(
+                ConfigField::RouteRuleSetDownloadDetour,
+            ));
+        }
         let update_interval = raw
             .update_interval_seconds
             .map(|seconds| {
@@ -1936,7 +2278,7 @@ fn prepare_rule_sets(
         prepared.push(PreparedRuleSet {
             tag: tag.into(),
             url: url.into(),
-            download_resolver,
+            download_mode,
             download_detour,
             update_interval,
         });
@@ -2001,6 +2343,216 @@ fn resolve_egress(
         return Ok(PreparedEgressRef::Chain(index));
     }
     Err(ConfigError::semantic(field))
+}
+
+fn prepare_egress_capabilities(
+    outbound_tags: &[&str],
+    selectors: &[RawSelector],
+    chains: &[RawChain],
+) -> Result<PreparedEgressCapabilities, ConfigError> {
+    let mut capabilities = PreparedEgressCapabilities {
+        outbounds: vec![true; outbound_tags.len()],
+        selectors: vec![false; selectors.len()],
+        chains: vec![false; chains.len()],
+    };
+    let mut selector_state = vec![0_u8; selectors.len()];
+    let mut chain_state = vec![0_u8; chains.len()];
+    let mut stack = Vec::new();
+    for index in 0..selectors.len() {
+        evaluate_egress_capability(
+            PreparedEgressRef::Selector(index),
+            outbound_tags,
+            selectors,
+            chains,
+            &mut capabilities,
+            &mut selector_state,
+            &mut chain_state,
+            &mut stack,
+        )?;
+        debug_assert!(stack.is_empty());
+    }
+    for index in 0..chains.len() {
+        evaluate_egress_capability(
+            PreparedEgressRef::Chain(index),
+            outbound_tags,
+            selectors,
+            chains,
+            &mut capabilities,
+            &mut selector_state,
+            &mut chain_state,
+            &mut stack,
+        )?;
+        debug_assert!(stack.is_empty());
+    }
+    Ok(capabilities)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_egress_capability(
+    egress: PreparedEgressRef,
+    outbound_tags: &[&str],
+    selectors: &[RawSelector],
+    chains: &[RawChain],
+    capabilities: &mut PreparedEgressCapabilities,
+    selector_state: &mut [u8],
+    chain_state: &mut [u8],
+    stack: &mut Vec<PreparedEgressRef>,
+) -> Result<bool, ConfigError> {
+    match egress {
+        PreparedEgressRef::Outbound(index) => capabilities
+            .outbounds
+            .get(index)
+            .copied()
+            .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization)),
+        PreparedEgressRef::Selector(index) => {
+            match selector_state.get(index).copied() {
+                Some(2) => return Ok(capabilities.selectors[index]),
+                Some(1) => {
+                    return Err(capability_cycle_error(stack, egress)?);
+                }
+                Some(0) => {}
+                _ => {
+                    return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
+                }
+            }
+            selector_state[index] = 1;
+            stack
+                .try_reserve(1)
+                .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+            stack.push(egress);
+            let members = &selectors[index].outbounds;
+            if members.is_empty() {
+                return Err(ConfigError::semantic(ConfigField::SelectorsOutbounds));
+            }
+            let mut accepts_domain_target = true;
+            for member in members {
+                let member = resolve_egress(
+                    member,
+                    outbound_tags,
+                    selectors,
+                    chains,
+                    ConfigField::SelectorsOutbounds,
+                )?;
+                accepts_domain_target &= evaluate_egress_capability(
+                    member,
+                    outbound_tags,
+                    selectors,
+                    chains,
+                    capabilities,
+                    selector_state,
+                    chain_state,
+                    stack,
+                )?;
+            }
+            if stack.pop() != Some(egress) {
+                return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
+            }
+            capabilities.selectors[index] = accepts_domain_target;
+            selector_state[index] = 2;
+            Ok(accepts_domain_target)
+        }
+        PreparedEgressRef::Chain(index) => {
+            match chain_state.get(index).copied() {
+                Some(2) => return Ok(capabilities.chains[index]),
+                Some(1) => {
+                    return Err(capability_cycle_error(stack, egress)?);
+                }
+                Some(0) => {}
+                _ => {
+                    return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
+                }
+            }
+            chain_state[index] = 1;
+            stack
+                .try_reserve(1)
+                .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+            stack.push(egress);
+            let terminal = chains[index]
+                .hops
+                .as_deref()
+                .and_then(<[String]>::last)
+                .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?;
+            let terminal = resolve_egress(
+                terminal,
+                outbound_tags,
+                selectors,
+                chains,
+                ConfigField::ChainsHops,
+            )?;
+            let accepts_domain_target = evaluate_egress_capability(
+                terminal,
+                outbound_tags,
+                selectors,
+                chains,
+                capabilities,
+                selector_state,
+                chain_state,
+                stack,
+            )?;
+            if stack.pop() != Some(egress) {
+                return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
+            }
+            capabilities.chains[index] = accepts_domain_target;
+            chain_state[index] = 2;
+            Ok(accepts_domain_target)
+        }
+    }
+}
+
+fn capability_cycle_error(
+    stack: &[PreparedEgressRef],
+    repeated: PreparedEgressRef,
+) -> Result<ConfigError, ConfigError> {
+    let start = stack
+        .iter()
+        .position(|candidate| *candidate == repeated)
+        .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+    let cycle_len = stack
+        .len()
+        .checked_sub(start)
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+    let mut path = Vec::new();
+    path.try_reserve_exact(cycle_len)
+        .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+    for egress in &stack[start..] {
+        path.push(egress_node(*egress)?);
+    }
+    path.push(egress_node(repeated)?);
+    Ok(ConfigError::dependency_cycle(path))
+}
+
+fn validate_deferred_dns_detours(
+    dns: Option<&RawDns>,
+    endpoints: &[PreparedDnsEndpoint],
+    outbound_tags: &[&str],
+    selectors: &[RawSelector],
+    chains: &[RawChain],
+    capabilities: &PreparedEgressCapabilities,
+) -> Result<(), ConfigError> {
+    let servers = dns.and_then(|dns| dns.servers.as_deref()).unwrap_or(&[]);
+    if servers.len() != endpoints.len() {
+        return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
+    }
+    for (server, endpoint) in servers.iter().zip(endpoints) {
+        if endpoint.mode() != PreparedDnsEndpointMode::DeferredToDetour {
+            continue;
+        }
+        let detour = resolve_egress(
+            server
+                .detour
+                .as_deref()
+                .ok_or_else(|| ConfigError::semantic(ConfigField::DnsServersDetour))?,
+            outbound_tags,
+            selectors,
+            chains,
+            ConfigField::DnsServersDetour,
+        )?;
+        if capabilities.get(detour) != Some(true) {
+            return Err(ConfigError::semantic(ConfigField::DnsServersDetour));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_route_rule_sets(
@@ -2473,9 +3025,10 @@ fn dns_matcher_present(rule: &RawDnsRouteRule) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn build_dependency_order(
     dns: Option<&RawDns>,
-    dns_endpoints: &[DialEndpoint],
+    dns_endpoints: &[PreparedDnsEndpoint],
     outbound_tags: &[&str],
     outbound_endpoints: &[Option<DialEndpoint>],
+    direct_domain_resolvers: &[Option<DirectDomainResolver>],
     selectors: &[RawSelector],
     chains: &[RawChain],
     rule_sets: &[PreparedRuleSet],
@@ -2559,17 +3112,33 @@ fn build_dependency_order(
                 .map_err(map_dependency_error)?;
         }
     }
+    for (index, resolver) in direct_domain_resolvers.iter().enumerate() {
+        let Some(DirectDomainResolver::DnsServer { server, .. }) = resolver else {
+            continue;
+        };
+        graph
+            .try_add_edge(
+                outbound_node(index)?,
+                dns_node(*server)?,
+                DependencySource::OutboundDomainResolver {
+                    outbound: checked_u32(index)?,
+                },
+            )
+            .map_err(map_dependency_error)?;
+    }
     for (index, selector) in selectors.iter().enumerate() {
         let mut members = Vec::new();
         members
             .try_reserve_exact(selector.outbounds.len())
             .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
         for member in &selector.outbounds {
-            let outbound = outbound_tags
-                .iter()
-                .position(|candidate| *candidate == member)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::SelectorsOutbounds))?;
-            members.push(outbound_node(outbound)?);
+            members.push(egress_node(resolve_egress(
+                member,
+                outbound_tags,
+                selectors,
+                chains,
+                ConfigField::SelectorsOutbounds,
+            )?)?);
         }
         graph
             .try_add_selector_members(checked_u64(index)?, members)
@@ -2584,11 +3153,13 @@ fn build_dependency_order(
             .try_reserve_exact(hops.len())
             .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
         for hop in hops {
-            let outbound = outbound_tags
-                .iter()
-                .position(|candidate| *candidate == hop)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?;
-            targets.push(outbound_node(outbound)?);
+            targets.push(egress_node(resolve_egress(
+                hop,
+                outbound_tags,
+                selectors,
+                chains,
+                ConfigField::ChainsHops,
+            )?)?);
         }
         graph
             .try_add_chain_hops(checked_u64(index)?, targets)
@@ -2596,15 +3167,17 @@ fn build_dependency_order(
     }
     for (index, rule_set) in rule_sets.iter().enumerate() {
         let from = rule_set_node(index)?;
-        graph
-            .try_add_edge(
-                from,
-                resolver_node(rule_set.download_resolver())?,
-                DependencySource::RuleSetDownloadResolver {
-                    rule_set: checked_u32(index)?,
-                },
-            )
-            .map_err(map_dependency_error)?;
+        if let Some(resolver) = rule_set.download_resolver() {
+            graph
+                .try_add_edge(
+                    from,
+                    resolver_node(resolver)?,
+                    DependencySource::RuleSetDownloadResolver {
+                        rule_set: checked_u32(index)?,
+                    },
+                )
+                .map_err(map_dependency_error)?;
+        }
         if let Some(detour) = rule_set.download_detour() {
             graph
                 .try_add_edge(
@@ -2621,10 +3194,9 @@ fn build_dependency_order(
 }
 
 fn map_dependency_error(error: DependencyGraphError) -> ConfigError {
-    if error.cycle().is_some() {
-        ConfigError::semantic(ConfigField::DnsDependencyCycle)
-    } else {
-        ConfigError::semantic(ConfigField::ResourceMaterialization)
+    match error {
+        DependencyGraphError::Cycle(cycle) => ConfigError::dependency_cycle(cycle.into_path()),
+        _ => ConfigError::semantic(ConfigField::ResourceMaterialization),
     }
 }
 

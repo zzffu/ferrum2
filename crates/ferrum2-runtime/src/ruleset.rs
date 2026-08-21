@@ -45,6 +45,32 @@ pub enum RuleSetDownloadResolver {
     DnsServer(DnsServerId),
 }
 
+/// The validated location at which a remote RuleSet URL host is resolved.
+///
+/// Deferred downloads deliberately carry no resolver. Their URL host is
+/// delivered as a domain target to the configured immutable detour instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleSetDownloadMode {
+    ClientResolved(RuleSetDownloadResolver),
+    DeferredToDetour,
+}
+
+impl RuleSetDownloadMode {
+    /// Returns the explicit client-side resolver, if this mode has one.
+    pub const fn resolver(self) -> Option<RuleSetDownloadResolver> {
+        match self {
+            Self::ClientResolved(resolver) => Some(resolver),
+            Self::DeferredToDetour => None,
+        }
+    }
+}
+
+impl From<RuleSetDownloadResolver> for RuleSetDownloadMode {
+    fn from(resolver: RuleSetDownloadResolver) -> Self {
+        Self::ClientResolved(resolver)
+    }
+}
+
 /// A cache filename component already proven safe against path traversal.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct RuleSetCacheName(Box<str>);
@@ -82,20 +108,27 @@ impl fmt::Debug for RuleSetCacheName {
 pub struct RuleSetRemoteSource {
     cache_name: RuleSetCacheName,
     url: Box<str>,
-    resolver: RuleSetDownloadResolver,
+    mode: RuleSetDownloadMode,
     detour: Option<EgressPlanHandle>,
     update_interval: Option<Duration>,
 }
 
 impl RuleSetRemoteSource {
-    pub fn new(
+    pub fn new<M>(
         cache_name: RuleSetCacheName,
         url: &str,
-        resolver: RuleSetDownloadResolver,
+        mode: M,
         detour: Option<EgressPlanHandle>,
         update_interval: Option<Duration>,
-    ) -> Result<Self, RuleSetLoadError> {
+    ) -> Result<Self, RuleSetLoadError>
+    where
+        M: Into<RuleSetDownloadMode>,
+    {
+        let mode = mode.into();
         if update_interval.is_some_and(|interval| interval.is_zero()) {
+            return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
+        }
+        if mode == RuleSetDownloadMode::DeferredToDetour && detour.is_none() {
             return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
         }
         let parsed = Url::parse(url)
@@ -111,7 +144,7 @@ impl RuleSetRemoteSource {
         Ok(Self {
             cache_name,
             url: parsed.as_str().into(),
-            resolver,
+            mode,
             detour,
             update_interval,
         })
@@ -128,7 +161,7 @@ impl fmt::Debug for RuleSetRemoteSource {
             .debug_struct("RuleSetRemoteSource")
             .field("cache_name", &self.cache_name)
             .field("url", &"[redacted]")
-            .field("resolver", &self.resolver)
+            .field("mode", &self.mode)
             .field("detour", &self.detour)
             .field("update_interval", &self.update_interval)
             .finish()
@@ -178,7 +211,7 @@ impl fmt::Debug for RuleSetLoaderConfig {
 #[derive(Clone)]
 pub struct RuleSetDownloadRequest {
     url: Box<str>,
-    resolver: RuleSetDownloadResolver,
+    mode: RuleSetDownloadMode,
     detour: Option<EgressPlanSnapshot>,
     if_none_match: Option<Box<str>>,
     if_modified_since: Option<Box<str>>,
@@ -191,8 +224,8 @@ impl RuleSetDownloadRequest {
         &self.url
     }
 
-    pub const fn resolver(&self) -> RuleSetDownloadResolver {
-        self.resolver
+    pub const fn mode(&self) -> RuleSetDownloadMode {
+        self.mode
     }
 
     pub fn detour(&self) -> Option<&EgressPlanSnapshot> {
@@ -221,7 +254,7 @@ impl fmt::Debug for RuleSetDownloadRequest {
         formatter
             .debug_struct("RuleSetDownloadRequest")
             .field("url", &"[redacted]")
-            .field("resolver", &self.resolver)
+            .field("mode", &self.mode)
             .field("detour", &self.detour)
             .field(
                 "conditional",
@@ -269,8 +302,8 @@ impl fmt::Display for RuleSetDownloadError {
 
 impl std::error::Error for RuleSetDownloadError {}
 
-/// Downloader seam. Implementations must apply the supplied resolver and
-/// detour to the original host and every redirect host.
+/// Downloader seam. Implementations must apply the supplied resolution mode
+/// and immutable detour to the original host and every redirect host.
 pub trait RuleSetDownloader: Send + Sync {
     fn fetch(&self, request: RuleSetDownloadRequest) -> RuleSetDownloadFuture<'_>;
 }
@@ -604,7 +637,7 @@ where
         let deadline = Instant::now() + self.config.download_timeout;
         let request = RuleSetDownloadRequest {
             url: source.url.clone(),
-            resolver: source.resolver,
+            mode: source.mode,
             detour: source.detour.as_ref().map(EgressPlanHandle::snapshot_owned),
             if_none_match: cached.as_ref().and_then(|cache| cache.etag.clone()),
             if_modified_since: cached
