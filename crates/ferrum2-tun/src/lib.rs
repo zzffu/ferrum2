@@ -1965,18 +1965,18 @@ impl MemoryDevice {
             Ok(length) => length,
             Err(reason) => {
                 self.rejected_output += 1;
-                return UdpInjectOutcome::Rejected(reason);
+                return UdpInjectOutcome::Rejected(map_packet_reject(reason));
             }
         };
         match self.validator.parse_ingress(&self.output[..length]) {
             Ok(ParsedPacket::Complete(_)) => {}
             Ok(ParsedPacket::Fragment(_)) => {
                 self.rejected_output += 1;
-                return UdpInjectOutcome::Rejected(packet::PacketRejectReason::InvalidFragment);
+                return UdpInjectOutcome::Rejected(TunRejectReason::FragmentMalformed);
             }
             Err(rejected) => {
                 self.rejected_output += 1;
-                return UdpInjectOutcome::Rejected(rejected.reason);
+                return UdpInjectOutcome::Rejected(map_packet_reject(rejected.reason));
             }
         }
         self.validated_output += 1;
@@ -3464,7 +3464,7 @@ mod tests {
         );
         assert_eq!(
             device.inject_udp_response(ipv6, b"disabled family"),
-            super::UdpInjectOutcome::Rejected(super::packet::PacketRejectReason::DisabledFamily)
+            super::UdpInjectOutcome::Rejected(super::TunRejectReason::FamilyDisabled)
         );
         let mixed = UdpTuple::new(
             "198.18.0.1:10000".parse().expect("local IPv4"),
@@ -3472,9 +3472,7 @@ mod tests {
         );
         assert_eq!(
             device.inject_udp_response(mixed, b"mixed family"),
-            super::UdpInjectOutcome::Rejected(
-                super::packet::PacketRejectReason::InvalidDestination
-            )
+            super::UdpInjectOutcome::Rejected(super::TunRejectReason::InvalidDestination)
         );
         assert_eq!(device.rejected_output, 2);
         assert!(!device.has_output());

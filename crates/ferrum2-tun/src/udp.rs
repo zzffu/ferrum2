@@ -10,8 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::packet::PacketRejectReason;
-use crate::{OwnerWake, TunEvent, TunEventSink, TunRejectReason, map_packet_reject};
+use crate::{OwnerWake, TunEvent, TunEventSink, TunRejectReason};
 
 const DATAGRAM_QUEUE_PACKETS: usize = 8;
 const RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION: usize = 8;
@@ -134,7 +133,7 @@ pub enum UdpResponseSendOutcome {
 pub(crate) enum InjectOutcome {
     Injected,
     Backpressured,
-    Rejected(PacketRejectReason),
+    Rejected(TunRejectReason),
 }
 
 /// One complete application datagram delivered in EIM-association order.
@@ -1275,8 +1274,7 @@ impl UdpTable {
                 ResponseProcessOutcome::Backpressured
             }
             InjectOutcome::Rejected(reason) => {
-                self.events
-                    .emit(TunEvent::PacketRejected(map_packet_reject(reason)));
+                self.events.emit(TunEvent::PacketRejected(reason));
                 ResponseProcessOutcome::Dropped
             }
         }
@@ -1651,7 +1649,7 @@ mod tests {
 
         assert_eq!(
             table.process_one_response(2, |_, _| {
-                InjectOutcome::Rejected(PacketRejectReason::InvalidHeaderChecksum)
+                InjectOutcome::Rejected(TunRejectReason::InvalidIpChecksum)
             }),
             ResponseProcessOutcome::Dropped
         );
