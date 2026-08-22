@@ -1,0 +1,182 @@
+{
+  "policy_id": "windows-tun-m17-calibration-required-v1",
+  "scenarios": {
+    "fragment-reassembly-throughput": {
+      "metrics": {
+        "reassembly_rate": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "reassembled_payload_bytes_per_second"
+        }
+      }
+    },
+    "idle-cpu-wakeup": {
+      "metrics": {
+        "cpu_idle_cost": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "cpu_nanoseconds_per_second"
+        },
+        "wakeups": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "process_context_switches_per_second"
+        }
+      }
+    },
+    "restart-recovery": {
+      "metrics": {
+        "recovery": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "p99_recovery_nanoseconds"
+        }
+      }
+    },
+    "tcp-256-flow-fairness": {
+      "metrics": {
+        "fairness": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "jain_index_parts_per_billion"
+        }
+      }
+    },
+    "tcp-single-flow": {
+      "metrics": {
+        "cpu_cost": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "cpu_nanoseconds_per_gibibyte"
+        },
+        "throughput": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "bytes_per_second"
+        }
+      }
+    },
+    "udp-8192-association-lookup-expiry": {
+      "metrics": {
+        "expiry_cost": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "nanoseconds_per_8192_expirations"
+        },
+        "lookup_rate": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "lookups_per_second"
+        }
+      }
+    },
+    "udp-packets-per-second": {
+      "metrics": {
+        "packet_rate": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "datagrams_per_second"
+        }
+      }
+    },
+    "wintun-ring-full-drop-rate": {
+      "metrics": {
+        "drop_rate": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "dropped_packets_per_million_responses"
+        }
+      }
+    }
+  },
+  "schema_version": 1,
+  "selection": "windows-tun-m17"
+}

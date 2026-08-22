@@ -104,9 +104,11 @@ pub(in crate::run) struct ClientUdpAssociation {
     pending_session: Option<PendingUdpSession>,
     manager: UdpSessionManager,
     handle: UdpSessionHandle,
+    meter_global_buffers: bool,
     live_ids: Arc<Mutex<HashSet<UdpSessionId>>>,
     upstream: ClientUdpUpstream,
     direct_target: Option<TargetAddr>,
+    direct_response_policy: DirectUdpResponsePolicy,
     direct_peers: VecDeque<SocketAddr>,
     direct_candidate_hints: DirectUdpCandidateHints,
     direct_resolver: ferrum2_runtime::ApplicationResolverAdapter,
@@ -116,7 +118,7 @@ pub(in crate::run) struct ClientUdpAssociation {
     inner_wire: Option<Vec<u8>>,
     upstream_wire: Option<Vec<u8>>,
     scratch: Option<UdpPacketScratch>,
-    _fixed_capacity: Vec<UdpBufferReservation>,
+    _metered_fixed_capacity: Vec<UdpBufferReservation>,
     #[cfg(test)]
     io_fault: Option<Arc<UdpIoFaultPlan>>,
 }
@@ -129,10 +131,56 @@ enum ClientUdpUpstream {
 enum ClientDirectUdpSocket {
     System(SystemDirectUdpSocket),
     #[cfg(windows)]
-    Managed {
-        ipv4: UdpSocket,
-        ipv6: Option<UdpSocket>,
-    },
+    Managed(UdpSocket),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectUdpResponsePolicy {
+    OutstandingPeers,
+    TunSink(DirectUdpFamily),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectUdpFamily {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectUdpResponseMatch {
+    OutstandingPeer(usize),
+    TunSink,
+}
+
+impl DirectUdpFamily {
+    fn matches(self, endpoint: SocketAddr) -> bool {
+        matches!(
+            (self, endpoint),
+            (Self::Ipv4, SocketAddr::V4(_)) | (Self::Ipv6, SocketAddr::V6(_))
+        )
+    }
+}
+
+impl DirectUdpResponsePolicy {
+    fn classify(
+        self,
+        expected_peers: &VecDeque<SocketAddr>,
+        source: SocketAddr,
+    ) -> Option<DirectUdpResponseMatch> {
+        match self {
+            Self::OutstandingPeers => expected_peers
+                .iter()
+                .position(|expected| *expected == source)
+                .map(DirectUdpResponseMatch::OutstandingPeer),
+            // TUN owns endpoint-independent mapping and its response sink owns
+            // ADF/EIF source admission. The direct child only enforces the
+            // socket family before handing the datagram to that policy owner.
+            Self::TunSink(family) if family.matches(source) => {
+                Some(DirectUdpResponseMatch::TunSink)
+            }
+            Self::TunSink(_) => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -172,24 +220,20 @@ impl DirectUdpCandidateHints {
     }
 }
 
-#[cfg(windows)]
-pub(super) const fn managed_direct_udp_ipv6_allowed(origin: ClientRequestOrigin) -> bool {
-    matches!(origin, ClientRequestOrigin::Socks)
-}
-
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManagedUdpBinding {
-    Fixed(std::net::SocketAddrV4),
-    Default,
+    Fixed(SocketAddr),
+    Target(SocketAddr),
 }
 
 #[cfg(all(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ManagedUdpEvent {
     OpenV4,
-    BindFixed(std::net::SocketAddrV4),
-    BindDefault,
+    OpenV6,
+    BindFixed(SocketAddr),
+    BindTarget(SocketAddr),
     Connect(SocketAddr),
 }
 
@@ -202,22 +246,22 @@ fn managed_udp_binding(
 ) -> Result<Option<ManagedUdpBinding>, ()> {
     match selected {
         SelectedEgress::Shadowsocks { first_server } if auto_route => {
-            let SocketAddr::V4(endpoint) = first_server else {
-                return Err(());
-            };
-            Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
+            Ok(Some(ManagedUdpBinding::Fixed(first_server)))
         }
         SelectedEgress::Shadowsocks { .. } => Ok(None),
         SelectedEgress::Direct { .. } if auto_route && origin == ClientRequestOrigin::Dns => {
             match target.and_then(TargetAddr::as_socket_addr) {
-                Some(SocketAddr::V4(endpoint)) => Ok(Some(ManagedUdpBinding::Fixed(endpoint))),
-                Some(SocketAddr::V6(_)) => Err(()),
-                None => Ok(Some(ManagedUdpBinding::Default)),
+                Some(endpoint) => Ok(Some(ManagedUdpBinding::Fixed(endpoint))),
+                // There is no safe adapter-wide fallback: a deferred destination
+                // must be resolved to a numeric bootstrap before opening its socket.
+                None => Err(()),
             }
         }
-        SelectedEgress::Direct { .. } if auto_route || origin == ClientRequestOrigin::Tun => {
-            Ok(Some(ManagedUdpBinding::Default))
-        }
+        SelectedEgress::Direct { .. } if auto_route || origin == ClientRequestOrigin::Tun => target
+            .and_then(TargetAddr::as_socket_addr)
+            .map(ManagedUdpBinding::Target)
+            .map(Some)
+            .ok_or(()),
         SelectedEgress::Direct { .. } => Ok(None),
     }
 }
@@ -227,12 +271,9 @@ trait ManagedUdpOperations {
     type Socket;
 
     async fn open_v4(&mut self) -> io::Result<Self::Socket>;
-    fn bind_fixed(
-        &self,
-        _socket: &Self::Socket,
-        endpoint: std::net::SocketAddrV4,
-    ) -> Result<(), ()>;
-    fn bind_default(&self, socket: &Self::Socket) -> Result<(), ()>;
+    async fn open_v6(&mut self) -> io::Result<Self::Socket>;
+    fn bind_fixed(&self, socket: &Self::Socket, endpoint: SocketAddr) -> Result<(), ()>;
+    fn bind_target(&self, socket: &Self::Socket, target: SocketAddr) -> Result<(), ()>;
     async fn connect(&self, socket: &Self::Socket, endpoint: SocketAddr) -> io::Result<()>;
 }
 
@@ -242,10 +283,21 @@ async fn open_managed_udp<O: ManagedUdpOperations>(
     binding: ManagedUdpBinding,
     connect: Option<SocketAddr>,
 ) -> Result<O::Socket, ()> {
-    let socket = operations.open_v4().await.map_err(|_| ())?;
+    let binding_endpoint = match binding {
+        ManagedUdpBinding::Fixed(endpoint) | ManagedUdpBinding::Target(endpoint) => endpoint,
+    };
+    if connect.is_some_and(|endpoint| endpoint.is_ipv4() != binding_endpoint.is_ipv4()) {
+        return Err(());
+    }
+    let socket = if binding_endpoint.is_ipv4() {
+        operations.open_v4().await
+    } else {
+        operations.open_v6().await
+    }
+    .map_err(|_| ())?;
     match binding {
         ManagedUdpBinding::Fixed(endpoint) => operations.bind_fixed(&socket, endpoint)?,
-        ManagedUdpBinding::Default => operations.bind_default(&socket)?,
+        ManagedUdpBinding::Target(target) => operations.bind_target(&socket, target)?,
     }
     if let Some(endpoint) = connect {
         operations
@@ -261,13 +313,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
         match self {
             Self::System(socket) => socket.send_to(payload, target).await,
             #[cfg(windows)]
-            Self::Managed { ipv4, .. } if target.is_ipv4() => ipv4.send_to(payload, target).await,
-            #[cfg(windows)]
-            Self::Managed {
-                ipv6: Some(ipv6), ..
-            } => ipv6.send_to(payload, target).await,
-            #[cfg(windows)]
-            Self::Managed { ipv6: None, .. } => Err(io::Error::other("managed IPv4 required")),
+            Self::Managed(socket) => socket.send_to(payload, target).await,
         }
     }
 
@@ -275,15 +321,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
         match self {
             Self::System(socket) => socket.readable().await,
             #[cfg(windows)]
-            Self::Managed {
-                ipv4,
-                ipv6: Some(ipv6),
-            } => tokio::select! {
-                result = ipv4.readable() => result,
-                result = ipv6.readable() => result,
-            },
-            #[cfg(windows)]
-            Self::Managed { ipv4, ipv6: None } => ipv4.readable().await,
+            Self::Managed(socket) => socket.readable().await,
         }
     }
 
@@ -291,27 +329,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
         match self {
             Self::System(socket) => socket.recv_buf_from(payload).await,
             #[cfg(windows)]
-            Self::Managed {
-                ipv4,
-                ipv6: Some(ipv6),
-            } => loop {
-                let ready = tokio::select! {
-                    result = ipv4.readable() => {
-                        result?;
-                        ipv4
-                    }
-                    result = ipv6.readable() => {
-                        result?;
-                        ipv6
-                    }
-                };
-                match ready.try_recv_buf_from(payload) {
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    result => break result,
-                }
-            },
-            #[cfg(windows)]
-            Self::Managed { ipv4, ipv6: None } => ipv4.recv_buf_from(payload).await,
+            Self::Managed(socket) => socket.recv_buf_from(payload).await,
         }
     }
 
@@ -319,17 +337,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
         match self {
             Self::System(socket) => socket.try_recv_buf_from(payload),
             #[cfg(windows)]
-            Self::Managed {
-                ipv4,
-                ipv6: Some(ipv6),
-            } => match ipv4.try_recv_buf_from(payload) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    ipv6.try_recv_buf_from(payload)
-                }
-                result => result,
-            },
-            #[cfg(windows)]
-            Self::Managed { ipv4, ipv6: None } => ipv4.try_recv_buf_from(payload),
+            Self::Managed(socket) => socket.try_recv_buf_from(payload),
         }
     }
 }
@@ -499,6 +507,7 @@ impl ClientUdpAssociation {
             protocol,
             manager,
             handle,
+            meter_global_buffers,
             inner_wire,
             upstream_wire,
             scratch,
@@ -531,6 +540,7 @@ impl ClientUdpAssociation {
                 commits,
                 manager,
                 *handle,
+                *meter_global_buffers,
                 &egress.clock,
             );
         }
@@ -576,6 +586,7 @@ impl ClientUdpAssociation {
                     commits,
                     manager,
                     *handle,
+                    *meter_global_buffers,
                     &egress.clock,
                 );
             }
@@ -609,12 +620,38 @@ impl ClientUdpAssociation {
         allocated_capacity: usize,
     ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
         match self.pending_session.as_ref() {
-            Some(session) => session.reserve_datagram(UdpDirection::ToTarget, allocated_capacity),
-            None => self.manager.reserve_datagram(
+            Some(session) if self.meter_global_buffers => {
+                session.reserve_datagram(UdpDirection::ToTarget, allocated_capacity)
+            }
+            Some(session) => {
+                session.reserve_unmetered_datagram(UdpDirection::ToTarget, allocated_capacity)
+            }
+            None if self.meter_global_buffers => self.manager.reserve_datagram(
                 self.handle,
                 UdpDirection::ToTarget,
                 allocated_capacity,
             ),
+            None => self.manager.reserve_unmetered_datagram(
+                self.handle,
+                UdpDirection::ToTarget,
+                allocated_capacity,
+            ),
+        }
+    }
+
+    fn reserve_response_datagram(
+        &self,
+        allocated_capacity: usize,
+    ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
+        if self.meter_global_buffers {
+            self.manager
+                .reserve_datagram(self.handle, UdpDirection::ToClient, allocated_capacity)
+        } else {
+            self.manager.reserve_unmetered_datagram(
+                self.handle,
+                UdpDirection::ToClient,
+                allocated_capacity,
+            )
         }
     }
 
@@ -737,11 +774,7 @@ impl ClientUdpAssociation {
                 self.restore_direct_wire(payload);
                 return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
             }
-            let reservation = match self.manager.reserve_datagram(
-                self.handle,
-                UdpDirection::ToClient,
-                payload.capacity(),
-            ) {
+            let reservation = match self.reserve_response_datagram(payload.capacity()) {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     self.restore_direct_wire(payload);
@@ -806,7 +839,9 @@ impl ClientUdpAssociation {
                 socket.send(&upstream_wire[..wire_len]).await
             }
             ClientUdpUpstream::Direct(socket) => {
-                if self.direct_peers.len() >= UDP_SESSION_QUEUE_DEPTH {
+                let tracks_outstanding =
+                    self.direct_response_policy == DirectUdpResponsePolicy::OutstandingPeers;
+                if tracks_outstanding && self.direct_peers.len() >= UDP_SESSION_QUEUE_DEPTH {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "direct UDP outstanding queue is full",
@@ -829,7 +864,9 @@ impl ClientUdpAssociation {
                     self.direct_timeout,
                 )
                 .await?;
-                self.direct_peers.push_back(peer);
+                if tracks_outstanding {
+                    self.direct_peers.push_back(peer);
+                }
                 Ok(length)
             }
         }
@@ -856,9 +893,10 @@ impl ClientUdpAssociation {
                 if self.pending_direct_response.is_some() {
                     return Err(io::Error::other("direct UDP response was not consumed"));
                 }
-                let (length, source, position) = receive_expected_direct_response(
+                let (length, source, response_match) = receive_direct_response(
                     socket,
                     &self.direct_peers,
+                    self.direct_response_policy,
                     self.direct_wire
                         .as_mut()
                         .ok_or_else(|| io::Error::other("direct UDP wire buffer unavailable"))?,
@@ -870,7 +908,9 @@ impl ClientUdpAssociation {
                     .expect("direct UDP receive owns its wire buffer");
                 let unused = payload.split_off(length);
                 drop(unused);
-                self.direct_peers.remove(position);
+                if let DirectUdpResponseMatch::OutstandingPeer(position) = response_match {
+                    self.direct_peers.remove(position);
+                }
                 self.pending_direct_response = Some((payload, source));
                 Ok(length)
             }
@@ -998,11 +1038,15 @@ where
         (self.bind)(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await
     }
 
-    fn bind_fixed(
-        &self,
-        _socket: &Self::Socket,
-        endpoint: std::net::SocketAddrV4,
-    ) -> Result<(), ()> {
+    async fn open_v6(&mut self) -> io::Result<Self::Socket> {
+        #[cfg(test)]
+        self.egress
+            .record_managed_udp_event(ManagedUdpEvent::OpenV6)
+            .map_err(|()| io::Error::other("injected managed UDP open failure"))?;
+        (self.bind)(SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)).await
+    }
+
+    fn bind_fixed(&self, _socket: &Self::Socket, endpoint: SocketAddr) -> Result<(), ()> {
         #[cfg(test)]
         return self
             .egress
@@ -1014,13 +1058,16 @@ where
             .map_err(|_| ())
     }
 
-    fn bind_default(&self, _socket: &Self::Socket) -> Result<(), ()> {
+    fn bind_target(&self, _socket: &Self::Socket, target: SocketAddr) -> Result<(), ()> {
         #[cfg(test)]
         return self
             .egress
-            .record_managed_udp_event(ManagedUdpEvent::BindDefault);
+            .record_managed_udp_event(ManagedUdpEvent::BindTarget(target));
         #[cfg(not(test))]
-        self.egress.underlay.bind_default(_socket).map_err(|_| ())
+        self.egress
+            .underlay
+            .bind_target(_socket, target)
+            .map_err(|_| ())
     }
 
     async fn connect(&self, socket: &Self::Socket, endpoint: SocketAddr) -> io::Result<()> {
@@ -1068,18 +1115,21 @@ where
         .reserve_session(Instant::now())
         .map_err(|_| ())?;
     let handle = pending_session.handle();
+    let meter_global_buffers = origin != ClientRequestOrigin::Tun;
     let budget = udp.manager.buffer_budget();
     let fixed_buffer_count = match selected {
         SelectedEgress::Direct { .. } => 1,
         SelectedEgress::Shadowsocks { .. } => 3,
     };
     let mut fixed_capacity = Vec::with_capacity(fixed_buffer_count);
-    for _ in 0..fixed_buffer_count {
-        let capacity = match selected {
-            SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
-            SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
-        };
-        fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
+    if meter_global_buffers {
+        for _ in 0..fixed_buffer_count {
+            let capacity = match selected {
+                SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
+                SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
+            };
+            fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
+        }
     }
     let inner_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
         .then(|| vec![0_u8; MAX_UDP_WIRE_LEN]);
@@ -1090,6 +1140,17 @@ where
     let first_server = match selected {
         SelectedEgress::Shadowsocks { first_server } => Some(first_server),
         SelectedEgress::Direct { .. } => None,
+    };
+    let direct_response_policy = match (selected, origin) {
+        (SelectedEgress::Direct { .. }, ClientRequestOrigin::Tun) => {
+            let endpoint = target.and_then(TargetAddr::as_socket_addr).ok_or(())?;
+            DirectUdpResponsePolicy::TunSink(if endpoint.is_ipv4() {
+                DirectUdpFamily::Ipv4
+            } else {
+                DirectUdpFamily::Ipv6
+            })
+        }
+        _ => DirectUdpResponsePolicy::OutstandingPeers,
     };
     let upstream = match selected {
         SelectedEgress::Shadowsocks { first_server } => {
@@ -1131,7 +1192,7 @@ where
         SelectedEgress::Direct { .. } => {
             #[cfg(windows)]
             if let Some(binding) = managed_binding {
-                let ipv4 = open_managed_udp(
+                let socket = open_managed_udp(
                     &mut ClientManagedUdpOperations {
                         egress,
                         bind: &mut bind,
@@ -1141,16 +1202,7 @@ where
                     None,
                 )
                 .await?;
-                let ipv6 = if managed_direct_udp_ipv6_allowed(origin) {
-                    Some(
-                        bind(SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0))
-                            .await
-                            .map_err(|_| ())?,
-                    )
-                } else {
-                    None
-                };
-                ClientUdpUpstream::Direct(ClientDirectUdpSocket::Managed { ipv4, ipv6 })
+                ClientUdpUpstream::Direct(ClientDirectUdpSocket::Managed(socket))
             } else {
                 ClientUdpUpstream::Direct(ClientDirectUdpSocket::System(
                     SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?,
@@ -1169,9 +1221,11 @@ where
         pending_session: Some(pending_session),
         manager: udp.manager.clone(),
         handle,
+        meter_global_buffers,
         live_ids: Arc::clone(&udp.live_ids),
         upstream,
         direct_target: None,
+        direct_response_policy,
         direct_peers: VecDeque::with_capacity(UDP_SESSION_QUEUE_DEPTH),
         direct_candidate_hints: DirectUdpCandidateHints::default(),
         direct_resolver,
@@ -1182,7 +1236,7 @@ where
         inner_wire,
         upstream_wire,
         scratch,
-        _fixed_capacity: fixed_capacity,
+        _metered_fixed_capacity: fixed_capacity,
         #[cfg(test)]
         io_fault: None,
     })
@@ -1253,11 +1307,12 @@ async fn send_direct_candidate(
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP send timeout"))?
 }
 
-async fn receive_expected_direct_response(
+async fn receive_direct_response(
     socket: &impl DirectUdpSocket,
     expected_peers: &VecDeque<SocketAddr>,
+    policy: DirectUdpResponsePolicy,
     payload: &mut BytesMut,
-) -> io::Result<(usize, SocketAddr, usize)> {
+) -> io::Result<(usize, SocketAddr, DirectUdpResponseMatch)> {
     loop {
         payload.clear();
         let mut received = socket.recv_buf_from(payload).await?;
@@ -1268,11 +1323,8 @@ async fn receive_expected_direct_response(
                     "invalid direct UDP receive length",
                 ));
             }
-            if let Some(position) = expected_peers
-                .iter()
-                .position(|expected| *expected == received.1)
-            {
-                return Ok((received.0, received.1, position));
+            if let Some(response_match) = policy.classify(expected_peers, received.1) {
+                return Ok((received.0, received.1, response_match));
             }
             if drained == MAX_DIRECT_UDP_READINESS_DRAIN {
                 tokio::task::yield_now().await;
@@ -1341,6 +1393,7 @@ fn commit_final_udp_response(
     mut commits: Vec<UdpResponseCommit>,
     manager: &UdpSessionManager,
     handle: UdpSessionHandle,
+    meter_global_buffers: bool,
     clock: &(impl Clock + ?Sized),
 ) -> Result<AccountedDatagram, UdpPlanResponseError> {
     let socks_len = 3_usize
@@ -1352,9 +1405,16 @@ fn commit_final_udp_response(
     {
         return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
     }
-    let reservation = manager
-        .reserve_datagram(handle, UdpDirection::ToClient, pending.allocated_capacity())
-        .map_err(UdpPlanResponseError::Runtime)?;
+    let reservation = if meter_global_buffers {
+        manager.reserve_datagram(handle, UdpDirection::ToClient, pending.allocated_capacity())
+    } else {
+        manager.reserve_unmetered_datagram(
+            handle,
+            UdpDirection::ToClient,
+            pending.allocated_capacity(),
+        )
+    }
+    .map_err(UdpPlanResponseError::Runtime)?;
     let (datagram, commit) = pending.materialize().into_parts();
     commits.push(commit);
     let sessions = plan
@@ -1491,9 +1551,26 @@ mod tests {
         KeySelector, MethodKeyProvider, MethodPsk, MethodSecretKeyRef, MethodSinglePskProvider,
     };
     use ferrum2_runtime::{OwnerRegistry, UdpRuntimeLimits};
+    use ferrum2_shadowsocks::UdpServer;
 
     use super::*;
     use crate::run::test_support::*;
+
+    fn exhaust_budget(
+        budget: &ferrum2_runtime::UdpBufferBudget,
+        limit: usize,
+    ) -> Vec<UdpBufferReservation> {
+        let mut remaining = limit
+            .checked_sub(budget.reserved_bytes())
+            .expect("test budget is not overcommitted");
+        let mut held = Vec::new();
+        while remaining != 0 {
+            let capacity = remaining.min(MAX_UDP_WIRE_DATAGRAM_BYTES);
+            held.push(budget.reserve(capacity).expect("fill test budget"));
+            remaining -= capacity;
+        }
+        held
+    }
 
     struct FailingConfiguredApplicationBackend {
         calls: AtomicUsize,
@@ -1524,17 +1601,18 @@ mod tests {
             Ok(())
         }
 
-        fn bind_fixed(
-            &self,
-            _socket: &Self::Socket,
-            _endpoint: std::net::SocketAddrV4,
-        ) -> Result<(), ()> {
+        async fn open_v6(&mut self) -> io::Result<Self::Socket> {
+            self.events.lock().unwrap().push("open-v6");
+            Ok(())
+        }
+
+        fn bind_fixed(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> Result<(), ()> {
             self.events.lock().unwrap().push("bind-fixed");
             if self.fail_binding { Err(()) } else { Ok(()) }
         }
 
-        fn bind_default(&self, _socket: &Self::Socket) -> Result<(), ()> {
-            self.events.lock().unwrap().push("bind-default");
+        fn bind_target(&self, _socket: &Self::Socket, _target: SocketAddr) -> Result<(), ()> {
+            self.events.lock().unwrap().push("bind-target");
             if self.fail_binding { Err(()) } else { Ok(()) }
         }
 
@@ -1545,8 +1623,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_udp_binding_precedes_io_and_failure_has_no_retry() {
-        let endpoint = "198.51.100.8:53".parse().unwrap();
+    async fn managed_udp_children_open_isolated_dual_stack_sockets_in_binding_order() {
+        let endpoint: SocketAddr = "198.51.100.8:53".parse().unwrap();
         let mut fixed = InjectedManagedUdp {
             events: Mutex::new(Vec::new()),
             fail_binding: false,
@@ -1554,7 +1632,7 @@ mod tests {
         open_managed_udp(
             &mut fixed,
             ManagedUdpBinding::Fixed(endpoint),
-            Some(SocketAddr::V4(endpoint)),
+            Some(endpoint),
         )
         .await
         .unwrap();
@@ -1563,26 +1641,37 @@ mod tests {
             ["open-v4", "bind-fixed", "connect"]
         );
 
+        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
+        let mut fixed_ipv6 = InjectedManagedUdp {
+            events: Mutex::new(Vec::new()),
+            fail_binding: false,
+        };
+        open_managed_udp(&mut fixed_ipv6, ManagedUdpBinding::Fixed(ipv6), Some(ipv6))
+            .await
+            .unwrap();
+        assert_eq!(
+            *fixed_ipv6.events.lock().unwrap(),
+            ["open-v6", "bind-fixed", "connect"]
+        );
+
         let mut failed = InjectedManagedUdp {
             events: Mutex::new(Vec::new()),
             fail_binding: true,
         };
         assert!(
-            open_managed_udp(
-                &mut failed,
-                ManagedUdpBinding::Default,
-                Some(SocketAddr::V4(endpoint)),
-            )
-            .await
-            .is_err()
+            open_managed_udp(&mut failed, ManagedUdpBinding::Target(ipv6), Some(ipv6),)
+                .await
+                .is_err()
         );
-        assert_eq!(*failed.events.lock().unwrap(), ["open-v4", "bind-default"]);
+        assert_eq!(*failed.events.lock().unwrap(), ["open-v6", "bind-target"]);
     }
 
     #[test]
     fn dns_direct_fixed_binding_uses_the_numeric_bootstrap() {
-        let endpoint = "198.51.100.8:53".parse().unwrap();
-        let target = TargetAddr::ip(SocketAddr::V4(endpoint)).unwrap();
+        let endpoint: SocketAddr = "198.51.100.8:53".parse().unwrap();
+        let target = TargetAddr::ip(endpoint).unwrap();
+        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
+        let ipv6_target = TargetAddr::ip(ipv6).unwrap();
         let deferred = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
         assert_eq!(
             managed_udp_binding(
@@ -1592,6 +1681,15 @@ mod tests {
                 Some(&target),
             ),
             Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
+        );
+        assert_eq!(
+            managed_udp_binding(
+                ClientRequestOrigin::Dns,
+                SelectedEgress::Direct { outbound: None },
+                true,
+                Some(&ipv6_target),
+            ),
+            Ok(Some(ManagedUdpBinding::Fixed(ipv6)))
         );
         assert_eq!(
             managed_udp_binding(
@@ -1609,7 +1707,7 @@ mod tests {
                 true,
                 Some(&deferred),
             ),
-            Ok(Some(ManagedUdpBinding::Default))
+            Err(())
         );
         assert_eq!(
             managed_udp_binding(
@@ -1618,7 +1716,7 @@ mod tests {
                 true,
                 Some(&target),
             ),
-            Ok(Some(ManagedUdpBinding::Default))
+            Ok(Some(ManagedUdpBinding::Target(endpoint)))
         );
         assert_eq!(
             managed_udp_binding(
@@ -1627,7 +1725,7 @@ mod tests {
                 false,
                 Some(&target),
             ),
-            Ok(Some(ManagedUdpBinding::Default))
+            Ok(Some(ManagedUdpBinding::Target(endpoint)))
         );
         assert_eq!(
             managed_udp_binding(
@@ -1636,13 +1734,13 @@ mod tests {
                 true,
                 Some(&target),
             ),
-            Ok(Some(ManagedUdpBinding::Default))
+            Ok(Some(ManagedUdpBinding::Target(endpoint)))
         );
         assert_eq!(
             managed_udp_binding(
                 ClientRequestOrigin::Socks,
                 SelectedEgress::Shadowsocks {
-                    first_server: SocketAddr::V4(endpoint),
+                    first_server: endpoint,
                 },
                 true,
                 None,
@@ -1706,8 +1804,8 @@ mod tests {
             )
             .with_underlay(ferrum2_tun::UnderlayPublisher::new(), auto_route)
         };
-        let endpoint = "198.51.100.8:53".parse().unwrap();
-        let target = TargetAddr::ip(SocketAddr::V4(endpoint)).unwrap();
+        let endpoint: SocketAddr = "198.51.100.8:53".parse().unwrap();
+        let target = TargetAddr::ip(endpoint).unwrap();
 
         let engine = make_engine(true);
         let association = engine
@@ -1725,19 +1823,18 @@ mod tests {
 
         let deferred = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
         let deferred_engine = make_engine(true);
-        let association = deferred_engine
-            .prepare_udp(
-                ClientRequestOrigin::Dns,
-                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
-                Some(&deferred),
-            )
-            .await
-            .unwrap();
         assert_eq!(
-            deferred_engine.managed_udp_events(),
-            [ManagedUdpEvent::OpenV4, ManagedUdpEvent::BindDefault]
+            deferred_engine
+                .prepare_udp(
+                    ClientRequestOrigin::Dns,
+                    Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                    Some(&deferred),
+                )
+                .await
+                .err(),
+            Some(super::super::ClientUdpPrepareFailure::Unavailable)
         );
-        drop(association);
+        assert!(deferred_engine.managed_udp_events().is_empty());
 
         let failed = make_engine(true);
         failed.fail_managed_udp_binding();
@@ -1775,7 +1872,27 @@ mod tests {
             .unwrap();
         assert_eq!(
             tun.managed_udp_events(),
-            [ManagedUdpEvent::OpenV4, ManagedUdpEvent::BindDefault]
+            [
+                ManagedUdpEvent::OpenV4,
+                ManagedUdpEvent::BindTarget(endpoint)
+            ]
+        );
+        drop(association);
+
+        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
+        let ipv6_target = TargetAddr::ip(ipv6).unwrap();
+        let tun_ipv6 = make_engine(false);
+        let association = tun_ipv6
+            .prepare_udp(
+                ClientRequestOrigin::Tun,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                Some(&ipv6_target),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tun_ipv6.managed_udp_events(),
+            [ManagedUdpEvent::OpenV6, ManagedUdpEvent::BindTarget(ipv6)]
         );
         drop(association);
     }
@@ -1938,6 +2055,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_response_policies_separate_tun_family_from_exact_outstanding_peer() {
+        let expected: SocketAddr = "192.0.2.8:53".parse().unwrap();
+        let alternate_port: SocketAddr = "192.0.2.8:5353".parse().unwrap();
+        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
+        let peers = VecDeque::from([expected]);
+
+        assert_eq!(
+            DirectUdpResponsePolicy::OutstandingPeers.classify(&peers, expected),
+            Some(DirectUdpResponseMatch::OutstandingPeer(0))
+        );
+        assert_eq!(
+            DirectUdpResponsePolicy::OutstandingPeers.classify(&peers, alternate_port),
+            None,
+            "SOCKS and DNS remain bound to an exact outstanding endpoint"
+        );
+        assert_eq!(
+            DirectUdpResponsePolicy::TunSink(DirectUdpFamily::Ipv4)
+                .classify(&VecDeque::new(), alternate_port),
+            Some(DirectUdpResponseMatch::TunSink),
+            "TUN defers same-family source admission to its ADF/EIF sink"
+        );
+        assert_eq!(
+            DirectUdpResponsePolicy::TunSink(DirectUdpFamily::Ipv4).classify(&peers, ipv6),
+            None
+        );
+        assert_eq!(
+            DirectUdpResponsePolicy::TunSink(DirectUdpFamily::Ipv6).classify(&peers, expected),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn direct_response_readiness_drain_is_bounded_and_yields() {
         let invalid: SocketAddr = "127.0.0.1:40000".parse().unwrap();
@@ -1963,10 +2112,14 @@ mod tests {
         let mut payload = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
         let peers = VecDeque::from([expected]);
 
-        let (length, source, position) =
-            receive_expected_direct_response(&socket, &peers, &mut payload)
-                .await
-                .expect("bounded drain response");
+        let (length, source, response_match) = receive_direct_response(
+            &socket,
+            &peers,
+            DirectUdpResponsePolicy::OutstandingPeers,
+            &mut payload,
+        )
+        .await
+        .expect("bounded drain response");
 
         assert!(scheduler_ran.load(Ordering::SeqCst));
         probe.await.expect("scheduler probe");
@@ -1975,8 +2128,362 @@ mod tests {
             socket.try_calls.load(Ordering::SeqCst),
             MAX_DIRECT_UDP_READINESS_DRAIN - 1
         );
-        assert_eq!((length, source, position), (8, expected, 0));
+        assert_eq!((length, source), (8, expected));
+        assert_eq!(response_match, DirectUdpResponseMatch::OutstandingPeer(0));
         assert_eq!(&payload[..], b"accepted");
+    }
+
+    #[tokio::test]
+    async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_gate() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let budget_limit = ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES;
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(8, budget_limit, ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT)
+                .expect("test limits"),
+            registry.clone(),
+        );
+        let budget = manager.buffer_budget();
+        let held_budget = exhaust_budget(&budget, budget_limit);
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager,
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            None,
+        );
+        let target_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("TUN target bind");
+        let target_endpoint = target_socket.local_addr().expect("TUN target address");
+        let target = TargetAddr::ip(target_endpoint).expect("TUN target");
+        let mut association = engine
+            .prepare_udp(
+                ClientRequestOrigin::Tun,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                Some(&target),
+            )
+            .await
+            .expect("direct TUN association");
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        association.activate(&engine).expect("direct activation");
+
+        for sequence in 0..=UDP_SESSION_QUEUE_DEPTH {
+            let payload = [u8::try_from(sequence).expect("bounded sequence")];
+            let length = association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    target.clone(),
+                    &payload,
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("TUN direct request"));
+            assert_eq!(association.send_encoded_request(length).await.unwrap(), 1);
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+        }
+        assert!(
+            association.direct_peers.is_empty(),
+            "TUN sends must not consume the SOCKS/DNS outstanding queue"
+        );
+
+        let mut wire = [0_u8; 8];
+        let mut association_endpoint = None;
+        let mut received_sequences = Vec::with_capacity(UDP_SESSION_QUEUE_DEPTH + 1);
+        for _ in 0..=UDP_SESSION_QUEUE_DEPTH {
+            let (length, peer) =
+                tokio::time::timeout(Duration::from_secs(1), target_socket.recv_from(&mut wire))
+                    .await
+                    .expect("TUN target receive timeout")
+                    .expect("TUN target receive");
+            assert_eq!(length, 1);
+            received_sequences.push(wire[0]);
+            match association_endpoint {
+                Some(expected) => assert_eq!(peer, expected),
+                None => association_endpoint = Some(peer),
+            }
+        }
+        received_sequences.sort_unstable();
+        assert_eq!(
+            received_sequences,
+            (0..=UDP_SESSION_QUEUE_DEPTH)
+                .map(|sequence| u8::try_from(sequence).expect("bounded sequence"))
+                .collect::<Vec<_>>()
+        );
+        let association_endpoint = association_endpoint.expect("direct association endpoint");
+
+        for payload in [b"alternate-one".as_slice(), b"alternate-two".as_slice()] {
+            let alternate = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("alternate source bind");
+            let alternate_endpoint = alternate.local_addr().expect("alternate source address");
+            assert_ne!(alternate_endpoint.port(), target_endpoint.port());
+            alternate
+                .send_to(payload, association_endpoint)
+                .await
+                .expect("alternate source send");
+
+            let length =
+                tokio::time::timeout(Duration::from_secs(1), association.receive_response_wire())
+                    .await
+                    .expect("same-family alternate-port response timeout")
+                    .expect("same-family alternate-port response");
+            let response = association
+                .prepare_application_response(&engine, &engine.outbounds, length)
+                .unwrap_or_else(|_| panic!("TUN direct response"));
+            assert_eq!(
+                response.datagram().target(),
+                &TargetAddr::ip(alternate_endpoint).expect("alternate target")
+            );
+            assert_eq!(response.datagram().payload(), payload);
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+            association.recycle_application_response(response);
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+        }
+
+        drop(association);
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        drop(held_budget);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot(), baseline);
+    }
+
+    #[tokio::test]
+    async fn proxy_tun_udp_request_and_response_ignore_an_exhausted_global_byte_budget() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let budget_limit = ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES;
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(8, budget_limit, ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT)
+                .expect("test limits"),
+            registry.clone(),
+        );
+        let budget = manager.buffer_budget();
+        let held_budget = exhaust_budget(&budget, budget_limit);
+        let proxy_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy bind");
+        let proxy_endpoint = proxy_socket.local_addr().expect("proxy address");
+        let outbounds = super::super::prepare_client_outbounds(vec![
+            ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: proxy_endpoint,
+                psk: Arc::new(default_test_psk()),
+            },
+        ])
+        .expect("proxy outbound");
+        let engine = ClientEgressEngine::new(
+            outbounds,
+            TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager,
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            None,
+        );
+        let server_keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk()));
+        let server = UdpServer::new(&server_keys).expect("proxy protocol");
+        let server_clock = ferrum2_crypto::SystemClock::new();
+        let server_random = ferrum2_crypto::SystemRandom;
+        let target =
+            TargetAddr::ip("192.0.2.25:53".parse().expect("target address")).expect("target");
+        let mut association = engine
+            .prepare_udp(
+                ClientRequestOrigin::Tun,
+                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+                Some(&target),
+            )
+            .await
+            .expect("proxy TUN association with exhausted budget");
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        association.activate(&engine).expect("proxy activation");
+
+        let request_len = association
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                target.clone(),
+                b"proxy-request",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("proxy TUN request with exhausted budget"));
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        association
+            .send_encoded_request(request_len)
+            .await
+            .expect("proxy request send");
+        let mut request_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
+        let (request_wire_len, peer) = proxy_socket
+            .recv_from(&mut request_wire)
+            .await
+            .expect("proxy request receive");
+        let mut server_scratch = UdpPacketScratch::new();
+        let pending = server
+            .prepare_request(
+                &server_clock,
+                &request_wire[..request_wire_len],
+                &mut server_scratch,
+            )
+            .expect("proxy request decode");
+        let (request, commit) = pending.into_parts();
+        assert_eq!(request.target(), &target);
+        assert_eq!(request.payload(), b"proxy-request");
+        let capability = server
+            .commit_request(commit, peer, server_clock.monotonic_now(), &server_random)
+            .expect("proxy request commit")
+            .capability();
+
+        let response_payload = BytesMut::from(&b"proxy-response"[..]);
+        let response_capacity = response_payload.capacity();
+        let response = Datagram::new(target.clone(), response_payload, response_capacity)
+            .expect("proxy response datagram");
+        let mut response_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
+        let encoded = server
+            .encode_response(
+                capability,
+                &server_clock,
+                &server_random,
+                &response,
+                0,
+                &mut response_wire,
+                &mut server_scratch,
+            )
+            .expect("proxy response encode");
+        proxy_socket
+            .send_to(&response_wire[..encoded.wire_len()], encoded.peer())
+            .await
+            .expect("proxy response send");
+        let response_wire_len = association
+            .receive_response_wire()
+            .await
+            .expect("proxy response receive");
+        let response = association
+            .prepare_application_response(&engine, &engine.outbounds, response_wire_len)
+            .unwrap_or_else(|_| panic!("proxy TUN response with exhausted budget"));
+        assert_eq!(response.datagram().target(), &target);
+        assert_eq!(response.datagram().payload(), b"proxy-response");
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        association.recycle_application_response(response);
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+
+        drop(association);
+        drop(held_budget);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot(), baseline);
+    }
+
+    #[tokio::test]
+    async fn ordinary_udp_fixed_request_and_response_buffers_remain_globally_metered() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let budget_limit = ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES;
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(8, budget_limit, ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT)
+                .expect("test limits"),
+            registry.clone(),
+        );
+        let budget = manager.buffer_budget();
+        let engine = ClientEgressEngine::new(
+            vec![ClientOutboundContext::Direct].into(),
+            TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+            ferrum2_crypto::SystemClock::new(),
+            ferrum2_crypto::SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager,
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            None,
+        );
+        let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("ordinary target bind");
+        let target = TargetAddr::ip(echo.local_addr().expect("ordinary target address"))
+            .expect("ordinary target");
+        let direct_plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+        let mut association = engine
+            .prepare_udp(
+                ClientRequestOrigin::Socks,
+                Some(direct_plan.clone()),
+                Some(&target),
+            )
+            .await
+            .expect("ordinary direct association");
+        assert_eq!(
+            budget.reserved_bytes(),
+            MAX_UDP_WIRE_DATAGRAM_BYTES,
+            "ordinary fixed buffer remains globally metered"
+        );
+        association.activate(&engine).expect("ordinary activation");
+        let request_len = association
+            .prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                target.clone(),
+                b"ordinary-request",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("ordinary request"));
+        association
+            .send_encoded_request(request_len)
+            .await
+            .expect("ordinary request send");
+        let mut raw = [0_u8; 32];
+        let (_, peer) = echo.recv_from(&mut raw).await.expect("ordinary receive");
+        echo.send_to(b"ordinary-response", peer)
+            .await
+            .expect("ordinary response send");
+        let response_wire_len = association
+            .receive_response_wire()
+            .await
+            .expect("ordinary response receive");
+
+        let held_budget = exhaust_budget(&budget, budget_limit);
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+        for origin in [
+            ClientRequestOrigin::Socks,
+            ClientRequestOrigin::Dns,
+            ClientRequestOrigin::RuleSet,
+        ] {
+            assert!(
+                engine
+                    .prepare_udp(origin, Some(direct_plan.clone()), Some(&target))
+                    .await
+                    .is_err(),
+                "ordinary association fixed buffers bypassed the full budget for {origin:?}"
+            );
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+        }
+        assert!(matches!(
+            association
+                .prepare_application_response(&engine, &engine.outbounds, response_wire_len,),
+            Err(UdpPlanResponseError::Runtime(UdpRuntimeError::BufferLimit))
+        ));
+        assert!(matches!(
+            association.prepare_application_request(
+                &engine,
+                &engine.outbounds,
+                target,
+                b"blocked-request",
+                Instant::now(),
+            ),
+            Err(UdpPlanResponseError::Runtime(UdpRuntimeError::BufferLimit))
+        ));
+        assert_eq!(budget.reserved_bytes(), budget_limit);
+
+        drop(held_budget);
+        assert_eq!(budget.reserved_bytes(), MAX_UDP_WIRE_DATAGRAM_BYTES);
+        drop(association);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot(), baseline);
     }
 
     #[tokio::test]

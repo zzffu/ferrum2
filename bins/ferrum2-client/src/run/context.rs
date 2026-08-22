@@ -20,6 +20,7 @@ pub(super) struct ClientRouting {
     pub(super) legacy: ferrum2_rule::RouteTable,
     pub(super) program: Option<ferrum2_config::CompiledRoute>,
     pub(super) outbounds: Arc<[ClientOutboundContext]>,
+    pub(super) selector: ferrum2_rule::SelectorControl,
 }
 
 pub(super) struct ClientContext {

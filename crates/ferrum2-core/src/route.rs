@@ -154,7 +154,7 @@ pub fn compile_egress_plans_with_roots(
         .collect::<Result<Vec<_>, _>>()?;
     validate_reachability(&selectors, outbounds, &compiled_plans, &root_actions)?;
 
-    let state = Arc::new(SelectorState { selectors });
+    let state = Arc::new(SelectorState::new(selectors));
     let plans = Arc::new(compiled_plans);
     let control = SelectorControl {
         state: Arc::clone(&state),

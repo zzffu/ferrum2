@@ -23,7 +23,6 @@ const DEFAULT_TUN_READY_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_TUN_MAX_TCP_FLOWS: u64 = 256;
 const DEFAULT_TUN_TCP_BUFFER_BYTES: u64 = 32_768;
 const DEFAULT_TUN_MAX_UDP_MAPPINGS: u64 = 1_024;
-const DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES: u64 = 16_777_216;
 
 mod dependency;
 mod error;
@@ -41,7 +40,7 @@ pub use model::{
     DnsPolicyBlueprintBinding, DnsQueryType, DnsRuntimeConfig, DnsServerConfig, DnsStrategy,
     DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, ReplayConfig, ResolverRef,
     RouteAction, RouteProtocol, RouteSniffConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute,
-    ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig, UdpConfig,
+    ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig, UdpConfig, UdpFiltering,
     ValidatedClientConfig, ValidatedServerConfig,
 };
 pub use prepared::{

@@ -307,6 +307,40 @@ fn tun_only_client() -> String {
     "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".into()
 }
 
+fn tun_client(fields: &str) -> String {
+    format!(
+        "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\n{fields}\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+    )
+}
+
+const TUN_DNS_RUNTIME: &str = "[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"resolver\"\ntransport = \"udp\"\naddress = \"1.1.1.1:53\"\n[dns.route]\nfinal = \"resolver\"\n";
+
+fn assert_tun_check_is_offline_valid(label: &str, source: &str) {
+    let directory = tempfile::tempdir().expect("temporary TUN config directory");
+    let path = directory.path().join(format!("{label}.toml"));
+    std::fs::write(&path, source).expect("TUN config fixture");
+    let output = run_binary(
+        "ferrum2-client",
+        &[
+            "--config",
+            path.to_str().expect("UTF-8 TUN config path"),
+            "--check-config",
+        ],
+    );
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        assert_eq!(output.status.code(), Some(0), "{label}");
+        assert_eq!(output.stdout, b"configuration valid\n", "{label}");
+        assert!(output.stderr.is_empty(), "{label}");
+    } else {
+        assert_eq!(output.status.code(), Some(2), "{label}");
+        assert!(output.stdout.is_empty(), "{label}");
+        assert_eq!(
+            output.stderr, b"error[config.semantic] tun: configuration value is invalid\n",
+            "{label}"
+        );
+    }
+}
+
 fn tagged_client(inbounds: &[SocketAddrV4], servers: &[SocketAddrV4]) -> String {
     let mut source = "schema_version = 1\n".to_owned();
     for (index, listen) in inbounds.iter().enumerate() {
@@ -426,6 +460,130 @@ fn tun_check_config_is_offline_and_has_a_pure_target_gate() {
         assert_eq!(
             output.stderr,
             b"error[config.semantic] tun: configuration value is invalid\n"
+        );
+    }
+}
+
+#[test]
+fn tun_optional_families_routes_dns_and_filtering_are_offline_qualified() {
+    let cases = [
+        (
+            "ipv4-only",
+            "ipv4_address = \"198.18.0.2/30\"\nauto_route = true\nroute_address = [\"0.0.0.0/0\"]\nroute_exclude_address = [\"10.0.0.0/8\", \"192.168.0.0/16\"]\nauto_dns = true\nipv4_dns_address = \"198.18.0.1\"\nudp_filtering = \"address_dependent\"",
+            true,
+        ),
+        (
+            "ipv6-only",
+            "ipv6_address = \"fd00::2/126\"\nauto_route = true\nroute_address = [\"::/0\"]\nroute_exclude_address = [\"2001:db8:ffff::/48\"]\nauto_dns = true\nipv6_dns_address = \"fd00::1\"\nudp_filtering = \"address_dependent\"",
+            true,
+        ),
+        (
+            "dual-stack",
+            "ipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\nroute_exclude_address = [\"10.0.0.0/8\", \"2001:db8:ffff::/48\"]\nauto_dns = true\nipv4_dns_address = \"198.18.0.1\"\nipv6_dns_address = \"fd00::1\"\nudp_filtering = \"endpoint_independent\"",
+            true,
+        ),
+        (
+            "compiled-prefix-difference",
+            "ipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\nroute_address = [\"10.0.0.1/8\", \"2001:db8:1::1/48\"]\nroute_exclude_address = [\"10.128.0.1/9\", \"2001:db8:1:8000::1/49\"]",
+            false,
+        ),
+    ];
+    for (label, fields, dns) in cases {
+        let mut source = tun_client(fields);
+        if dns {
+            source.push_str(TUN_DNS_RUNTIME);
+        }
+        assert_tun_check_is_offline_valid(label, &source);
+    }
+}
+
+#[test]
+fn tun_compiled_capture_plan_is_bounded_after_excludes() {
+    let directory = tempfile::tempdir().expect("temporary compiled-route directory");
+    let compiled_plan = |last_exclude: &str| {
+        let mut excludes = (0..10)
+            .map(|index| format!("\"{index}.0.0.1/32\""))
+            .collect::<Vec<_>>();
+        excludes.push(format!("\"{last_exclude}\""));
+        tun_client(&format!(
+            "ipv4_address = \"198.18.0.2/30\"\nauto_route = true\nroute_exclude_address = [{}]",
+            excludes.join(", ")
+        ))
+    };
+
+    assert_tun_check_is_offline_valid("compiled-route-limit", &compiled_plan("10.0.0.0/18"));
+
+    for (label, source) in [
+        ("compiled-route-over-limit", compiled_plan("10.0.0.0/19")),
+        (
+            "compiled-route-empty",
+            tun_client(
+                "ipv4_address = \"198.18.0.2/30\"\nauto_route = true\nroute_address = [\"10.0.0.1/8\"]\nroute_exclude_address = [\"10.128.0.1/9\", \"10.0.0.1/9\"]",
+            ),
+        ),
+    ] {
+        let path = directory.path().join(format!("{label}.toml"));
+        std::fs::write(&path, source).expect("compiled-route fixture");
+        assert_invalid(
+            "ferrum2-client",
+            &path,
+            "error[config.semantic] tun.route_address: configuration value is invalid\n",
+            label,
+        );
+    }
+}
+
+#[test]
+fn legacy_tun_udp_buffer_field_is_parse_only_and_not_range_checked() {
+    for (label, value) in [
+        ("legacy-zero", "0"),
+        ("legacy-former-minimum-minus-one", "65535"),
+        ("legacy-former-maximum-plus-one", "134217729"),
+        ("legacy-maximum-integer", "18446744073709551615"),
+    ] {
+        let fields = format!("ipv4_address = \"198.18.0.2/30\"\nmax_udp_buffered_bytes = {value}");
+        assert_tun_check_is_offline_valid(label, &tun_client(&fields));
+    }
+}
+
+#[test]
+fn tun_family_mismatches_and_unknown_filter_fail_before_platform_gating() {
+    let directory = tempfile::tempdir().expect("temporary TUN invalid directory");
+    let cases = [
+        (
+            "missing-family",
+            "udp_filtering = \"address_dependent\"",
+            "tun",
+        ),
+        (
+            "ipv4-with-ipv6-route",
+            "ipv4_address = \"198.18.0.2/30\"\nauto_route = true\nroute_address = [\"::/0\"]",
+            "tun.route_address",
+        ),
+        (
+            "ipv6-with-ipv4-exclude",
+            "ipv6_address = \"fd00::2/126\"\nauto_route = true\nroute_exclude_address = [\"10.0.0.0/8\"]",
+            "tun.route_exclude_address",
+        ),
+        (
+            "ipv4-with-ipv6-dns",
+            "ipv4_address = \"198.18.0.2/30\"\nauto_route = true\nauto_dns = true\nipv6_dns_address = \"fd00::1\"",
+            "tun.ipv6_dns_address",
+        ),
+        (
+            "unknown-filter",
+            "ipv4_address = \"198.18.0.2/30\"\nudp_filtering = \"port_dependent\"",
+            "tun.udp_filtering",
+        ),
+    ];
+    for (label, fields, field) in cases {
+        let path = directory.path().join(format!("{label}.toml"));
+        std::fs::write(&path, tun_client(fields)).expect("invalid TUN fixture");
+        assert_invalid(
+            "ferrum2-client",
+            &path,
+            &format!("error[config.semantic] {field}: configuration value is invalid\n"),
+            label,
         );
     }
 }

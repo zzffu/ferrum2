@@ -45,7 +45,23 @@ impl AsRef<[u8]> for TcpRoutePrefix {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct RouteGeneration {
+    rule_engine: u64,
+    selector: u64,
+}
+
 impl ClientRouting {
+    pub(super) fn route_generation(&self) -> RouteGeneration {
+        RouteGeneration {
+            rule_engine: self
+                .program
+                .as_ref()
+                .map_or(0, ferrum2_config::CompiledRoute::rule_engine_generation),
+            selector: self.selector.generation(),
+        }
+    }
+
     pub(super) fn route_scratch(&self) -> Result<Option<RuleEvaluationScratch>, RuleCompileError> {
         self.program
             .as_ref()

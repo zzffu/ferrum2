@@ -21,3 +21,7 @@ Add focused unit tests beside the affected `run/` module. Changes visible across
 ## Safety and Observability
 
 Keep peer addresses, keys, and configuration secrets out of logs and error chains. Use the shared observability facilities and stable error categories. Maintain bounded queues, timeouts, and explicit ownership; do not add detached tasks or fallback paths that bypass validated routing policy. The repository-level `AGENTS.md` continues to apply.
+
+Managed TUN handlers are session-bound and must stop when their session generation is cancelled. A logical UDP TUN association uses endpoint-independent mapping, but every destination still receives an independent route decision and compatible child outbound/underlay binding; never reuse the first destination's terminal for a later destination. Synthetic DNS matching remains exact per datagram or TCP destination and supports either configured address family.
+
+Managed-TUN UDP target children use `reserve_unmetered_datagram` for both request and response buffers, regardless of Direct or Shadowsocks egress. “Unmetered” means only that these buffers do not charge or fail against the shared runtime UDP byte budget; association/session capacity, packet-queue depth, payload length, timeout, and generation checks remain mandatory. SOCKS, DNS, and RuleSet UDP must continue using metered reservations and must retain their existing `BufferLimit` behavior.

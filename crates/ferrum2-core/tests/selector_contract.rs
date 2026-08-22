@@ -28,6 +28,7 @@ fn nested_graph() -> (ferrum2_core::selector::SelectorControl, EgressPlanHandle)
 #[test]
 fn public_control_resolves_nested_members_and_switches_whole_plans() {
     let (control, root) = nested_graph();
+    let initial_generation = control.generation();
     assert_eq!(control.selected("outer"), Ok("inner"));
     assert_eq!(control.selected("inner"), Ok("leaf-a"));
     assert_eq!(root.snapshot().hops(), &[7]);
@@ -36,11 +37,18 @@ fn public_control_resolves_nested_members_and_switches_whole_plans() {
         control.switch("missing", "leaf-a"),
         Err(SelectorError::UnknownSelector)
     );
+    assert_eq!(control.generation(), initial_generation);
     assert_eq!(
         control.switch("outer", "missing"),
         Err(SelectorError::UnknownMember)
     );
+    assert_eq!(control.generation(), initial_generation);
+    control.switch("inner", "leaf-a").expect("no-op switch");
+    assert_eq!(control.generation(), initial_generation);
+
+    let observer = control.clone();
     control.switch("inner", "leaf-b").expect("valid switch");
+    assert_ne!(observer.generation(), initial_generation);
     assert_eq!(root.snapshot_owned().hops(), &[8]);
 }
 

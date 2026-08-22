@@ -1,0 +1,135 @@
+name: tun-fuzz-deterministic
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/tun-fuzz-deterministic.yml"
+      - "crates/ferrum2-tun/fuzz/**"
+      - "crates/ferrum2-tun/src/packet.rs"
+      - "crates/ferrum2-tun/src/reassembly.rs"
+      - "crates/ferrum2-tun/tests/fixtures/packets/**"
+  push:
+    branches:
+      - master
+      - "codex/integration/**"
+    paths:
+      - ".github/workflows/tun-fuzz-deterministic.yml"
+      - "crates/ferrum2-tun/fuzz/**"
+      - "crates/ferrum2-tun/src/packet.rs"
+      - "crates/ferrum2-tun/src/reassembly.rs"
+      - "crates/ferrum2-tun/tests/fixtures/packets/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-properties:
+    name: deterministic-properties
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install pinned deterministic toolchain
+        shell: bash
+        run: rustup toolchain install nightly-2026-07-10 --profile minimal --component rustfmt
+      - name: Fetch locked deterministic dependencies
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: cargo +nightly-2026-07-10 fetch --locked
+      - name: Run no-default-features checks
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: |
+          set -euo pipefail
+          cargo +nightly-2026-07-10 fmt --all -- --check
+          cargo +nightly-2026-07-10 check --all-targets --no-default-features --locked --offline
+          cargo +nightly-2026-07-10 test --no-default-features --locked --offline
+          cargo +nightly-2026-07-10 run --bin smoke --no-default-features --locked --offline
+      - name: Verify no generated diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git status --porcelain --untracked-files=no)" = ""
+
+  libfuzzer-smoke:
+    name: libfuzzer-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install pinned fuzz toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-07-10 --profile minimal
+          cargo +nightly-2026-07-10 install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo +nightly-2026-07-10 fuzz --version)" = "cargo-fuzz 0.13.2"
+      - name: Fetch locked fuzz dependencies
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: cargo +nightly-2026-07-10 fetch --locked
+      - name: Compile and run bounded packet reassembly fuzz target
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          fuzz_corpus="$RUNNER_TEMP/ferrum2-tun-fuzz-corpus"
+          fuzz_artifacts="$RUNNER_TEMP/ferrum2-tun-fuzz-artifacts"
+          mkdir -p "$fuzz_corpus" "$fuzz_artifacts"
+          cp corpus/packet_reassembly/* "$fuzz_corpus/"
+          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz run \
+            --features libfuzzer \
+            --jobs 1 \
+            packet_reassembly \
+            "$fuzz_corpus" \
+            -- \
+            -runs=512 \
+            -max_total_time=30 \
+            -timeout=5 \
+            -rss_limit_mb=2048 \
+            -max_len=262144 \
+            -seed=61924557 \
+            -artifact_prefix="$fuzz_artifacts/" \
+            -print_final_stats=1
+      - name: Upload libFuzzer failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ferrum2-tun-libfuzzer-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ferrum2-tun-fuzz-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Verify no generated diff
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git status --porcelain --untracked-files=no)" = ""

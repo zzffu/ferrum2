@@ -9,15 +9,24 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "performance_candidate.py"
 POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
 SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.json"
+WINDOWS_TUN_POLICY_PATH = ROOT / "tools" / "windows_tun_performance_policy.json"
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "performance-candidate.yml"
+WINDOWS_TUN_WORKFLOW_PATH = (
+    ROOT / ".github" / "workflows" / "windows-tun-performance.yml"
+)
+WINDOWS_TUN_COLLECTOR_PATH = ROOT / "tools" / "collect_windows_tun_performance_trial.ps1"
+M4_SUPPORT_PATH = ROOT / "tools" / "ferrum2-m4-qualification" / "src" / "m4_support" / "mod.rs"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 CONTROL = importlib.util.module_from_spec(SPEC)
@@ -678,6 +687,484 @@ class ScenarioPlanTests(unittest.TestCase):
             self.plan("diagnostic", "tcp-frame-capacity")
         with self.assertRaisesRegex(CONTROL.CandidateControlError, "diagnostic"):
             self.plan("diagnostic", "udp-payload-matrix")
+
+    def test_only_named_windows_tun_lifecycle_profiles_are_qualification_only(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "lifecycle selection is qualification-only"
+        ):
+            self.plan("qualification", "windows-tun-scheduler-ring-full")
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "dedicated windows-tun-plan"
+        ):
+            self.plan("qualification", CONTROL.WINDOWS_TUN_SELECTION)
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "selection"):
+            self.plan("qualification", "windows-tun-unregistered")
+
+    def test_workflow_exposes_only_controller_plannable_selections(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^      selection:\n.*?^        options:\n"
+            r"(?P<options>(?:^          - [^\n]+\n)+)",
+            workflow,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        choices = {
+            line.removeprefix("          - ")
+            for line in match.group("options").splitlines()
+        }
+        self.assertEqual(
+            choices,
+            set(CONTROL.SCENARIO_CATALOG)
+            | set(CONTROL.QUALIFICATION_GROUPS)
+            | {CONTROL.SCALE_SCENARIO},
+        )
+
+
+class WindowsTunPerformanceTests(unittest.TestCase):
+    AA_SHA = "1" * 40
+    PARENT_SHA = "2" * 40
+    CANDIDATE_SHA = "3" * 40
+
+    def policy(self, *, calibrated: bool = False) -> dict[str, object]:
+        policy = CONTROL.load_windows_tun_policy(WINDOWS_TUN_POLICY_PATH)
+        if not calibrated:
+            return policy
+        environment = {
+            **CONTROL.WINDOWS_TUN_GUEST,
+            "recipe_sha256": CONTROL.windows_tun_recipe_sha256(),
+            "guest_build": "19045.6216",
+            "cpu_model": "Synthetic CPU",
+            "cpu_count": 8,
+            "memory_bytes": 17_179_869_184,
+            "power_plan_guid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+        }
+        digest = "4" * 64
+        for scenario in policy["scenarios"].values():
+            for entry in scenario["metrics"].values():
+                entry.update(
+                    {
+                        "noise_band_percent": 2.0,
+                        "regression_threshold_percent": -5.0,
+                        "adoption_threshold_percent": 5.0,
+                        "minimum_pairs": 5,
+                        "minimum_wins": 4,
+                        "minimum_losses": 3,
+                        "calibration_source": f"artifact:test-aa@sha256:{digest}",
+                        "calibration_artifact_sha256": digest,
+                        "calibration_environment": copy.deepcopy(environment),
+                    }
+                )
+        CONTROL.validate_windows_tun_policy(policy)
+        return policy
+
+    def environment(self) -> dict[str, object]:
+        return {
+            **CONTROL.WINDOWS_TUN_GUEST,
+            "guest_build": "19045.6216",
+            "cpu_model": "Synthetic CPU",
+            "cpu_count": 8,
+            "memory_bytes": 17_179_869_184,
+            "power_plan_guid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+        }
+
+    def row(
+        self,
+        *,
+        plan: dict[str, object],
+        scenario: str,
+        pair: int,
+        member: str,
+        parent_sha: str,
+        candidate_sha: str,
+        regression: bool = False,
+    ) -> dict[str, object]:
+        contract = CONTROL.WINDOWS_TUN_SCENARIOS[scenario]
+        order = 1 if (member == "parent") == (pair % 2 == 1) else 2
+        sequence = (
+            list(CONTROL.WINDOWS_TUN_SCENARIOS).index(scenario)
+            * CONTROL.WINDOWS_TUN_PAIR_COUNT
+            * 2
+            + (pair - 1) * 2
+            + order
+        )
+        started = datetime(2026, 8, 22, tzinfo=timezone.utc) + timedelta(
+            seconds=sequence * 2
+        )
+        finished = started + timedelta(seconds=1)
+        canonical_utc = lambda value: value.strftime("%Y-%m-%dT%H:%M:%S.%f") + "0Z"
+        measurements = {}
+        for metric, metric_contract in contract["metrics"].items():
+            value = 1_000
+            if regression and member == "candidate":
+                value = (
+                    900
+                    if metric_contract["direction"] == "higher_is_better"
+                    else 1_100
+                )
+            measurements[metric] = {
+                "unit": metric_contract["unit"],
+                "value": value,
+            }
+        member_sha = parent_sha if member == "parent" else candidate_sha
+        aa = parent_sha == candidate_sha
+        identity_digit = "5" if aa or member == "parent" else "6"
+        return {
+            "schema_version": CONTROL.WINDOWS_TUN_TRIAL_SCHEMA_VERSION,
+            "kind": "windows_tun_performance_trial",
+            "selection": CONTROL.WINDOWS_TUN_SELECTION,
+            "run_kind": plan["run_kind"],
+            "scenario": scenario,
+            "member": member,
+            "pair": pair,
+            "order": order,
+            "sequence": sequence,
+            "started_utc": canonical_utc(started),
+            "finished_utc": canonical_utc(finished),
+            "parent_sha": parent_sha,
+            "candidate_sha": candidate_sha,
+            "sha": member_sha,
+            "tree": identity_digit * 40,
+            "client_sha256": identity_digit * 64,
+            "server_sha256": identity_digit * 64,
+            "harness_sha256": "7" * 64,
+            "recipe_sha256": plan["recipe_sha256"],
+            "environment": self.environment(),
+            "measurements": measurements,
+            "correctness": {
+                "status": "PASS",
+                "checked_unit": contract["checked_unit"],
+                "checked_units": contract["minimum_checked_units"],
+                "checks": {
+                    check: True for check in contract["correctness_checks"]
+                },
+            },
+            "status": "PASS",
+        }
+
+    def evidence(
+        self,
+        root: pathlib.Path,
+        *,
+        plan: dict[str, object],
+        parent_sha: str,
+        candidate_sha: str,
+        regression: bool = False,
+    ) -> None:
+        for trial in plan["trials"]:
+            row = self.row(
+                plan=plan,
+                scenario=trial["scenario"],
+                pair=trial["pair"],
+                member=trial["member"],
+                parent_sha=parent_sha,
+                candidate_sha=candidate_sha,
+                regression=regression,
+            )
+            path = root / (
+                f"{trial['scenario']}-{trial['pair']}-{trial['member']}.json"
+            )
+            path.write_text(json.dumps(row), encoding="utf-8")
+
+    def test_repository_policy_and_plan_are_closed_and_uncalibrated(self) -> None:
+        policy = self.policy()
+        self.assertFalse(CONTROL.windows_tun_policy_is_calibrated(policy))
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=policy
+        )
+        self.assertEqual(set(plan["scenarios"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
+        self.assertEqual(len(plan["scenarios"]), 8)
+        self.assertEqual(
+            sum(len(contract["metrics"]) for contract in plan["scenarios"].values()),
+            11,
+        )
+        self.assertEqual(len(plan["trials"]), 80)
+        self.assertFalse(plan["calibration_complete"])
+        self.assertFalse(plan["adoption_eligible"])
+        for scenario, contract in plan["scenarios"].items():
+            with self.subTest(scenario=scenario):
+                for field, value in CONTROL.WINDOWS_TUN_RUNTIME_RECIPE.items():
+                    self.assertEqual(contract["recipe"][field], value)
+                if scenario != "idle-cpu-wakeup":
+                    self.assertIn(
+                        "tun_path_observed", contract["correctness_checks"]
+                    )
+        for sequence, trial in enumerate(plan["trials"], start=1):
+            self.assertEqual(trial["sequence"], sequence)
+            expected = 1 if (
+                (trial["member"] == "parent") == (trial["pair"] % 2 == 1)
+            ) else 2
+            self.assertEqual(trial["order"], expected)
+
+    def test_guest_workflow_runs_the_reducer_without_the_qualification_script(
+        self,
+    ) -> None:
+        workflow = WINDOWS_TUN_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "runs-on: [self-hosted, Windows, X64, ferrum2-hyperv-guest]",
+            workflow,
+        )
+        self.assertIn("windows-tun-plan", workflow)
+        self.assertIn("windows-tun-trials", workflow)
+        self.assertIn("windows-tun-summarize", workflow)
+        self.assertIn('trials.Count -ne 80', workflow)
+        self.assertIn("--calibration-output", workflow)
+        self.assertIn('"raw-evidence"', workflow)
+        self.assertIn("entry.sha256", workflow)
+        self.assertNotIn("qualify_windows_tun.ps1", workflow)
+
+    def test_raw_collector_and_traffic_harness_cover_the_closed_catalog(self) -> None:
+        collector = WINDOWS_TUN_COLLECTOR_PATH.read_text(encoding="utf-8")
+        harness_dispatch = M4_SUPPORT_PATH.read_text(encoding="utf-8")
+        for scenario in CONTROL.WINDOWS_TUN_SCENARIOS:
+            with self.subTest(scenario=scenario):
+                self.assertIn(f'"{scenario}"', collector)
+        for mode in (
+            "windows-tun-workload",
+            "windows-tun-probe",
+            "windows-tun-support",
+        ):
+            self.assertIn(f'"{mode}"', harness_dispatch)
+        self.assertIn("ferrum2_tun_wintun_ring_full_dropped", collector)
+        self.assertIn("ferrum2_tun_session_restart_succeeded", collector)
+        self.assertIn("ferrum2_tun_reassembly_completed", collector)
+        self.assertIn("ferrum2_tun_udp_associations_active", collector)
+        self.assertIn("workload did not traverse both directions", collector)
+        self.assertNotIn("qualify_windows_tun.ps1", collector)
+
+    def test_policy_rejects_partial_or_unbound_calibration(self) -> None:
+        policy = self.policy()
+        first_scenario = next(iter(policy["scenarios"].values()))
+        first_metric = next(iter(first_scenario["metrics"].values()))
+        first_metric["noise_band_percent"] = 2.0
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "complete or entirely null"
+        ):
+            CONTROL.validate_windows_tun_policy(policy)
+        calibrated = self.policy(calibrated=True)
+        first_scenario = next(iter(calibrated["scenarios"].values()))
+        first_metric = next(iter(first_scenario["metrics"].values()))
+        first_metric["calibration_artifact_sha256"] = "8" * 64
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "bind one SHA-256"
+        ):
+            CONTROL.validate_windows_tun_policy(calibrated)
+
+    def test_aa_evidence_produces_separate_non_adoptable_calibration_artifact(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="calibration-aa", decision_policy=self.policy()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.evidence(
+                root,
+                plan=plan,
+                parent_sha=self.AA_SHA,
+                candidate_sha=self.AA_SHA,
+            )
+            summary = CONTROL.summarize_windows_tun_evidence(
+                plan=plan,
+                evidence_root=root,
+                parent_sha=self.AA_SHA,
+                candidate_sha=self.AA_SHA,
+            )
+        self.assertEqual(summary["status"], "CALIBRATION_EVIDENCE")
+        self.assertFalse(summary["adoption_eligible"])
+        artifact = CONTROL.windows_tun_calibration_artifact(summary)
+        self.assertFalse(artifact["adoption_eligible"])
+        self.assertFalse(artifact["thresholds_reviewed"])
+        self.assertRegex(artifact["content_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(set(artifact["observations"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
+
+    def test_uncalibrated_comparison_is_fail_closed(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.evidence(
+                root,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+            summary = CONTROL.summarize_windows_tun_evidence(
+                plan=plan,
+                evidence_root=root,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+        self.assertEqual(summary["status"], "CALIBRATION_REQUIRED")
+        self.assertFalse(summary["adoption_eligible"])
+        self.assertTrue(summary["correctness_complete"])
+
+    def test_uncalibrated_comparison_cli_returns_non_success(self) -> None:
+        policy = self.policy()
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=policy
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            self.evidence(
+                evidence,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+            plan_path = root / "plan.json"
+            output = root / "summary.json"
+            markdown = root / "summary.md"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            status = CONTROL.main(
+                [
+                    "windows-tun-summarize",
+                    "--plan",
+                    str(plan_path),
+                    "--evidence-root",
+                    str(evidence),
+                    "--parent-sha",
+                    self.PARENT_SHA,
+                    "--candidate-sha",
+                    self.CANDIDATE_SHA,
+                    "--policy",
+                    str(WINDOWS_TUN_POLICY_PATH),
+                    "--output",
+                    str(output),
+                    "--markdown",
+                    str(markdown),
+                ]
+            )
+            summary = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(status, 4)
+        self.assertEqual(summary["status"], "CALIBRATION_REQUIRED")
+        self.assertFalse(summary["adoption_eligible"])
+
+    def test_evidence_rejects_claimed_order_when_trials_overlap(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.evidence(
+                root,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+            second = root / "tcp-single-flow-1-candidate.json"
+            row = json.loads(second.read_text(encoding="utf-8"))
+            row["started_utc"] = "2026-08-22T00:00:02.5000000Z"
+            second.write_text(json.dumps(row), encoding="utf-8")
+            with self.assertRaisesRegex(
+                CONTROL.CandidateControlError, "overlap.*planned order"
+            ):
+                CONTROL.summarize_windows_tun_evidence(
+                    plan=plan,
+                    evidence_root=root,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                )
+
+    def test_calibrated_comparison_detects_clear_and_regression(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy(calibrated=True)
+        )
+        self.assertTrue(plan["calibration_complete"])
+        self.assertFalse(plan["adoption_eligible"])
+        for regression, expected, eligible in (
+            (False, "NO_REGRESSION", True),
+            (True, "REGRESSION", False),
+        ):
+            with self.subTest(regression=regression), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self.evidence(
+                    root,
+                    plan=plan,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                    regression=regression,
+                )
+                summary = CONTROL.summarize_windows_tun_evidence(
+                    plan=plan,
+                    evidence_root=root,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                )
+                self.assertEqual(summary["status"], expected)
+                self.assertEqual(summary["adoption_eligible"], eligible)
+
+    def test_trial_rejects_unit_correctness_and_order_tampering(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="tcp-single-flow",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        cases = []
+        wrong_unit = copy.deepcopy(row)
+        wrong_unit["measurements"]["throughput"]["unit"] = "bits_per_second"
+        cases.append((wrong_unit, "unit mismatch"))
+        wrong_check = copy.deepcopy(row)
+        wrong_check["correctness"]["checks"]["payload_exact"] = False
+        cases.append((wrong_check, "correctness check failed"))
+        wrong_order = copy.deepcopy(row)
+        wrong_order["order"] = 2
+        cases.append((wrong_order, "alternating"))
+        for candidate, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(CONTROL.CandidateControlError, message):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+    def test_single_trial_cli_validates_collector_output(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="tcp-single-flow",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            plan_path = root / "plan.json"
+            trial_path = root / "trial.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            trial_path.write_text(json.dumps(row), encoding="utf-8")
+            status = CONTROL.main(
+                [
+                    "windows-tun-validate-trial",
+                    "--plan",
+                    str(plan_path),
+                    "--trial",
+                    str(trial_path),
+                    "--parent-sha",
+                    self.PARENT_SHA,
+                    "--candidate-sha",
+                    self.CANDIDATE_SHA,
+                    "--policy",
+                    str(WINDOWS_TUN_POLICY_PATH),
+                ]
+            )
+        self.assertEqual(status, 0)
 
 
 class DecisionPolicyTests(unittest.TestCase):

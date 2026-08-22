@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use ferrum2_rule::{
     RuleCompileError, RuleEvaluationScratch,
 };
 use ferrum2_rule::{RuleEngineRegistry, SelectorControl};
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 /// A validated client configuration with no retained source text.
 pub struct ValidatedClientConfig {
@@ -30,25 +30,35 @@ pub struct ValidatedClientConfig {
     pub metrics: Option<MetricsConfig>,
 }
 
-/// Validated Windows TUN configuration and its complete owned-buffer plan.
+/// Validated family-neutral Windows TUN configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TunConfig {
     pub adapter_name: Box<str>,
-    pub ipv4_address: Ipv4Net,
-    pub ipv6_address: Ipv6Net,
+    pub ipv4_address: Option<Ipv4Net>,
+    pub ipv6_address: Option<Ipv6Net>,
     pub auto_route: bool,
-    pub capture_routes: Vec<Ipv4Net>,
+    pub capture_routes: Vec<IpNet>,
     pub auto_dns: bool,
     pub ipv4_dns_address: Option<Ipv4Addr>,
-    pub physical_endpoints: Vec<SocketAddrV4>,
+    pub ipv6_dns_address: Option<Ipv6Addr>,
+    pub physical_endpoints: Vec<SocketAddr>,
     pub mtu: u16,
     pub ring_capacity: u32,
     pub ready_timeout: Duration,
     pub max_tcp_flows: usize,
     pub tcp_buffer_bytes: usize,
     pub max_udp_mappings: usize,
-    pub max_udp_buffered_bytes: usize,
-    pub owned_buffer_bytes: u64,
+    pub udp_filtering: UdpFiltering,
+    /// True when the ignored compatibility-only field appeared in source.
+    pub deprecated_max_udp_buffered_bytes_present: bool,
+}
+
+/// Source-address filtering applied to one endpoint-independent UDP association.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UdpFiltering {
+    #[default]
+    AddressDependent,
+    EndpointIndependent,
 }
 
 /// One validated SOCKS5 listener.
@@ -222,6 +232,14 @@ impl CompiledRoute {
     /// Allocates one scratch owner that callers may reuse across route evaluations.
     pub fn evaluation_scratch(&self) -> Result<RuleEvaluationScratch, RuleCompileError> {
         self.program.evaluation_scratch()
+    }
+
+    /// Returns the current ruleset registry generation used for route snapshots.
+    /// Registry-free route programs are immutable generation zero.
+    pub fn rule_engine_generation(&self) -> u64 {
+        self.registry
+            .as_ref()
+            .map_or(0, |registry| registry.generation())
     }
 
     pub const fn program_mode(&self) -> ferrum2_rule::RuleProgramMode {

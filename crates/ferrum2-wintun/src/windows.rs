@@ -10,34 +10,35 @@ use std::path::{Path, PathBuf, Prefix};
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW,
     ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_NOT_FOUND, ERROR_SUCCESS, FreeLibrary,
-    GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+    GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     CancelMibChangeNotify2, ConvertInterfaceLuidToGuid, ConvertInterfaceLuidToIndex,
     CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DNS_INTERFACE_SETTINGS,
-    DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_NAMESERVER, DeleteIpForwardEntry2,
-    DeleteUnicastIpAddressEntry, FreeInterfaceDnsSettings, FreeMibTable, GetBestInterfaceEx,
-    GetBestRoute2, GetIfTable2, GetInterfaceDnsSettings, GetIpForwardEntry2, GetIpForwardTable2,
-    GetIpInterfaceEntry, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
-    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
-    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
-    NotifyIpInterfaceChange, NotifyRouteChange2, NotifyUnicastIpAddressChange,
-    SetInterfaceDnsSettings, SetIpInterfaceEntry,
+    DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER,
+    DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeInterfaceDnsSettings, FreeMibTable,
+    GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetInterfaceDnsSettings, GetIpForwardEntry2,
+    GetIpForwardTable2, GetIpInterfaceEntry, GetIpInterfaceTable, GetUnicastIpAddressEntry,
+    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
+    MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
+    MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW, NotifyIpInterfaceChange, NotifyRouteChange2,
+    NotifyUnicastIpAddressChange, SetInterfaceDnsSettings, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
 };
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IP_UNICAST_IF, IPPROTO_IP,
-    IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred,
-    IpDadStateTentative, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, NlroManual, SOCKADDR, SOCKADDR_IN,
-    SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, setsockopt,
+    AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IP_UNICAST_IF,
+    IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IpDadStateDeprecated, IpDadStateDuplicate,
+    IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, IpPrefixOriginManual,
+    IpSuffixOriginManual, MIB_IPPROTO_LOCAL, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, NlroManual,
+    SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, setsockopt,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -57,7 +58,11 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::core::GUID;
 
-use crate::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, Ipv4Prefix};
+use crate::{
+    ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, IpFamily, IpPrefix,
+    NetworkChangeOutcome, RouteConflict, RouteConflictReason, RouteIntegrityResult, SendOutcome,
+    WaitOutcome,
+};
 
 type WintunAdapter = *mut c_void;
 type WintunSession = *mut c_void;
@@ -309,57 +314,238 @@ impl Drop for WaitGuard<'_> {
 struct RouteFingerprint {
     interface_luid: u64,
     interface_index: u32,
-    destination: u32,
+    destination: std::net::IpAddr,
     prefix_length: u8,
-    next_hop: u32,
+    next_hop: std::net::IpAddr,
     metric: u32,
-    source: Option<u32>,
+    source: Option<std::net::IpAddr>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InterfaceIdentity {
     luid: u64,
     index: u32,
 }
 
-/// Immutable, redacted IPv4 socket-binding policy frozen before capture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouteFamily {
+    Ipv4,
+    Ipv6,
+}
+
+impl RouteFamily {
+    const fn public(self) -> IpFamily {
+        match self {
+            Self::Ipv4 => IpFamily::Ipv4,
+            Self::Ipv6 => IpFamily::Ipv6,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RoutePrefix {
+    address: std::net::IpAddr,
+    length: u8,
+}
+
+impl RoutePrefix {
+    fn new(address: std::net::IpAddr, length: u8) -> Option<Self> {
+        let bits = match address {
+            std::net::IpAddr::V4(_) => 32,
+            std::net::IpAddr::V6(_) => 128,
+        };
+        if length > bits {
+            return None;
+        }
+        let canonical = match address {
+            std::net::IpAddr::V4(address) => {
+                let mask = u32::MAX.checked_shl(u32::from(bits - length)).unwrap_or(0);
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(u32::from(address) & mask))
+            }
+            std::net::IpAddr::V6(address) => {
+                let mask = u128::MAX.checked_shl(u32::from(bits - length)).unwrap_or(0);
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(u128::from(address) & mask))
+            }
+        };
+        (canonical == address).then_some(Self {
+            address: canonical,
+            length,
+        })
+    }
+
+    fn from_capture(prefix: IpPrefix) -> Self {
+        match prefix {
+            IpPrefix::V4(prefix) => Self {
+                address: std::net::IpAddr::V4(prefix.address()),
+                length: prefix.length(),
+            },
+            IpPrefix::V6(prefix) => Self {
+                address: std::net::IpAddr::V6(prefix.address()),
+                length: prefix.length(),
+            },
+        }
+    }
+
+    const fn family(self) -> RouteFamily {
+        match self.address {
+            std::net::IpAddr::V4(_) => RouteFamily::Ipv4,
+            std::net::IpAddr::V6(_) => RouteFamily::Ipv6,
+        }
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        if self.family() != other.family() {
+            return false;
+        }
+        let shared = self.length.min(other.length);
+        match (self.address, other.address) {
+            (std::net::IpAddr::V4(left), std::net::IpAddr::V4(right)) => {
+                let mask = u32::MAX.checked_shl(u32::from(32 - shared)).unwrap_or(0);
+                u32::from(left) & mask == u32::from(right) & mask
+            }
+            (std::net::IpAddr::V6(left), std::net::IpAddr::V6(right)) => {
+                let mask = u128::MAX.checked_shl(u32::from(128 - shared)).unwrap_or(0);
+                u128::from(left) & mask == u128::from(right) & mask
+            }
+            _ => false,
+        }
+    }
+
+    fn is_within(self, parent: Self) -> bool {
+        self.family() == parent.family() && self.length >= parent.length && self.overlaps(parent)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RouteIntegrityRoute {
+    interface: InterfaceIdentity,
+    destination: RoutePrefix,
+    route_metric: u32,
+    valid: bool,
+    owned_shape: bool,
+    owned_local_shape: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InterfaceFamilyState {
+    up: bool,
+    metric: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RouteIntegrityInterface {
+    identity: InterfaceIdentity,
+    software_loopback: bool,
+    up: bool,
+    ipv4: Option<InterfaceFamilyState>,
+    ipv6: Option<InterfaceFamilyState>,
+}
+
+impl RouteIntegrityInterface {
+    const fn family(self, family: RouteFamily) -> Option<InterfaceFamilyState> {
+        match family {
+            RouteFamily::Ipv4 => self.ipv4,
+            RouteFamily::Ipv6 => self.ipv6,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct RouteIntegritySnapshot {
+    routes: Vec<RouteIntegrityRoute>,
+    interfaces: Vec<RouteIntegrityInterface>,
+}
+
+/// Immutable, redacted dual-stack socket-binding policy frozen before capture.
 #[derive(Clone)]
 pub struct UnderlayPolicy {
-    fixed: Arc<[(std::net::SocketAddrV4, RouteFingerprint)]>,
-    default: Option<RouteFingerprint>,
+    fixed: Arc<[(std::net::SocketAddr, RouteFingerprint)]>,
+    target_binder: bool,
     valid: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    accepted_generation: Arc<AtomicU64>,
+    owned_luid: Arc<AtomicU64>,
+    owned_index: Arc<AtomicU32>,
 }
 
 impl UnderlayPolicy {
     pub fn bind_fixed<T: AsRawSocket>(
         &self,
         socket: &T,
-        endpoint: std::net::SocketAddrV4,
+        endpoint: std::net::SocketAddr,
     ) -> Result<(), Error> {
-        if !self.valid.load(Ordering::Acquire) {
-            return Err(Error);
-        }
-        let route = self
-            .fixed
-            .iter()
-            .find_map(|(candidate, route)| (*candidate == endpoint).then_some(*route))
-            .ok_or(Error)?;
-        bind_ipv4_socket(socket, route.interface_index)?;
-        self.valid
-            .load(Ordering::Acquire)
+        bind_fixed_with(self, endpoint, &mut PlatformSocketBinder(socket))
+    }
+
+    pub fn bind_target<T: AsRawSocket>(
+        &self,
+        socket: &T,
+        target: std::net::SocketAddr,
+    ) -> Result<(), Error> {
+        bind_target_with(
+            self,
+            target,
+            &mut PlatformUnderlay,
+            &mut PlatformSocketBinder(socket),
+        )
+    }
+
+    /// Returns whether this snapshot is still the currently accepted network generation.
+    pub fn generation_is_current(&self) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.valid.load(Ordering::Acquire)
+            && self.accepted_generation.load(Ordering::Acquire) == generation
+    }
+
+    fn begin_binding(&self) -> Result<u64, Error> {
+        let generation = self.generation.load(Ordering::Acquire);
+        self.require_generation(generation)?;
+        Ok(generation)
+    }
+
+    fn require_generation(&self, generation: u64) -> Result<(), Error> {
+        (self.valid.load(Ordering::Acquire)
+            && self.accepted_generation.load(Ordering::Acquire) == generation
+            && self.generation.load(Ordering::Acquire) == generation)
             .then_some(())
             .ok_or(Error)
     }
 
-    pub fn bind_default<T: AsRawSocket>(&self, socket: &T) -> Result<(), Error> {
-        if !self.valid.load(Ordering::Acquire) {
+    fn accept_generation(&self, generation: u64) {
+        self.accepted_generation
+            .store(generation, Ordering::Release);
+    }
+
+    fn set_owned_identity(&self, owned: InterfaceIdentity) -> Result<(), Error> {
+        if owned.luid == 0 || owned.index == 0 {
             return Err(Error);
         }
-        bind_ipv4_socket(socket, self.default.ok_or(Error)?.interface_index)?;
-        self.valid
-            .load(Ordering::Acquire)
-            .then_some(())
-            .ok_or(Error)
+        match self
+            .owned_index
+            .compare_exchange(0, owned.index, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => {}
+            Err(current) if current == owned.index => {}
+            Err(_) => return Err(Error),
+        }
+        match self
+            .owned_luid
+            .compare_exchange(0, owned.luid, Ordering::Release, Ordering::Acquire)
+        {
+            Ok(_) => Ok(()),
+            Err(current) if current == owned.luid => Ok(()),
+            Err(_) => Err(Error),
+        }
+    }
+
+    fn owned_identity(&self) -> Result<InterfaceIdentity, Error> {
+        let luid = self.owned_luid.load(Ordering::Acquire);
+        let index = self.owned_index.load(Ordering::Acquire);
+        if luid == 0 || index == 0 {
+            Err(Error)
+        } else {
+            Ok(InterfaceIdentity { luid, index })
+        }
     }
 
     fn invalidate(&self) {
@@ -367,26 +553,133 @@ impl UnderlayPolicy {
     }
 }
 
-fn bind_ipv4_socket<T: AsRawSocket>(socket: &T, interface_index: u32) -> Result<(), Error> {
-    let network_order = interface_index_option_value(interface_index);
+trait SocketBindingOperations {
+    fn bind(&mut self, family: std::net::IpAddr, interface_index: u32) -> Result<(), Error>;
+}
+
+fn bind_fixed_with(
+    policy: &UnderlayPolicy,
+    endpoint: std::net::SocketAddr,
+    binder: &mut impl SocketBindingOperations,
+) -> Result<(), Error> {
+    let generation = policy.begin_binding()?;
+    let route = policy
+        .fixed
+        .iter()
+        .find_map(|(candidate, route)| (*candidate == endpoint).then_some(*route))
+        .ok_or(Error)?;
+    if !same_ip_family(endpoint.ip(), route.destination) {
+        return Err(Error);
+    }
+    policy.require_generation(generation)?;
+    binder.bind(endpoint.ip(), route.interface_index)?;
+    policy.require_generation(generation)
+}
+
+fn bind_target_with(
+    policy: &UnderlayPolicy,
+    target: std::net::SocketAddr,
+    operations: &mut impl UnderlayOperations,
+    binder: &mut impl SocketBindingOperations,
+) -> Result<(), Error> {
+    if !policy.target_binder {
+        return Err(Error);
+    }
+    let generation = policy.begin_binding()?;
+    let owned = policy.owned_identity()?;
+    let interfaces = operations.eligible_interfaces(Some(owned))?;
+    let mut selected = None::<(RouteFingerprint, u64)>;
+    for identity in interfaces {
+        let Ok(route) = operations.constrained_route(target, identity.index, true) else {
+            continue;
+        };
+        if route.interface_luid != identity.luid
+            || route.interface_index != identity.index
+            || !same_ip_family(target.ip(), route.destination)
+            || route
+                .source
+                .is_none_or(|source| !same_ip_family(target.ip(), source))
+        {
+            continue;
+        }
+        let interface_metric = operations.interface_metric(target.ip(), identity.index)?;
+        let effective_metric = u64::from(route.metric) + u64::from(interface_metric);
+        let preferred = selected.as_ref().is_none_or(|(current, current_metric)| {
+            route.prefix_length > current.prefix_length
+                || (route.prefix_length == current.prefix_length
+                    && (effective_metric < *current_metric
+                        || (effective_metric == *current_metric
+                            && route.interface_index < current.interface_index)))
+        });
+        if preferred {
+            selected = Some((route, effective_metric));
+        }
+    }
+    let (route, _) = selected.ok_or(Error)?;
+    policy.require_generation(generation)?;
+    binder.bind(target.ip(), route.interface_index)?;
+    policy.require_generation(generation)
+}
+
+fn same_ip_family(left: std::net::IpAddr, right: std::net::IpAddr) -> bool {
+    matches!(
+        (left, right),
+        (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_))
+            | (std::net::IpAddr::V6(_), std::net::IpAddr::V6(_))
+    )
+}
+
+struct PlatformSocketBinder<'a, T>(&'a T);
+
+impl<T: AsRawSocket> SocketBindingOperations for PlatformSocketBinder<'_, T> {
+    fn bind(&mut self, family: std::net::IpAddr, interface_index: u32) -> Result<(), Error> {
+        bind_socket(self.0, family, interface_index)
+    }
+}
+
+fn bind_socket<T: AsRawSocket>(
+    socket: &T,
+    family: std::net::IpAddr,
+    interface_index: u32,
+) -> Result<(), Error> {
+    let (level, option, value) = interface_socket_option(family, interface_index);
     let status = unsafe {
         setsockopt(
             socket.as_raw_socket() as usize,
-            IPPROTO_IP,
-            IP_UNICAST_IF,
-            (&raw const network_order).cast(),
-            i32::try_from(std::mem::size_of_val(&network_order)).map_err(|_| Error)?,
+            level,
+            option,
+            (&raw const value).cast(),
+            i32::try_from(std::mem::size_of_val(&value)).map_err(|_| Error)?,
         )
     };
     if status == 0 { Ok(()) } else { Err(Error) }
 }
 
-const fn interface_index_option_value(interface_index: u32) -> u32 {
+fn interface_socket_option(family: std::net::IpAddr, interface_index: u32) -> (i32, i32, u32) {
+    match family {
+        std::net::IpAddr::V4(_) => (
+            IPPROTO_IP,
+            IP_UNICAST_IF,
+            ipv4_interface_index_option_value(interface_index),
+        ),
+        std::net::IpAddr::V6(_) => (
+            IPPROTO_IPV6,
+            IPV6_UNICAST_IF,
+            ipv6_interface_index_option_value(interface_index),
+        ),
+    }
+}
+
+const fn ipv4_interface_index_option_value(interface_index: u32) -> u32 {
     interface_index.to_be()
 }
 
+const fn ipv6_interface_index_option_value(interface_index: u32) -> u32 {
+    interface_index
+}
+
 struct NotificationContext {
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
     owned_luid: AtomicU64,
     provisional_luid: AtomicU64,
     callbacks_in_flight: AtomicU64,
@@ -399,7 +692,7 @@ struct NotificationContext {
 impl NotificationContext {
     fn new(wake: Option<StopSignal>) -> Self {
         Self {
-            generation: AtomicU64::new(0),
+            generation: Arc::new(AtomicU64::new(0)),
             owned_luid: AtomicU64::new(0),
             provisional_luid: AtomicU64::new(0),
             callbacks_in_flight: AtomicU64::new(0),
@@ -410,8 +703,11 @@ impl NotificationContext {
         }
     }
 
-    fn signal_owner(&self) {
+    fn observe_raw(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn wake_owner(&self) {
         if let Some(wake) = &self.wake {
             let _ = wake.signal();
         }
@@ -475,6 +771,9 @@ struct NotificationOwners {
     context: Option<Box<NotificationContext>>,
 }
 
+const NOTIFICATION_QUIESCENCE: Duration = Duration::from_millis(350);
+const NOTIFICATION_QUIESCENCE_POLL: Duration = Duration::from_millis(25);
+
 impl NotificationOwners {
     fn generation(&self) -> u64 {
         self.context
@@ -482,6 +781,16 @@ impl NotificationOwners {
             .expect("live notifications retain their callback context")
             .generation
             .load(Ordering::Acquire)
+    }
+
+    fn generation_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(
+            &self
+                .context
+                .as_ref()
+                .expect("live notifications retain their callback context")
+                .generation,
+        )
     }
 
     fn set_owned_luid(
@@ -503,6 +812,35 @@ impl NotificationOwners {
             .expect("live notifications retain their callback context")
             .monitor_runtime
             .store(true, Ordering::Release);
+    }
+
+    fn wait_until_quiescent(&self, deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
+        let mut observed = self.generation();
+        let mut quiet_since = Instant::now();
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(Error);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Error);
+            }
+            let current = self.generation();
+            if current != observed {
+                observed = current;
+                quiet_since = now;
+            }
+            let quiet_remaining =
+                NOTIFICATION_QUIESCENCE.saturating_sub(now.saturating_duration_since(quiet_since));
+            if quiet_remaining.is_zero() {
+                return Ok(());
+            }
+            std::thread::sleep(
+                NOTIFICATION_QUIESCENCE_POLL
+                    .min(quiet_remaining)
+                    .min(deadline.saturating_duration_since(now)),
+            );
+        }
     }
 
     fn cancel_all(&mut self) -> bool {
@@ -622,18 +960,19 @@ fn classify_notification_luid(
     after_unpublished_load: impl FnOnce(),
 ) {
     let _in_flight = NotificationCallbackGuard::enter(context);
+    context.observe_raw();
     if context.monitor_runtime.load(Ordering::Acquire) {
-        context.signal_owner();
+        context.wake_owner();
         return;
     }
     if luid == 0 {
-        context.signal_owner();
+        context.wake_owner();
         return;
     }
     let owned = context.owned_luid.load(Ordering::SeqCst);
     if owned != 0 {
         if owned != luid {
-            context.signal_owner();
+            context.wake_owner();
         }
         return;
     }
@@ -647,21 +986,22 @@ fn classify_notification_luid(
             Err(current) => current != luid,
         };
     if provisional_mismatch {
-        context.signal_owner();
+        context.wake_owner();
     }
 }
 
 struct ManagedState {
     notifications: NotificationOwners,
-    snapshot_generation: u64,
     validated_generation: u64,
     policy: UnderlayPolicy,
-    capture_routes: Vec<Ipv4Prefix>,
+    capture_routes: Vec<IpPrefix>,
     pending_route: Option<MIB_IPFORWARD_ROW2>,
     routes: Vec<MIB_IPFORWARD_ROW2>,
     ipv4_dns_address: Option<std::net::Ipv4Addr>,
+    ipv6_dns_address: Option<std::net::Ipv6Addr>,
     dns_interface: Option<GUID>,
-    dns: Option<ManagedDnsLease<Ipv4DnsSettings>>,
+    ipv4_dns: Option<ManagedDnsLease<Ipv4DnsSettings>>,
+    ipv6_dns: Option<ManagedDnsLease<Ipv6DnsSettings>>,
 }
 
 /// Safe RAII owner of the exact Wintun adapter, address, MTU, session and DLL transaction.
@@ -672,10 +1012,12 @@ pub struct Adapter {
     luid: NET_LUID_LH,
     interface_index: u32,
     mtus: [Option<MtuState>; 2],
+    pending_address: Option<MIB_UNICASTIPADDRESS_ROW>,
     addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     session: Option<SessionState>,
     session_journal: SessionJournal,
     stop: StopSignal,
+    work: WorkSignal,
     network_change: StopSignal,
     managed: Option<ManagedState>,
     _not_send: PhantomData<Rc<()>>,
@@ -693,10 +1035,13 @@ impl Adapter {
         }
         let library = Library::load().map_err(|_| CreateError::operation())?;
         let stop = StopSignal(Arc::new(OwnedHandle(
-            create_event().map_err(|_| CreateError::operation())?,
+            create_event(true).map_err(|_| CreateError::operation())?,
+        )));
+        let work = WorkSignal(Arc::new(OwnedHandle(
+            create_event(false).map_err(|_| CreateError::operation())?,
         )));
         let network_change = StopSignal(Arc::new(OwnedHandle(
-            create_event().map_err(|_| CreateError::operation())?,
+            create_event(true).map_err(|_| CreateError::operation())?,
         )));
         let mut owner = Self {
             config,
@@ -705,24 +1050,23 @@ impl Adapter {
             luid: NET_LUID_LH::default(),
             interface_index: 0,
             mtus: [None, None],
+            pending_address: None,
             addresses: Vec::with_capacity(2),
             session: None,
             session_journal: SessionJournal::default(),
             stop,
+            work,
             network_change,
             managed: None,
             _not_send: PhantomData,
         };
-        let setup = owner
-            .prepare_managed()
-            .and_then(|()| {
-                setup_transaction(&mut PlatformSetup {
-                    owner: &mut owner,
-                    deadline,
-                    cancelled,
-                })
-            })
-            .and_then(|()| owner.finish_managed(deadline, cancelled));
+        let setup = setup_transaction(&mut PlatformSetup {
+            owner: &mut owner,
+            deadline,
+            cancelled,
+        })
+        .and_then(|()| owner.prepare_managed())
+        .and_then(|()| owner.finish_managed(deadline, cancelled));
         match finish_setup_transaction(setup, || owner.cleanup_inner()) {
             Ok(()) => Ok(owner),
             Err(error) => Err(error),
@@ -733,8 +1077,59 @@ impl Adapter {
         self.stop.clone()
     }
 
+    pub fn work_signal(&self) -> WorkSignal {
+        self.work.clone()
+    }
+
     pub fn underlay_policy(&self) -> Option<UnderlayPolicy> {
         self.managed.as_ref().map(|state| state.policy.clone())
+    }
+
+    /// Scans all current route and interface rows against the managed capture plan.
+    pub fn route_integrity(&self) -> RouteIntegrityResult {
+        let Some(state) = &self.managed else {
+            return RouteIntegrityResult::Clean;
+        };
+        scan_route_integrity_with(
+            &state.capture_routes,
+            InterfaceIdentity {
+                luid: unsafe { self.luid.Value },
+                index: self.interface_index,
+            },
+            || state.notifications.generation(),
+            &mut PlatformRouteIntegrity,
+        )
+    }
+
+    /// Revalidates one stable, debounced notification burst against managed state.
+    pub fn revalidate_network_change(&mut self) -> Result<NetworkChangeOutcome, Error> {
+        let matches = match self.managed_network_matches(true) {
+            Ok(matches) => matches,
+            Err(_) => {
+                if let Some(state) = &self.managed {
+                    state.policy.invalidate();
+                }
+                return Err(Error::recoverable_session());
+            }
+        };
+        if !matches {
+            return Ok(NetworkChangeOutcome::Changed);
+        }
+        match self.route_integrity() {
+            RouteIntegrityResult::Clean => Ok(NetworkChangeOutcome::Unchanged),
+            RouteIntegrityResult::Conflict(reason) => {
+                if let Some(state) = &self.managed {
+                    state.policy.invalidate();
+                }
+                Ok(NetworkChangeOutcome::RouteConflict(reason))
+            }
+            RouteIntegrityResult::UnstableGeneration | RouteIntegrityResult::PlatformError => {
+                if let Some(state) = &self.managed {
+                    state.policy.invalidate();
+                }
+                Err(Error::recoverable_session())
+            }
+        }
     }
 
     pub fn receive(&mut self) -> Result<Option<ReceivedPacket<'_>>, Error> {
@@ -742,11 +1137,10 @@ impl Adapter {
         let mut len = 0_u32;
         let packet = unsafe { (self.library.exports.receive_packet)(session, &mut len) };
         if packet.is_null() {
-            return match unsafe { windows_sys::Win32::Foundation::GetLastError() } {
-                ERROR_NO_MORE_ITEMS => Ok(None),
-                ERROR_HANDLE_EOF => Err(Error),
-                _ => Err(Error),
-            };
+            return classify_receive_null(unsafe {
+                windows_sys::Win32::Foundation::GetLastError()
+            })
+            .map(|()| None);
         }
         if len == 0 || len > u32::from(u16::MAX) {
             unsafe { (self.library.exports.release_receive_packet)(session, packet) };
@@ -762,36 +1156,24 @@ impl Adapter {
         }))
     }
 
-    /// Returns `true` for readable session data and `false` for stop/timeout.
-    pub fn wait(&mut self, timeout: Duration) -> Result<bool, Error> {
+    pub fn wait(&mut self, timeout: Duration) -> Result<WaitOutcome, Error> {
         let read = self.session.as_ref().ok_or(Error)?.read_event;
-        let handles = [self.stop.0.0, self.network_change.0.0, read];
+        let handles = [self.stop.0.0, self.work.0.0, self.network_change.0.0, read];
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
         let result = {
             let _wait = self.session_journal.begin_wait()?;
-            unsafe { WaitForMultipleObjects(3, handles.as_ptr(), 0, millis) }
+            unsafe { WaitForMultipleObjects(4, handles.as_ptr(), 0, millis) }
         };
-        match result {
-            WAIT_OBJECT_0 => Ok(false),
-            value if value == WAIT_OBJECT_0 + 1 => {
-                let valid = unsafe { ResetEvent(self.network_change.0.0) } != 0
-                    && self.revalidate_managed_network().unwrap_or(false);
-                if !valid {
-                    if let Some(state) = &self.managed {
-                        state.policy.invalidate();
-                    }
-                    Err(Error)
-                } else {
-                    Ok(false)
-                }
-            }
-            value if value == WAIT_OBJECT_0 + 2 => Ok(true),
-            WAIT_FAILED => Err(Error),
-            _ => Ok(false),
+        let outcome = classify_wait_result(result)?;
+        if outcome == WaitOutcome::NetworkChanged
+            && unsafe { ResetEvent(self.network_change.0.0) } == 0
+        {
+            return Err(Error);
         }
+        Ok(outcome)
     }
 
-    pub fn send(&mut self, packet: &[u8]) -> Result<(), Error> {
+    pub fn send(&mut self, packet: &[u8]) -> Result<SendOutcome, Error> {
         let len = u32::try_from(packet.len()).map_err(|_| Error)?;
         if len == 0 || len > u32::from(u16::MAX) {
             return Err(Error);
@@ -799,21 +1181,18 @@ impl Adapter {
         let session = self.session.as_ref().ok_or(Error)?.handle;
         let output = unsafe { (self.library.exports.allocate_send_packet)(session, len) };
         if output.is_null() {
-            return match unsafe { windows_sys::Win32::Foundation::GetLastError() } {
-                ERROR_BUFFER_OVERFLOW => Ok(()),
-                _ => Err(Error),
-            };
+            return classify_send_allocation_failure(unsafe { GetLastError() });
         }
         unsafe {
             std::ptr::copy_nonoverlapping(packet.as_ptr(), output, packet.len());
             (self.library.exports.send_packet)(session, output);
         }
-        Ok(())
+        Ok(SendOutcome::Sent)
     }
 
     pub fn cleanup(mut self) -> Result<(), Error> {
         if self.cleanup_inner() {
-            Err(Error)
+            Err(Error::cleanup())
         } else {
             Ok(())
         }
@@ -842,51 +1221,63 @@ impl Adapter {
             previous,
             configured: row.NlMtu,
         });
-        Ok(())
+        let current = read_ip_interface(self.luid, family)?;
+        (current.NlMtu == row.NlMtu).then_some(()).ok_or(Error)
     }
 
-    fn ipv4_address_row(&self) -> MIB_UNICASTIPADDRESS_ROW {
+    fn ipv4_address_row(&self) -> Result<MIB_UNICASTIPADDRESS_ROW, Error> {
+        let prefix = self.config.ipv4.ok_or(Error)?;
         let mut ipv4 = MIB_UNICASTIPADDRESS_ROW::default();
-        unsafe { InitializeUnicastIpAddressEntry(&mut ipv4) };
+        initialize_managed_address(&mut ipv4);
         ipv4.InterfaceLuid = self.luid;
-        ipv4.OnLinkPrefixLength = self.config.ipv4_prefix;
+        ipv4.InterfaceIndex = self.interface_index;
+        ipv4.OnLinkPrefixLength = prefix.length();
         ipv4.Address.Ipv4 = SOCKADDR_IN {
             sin_family: AF_INET,
             sin_port: 0,
             sin_addr: IN_ADDR {
                 S_un: IN_ADDR_0 {
-                    S_addr: u32::from_ne_bytes(self.config.ipv4.octets()),
+                    S_addr: u32::from_ne_bytes(prefix.address().octets()),
                 },
             },
             sin_zero: [0; 8],
         };
-        ipv4
+        Ok(ipv4)
     }
 
-    fn ipv6_address_row(&self) -> MIB_UNICASTIPADDRESS_ROW {
+    fn ipv6_address_row(&self) -> Result<MIB_UNICASTIPADDRESS_ROW, Error> {
+        let prefix = self.config.ipv6.ok_or(Error)?;
         let mut ipv6 = MIB_UNICASTIPADDRESS_ROW::default();
-        unsafe { InitializeUnicastIpAddressEntry(&mut ipv6) };
+        initialize_managed_address(&mut ipv6);
         ipv6.InterfaceLuid = self.luid;
-        ipv6.OnLinkPrefixLength = self.config.ipv6_prefix;
+        ipv6.InterfaceIndex = self.interface_index;
+        ipv6.OnLinkPrefixLength = prefix.length();
         ipv6.Address.Ipv6 = SOCKADDR_IN6 {
             sin6_family: AF_INET6,
             sin6_port: 0,
             sin6_flowinfo: 0,
             sin6_addr: IN6_ADDR {
                 u: IN6_ADDR_0 {
-                    Byte: self.config.ipv6.octets(),
+                    Byte: prefix.address().octets(),
                 },
             },
             Anonymous: SOCKADDR_IN6_0 { sin6_scope_id: 0 },
         };
-        ipv6
+        Ok(ipv6)
     }
 
     fn create_address(&mut self, row: MIB_UNICASTIPADDRESS_ROW) -> Result<(), Error> {
+        require_address_absent(&row)?;
         if unsafe { CreateUnicastIpAddressEntry(&row) } != ERROR_SUCCESS {
             return Err(Error);
         }
-        self.addresses.push(row);
+        self.pending_address = Some(row);
+        let current = read_owned_address(&row)?;
+        if !managed_address_matches(&row, &current) {
+            return Err(Error);
+        }
+        self.addresses
+            .push(self.pending_address.take().ok_or(Error)?);
         Ok(())
     }
 
@@ -895,18 +1286,18 @@ impl Adapter {
             if cancelled.load(Ordering::Acquire) {
                 return Err(Error);
             }
-            if self.addresses.len() != 2 {
+            if self.addresses.is_empty() {
                 return Err(Error);
             }
-            let mut states = [IpDadStateInvalid; 2];
-            for (state, address) in states.iter_mut().zip(&self.addresses) {
-                let mut row = *address;
-                if unsafe { GetUnicastIpAddressEntry(&mut row) } != ERROR_SUCCESS {
+            let mut states = Vec::with_capacity(self.addresses.len());
+            for address in &self.addresses {
+                let row = read_owned_address(address)?;
+                if !managed_address_matches(address, &row) {
                     return Err(Error);
                 }
-                *state = row.DadState;
+                states.push(row.DadState);
             }
-            match dad_snapshot(self.session.is_some(), states, Instant::now() >= deadline)? {
+            match dad_snapshot(self.session.is_some(), &states, Instant::now() >= deadline)? {
                 DadProgress::Ready => return Ok(()),
                 DadProgress::Waiting => {}
             }
@@ -915,34 +1306,46 @@ impl Adapter {
     }
 
     fn prepare_managed(&mut self) -> Result<(), Error> {
-        let Some((notifications, snapshot_generation, policy, capture_routes, ipv4_dns_address)) =
-            prepare_managed_intent(self.config.managed_ipv4(), |config| {
-                let notifications = subscribe_network_changes(self.network_change.clone())?;
-                let snapshot_generation = notifications.generation();
-                let policy = snapshot_underlay(config)?;
-                Ok((
-                    notifications,
-                    snapshot_generation,
-                    policy,
-                    config.capture_routes().to_vec(),
-                    config.ipv4_dns_address(),
-                ))
-            })?
+        let Some((
+            notifications,
+            snapshot_generation,
+            policy,
+            capture_routes,
+            ipv4_dns_address,
+            ipv6_dns_address,
+        )) = prepare_managed_intent(self.config.managed_network(), |config| {
+            let notifications = subscribe_network_changes(self.network_change.clone())?;
+            let snapshot_generation = notifications.generation();
+            let policy = snapshot_underlay(
+                config,
+                notifications.generation_counter(),
+                snapshot_generation,
+            )?;
+            Ok((
+                notifications,
+                snapshot_generation,
+                policy,
+                config.capture_routes().to_vec(),
+                config.ipv4_dns_address(),
+                config.ipv6_dns_address(),
+            ))
+        })?
         else {
             return Ok(());
         };
         let route_capacity = capture_routes.len();
         self.managed = Some(ManagedState {
             notifications,
-            snapshot_generation,
             validated_generation: snapshot_generation,
             policy,
             capture_routes,
             pending_route: None,
             routes: Vec::with_capacity(route_capacity),
             ipv4_dns_address,
+            ipv6_dns_address,
             dns_interface: None,
-            dns: None,
+            ipv4_dns: None,
+            ipv6_dns: None,
         });
         Ok(())
     }
@@ -958,22 +1361,9 @@ impl Adapter {
             luid: unsafe { self.luid.Value },
             index: self.interface_index,
         };
-        if !underlay_snapshot_matches(
-            &state.policy,
-            owned,
-            state.snapshot_generation,
-            || state.notifications.generation(),
-            &mut PlatformUnderlay,
-        )? {
+        state.policy.set_owned_identity(owned)?;
+        if !underlay_matches_with(&state.policy, owned, &mut PlatformUnderlay)? {
             return Err(Error);
-        }
-        if let Some(address) = state.ipv4_dns_address {
-            let mut interface = GUID::default();
-            if unsafe { ConvertInterfaceLuidToGuid(&self.luid, &mut interface) } != ERROR_SUCCESS {
-                return Err(Error);
-            }
-            state.dns_interface = Some(interface);
-            install_managed_dns(address, &mut PlatformManagedDns(interface), &mut state.dns)?;
         }
         let rows = state
             .capture_routes
@@ -982,24 +1372,66 @@ impl Adapter {
             .map(|prefix| capture_route_row(self.luid, self.interface_index, prefix))
             .collect::<Vec<_>>();
         install_managed_routes(&rows, &mut PlatformManagedRoutes(state))?;
-        if !underlay_snapshot_matches(
-            &state.policy,
-            owned,
-            state.snapshot_generation,
+        if state.ipv4_dns_address.is_some() || state.ipv6_dns_address.is_some() {
+            let mut interface = GUID::default();
+            if unsafe { ConvertInterfaceLuidToGuid(&self.luid, &mut interface) } != ERROR_SUCCESS {
+                return Err(Error);
+            }
+            state.dns_interface = Some(interface);
+        }
+        if let Some(address) = state.ipv4_dns_address {
+            install_managed_dns(
+                address,
+                &mut PlatformManagedIpv4Dns(state.dns_interface.ok_or(Error)?),
+                &mut state.ipv4_dns,
+            )?;
+        }
+        if let Some(address) = state.ipv6_dns_address {
+            install_managed_dns(
+                address,
+                &mut PlatformManagedIpv6Dns(state.dns_interface.ok_or(Error)?),
+                &mut state.ipv6_dns,
+            )?;
+        }
+        state
+            .notifications
+            .wait_until_quiescent(deadline, cancelled)?;
+        state.notifications.monitor_runtime();
+        let dns_interface = state.dns_interface;
+        if !revalidate_managed_network(
+            ManagedNetworkValidation {
+                policy: &state.policy,
+                owned,
+                routes: &state.routes,
+                validated_generation: &mut state.validated_generation,
+            },
+            true,
             || state.notifications.generation(),
             &mut PlatformUnderlay,
+            &mut PlatformManagedRouteCleanup,
+            || {
+                let Some(interface) = dns_interface else {
+                    return Ok(state.ipv4_dns.is_none() && state.ipv6_dns.is_none());
+                };
+                if let Some(lease) = &state.ipv4_dns
+                    && !managed_dns_matches(&mut PlatformManagedIpv4Dns(interface), lease)?
+                {
+                    return Ok(false);
+                }
+                if let Some(lease) = &state.ipv6_dns
+                    && !managed_dns_matches(&mut PlatformManagedIpv6Dns(interface), lease)?
+                {
+                    return Ok(false);
+                }
+                Ok(true)
+            },
         )? {
             return Err(Error);
         }
-        state.notifications.monitor_runtime();
-        if !managed_routes_match(&state.routes, &mut PlatformManagedRouteCleanup) {
-            return Err(Error);
-        }
-        state.validated_generation = state.notifications.generation();
         Ok(())
     }
 
-    fn revalidate_managed_network(&mut self) -> Result<bool, Error> {
+    fn managed_network_matches(&mut self, force: bool) -> Result<bool, Error> {
         let Some(state) = self.managed.as_mut() else {
             return Ok(true);
         };
@@ -1007,14 +1439,44 @@ impl Adapter {
             luid: unsafe { self.luid.Value },
             index: self.interface_index,
         };
+        let ManagedState {
+            notifications,
+            policy,
+            routes,
+            validated_generation,
+            dns_interface,
+            ipv4_dns,
+            ipv6_dns,
+            ..
+        } = state;
+        let dns_interface = *dns_interface;
         revalidate_managed_network(
-            &state.policy,
-            owned,
-            &state.routes,
-            &mut state.validated_generation,
-            || state.notifications.generation(),
+            ManagedNetworkValidation {
+                policy,
+                owned,
+                routes,
+                validated_generation,
+            },
+            force,
+            || notifications.generation(),
             &mut PlatformUnderlay,
             &mut PlatformManagedRouteCleanup,
+            || {
+                let Some(interface) = dns_interface else {
+                    return Ok(ipv4_dns.is_none() && ipv6_dns.is_none());
+                };
+                if let Some(lease) = ipv4_dns
+                    && !managed_dns_matches(&mut PlatformManagedIpv4Dns(interface), lease)?
+                {
+                    return Ok(false);
+                }
+                if let Some(lease) = ipv6_dns
+                    && !managed_dns_matches(&mut PlatformManagedIpv6Dns(interface), lease)?
+                {
+                    return Ok(false);
+                }
+                Ok(true)
+            },
         )
     }
 
@@ -1023,15 +1485,46 @@ impl Adapter {
     }
 }
 
+fn classify_receive_null(error: u32) -> Result<(), Error> {
+    match error {
+        ERROR_NO_MORE_ITEMS => Ok(()),
+        ERROR_HANDLE_EOF => Err(Error::recoverable_session()),
+        _ => Err(Error),
+    }
+}
+
+fn classify_wait_result(result: u32) -> Result<WaitOutcome, Error> {
+    match result {
+        WAIT_OBJECT_0 => Ok(WaitOutcome::Stop),
+        value if value == WAIT_OBJECT_0 + 1 => Ok(WaitOutcome::Work),
+        value if value == WAIT_OBJECT_0 + 2 => Ok(WaitOutcome::NetworkChanged),
+        value if value == WAIT_OBJECT_0 + 3 => Ok(WaitOutcome::Readable),
+        WAIT_TIMEOUT => Ok(WaitOutcome::Timeout),
+        WAIT_FAILED => Err(Error),
+        _ => Err(Error),
+    }
+}
+
+fn classify_send_allocation_failure(error: u32) -> Result<SendOutcome, Error> {
+    if error == ERROR_BUFFER_OVERFLOW {
+        Ok(SendOutcome::DroppedRingFull)
+    } else {
+        Err(Error)
+    }
+}
+
 fn prepare_managed_intent<T>(
-    config: Option<&crate::ManagedIpv4Config>,
-    prepare: impl FnOnce(&crate::ManagedIpv4Config) -> Result<T, Error>,
+    config: Option<&crate::ManagedNetworkConfig>,
+    prepare: impl FnOnce(&crate::ManagedNetworkConfig) -> Result<T, Error>,
 ) -> Result<Option<T>, Error> {
     config.map(prepare).transpose()
 }
 
 #[derive(Clone, Eq, PartialEq)]
 struct Ipv4DnsSettings(Option<Box<[u16]>>);
+
+#[derive(Clone, Eq, PartialEq)]
+struct Ipv6DnsSettings(Option<Box<[u16]>>);
 
 struct ManagedDnsLease<S> {
     previous: S,
@@ -1040,15 +1533,16 @@ struct ManagedDnsLease<S> {
 
 trait ManagedDnsOperations {
     type Settings: Clone + Eq;
+    type Address: Copy;
 
     fn snapshot(&mut self) -> Result<Self::Settings, Error>;
-    fn apply(&mut self, address: std::net::Ipv4Addr) -> Result<Self::Settings, Error>;
+    fn apply(&mut self, address: Self::Address) -> Result<Self::Settings, Error>;
     fn readback(&mut self) -> Result<Self::Settings, Error>;
     fn restore(&mut self, settings: &Self::Settings) -> Result<(), Error>;
 }
 
 fn install_managed_dns<O: ManagedDnsOperations>(
-    address: std::net::Ipv4Addr,
+    address: O::Address,
     operations: &mut O,
     lease: &mut Option<ManagedDnsLease<O::Settings>>,
 ) -> Result<(), Error> {
@@ -1060,6 +1554,13 @@ fn install_managed_dns<O: ManagedDnsOperations>(
     } else {
         Err(Error)
     }
+}
+
+fn managed_dns_matches<O: ManagedDnsOperations>(
+    operations: &mut O,
+    lease: &ManagedDnsLease<O::Settings>,
+) -> Result<bool, Error> {
+    Ok(operations.readback()? == lease.applied)
 }
 
 fn restore_managed_dns<O: ManagedDnsOperations>(
@@ -1078,10 +1579,11 @@ fn restore_managed_dns<O: ManagedDnsOperations>(
     !matches!(operations.readback(), Ok(current) if current == lease.previous)
 }
 
-struct PlatformManagedDns(GUID);
+struct PlatformManagedIpv4Dns(GUID);
 
-impl ManagedDnsOperations for PlatformManagedDns {
+impl ManagedDnsOperations for PlatformManagedIpv4Dns {
     type Settings = Ipv4DnsSettings;
+    type Address = std::net::Ipv4Addr;
 
     fn snapshot(&mut self) -> Result<Self::Settings, Error> {
         read_ipv4_dns_settings(self.0)
@@ -1104,26 +1606,119 @@ impl ManagedDnsOperations for PlatformManagedDns {
     }
 }
 
-fn read_ipv4_dns_settings(interface: GUID) -> Result<Ipv4DnsSettings, Error> {
+struct PlatformManagedIpv6Dns(GUID);
+
+impl ManagedDnsOperations for PlatformManagedIpv6Dns {
+    type Settings = Ipv6DnsSettings;
+    type Address = std::net::Ipv6Addr;
+
+    fn snapshot(&mut self) -> Result<Self::Settings, Error> {
+        read_ipv6_dns_settings(self.0)
+    }
+
+    fn apply(&mut self, address: std::net::Ipv6Addr) -> Result<Self::Settings, Error> {
+        let settings = Ipv6DnsSettings(Some(
+            address.to_string().encode_utf16().collect::<Box<[_]>>(),
+        ));
+        set_ipv6_dns_settings(self.0, &settings)?;
+        Ok(settings)
+    }
+
+    fn readback(&mut self) -> Result<Self::Settings, Error> {
+        read_ipv6_dns_settings(self.0)
+    }
+
+    fn restore(&mut self, settings: &Self::Settings) -> Result<(), Error> {
+        set_ipv6_dns_settings(self.0, settings)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DnsFamily {
+    Ipv4,
+    Ipv6,
+}
+
+fn read_dns_settings(interface: GUID, family: DnsFamily) -> Result<Option<Box<[u16]>>, Error> {
     let mut settings = DNS_INTERFACE_SETTINGS {
         Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: dns_settings_query_flags(family),
         ..DNS_INTERFACE_SETTINGS::default()
     };
     if unsafe { GetInterfaceDnsSettings(interface, &mut settings) } != ERROR_SUCCESS {
         return Err(Error);
     }
-    let result = copy_bounded_wide(settings.NameServer).map(Ipv4DnsSettings);
+    let result = copy_bounded_wide(settings.NameServer)
+        .and_then(|settings| normalize_dns_settings(settings.as_deref(), family));
     unsafe { FreeInterfaceDnsSettings(&mut settings) };
     result
 }
 
+const fn dns_settings_query_flags(family: DnsFamily) -> u64 {
+    match family {
+        DnsFamily::Ipv4 => 0,
+        DnsFamily::Ipv6 => DNS_SETTING_IPV6 as u64,
+    }
+}
+
+fn read_ipv4_dns_settings(interface: GUID) -> Result<Ipv4DnsSettings, Error> {
+    read_dns_settings(interface, DnsFamily::Ipv4).map(Ipv4DnsSettings)
+}
+
+fn read_ipv6_dns_settings(interface: GUID) -> Result<Ipv6DnsSettings, Error> {
+    read_dns_settings(interface, DnsFamily::Ipv6).map(Ipv6DnsSettings)
+}
+
+fn normalize_dns_settings(
+    settings: Option<&[u16]>,
+    family: DnsFamily,
+) -> Result<Option<Box<[u16]>>, Error> {
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    let settings = String::from_utf16(settings).map_err(|_| Error)?;
+    let mut addresses = Vec::new();
+    for candidate in settings.split(|character: char| character == ',' || character.is_whitespace())
+    {
+        if candidate.is_empty() {
+            continue;
+        }
+        let address = candidate.parse::<std::net::IpAddr>().map_err(|_| Error)?;
+        if matches!(
+            (family, address),
+            (DnsFamily::Ipv4, std::net::IpAddr::V4(_)) | (DnsFamily::Ipv6, std::net::IpAddr::V6(_))
+        ) {
+            addresses.push(address.to_string());
+        }
+    }
+    if addresses.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(
+            addresses.join(",").encode_utf16().collect::<Box<[_]>>(),
+        ))
+    }
+}
+
 fn ipv4_dns_settings_input(settings: &Ipv4DnsSettings) -> (Box<[u16]>, DNS_INTERFACE_SETTINGS) {
-    let mut name_server = settings.0.as_deref().unwrap_or_default().to_vec();
+    dns_settings_input(settings.0.as_deref(), false)
+}
+
+fn ipv6_dns_settings_input(settings: &Ipv6DnsSettings) -> (Box<[u16]>, DNS_INTERFACE_SETTINGS) {
+    dns_settings_input(settings.0.as_deref(), true)
+}
+
+fn dns_settings_input(
+    settings: Option<&[u16]>,
+    ipv6: bool,
+) -> (Box<[u16]>, DNS_INTERFACE_SETTINGS) {
+    let mut name_server = settings.unwrap_or_default().to_vec();
     name_server.push(0);
     let mut name_server = name_server.into_boxed_slice();
     let raw = DNS_INTERFACE_SETTINGS {
         Version: DNS_INTERFACE_SETTINGS_VERSION1,
-        Flags: u64::from(DNS_SETTING_NAMESERVER),
+        Flags: u64::from(DNS_SETTING_NAMESERVER)
+            | if ipv6 { u64::from(DNS_SETTING_IPV6) } else { 0 },
         NameServer: name_server.as_mut_ptr(),
         ..DNS_INTERFACE_SETTINGS::default()
     };
@@ -1132,6 +1727,15 @@ fn ipv4_dns_settings_input(settings: &Ipv4DnsSettings) -> (Box<[u16]>, DNS_INTER
 
 fn set_ipv4_dns_settings(interface: GUID, settings: &Ipv4DnsSettings) -> Result<(), Error> {
     let (_name_server, raw) = ipv4_dns_settings_input(settings);
+    if unsafe { SetInterfaceDnsSettings(interface, &raw) } == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(Error)
+    }
+}
+
+fn set_ipv6_dns_settings(interface: GUID, settings: &Ipv6DnsSettings) -> Result<(), Error> {
+    let (_name_server, raw) = ipv6_dns_settings_input(settings);
     if unsafe { SetInterfaceDnsSettings(interface, &raw) } == ERROR_SUCCESS {
         Ok(())
     } else {
@@ -1220,7 +1824,7 @@ fn subscribe_network_changes(wake: StopSignal) -> Result<NotificationOwners, Err
             let status = match ordinal {
                 0 => unsafe {
                     NotifyRouteChange2(
-                        AF_INET,
+                        managed_notification_family(),
                         Some(route_changed),
                         context_pointer,
                         false,
@@ -1229,7 +1833,7 @@ fn subscribe_network_changes(wake: StopSignal) -> Result<NotificationOwners, Err
                 },
                 1 => unsafe {
                     NotifyIpInterfaceChange(
-                        AF_INET,
+                        managed_notification_family(),
                         Some(interface_changed),
                         context_pointer,
                         false,
@@ -1238,7 +1842,7 @@ fn subscribe_network_changes(wake: StopSignal) -> Result<NotificationOwners, Err
                 },
                 2 => unsafe {
                     NotifyUnicastIpAddressChange(
-                        AF_INET,
+                        managed_notification_family(),
                         Some(address_changed),
                         context_pointer,
                         false,
@@ -1261,8 +1865,21 @@ fn subscribe_network_changes(wake: StopSignal) -> Result<NotificationOwners, Err
     })
 }
 
-fn snapshot_underlay(config: &crate::ManagedIpv4Config) -> Result<UnderlayPolicy, Error> {
-    snapshot_underlay_with(config, &mut PlatformUnderlay)
+const fn managed_notification_family() -> u16 {
+    AF_UNSPEC
+}
+
+fn snapshot_underlay(
+    config: &crate::ManagedNetworkConfig,
+    generation: Arc<AtomicU64>,
+    expected_generation: u64,
+) -> Result<UnderlayPolicy, Error> {
+    snapshot_underlay_at(
+        config,
+        generation,
+        expected_generation,
+        &mut PlatformUnderlay,
+    )
 }
 
 trait UnderlayOperations {
@@ -1270,49 +1887,92 @@ trait UnderlayOperations {
         &mut self,
         excluded: Option<InterfaceIdentity>,
     ) -> Result<Vec<InterfaceIdentity>, Error>;
-    fn best_interface(&mut self, destination: std::net::Ipv4Addr) -> Result<u32, Error>;
+    fn best_interface(&mut self, destination: std::net::SocketAddr) -> Result<u32, Error>;
+    fn interface_metric(
+        &mut self,
+        _family: std::net::IpAddr,
+        _interface_index: u32,
+    ) -> Result<u32, Error> {
+        Ok(0)
+    }
     fn constrained_route(
         &mut self,
-        destination: std::net::Ipv4Addr,
+        destination: std::net::SocketAddr,
         interface_index: u32,
         require_source: bool,
     ) -> Result<RouteFingerprint, Error>;
-    fn unique_default_route(
-        &mut self,
-        interfaces: &[InterfaceIdentity],
-    ) -> Result<RouteFingerprint, Error>;
 }
 
+#[cfg(test)]
 fn snapshot_underlay_with(
-    config: &crate::ManagedIpv4Config,
+    config: &crate::ManagedNetworkConfig,
     operations: &mut impl UnderlayOperations,
 ) -> Result<UnderlayPolicy, Error> {
+    snapshot_underlay_at(config, Arc::new(AtomicU64::new(0)), 0, operations)
+}
+
+fn snapshot_underlay_at(
+    config: &crate::ManagedNetworkConfig,
+    generation: Arc<AtomicU64>,
+    expected_generation: u64,
+    operations: &mut impl UnderlayOperations,
+) -> Result<UnderlayPolicy, Error> {
+    if generation.load(Ordering::Acquire) != expected_generation {
+        return Err(Error);
+    }
     let interfaces = operations.eligible_interfaces(None)?;
+    if config.needs_target_binder() && interfaces.is_empty() {
+        return Err(Error);
+    }
     let mut fixed = Vec::with_capacity(config.physical_endpoints().len());
     for endpoint in config.physical_endpoints() {
-        let index = operations.best_interface(*endpoint.ip())?;
+        let index = operations.best_interface(*endpoint)?;
         let identity = interfaces
             .iter()
             .find(|candidate| candidate.index == index)
             .ok_or(Error)?;
-        let route = operations.constrained_route(*endpoint.ip(), index, true)?;
-        if route.interface_luid != identity.luid || route.interface_index != identity.index {
+        let route = operations.constrained_route(*endpoint, index, true)?;
+        if route.interface_luid != identity.luid
+            || route.interface_index != identity.index
+            || !same_ip_family(endpoint.ip(), route.destination)
+        {
             return Err(Error);
         }
         fixed.push((*endpoint, route));
     }
-    let default = if config.needs_default_binder() {
-        Some(operations.unique_default_route(&interfaces)?)
-    } else {
-        None
-    };
+    if generation.load(Ordering::Acquire) != expected_generation {
+        return Err(Error);
+    }
     Ok(UnderlayPolicy {
         fixed: fixed.into(),
-        default,
+        target_binder: config.needs_target_binder(),
         valid: Arc::new(AtomicBool::new(true)),
+        generation,
+        accepted_generation: Arc::new(AtomicU64::new(expected_generation)),
+        owned_luid: Arc::new(AtomicU64::new(0)),
+        owned_index: Arc::new(AtomicU32::new(0)),
     })
 }
 
+fn underlay_matches_with(
+    policy: &UnderlayPolicy,
+    owned: InterfaceIdentity,
+    operations: &mut impl UnderlayOperations,
+) -> Result<bool, Error> {
+    let interfaces = operations.eligible_interfaces(Some(owned))?;
+    for (endpoint, expected) in policy.fixed.iter() {
+        if !interfaces.iter().any(|candidate| {
+            candidate.index == expected.interface_index && candidate.luid == expected.interface_luid
+        }) || operations.constrained_route(*endpoint, expected.interface_index, true)?
+            != *expected
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
 fn underlay_snapshot_matches(
     policy: &UnderlayPolicy,
     owned: InterfaceIdentity,
@@ -1327,29 +1987,6 @@ fn underlay_snapshot_matches(
     Ok(generation() == before)
 }
 
-fn underlay_matches_with(
-    policy: &UnderlayPolicy,
-    owned: InterfaceIdentity,
-    operations: &mut impl UnderlayOperations,
-) -> Result<bool, Error> {
-    let interfaces = operations.eligible_interfaces(Some(owned))?;
-    for (endpoint, expected) in policy.fixed.iter() {
-        if !interfaces.iter().any(|candidate| {
-            candidate.index == expected.interface_index && candidate.luid == expected.interface_luid
-        }) || operations.constrained_route(*endpoint.ip(), expected.interface_index, true)?
-            != *expected
-        {
-            return Ok(false);
-        }
-    }
-    if let Some(expected) = policy.default
-        && operations.unique_default_route(&interfaces)? != expected
-    {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
 struct PlatformUnderlay;
 
 impl UnderlayOperations for PlatformUnderlay {
@@ -1360,8 +1997,8 @@ impl UnderlayOperations for PlatformUnderlay {
         eligible_interfaces(excluded)
     }
 
-    fn best_interface(&mut self, destination: std::net::Ipv4Addr) -> Result<u32, Error> {
-        let destination = ipv4_sockaddr(destination);
+    fn best_interface(&mut self, destination: std::net::SocketAddr) -> Result<u32, Error> {
+        let destination = socket_addr_sockaddr(destination);
         let mut index = 0;
         if unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) }
             != ERROR_SUCCESS
@@ -1373,20 +2010,31 @@ impl UnderlayOperations for PlatformUnderlay {
         }
     }
 
+    fn interface_metric(
+        &mut self,
+        family: std::net::IpAddr,
+        interface_index: u32,
+    ) -> Result<u32, Error> {
+        let mut row = MIB_IPINTERFACE_ROW::default();
+        unsafe { InitializeIpInterfaceEntry(&mut row) };
+        row.Family = match family {
+            std::net::IpAddr::V4(_) => AF_INET,
+            std::net::IpAddr::V6(_) => AF_INET6,
+        };
+        row.InterfaceIndex = interface_index;
+        if unsafe { GetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS || !row.Connected {
+            return Err(Error);
+        }
+        Ok(row.Metric)
+    }
+
     fn constrained_route(
         &mut self,
-        destination: std::net::Ipv4Addr,
+        destination: std::net::SocketAddr,
         interface_index: u32,
         require_source: bool,
     ) -> Result<RouteFingerprint, Error> {
         constrained_route(destination, interface_index, require_source)
-    }
-
-    fn unique_default_route(
-        &mut self,
-        interfaces: &[InterfaceIdentity],
-    ) -> Result<RouteFingerprint, Error> {
-        unique_default_route(interfaces)
     }
 }
 
@@ -1434,44 +2082,326 @@ impl Drop for MibTable {
     }
 }
 
-fn unique_default_route(interfaces: &[InterfaceIdentity]) -> Result<RouteFingerprint, Error> {
-    let mut table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
-    if unsafe { GetIpForwardTable2(AF_INET, &mut table) } != ERROR_SUCCESS || table.is_null() {
-        return Err(Error);
-    }
-    let owner = MibTable(table.cast());
-    let count = unsafe { (*table).NumEntries as usize };
-    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
-    let result = select_unique_default_route(rows, interfaces);
-    drop(owner);
-    result
+const MANAGED_CAPTURE_ROUTE_METRIC: u32 = 1;
+const ROUTE_INTEGRITY_GENERATION_RETRIES: usize = 2;
+
+trait RouteIntegrityOperations {
+    fn snapshot(&mut self) -> Result<RouteIntegritySnapshot, Error>;
 }
 
-fn select_unique_default_route(
-    rows: &[MIB_IPFORWARD_ROW2],
-    interfaces: &[InterfaceIdentity],
-) -> Result<RouteFingerprint, Error> {
-    let mut defaults = rows.iter().filter(|row| {
-        interfaces.iter().any(|candidate| {
-            candidate.index == row.InterfaceIndex
-                && candidate.luid == unsafe { row.InterfaceLuid.Value }
-        }) && row.DestinationPrefix.PrefixLength == 0
-            && unsafe { row.DestinationPrefix.Prefix.si_family } == AF_INET
-            && unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr } == 0
-    });
-    let row = defaults.next().copied().ok_or(Error)?;
-    if defaults.next().is_some() {
+struct PlatformRouteIntegrity;
+
+impl RouteIntegrityOperations for PlatformRouteIntegrity {
+    fn snapshot(&mut self) -> Result<RouteIntegritySnapshot, Error> {
+        platform_route_integrity_snapshot()
+    }
+}
+
+fn scan_route_integrity_with(
+    capture_routes: &[IpPrefix],
+    owned: InterfaceIdentity,
+    mut generation: impl FnMut() -> u64,
+    operations: &mut impl RouteIntegrityOperations,
+) -> RouteIntegrityResult {
+    if capture_routes.is_empty() {
+        return RouteIntegrityResult::Clean;
+    }
+    for _ in 0..=ROUTE_INTEGRITY_GENERATION_RETRIES {
+        let before = generation();
+        let result = match operations.snapshot() {
+            Ok(snapshot) => evaluate_route_integrity(capture_routes, owned, &snapshot),
+            Err(_) => RouteIntegrityResult::PlatformError,
+        };
+        if generation() == before {
+            return result;
+        }
+    }
+    RouteIntegrityResult::UnstableGeneration
+}
+
+fn evaluate_route_integrity(
+    capture_routes: &[IpPrefix],
+    owned: InterfaceIdentity,
+    snapshot: &RouteIntegritySnapshot,
+) -> RouteIntegrityResult {
+    if owned.luid == 0 || owned.index == 0 {
+        return RouteIntegrityResult::PlatformError;
+    }
+    let captures = capture_routes
+        .iter()
+        .copied()
+        .map(RoutePrefix::from_capture)
+        .collect::<Vec<_>>();
+    let owned_ipv4 = captures
+        .iter()
+        .any(|prefix| prefix.family() == RouteFamily::Ipv4)
+        .then(|| owned_effective_metric(snapshot, owned, RouteFamily::Ipv4))
+        .transpose();
+    let owned_ipv6 = captures
+        .iter()
+        .any(|prefix| prefix.family() == RouteFamily::Ipv6)
+        .then(|| owned_effective_metric(snapshot, owned, RouteFamily::Ipv6))
+        .transpose();
+    let (owned_ipv4, owned_ipv6) = match (owned_ipv4, owned_ipv6) {
+        (Ok(ipv4), Ok(ipv6)) => (ipv4, ipv6),
+        _ => return RouteIntegrityResult::PlatformError,
+    };
+    let mut equal_prefix_conflict = None;
+    for route in &snapshot.routes {
+        if !route.valid
+            || is_control_prefix(route.destination)
+            || is_exact_owned_route(route, owned, &captures)
+        {
+            continue;
+        }
+        let interface = snapshot
+            .interfaces
+            .iter()
+            .find(|interface| interface.identity == route.interface);
+        if interface.is_some_and(|interface| {
+            interface.software_loopback
+                || !interface.up
+                || interface
+                    .family(route.destination.family())
+                    .is_some_and(|family| !family.up)
+        }) {
+            continue;
+        }
+        for capture in &captures {
+            if !route.destination.overlaps(*capture) || route.destination.length < capture.length {
+                continue;
+            }
+            if route.destination.length > capture.length {
+                return RouteIntegrityResult::Conflict(RouteConflict::new(
+                    RouteConflictReason::MoreSpecificRoute,
+                    capture.family().public(),
+                ));
+            }
+            let owned_metric = match capture.family() {
+                RouteFamily::Ipv4 => owned_ipv4,
+                RouteFamily::Ipv6 => owned_ipv6,
+            }
+            .expect("a used capture family has a validated owned metric");
+            let external_metric = interface
+                .and_then(|interface| interface.family(capture.family()))
+                .and_then(|family| route.route_metric.checked_add(family.metric));
+            if external_metric.is_none_or(|metric| metric <= owned_metric) {
+                equal_prefix_conflict.get_or_insert(capture.family().public());
+            }
+        }
+    }
+    if let Some(family) = equal_prefix_conflict {
+        RouteIntegrityResult::Conflict(RouteConflict::new(
+            RouteConflictReason::EqualPrefixPreferred,
+            family,
+        ))
+    } else {
+        RouteIntegrityResult::Clean
+    }
+}
+
+fn owned_effective_metric(
+    snapshot: &RouteIntegritySnapshot,
+    owned: InterfaceIdentity,
+    family: RouteFamily,
+) -> Result<u32, Error> {
+    let interface = snapshot
+        .interfaces
+        .iter()
+        .find(|interface| interface.identity == owned)
+        .ok_or(Error)?;
+    let family = interface.family(family).ok_or(Error)?;
+    if interface.software_loopback || !interface.up || !family.up {
         return Err(Error);
     }
-    route_fingerprint(&row, None)
+    MANAGED_CAPTURE_ROUTE_METRIC
+        .checked_add(family.metric)
+        .ok_or(Error)
+}
+
+fn is_exact_owned_route(
+    route: &RouteIntegrityRoute,
+    owned: InterfaceIdentity,
+    captures: &[RoutePrefix],
+) -> bool {
+    route.interface == owned
+        && ((route.owned_shape && captures.contains(&route.destination))
+            || (route.owned_local_shape
+                && captures
+                    .iter()
+                    .any(|capture| route.destination.is_within(*capture))))
+}
+
+fn is_control_prefix(prefix: RoutePrefix) -> bool {
+    match prefix.address {
+        std::net::IpAddr::V4(_) => [
+            route_prefix_v4([0, 0, 0, 0], 8),
+            route_prefix_v4([127, 0, 0, 0], 8),
+            route_prefix_v4([169, 254, 0, 0], 16),
+            route_prefix_v4([224, 0, 0, 0], 4),
+            route_prefix_v4([240, 0, 0, 0], 4),
+        ]
+        .into_iter()
+        .any(|control| prefix.is_within(control)),
+        std::net::IpAddr::V6(_) => [
+            route_prefix_v6([0; 16], 128),
+            route_prefix_v6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 128),
+            route_prefix_v6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10),
+            route_prefix_v6([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8),
+        ]
+        .into_iter()
+        .any(|control| prefix.is_within(control)),
+    }
+}
+
+fn route_prefix_v4(address: [u8; 4], length: u8) -> RoutePrefix {
+    RoutePrefix {
+        address: std::net::IpAddr::V4(std::net::Ipv4Addr::from(address)),
+        length,
+    }
+}
+
+fn route_prefix_v6(address: [u8; 16], length: u8) -> RoutePrefix {
+    RoutePrefix {
+        address: std::net::IpAddr::V6(std::net::Ipv6Addr::from(address)),
+        length,
+    }
+}
+
+fn platform_route_integrity_snapshot() -> Result<RouteIntegritySnapshot, Error> {
+    let mut route_table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
+    if unsafe { GetIpForwardTable2(AF_UNSPEC, &mut route_table) } != ERROR_SUCCESS
+        || route_table.is_null()
+    {
+        return Err(Error);
+    }
+    let route_owner = MibTable(route_table.cast());
+    let route_count = unsafe { (*route_table).NumEntries as usize };
+    let route_rows =
+        unsafe { std::slice::from_raw_parts((*route_table).Table.as_ptr(), route_count) };
+    let routes = route_rows
+        .iter()
+        .filter_map(normalize_route_integrity_row)
+        .collect::<Vec<_>>();
+    drop(route_owner);
+
+    let mut interface_table: *mut MIB_IF_TABLE2 = null_mut();
+    if unsafe { GetIfTable2(&mut interface_table) } != ERROR_SUCCESS || interface_table.is_null() {
+        return Err(Error);
+    }
+    let interface_owner = MibTable(interface_table.cast());
+    let interface_count = unsafe { (*interface_table).NumEntries as usize };
+    let interface_rows =
+        unsafe { std::slice::from_raw_parts((*interface_table).Table.as_ptr(), interface_count) };
+    let mut interfaces = interface_rows
+        .iter()
+        .filter_map(normalize_route_integrity_interface)
+        .collect::<Vec<_>>();
+    drop(interface_owner);
+
+    let mut ip_interface_table: *mut MIB_IPINTERFACE_TABLE = null_mut();
+    if unsafe { GetIpInterfaceTable(AF_UNSPEC, &mut ip_interface_table) } != ERROR_SUCCESS
+        || ip_interface_table.is_null()
+    {
+        return Err(Error);
+    }
+    let ip_interface_owner = MibTable(ip_interface_table.cast());
+    let ip_interface_count = unsafe { (*ip_interface_table).NumEntries as usize };
+    let ip_interface_rows = unsafe {
+        std::slice::from_raw_parts((*ip_interface_table).Table.as_ptr(), ip_interface_count)
+    };
+    for row in ip_interface_rows {
+        merge_ip_interface_row(&mut interfaces, row)?;
+    }
+    drop(ip_interface_owner);
+    Ok(RouteIntegritySnapshot { routes, interfaces })
+}
+
+fn normalize_route_integrity_row(row: &MIB_IPFORWARD_ROW2) -> Option<RouteIntegrityRoute> {
+    let interface = InterfaceIdentity {
+        luid: unsafe { row.InterfaceLuid.Value },
+        index: row.InterfaceIndex,
+    };
+    let destination_address = sockaddr_ip(&row.DestinationPrefix.Prefix).ok()?;
+    let destination = RoutePrefix::new(destination_address, row.DestinationPrefix.PrefixLength)?;
+    let next_hop = sockaddr_ip(&row.NextHop).ok()?;
+    let valid = interface.luid != 0
+        && interface.index != 0
+        && row.ValidLifetime != 0
+        && same_ip_family(destination_address, next_hop);
+    let owned_shape = valid
+        && next_hop.is_unspecified()
+        && row.SitePrefixLength == 0
+        && row.ValidLifetime == u32::MAX
+        && row.PreferredLifetime == u32::MAX
+        && row.Metric == MANAGED_CAPTURE_ROUTE_METRIC
+        && row.Protocol == MIB_IPPROTO_NETMGMT
+        && !row.Loopback
+        && !row.AutoconfigureAddress
+        && !row.Publish
+        && !row.Immortal
+        && row.Origin == NlroManual;
+    let owned_local_shape = valid && next_hop.is_unspecified() && row.Protocol == MIB_IPPROTO_LOCAL;
+    Some(RouteIntegrityRoute {
+        interface,
+        destination,
+        route_metric: row.Metric,
+        valid,
+        owned_shape,
+        owned_local_shape,
+    })
+}
+
+fn normalize_route_integrity_interface(row: &MIB_IF_ROW2) -> Option<RouteIntegrityInterface> {
+    let identity = InterfaceIdentity {
+        luid: unsafe { row.InterfaceLuid.Value },
+        index: row.InterfaceIndex,
+    };
+    (identity.luid != 0 && identity.index != 0).then_some(RouteIntegrityInterface {
+        identity,
+        software_loopback: row.Type
+            == windows_sys::Win32::NetworkManagement::IpHelper::IF_TYPE_SOFTWARE_LOOPBACK,
+        up: row.OperStatus == IfOperStatusUp
+            && row.AdminStatus == NET_IF_ADMIN_STATUS_UP
+            && row.MediaConnectState == MediaConnectStateConnected,
+        ipv4: None,
+        ipv6: None,
+    })
+}
+
+fn merge_ip_interface_row(
+    interfaces: &mut [RouteIntegrityInterface],
+    row: &MIB_IPINTERFACE_ROW,
+) -> Result<(), Error> {
+    let identity = InterfaceIdentity {
+        luid: unsafe { row.InterfaceLuid.Value },
+        index: row.InterfaceIndex,
+    };
+    let interface = interfaces
+        .iter_mut()
+        .find(|interface| interface.identity == identity)
+        .ok_or(Error)?;
+    let destination = match row.Family {
+        AF_INET => &mut interface.ipv4,
+        AF_INET6 => &mut interface.ipv6,
+        _ => return Err(Error),
+    };
+    if destination.is_some() {
+        return Err(Error);
+    }
+    *destination = Some(InterfaceFamilyState {
+        up: row.Connected,
+        metric: row.Metric,
+    });
+    Ok(())
 }
 
 fn constrained_route(
-    destination: std::net::Ipv4Addr,
+    destination: std::net::SocketAddr,
     interface_index: u32,
     require_source: bool,
 ) -> Result<RouteFingerprint, Error> {
-    let destination = ipv4_sockaddr(destination);
+    let destination_sockaddr = socket_addr_sockaddr(destination);
     let mut route = MIB_IPFORWARD_ROW2::default();
     let mut source = SOCKADDR_INET::default();
     if unsafe {
@@ -1479,19 +2409,18 @@ fn constrained_route(
             null(),
             interface_index,
             null(),
-            &destination,
+            &destination_sockaddr,
             0,
             &mut route,
             &mut source,
         )
     } != ERROR_SUCCESS
         || route.InterfaceIndex != interface_index
-        || unsafe { source.si_family } != AF_INET
     {
         return Err(Error);
     }
-    let source = unsafe { source.Ipv4.sin_addr.S_un.S_addr };
-    if require_source && source == 0 {
+    let source = sockaddr_ip(&source)?;
+    if !same_ip_family(destination.ip(), source) || (require_source && source.is_unspecified()) {
         return Err(Error);
     }
     route_fingerprint(&route, require_source.then_some(source))
@@ -1499,22 +2428,49 @@ fn constrained_route(
 
 fn route_fingerprint(
     row: &MIB_IPFORWARD_ROW2,
-    source: Option<u32>,
+    source: Option<std::net::IpAddr>,
 ) -> Result<RouteFingerprint, Error> {
-    if unsafe { row.DestinationPrefix.Prefix.si_family } != AF_INET
-        || unsafe { row.NextHop.si_family } != AF_INET
+    let destination = sockaddr_ip(&row.DestinationPrefix.Prefix)?;
+    let next_hop = sockaddr_ip(&row.NextHop)?;
+    if !same_ip_family(destination, next_hop)
+        || source.is_some_and(|source| !same_ip_family(destination, source))
     {
         return Err(Error);
     }
     Ok(RouteFingerprint {
         interface_luid: unsafe { row.InterfaceLuid.Value },
         interface_index: row.InterfaceIndex,
-        destination: unsafe { row.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr },
+        destination,
         prefix_length: row.DestinationPrefix.PrefixLength,
-        next_hop: unsafe { row.NextHop.Ipv4.sin_addr.S_un.S_addr },
+        next_hop,
         metric: row.Metric,
         source,
     })
+}
+
+fn sockaddr_ip(address: &SOCKADDR_INET) -> Result<std::net::IpAddr, Error> {
+    unsafe {
+        match address.si_family {
+            AF_INET => Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+                address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes(),
+            ))),
+            AF_INET6 => Ok(std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                address.Ipv6.sin6_addr.u.Byte,
+            ))),
+            _ => Err(Error),
+        }
+    }
+}
+
+fn socket_addr_sockaddr(address: std::net::SocketAddr) -> SOCKADDR_INET {
+    match address {
+        std::net::SocketAddr::V4(address) => ipv4_sockaddr(*address.ip()),
+        std::net::SocketAddr::V6(address) => {
+            let mut raw = ipv6_sockaddr(*address.ip());
+            raw.Ipv6.Anonymous.sin6_scope_id = address.scope_id();
+            raw
+        }
+    }
 }
 
 fn ipv4_sockaddr(address: std::net::Ipv4Addr) -> SOCKADDR_INET {
@@ -1532,22 +2488,169 @@ fn ipv4_sockaddr(address: std::net::Ipv4Addr) -> SOCKADDR_INET {
     }
 }
 
+fn ipv6_sockaddr(address: std::net::Ipv6Addr) -> SOCKADDR_INET {
+    SOCKADDR_INET {
+        Ipv6: SOCKADDR_IN6 {
+            sin6_family: AF_INET6,
+            sin6_port: 0,
+            sin6_flowinfo: 0,
+            sin6_addr: IN6_ADDR {
+                u: IN6_ADDR_0 {
+                    Byte: address.octets(),
+                },
+            },
+            Anonymous: SOCKADDR_IN6_0 { sin6_scope_id: 0 },
+        },
+    }
+}
+
+fn read_ip_interface(luid: NET_LUID_LH, family: u16) -> Result<MIB_IPINTERFACE_ROW, Error> {
+    let mut row = MIB_IPINTERFACE_ROW::default();
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = family;
+    row.InterfaceLuid = luid;
+    if unsafe { GetIpInterfaceEntry(&mut row) } == ERROR_SUCCESS {
+        Ok(row)
+    } else {
+        Err(Error)
+    }
+}
+
+fn address_key(intended: &MIB_UNICASTIPADDRESS_ROW) -> MIB_UNICASTIPADDRESS_ROW {
+    let mut key = MIB_UNICASTIPADDRESS_ROW::default();
+    unsafe { InitializeUnicastIpAddressEntry(&mut key) };
+    key.Address = intended.Address;
+    key.InterfaceLuid = intended.InterfaceLuid;
+    key.InterfaceIndex = intended.InterfaceIndex;
+    key
+}
+
+fn initialize_managed_address(row: &mut MIB_UNICASTIPADDRESS_ROW) {
+    unsafe { InitializeUnicastIpAddressEntry(row) };
+    // Windows normalizes "unchanged" origins to manual when the row is created. Record the
+    // normalized values up front so exact ownership readback and rollback remain comparable.
+    row.PrefixOrigin = IpPrefixOriginManual;
+    row.SuffixOrigin = IpSuffixOriginManual;
+}
+
+fn require_address_absent(intended: &MIB_UNICASTIPADDRESS_ROW) -> Result<(), Error> {
+    let mut current = address_key(intended);
+    match unsafe { GetUnicastIpAddressEntry(&mut current) } {
+        ERROR_NOT_FOUND => Ok(()),
+        _ => Err(Error),
+    }
+}
+
+fn read_owned_address(
+    intended: &MIB_UNICASTIPADDRESS_ROW,
+) -> Result<MIB_UNICASTIPADDRESS_ROW, Error> {
+    let mut current = address_key(intended);
+    if unsafe { GetUnicastIpAddressEntry(&mut current) } == ERROR_SUCCESS {
+        Ok(current)
+    } else {
+        Err(Error)
+    }
+}
+
+fn managed_address_matches(
+    expected: &MIB_UNICASTIPADDRESS_ROW,
+    actual: &MIB_UNICASTIPADDRESS_ROW,
+) -> bool {
+    unsafe {
+        actual.InterfaceLuid.Value == expected.InterfaceLuid.Value
+            && actual.InterfaceIndex == expected.InterfaceIndex
+            && sockaddr_matches(&expected.Address, &actual.Address)
+            && actual.PrefixOrigin == expected.PrefixOrigin
+            && actual.SuffixOrigin == expected.SuffixOrigin
+            && actual.ValidLifetime == expected.ValidLifetime
+            && actual.PreferredLifetime == expected.PreferredLifetime
+            && actual.OnLinkPrefixLength == expected.OnLinkPrefixLength
+            && actual.SkipAsSource == expected.SkipAsSource
+            && actual.ScopeId.Anonymous.Value == expected.ScopeId.Anonymous.Value
+    }
+}
+
+enum ManagedAddressRead<R> {
+    Absent,
+    Present(R),
+    Failed,
+}
+
+trait ManagedAddressCleanupOperations {
+    type Row: Copy;
+
+    fn read(&mut self, intended: &Self::Row) -> ManagedAddressRead<Self::Row>;
+    fn matches(&self, intended: &Self::Row, current: &Self::Row) -> bool;
+    fn delete(&mut self, current: &Self::Row) -> Result<(), Error>;
+}
+
+fn delete_managed_address<O: ManagedAddressCleanupOperations>(
+    operations: &mut O,
+    intended: &O::Row,
+) -> bool {
+    match operations.read(intended) {
+        ManagedAddressRead::Absent => false,
+        ManagedAddressRead::Present(current) if operations.matches(intended, &current) => {
+            let delete_failed = operations.delete(&current).is_err();
+            let final_read_failed =
+                !matches!(operations.read(intended), ManagedAddressRead::Absent);
+            delete_failed | final_read_failed
+        }
+        ManagedAddressRead::Present(_) | ManagedAddressRead::Failed => true,
+    }
+}
+
+struct PlatformManagedAddressCleanup;
+
+impl ManagedAddressCleanupOperations for PlatformManagedAddressCleanup {
+    type Row = MIB_UNICASTIPADDRESS_ROW;
+
+    fn read(&mut self, intended: &Self::Row) -> ManagedAddressRead<Self::Row> {
+        let mut current = address_key(intended);
+        match unsafe { GetUnicastIpAddressEntry(&mut current) } {
+            ERROR_NOT_FOUND => ManagedAddressRead::Absent,
+            ERROR_SUCCESS => ManagedAddressRead::Present(current),
+            _ => ManagedAddressRead::Failed,
+        }
+    }
+
+    fn matches(&self, intended: &Self::Row, current: &Self::Row) -> bool {
+        managed_address_matches(intended, current)
+    }
+
+    fn delete(&mut self, current: &Self::Row) -> Result<(), Error> {
+        match unsafe { DeleteUnicastIpAddressEntry(current) } {
+            ERROR_SUCCESS | ERROR_NOT_FOUND => Ok(()),
+            _ => Err(Error),
+        }
+    }
+}
+
 fn capture_route_row(
     luid: NET_LUID_LH,
     interface_index: u32,
-    prefix: Ipv4Prefix,
+    prefix: IpPrefix,
 ) -> MIB_IPFORWARD_ROW2 {
     let mut row = MIB_IPFORWARD_ROW2::default();
     unsafe { InitializeIpForwardEntry(&mut row) };
     row.InterfaceLuid = luid;
     row.InterfaceIndex = interface_index;
-    row.DestinationPrefix.Prefix = ipv4_sockaddr(prefix.address());
-    row.DestinationPrefix.PrefixLength = prefix.length();
-    row.NextHop = ipv4_sockaddr(std::net::Ipv4Addr::UNSPECIFIED);
+    match prefix {
+        IpPrefix::V4(prefix) => {
+            row.DestinationPrefix.Prefix = ipv4_sockaddr(prefix.address());
+            row.DestinationPrefix.PrefixLength = prefix.length();
+            row.NextHop = ipv4_sockaddr(std::net::Ipv4Addr::UNSPECIFIED);
+        }
+        IpPrefix::V6(prefix) => {
+            row.DestinationPrefix.Prefix = ipv6_sockaddr(prefix.address());
+            row.DestinationPrefix.PrefixLength = prefix.length();
+            row.NextHop = ipv6_sockaddr(std::net::Ipv6Addr::UNSPECIFIED);
+        }
+    }
     row.SitePrefixLength = 0;
     row.ValidLifetime = u32::MAX;
     row.PreferredLifetime = u32::MAX;
-    row.Metric = 1;
+    row.Metric = MANAGED_CAPTURE_ROUTE_METRIC;
     row.Protocol = MIB_IPPROTO_NETMGMT;
     row.Loopback = false;
     row.AutoconfigureAddress = false;
@@ -1589,22 +2692,42 @@ fn route_matches(expected: &MIB_IPFORWARD_ROW2, actual: &MIB_IPFORWARD_ROW2) -> 
     unsafe {
         actual.InterfaceLuid.Value == expected.InterfaceLuid.Value
             && actual.InterfaceIndex == expected.InterfaceIndex
-            && actual.DestinationPrefix.Prefix.si_family == AF_INET
-            && actual.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr
-                == expected.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr
+            && sockaddr_matches(
+                &expected.DestinationPrefix.Prefix,
+                &actual.DestinationPrefix.Prefix,
+            )
             && actual.DestinationPrefix.PrefixLength == expected.DestinationPrefix.PrefixLength
-            && actual.NextHop.si_family == AF_INET
-            && actual.NextHop.Ipv4.sin_addr.S_un.S_addr == 0
+            && sockaddr_matches(&expected.NextHop, &actual.NextHop)
             && actual.SitePrefixLength == 0
             && actual.ValidLifetime == u32::MAX
             && actual.PreferredLifetime == u32::MAX
-            && actual.Metric == 1
+            && actual.Metric == MANAGED_CAPTURE_ROUTE_METRIC
             && actual.Protocol == MIB_IPPROTO_NETMGMT
             && !actual.Loopback
             && !actual.AutoconfigureAddress
             && !actual.Publish
             && !actual.Immortal
             && actual.Origin == NlroManual
+    }
+}
+
+fn sockaddr_matches(expected: &SOCKADDR_INET, actual: &SOCKADDR_INET) -> bool {
+    unsafe {
+        match expected.si_family {
+            AF_INET => {
+                actual.si_family == AF_INET
+                    && actual.Ipv4.sin_port == expected.Ipv4.sin_port
+                    && actual.Ipv4.sin_addr.S_un.S_addr == expected.Ipv4.sin_addr.S_un.S_addr
+            }
+            AF_INET6 => {
+                actual.si_family == AF_INET6
+                    && actual.Ipv6.sin6_port == expected.Ipv6.sin6_port
+                    && actual.Ipv6.sin6_flowinfo == expected.Ipv6.sin6_flowinfo
+                    && actual.Ipv6.sin6_addr.u.Byte == expected.Ipv6.sin6_addr.u.Byte
+                    && actual.Ipv6.Anonymous.sin6_scope_id == expected.Ipv6.Anonymous.sin6_scope_id
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1649,29 +2772,62 @@ fn managed_routes_match<O: ManagedRouteCleanupOperations>(
     })
 }
 
-fn revalidate_managed_network<U: UnderlayOperations, O: ManagedRouteCleanupOperations>(
-    policy: &UnderlayPolicy,
+struct ManagedNetworkValidation<'a, R> {
+    policy: &'a UnderlayPolicy,
     owned: InterfaceIdentity,
-    routes: &[O::Row],
-    validated_generation: &mut u64,
+    routes: &'a [R],
+    validated_generation: &'a mut u64,
+}
+
+fn revalidate_managed_network<
+    U: UnderlayOperations,
+    O: ManagedRouteCleanupOperations,
+    F: FnMut() -> Result<bool, Error>,
+>(
+    validation: ManagedNetworkValidation<'_, O::Row>,
+    force: bool,
     mut generation: impl FnMut() -> u64,
     underlay: &mut U,
     route_operations: &mut O,
+    mut additional_matches: F,
 ) -> Result<bool, Error> {
+    let ManagedNetworkValidation {
+        policy,
+        owned,
+        routes,
+        validated_generation,
+    } = validation;
     let mut before = generation();
-    if before == *validated_generation {
+    if !force && before == *validated_generation {
         return Ok(true);
     }
     for _ in 0..2 {
-        if !underlay_matches_with(policy, owned, underlay)?
-            || !managed_routes_match(routes, route_operations)
-        {
+        let underlay_matches = match underlay_matches_with(policy, owned, underlay) {
+            Ok(matches) => matches,
+            Err(error) => {
+                policy.invalidate();
+                return Err(error);
+            }
+        };
+        if !underlay_matches || !managed_routes_match(routes, route_operations) {
+            policy.invalidate();
+            return Ok(false);
+        }
+        let additional_matches = match additional_matches() {
+            Ok(matches) => matches,
+            Err(error) => {
+                policy.invalidate();
+                return Err(error);
+            }
+        };
+        if !additional_matches {
             policy.invalidate();
             return Ok(false);
         }
         let after = generation();
         if after == before {
             *validated_generation = after;
+            policy.accept_generation(after);
             return Ok(true);
         }
         before = after;
@@ -1734,7 +2890,7 @@ trait CleanupOperations {
     fn delete_last_route(&mut self) -> Option<bool> {
         None
     }
-    fn restore_dns(&mut self) -> Option<bool> {
+    fn restore_last_dns(&mut self) -> Option<bool> {
         None
     }
     fn end_session(&mut self) -> Option<bool>;
@@ -1749,16 +2905,18 @@ fn cleanup_transaction(cleanup: &mut impl CleanupOperations) -> bool {
         return true;
     }
     let mut failed = cleanup.cancel_notifications().unwrap_or(false);
+    while let Some(step_failed) = cleanup.restore_last_dns() {
+        failed |= step_failed;
+    }
     while let Some(step_failed) = cleanup.delete_last_route() {
         failed |= step_failed;
     }
-    failed |= cleanup.restore_dns().unwrap_or(false);
-    failed |= cleanup.end_session().unwrap_or(false);
     while let Some(step_failed) = cleanup.delete_last_address() {
         failed |= step_failed;
     }
     failed |= cleanup.restore_ipv6_mtu().unwrap_or(false);
     failed |= cleanup.restore_ipv4_mtu().unwrap_or(false);
+    failed |= cleanup.end_session().unwrap_or(false);
     failed |= cleanup.close_adapter().unwrap_or(false);
     failed
 }
@@ -1768,19 +2926,23 @@ struct PlatformCleanup<'a>(&'a mut Adapter);
 impl PlatformCleanup<'_> {
     fn restore_mtu(&mut self, slot: usize) -> Option<bool> {
         let state = self.0.mtus[slot].take()?;
-        let mut row = MIB_IPINTERFACE_ROW::default();
-        unsafe { InitializeIpInterfaceEntry(&mut row) };
-        row.Family = state.family;
-        row.InterfaceLuid = self.0.luid;
-        let get_status = unsafe { GetIpInterfaceEntry(&mut row) };
-        if get_status != ERROR_SUCCESS || row.NlMtu != state.configured {
+        let Ok(mut row) = read_ip_interface(self.0.luid, state.family) else {
+            return Some(true);
+        };
+        if row.NlMtu != state.configured {
             return Some(true);
         }
         if state.family == AF_INET {
             row.SitePrefixLength = 0;
         }
         row.NlMtu = state.previous;
-        Some(unsafe { SetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS)
+        if unsafe { SetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS {
+            return Some(true);
+        }
+        Some(match read_ip_interface(self.0.luid, state.family) {
+            Ok(current) => current.NlMtu != state.previous,
+            Err(_) => true,
+        })
     }
 }
 
@@ -1790,10 +2952,10 @@ impl CleanupOperations for PlatformCleanup<'_> {
     }
 
     fn cancel_notifications(&mut self) -> Option<bool> {
-        self.0
-            .managed
-            .as_mut()
-            .map(|state| state.notifications.cancel_all())
+        self.0.managed.as_mut().map(|state| {
+            state.policy.invalidate();
+            state.notifications.cancel_all()
+        })
     }
 
     fn delete_last_route(&mut self) -> Option<bool> {
@@ -1805,16 +2967,20 @@ impl CleanupOperations for PlatformCleanup<'_> {
         ))
     }
 
-    fn restore_dns(&mut self) -> Option<bool> {
+    fn restore_last_dns(&mut self) -> Option<bool> {
         let state = self.0.managed.as_mut()?;
-        let lease = state.dns.take()?;
-        let Some(interface) = state.dns_interface.take() else {
-            return Some(true);
-        };
-        Some(restore_managed_dns(
-            &mut PlatformManagedDns(interface),
-            &lease,
-        ))
+        if let Some(lease) = state.ipv6_dns.take() {
+            return Some(state.dns_interface.is_none_or(|interface| {
+                restore_managed_dns(&mut PlatformManagedIpv6Dns(interface), &lease)
+            }));
+        }
+        if let Some(lease) = state.ipv4_dns.take() {
+            return Some(state.dns_interface.is_none_or(|interface| {
+                restore_managed_dns(&mut PlatformManagedIpv4Dns(interface), &lease)
+            }));
+        }
+        state.dns_interface.take();
+        None
     }
 
     fn end_session(&mut self) -> Option<bool> {
@@ -1824,8 +2990,15 @@ impl CleanupOperations for PlatformCleanup<'_> {
     }
 
     fn delete_last_address(&mut self) -> Option<bool> {
-        let address = self.0.addresses.pop()?;
-        Some(unsafe { DeleteUnicastIpAddressEntry(&address) } != ERROR_SUCCESS)
+        let address = self
+            .0
+            .pending_address
+            .take()
+            .or_else(|| self.0.addresses.pop())?;
+        Some(delete_managed_address(
+            &mut PlatformManagedAddressCleanup,
+            &address,
+        ))
     }
 
     fn restore_ipv6_mtu(&mut self) -> Option<bool> {
@@ -1874,14 +3047,14 @@ fn dad_poll(waiting: bool, deadline_elapsed: bool) -> Result<DadProgress, Error>
 
 fn dad_snapshot(
     session_started: bool,
-    states: [NL_DAD_STATE; 2],
+    states: &[NL_DAD_STATE],
     deadline_elapsed: bool,
 ) -> Result<DadProgress, Error> {
-    if !session_started {
+    if !session_started || states.is_empty() {
         return Err(Error);
     }
     let mut waiting = false;
-    for state in states {
+    for &state in states {
         waiting |= dad_progress(state)? == DadProgress::Waiting;
     }
     dad_poll(waiting, deadline_elapsed)
@@ -1913,11 +3086,14 @@ trait SetupOperations {
     fn check_deadline(&mut self) -> Result<(), Error>;
     fn create_adapter(&mut self) -> Result<(), Error>;
     fn check_driver(&mut self) -> Result<(), Error>;
+    fn start_session(&mut self) -> Result<(), Error>;
+    fn identify_adapter(&mut self) -> Result<(), Error>;
+    fn ipv4_enabled(&self) -> bool;
+    fn ipv6_enabled(&self) -> bool;
     fn set_ipv4_mtu(&mut self) -> Result<(), Error>;
     fn set_ipv6_mtu(&mut self) -> Result<(), Error>;
     fn add_ipv4_address(&mut self) -> Result<(), Error>;
     fn add_ipv6_address(&mut self) -> Result<(), Error>;
-    fn start_session(&mut self) -> Result<(), Error>;
     fn wait_for_dad(&mut self) -> Result<(), Error>;
 }
 
@@ -1926,11 +3102,20 @@ fn setup_transaction(setup: &mut impl SetupOperations) -> Result<(), Error> {
     setup.check_deadline()?;
     setup.create_adapter()?;
     setup.check_driver()?;
-    setup.set_ipv4_mtu()?;
-    setup.set_ipv6_mtu()?;
-    setup.add_ipv4_address()?;
-    setup.add_ipv6_address()?;
     setup.start_session()?;
+    setup.identify_adapter()?;
+    if setup.ipv4_enabled() {
+        setup.set_ipv4_mtu()?;
+    }
+    if setup.ipv6_enabled() {
+        setup.set_ipv6_mtu()?;
+    }
+    if setup.ipv4_enabled() {
+        setup.add_ipv4_address()?;
+    }
+    if setup.ipv6_enabled() {
+        setup.add_ipv6_address()?;
+    }
     setup.wait_for_dad()
 }
 
@@ -1967,17 +3152,17 @@ impl SetupOperations for PlatformSetup<'_> {
             return Err(classify_adapter_create_failure(unsafe { GetLastError() }).into_error());
         }
         self.owner.adapter = Some(adapter);
+        Ok(())
+    }
+
+    fn identify_adapter(&mut self) -> Result<(), Error> {
+        let adapter = self.owner.adapter.ok_or(Error)?;
         unsafe { (self.owner.library.exports.get_adapter_luid)(adapter, &mut self.owner.luid) };
         if unsafe { ConvertInterfaceLuidToIndex(&self.owner.luid, &mut self.owner.interface_index) }
             != ERROR_SUCCESS
             || self.owner.interface_index == 0
         {
             return Err(Error);
-        }
-        if let Some(state) = &self.owner.managed {
-            state
-                .notifications
-                .set_owned_luid(self.owner.luid, self.deadline, self.cancelled)?;
         }
         Ok(())
     }
@@ -1990,22 +3175,12 @@ impl SetupOperations for PlatformSetup<'_> {
         }
     }
 
-    fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
-        self.owner.set_mtu(AF_INET, 0)
+    fn ipv4_enabled(&self) -> bool {
+        self.owner.config.ipv4.is_some()
     }
 
-    fn set_ipv6_mtu(&mut self) -> Result<(), Error> {
-        self.owner.set_mtu(AF_INET6, 1)
-    }
-
-    fn add_ipv4_address(&mut self) -> Result<(), Error> {
-        let row = self.owner.ipv4_address_row();
-        self.owner.create_address(row)
-    }
-
-    fn add_ipv6_address(&mut self) -> Result<(), Error> {
-        let row = self.owner.ipv6_address_row();
-        self.owner.create_address(row)
+    fn ipv6_enabled(&self) -> bool {
+        self.owner.config.ipv6.is_some()
     }
 
     fn start_session(&mut self) -> Result<(), Error> {
@@ -2026,6 +3201,24 @@ impl SetupOperations for PlatformSetup<'_> {
         } else {
             Ok(())
         }
+    }
+
+    fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
+        self.owner.set_mtu(AF_INET, 0)
+    }
+
+    fn set_ipv6_mtu(&mut self) -> Result<(), Error> {
+        self.owner.set_mtu(AF_INET6, 1)
+    }
+
+    fn add_ipv4_address(&mut self) -> Result<(), Error> {
+        let row = self.owner.ipv4_address_row()?;
+        self.owner.create_address(row)
+    }
+
+    fn add_ipv6_address(&mut self) -> Result<(), Error> {
+        let row = self.owner.ipv6_address_row()?;
+        self.owner.create_address(row)
     }
 
     fn wait_for_dad(&mut self) -> Result<(), Error> {
@@ -2066,6 +3259,25 @@ impl Clone for StopSignal {
 }
 
 impl StopSignal {
+    pub fn signal(&self) -> Result<(), Error> {
+        if unsafe { SetEvent(self.0.0) } == 0 {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Cloneable auto-reset signal for waking the owner when adapter-owned work arrives.
+pub struct WorkSignal(Arc<OwnedHandle>);
+
+impl Clone for WorkSignal {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl WorkSignal {
     pub fn signal(&self) -> Result<(), Error> {
         if unsafe { SetEvent(self.0.0) } == 0 {
             Err(Error)
@@ -2237,8 +3449,8 @@ fn cng_sha256(file: &File) -> Result<[u8; 32], Error> {
     }
 }
 
-fn create_event() -> Result<HANDLE, Error> {
-    let handle = unsafe { CreateEventW(null(), 1, 0, null()) };
+fn create_event(manual_reset: bool) -> Result<HANDLE, Error> {
+    let handle = unsafe { CreateEventW(null(), i32::from(manual_reset), 0, null()) };
     if handle.is_null() {
         Err(Error)
     } else {
@@ -2277,24 +3489,40 @@ fn wide(path: &Path) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_EXPORTS, AdapterCreateFailure, CleanupOperations, DLL_BYTES, DLL_SHA256,
-        DNS_SETTING_NAMESERVER, DadProgress, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, Error,
-        InterfaceIdentity, IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid,
-        IpDadStatePreferred, IpDadStateTentative, Ipv4DnsSettings, LoaderOperations, MIB_IF_ROW2,
-        MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, ManagedDnsOperations,
+        ABI_EXPORTS, AF_INET6, AF_UNSPEC, AdapterCreateFailure, CleanupOperations, DLL_BYTES,
+        DLL_SHA256, DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER, DadProgress, DnsFamily,
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF,
+        ERROR_NO_MORE_ITEMS, Error, InterfaceFamilyState, InterfaceIdentity, IpDadStateDeprecated,
+        IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
+        Ipv4DnsSettings, Ipv6DnsSettings, LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2,
+        MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, ManagedAddressCleanupOperations,
+        ManagedAddressRead, ManagedDnsLease, ManagedDnsOperations, ManagedNetworkValidation,
         ManagedRouteCleanupOperations, ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH,
-        NotificationContext, NotificationOwners, RouteFingerprint, SessionJournal, SetupOperations,
-        UnderlayOperations, address_changed, cancel_notification_handles, capture_route_row,
-        classify_adapter_create_failure, classify_notification_luid, cleanup_transaction,
-        copy_bounded_wide, dad_snapshot, delete_managed_route, eligible_interface_identity,
-        finish_setup_transaction, install_managed_dns, install_managed_routes, interface_changed,
-        interface_index_option_value, ipv4_dns_settings_input, leak_notification_owners,
-        load_transaction, prepare_managed_intent, require_exports, restore_managed_dns,
-        revalidate_managed_network, route_changed, route_matches, select_unique_default_route,
-        setup_transaction, snapshot_underlay_with, subscribe_notification_sequence,
-        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        NotificationContext, NotificationOwners, OwnedHandle, RouteFingerprint,
+        RouteIntegrityInterface, RouteIntegrityOperations, RouteIntegrityRoute,
+        RouteIntegritySnapshot, RoutePrefix, SessionJournal, SetupOperations,
+        SocketBindingOperations, StopSignal, UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT, WaitForMultipleObjects, WorkSignal, address_changed, bind_fixed_with,
+        bind_target_with, cancel_notification_handles, capture_route_row,
+        classify_adapter_create_failure, classify_notification_luid, classify_receive_null,
+        classify_send_allocation_failure, classify_wait_result, cleanup_transaction,
+        copy_bounded_wide, create_event, dad_snapshot, delete_managed_address,
+        delete_managed_route, dns_settings_query_flags, eligible_interface_identity,
+        evaluate_route_integrity, finish_setup_transaction, initialize_managed_address,
+        install_managed_dns, install_managed_routes, interface_changed, interface_socket_option,
+        ipv4_dns_settings_input, ipv4_interface_index_option_value, ipv4_sockaddr,
+        ipv6_dns_settings_input, ipv6_interface_index_option_value, ipv6_sockaddr,
+        leak_notification_owners, load_transaction, managed_address_matches, managed_dns_matches,
+        managed_notification_family, normalize_dns_settings, prepare_managed_intent,
+        require_exports, restore_managed_dns, revalidate_managed_network, route_changed,
+        route_matches, scan_route_integrity_with, setup_transaction, snapshot_underlay_at,
+        snapshot_underlay_with, subscribe_notification_sequence, take_last_owned_route,
+        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
-    use crate::Ipv4Prefix;
+    use crate::{
+        ErrorKind, IpFamily, IpPrefix, Ipv4Prefix, Ipv6Prefix, RouteConflict, RouteConflictReason,
+        RouteIntegrityResult, SendOutcome, WaitOutcome,
+    };
 
     enum PublicationObservation<T> {
         Blocked,
@@ -2358,8 +3586,8 @@ mod tests {
         const FOREIGN_LUID: u64 = 0x5060_7080;
 
         for (name, notified_luid, expected_generation, expected_ok) in [
-            ("exact own", OWN_LUID, 0, true),
-            ("foreign", FOREIGN_LUID, 1, false),
+            ("exact own", OWN_LUID, 1, true),
+            ("foreign", FOREIGN_LUID, 2, false),
         ] {
             let context = NotificationContext::new(None);
             let entered = std::sync::Barrier::new(2);
@@ -2625,7 +3853,7 @@ mod tests {
                     Action::Notify(Some(OWN_LUID)),
                     Action::Publish(OWN_LUID),
                 ],
-                false,
+                true,
             ),
             (
                 "foreign before publication",
@@ -2666,7 +3894,7 @@ mod tests {
             (
                 "own after publication",
                 &[Action::Publish(OWN_LUID), Action::Notify(Some(OWN_LUID))],
-                false,
+                true,
             ),
             (
                 "foreign after publication",
@@ -2789,6 +4017,8 @@ mod tests {
 
     #[test]
     fn notification_subscription_failure_cleans_each_completed_ordinal() {
+        assert_eq!(managed_notification_family(), AF_UNSPEC);
+
         struct Context(std::sync::Arc<std::sync::atomic::AtomicUsize>);
         impl Drop for Context {
             fn drop(&mut self) {
@@ -3033,14 +4263,140 @@ mod tests {
         }
     }
 
+    struct InjectedAddressCleanup {
+        reads: std::collections::VecDeque<ManagedAddressRead<u8>>,
+        delete_error: bool,
+        calls: Vec<&'static str>,
+    }
+
+    impl ManagedAddressCleanupOperations for InjectedAddressCleanup {
+        type Row = u8;
+
+        fn read(&mut self, _intended: &Self::Row) -> ManagedAddressRead<Self::Row> {
+            self.calls.push("get");
+            self.reads.pop_front().unwrap_or(ManagedAddressRead::Failed)
+        }
+
+        fn matches(&self, intended: &Self::Row, current: &Self::Row) -> bool {
+            intended == current
+        }
+
+        fn delete(&mut self, _current: &Self::Row) -> Result<(), Error> {
+            self.calls.push("delete");
+            if self.delete_error {
+                Err(Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn managed_address_readback_and_cleanup_are_exact_and_foreign_safe() {
+        let run = |reads, delete_error| {
+            let mut cleanup = InjectedAddressCleanup {
+                reads: std::collections::VecDeque::from(reads),
+                delete_error,
+                calls: Vec::new(),
+            };
+            let failed = delete_managed_address(&mut cleanup, &1);
+            (failed, cleanup.calls)
+        };
+        assert_eq!(
+            run(vec![ManagedAddressRead::Absent], false),
+            (false, vec!["get"])
+        );
+        assert_eq!(
+            run(
+                vec![ManagedAddressRead::Present(1), ManagedAddressRead::Absent,],
+                false,
+            ),
+            (false, vec!["get", "delete", "get"])
+        );
+        assert_eq!(
+            run(vec![ManagedAddressRead::Present(2)], false),
+            (true, vec!["get"]),
+            "a foreign replacement is preserved"
+        );
+        for (delete_error, final_read) in [
+            (true, ManagedAddressRead::Absent),
+            (false, ManagedAddressRead::Failed),
+            (false, ManagedAddressRead::Present(1)),
+        ] {
+            assert_eq!(
+                run(
+                    vec![ManagedAddressRead::Present(1), final_read],
+                    delete_error,
+                ),
+                (true, vec!["get", "delete", "get"])
+            );
+        }
+
+        let mut expected = MIB_UNICASTIPADDRESS_ROW::default();
+        initialize_managed_address(&mut expected);
+        assert_eq!(expected.PrefixOrigin, super::IpPrefixOriginManual);
+        assert_eq!(expected.SuffixOrigin, super::IpSuffixOriginManual);
+        expected.InterfaceLuid.Value = 7;
+        expected.InterfaceIndex = 17;
+        expected.Address = ipv4_sockaddr("198.18.0.2".parse().unwrap());
+        expected.OnLinkPrefixLength = 30;
+        let mut actual = expected;
+        actual.DadState = IpDadStatePreferred;
+        actual.CreationTimeStamp = 123;
+        assert!(managed_address_matches(&expected, &actual));
+
+        let changed = [
+            {
+                let mut row = actual;
+                unsafe { row.InterfaceLuid.Value += 1 };
+                row
+            },
+            {
+                let mut row = actual;
+                row.InterfaceIndex += 1;
+                row
+            },
+            {
+                let mut row = actual;
+                row.Address = ipv4_sockaddr("198.18.0.3".parse().unwrap());
+                row
+            },
+            {
+                let mut row = actual;
+                row.OnLinkPrefixLength += 1;
+                row
+            },
+            {
+                let mut row = actual;
+                row.SkipAsSource = !row.SkipAsSource;
+                row
+            },
+            {
+                let mut row = actual;
+                row.ValidLifetime = row.ValidLifetime.saturating_sub(1);
+                row
+            },
+        ];
+        assert!(
+            changed
+                .iter()
+                .all(|row| !managed_address_matches(&expected, row))
+        );
+
+        let mut ipv6 = expected;
+        ipv6.Address = ipv6_sockaddr("fd00::2".parse().unwrap());
+        ipv6.OnLinkPrefixLength = 126;
+        assert!(managed_address_matches(&ipv6, &ipv6));
+    }
+
     #[derive(Clone)]
     struct InjectedUnderlay {
         interfaces: Vec<InterfaceIdentity>,
-        best_index: u32,
-        route: RouteFingerprint,
-        default: RouteFingerprint,
+        routes: Vec<(std::net::IpAddr, RouteFingerprint)>,
+        interface_metrics: Vec<(u32, u32)>,
         best_calls: usize,
         fail_at: Option<&'static str>,
+        change_generation: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     }
 
     #[test]
@@ -3050,21 +4406,22 @@ mod tests {
         let route = RouteFingerprint {
             interface_luid: physical.luid,
             interface_index: physical.index,
-            destination: u32::from_ne_bytes([198, 51, 100, 8]),
+            destination: "0.0.0.0".parse().unwrap(),
             prefix_length: 0,
-            next_hop: u32::from_ne_bytes([192, 0, 2, 1]),
+            next_hop: "192.0.2.1".parse().unwrap(),
             metric: 4,
-            source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
+            source: Some("192.0.2.2".parse().unwrap()),
         };
-        let endpoint = "198.51.100.8:443".parse().unwrap();
-        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true, None).unwrap();
+        let endpoint: std::net::SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let config =
+            crate::ManagedNetworkConfig::new(Vec::new(), vec![endpoint], true, None, None).unwrap();
         let underlay = InjectedUnderlay {
             interfaces: vec![physical],
-            best_index: physical.index,
-            route,
-            default: route,
+            routes: vec![(endpoint.ip(), route)],
+            interface_metrics: Vec::new(),
             best_calls: 0,
             fail_at: None,
+            change_generation: None,
         };
         let policy = snapshot_underlay_with(&config, &mut underlay.clone()).unwrap();
 
@@ -3077,13 +4434,17 @@ mod tests {
         };
         assert!(
             revalidate_managed_network(
-                &policy,
-                wintun,
-                &[1],
-                &mut validated_generation,
+                ManagedNetworkValidation {
+                    policy: &policy,
+                    owned: wintun,
+                    routes: &[1],
+                    validated_generation: &mut validated_generation,
+                },
+                false,
                 || generation.next().unwrap(),
                 &mut underlay.clone(),
                 &mut owned_routes,
+                || Ok(true),
             )
             .unwrap()
         );
@@ -3097,7 +4458,7 @@ mod tests {
         ] {
             let mut changed = underlay.clone();
             if changed_underlay {
-                changed.route.metric += 1;
+                changed.routes[0].1.metric += 1;
             }
             let mut owned_routes = InjectedRouteCleanup {
                 reads: [route_readback].into(),
@@ -3108,13 +4469,17 @@ mod tests {
             let mut generation = [2, 2].into_iter();
             assert!(
                 !revalidate_managed_network(
-                    &policy,
-                    wintun,
-                    &[1],
-                    &mut observed,
+                    ManagedNetworkValidation {
+                        policy: &policy,
+                        owned: wintun,
+                        routes: &[1],
+                        validated_generation: &mut observed,
+                    },
+                    false,
                     || generation.next().unwrap(),
                     &mut changed,
                     &mut owned_routes,
+                    || Ok(true),
                 )
                 .unwrap(),
                 "{name}"
@@ -3133,13 +4498,17 @@ mod tests {
         };
         assert!(
             revalidate_managed_network(
-                &policy,
-                wintun,
-                &[1],
-                &mut observed,
+                ManagedNetworkValidation {
+                    policy: &policy,
+                    owned: wintun,
+                    routes: &[1],
+                    validated_generation: &mut observed,
+                },
+                false,
                 || generation.next().unwrap(),
                 &mut underlay.clone(),
                 &mut owned_routes,
+                || Ok(true),
             )
             .unwrap(),
             "one repeated/coalesced signal gets one bounded retry"
@@ -3154,19 +4523,54 @@ mod tests {
         };
         assert!(
             !revalidate_managed_network(
-                &policy,
-                wintun,
-                &[1],
-                &mut observed,
+                ManagedNetworkValidation {
+                    policy: &policy,
+                    owned: wintun,
+                    routes: &[1],
+                    validated_generation: &mut observed,
+                },
+                false,
                 || generation.next().unwrap(),
                 &mut underlay.clone(),
                 &mut owned_routes,
+                || Ok(true),
             )
             .unwrap(),
             "repeated changes exhaust the bounded retry"
         );
         assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
-        assert!(policy.bind_default(&NeverSocket).is_err());
+        assert!(policy.bind_target(&NeverSocket, endpoint).is_err());
+
+        let policy = snapshot_underlay_with(&config, &mut underlay.clone()).unwrap();
+        let mut observed = 0;
+        let mut owned_routes = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        let mut additional_checks = 0;
+        assert!(
+            !revalidate_managed_network(
+                ManagedNetworkValidation {
+                    policy: &policy,
+                    owned: wintun,
+                    routes: &[1],
+                    validated_generation: &mut observed,
+                },
+                true,
+                || 0,
+                &mut underlay.clone(),
+                &mut owned_routes,
+                || {
+                    additional_checks += 1;
+                    Ok(false)
+                },
+            )
+            .unwrap(),
+            "a forced runtime audit rejects a mutated DNS lease even without a generation bump"
+        );
+        assert_eq!(additional_checks, 1);
+        assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
     }
 
     struct NeverSocket;
@@ -3193,38 +4597,334 @@ mod tests {
                 .collect())
         }
 
-        fn best_interface(&mut self, _destination: std::net::Ipv4Addr) -> Result<u32, Error> {
+        fn best_interface(&mut self, destination: std::net::SocketAddr) -> Result<u32, Error> {
             self.best_calls += 1;
             if self.fail_at == Some("best") {
                 Err(Error)
             } else {
-                Ok(self.best_index)
+                self.routes
+                    .iter()
+                    .find_map(|(candidate, route)| {
+                        (*candidate == destination.ip()).then_some(route.interface_index)
+                    })
+                    .ok_or(Error)
             }
+        }
+
+        fn interface_metric(
+            &mut self,
+            _family: std::net::IpAddr,
+            interface_index: u32,
+        ) -> Result<u32, Error> {
+            Ok(self
+                .interface_metrics
+                .iter()
+                .find_map(|(index, metric)| (*index == interface_index).then_some(*metric))
+                .unwrap_or(0))
         }
 
         fn constrained_route(
             &mut self,
-            _destination: std::net::Ipv4Addr,
-            _interface_index: u32,
+            destination: std::net::SocketAddr,
+            interface_index: u32,
             _require_source: bool,
         ) -> Result<RouteFingerprint, Error> {
             if self.fail_at == Some("route") {
-                Err(Error)
-            } else {
-                Ok(self.route)
+                return Err(Error);
             }
+            if let Some(generation) = &self.change_generation {
+                generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            self.routes
+                .iter()
+                .find_map(|(candidate, route)| {
+                    (*candidate == destination.ip() && route.interface_index == interface_index)
+                        .then_some(*route)
+                })
+                .or_else(|| {
+                    self.routes.iter().find_map(|(candidate, route)| {
+                        (*candidate == destination.ip()).then_some(*route)
+                    })
+                })
+                .ok_or(Error)
         }
+    }
 
-        fn unique_default_route(
-            &mut self,
-            _interfaces: &[InterfaceIdentity],
-        ) -> Result<RouteFingerprint, Error> {
-            if self.fail_at == Some("default") {
-                Err(Error)
-            } else {
-                Ok(self.default)
+    #[derive(Default)]
+    struct InjectedBinder {
+        calls: Vec<(std::net::IpAddr, u32)>,
+        change_generation: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+        fail: bool,
+    }
+
+    impl SocketBindingOperations for InjectedBinder {
+        fn bind(&mut self, family: std::net::IpAddr, interface_index: u32) -> Result<(), Error> {
+            self.calls.push((family, interface_index));
+            if let Some(generation) = &self.change_generation {
+                generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
+            if self.fail { Err(Error) } else { Ok(()) }
         }
+    }
+
+    fn injected_fingerprint(
+        identity: InterfaceIdentity,
+        family: std::net::IpAddr,
+    ) -> RouteFingerprint {
+        match family {
+            std::net::IpAddr::V4(_) => RouteFingerprint {
+                interface_luid: identity.luid,
+                interface_index: identity.index,
+                destination: "0.0.0.0".parse().unwrap(),
+                prefix_length: 0,
+                next_hop: "192.0.2.1".parse().unwrap(),
+                metric: 4,
+                source: Some("192.0.2.2".parse().unwrap()),
+            },
+            std::net::IpAddr::V6(_) => RouteFingerprint {
+                interface_luid: identity.luid,
+                interface_index: identity.index,
+                destination: "::".parse().unwrap(),
+                prefix_length: 0,
+                next_hop: "2001:db8:ffff::1".parse().unwrap(),
+                metric: 4,
+                source: Some("2001:db8:ffff::2".parse().unwrap()),
+            },
+        }
+    }
+
+    #[test]
+    fn dual_stack_target_binding_selects_actual_target_and_rejects_tun() {
+        let physical_v4 = InterfaceIdentity { luid: 7, index: 17 };
+        let physical_v6 = InterfaceIdentity { luid: 8, index: 18 };
+        let wintun = InterfaceIdentity { luid: 9, index: 19 };
+        let fixed_v4: std::net::SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let fixed_v6: std::net::SocketAddr = "[2001:db8::8]:443".parse().unwrap();
+        let target_v4_a: std::net::SocketAddr = "203.0.113.8:80".parse().unwrap();
+        let target_v4_b: std::net::SocketAddr = "192.0.2.200:80".parse().unwrap();
+        let target_v6: std::net::SocketAddr = "[2001:db8:1::8]:80".parse().unwrap();
+        let tun_target: std::net::SocketAddr = "203.0.113.19:80".parse().unwrap();
+        let routes = vec![
+            (
+                fixed_v4.ip(),
+                injected_fingerprint(physical_v4, fixed_v4.ip()),
+            ),
+            (
+                fixed_v6.ip(),
+                injected_fingerprint(physical_v6, fixed_v6.ip()),
+            ),
+            (
+                target_v4_a.ip(),
+                injected_fingerprint(physical_v4, target_v4_a.ip()),
+            ),
+            (
+                target_v4_b.ip(),
+                injected_fingerprint(physical_v6, target_v4_b.ip()),
+            ),
+            (
+                target_v6.ip(),
+                injected_fingerprint(physical_v6, target_v6.ip()),
+            ),
+            (
+                tun_target.ip(),
+                injected_fingerprint(wintun, tun_target.ip()),
+            ),
+        ];
+        let mut operations = InjectedUnderlay {
+            interfaces: vec![physical_v4, physical_v6, wintun],
+            routes,
+            interface_metrics: Vec::new(),
+            best_calls: 0,
+            fail_at: None,
+            change_generation: None,
+        };
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(41));
+        let config = crate::ManagedNetworkConfig::new(
+            Vec::new(),
+            vec![fixed_v4, fixed_v6],
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let policy = snapshot_underlay_at(&config, generation, 41, &mut operations).unwrap();
+        policy.set_owned_identity(wintun).unwrap();
+
+        let mut binder = InjectedBinder::default();
+        bind_fixed_with(&policy, fixed_v4, &mut binder).unwrap();
+        bind_fixed_with(&policy, fixed_v6, &mut binder).unwrap();
+        bind_target_with(&policy, target_v4_a, &mut operations, &mut binder).unwrap();
+        bind_target_with(&policy, target_v4_b, &mut operations, &mut binder).unwrap();
+        bind_target_with(&policy, target_v6, &mut operations, &mut binder).unwrap();
+        assert_eq!(operations.best_calls, 2, "target binds remain constrained");
+        assert_eq!(
+            binder.calls,
+            [
+                (fixed_v4.ip(), physical_v4.index),
+                (fixed_v6.ip(), physical_v6.index),
+                (target_v4_a.ip(), physical_v4.index),
+                (target_v4_b.ip(), physical_v6.index),
+                (target_v6.ip(), physical_v6.index),
+            ],
+            "multiple default routes are selected per actual target and family"
+        );
+        assert!(bind_target_with(&policy, tun_target, &mut operations, &mut binder).is_err());
+        assert_eq!(
+            operations.best_calls, 2,
+            "target binds never use global best route"
+        );
+        assert_eq!(
+            binder.calls.len(),
+            5,
+            "the managed interface is never bound"
+        );
+
+        let fixed_only =
+            crate::ManagedNetworkConfig::new(Vec::new(), vec![fixed_v4], false, None, None)
+                .unwrap();
+        let fixed_only = snapshot_underlay_with(&fixed_only, &mut operations).unwrap();
+        fixed_only.set_owned_identity(wintun).unwrap();
+        assert!(bind_target_with(&fixed_only, target_v4_a, &mut operations, &mut binder).is_err());
+    }
+
+    #[test]
+    fn target_binding_excludes_tun_and_orders_prefix_then_effective_metric() {
+        let physical_a = InterfaceIdentity { luid: 7, index: 17 };
+        let physical_b = InterfaceIdentity { luid: 8, index: 18 };
+        let physical_c = InterfaceIdentity { luid: 9, index: 20 };
+        let wintun = InterfaceIdentity {
+            luid: 10,
+            index: 19,
+        };
+        let target: std::net::SocketAddr = "203.0.113.8:443".parse().unwrap();
+        let mut route_a = injected_fingerprint(physical_a, target.ip());
+        route_a.prefix_length = 8;
+        route_a.metric = 1;
+        let mut route_b = injected_fingerprint(physical_b, target.ip());
+        route_b.prefix_length = 24;
+        route_b.metric = 100;
+        let mut route_c = injected_fingerprint(physical_c, target.ip());
+        route_c.prefix_length = 24;
+        route_c.metric = 50;
+        let mut tun_route = injected_fingerprint(wintun, target.ip());
+        tun_route.prefix_length = 32;
+        tun_route.metric = 0;
+        let mut operations = InjectedUnderlay {
+            interfaces: vec![physical_a, physical_b, physical_c, wintun],
+            routes: vec![
+                (target.ip(), route_a),
+                (target.ip(), route_b),
+                (target.ip(), route_c),
+                (target.ip(), tun_route),
+            ],
+            interface_metrics: vec![(physical_b.index, 100), (physical_c.index, 10)],
+            best_calls: 0,
+            fail_at: None,
+            change_generation: None,
+        };
+        let config =
+            crate::ManagedNetworkConfig::new(Vec::new(), Vec::new(), true, None, None).unwrap();
+        let policy = snapshot_underlay_with(&config, &mut operations).unwrap();
+        policy.set_owned_identity(wintun).unwrap();
+        let mut binder = InjectedBinder::default();
+
+        bind_target_with(&policy, target, &mut operations, &mut binder).unwrap();
+
+        assert_eq!(binder.calls, [(target.ip(), physical_c.index)]);
+        assert_eq!(operations.best_calls, 0);
+    }
+
+    #[test]
+    fn underlay_binding_fails_closed_across_every_generation_race() {
+        let physical = InterfaceIdentity { luid: 7, index: 17 };
+        let wintun = InterfaceIdentity { luid: 9, index: 19 };
+        let target: std::net::SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let config =
+            crate::ManagedNetworkConfig::new(Vec::new(), Vec::new(), true, None, None).unwrap();
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(7));
+        let make_operations = || InjectedUnderlay {
+            interfaces: vec![physical, wintun],
+            routes: vec![(target.ip(), injected_fingerprint(physical, target.ip()))],
+            interface_metrics: Vec::new(),
+            best_calls: 0,
+            fail_at: None,
+            change_generation: None,
+        };
+        let mut operations = make_operations();
+        let policy = snapshot_underlay_at(&config, generation.clone(), 7, &mut operations).unwrap();
+        policy.set_owned_identity(wintun).unwrap();
+
+        generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let mut binder = InjectedBinder::default();
+        assert!(bind_target_with(&policy, target, &mut operations, &mut binder).is_err());
+        assert!(
+            binder.calls.is_empty(),
+            "a stale policy does not touch the socket"
+        );
+
+        policy.accept_generation(8);
+        let mut changes_during_route = make_operations();
+        changes_during_route.change_generation = Some(generation.clone());
+        assert!(
+            bind_target_with(&policy, target, &mut changes_during_route, &mut binder,).is_err()
+        );
+        assert!(
+            binder.calls.is_empty(),
+            "a route-selection race is caught before setsockopt"
+        );
+
+        policy.accept_generation(9);
+        let mut changes_during_bind = InjectedBinder {
+            change_generation: Some(generation.clone()),
+            ..InjectedBinder::default()
+        };
+        assert!(
+            bind_target_with(
+                &policy,
+                target,
+                &mut make_operations(),
+                &mut changes_during_bind,
+            )
+            .is_err()
+        );
+        assert_eq!(changes_during_bind.calls.len(), 1);
+
+        let mut validated_generation = 9;
+        let mut no_routes = InjectedRouteCleanup {
+            reads: std::collections::VecDeque::new(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert!(
+            revalidate_managed_network(
+                ManagedNetworkValidation {
+                    policy: &policy,
+                    owned: wintun,
+                    routes: &[],
+                    validated_generation: &mut validated_generation,
+                },
+                false,
+                || generation.load(std::sync::atomic::Ordering::Acquire),
+                &mut make_operations(),
+                &mut no_routes,
+                || Ok(true),
+            )
+            .unwrap()
+        );
+        assert_eq!(validated_generation, 10);
+        bind_target_with(
+            &policy,
+            target,
+            &mut make_operations(),
+            &mut InjectedBinder::default(),
+        )
+        .unwrap();
+
+        let fixed =
+            crate::ManagedNetworkConfig::new(Vec::new(), vec![target], false, None, None).unwrap();
+        let mut snapshot_race = make_operations();
+        snapshot_race.change_generation = Some(generation.clone());
+        assert!(snapshot_underlay_at(&fixed, generation, 10, &mut snapshot_race).is_err());
     }
 
     #[test]
@@ -3234,21 +4934,22 @@ mod tests {
         let route = RouteFingerprint {
             interface_luid: physical.luid,
             interface_index: physical.index,
-            destination: u32::from_ne_bytes([198, 51, 100, 8]),
+            destination: "0.0.0.0".parse().unwrap(),
             prefix_length: 0,
-            next_hop: u32::from_ne_bytes([192, 0, 2, 1]),
+            next_hop: "192.0.2.1".parse().unwrap(),
             metric: 4,
-            source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
+            source: Some("192.0.2.2".parse().unwrap()),
         };
-        let endpoint = "198.51.100.8:443".parse().unwrap();
-        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true, None).unwrap();
+        let endpoint: std::net::SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let config =
+            crate::ManagedNetworkConfig::new(Vec::new(), vec![endpoint], true, None, None).unwrap();
         let mut operations = InjectedUnderlay {
             interfaces: vec![physical],
-            best_index: physical.index,
-            route,
-            default: route,
+            routes: vec![(endpoint.ip(), route)],
+            interface_metrics: Vec::new(),
             best_calls: 0,
             fail_at: None,
+            change_generation: None,
         };
         let policy = snapshot_underlay_with(&config, &mut operations).unwrap();
         assert_eq!(
@@ -3257,7 +4958,6 @@ mod tests {
         );
 
         operations.interfaces.push(wintun);
-        operations.best_index = wintun.index;
         assert!(underlay_matches_with(&policy, wintun, &mut operations).unwrap());
         assert_eq!(
             operations.best_calls, 1,
@@ -3274,27 +4974,23 @@ mod tests {
                 ..route
             },
             RouteFingerprint {
-                source: Some(u32::from_ne_bytes([192, 0, 2, 3])),
+                source: Some("192.0.2.3".parse().unwrap()),
                 ..route
             },
             RouteFingerprint {
-                next_hop: u32::from_ne_bytes([192, 0, 2, 9]),
+                next_hop: "192.0.2.9".parse().unwrap(),
                 ..route
             },
             RouteFingerprint { metric: 5, ..route },
         ] {
             let mut changed_operations = operations.clone();
-            changed_operations.route = changed;
+            changed_operations.routes[0].1 = changed;
             assert!(!underlay_matches_with(&policy, wintun, &mut changed_operations).unwrap());
         }
 
         let mut changed_identity = operations.clone();
         changed_identity.interfaces[0].luid += 1;
         assert!(!underlay_matches_with(&policy, wintun, &mut changed_identity).unwrap());
-
-        let mut changed_default = operations.clone();
-        changed_default.default.metric += 1;
-        assert!(!underlay_matches_with(&policy, wintun, &mut changed_default).unwrap());
 
         let mut stable = [4_u64, 4].into_iter();
         assert!(
@@ -3337,27 +5033,25 @@ mod tests {
         let route = RouteFingerprint {
             interface_luid: physical.luid,
             interface_index: physical.index,
-            destination: 0,
+            destination: "0.0.0.0".parse().unwrap(),
             prefix_length: 0,
-            next_hop: u32::from_ne_bytes([192, 0, 2, 1]),
+            next_hop: "192.0.2.1".parse().unwrap(),
             metric: 4,
-            source: Some(u32::from_ne_bytes([192, 0, 2, 2])),
+            source: Some("192.0.2.2".parse().unwrap()),
         };
-        let endpoint = "198.51.100.8:443".parse().unwrap();
-        let config = crate::ManagedIpv4Config::new(Vec::new(), vec![endpoint], true, None).unwrap();
+        let endpoint: std::net::SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let config =
+            crate::ManagedNetworkConfig::new(Vec::new(), vec![endpoint], true, None, None).unwrap();
         let operations = InjectedUnderlay {
             interfaces: vec![physical],
-            best_index: physical.index,
-            route,
-            default: RouteFingerprint {
-                source: None,
-                ..route
-            },
+            routes: vec![(endpoint.ip(), route)],
+            interface_metrics: Vec::new(),
             best_calls: 0,
             fail_at: None,
+            change_generation: None,
         };
 
-        for failure in ["eligible", "best", "route", "default"] {
+        for failure in ["eligible", "best", "route"] {
             let mut failed = operations.clone();
             failed.fail_at = Some(failure);
             assert!(snapshot_underlay_with(&config, &mut failed).is_err());
@@ -3366,7 +5060,7 @@ mod tests {
         none.interfaces.clear();
         assert!(snapshot_underlay_with(&config, &mut none).is_err());
         let mut missing_best = operations.clone();
-        missing_best.best_index += 1;
+        missing_best.routes[0].1.interface_index += 1;
         assert!(snapshot_underlay_with(&config, &mut missing_best).is_err());
 
         let mut raw = MIB_IF_ROW2::default();
@@ -3414,24 +5108,6 @@ mod tests {
         ] {
             assert!(eligible_interface_identity(&ineligible, None).is_none());
         }
-
-        let mut luid = super::NET_LUID_LH::default();
-        luid.Value = physical.luid;
-        let mut default = capture_route_row(
-            luid,
-            physical.index,
-            Ipv4Prefix::new("0.0.0.0".parse().unwrap(), 1).unwrap(),
-        );
-        default.DestinationPrefix.PrefixLength = 0;
-        default.Metric = route.metric;
-        default.NextHop.Ipv4.sin_addr.S_un.S_addr = route.next_hop;
-        let expected = RouteFingerprint {
-            source: None,
-            ..route
-        };
-        assert!(select_unique_default_route(&[], &[physical]).is_err());
-        assert!(select_unique_default_route(&[default], &[physical]).unwrap() == expected);
-        assert!(select_unique_default_route(&[default, default], &[physical]).is_err());
     }
 
     #[test]
@@ -3448,11 +5124,11 @@ mod tests {
         assert!(calls.is_empty());
 
         let manual_direct =
-            crate::ManagedIpv4Config::new(Vec::new(), Vec::new(), true, None).unwrap();
+            crate::ManagedNetworkConfig::new(Vec::new(), Vec::new(), true, None, None).unwrap();
         assert_eq!(
             prepare_managed_intent(Some(&manual_direct), |config| {
                 calls.extend(["subscribe", "generation", "default-snapshot"]);
-                assert!(config.needs_default_binder());
+                assert!(config.needs_target_binder());
                 Ok(())
             })
             .unwrap(),
@@ -3468,21 +5144,25 @@ mod tests {
         let endpoint: std::net::SocketAddrV4 = "203.0.113.211:49153".parse().unwrap();
         let dns_address = "198.18.0.1".parse().unwrap();
         let prefix = Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24).unwrap();
-        let managed =
-            crate::ManagedIpv4Config::new(vec![prefix], vec![endpoint], true, Some(dns_address))
-                .unwrap();
+        let managed = crate::ManagedNetworkConfig::new(
+            vec![IpPrefix::V4(prefix)],
+            vec![endpoint.into()],
+            true,
+            Some(dns_address),
+            None,
+        )
+        .unwrap();
         let config = crate::AdapterConfig::new(
             adapter_name.into(),
-            "198.18.0.2".parse().unwrap(),
-            30,
-            "fd00::2".parse().unwrap(),
-            126,
+            Some(Ipv4Prefix::new("198.18.0.2".parse().unwrap(), 30).unwrap()),
+            Some(crate::Ipv6Prefix::new("fd00::2".parse().unwrap(), 126).unwrap()),
             1420,
             8_388_608,
             std::time::Duration::from_secs(10),
         )
         .unwrap()
-        .with_managed_ipv4(managed);
+        .with_managed_network(managed)
+        .unwrap();
         assert_eq!(config.name.as_ref(), adapter_name);
 
         let identity = InterfaceIdentity {
@@ -3511,11 +5191,11 @@ mod tests {
         let route = RouteFingerprint {
             interface_luid: identity.luid,
             interface_index: identity.index,
-            destination: u32::from_ne_bytes([203, 0, 113, 0]),
+            destination: "203.0.113.0".parse().unwrap(),
             prefix_length: 24,
-            next_hop: u32::from_ne_bytes([192, 0, 2, 137]),
+            next_hop: "192.0.2.137".parse().unwrap(),
             metric: 31337,
-            source: Some(u32::from_ne_bytes([192, 0, 2, 138])),
+            source: Some("192.0.2.138".parse().unwrap()),
         };
         assert_eq!(route.interface_index, identity.index);
 
@@ -3537,8 +5217,8 @@ mod tests {
             identity.index.to_string(),
             identity.luid.to_string(),
             "6fc72c11-4c9a-45c4-8f61-4955721a77e1".to_owned(),
-            std::net::Ipv4Addr::from(route.next_hop.to_ne_bytes()).to_string(),
-            std::net::Ipv4Addr::from(route.source.unwrap().to_ne_bytes()).to_string(),
+            route.next_hop.to_string(),
+            route.source.unwrap().to_string(),
             route.metric.to_string(),
         ];
         let leaks = |values: &[String]| {
@@ -3560,6 +5240,7 @@ mod tests {
 
     impl ManagedDnsOperations for InjectedManagedDns {
         type Settings = u8;
+        type Address = std::net::IpAddr;
 
         fn snapshot(&mut self) -> Result<Self::Settings, Error> {
             self.calls.push("snapshot");
@@ -3568,7 +5249,7 @@ mod tests {
                 .ok_or(Error)
         }
 
-        fn apply(&mut self, _address: std::net::Ipv4Addr) -> Result<Self::Settings, Error> {
+        fn apply(&mut self, _address: Self::Address) -> Result<Self::Settings, Error> {
             self.calls.push("apply");
             if self.fail_at == Some("apply") {
                 return Err(Error);
@@ -3603,8 +5284,29 @@ mod tests {
     }
 
     #[test]
+    fn managed_dns_runtime_readback_detects_replacement_and_failure() {
+        let lease = ManagedDnsLease {
+            previous: 1,
+            applied: 2,
+        };
+        let mut matching = InjectedManagedDns {
+            current: 2,
+            fail_at: None,
+            replace_on_read: None,
+            readbacks: 0,
+            calls: Vec::new(),
+        };
+        assert!(managed_dns_matches(&mut matching, &lease).unwrap());
+        matching.current = 3;
+        assert!(!managed_dns_matches(&mut matching, &lease).unwrap());
+        matching.fail_at = Some("readback");
+        assert!(managed_dns_matches(&mut matching, &lease).is_err());
+    }
+
+    #[test]
     fn managed_dns_snapshots_reads_back_and_conditionally_restores() {
-        let address = "198.18.0.1".parse().unwrap();
+        let address = std::net::IpAddr::V4("198.18.0.1".parse().unwrap());
+        let ipv6_address = std::net::IpAddr::V6("fd00::1".parse().unwrap());
         let make = || InjectedManagedDns {
             current: 1,
             fail_at: None,
@@ -3613,18 +5315,20 @@ mod tests {
             calls: Vec::new(),
         };
 
-        let mut complete = make();
-        let mut lease = None;
-        install_managed_dns(address, &mut complete, &mut lease).unwrap();
-        assert_eq!(complete.calls, ["snapshot", "apply", "readback"]);
-        assert!(!restore_managed_dns(&mut complete, lease.as_ref().unwrap()));
-        assert_eq!(complete.current, 1);
-        assert_eq!(
-            complete.calls,
-            [
-                "snapshot", "apply", "readback", "readback", "restore", "readback"
-            ]
-        );
+        for family_address in [address, ipv6_address] {
+            let mut complete = make();
+            let mut lease = None;
+            install_managed_dns(family_address, &mut complete, &mut lease).unwrap();
+            assert_eq!(complete.calls, ["snapshot", "apply", "readback"]);
+            assert!(!restore_managed_dns(&mut complete, lease.as_ref().unwrap()));
+            assert_eq!(complete.current, 1);
+            assert_eq!(
+                complete.calls,
+                [
+                    "snapshot", "apply", "readback", "readback", "restore", "readback"
+                ]
+            );
+        }
 
         for failure in ["snapshot", "apply", "readback"] {
             let mut injected = make();
@@ -3673,6 +5377,37 @@ mod tests {
             assert_eq!(name_server.as_ref(), expected);
         }
 
+        assert_eq!(dns_settings_query_flags(DnsFamily::Ipv4), 0);
+        assert_eq!(
+            dns_settings_query_flags(DnsFamily::Ipv6),
+            u64::from(DNS_SETTING_IPV6)
+        );
+
+        let ipv6_settings = Ipv6DnsSettings(Some("fd00::1".encode_utf16().collect::<Box<[u16]>>()));
+        let (name_server, raw) = ipv6_dns_settings_input(&ipv6_settings);
+        assert_eq!(
+            raw.Flags,
+            u64::from(DNS_SETTING_NAMESERVER | DNS_SETTING_IPV6)
+        );
+        assert_eq!(raw.NameServer, name_server.as_ptr().cast_mut());
+        assert_eq!(name_server.last(), Some(&0));
+
+        let mixed = "1.1.1.1, 2001:0db8::1 8.8.8.8,2001:db8::2"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let ipv4 = normalize_dns_settings(Some(&mixed), DnsFamily::Ipv4)
+            .unwrap()
+            .unwrap();
+        let ipv6 = normalize_dns_settings(Some(&mixed), DnsFamily::Ipv6)
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf16(&ipv4).unwrap(), "1.1.1.1,8.8.8.8");
+        assert_eq!(
+            String::from_utf16(&ipv6).unwrap(),
+            "2001:db8::1,2001:db8::2"
+        );
+        assert!(normalize_dns_settings(Some(&[b'x' as u16]), DnsFamily::Ipv4).is_err());
+
         assert_eq!(copy_bounded_wide(std::ptr::null_mut()).unwrap(), None);
         let mut empty = [0_u16];
         assert_eq!(copy_bounded_wide(empty.as_mut_ptr()).unwrap(), None);
@@ -3693,6 +5428,8 @@ mod tests {
     }
 
     struct InjectedSetup {
+        ipv4: bool,
+        ipv6: bool,
         fail_at: Option<usize>,
         cleanup_fail_at: Option<usize>,
         idle: bool,
@@ -3700,7 +5437,7 @@ mod tests {
         resources: Vec<&'static str>,
         notifications: bool,
         routes: Vec<&'static str>,
-        dns: bool,
+        dns: Vec<&'static str>,
         cleanup_calls: Vec<&'static str>,
     }
 
@@ -3750,6 +5487,18 @@ mod tests {
             self.step("driver", None)
         }
 
+        fn identify_adapter(&mut self) -> Result<(), Error> {
+            self.step("identity", None)
+        }
+
+        fn ipv4_enabled(&self) -> bool {
+            self.ipv4
+        }
+
+        fn ipv6_enabled(&self) -> bool {
+            self.ipv6
+        }
+
         fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
             self.step("ipv4-mtu", Some("ipv4-mtu"))
         }
@@ -3771,7 +5520,7 @@ mod tests {
         }
 
         fn wait_for_dad(&mut self) -> Result<(), Error> {
-            assert_eq!(self.resources.last(), Some(&"session"));
+            assert!(self.resources.contains(&"session"));
             self.step("dad", None)
         }
     }
@@ -3797,12 +5546,10 @@ mod tests {
             Some(self.cleanup_fail_at == Some(position))
         }
 
-        fn restore_dns(&mut self) -> Option<bool> {
-            if !std::mem::take(&mut self.dns) {
-                return None;
-            }
+        fn restore_last_dns(&mut self) -> Option<bool> {
+            let dns = self.dns.pop()?;
             let position = self.cleanup_calls.len();
-            self.cleanup_calls.push("dns");
+            self.cleanup_calls.push(dns);
             Some(self.cleanup_fail_at == Some(position))
         }
 
@@ -3947,86 +5694,143 @@ mod tests {
     }
 
     #[test]
-    fn every_setup_position_fails_before_later_work_and_session_precedes_dad() {
-        let order = [
-            "cancel",
-            "deadline",
-            "create",
-            "driver",
-            "ipv4-mtu",
-            "ipv6-mtu",
-            "ipv4-address",
-            "ipv6-address",
-            "start-session",
-            "dad",
+    fn every_enabled_family_setup_stage_fails_closed_and_rolls_back() {
+        let cases: [(bool, bool, &[&str]); 3] = [
+            (
+                true,
+                false,
+                &[
+                    "cancel",
+                    "deadline",
+                    "create",
+                    "driver",
+                    "start-session",
+                    "identity",
+                    "ipv4-mtu",
+                    "ipv4-address",
+                    "dad",
+                ],
+            ),
+            (
+                false,
+                true,
+                &[
+                    "cancel",
+                    "deadline",
+                    "create",
+                    "driver",
+                    "start-session",
+                    "identity",
+                    "ipv6-mtu",
+                    "ipv6-address",
+                    "dad",
+                ],
+            ),
+            (
+                true,
+                true,
+                &[
+                    "cancel",
+                    "deadline",
+                    "create",
+                    "driver",
+                    "start-session",
+                    "identity",
+                    "ipv4-mtu",
+                    "ipv6-mtu",
+                    "ipv4-address",
+                    "ipv6-address",
+                    "dad",
+                ],
+            ),
         ];
-        let rollback = [
-            &[][..],
-            &[][..],
-            &[][..],
-            &["adapter"][..],
-            &["adapter"][..],
-            &["ipv4-mtu", "adapter"][..],
-            &["ipv6-mtu", "ipv4-mtu", "adapter"][..],
-            &["ipv4-address", "ipv6-mtu", "ipv4-mtu", "adapter"][..],
-            &[
-                "ipv6-address",
-                "ipv4-address",
-                "ipv6-mtu",
-                "ipv4-mtu",
-                "adapter",
-            ][..],
-            &[
-                "end-session",
-                "ipv6-address",
-                "ipv4-address",
-                "ipv6-mtu",
-                "ipv4-mtu",
-                "adapter",
-            ][..],
-        ];
-        for (failed, expected_cleanup) in rollback.into_iter().enumerate() {
+        for (ipv4, ipv6, order) in cases {
+            for failed in 0..order.len() {
+                let mut setup = InjectedSetup {
+                    ipv4,
+                    ipv6,
+                    fail_at: Some(failed),
+                    cleanup_fail_at: None,
+                    idle: true,
+                    calls: Vec::new(),
+                    resources: Vec::new(),
+                    notifications: false,
+                    routes: Vec::new(),
+                    dns: Vec::new(),
+                    cleanup_calls: Vec::new(),
+                };
+                assert!(
+                    setup_transaction(&mut setup).is_err(),
+                    "families {ipv4}/{ipv6}, step {failed}"
+                );
+                assert_eq!(setup.calls, order[..=failed]);
+                let expected_cleanup = [
+                    ("ipv6-address", "ipv6-address"),
+                    ("ipv4-address", "ipv4-address"),
+                    ("ipv6-mtu", "ipv6-mtu"),
+                    ("ipv4-mtu", "ipv4-mtu"),
+                    ("session", "end-session"),
+                    ("adapter", "adapter"),
+                ]
+                .into_iter()
+                .filter_map(|(resource, cleanup)| {
+                    setup.resources.contains(&resource).then_some(cleanup)
+                })
+                .collect::<Vec<_>>();
+                assert!(!cleanup_transaction(&mut setup));
+                assert_eq!(setup.cleanup_calls, expected_cleanup);
+                assert!(setup.resources.is_empty());
+            }
+
             let mut setup = InjectedSetup {
-                fail_at: Some(failed),
+                ipv4,
+                ipv6,
+                fail_at: None,
                 cleanup_fail_at: None,
                 idle: true,
                 calls: Vec::new(),
                 resources: Vec::new(),
                 notifications: false,
                 routes: Vec::new(),
-                dns: false,
+                dns: Vec::new(),
                 cleanup_calls: Vec::new(),
             };
-            assert!(setup_transaction(&mut setup).is_err(), "step {failed}");
-            assert_eq!(setup.calls, order[..=failed], "step {failed}");
-            assert!(!cleanup_transaction(&mut setup), "step {failed}");
-            assert_eq!(setup.cleanup_calls, expected_cleanup, "step {failed}");
-            assert!(setup.resources.is_empty(), "step {failed}");
+            setup_transaction(&mut setup).expect("complete setup");
+            assert_eq!(setup.calls, order);
+            assert!(
+                setup.calls.iter().position(|step| *step == "start-session")
+                    < setup.calls.iter().position(|step| *step == "identity")
+            );
+            assert!(
+                setup
+                    .calls
+                    .iter()
+                    .position(|step| *step == "identity")
+                    .unwrap()
+                    < setup
+                        .calls
+                        .iter()
+                        .position(|step| matches!(*step, "ipv4-mtu" | "ipv6-mtu"))
+                        .unwrap()
+            );
         }
-        let mut setup = InjectedSetup {
-            fail_at: None,
-            cleanup_fail_at: None,
-            idle: true,
-            calls: Vec::new(),
-            resources: Vec::new(),
-            notifications: false,
-            routes: Vec::new(),
-            dns: false,
-            cleanup_calls: Vec::new(),
-        };
-        setup_transaction(&mut setup).expect("complete setup");
-        assert_eq!(setup.calls, order);
-        assert!(
-            setup.calls.iter().position(|step| *step == "start-session")
-                < setup.calls.iter().position(|step| *step == "dad")
-        );
     }
 
     #[test]
-    fn only_post_session_dual_family_natural_preferred_dad_is_ready() {
-        assert!(dad_snapshot(false, [IpDadStatePreferred, IpDadStatePreferred], false).is_err());
+    fn only_post_session_enabled_family_natural_preferred_dad_is_ready() {
+        assert!(dad_snapshot(true, &[], false).is_err());
         assert_eq!(
-            dad_snapshot(true, [IpDadStatePreferred, IpDadStatePreferred], false),
+            dad_snapshot(true, &[IpDadStatePreferred], false),
+            Ok(DadProgress::Ready)
+        );
+        assert_eq!(
+            dad_snapshot(true, &[IpDadStateTentative], false),
+            Ok(DadProgress::Waiting)
+        );
+        assert!(dad_snapshot(true, &[IpDadStateTentative], true).is_err());
+        assert!(dad_snapshot(false, &[IpDadStatePreferred, IpDadStatePreferred], false).is_err());
+        assert_eq!(
+            dad_snapshot(true, &[IpDadStatePreferred, IpDadStatePreferred], false),
             Ok(DadProgress::Ready)
         );
         for states in [
@@ -4034,14 +5838,14 @@ mod tests {
             [IpDadStatePreferred, IpDadStateTentative],
             [IpDadStateTentative, IpDadStateTentative],
         ] {
-            assert_eq!(dad_snapshot(true, states, false), Ok(DadProgress::Waiting));
-            assert!(dad_snapshot(true, states, true).is_err());
+            assert_eq!(dad_snapshot(true, &states, false), Ok(DadProgress::Waiting));
+            assert!(dad_snapshot(true, &states, true).is_err());
         }
         for family in 0..2 {
             for state in [IpDadStateDuplicate, IpDadStateInvalid, IpDadStateDeprecated] {
                 let mut states = [IpDadStatePreferred, IpDadStatePreferred];
                 states[family] = state;
-                assert!(dad_snapshot(true, states, false).is_err());
+                assert!(dad_snapshot(true, &states, false).is_err());
             }
         }
     }
@@ -4063,17 +5867,109 @@ mod tests {
     }
 
     #[test]
-    fn dad_failure_ends_session_first_and_cleanup_conflicts_do_not_short_circuit() {
+    fn send_allocation_failure_distinguishes_ring_full_from_fatal_errors() {
+        assert_eq!(
+            classify_send_allocation_failure(ERROR_BUFFER_OVERFLOW),
+            Ok(SendOutcome::DroppedRingFull)
+        );
+        assert_eq!(
+            classify_send_allocation_failure(ERROR_ACCESS_DENIED)
+                .expect_err("non-ring failure")
+                .kind(),
+            ErrorKind::UnrecoverableCorruption
+        );
+    }
+
+    #[test]
+    fn receive_null_distinguishes_empty_recoverable_eof_and_corruption() {
+        assert_eq!(classify_receive_null(ERROR_NO_MORE_ITEMS), Ok(()));
+        assert_eq!(
+            classify_receive_null(ERROR_HANDLE_EOF)
+                .expect_err("ended session")
+                .kind(),
+            ErrorKind::RecoverableSession
+        );
+        assert_eq!(
+            classify_receive_null(ERROR_ACCESS_DENIED)
+                .expect_err("unexpected driver failure")
+                .kind(),
+            ErrorKind::UnrecoverableCorruption
+        );
+    }
+
+    #[test]
+    fn wait_result_distinguishes_each_installed_handle_and_timeout() {
+        for (result, expected) in [
+            (WAIT_OBJECT_0, WaitOutcome::Stop),
+            (WAIT_OBJECT_0 + 1, WaitOutcome::Work),
+            (WAIT_OBJECT_0 + 2, WaitOutcome::NetworkChanged),
+            (WAIT_OBJECT_0 + 3, WaitOutcome::Readable),
+            (WAIT_TIMEOUT, WaitOutcome::Timeout),
+        ] {
+            assert_eq!(classify_wait_result(result), Ok(expected));
+        }
+        assert_eq!(
+            classify_wait_result(WAIT_FAILED)
+                .expect_err("failed wait")
+                .kind(),
+            ErrorKind::UnrecoverableCorruption
+        );
+        assert_eq!(
+            classify_wait_result(WAIT_OBJECT_0 + 4)
+                .expect_err("unexpected wait index")
+                .kind(),
+            ErrorKind::UnrecoverableCorruption
+        );
+    }
+
+    #[test]
+    fn work_signal_is_distinct_and_auto_resets_while_stop_remains_set() {
+        let stop = StopSignal(std::sync::Arc::new(OwnedHandle(
+            create_event(true).unwrap(),
+        )));
+        let work = WorkSignal(std::sync::Arc::new(OwnedHandle(
+            create_event(false).unwrap(),
+        )));
+        let work_clone = work.clone();
+        assert_ne!(stop.0.0, work.0.0);
+        assert_eq!(work.0.0, work_clone.0.0);
+
+        work_clone.signal().unwrap();
+        let handles = [stop.0.0, work.0.0];
+        let result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 0) };
+        assert_eq!(classify_wait_result(result), Ok(WaitOutcome::Work));
+        assert_eq!(
+            unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 0) },
+            WAIT_TIMEOUT,
+            "work is a one-wake auto-reset event"
+        );
+
+        stop.clone().signal().unwrap();
+        for _ in 0..2 {
+            let result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 0) };
+            assert_eq!(classify_wait_result(result), Ok(WaitOutcome::Stop));
+        }
+        assert_ne!(unsafe { super::ResetEvent(stop.0.0) }, 0);
+        assert_eq!(
+            unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 0) },
+            WAIT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn dad_failure_rolls_back_in_reverse_and_cleanup_conflicts_do_not_short_circuit() {
         let order = [
-            "end-session",
             "ipv6-address",
             "ipv4-address",
             "ipv6-mtu",
             "ipv4-mtu",
+            "end-session",
             "adapter",
         ];
         for failed in 0..order.len() {
             let mut cleanup = InjectedSetup {
+                ipv4: true,
+                ipv6: true,
                 fail_at: None,
                 cleanup_fail_at: Some(failed),
                 idle: true,
@@ -4081,7 +5977,7 @@ mod tests {
                 resources: Vec::new(),
                 notifications: false,
                 routes: Vec::new(),
-                dns: false,
+                dns: Vec::new(),
                 cleanup_calls: Vec::new(),
             };
             setup_transaction(&mut cleanup).expect("complete setup");
@@ -4091,6 +5987,8 @@ mod tests {
         }
 
         let mut cleanup = InjectedSetup {
+            ipv4: true,
+            ipv6: true,
             fail_at: None,
             cleanup_fail_at: None,
             idle: true,
@@ -4098,7 +5996,7 @@ mod tests {
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
-            dns: false,
+            dns: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut cleanup).expect("complete setup");
@@ -4112,6 +6010,8 @@ mod tests {
             "overlapping waits fail closed"
         );
         let mut overlap = InjectedSetup {
+            ipv4: true,
+            ipv6: true,
             fail_at: None,
             idle: journal.cleanup_is_safe(),
             calls: Vec::new(),
@@ -4119,7 +6019,7 @@ mod tests {
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
-            dns: false,
+            dns: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut overlap).expect("complete setup");
@@ -4152,8 +6052,8 @@ mod tests {
         let low = Ipv4Prefix::new("0.0.0.0".parse().unwrap(), 1).unwrap();
         let high = Ipv4Prefix::new("128.0.0.0".parse().unwrap(), 1).unwrap();
         let luid = windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH { Value: 7 };
-        let low = capture_route_row(luid, 11, low);
-        let high = capture_route_row(luid, 11, high);
+        let low = capture_route_row(luid, 11, IpPrefix::V4(low));
+        let high = capture_route_row(luid, 11, IpPrefix::V4(high));
         assert!(route_matches(&low, &low));
         assert!(route_matches(&high, &high));
         assert_ne!(
@@ -4201,21 +6101,46 @@ mod tests {
             "every initialized ownership field is mutation-sensitive"
         );
 
+        let ipv6 = capture_route_row(
+            luid,
+            11,
+            IpPrefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32).unwrap()),
+        );
+        assert!(route_matches(&ipv6, &ipv6));
+        assert_eq!(unsafe { ipv6.DestinationPrefix.Prefix.si_family }, AF_INET6);
+        assert_eq!(unsafe { ipv6.NextHop.Ipv6.sin6_addr.u.Byte }, [0; 16]);
+        let mut changed_ipv6_destination = ipv6;
+        unsafe {
+            changed_ipv6_destination
+                .DestinationPrefix
+                .Prefix
+                .Ipv6
+                .sin6_addr
+                .u
+                .Byte[15] = 1;
+        }
+        let mut changed_ipv6_next_hop = ipv6;
+        unsafe { changed_ipv6_next_hop.NextHop.Ipv6.sin6_addr.u.Byte[15] = 1 };
+        assert!(!route_matches(&ipv6, &changed_ipv6_destination));
+        assert!(!route_matches(&ipv6, &changed_ipv6_next_hop));
+
         let mut cleanup = InjectedSetup {
+            ipv4: true,
+            ipv6: true,
             fail_at: None,
-            cleanup_fail_at: Some(1),
+            cleanup_fail_at: Some(3),
             idle: true,
             calls: Vec::new(),
             resources: Vec::new(),
             notifications: false,
             routes: Vec::new(),
-            dns: false,
+            dns: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut cleanup).expect("complete adapter setup");
         cleanup.notifications = true;
         cleanup.routes.extend(["low-route", "high-route"]);
-        cleanup.dns = true;
+        cleanup.dns.extend(["ipv4-dns", "ipv6-dns"]);
         assert!(
             cleanup_transaction(&mut cleanup),
             "route conflict is surfaced"
@@ -4224,14 +6149,15 @@ mod tests {
             cleanup.cleanup_calls,
             [
                 "notifications",
+                "ipv6-dns",
+                "ipv4-dns",
                 "high-route",
                 "low-route",
-                "dns",
-                "end-session",
                 "ipv6-address",
                 "ipv4-address",
                 "ipv6-mtu",
                 "ipv4-mtu",
+                "end-session",
                 "adapter",
             ],
             "route conflict cannot short-circuit reverse cleanup"
@@ -4242,12 +6168,428 @@ mod tests {
         assert_eq!(unsafe { low.NextHop.Ipv4.sin_addr.S_un.S_addr }, 0);
     }
 
+    fn integrity_capture_v4(address: &str, length: u8) -> IpPrefix {
+        IpPrefix::V4(Ipv4Prefix::new(address.parse().unwrap(), length).unwrap())
+    }
+
+    fn integrity_capture_v6(address: &str, length: u8) -> IpPrefix {
+        IpPrefix::V6(Ipv6Prefix::new(address.parse().unwrap(), length).unwrap())
+    }
+
+    fn integrity_prefix(address: &str, length: u8) -> RoutePrefix {
+        RoutePrefix::new(address.parse().unwrap(), length).unwrap()
+    }
+
+    fn integrity_route(
+        interface: InterfaceIdentity,
+        address: &str,
+        length: u8,
+        route_metric: u32,
+    ) -> RouteIntegrityRoute {
+        RouteIntegrityRoute {
+            interface,
+            destination: integrity_prefix(address, length),
+            route_metric,
+            valid: true,
+            owned_shape: false,
+            owned_local_shape: false,
+        }
+    }
+
+    fn integrity_interface(
+        identity: InterfaceIdentity,
+        ipv4_metric: u32,
+        ipv6_metric: u32,
+    ) -> RouteIntegrityInterface {
+        RouteIntegrityInterface {
+            identity,
+            software_loopback: false,
+            up: true,
+            ipv4: Some(InterfaceFamilyState {
+                up: true,
+                metric: ipv4_metric,
+            }),
+            ipv6: Some(InterfaceFamilyState {
+                up: true,
+                metric: ipv6_metric,
+            }),
+        }
+    }
+
+    fn integrity_snapshot(
+        owned: InterfaceIdentity,
+        routes: Vec<RouteIntegrityRoute>,
+        mut interfaces: Vec<RouteIntegrityInterface>,
+    ) -> RouteIntegritySnapshot {
+        interfaces.insert(0, integrity_interface(owned, 10, 20));
+        RouteIntegritySnapshot { routes, interfaces }
+    }
+
+    #[derive(Default)]
+    struct InjectedRouteIntegrity {
+        snapshots: std::collections::VecDeque<Result<RouteIntegritySnapshot, Error>>,
+        calls: usize,
+    }
+
+    impl RouteIntegrityOperations for InjectedRouteIntegrity {
+        fn snapshot(&mut self) -> Result<RouteIntegritySnapshot, Error> {
+            self.calls += 1;
+            self.snapshots.pop_front().unwrap_or(Err(Error))
+        }
+    }
+
     #[test]
-    fn underlay_interface_option_is_exact_network_byte_order() {
+    fn route_integrity_detects_v4_and_v6_specificity_without_default_route_false_positives() {
+        let owned = InterfaceIdentity { luid: 90, index: 9 };
+        let external = InterfaceIdentity { luid: 70, index: 7 };
+        let external_interface = integrity_interface(external, 30, 30);
+
+        let ipv4 = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "10.20.30.0", 24, 50)],
+            vec![external_interface],
+        );
         assert_eq!(
-            interface_index_option_value(0x0102_0304).to_ne_bytes(),
+            evaluate_route_integrity(&[integrity_capture_v4("0.0.0.0", 1)], owned, &ipv4),
+            RouteIntegrityResult::Conflict(RouteConflict::new(
+                RouteConflictReason::MoreSpecificRoute,
+                IpFamily::Ipv4,
+            ))
+        );
+
+        let ipv6 = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "2001:db8:1::", 64, 50)],
+            vec![external_interface],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&[integrity_capture_v6("::", 1)], owned, &ipv6),
+            RouteIntegrityResult::Conflict(RouteConflict::new(
+                RouteConflictReason::MoreSpecificRoute,
+                IpFamily::Ipv6,
+            ))
+        );
+
+        let defaults = integrity_snapshot(
+            owned,
+            vec![
+                integrity_route(external, "0.0.0.0", 0, 0),
+                integrity_route(external, "::", 0, 0),
+            ],
+            vec![external_interface],
+        );
+        assert_eq!(
+            evaluate_route_integrity(
+                &[
+                    integrity_capture_v4("10.0.0.0", 8),
+                    integrity_capture_v6("2001:db8::", 32),
+                ],
+                owned,
+                &defaults,
+            ),
+            RouteIntegrityResult::Clean,
+            "external /0 routes are less specific than managed capture"
+        );
+
+        let disjoint = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "192.0.2.0", 24, 0)],
+            vec![external_interface],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&[integrity_capture_v4("10.0.0.0", 8)], owned, &disjoint),
+            RouteIntegrityResult::Clean,
+            "a route with no overlap is ignored"
+        );
+    }
+
+    #[test]
+    fn equal_prefix_metric_is_closed_for_lower_equal_overflow_and_unknown() {
+        let owned = InterfaceIdentity { luid: 90, index: 9 };
+        let external = InterfaceIdentity { luid: 70, index: 7 };
+        let capture = [integrity_capture_v4("10.0.0.0", 8)];
+        let cases = [
+            (1, Some(8), true, "lower total metric"),
+            (1, Some(10), true, "equal total metric"),
+            (1, Some(11), false, "higher total metric"),
+            (u32::MAX, Some(1), true, "overflowed total metric"),
+            (1, None, true, "unknown interface metric"),
+        ];
+        for (route_metric, interface_metric, conflicts, label) in cases {
+            let interfaces = interface_metric
+                .map(|metric| integrity_interface(external, metric, metric))
+                .into_iter()
+                .collect();
+            let snapshot = integrity_snapshot(
+                owned,
+                vec![integrity_route(external, "10.0.0.0", 8, route_metric)],
+                interfaces,
+            );
+            let expected = if conflicts {
+                RouteIntegrityResult::Conflict(RouteConflict::new(
+                    RouteConflictReason::EqualPrefixPreferred,
+                    IpFamily::Ipv4,
+                ))
+            } else {
+                RouteIntegrityResult::Clean
+            };
+            assert_eq!(
+                evaluate_route_integrity(&capture, owned, &snapshot),
+                expected,
+                "{label}"
+            );
+        }
+
+        let ipv6_equal = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "2001:db8::", 32, 1)],
+            vec![integrity_interface(external, 10, 20)],
+        );
+        assert_eq!(
+            evaluate_route_integrity(
+                &[integrity_capture_v6("2001:db8::", 32)],
+                owned,
+                &ipv6_equal,
+            ),
+            RouteIntegrityResult::Conflict(RouteConflict::new(
+                RouteConflictReason::EqualPrefixPreferred,
+                IpFamily::Ipv6,
+            ))
+        );
+    }
+
+    #[test]
+    fn route_integrity_uses_only_fixed_control_and_liveness_exemptions() {
+        let owned = InterfaceIdentity { luid: 90, index: 9 };
+        let external = InterfaceIdentity { luid: 70, index: 7 };
+        let captures = [
+            integrity_capture_v4("0.0.0.0", 1),
+            integrity_capture_v4("128.0.0.0", 1),
+            integrity_capture_v6("::", 1),
+            integrity_capture_v6("8000::", 1),
+        ];
+        let controls = integrity_snapshot(
+            owned,
+            vec![
+                integrity_route(external, "127.0.0.0", 8, 0),
+                integrity_route(external, "169.254.0.0", 16, 0),
+                integrity_route(external, "224.0.0.0", 4, 0),
+                integrity_route(external, "255.255.255.255", 32, 0),
+                integrity_route(external, "::1", 128, 0),
+                integrity_route(external, "fe80::", 10, 0),
+                integrity_route(external, "ff00::", 8, 0),
+            ],
+            vec![integrity_interface(external, 1, 1)],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&captures, owned, &controls),
+            RouteIntegrityResult::Clean
+        );
+
+        let mut loopback = integrity_interface(external, 1, 1);
+        loopback.software_loopback = true;
+        let snapshot = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "10.0.0.0", 8, 1)],
+            vec![loopback],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&captures, owned, &snapshot),
+            RouteIntegrityResult::Clean
+        );
+
+        let mut down = integrity_interface(external, 1, 1);
+        down.up = false;
+        let snapshot = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "10.0.0.0", 8, 1)],
+            vec![down],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&captures, owned, &snapshot),
+            RouteIntegrityResult::Clean
+        );
+
+        let mut family_down = integrity_interface(external, 1, 1);
+        family_down.ipv4.as_mut().unwrap().up = false;
+        let snapshot = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "10.0.0.0", 8, 1)],
+            vec![family_down],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&captures, owned, &snapshot),
+            RouteIntegrityResult::Clean
+        );
+
+        let mut invalid = integrity_route(external, "10.0.0.0", 8, 1);
+        invalid.valid = false;
+        let snapshot = integrity_snapshot(
+            owned,
+            vec![invalid],
+            vec![integrity_interface(external, 1, 1)],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&captures, owned, &snapshot),
+            RouteIntegrityResult::Clean
+        );
+
+        for (address, length, label) in [
+            ("10.0.0.0", 8, "RFC1918"),
+            ("172.17.0.0", 16, "Docker/Hyper-V-style private route"),
+            ("198.51.100.0", 24, "route containing a fixed endpoint"),
+            ("fc00::", 7, "ULA or another VPN route"),
+        ] {
+            let snapshot = integrity_snapshot(
+                owned,
+                vec![integrity_route(external, address, length, 100)],
+                vec![integrity_interface(external, 100, 100)],
+            );
+            assert_eq!(
+                evaluate_route_integrity(&captures, owned, &snapshot),
+                RouteIntegrityResult::Conflict(RouteConflict::new(
+                    RouteConflictReason::MoreSpecificRoute,
+                    if address.contains(':') {
+                        IpFamily::Ipv6
+                    } else {
+                        IpFamily::Ipv4
+                    },
+                )),
+                "{label} is not implicitly exempt"
+            );
+        }
+    }
+
+    #[test]
+    fn only_exact_managed_and_kernel_local_owned_rows_are_ignored() {
+        let owned = InterfaceIdentity { luid: 90, index: 9 };
+        let external = InterfaceIdentity { luid: 70, index: 7 };
+        let capture = [integrity_capture_v4("0.0.0.0", 1)];
+        let mut owned_route = integrity_route(owned, "0.0.0.0", 1, 1);
+        owned_route.owned_shape = true;
+        let exact = integrity_snapshot(owned, vec![owned_route], Vec::new());
+        assert_eq!(
+            evaluate_route_integrity(&capture, owned, &exact),
+            RouteIntegrityResult::Clean
+        );
+
+        owned_route.owned_shape = false;
+        let changed = integrity_snapshot(owned, vec![owned_route], Vec::new());
+        assert_eq!(
+            evaluate_route_integrity(&capture, owned, &changed),
+            RouteIntegrityResult::Conflict(RouteConflict::new(
+                RouteConflictReason::EqualPrefixPreferred,
+                IpFamily::Ipv4,
+            ))
+        );
+
+        let mut local = integrity_route(owned, "10.255.255.255", 32, 256);
+        local.owned_local_shape = true;
+        let owned_local = integrity_snapshot(owned, vec![local], Vec::new());
+        assert_eq!(
+            evaluate_route_integrity(&capture, owned, &owned_local),
+            RouteIntegrityResult::Clean,
+            "kernel-local routes on the owned adapter cannot bypass capture"
+        );
+
+        local.interface = external;
+        let external_local = integrity_snapshot(
+            owned,
+            vec![local],
+            vec![integrity_interface(external, 1, 1)],
+        );
+        assert_eq!(
+            evaluate_route_integrity(&capture, owned, &external_local),
+            RouteIntegrityResult::Conflict(RouteConflict::new(
+                RouteConflictReason::MoreSpecificRoute,
+                IpFamily::Ipv4,
+            )),
+            "the exemption is identity-bound to the owned adapter"
+        );
+    }
+
+    #[test]
+    fn route_integrity_retries_generation_twice_then_reports_unstable() {
+        let owned = InterfaceIdentity { luid: 90, index: 9 };
+        let capture = [integrity_capture_v4("0.0.0.0", 1)];
+        let clean = integrity_snapshot(owned, Vec::new(), Vec::new());
+        let external = InterfaceIdentity { luid: 70, index: 7 };
+        let conflict = integrity_snapshot(
+            owned,
+            vec![integrity_route(external, "10.0.0.0", 8, 1)],
+            vec![integrity_interface(external, 1, 1)],
+        );
+        let mut operations = InjectedRouteIntegrity {
+            snapshots: [Ok(conflict), Ok(clean.clone())].into(),
+            calls: 0,
+        };
+        let mut generations = [1, 2, 2, 2].into_iter();
+        assert_eq!(
+            scan_route_integrity_with(
+                &capture,
+                owned,
+                || generations.next().unwrap(),
+                &mut operations,
+            ),
+            RouteIntegrityResult::Clean,
+            "a raced conflict snapshot is never adopted"
+        );
+        assert_eq!(operations.calls, 2);
+
+        let mut operations = InjectedRouteIntegrity {
+            snapshots: [Ok(clean.clone()), Ok(clean.clone()), Ok(clean)].into(),
+            calls: 0,
+        };
+        let mut generations = [1, 2, 2, 3, 3, 4].into_iter();
+        assert_eq!(
+            scan_route_integrity_with(
+                &capture,
+                owned,
+                || generations.next().unwrap(),
+                &mut operations,
+            ),
+            RouteIntegrityResult::UnstableGeneration
+        );
+        assert_eq!(operations.calls, 3, "one attempt plus two retries");
+    }
+
+    #[test]
+    fn route_integrity_platform_failures_are_closed_and_generation_checked() {
+        let owned = InterfaceIdentity { luid: 90, index: 9 };
+        let capture = [integrity_capture_v4("0.0.0.0", 1)];
+        let mut operations = InjectedRouteIntegrity {
+            snapshots: [Err(Error)].into(),
+            calls: 0,
+        };
+        let mut generations = [7, 7].into_iter();
+        assert_eq!(
+            scan_route_integrity_with(
+                &capture,
+                owned,
+                || generations.next().unwrap(),
+                &mut operations,
+            ),
+            RouteIntegrityResult::PlatformError
+        );
+        assert_eq!(operations.calls, 1);
+    }
+
+    #[test]
+    fn underlay_interface_options_use_family_specific_byte_order() {
+        let index = 0x0102_0304;
+        assert_eq!(
+            ipv4_interface_index_option_value(index).to_ne_bytes(),
             [1, 2, 3, 4]
         );
-        assert_ne!(interface_index_option_value(0x0102_0304), 0x0102_0304);
+        assert_ne!(ipv4_interface_index_option_value(index), index);
+        assert_eq!(ipv6_interface_index_option_value(index), index);
+        assert_eq!(
+            interface_socket_option("192.0.2.1".parse().unwrap(), index),
+            (super::IPPROTO_IP, super::IP_UNICAST_IF, index.to_be())
+        );
+        assert_eq!(
+            interface_socket_option("2001:db8::1".parse().unwrap(), index),
+            (super::IPPROTO_IPV6, super::IPV6_UNICAST_IF, index)
+        );
     }
 }

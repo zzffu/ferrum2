@@ -1,0 +1,49 @@
+schema = "ferrum2-packet-corpus-provenance-v1"
+name = "reassembly-v1"
+classification = "reviewed repository-owned synthetic packet input; not a capture or external conformance vector"
+encoding = "canonical-LF UTF-8 text; lowercase hexadecimal; one complete IP packet or fragment per data row"
+row_schema = "case_name|expected_operation|packet_hex; rows for one stateful case are contiguous and evaluated in file order"
+row_count = 26
+created = "2026-08-22"
+content_hash_contract = "corpus_sha256 is SHA-256 over the exact canonical-LF UTF-8 bytes, including comments and the final LF; CRLF and bare CR are invalid"
+
+[sources]
+ipv4 = "Independently constructed from RFC 791 IPv4 header, checksum, identification, flags, and fragment-offset fields"
+ipv6 = "Independently constructed from RFC 8200 IPv6, Hop-by-Hop Options, Destination Options, and Fragment Header fields"
+udp = "Independently constructed from RFC 768 UDP header and checksum fields"
+external_bytes = "none"
+source_license = "RFCs are referenced but not copied; repository-owned synthetic bytes and documentation are GPL-3.0-only"
+
+[construction]
+method = "Deterministic field construction and reviewed byte mutation; no ferrum2 production module, packet capture, OCR, pcap parser, live network, external binary, or random source was used"
+ipv4_source = "198.18.0.1"
+ipv4_destination = "192.0.2.1"
+ipv6_source = "fd00::2"
+ipv6_destination = "2001:db8::1"
+udp_source_port = 10000
+udp_destination_port = 53
+base_ipv4_identification = "0x6101"
+base_ipv6_identification = "0x00006102"
+boundary_ipv4_identification = "0x6201"
+boundary_ipv6_identification = "0x00006202"
+base_payload = "ASCII fixture-v4-payload or fixture-v6-payload split after the UDP header plus eight payload bytes"
+collision_mutation = "The second same-key first fragment changes only the final payload byte from 0x2d to 0x2c; its IPv4 header remains independently valid"
+
+[coverage]
+normal = "Out-of-order-capable two-fragment IPv4 UDP, IPv6 UDP after Hop-by-Hop Options, and IPv6 UDP after Destination Options complete and reparse canonically"
+extension_boundary = "PadN length four consumes the exact six-byte option area in each eight-byte options header; matching fixed vectors set its data length to five and must fail before Fragment admission"
+checksum_and_length = "A fixed IPv4 fragment has a one-bit TTL mutation without checksum repair; another declares one byte beyond the supplied packet; a maximum-offset IPv4 fragment crosses reconstructed length 65535 by one byte"
+overlap_and_collision = "An exact duplicate and a same identification/source/destination/protocol fragment with different payload both drop the complete entry as overlap"
+timeout = "At the exact 30000 ms deadline the old head expires, the fixed tail remains pending, and a new head completes only the new entry"
+restart_stale = "Generation 98 clears the generation-97 head; its tail remains pending until a generation-98 head arrives"
+boundary_65535 = "Compact IPv4 and IPv6 terminal fragments have prefix length plus fragment offset plus payload length exactly 65535; an IPv4 vector at 65536 is parser-rejected"
+disabled_family = "Fixed IPv4 and IPv6 fragments are rejected before key attribution when their address family is disabled"
+unsupported = "An IPv6 Fragment Header naming another Fragment Header is rejected with its fragment key and creates no table state"
+
+[verification]
+consumer = "crates/ferrum2-tun/src/reassembly.rs packet_corpus_exercises_stable_parser_and_reassembly_contracts"
+corpus_sha256 = "90862db4d1b5e9caf7c144768c1a016889627b74d4e363cde6a5a03b64bf8c10"
+corpus_bytes = 4153
+consumer_contract = "The test enforces canonical names/hex/LF, contiguous cases, exact row count, closed operation coverage, parser reject reasons and key attribution, deterministic timeout/generation transitions, exact reconstructed boundary arithmetic, and successful canonical reparse after completion"
+behavioral_companions = "reassembled_packet_boundary_is_exactly_65535_for_both_families materializes full-size IPv4/IPv6 packets; timeout_and_generation_change_prevent_cross_epoch_completion and generation_change_discards_partial_state_before_accepting_new_epoch_fragments independently exercise constructed state"
+static_fixture_limit = "Clock values and restart generations are semantic consumer inputs rather than packet bytes; the fixture operation names bind those deterministic transitions while keeping every packet input fixed and reviewable"

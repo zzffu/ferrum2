@@ -12,6 +12,8 @@ DLL loading is security-sensitive. Preserve rejection of network/reparse paths, 
 
 Adapter creation is transactional. Setup failures and cancellation must roll back owned state in reverse order, surface cleanup conflicts, and avoid deleting state no longer matching the journal. Preserve DAD readiness ordering, managed route/DNS readback, underlay snapshot validation, and notification cancellation races.
 
+The managed transaction is family-neutral: IPv4 and IPv6 addresses, MTU state, DAD, capture routes, and DNS leases are optional per family and must each have exact readback plus ownership-safe reverse rollback. Route, interface, and address notifications cover both families and only signal generation changes from callbacks. Route-integrity detection is always active when managed routing is enabled. Underlay binding is target-aware and generation-checked; do not restore a unique-default-route assumption. A full send ring returns an explicit drop outcome without retry or session failure.
+
 ## Focused Verification
 
 Run on Windows x86_64:
@@ -20,4 +22,4 @@ Run on Windows x86_64:
 cargo test -p ferrum2-wintun --locked
 ```
 
-FFI or live adapter changes also require the repository's privileged Windows platform workflow; ordinary injected-operation tests do not prove live-driver behavior.
+FFI or live adapter changes also require the `windows-tun-guest` job in `.github/workflows/lifecycle-stress.yml`; ordinary injected-operation tests do not prove live-driver behavior. Release evidence is eight M17 profiles plus the independent ninth M16 `hard-kill` profile, with the distinct readback and cleanup contracts documented in `docs/windows-tun-m17-qualification.md`.

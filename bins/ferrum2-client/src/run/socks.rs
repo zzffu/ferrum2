@@ -401,7 +401,6 @@ async fn client_connection(
         Err(ClientOpenFailure::Plan(failure)) => {
             let kind = match failure {
                 #[cfg(windows)]
-                super::egress::ClientPlanFailure::DirectIpv6Unsupported => ConnectErrorKind::Other,
                 super::egress::ClientPlanFailure::Invalid => ConnectErrorKind::Other,
             };
             let _ = reply.failed(kind).await;
@@ -1739,13 +1738,10 @@ pub(in crate::run) mod tests {
     async fn client_route_reject_hijack() {
         let listen = reserve_address();
         let dns_listen = reserve_address();
-        let shadowsocks = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let shadowsocks_address = reserve_address();
+        let shadowsocks = TcpListener::bind(shadowsocks_address)
             .await
             .expect("Shadowsocks listener");
-        let shadowsocks_address = match shadowsocks.local_addr().expect("Shadowsocks address") {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => unreachable!("IPv4 Shadowsocks listener"),
-        };
         let shadowsocks_udp = UdpSocket::bind(shadowsocks_address)
             .await
             .expect("Shadowsocks UDP listener");
@@ -2046,6 +2042,7 @@ pub(in crate::run) mod tests {
             legacy: config.route,
             program: config.route_program,
             outbounds,
+            selector: selector.clone(),
         });
 
         let (association, mut peer) = parsed_udp_association().await;
@@ -2915,6 +2912,7 @@ pub(in crate::run) mod tests {
             legacy: route,
             program: None,
             outbounds,
+            selector: selector.clone(),
         });
         let endpoint = SocksUdpEndpoint::bind(
             Ipv4Addr::LOCALHOST,
@@ -3066,6 +3064,7 @@ pub(in crate::run) mod tests {
             legacy: route,
             program: None,
             outbounds,
+            selector: ferrum2_rule::SelectorControl::empty(),
         });
         let (path, mut context) = udp_test_context_for_psk(
             registry.clone(),

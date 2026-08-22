@@ -62,6 +62,23 @@ use tokio_io::{TokioConnector, bind_listener, shutdown_signal};
 use egress::IdSequenceRandom;
 use egress::{ClientEgressEngine, ClientUdpContext, prepare_client_outbounds};
 
+const DEPRECATED_TUN_UDP_BUFFER_WARNING: &str =
+    "warning[config.deprecated] tun.max_udp_buffered_bytes: ignored and scheduled for removal";
+
+fn emit_deprecated_tun_memory_warning(config: &ValidatedClientConfig) {
+    if config
+        .tun
+        .as_ref()
+        .is_some_and(|tun| tun.deprecated_max_udp_buffered_bytes_present)
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = std::io::Write::write_fmt(
+            &mut stderr,
+            format_args!("{DEPRECATED_TUN_UDP_BUFFER_WARNING}\n"),
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
     StartupObservability,
@@ -963,6 +980,8 @@ where
     } = resources;
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
+        emit_deprecated_tun_memory_warning(&config);
+        let selector = config.selector_control();
         let tun_config = config.tun;
         let tun_auto_route = tun_config.as_ref().is_some_and(|tun| tun.auto_route);
         let tun_direct = tun_config.is_some()
@@ -1140,6 +1159,7 @@ where
             legacy: config.route,
             program: config.route_program,
             outbounds,
+            selector,
         });
         // Probe caller-owned route scratch before any listener is prepared so
         // an allocation/capacity failure has a stable process-level category.

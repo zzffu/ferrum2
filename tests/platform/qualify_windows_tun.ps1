@@ -1,8 +1,10 @@
 param(
     [Parameter(Mandatory = $true)]
     # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
-    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "route-detect", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
     [string]$Mode,
+    [ValidateSet(10, 100, 1000)]
+    [int]$RestartCycles = 10,
     [string]$WintunZip,
     [string]$RunToken,
     [string]$IdentityLedger,
@@ -10,6 +12,7 @@ param(
     [string]$ServerBinary,
     [string]$ProductRoot,
     [string]$ArtifactDirectory,
+    [string]$CandidateTestDirectory,
     [string]$RuntimeLibraryDirectory,
     [switch]$RequireTcp08ProductMetrics
 )
@@ -20,9 +23,55 @@ Set-StrictMode -Version Latest
 $tcp08ClockOriginUtc = [DateTime]::UtcNow.ToString("o")
 $tcp08ClockOriginTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
 $controllerStartedUtc = $tcp08ClockOriginUtc
+$m17Modes = @(
+    "route-detect", "restart-stress", "fragments", "dual-stack-dns", "udp-policy",
+    "scheduler-ring-full"
+)
+$expectedHyperVVmName = "Windows 10 MSIX packaging environment"
+$expectedHyperVVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
+$expectedHyperVCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
+$expectedHyperVCheckpointId = "1e570209-faf7-4248-8167-aa0687cdb8cf"
+
+if ($Mode -ne "restart-stress" -and $PSBoundParameters.ContainsKey("RestartCycles")) {
+    throw "RestartCycles is valid only with restart-stress mode"
+}
 
 if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne "X64") {
     throw "Windows AMD64 is required"
+}
+
+# Every mode in this controller can mutate adapter, route, or DNS state, including cleanup. Keep
+# accidental host execution fail-closed; the host orchestrator must copy and invoke this script in
+# an isolated Hyper-V guest.
+$computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+if ($computerSystem.Manufacturer -cne "Microsoft Corporation" -or
+    $computerSystem.Model -cne "Virtual Machine") {
+    throw "Windows TUN qualification must run inside an isolated Hyper-V guest"
+}
+
+function Assert-M17GuestIdentityMarker([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "M17 Windows TUN qualification requires an identity ledger"
+    }
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if ($item.Length -lt 2 -or $item.Length -gt 65536 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "M17 identity ledger file boundary is invalid"
+    }
+    $ledger = Get-Content -LiteralPath $resolved -Raw -Encoding utf8 | ConvertFrom-Json -Depth 4 -ErrorAction Stop
+    if ($ledger.schema -ne 1 -or
+        $ledger.vm_name -cne $script:expectedHyperVVmName -or
+        $ledger.vm_id -cne $script:expectedHyperVVmId -or
+        $ledger.checkpoint_name -cne $script:expectedHyperVCheckpointName -or
+        $ledger.checkpoint_id -cne $script:expectedHyperVCheckpointId) {
+        throw "M17 identity ledger does not name the approved Hyper-V guest"
+    }
+    return $resolved
+}
+
+$m17IdentityMarker = $null
+if ($Mode -in $m17Modes) {
+    $m17IdentityMarker = Assert-M17GuestIdentityMarker $IdentityLedger
 }
 
 $expectedZipHash = "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51"
@@ -44,13 +93,17 @@ $resolvedProductRoot = if ($ProductRoot) {
 $clientBinaryExplicit = -not [string]::IsNullOrWhiteSpace($clientBinaryInput)
 $serverBinaryExplicit = -not [string]::IsNullOrWhiteSpace($serverBinaryInput)
 $runtimeLibraryDirectoryExplicit = -not [string]::IsNullOrWhiteSpace($RuntimeLibraryDirectory)
+$candidateTestDirectoryExplicit = -not [string]::IsNullOrWhiteSpace($CandidateTestDirectory)
+$resolvedCandidateTestDirectory = $null
 $resolvedRuntimeLibraryDirectory = $null
 $runtimeVcruntimePath = $null
 $runtimeVcruntimeBytes = $null
 $runtimeVcruntimeSha256 = $null
 $runIdentity = if ($RunToken) { $RunToken } elseif ($Mode -eq "cleanup") { throw "cleanup requires RunToken" } else { "local-$PID" }
 if ($runIdentity -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$') { throw "RunToken is invalid" }
-$work = if ($Mode -eq "network-feasibility") {
+$work = if ($Mode -in $m17Modes) {
+    Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-tun-$runIdentity"
+} elseif ($Mode -eq "network-feasibility") {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$runIdentity"
 } elseif ($Mode -in @("managed-product", "full", "hard-kill")) {
     Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$runIdentity"
@@ -92,7 +145,9 @@ $tcp08RequiredJsonNames = @(
 )
 $managedAutoAdapterName = "F2-M16P-A-$runIdentity"
 $managedManualAdapterName = "F2-M16P-M-$runIdentity"
-$adapterName = if ($Mode -eq "network-feasibility") {
+$adapterName = if ($Mode -in $m17Modes) {
+    "F2-M17-$runIdentity"
+} elseif ($Mode -eq "network-feasibility") {
     "Ferrum2-M16-$runIdentity"
 } elseif ($Mode -eq "managed-product") {
     $managedAutoAdapterName
@@ -107,6 +162,9 @@ $managedRouteOnlyConfig = Join-Path $work "client-managed-route-only.toml"
 $failureConfig = Join-Path $work "client-failure.toml"
 $addressJournal = Join-Path $work "owned-target-addresses.txt"
 $dllJournal = Join-Path $work "owned-wintun-dll.txt"
+$m17NetworkMutationJournal = Join-Path $work "m17-network-mutations"
+$m17UdpFirewallRuleName = "Ferrum2-M17-UDP-$runIdentity"
+$controllerProgram = [IO.Path]::GetFullPath((Get-Process -Id $PID -ErrorAction Stop).Path)
 $runIdentityJournalRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "Ferrum2\ControllerRunIdentities"
 $runIdentityJournalPath = Join-Path $runIdentityJournalRoot "$runIdentity.json"
 
@@ -114,11 +172,42 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+function Test-UtcRoundTripTimestamp([object]$Value) {
+    if ($Value -isnot [string]) { return $false }
+    [DateTimeOffset]$parsed = [DateTimeOffset]::MinValue
+    return [DateTimeOffset]::TryParseExact(
+        $Value,
+        "o",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    ) -and $parsed.Offset -eq [TimeSpan]::Zero
+}
+
+function Get-RequiredJsonStrings([string]$Json, [string[]]$Names, [string]$Label) {
+    $document = [Text.Json.JsonDocument]::Parse($Json)
+    try {
+        Assert-True ($document.RootElement.ValueKind -eq [Text.Json.JsonValueKind]::Object) "$Label root is not an object"
+        $properties = @($document.RootElement.EnumerateObject())
+        $result = [ordered]@{}
+        foreach ($name in $Names) {
+            $matches = @($properties | Where-Object { $_.Name -ceq $name })
+            Assert-True ($matches.Count -eq 1 -and
+                $matches[0].Value.ValueKind -eq [Text.Json.JsonValueKind]::String) "$Label property is not one unique JSON string: $name"
+            $result[$name] = $matches[0].Value.GetString()
+        }
+        return $result
+    } finally {
+        $document.Dispose()
+    }
+}
+
 function Get-ControllerWorkPaths {
     $paths = @(
         Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$script:runIdentity"
         Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$script:runIdentity"
         Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$script:runIdentity"
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-tun-$script:runIdentity"
     )
     return @($paths | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') })
 }
@@ -204,11 +293,17 @@ function Write-RunIdentityJournal {
     $workPath = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
     $siblingPath = [IO.Path]::GetFullPath($script:siblingDll).TrimEnd('\', '/')
     $controllerPath = (Resolve-Path -LiteralPath $PSCommandPath).Path
-    $serverRequired = $script:Mode -in @("tcp", "tcp08", "udp", "full", "performance")
+    $serverRequired = $script:Mode -in @(
+        "tcp", "tcp08", "udp", "full", "performance", "route-detect", "restart-stress",
+        "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
+    )
     $document = [ordered]@{
         schema = "ferrum2.windows-tun.cleanup-identity.v1"
         run_token = $script:runIdentity
         mode = $script:Mode
+        identity_sha256 = if ($script:Mode -in $script:m17Modes) {
+            (Get-FileHash -LiteralPath $script:m17IdentityMarker -Algorithm SHA256).Hash.ToLowerInvariant()
+        } else { $null }
         work_path = $workPath
         product_root = $productRoot
         client_binary_path = $clientPath
@@ -240,7 +335,7 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     Assert-True ($item.Length -gt 0 -and $item.Length -le 65536) "run identity journal size is invalid"
     $document = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -Depth 4 -ErrorAction Stop
     Assert-ClosedJsonProperties $document @(
-        "schema", "run_token", "mode", "work_path", "product_root",
+        "schema", "run_token", "mode", "identity_sha256", "work_path", "product_root",
         "client_binary_path", "client_binary_sha256", "client_binary_explicit",
         "server_binary_path", "server_binary_sha256", "server_binary_explicit", "server_required",
         "sibling_dll_path", "dll_ownership", "dll_marker_path", "expected_dll_sha256",
@@ -248,7 +343,16 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     ) "run identity journal"
     Assert-True ($document.schema -ceq "ferrum2.windows-tun.cleanup-identity.v1" -and
         $document.run_token -ceq $script:runIdentity) "run identity journal schema/token mismatch"
-    Assert-True ($document.mode -in @("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill")) "run identity journal mode is invalid"
+    Assert-True ($document.mode -in @(
+        "lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance",
+        "network-feasibility", "managed-product", "hard-kill", "route-detect",
+        "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
+    )) "run identity journal mode is invalid"
+    if ($document.mode -in $script:m17Modes) {
+        Assert-True ([string]$document.identity_sha256 -cmatch '^[0-9a-f]{64}$') "M17 run identity journal hash is invalid"
+    } else {
+        Assert-True ($null -eq $document.identity_sha256) "legacy run identity journal unexpectedly has an M17 identity hash"
+    }
     $workPath = Get-CanonicalJournalPath ([string]$document.work_path) "journal work_path"
     Assert-True (@($ExpectedWorks | Where-Object { $_.Equals($workPath, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) "run identity journal work path is outside the token scope"
     $productRoot = Get-CanonicalJournalPath ([string]$document.product_root) "journal product_root"
@@ -268,7 +372,10 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     }
     Assert-True ($document.client_binary_explicit -is [bool] -and
         $document.server_binary_explicit -is [bool] -and $document.server_required -is [bool]) "run identity journal boolean field is invalid"
-    $expectedServerRequired = $document.mode -in @("tcp", "tcp08", "udp", "full", "performance")
+    $expectedServerRequired = $document.mode -in @(
+        "tcp", "tcp08", "udp", "full", "performance", "route-detect", "restart-stress",
+        "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
+    )
     Assert-True ($document.server_required -eq $expectedServerRequired) "run identity journal server requirement is inconsistent with mode"
     if (-not $document.client_binary_explicit) {
         Assert-True ($clientPath.Equals((Join-Path $productRoot "target\debug\ferrum2-client.exe"), [StringComparison]::OrdinalIgnoreCase)) "default client path escaped product root"
@@ -367,11 +474,291 @@ function Get-ExactRunProcesses([string]$WorkPath, [string[]]$Executables = @($sc
     })
 }
 
+function Get-M17RouteMutationIntentPath(
+    [string]$Prefix,
+    [string]$JournalPath = $script:m17NetworkMutationJournal
+) {
+    $name = switch ($Prefix) {
+        "203.0.113.128/25" { "route-more-specific.json" }
+        "203.0.113.0/24" { "route-equal-prefix.json" }
+        default { throw "M17 external route is outside the durable journal whitelist: $Prefix" }
+    }
+    return Join-Path $JournalPath $name
+}
+
+function Write-M17DurableMutationIntent([string]$Path, [System.Collections.IDictionary]$Document) {
+    if (-not (Test-Path -LiteralPath $script:m17NetworkMutationJournal -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:m17NetworkMutationJournal -ErrorAction Stop | Out-Null
+    }
+    Assert-NotReparsePoint $script:m17NetworkMutationJournal "M17 network mutation journal directory"
+    $parent = [IO.Path]::GetFullPath((Split-Path -Parent $Path)).TrimEnd('\', '/')
+    $expectedParent = [IO.Path]::GetFullPath($script:m17NetworkMutationJournal).TrimEnd('\', '/')
+    Assert-True ($parent.Equals($expectedParent, [StringComparison]::OrdinalIgnoreCase)) "M17 mutation intent escaped its journal directory"
+    $pendingPath = "$Path.pending"
+    Assert-True (-not (Test-Path -LiteralPath $Path) -and -not (Test-Path -LiteralPath $pendingPath)) "M17 mutation intent baseline is not absent"
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Document | ConvertTo-Json -Compress -Depth 4) + "`n")
+    Assert-True ($bytes.Length -le 4096) "M17 mutation intent exceeded its fixed boundary"
+    $stream = [IO.FileStream]::new($pendingPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+    Move-Item -LiteralPath $pendingPath -Destination $Path -ErrorAction Stop
+}
+
+function Read-M17MutationIntent(
+    [string]$Path,
+    [string]$Schema,
+    [string[]]$Properties,
+    [string]$ExpectedWorkPath = $script:work,
+    [string[]]$ExpectedSourceMode = @("route-detect")
+) {
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "M17 mutation intent is missing"
+    Assert-NotReparsePoint $Path "M17 mutation intent"
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True ($item.Length -gt 1 -and $item.Length -le 4096) "M17 mutation intent size is invalid"
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    Assert-True ($bytes[$bytes.Length - 1] -eq 10 -and
+        -not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf)) "M17 mutation intent encoding is invalid"
+    $document = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) |
+        ConvertFrom-Json -Depth 4 -ErrorAction Stop
+    Assert-ClosedJsonProperties $document $Properties "M17 mutation intent"
+    Assert-True ($document.schema -ceq $Schema -and $document.run_token -ceq $script:runIdentity -and
+        $ExpectedSourceMode -ccontains [string]$document.source_mode -and
+        (Get-CanonicalJournalPath ([string]$document.work_path) "M17 mutation intent work_path").Equals(
+            (Get-CanonicalJournalPath $ExpectedWorkPath "M17 expected mutation work_path"),
+            [StringComparison]::OrdinalIgnoreCase
+        )) "M17 mutation intent identity is invalid"
+    return $document
+}
+
+function Read-M17UdpFirewallMutationIntent(
+    [string]$Path,
+    [string]$ExpectedWorkPath = $script:work,
+    [string]$JournalPath = $script:m17NetworkMutationJournal
+) {
+    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-udp-firewall-intent.v1" @(
+        "schema", "run_token", "source_mode", "work_path", "rule_name",
+        "local_address", "remote_address", "protocol", "direction", "action",
+        "local_only_mapping", "program_path"
+    ) $ExpectedWorkPath @("udp-policy", "scheduler-ring-full")
+    $expectedPath = Join-Path $JournalPath "udp-firewall.json"
+    $expectedRuleName = "Ferrum2-M17-UDP-$($script:runIdentity)"
+    Assert-True ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($expectedPath), [StringComparison]::OrdinalIgnoreCase) -and
+        $document.rule_name -ceq $expectedRuleName -and
+        $document.local_address -ceq "198.18.0.2" -and
+        $document.remote_address -ceq "Any" -and
+        $document.protocol -ceq "UDP" -and $document.direction -ceq "Inbound" -and
+        $document.action -ceq "Allow" -and
+        $document.local_only_mapping -is [bool] -and
+        $document.local_only_mapping -and
+        $document.program_path -is [string] -and
+        [IO.Path]::GetFullPath([string]$document.program_path).Equals(
+            $script:controllerProgram,
+            [StringComparison]::OrdinalIgnoreCase
+        )) "M17 UDP firewall mutation intent values are invalid"
+    return $document
+}
+
+function Read-M17RouteMutationIntent(
+    [string]$Path,
+    [string]$ExpectedWorkPath = $script:work,
+    [string]$JournalPath = $script:m17NetworkMutationJournal
+) {
+    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-route-intent.v1" @(
+        "schema", "run_token", "source_mode", "work_path", "interface_index",
+        "destination_prefix", "next_hop", "route_metric"
+    ) $ExpectedWorkPath
+    $expectedPath = Get-M17RouteMutationIntentPath ([string]$document.destination_prefix) $JournalPath
+    Assert-True ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($expectedPath), [StringComparison]::OrdinalIgnoreCase) -and
+        $document.interface_index -is [long] -and $document.interface_index -ge 1 -and
+        $document.interface_index -le [uint32]::MaxValue -and $document.route_metric -is [long] -and
+        $document.route_metric -ge 0 -and $document.route_metric -le [uint32]::MaxValue) "M17 route mutation intent values are invalid"
+    $nextHop = $null
+    Assert-True ([Net.IPAddress]::TryParse([string]$document.next_hop, [ref]$nextHop) -and
+        $nextHop.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) "M17 route mutation next hop is invalid"
+    return $document
+}
+
+function Read-M17MetricMutationIntent(
+    [string]$Path,
+    [string]$ExpectedWorkPath = $script:work,
+    [string]$JournalPath = $script:m17NetworkMutationJournal
+) {
+    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-metric-intent.v1" @(
+        "schema", "run_token", "source_mode", "work_path", "interface_index", "interface_guid",
+        "original_automatic_metric", "original_interface_metric", "applied_automatic_metric", "applied_interface_metric"
+    ) $ExpectedWorkPath
+    $expectedPath = Join-Path $JournalPath "physical-ipv4-metric.json"
+    $guid = [Guid]::Empty
+    Assert-True ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($expectedPath), [StringComparison]::OrdinalIgnoreCase) -and
+        $document.interface_index -is [long] -and $document.interface_index -ge 1 -and
+        $document.interface_index -le [uint32]::MaxValue -and
+        [Guid]::TryParseExact([string]$document.interface_guid, "D", [ref]$guid) -and $guid -ne [Guid]::Empty -and
+        $document.original_automatic_metric -in @("Enabled", "Disabled") -and
+        $document.original_interface_metric -is [long] -and $document.original_interface_metric -ge 0 -and
+        $document.original_interface_metric -le [uint32]::MaxValue -and
+        $document.applied_automatic_metric -ceq "Disabled" -and
+        $document.applied_interface_metric -is [long] -and $document.applied_interface_metric -eq 1) "M17 metric mutation intent values are invalid"
+    return $document
+}
+
+function Get-M17OwnedUdpFirewallRule([object]$Intent) {
+    $rules = @(Get-NetFirewallRule -Name ([string]$Intent.rule_name) -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
+    Assert-True ($rules.Count -le 1) "M17 UDP firewall rule ownership is ambiguous"
+    if ($rules.Count -eq 0) { return @() }
+    $rule = $rules[0]
+    $addressFilters = @($rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
+    $portFilters = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+    $applicationFilters = @($rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+    $localAddresses = @($addressFilters | ForEach-Object { @($_.LocalAddress) })
+    $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) })
+    $protocols = @($portFilters | ForEach-Object { [string]$_.Protocol })
+    Assert-True ($rule.Name -ceq [string]$Intent.rule_name -and
+        $rule.DisplayName -ceq [string]$Intent.rule_name -and
+        [string]$rule.Enabled -ceq "True" -and [string]$rule.Direction -ceq "Inbound" -and
+        [string]$rule.Action -ceq "Allow" -and [string]$rule.Profile -ceq "Any" -and
+        -not [bool]$rule.LooseSourceMapping -and [bool]$rule.LocalOnlyMapping -and
+        $addressFilters.Count -eq 1 -and $portFilters.Count -eq 1 -and $applicationFilters.Count -eq 1 -and
+        $localAddresses.Count -eq 1 -and $localAddresses[0] -ceq "198.18.0.2" -and
+        $remoteAddresses.Count -eq 1 -and $remoteAddresses[0] -ceq "Any" -and
+        $protocols.Count -eq 1 -and $protocols[0] -in @("UDP", "17") -and
+        [IO.Path]::GetFullPath([string]$applicationFilters[0].Program).Equals(
+            $script:controllerProgram,
+            [StringComparison]::OrdinalIgnoreCase
+        )) "M17 UDP firewall rule ownership changed"
+    return @($rule)
+}
+
+function Enable-M17UdpFirewallAdmission {
+    Assert-True (@("udp-policy", "scheduler-ring-full") -ccontains $script:Mode) "M17 UDP firewall exception is restricted to UDP live modes"
+    Assert-True (-not (Get-NetFirewallRule -Name $script:m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) "M17 UDP firewall rule baseline is not absent"
+    $intentPath = Join-Path $script:m17NetworkMutationJournal "udp-firewall.json"
+    Write-M17DurableMutationIntent $intentPath ([ordered]@{
+        schema = "ferrum2.windows-tun.m17-udp-firewall-intent.v1"
+        run_token = $script:runIdentity
+        source_mode = $script:Mode
+        work_path = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
+        rule_name = $script:m17UdpFirewallRuleName
+        local_address = "198.18.0.2"
+        remote_address = "Any"
+        protocol = "UDP"
+        direction = "Inbound"
+        action = "Allow"
+        local_only_mapping = $true
+        program_path = $script:controllerProgram
+    })
+    New-NetFirewallRule `
+        -Name $script:m17UdpFirewallRuleName `
+        -DisplayName $script:m17UdpFirewallRuleName `
+        -PolicyStore ActiveStore `
+        -Enabled True `
+        -Profile Any `
+        -Direction Inbound `
+        -Action Allow `
+        -Protocol UDP `
+        -LocalAddress "198.18.0.2" `
+        -RemoteAddress Any `
+        -Program $script:controllerProgram `
+        -LocalOnlyMapping $true `
+        -EdgeTraversalPolicy Block | Out-Null
+    $intent = Read-M17UdpFirewallMutationIntent $intentPath
+    Assert-True (@(Get-M17OwnedUdpFirewallRule $intent).Count -eq 1) "M17 UDP firewall rule readback failed"
+}
+
+function Complete-M17MutationIntent([string]$Path) {
+    Assert-NotReparsePoint $Path "M17 completed mutation intent"
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True (-not (Test-Path -LiteralPath $Path)) "M17 mutation intent was not removed"
+}
+
+function Restore-M17NetworkMutationJournal([string]$WorkPath, [string]$JournalPath) {
+    $canonicalWork = Get-CanonicalJournalPath $WorkPath "M17 recovery work_path"
+    $canonicalJournal = Get-CanonicalJournalPath $JournalPath "M17 recovery journal_path"
+    $allowedWorks = @(Get-ControllerWorkPaths)
+    Assert-True (@($allowedWorks | Where-Object { $_.Equals($canonicalWork, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) "M17 recovery work escaped the run-token scope"
+    Assert-True ($canonicalJournal.Equals((Join-Path $canonicalWork "m17-network-mutations"), [StringComparison]::OrdinalIgnoreCase)) "M17 recovery journal derivation is invalid"
+    if (-not (Test-Path -LiteralPath $canonicalJournal)) { return }
+    Assert-NotReparsePoint $canonicalWork "M17 recovery work directory"
+    Assert-NotReparsePoint $canonicalJournal "M17 network mutation journal directory"
+    $intentNames = @(
+        "route-more-specific.json", "route-equal-prefix.json", "physical-ipv4-metric.json",
+        "udp-firewall.json"
+    )
+    $allowedNames = @($intentNames + @($intentNames | ForEach-Object { "$_.pending" }))
+    $entries = @(Get-ChildItem -LiteralPath $canonicalJournal -Force -ErrorAction Stop)
+    Assert-True (@($entries | Where-Object { $_.PSIsContainer -or $allowedNames -notcontains $_.Name }).Count -eq 0) "M17 network mutation journal contains an unknown entry"
+    foreach ($name in $intentNames) {
+        $path = Join-Path $canonicalJournal $name
+        $pendingPath = "$path.pending"
+        if (Test-Path -LiteralPath $pendingPath) {
+            Assert-True (-not (Test-Path -LiteralPath $path)) "completed and pending M17 mutation intents coexist"
+            Assert-NotReparsePoint $pendingPath "pending M17 mutation intent"
+            Remove-Item -LiteralPath $pendingPath -Force -ErrorAction Stop
+        }
+    }
+    $firewallPath = Join-Path $canonicalJournal "udp-firewall.json"
+    if (Test-Path -LiteralPath $firewallPath) {
+        $intent = Read-M17UdpFirewallMutationIntent $firewallPath $canonicalWork $canonicalJournal
+        $owned = @(Get-M17OwnedUdpFirewallRule $intent)
+        if ($owned.Count -eq 1) { $owned[0] | Remove-NetFirewallRule -ErrorAction Stop }
+        Assert-True (@(Get-NetFirewallRule -Name ([string]$intent.rule_name) -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 journaled UDP firewall rule remained"
+        Complete-M17MutationIntent $firewallPath
+    }
+    foreach ($name in @("route-more-specific.json", "route-equal-prefix.json")) {
+        $path = Join-Path $canonicalJournal $name
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $intent = Read-M17RouteMutationIntent $path $canonicalWork $canonicalJournal
+        $owned = @(Get-NetRoute -InterfaceIndex ([int]$intent.interface_index) `
+            -DestinationPrefix ([string]$intent.destination_prefix) -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -ceq [string]$intent.next_hop -and [uint32]$_.RouteMetric -eq [uint32]$intent.route_metric })
+        Assert-True ($owned.Count -le 1) "M17 journaled external route ownership is ambiguous"
+        if ($owned.Count -eq 1) { Remove-NetRoute -InputObject $owned[0] -Confirm:$false -ErrorAction Stop }
+        Assert-True (@(Get-NetRoute -InterfaceIndex ([int]$intent.interface_index) `
+            -DestinationPrefix ([string]$intent.destination_prefix) -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -ceq [string]$intent.next_hop -and [uint32]$_.RouteMetric -eq [uint32]$intent.route_metric }).Count -eq 0) "M17 journaled external route remained"
+        Complete-M17MutationIntent $path
+    }
+    $metricPath = Join-Path $canonicalJournal "physical-ipv4-metric.json"
+    if (Test-Path -LiteralPath $metricPath) {
+        $intent = Read-M17MetricMutationIntent $metricPath $canonicalWork $canonicalJournal
+        $adapters = @(Get-NetAdapter -InterfaceIndex ([int]$intent.interface_index) -IncludeHidden -ErrorAction Stop)
+        Assert-True ($adapters.Count -eq 1 -and
+            ([Guid]$adapters[0].InterfaceGuid).ToString("D").ToLowerInvariant() -ceq [string]$intent.interface_guid) "M17 journaled physical interface identity changed"
+        $current = Get-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+        $isOriginal = if ($intent.original_automatic_metric -ceq "Enabled") {
+            [string]$current.AutomaticMetric -ceq "Enabled"
+        } else {
+            [string]$current.AutomaticMetric -ceq "Disabled" -and
+                [uint32]$current.InterfaceMetric -eq [uint32]$intent.original_interface_metric
+        }
+        $isApplied = [string]$current.AutomaticMetric -ceq "Disabled" -and
+            [uint32]$current.InterfaceMetric -eq [uint32]$intent.applied_interface_metric
+        Assert-True ($isOriginal -or $isApplied) "M17 journaled physical interface metric ownership changed"
+        if ($isApplied) {
+            if ($intent.original_automatic_metric -ceq "Enabled") {
+                Set-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 `
+                    -AutomaticMetric Enabled -PolicyStore ActiveStore -ErrorAction Stop
+            } else {
+                Set-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 `
+                    -AutomaticMetric Disabled -InterfaceMetric ([uint32]$intent.original_interface_metric) `
+                    -PolicyStore ActiveStore -ErrorAction Stop
+            }
+        }
+        $restored = Get-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+        $restoredMetric = ($intent.original_automatic_metric -ceq "Enabled") -or
+            ([uint32]$restored.InterfaceMetric -eq [uint32]$intent.original_interface_metric)
+        Assert-True ([string]$restored.AutomaticMetric -ceq [string]$intent.original_automatic_metric -and $restoredMetric) "M17 journaled physical interface metric restore failed"
+        Complete-M17MutationIntent $metricPath
+    }
+    Assert-True (@(Get-ChildItem -LiteralPath $canonicalJournal -Force -ErrorAction Stop).Count -eq 0) "M17 network mutation journal was not drained"
+    Remove-Item -LiteralPath $canonicalJournal -Force -ErrorAction Stop
+    Assert-True (-not (Test-Path -LiteralPath $canonicalJournal)) "M17 network mutation journal directory remained"
+}
+
 if ($Mode -eq "cleanup") {
     $cleanupWorks = @(Get-ControllerWorkPaths)
     $cleanupAdapterNames = @(
         "Ferrum2-M15-$runIdentity", "Ferrum2-M16-$runIdentity",
-        $managedAutoAdapterName, $managedManualAdapterName
+        $managedAutoAdapterName, $managedManualAdapterName, "F2-M17-$runIdentity"
     )
     $pendingIdentityPath = "$runIdentityJournalPath.pending"
     $cleanupIdentity = $null
@@ -412,7 +799,8 @@ if ($Mode -eq "cleanup") {
     } while ([DateTime]::UtcNow -lt $deadline)
     $allowedAddresses = @(
         "192.0.2.201", "2001:db8::202", "192.0.2.203", "2001:db8::204",
-        "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208", "192.0.2.250"
+        "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208", "192.0.2.250",
+        "192.0.2.241", "192.0.2.242", "2001:db8::241"
     )
     $journaledAddresses = @($cleanupWorks | ForEach-Object {
         $cleanupAddressJournal = Join-Path $_ "owned-target-addresses.txt"
@@ -447,6 +835,19 @@ if ($Mode -eq "cleanup") {
     if (@($cleanupAdapterNames | ForEach-Object {
         Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue
     }).Count -ne 0) { throw "controller adapter residue" }
+    $mutationJournals = @($cleanupWorks | ForEach-Object {
+        $candidate = Join-Path $_ "m17-network-mutations"
+        if (Test-Path -LiteralPath $candidate) { [IO.Path]::GetFullPath($candidate).TrimEnd('\', '/') }
+    })
+    if ($cleanupIdentity -and $cleanupIdentity.Document.mode -in $m17Modes) {
+        $expectedMutationJournal = Join-Path $cleanupIdentity.WorkPath "m17-network-mutations"
+        Assert-True ($mutationJournals.Count -le 1 -and
+            ($mutationJournals.Count -eq 0 -or $mutationJournals[0].Equals($expectedMutationJournal, [StringComparison]::OrdinalIgnoreCase))) "M17 recovery journal is outside the identity work path"
+        Restore-M17NetworkMutationJournal $cleanupIdentity.WorkPath $expectedMutationJournal
+    } else {
+        Assert-True ($mutationJournals.Count -eq 0) "M17 recovery journal exists for a non-M17 identity"
+    }
+    Assert-True (-not (Get-NetFirewallRule -Name $m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) "controller UDP firewall rule residue"
     foreach ($address in $journaledAddresses) {
         $prefix = if ($address.Contains(":")) { "$address/128" } else { "$address/32" }
         if (Get-NetIPAddress -InterfaceIndex 1 -IPAddress $address -ErrorAction SilentlyContinue) { throw "controller address residue" }
@@ -463,10 +864,195 @@ if ($Mode -eq "cleanup") {
                 Assert-True (-not (Test-Path -LiteralPath $cleanupWork)) "unowned token work path residue"
             }
         }
-        Remove-Item -LiteralPath $runIdentityJournalPath -Force -ErrorAction Stop
-        Assert-True (-not (Test-Path -LiteralPath $runIdentityJournalPath)) "run identity journal residue"
     }
+    if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) {
+        if ($cleanupIdentity) {
+            Remove-Item -LiteralPath $runIdentityJournalPath -Force -ErrorAction Stop
+            Assert-True (-not (Test-Path -LiteralPath $runIdentityJournalPath)) "run identity journal residue"
+        }
+        return
+    }
+
+    $externalArtifactRoot = [IO.Path]::GetFullPath($ArtifactDirectory).TrimEnd('\', '/')
+    Assert-True (Test-Path -LiteralPath $externalArtifactRoot -PathType Container) "external cleanup artifact directory is missing"
+    Assert-NotReparsePoint $externalArtifactRoot "external cleanup artifact directory"
+    foreach ($cleanupWork in $cleanupWorks) {
+        $workPrefix = "$($cleanupWork.TrimEnd('\', '/'))\"
+        Assert-True (-not $externalArtifactRoot.Equals($cleanupWork, [StringComparison]::OrdinalIgnoreCase) -and
+            -not $externalArtifactRoot.StartsWith($workPrefix, [StringComparison]::OrdinalIgnoreCase)) "external cleanup artifact directory is inside disposable work"
+    }
+    $artifactLedgerPath = Join-Path $externalArtifactRoot "identity-ledger.json"
+    $artifactResultPath = Join-Path $externalArtifactRoot "m17-result.json"
+    [void](Assert-M17GuestIdentityMarker $artifactLedgerPath)
+    $artifactIdentityHash = (Get-FileHash -LiteralPath $artifactLedgerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True (Test-Path -LiteralPath $artifactResultPath -PathType Leaf) "external cleanup requires the M17 result artifact"
+    Assert-NotReparsePoint $artifactResultPath "M17 result artifact"
+    $artifactResultRaw = Get-Content -LiteralPath $artifactResultPath -Raw -Encoding utf8
+    $artifactResultStrings = Get-RequiredJsonStrings $artifactResultRaw @(
+        "schema", "status", "mode", "run_token", "approved_vm_name", "approved_vm_id",
+        "approved_checkpoint_name", "approved_checkpoint_id", "identity_sha256", "controller_sha256",
+        "started_utc", "finished_utc"
+    ) "M17 result artifact"
+    $artifactResult = $artifactResultRaw | ConvertFrom-Json -Depth 12 -ErrorAction Stop
+    Assert-ClosedJsonProperties $artifactResult @(
+        "schema", "status", "mode", "run_token", "restart_cycles", "approved_vm_name",
+        "approved_vm_id", "approved_checkpoint_name", "approved_checkpoint_id", "guest_build",
+        "identity_sha256", "candidate_sha", "client_sha256", "server_sha256", "controller_sha256",
+        "wintun_zip_sha256", "wintun_dll_sha256", "test_binaries", "started_utc", "finished_utc",
+        "fixtures", "processes", "live_checks", "deterministic_tests", "witnesses", "counters_before",
+        "counters_after", "cleanup", "failure"
+    ) "M17 result artifact"
+    Assert-True ($artifactResult.schema -is [string] -and
+        $artifactResult.status -is [string] -and $artifactResult.mode -is [string] -and
+        $artifactResult.run_token -is [string] -and $artifactResult.approved_vm_name -is [string] -and
+        $artifactResult.approved_vm_id -is [string] -and $artifactResult.approved_checkpoint_name -is [string] -and
+        $artifactResult.approved_checkpoint_id -is [string] -and $artifactResult.identity_sha256 -is [string] -and
+        $artifactResult.controller_sha256 -is [string] -and
+        $artifactResult.schema -ceq "ferrum2.windows-tun.m17-result.v1" -and
+        @("pass", "fail") -ccontains $artifactResult.status -and $m17Modes -ccontains $artifactResult.mode -and
+        $artifactResult.run_token -ceq $script:runIdentity -and
+        $artifactResult.approved_vm_name -ceq $script:expectedHyperVVmName -and
+        $artifactResult.approved_vm_id -ceq $script:expectedHyperVVmId -and
+        $artifactResult.approved_checkpoint_name -ceq $script:expectedHyperVCheckpointName -and
+        $artifactResult.approved_checkpoint_id -ceq $script:expectedHyperVCheckpointId -and
+        $artifactResult.identity_sha256 -ceq $artifactIdentityHash -and
+        $artifactResult.controller_sha256 -ceq (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant() -and
+        (Test-UtcRoundTripTimestamp $artifactResultStrings.started_utc) -and
+        (Test-UtcRoundTripTimestamp $artifactResultStrings.finished_utc)) "M17 result artifact identity is invalid"
+
+    $externalPath = Join-Path $externalArtifactRoot "external-cleanup.json"
+    $pendingExternalPath = "$externalPath.pending"
+    Assert-True (-not ((Test-Path -LiteralPath $externalPath) -and
+        (Test-Path -LiteralPath $pendingExternalPath))) "completed and pending external cleanup artifacts coexist"
+    if ($cleanupIdentity) {
+        Assert-True ($cleanupIdentity.Document.mode -ceq [string]$artifactResult.mode -and
+            $cleanupIdentity.Document.identity_sha256 -ceq $artifactIdentityHash -and
+            $cleanupIdentity.Document.controller_sha256 -ceq [string]$artifactResult.controller_sha256) "external cleanup journal and artifact identities differ"
+    } else {
+        Assert-True ((Test-Path -LiteralPath $externalPath -PathType Leaf) -or
+            (Test-Path -LiteralPath $pendingExternalPath -PathType Leaf)) "external cleanup cannot mint evidence without a durable identity journal"
+    }
+
+    $evidenceAddresses = @("192.0.2.241", "192.0.2.242", "2001:db8::241")
+    $processResidue = @($cleanupWorks | ForEach-Object { Get-ExactRunProcesses $_ $cleanupExecutables }).Count
+    $adapterResidue = @($cleanupAdapterNames | ForEach-Object {
+        Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue
+    }).Count
+    $addressResidue = @($evidenceAddresses | Where-Object {
+        Get-NetIPAddress -InterfaceIndex 1 -IPAddress $_ -ErrorAction SilentlyContinue
+    }).Count
+    $routeResidue = @($evidenceAddresses | Where-Object {
+        $prefix = if ($_.Contains(":")) { "$_/128" } else { "$_/32" }
+        Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue
+    }).Count
+    $workResidue = @($cleanupWorks | Where-Object { Test-Path -LiteralPath $_ }).Count
+    $mutationResidue = @($cleanupWorks | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_ "m17-network-mutations")
+    }).Count
+    $firewallResidue = @(Get-NetFirewallRule -Name $m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count
+    $siblingResidue = if ($cleanupIdentity -and (Test-Path -LiteralPath $cleanupIdentity.SiblingDllPath)) { 1 } else { 0 }
+    Assert-True ($processResidue -eq 0 -and $adapterResidue -eq 0 -and $addressResidue -eq 0 -and
+        $routeResidue -eq 0 -and $workResidue -eq 0 -and $mutationResidue -eq 0 -and
+        $firewallResidue -eq 0 -and $siblingResidue -eq 0) "external M17 cleanup readback found residue"
+
+    $externalProperties = @(
+        "schema", "status", "run_token", "source_mode", "identity_sha256", "processes", "adapters",
+        "target_addresses", "target_routes", "sibling_dll", "work_directories", "mutation_journals",
+        "identity_journal", "finished_utc"
+    )
+    if (Test-Path -LiteralPath $externalPath -PathType Leaf) {
+        $publishedRaw = Get-Content -LiteralPath $externalPath -Raw -Encoding utf8
+        $publishedStrings = Get-RequiredJsonStrings $publishedRaw @(
+            "schema", "status", "run_token", "source_mode", "identity_sha256", "finished_utc"
+        ) "external cleanup artifact"
+        $published = $publishedRaw | ConvertFrom-Json -Depth 4 -ErrorAction Stop
+        Assert-ClosedJsonProperties $published $externalProperties "external cleanup artifact"
+        Assert-True ($published.schema -is [string] -and $published.status -is [string] -and
+            $published.run_token -is [string] -and $published.source_mode -is [string] -and
+            $published.identity_sha256 -is [string] -and
+            $published.schema -ceq "ferrum2.windows-tun.m17-external-cleanup.v1" -and
+            $published.status -ceq "pass" -and $published.run_token -ceq $script:runIdentity -and
+            $published.source_mode -ceq [string]$artifactResult.mode -and
+            $published.identity_sha256 -ceq $artifactIdentityHash -and
+            (Test-UtcRoundTripTimestamp $publishedStrings.finished_utc) -and
+            @($externalProperties[5..12] | Where-Object {
+                $value = $published.$_
+                -not ($value -is [long] -and $value -eq 0)
+            }).Count -eq 0 -and
+            -not (Test-Path -LiteralPath $runIdentityJournalPath)) "published external cleanup artifact is invalid"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $pendingExternalPath -PathType Leaf)) {
+        Assert-True ($null -ne $cleanupIdentity) "external cleanup pending evidence lacks its durable identity journal"
+        $externalDocument = [ordered]@{
+            schema = "ferrum2.windows-tun.m17-external-cleanup.v1"
+            status = "pass"
+            run_token = $script:runIdentity
+            source_mode = [string]$artifactResult.mode
+            identity_sha256 = $artifactIdentityHash
+            processes = 0
+            adapters = 0
+            target_addresses = 0
+            target_routes = 0
+            sibling_dll = 0
+            work_directories = 0
+            mutation_journals = 0
+            identity_journal = 0
+            finished_utc = [DateTime]::UtcNow.ToString("o")
+        }
+        $externalBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            ($externalDocument | ConvertTo-Json -Depth 4) + "`n"
+        )
+        $externalStream = [IO.FileStream]::new(
+            $pendingExternalPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        try { $externalStream.Write($externalBytes, 0, $externalBytes.Length); $externalStream.Flush($true) }
+        finally { $externalStream.Dispose() }
+    }
+    Assert-NotReparsePoint $pendingExternalPath "pending external cleanup artifact"
+    $pendingExternalRaw = Get-Content -LiteralPath $pendingExternalPath -Raw -Encoding utf8
+    $pendingExternalStrings = Get-RequiredJsonStrings $pendingExternalRaw @(
+        "schema", "status", "run_token", "source_mode", "identity_sha256", "finished_utc"
+    ) "pending external cleanup artifact"
+    $pendingExternal = $pendingExternalRaw | ConvertFrom-Json -Depth 4 -ErrorAction Stop
+    Assert-ClosedJsonProperties $pendingExternal $externalProperties "pending external cleanup artifact"
+    Assert-True ($pendingExternal.schema -is [string] -and $pendingExternal.status -is [string] -and
+        $pendingExternal.run_token -is [string] -and $pendingExternal.source_mode -is [string] -and
+        $pendingExternal.identity_sha256 -is [string] -and
+        $pendingExternal.schema -ceq "ferrum2.windows-tun.m17-external-cleanup.v1" -and
+        $pendingExternal.status -ceq "pass" -and $pendingExternal.run_token -ceq $script:runIdentity -and
+        $pendingExternal.source_mode -ceq [string]$artifactResult.mode -and
+        $pendingExternal.identity_sha256 -ceq $artifactIdentityHash -and
+        (Test-UtcRoundTripTimestamp $pendingExternalStrings.finished_utc) -and
+        @($externalProperties[5..12] | Where-Object {
+            $value = $pendingExternal.$_
+            -not ($value -is [long] -and $value -eq 0)
+        }).Count -eq 0) "pending external cleanup artifact is invalid"
+    if (Test-Path -LiteralPath $runIdentityJournalPath) {
+        Remove-Item -LiteralPath $runIdentityJournalPath -Force -ErrorAction Stop
+    }
+    Assert-True (-not (Test-Path -LiteralPath $runIdentityJournalPath)) "run identity journal residue"
+    Move-Item -LiteralPath $pendingExternalPath -Destination $externalPath -ErrorAction Stop
+    Assert-True (Test-Path -LiteralPath $externalPath -PathType Leaf) "external cleanup artifact publish failed"
     return
+}
+
+if ($candidateTestDirectoryExplicit) {
+    Assert-True ($Mode -in $m17Modes) "CandidateTestDirectory is valid only with an M17 mode"
+    $candidateTestDirectoryItem = Get-Item -LiteralPath $CandidateTestDirectory -Force -ErrorAction Stop
+    Assert-True $candidateTestDirectoryItem.PSIsContainer "CandidateTestDirectory must be a directory"
+    Assert-True (($candidateTestDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "CandidateTestDirectory must not be a reparse point"
+    $resolvedCandidateTestDirectory = [IO.Path]::GetFullPath($candidateTestDirectoryItem.FullName)
+    foreach ($name in @("ferrum2-client-tests.exe", "ferrum2-tun-tests.exe", "ferrum2-wintun-tests.exe")) {
+        $path = Join-Path $resolvedCandidateTestDirectory $name
+        Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "CandidateTestDirectory is missing $name"
+        Assert-NotReparsePoint $path "candidate test binary"
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        Assert-True ($item.Length -ge 4096 -and $item.Length -le 536870912) "candidate test binary size is invalid"
+    }
 }
 
 if ($runtimeLibraryDirectoryExplicit) {
@@ -594,6 +1180,24 @@ $capabilityFilteredPackets = [ordered]@{
     dynamic_udp_unpinned = $null
     dynamic_udp_pinned = $null
 }
+$m17ArtifactRoot = $null
+$m17ArtifactInitialized = $false
+$m17Contract = $null
+$m17FixtureRows = @()
+$m17WitnessRows = [ordered]@{}
+$m17TestRows = [System.Collections.Generic.List[object]]::new()
+$m17ProcessRows = [System.Collections.Generic.List[object]]::new()
+$m17LiveRows = [System.Collections.Generic.List[object]]::new()
+$m17CounterBefore = $null
+$m17CounterAfter = $null
+$m17StartedUtc = $null
+$m17FinishedUtc = $null
+$m17ProcessOrdinal = 0
+$m17ServerProcess = $null
+$m17ServerPort = $null
+$m17MetricsPort = $null
+$m17ExpectedWarning = $null
+$m17ExpectedWarningCount = $null
 
 function Get-Tcp08ElapsedMilliseconds([long]$MonotonicTimestamp) {
     return [Math]::Round(
@@ -662,7 +1266,7 @@ function Get-Tcp08ResidueNetworkSnapshot {
     $testAddresses = @(
         "198.18.0.2", "fd00::2", "192.0.2.201", "2001:db8::202", "192.0.2.203",
         "2001:db8::204", "192.0.2.205", "2001:db8::206", "192.0.2.207", "2001:db8::208",
-        "192.0.2.250"
+        "192.0.2.250", "192.0.2.241", "192.0.2.242", "2001:db8::241"
     )
     $adapterNames = @($script:adapterName, $script:managedAutoAdapterName, $script:managedManualAdapterName)
     $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {
@@ -1639,13 +2243,17 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
         "guest_edition", "guest_architecture", "guest_version", "guest_build", "candidate_sha",
         "probe_sha256", "client_sha256", "server_sha256", "support_listener"
     )
+    $hasTestBinaries = $ledger.PSObject.Properties.Name -ccontains "test_binaries"
+    if ($hasTestBinaries) { $keys += "test_binaries" }
     Assert-True ((@($ledger.PSObject.Properties.Name) -join "|") -ceq ($keys -join "|")) "identity ledger keys are invalid"
     $listenerKeys = @("ipv4", "tcp_port", "udp_port", "pid", "owner")
     Assert-True ((@($ledger.support_listener.PSObject.Properties.Name) -join "|") -ceq ($listenerKeys -join "|")) "support listener keys are invalid"
     Assert-True (($ledger | ConvertTo-Json -Compress -Depth 4) -ceq $json) "identity ledger is not canonical JSON"
     Assert-True ($ledger.schema -is [long] -and $ledger.schema -eq 1) "identity ledger schema is invalid"
-    Assert-True ($ledger.vm_name -ceq "Windows 10 MSIX packaging environment") "identity ledger VM name is invalid"
-    Assert-True ($ledger.checkpoint_name -ceq "M15-T04-before-2b0c25b-20260810") "identity ledger checkpoint name is invalid"
+    Assert-True ($ledger.vm_name -ceq $script:expectedHyperVVmName) "identity ledger VM name is invalid"
+    Assert-True ($ledger.vm_id -ceq $script:expectedHyperVVmId) "identity ledger VM ID is invalid"
+    Assert-True ($ledger.checkpoint_name -ceq $script:expectedHyperVCheckpointName) "identity ledger checkpoint name is invalid"
+    Assert-True ($ledger.checkpoint_id -ceq $script:expectedHyperVCheckpointId) "identity ledger checkpoint ID is invalid"
     $parsedGuid = [Guid]::Empty
     Assert-True ([Guid]::TryParseExact([string]$ledger.vm_id, "D", [ref]$parsedGuid) -and $parsedGuid -ne [Guid]::Empty) "identity ledger VM ID is invalid"
     $parsedGuid = [Guid]::Empty
@@ -1654,7 +2262,27 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     Assert-True ([string]$ledger.probe_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger probe hash is invalid"
     Assert-True ([string]$ledger.client_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger client hash is invalid"
     Assert-True ([string]$ledger.server_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger server hash is invalid"
-    $probePath = Join-Path $PSScriptRoot "qualify_windows_tun.ps1"
+    if ($hasTestBinaries) {
+        $testKeys = @("client", "tun", "wintun")
+        Assert-True ((@($ledger.test_binaries.PSObject.Properties.Name) -join "|") -ceq ($testKeys -join "|")) "identity ledger test binary keys are invalid"
+        foreach ($name in $testKeys) {
+            Assert-True ([string]$ledger.test_binaries.$name -cmatch '^[0-9a-f]{64}$') "identity ledger test binary hash is invalid"
+        }
+    }
+    if ($script:candidateTestDirectoryExplicit) {
+        Assert-True $hasTestBinaries "prebuilt candidate tests require identity ledger hashes"
+        $testFiles = [ordered]@{
+            client = "ferrum2-client-tests.exe"
+            tun = "ferrum2-tun-tests.exe"
+            wintun = "ferrum2-wintun-tests.exe"
+        }
+        foreach ($name in $testFiles.Keys) {
+            $path = Join-Path $script:resolvedCandidateTestDirectory $testFiles[$name]
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            Assert-True ($ledger.test_binaries.$name -ceq $hash) "staged candidate test hash mismatch: $name"
+        }
+    }
+    $probePath = (Resolve-Path -LiteralPath $PSCommandPath -ErrorAction Stop).Path
     $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True ($ledger.probe_sha256 -ceq $probeHash) "identity ledger probe hash mismatch"
     Assert-True (Test-Path -LiteralPath $binary) "staged candidate binary is missing"
@@ -1699,8 +2327,8 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     }
 }
 
-if ($Mode -in @("network-feasibility", "managed-product", "full", "hard-kill")) {
-    $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger ($Mode -eq "full")
+if ($Mode -in (@("network-feasibility", "managed-product", "full", "hard-kill") + $m17Modes)) {
+    $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger ($Mode -eq "full" -or $Mode -in $m17Modes)
     $capabilityIdentityHash = $capabilityIdentity.IdentitySha256
     $capabilityEvidence = "$($capabilityIdentity.Path).evidence-$runIdentity.jsonl"
     Assert-True (-not (Test-Path -LiteralPath $capabilityEvidence)) "network feasibility evidence baseline not absent"
@@ -1807,8 +2435,17 @@ function Wait-AdapterReady(
     [string]$Name,
     [int]$TimeoutSeconds = 20,
     [bool]$Managed = $false,
-    [bool]$ManagedDns = $false
+    [bool]$ManagedDns = $false,
+    [string[]]$ManagedCapturePrefixes = @("0.0.0.0/1", "128.0.0.0/1")
 ) {
+    $expectedCapturePrefixes = @($ManagedCapturePrefixes | Sort-Object -Unique)
+    if ($Managed) {
+        Assert-True ($expectedCapturePrefixes.Count -ge 1 -and
+            $expectedCapturePrefixes.Count -eq $ManagedCapturePrefixes.Count -and
+            @($expectedCapturePrefixes | Where-Object {
+                [string]::IsNullOrWhiteSpace($_)
+            }).Count -eq 0) "managed state readiness capture prefix contract is invalid"
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         if ($script:activeProcess) {
@@ -1824,7 +2461,7 @@ function Wait-AdapterReady(
                 if (-not $Managed) { return $adapter }
                 $capturePrefixes = @(
                     Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
-                        Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") } |
+                        Where-Object { $expectedCapturePrefixes -ccontains [string]$_.DestinationPrefix } |
                         Sort-Object DestinationPrefix |
                         ForEach-Object { $_.DestinationPrefix }
                 )
@@ -1833,15 +2470,15 @@ function Wait-AdapterReady(
                     $dnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)
                     $dnsReady = ($dnsAddresses -join "|") -ceq "198.18.0.1"
                 }
-                if (($capturePrefixes -join "|") -ceq "0.0.0.0/1|128.0.0.0/1" -and $dnsReady) {
+                if (($capturePrefixes -join "|") -ceq ($expectedCapturePrefixes -join "|") -and $dnsReady) {
                     try {
                         $finalCapturePrefixes = @(
                             Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop |
-                                Where-Object { $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1") } |
+                                Where-Object { $expectedCapturePrefixes -ccontains [string]$_.DestinationPrefix } |
                                 Sort-Object DestinationPrefix |
                                 ForEach-Object { $_.DestinationPrefix }
                         )
-                        Assert-SnapshotEqual @("0.0.0.0/1", "128.0.0.0/1") $finalCapturePrefixes "managed state readiness capture"
+                        Assert-SnapshotEqual $expectedCapturePrefixes $finalCapturePrefixes "managed state readiness capture"
                         if ($ManagedDns) {
                             $finalDnsAddresses = @(Get-TunIpv4Dns $adapter.ifIndex)
                             Assert-SnapshotEqual @("198.18.0.1") $finalDnsAddresses "managed state readiness DNS"
@@ -1907,9 +2544,19 @@ function Assert-SnapshotEqual([object[]]$Expected, [object[]]$Actual, [string]$L
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Server.ExclusiveAddressUse = $true
     $listener.Start()
-    try { return ([Net.IPEndPoint]$listener.LocalEndpoint).Port }
-    finally { $listener.Stop() }
+    $udp = $null
+    try {
+        $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $udp = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+        $udp.Client.ExclusiveAddressUse = $true
+        $udp.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $port))
+        return $port
+    } finally {
+        if ($udp) { $udp.Dispose() }
+        $listener.Stop()
+    }
 }
 
 function Get-UniqueTcpPort {
@@ -2108,6 +2755,44 @@ function Wait-TcpListener(
         foreign_listener_process_ids = @($foreignListenerPids)
     })
     throw "TCP listener readiness timeout: label=$Label port=$Port expected_pid=$($Process.Id) foreign_listener_pids=$foreignText"
+}
+
+function Wait-UdpListener(
+    [int]$Port,
+    [System.Diagnostics.Process]$Process,
+    [string]$Label,
+    [int]$TimeoutSeconds = 10
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $stableSamples = 0
+    $foreignListenerPids = @()
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            $exitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$Process.Id)
+            throw "UDP listener process exited before readiness: label=$Label port=$Port pid=$($Process.Id) exit=$exitCode"
+        }
+        $listeners = @(Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue)
+        $owned = @($listeners | Where-Object {
+            $_.LocalAddress -ceq "127.0.0.1" -and [uint32]$_.OwningProcess -eq [uint32]$Process.Id
+        })
+        if ($owned.Count -eq 1) {
+            $stableSamples++
+            if ($stableSamples -ge 2) {
+                $Process.Refresh()
+                if (-not $Process.HasExited) { return }
+            }
+        } else {
+            $stableSamples = 0
+        }
+        $foreignListenerPids = @($listeners |
+            Where-Object { [uint32]$_.OwningProcess -ne [uint32]$Process.Id } |
+            ForEach-Object { [uint32]$_.OwningProcess } |
+            Sort-Object -Unique)
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $foreignText = if ($foreignListenerPids.Count -eq 0) { "none" } else { $foreignListenerPids -join "," }
+    throw "UDP listener readiness timeout: label=$Label port=$Port expected_pid=$($Process.Id) foreign_listener_pids=$foreignText"
 }
 
 function Start-Server([string]$Executable, [string]$Configuration) {
@@ -2974,22 +3659,33 @@ public sealed class Ferrum2UdpGate : IDisposable {
 
 public sealed class Ferrum2UdpProbe : IDisposable {
     private readonly UdpClient socket;
+    private readonly byte[] fixedResponse;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
     private readonly Task worker;
     private byte[] received = new byte[0];
+    private IPEndPoint remoteEndpoint;
     private int requests;
     private int responses;
     private int disposed;
     private string fault;
 
-    public Ferrum2UdpProbe(string address, int port) {
+    public Ferrum2UdpProbe(string address, int port) : this(address, port, null) { }
+
+    public Ferrum2UdpProbe(string address, int port, byte[] responsePayload) {
         socket = new UdpClient(new IPEndPoint(IPAddress.Parse(address), port));
+        fixedResponse = responsePayload == null ? null : (byte[])responsePayload.Clone();
         worker = Task.Run(Run);
     }
 
     public int Requests { get { return Volatile.Read(ref requests); } }
     public int Responses { get { return Volatile.Read(ref responses); } }
     public byte[] Received { get { return Volatile.Read(ref received); } }
+    public IPEndPoint RemoteEndpoint {
+        get {
+            var endpoint = Volatile.Read(ref remoteEndpoint);
+            return endpoint == null ? null : new IPEndPoint(endpoint.Address, endpoint.Port);
+        }
+    }
     public string Fault { get { return Volatile.Read(ref fault) ?? "none"; } }
 
     public bool WaitRequests(int expected, int milliseconds) {
@@ -3001,13 +3697,21 @@ public sealed class Ferrum2UdpProbe : IDisposable {
         return Requests >= expected;
     }
 
+    public void SendTo(byte[] payload, IPEndPoint endpoint) {
+        if (payload == null || endpoint == null) throw new ArgumentNullException();
+        if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException("Ferrum2UdpProbe");
+        socket.Send(payload, payload.Length, endpoint);
+    }
+
     private async Task Run() {
         try {
             while (!stopped.IsCancellationRequested) {
                 var request = await socket.ReceiveAsync().ConfigureAwait(false);
                 Volatile.Write(ref received, (byte[])request.Buffer.Clone());
+                Volatile.Write(ref remoteEndpoint, request.RemoteEndPoint);
                 Interlocked.Increment(ref requests);
-                await socket.SendAsync(request.Buffer, request.Buffer.Length, request.RemoteEndPoint).ConfigureAwait(false);
+                var response = fixedResponse ?? request.Buffer;
+                await socket.SendAsync(response, response.Length, request.RemoteEndPoint).ConfigureAwait(false);
                 Interlocked.Increment(ref responses);
             }
         } catch (ObjectDisposedException) { }
@@ -3055,13 +3759,26 @@ public sealed class Ferrum2DnsResponder : IDisposable {
                 var request = await socket.ReceiveAsync().ConfigureAwait(false);
                 var query = request.Buffer;
                 if (query.Length < 17) continue;
+                var questionEnd = 12;
+                var validQuestion = false;
+                while (questionEnd < query.Length) {
+                    var labelLength = query[questionEnd++];
+                    if (labelLength == 0) {
+                        validQuestion = questionEnd + 4 <= query.Length;
+                        questionEnd += 4;
+                        break;
+                    }
+                    if (labelLength > 63 || questionEnd + labelLength > query.Length) break;
+                    questionEnd += labelLength;
+                }
+                if (!validQuestion) continue;
                 using (var response = new MemoryStream()) {
                     response.WriteByte(query[0]); response.WriteByte(query[1]);
                     response.WriteByte(0x81); response.WriteByte(0x80);
                     response.WriteByte(0); response.WriteByte(1);
                     response.WriteByte(0); response.WriteByte(1);
                     response.Write(new byte[4], 0, 4);
-                    response.Write(query, 12, query.Length - 12);
+                    response.Write(query, 12, questionEnd - 12);
                     byte[] answer = { 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 192, 0, 2, 55 };
                     response.Write(answer, 0, answer.Length);
                     var bytes = response.ToArray();
@@ -3166,7 +3883,9 @@ public static class Ferrum2NetworkFeasibility {
     private const ushort AF_INET = 2;
     private const uint ERROR_NOT_FOUND = 1168;
     private const int IPPROTO_IP = 0;
+    private const int IPPROTO_IPV6 = 41;
     private const int IP_UNICAST_IF = 31;
+    private const int IPV6_UNICAST_IF = 31;
 
     [DllImport("iphlpapi.dll")]
     private static extern void InitializeIpForwardEntry(ref Ferrum2IpForwardRow2 row);
@@ -3298,10 +4017,23 @@ public static class Ferrum2NetworkFeasibility {
         };
     }
 
-    private static void Pin(Socket socket, uint interfaceIndex) {
-        var networkOrder = unchecked((uint)IPAddress.HostToNetworkOrder(unchecked((int)interfaceIndex)));
-        if (setsockopt(socket.Handle, IPPROTO_IP, IP_UNICAST_IF, ref networkOrder, sizeof(uint)) != 0)
-            throw new Win32Exception(WSAGetLastError(), "IP_UNICAST_IF");
+    public static void Pin(Socket socket, uint interfaceIndex) {
+        if (socket == null) throw new ArgumentNullException("socket");
+        if (interfaceIndex == 0) throw new ArgumentOutOfRangeException("interfaceIndex");
+        var value = interfaceIndex;
+        var level = IPPROTO_IPV6;
+        var option = IPV6_UNICAST_IF;
+        var name = "IPV6_UNICAST_IF";
+        if (socket.AddressFamily == AddressFamily.InterNetwork) {
+            value = unchecked((uint)IPAddress.HostToNetworkOrder(unchecked((int)interfaceIndex)));
+            level = IPPROTO_IP;
+            option = IP_UNICAST_IF;
+            name = "IP_UNICAST_IF";
+        } else if (socket.AddressFamily != AddressFamily.InterNetworkV6) {
+            throw new ArgumentException("an IPv4 or IPv6 socket is required", "socket");
+        }
+        if (setsockopt(socket.Handle, level, option, ref value, sizeof(uint)) != 0)
+            throw new Win32Exception(WSAGetLastError(), name);
     }
 
     private static void SendAll(Socket socket, byte[] payload) {
@@ -3632,6 +4364,26 @@ function Get-Ipv4DefaultUnderlay {
     return [pscustomobject]@{ InterfaceIndex = $indices[0]; Row = $best[0]; Sources = $sources }
 }
 
+function Get-Ipv4ConnectedPrefix([object]$AddressRow) {
+    $prefixLength = [int]$AddressRow.PrefixLength
+    Assert-True ($prefixLength -ge 0 -and $prefixLength -le 32) "IPv4 connected prefix length is invalid"
+    $bytes = [Net.IPAddress]::Parse([string]$AddressRow.IPAddress).GetAddressBytes()
+    for ($index = 0; $index -lt 4; $index++) {
+        $remaining = $prefixLength - ($index * 8)
+        $mask = if ($remaining -ge 8) { 255 } elseif ($remaining -le 0) { 0 } else { (255 -shl (8 - $remaining)) -band 255 }
+        $bytes[$index] = [byte]([int]$bytes[$index] -band $mask)
+    }
+    return "$([Net.IPAddress]::new($bytes))/$prefixLength"
+}
+
+function Get-Ipv4PrivateSupernet([string]$Address) {
+    $bytes = [Net.IPAddress]::Parse($Address).GetAddressBytes()
+    if ($bytes[0] -eq 10) { return "10.0.0.0/8" }
+    if ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) { return "172.16.0.0/12" }
+    if ($bytes[0] -eq 192 -and $bytes[1] -eq 168) { return "192.168.0.0/16" }
+    throw "approved guest underlay is not RFC1918"
+}
+
 function Get-PhysicalDnsSnapshot([int]$TunInterfaceIndex) {
     return @(
         Get-DnsClientServerAddress -ErrorAction Stop |
@@ -3705,12 +4457,19 @@ function Restore-CapabilityInterfaceMetric([int]$InterfaceIndex) {
     if (-not $script:capabilityMetricApplied) { return }
     $current = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
     Assert-True ($current.AutomaticMetric -eq "Disabled" -and $current.InterfaceMetric -eq 1) "capability interface metric ownership changed"
-    Set-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 `
-        -AutomaticMetric $script:capabilityMetricSnapshot.AutomaticMetric `
-        -InterfaceMetric $script:capabilityMetricSnapshot.InterfaceMetric -PolicyStore ActiveStore -ErrorAction Stop
+    if ($script:capabilityMetricSnapshot.AutomaticMetric -ceq "Enabled") {
+        Set-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 `
+            -AutomaticMetric Enabled -PolicyStore ActiveStore -ErrorAction Stop
+    } else {
+        Set-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 `
+            -AutomaticMetric Disabled -InterfaceMetric $script:capabilityMetricSnapshot.InterfaceMetric `
+            -PolicyStore ActiveStore -ErrorAction Stop
+    }
     $restored = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-    Assert-True ([string]$restored.AutomaticMetric -eq $script:capabilityMetricSnapshot.AutomaticMetric -and
-        [uint32]$restored.InterfaceMetric -eq $script:capabilityMetricSnapshot.InterfaceMetric) "capability interface metric restore mismatch"
+    $metricMatches = ($script:capabilityMetricSnapshot.AutomaticMetric -ceq "Enabled") -or
+        ([uint32]$restored.InterfaceMetric -eq $script:capabilityMetricSnapshot.InterfaceMetric)
+    Assert-True ([string]$restored.AutomaticMetric -ceq $script:capabilityMetricSnapshot.AutomaticMetric -and
+        $metricMatches) "capability interface metric restore mismatch"
     $script:capabilityMetricApplied = $false
     $script:capabilityMetricSnapshot = $null
 }
@@ -4015,6 +4774,7 @@ function Open-TunTcp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $client = [Net.Sockets.TcpClient]::new($family)
     $client.NoDelay = $true
     $client.SendBufferSize = 4096
+    [Ferrum2NetworkFeasibility]::Pin($client.Client, [uint32]$InterfaceIndex)
     $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))
     $connected = $client.ConnectAsync($Address, $Port)
     Assert-True ($connected.Wait(5000)) "TUN TCP local handshake timeout"
@@ -4308,6 +5068,7 @@ function Open-TunUdp([string]$Address, [int]$Port, [int]$InterfaceIndex) {
     $family = if ($isV6) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
     $sourceAddress = if ($isV6) { [Net.IPAddress]::Parse("fd00::2") } else { [Net.IPAddress]::Parse("198.18.0.2") }
     $client = [Net.Sockets.UdpClient]::new($family)
+    [Ferrum2NetworkFeasibility]::Pin($client.Client, [uint32]$InterfaceIndex)
     $client.Client.Bind([Net.IPEndPoint]::new($sourceAddress, 0))
     $client.Connect($Address, $Port)
     $localEndpoint = [Net.IPEndPoint]$client.Client.LocalEndPoint
@@ -4695,11 +5456,2438 @@ function Invoke-Tcp08(
     }
 }
 
+function New-M17TunFixture(
+    [string]$Name,
+    [string]$TunFields,
+    [bool]$WithDns,
+    [string]$Additional = ""
+) {
+    $tunOutbound = if ([regex]::IsMatch($Additional, '(?m)^\[route\]\r?$')) {
+        ""
+    } else {
+        'outbound = "proxy"'
+    }
+    $dns = if ($WithDns) {
+@"
+[dns]
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:15353"
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "1.1.1.1:53"
+[dns.route]
+final = "resolver"
+"@
+    } else { "" }
+    $source = @"
+schema_version = 2
+[tun]
+tag = "tun-in"
+adapter_name = "$script:adapterName"
+$TunFields
+$tunOutbound
+[[outbounds]]
+tag = "proxy"
+server = "192.0.2.10:8388"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+$dns
+$Additional
+"@
+    return [pscustomobject]@{ Name = $Name; Source = $source }
+}
+
+function Get-M17ModeContract {
+    switch ($script:Mode) {
+        "route-detect" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "route-detect-dual" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+route_address = ["10.0.0.1/8", "2001:db8:1::1/48"]
+route_exclude_address = ["10.128.0.1/9", "2001:db8:1:8000::1/49"]
+udp_filtering = "address_dependent"
+"@ $false
+                )
+                witnesses = @(
+                    "clean_route_scan", "more_specific_external_conflict",
+                    "equal_prefix_winning_metric_conflict", "owned_route_exemption",
+                    "admission_quiesced_before_conflicting_session",
+                    "lan_exclude_remains_active",
+                    "fixed_and_direct_dual_stack_underlay_binding",
+                    "multihoming_prefix_and_metric_selection",
+                    "route_interface_and_address_notifications",
+                    "foreign_route_state_survives_cleanup",
+                    "foreign_address_state_survives_cleanup",
+                    "dad_failure_rolls_back_in_reverse"
+                )
+                counters = @("ferrum2_tun_route_detect_total", "ferrum2_tun_route_conflict_total")
+            }
+        }
+        "restart-stress" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "restart-dual-legacy" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+max_udp_mappings = 32
+udp_filtering = "address_dependent"
+max_udp_buffered_bytes = 0
+"@ $true
+                )
+                witnesses = @(
+                    "same_process_for_every_restart", "generation_advances_once_per_restart",
+                    "admission_quiesces_during_rebuild", "stale_flows_and_fragments_are_cleared",
+                    "adapter_route_dns_and_handler_baselines_restore",
+                    "one_fixed_deprecation_warning_on_normal_startup"
+                )
+                counters = @(
+                    "ferrum2_tun_session_restart_started_total",
+                    "ferrum2_tun_session_restart_succeeded_total",
+                    "ferrum2_tun_session_restart_failed_total",
+                    "ferrum2_tun_session_generation"
+                )
+                restart_cycles = $script:RestartCycles
+                deprecation_warning = "warning[config.deprecated] tun.max_udp_buffered_bytes: ignored and scheduled for removal"
+                deprecation_warning_count = 1
+            }
+        }
+        "fragments" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "fragments-dual" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+udp_filtering = "address_dependent"
+"@ $true
+                )
+                witnesses = @(
+                    "ipv4_udp_out_of_order", "ipv4_tcp_out_of_order",
+                    "ipv6_extension_and_fragment", "ipv6_atomic_fragment",
+                    "fragmented_synthetic_dns", "overlap_drops_entry", "timeout_drops_entry",
+                    "disabled_family_rejects_fragment", "restart_rejects_stale_generation"
+                )
+                counters = @(
+                    "ferrum2_tun_reassembly_entries_active",
+                    "ferrum2_tun_packets_rejected_total"
+                )
+            }
+        }
+        "dual-stack-dns" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "dns-ipv4-only" @"
+ipv4_address = "198.18.0.2/30"
+auto_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+udp_filtering = "address_dependent"
+"@ $true
+                    New-M17TunFixture "dns-ipv6-only" @"
+ipv6_address = "fd00::2/126"
+auto_route = true
+auto_dns = true
+ipv6_dns_address = "fd00::1"
+udp_filtering = "address_dependent"
+"@ $true
+                    New-M17TunFixture "dns-dual" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+udp_filtering = "address_dependent"
+"@ $true
+                )
+                witnesses = @(
+                    "ipv4_udp_dns", "ipv4_tcp_dns", "ipv6_udp_dns", "ipv6_tcp_dns",
+                    "exact_port_53_match", "ordinary_port_53_not_intercepted",
+                    "dual_dns_readback_and_restore"
+                )
+                counters = @("ferrum2_tun_packets_ingress_total", "ferrum2_tun_packets_egress_total")
+            }
+        }
+        "udp-policy" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "udp-adf" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+max_udp_mappings = 2
+udp_filtering = "address_dependent"
+"@ $false @"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[route]
+final = "proxy"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "198.51.100.10"
+port = 3478
+action = "route"
+outbound = "direct"
+"@
+                    New-M17TunFixture "udp-eif" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+max_udp_mappings = 2
+udp_filtering = "endpoint_independent"
+"@ $false @"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[route]
+final = "proxy"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "198.51.100.10"
+port = 3478
+action = "route"
+outbound = "direct"
+"@
+                )
+                witnesses = @(
+                    "one_eim_association_for_multiple_targets", "adf_allows_authorized_ip_any_port",
+                    "adf_rejects_unauthorized_ip", "eif_allows_valid_same_family_peer",
+                    "rejected_target_never_authorizes_peer", "per_target_route_and_outbound_decision",
+                    "mixed_ipv4_ipv6_target_children", "directed_broadcast_never_allocates_association",
+                    "udp_firewall_scope_is_journaled_and_removed",
+                    "dns_udp_payload_round_trips", "quic_v1_initial_envelope_round_trips",
+                    "stun_binding_requests_reach_multiple_servers",
+                    "webrtc_ice_candidate_check_round_trips",
+                    "game_style_binary_datagrams_reach_multiple_peers",
+                    "one_eim_association_mixes_direct_and_shadowsocks_targets",
+                    "association_capacity_drops_new_without_evicting_live",
+                    "udp_queue_pressure_is_bounded_and_control_remains_live",
+                    "restart_clears_udp_stale_generation_state"
+                )
+                counters = @(
+                    "ferrum2_tun_udp_associations_active", "ferrum2_tun_udp_candidates_active",
+                    "ferrum2_tun_udp_association_rejected_limit_total",
+                    "ferrum2_tun_udp_datagram_queue_full_total",
+                    "ferrum2_tun_udp_response_queue_full_total",
+                    "ferrum2_tun_udp_stale_generation_total"
+                )
+            }
+        }
+        "scheduler-ring-full" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "scheduler-ring-full" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+max_tcp_flows = 256
+tcp_buffer_bytes = 32768
+max_udp_mappings = 1024
+udp_filtering = "address_dependent"
+"@ $false
+                )
+                witnesses = @(
+                    "rx_bursts_8_16_64_have_no_structural_drop", "work_stages_rotate_fairly",
+                    "udp_response_backpressure_is_lossless", "ring_full_drops_one_complete_packet",
+                    "ring_full_is_not_retried", "ring_full_does_not_restart_session",
+                    "wintun_error_kinds_have_exact_owner_dispositions",
+                    "live_egress_pressure_has_closed_accounting"
+                )
+                counters = @(
+                    "ferrum2_tun_internal_egress_backpressured_total",
+                    "ferrum2_tun_wintun_ring_full_dropped_total",
+                    "ferrum2_tun_packets_egress_total"
+                )
+            }
+        }
+        default { throw "M17 contract dispatch received an invalid mode" }
+    }
+}
+
+function Invoke-M17ContractPreflight {
+    $contract = Get-M17ModeContract
+    $artifactRoot = if ([string]::IsNullOrWhiteSpace($script:ArtifactDirectory)) {
+        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-artifacts\$script:runIdentity"
+    } else {
+        [IO.Path]::GetFullPath($script:ArtifactDirectory)
+    }
+    $artifactRoot = [IO.Path]::GetFullPath($artifactRoot).TrimEnd('\', '/')
+    $workRoot = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
+    Assert-True (-not $artifactRoot.Equals($workRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $artifactRoot.StartsWith("$workRoot\", [StringComparison]::OrdinalIgnoreCase)) "M17 artifacts must survive controller work cleanup"
+    if (-not (Test-Path -LiteralPath $artifactRoot)) {
+        New-Item -ItemType Directory -Path $artifactRoot | Out-Null
+    }
+    Assert-NotReparsePoint $artifactRoot "M17 artifact directory"
+    foreach ($name in @(
+        "identity-ledger.json", "m17-contract.json", "m17-result.json",
+        "external-cleanup.json", "external-cleanup.json.pending"
+    )) {
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $artifactRoot $name))) "M17 artifact baseline is not absent: $name"
+    }
+    $script:m17ArtifactRoot = $artifactRoot
+    $script:m17ArtifactInitialized = $true
+    $script:m17Contract = $contract
+    $script:m17ExpectedWarning = if ($contract.Contains("deprecation_warning")) { [string]$contract.deprecation_warning } else { $null }
+    $script:m17ExpectedWarningCount = if ($contract.Contains("deprecation_warning_count")) { [int]$contract.deprecation_warning_count } else { $null }
+    $script:m17StartedUtc = [DateTime]::UtcNow.ToString("o")
+    $identityArtifact = Join-Path $artifactRoot "identity-ledger.json"
+    [IO.File]::WriteAllBytes($identityArtifact, [IO.File]::ReadAllBytes($script:capabilityIdentity.Path))
+    Assert-True ((Get-FileHash -LiteralPath $identityArtifact -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+        $script:capabilityIdentityHash) "M17 artifact identity ledger hash changed"
+    $fixtureRoot = Join-Path $script:work "m17-fixtures"
+    New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
+    $fixtureRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($fixture in $contract.fixtures) {
+        $path = Join-Path $fixtureRoot "$($fixture.Name).toml"
+        [IO.File]::WriteAllText($path, $fixture.Source, [Text.UTF8Encoding]::new($false))
+        $stderrPath = "$path.stderr"
+        $stdout = @(& $script:binary --config $path --check-config 2> $stderrPath)
+        $exitCode = $LASTEXITCODE
+        $stderr = if (Test-Path -LiteralPath $stderrPath) {
+            Get-Content -LiteralPath $stderrPath -Raw -Encoding utf8
+        } else { "" }
+        Assert-True ($exitCode -eq 0) "M17 fixture $($fixture.Name) did not pass offline config validation"
+        Assert-True (($stdout -join "`n") -ceq "configuration valid") "M17 fixture $($fixture.Name) stdout changed"
+        Assert-True ([string]::IsNullOrEmpty($stderr)) "M17 fixture $($fixture.Name) emitted stderr during offline validation"
+        $fixtureRows.Add([ordered]@{
+            name = $fixture.Name
+            sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            offline_check = "pass"
+        })
+    }
+    $document = [ordered]@{
+        schema = "ferrum2.windows-tun.m17-contract.v1"
+        status = "preflight_pass"
+        mode = $script:Mode
+        restart_cycles = if ($script:Mode -eq "restart-stress") { $script:RestartCycles } else { $null }
+        approved_vm_name = $script:expectedHyperVVmName
+        approved_vm_id = $script:expectedHyperVVmId
+        approved_checkpoint_name = $script:expectedHyperVCheckpointName
+        approved_checkpoint_id = $script:expectedHyperVCheckpointId
+        guest_build = [string]$script:capabilityIdentity.Ledger.guest_build
+        identity_sha256 = $script:capabilityIdentityHash
+        candidate_sha = [string]$script:capabilityIdentity.Ledger.candidate_sha
+        client_sha256 = [string]$script:capabilityIdentity.Ledger.client_sha256
+        server_sha256 = [string]$script:capabilityIdentity.Ledger.server_sha256
+        controller_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
+        wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
+        test_binaries = if ($script:capabilityIdentity.Ledger.PSObject.Properties.Name -ccontains "test_binaries") {
+            $script:capabilityIdentity.Ledger.test_binaries
+        } else { $null }
+        fixtures = $fixtureRows
+        witnesses = $contract.witnesses
+        counters = $contract.counters
+        deprecation_warning = if ($contract.Contains("deprecation_warning")) { $contract.deprecation_warning } else { $null }
+        deprecation_warning_count = if ($contract.Contains("deprecation_warning_count")) { $contract.deprecation_warning_count } else { $null }
+    }
+    $artifact = Join-Path $artifactRoot "m17-contract.json"
+    [IO.File]::WriteAllText(
+        $artifact,
+        (($document | ConvertTo-Json -Depth 8) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $script:m17FixtureRows = @($fixtureRows)
+    return [pscustomobject]@{ Contract = $contract; ArtifactRoot = $artifactRoot; FixtureRoot = $fixtureRoot }
+}
+
+function Add-M17Witness([string]$Name, [string]$Provenance, [string]$Evidence) {
+    Assert-True ($Name -in @($script:m17Contract.witnesses)) "M17 witness is outside the mode contract: $Name"
+    Assert-True (-not $script:m17WitnessRows.Contains($Name)) "duplicate M17 witness: $Name"
+    $script:m17WitnessRows[$Name] = [ordered]@{
+        name = $Name
+        status = "pass"
+        provenance = $Provenance
+        evidence = $Evidence
+    }
+}
+
+function Add-M17LiveRow([string]$Name, [System.Collections.IDictionary]$Evidence) {
+    $script:m17LiveRows.Add([ordered]@{
+        name = $Name
+        status = "pass"
+        evidence = $Evidence
+    })
+}
+
+function Invoke-M17BoundedCommand(
+    [string]$Name,
+    [string]$Executable,
+    [string[]]$Arguments,
+    [string]$WorkingDirectory,
+    [int]$TimeoutSeconds = 300
+) {
+    Assert-True ($Name -cmatch '^[a-z0-9][a-z0-9-]{0,95}$') "M17 command name is invalid"
+    $stdoutPath = Join-Path $script:m17ArtifactRoot "$Name.stdout.log"
+    $stderrPath = Join-Path $script:m17ArtifactRoot "$Name.stderr.log"
+    Assert-True (-not (Test-Path -LiteralPath $stdoutPath) -and -not (Test-Path -LiteralPath $stderrPath)) "M17 command log baseline is not absent"
+    $start = [Diagnostics.Stopwatch]::StartNew()
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $Executable
+    $info.WorkingDirectory = $WorkingDirectory
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    foreach ($argument in $Arguments) { [void]$info.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    Assert-True $process.Start() "M17 command did not start: $Name"
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+    if ($timedOut) {
+        try { $process.Kill($true) } catch { try { $process.Kill() } catch { } }
+        [void]$process.WaitForExit(10000)
+    }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $start.Stop()
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    Assert-True ($utf8.GetByteCount($stdout) -le 4194304 -and $utf8.GetByteCount($stderr) -le 4194304) "M17 command output exceeded the fixed 4 MiB cap: $Name"
+    [IO.File]::WriteAllText($stdoutPath, $stdout, $utf8)
+    [IO.File]::WriteAllText($stderrPath, $stderr, $utf8)
+    Assert-True (-not $timedOut) "M17 command timed out: $Name"
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    return [pscustomobject]@{
+        Name = $Name
+        ExitCode = $exitCode
+        DurationMilliseconds = [Math]::Round($start.Elapsed.TotalMilliseconds, 3)
+        Stdout = $stdout
+        Stderr = $stderr
+        StdoutPath = $stdoutPath
+        StderrPath = $stderrPath
+    }
+}
+
+function Get-M17MetricValue([string]$Metrics, [string]$Name, [bool]$AllowAbsent = $false) {
+    $pattern = "(?m)^$([regex]::Escape($Name))(?:_total)?(?:\{[^}`r`n]*\})? ([0-9]+(?:\.[0-9]+)?)$"
+    $matches = [regex]::Matches($Metrics, $pattern)
+    if ($matches.Count -eq 0 -and $AllowAbsent) { return 0.0 }
+    Assert-True ($matches.Count -gt 0) "missing M17 metric: $Name"
+    [double]$total = 0
+    foreach ($match in $matches) { $total += [double]::Parse($match.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) }
+    return $total
+}
+
+function Get-M17LabeledMetricValue(
+    [string]$Metrics,
+    [string]$Name,
+    [string]$Label,
+    [string]$Value,
+    [bool]$AllowAbsent = $false
+) {
+    $pattern = "(?m)^$([regex]::Escape($Name))(?:_total)?\{[^}`r`n]*$([regex]::Escape($Label))=`"$([regex]::Escape($Value))`"[^}`r`n]*\} ([0-9]+(?:\.[0-9]+)?)$"
+    $match = [regex]::Match($Metrics, $pattern)
+    if (-not $match.Success -and $AllowAbsent) { return 0.0 }
+    Assert-True $match.Success "missing M17 labeled metric: $Name/$Label=$Value"
+    return [double]::Parse($match.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-M17CounterSnapshot([string]$Metrics) {
+    $snapshot = [ordered]@{}
+    foreach ($name in @($script:m17Contract.counters)) {
+        $snapshot[$name] = Get-M17MetricValue $Metrics $name $true
+    }
+    foreach ($name in @("ferrum2_tun_session_active", "ferrum2_tun_session_generation")) {
+        if (-not $snapshot.Contains($name)) { $snapshot[$name] = Get-M17MetricValue $Metrics $name }
+    }
+    return $snapshot
+}
+
+function Wait-M17Session(
+    [int]$MetricsPort,
+    [double]$MinimumGeneration,
+    [double]$ExpectedActive,
+    [int]$TimeoutSeconds = 30
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $metrics = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try { $metrics = Get-Metrics $MetricsPort 2 }
+        catch {
+            if ($_.Exception.Message -cne "metrics readiness timeout") { throw }
+            if ([DateTime]::UtcNow -ge $deadline) { break }
+            Start-Sleep -Milliseconds 50
+            continue
+        }
+        $generation = Get-M17MetricValue $metrics "ferrum2_tun_session_generation"
+        $active = Get-M17MetricValue $metrics "ferrum2_tun_session_active"
+        if ($generation -ge $MinimumGeneration -and $active -eq $ExpectedActive) {
+            return [pscustomobject]@{ Metrics = $metrics; Generation = $generation; Active = $active }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    if ($null -eq $metrics) {
+        throw "M17 metrics remained unavailable during the bounded session wait: minimum_generation=$MinimumGeneration expected_active=$ExpectedActive"
+    }
+    $restartStarted = Get-M17MetricValue $metrics "ferrum2_tun_session_restart_started" $true
+    $restartSucceeded = Get-M17MetricValue $metrics "ferrum2_tun_session_restart_succeeded" $true
+    $restartFailed = Get-M17MetricValue $metrics "ferrum2_tun_session_restart_failed" $true
+    throw "M17 session state timeout: minimum_generation=$MinimumGeneration expected_active=$ExpectedActive generation=$generation active=$active restart_started=$restartStarted restart_succeeded=$restartSucceeded restart_failed=$restartFailed"
+}
+
+function Wait-M17FlowDrain(
+    [int]$MetricsPort,
+    [double]$ExpectedGeneration,
+    [int]$MaximumUdpAssociations,
+    [int]$TimeoutSeconds = 10
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $metrics = $null
+    do {
+        try { $metrics = Get-Metrics $MetricsPort 2 }
+        catch {
+            if ($_.Exception.Message -cne "metrics readiness timeout") { throw }
+            if ([DateTime]::UtcNow -ge $deadline) { break }
+            Start-Sleep -Milliseconds 50
+            continue
+        }
+        $generation = Get-M17MetricValue $metrics "ferrum2_tun_session_generation"
+        $active = Get-M17MetricValue $metrics "ferrum2_tun_session_active"
+        $tcpFlows = Get-M17MetricValue $metrics "ferrum2_tun_tcp_flows_active"
+        $udpAssociations = Get-M17MetricValue $metrics "ferrum2_tun_udp_associations_active"
+        $udpCandidates = Get-M17MetricValue $metrics "ferrum2_tun_udp_candidates_active"
+        $reassemblyEntries = Get-M17MetricValue $metrics "ferrum2_tun_reassembly_entries_active"
+        $handlerTasks = Get-ClientGaugeValue $metrics "ferrum2_tun_handler_tasks_active"
+        if ($generation -eq $ExpectedGeneration -and $active -eq 1 -and
+            $tcpFlows -eq 0 -and $udpCandidates -eq 0 -and
+            $udpAssociations -le $MaximumUdpAssociations -and
+            $reassemblyEntries -eq 0 -and $handlerTasks -eq $udpAssociations) {
+            return [pscustomobject]@{
+                Metrics = $metrics
+                Generation = $generation
+                TcpFlows = $tcpFlows
+                UdpAssociations = $udpAssociations
+                UdpCandidates = $udpCandidates
+                ReassemblyEntries = $reassemblyEntries
+                HandlerTasks = $handlerTasks
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($null -eq $metrics) {
+        throw "M17 metrics remained unavailable during the bounded flow/fragment wait: expected_generation=$ExpectedGeneration"
+    }
+    throw "M17 flow/fragment baseline did not drain: expected_generation=$ExpectedGeneration generation=$generation active=$active tcp_flows=$tcpFlows udp_associations=$udpAssociations udp_candidates=$udpCandidates udp_limit=$MaximumUdpAssociations reassembly_entries=$reassemblyEntries handler_tasks=$handlerTasks"
+}
+
+function Wait-M17AdapterReady(
+    [string]$Name,
+    [bool]$Ipv4,
+    [bool]$Ipv6,
+    [string[]]$Ipv4Dns = @(),
+    [string[]]$Ipv6Dns = @(),
+    [uint32]$ExpectedMtu = 1420,
+    [int]$TimeoutSeconds = 30
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if ($script:activeProcess) {
+            $script:activeProcess.Refresh()
+            if ($script:activeProcess.HasExited) { throw "M17 candidate failed during prepare" }
+        }
+        $adapter = Get-NetAdapter -Name $Name -ErrorAction SilentlyContinue
+        if ($adapter) {
+            $addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue)
+            $v4 = @($addresses | Where-Object { $_.IPAddress -ceq "198.18.0.2" -and $_.PrefixLength -eq 30 -and $_.AddressState -eq "Preferred" })
+            $v6 = @($addresses | Where-Object { $_.IPAddress -ceq "fd00::2" -and $_.PrefixLength -eq 126 -and $_.AddressState -eq "Preferred" })
+            $addressesReady = (($Ipv4 -and $v4.Count -eq 1) -or (-not $Ipv4 -and $v4.Count -eq 0)) -and
+                (($Ipv6 -and $v6.Count -eq 1) -or (-not $Ipv6 -and $v6.Count -eq 0))
+            if ($addressesReady) {
+                $v4Interface = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue
+                $v6Interface = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -PolicyStore ActiveStore -ErrorAction SilentlyContinue
+                $mtuReady = ((-not $Ipv4) -or ($v4Interface -and [uint32]$v4Interface.NlMtu -eq $ExpectedMtu)) -and
+                    ((-not $Ipv6) -or ($v6Interface -and [uint32]$v6Interface.NlMtu -eq $ExpectedMtu))
+                $actualV4Dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+                $actualV6Dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+                $expectedV4Dns = @($Ipv4Dns | Sort-Object -Unique)
+                $expectedV6Dns = @($Ipv6Dns | Sort-Object -Unique)
+                $windowsIntrinsicV6Dns = @(
+                    "fec0:0:0:ffff::1", "fec0:0:0:ffff::2", "fec0:0:0:ffff::3"
+                )
+                $v4DnsReady = ($actualV4Dns -join "|") -ceq ($expectedV4Dns -join "|")
+                $v6DnsReady = ($actualV6Dns -join "|") -ceq ($expectedV6Dns -join "|") -or
+                    ($expectedV6Dns.Count -eq 0 -and
+                        ($actualV6Dns -join "|") -ceq ($windowsIntrinsicV6Dns -join "|"))
+                if ($mtuReady -and $v4DnsReady -and $v6DnsReady) {
+                    return $adapter
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "M17 adapter readiness timeout"
+}
+
+function Start-M17Candidate([string]$Configuration, [string]$Label) {
+    Assert-True ($Label -cmatch '^[a-z0-9][a-z0-9-]{0,63}$') "M17 process label is invalid"
+    $script:m17ProcessOrdinal++
+    $stdoutPath = Join-Path $script:m17ArtifactRoot ("{0:D3}-client-{1}.stdout.log" -f $script:m17ProcessOrdinal, $Label)
+    $stderrPath = Join-Path $script:m17ArtifactRoot ("{0:D3}-client-{1}.stderr.log" -f $script:m17ProcessOrdinal, $Label)
+    $arguments = "--config `"$Configuration`""
+    $id = [Ferrum2ProcessGroup]::Start($script:binary, $arguments, (Split-Path -Parent $script:binary), $stdoutPath, $stderrPath)
+    $process = Get-Process -Id $id
+    $script:activeProcess = $process
+    $script:m17ProcessRows.Add([ordered]@{
+        role = "client"
+        label = $Label
+        process_id = [uint32]$id
+        binary_sha256 = (Get-FileHash -LiteralPath $script:binary -Algorithm SHA256).Hash.ToLowerInvariant()
+        stdout = [IO.Path]::GetFileName($stdoutPath)
+        stderr = [IO.Path]::GetFileName($stderrPath)
+    })
+    return $process
+}
+
+function Start-M17Server {
+    $serverConfig = Join-Path $script:work "m17-server.toml"
+    $script:m17ServerPort = Get-UniqueTcpPort
+    @"
+schema_version = 1
+[server]
+listen = "127.0.0.1:$script:m17ServerPort"
+[runtime]
+shutdown_grace_ms = 1000
+[udp]
+enabled = true
+max_sessions = 64
+max_buffered_bytes = 4194304
+idle_timeout_ms = 60000
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"@ | Set-Content -LiteralPath $serverConfig -Encoding utf8NoBOM
+    $stdoutPath = Join-Path $script:m17ArtifactRoot "server.stdout.log"
+    $stderrPath = Join-Path $script:m17ArtifactRoot "server.stderr.log"
+    $id = [Ferrum2ProcessGroup]::Start($script:serverBinary, "--config `"$serverConfig`"", (Split-Path -Parent $script:serverBinary), $stdoutPath, $stderrPath)
+    $process = Get-Process -Id $id
+    $script:serverProcesses.Add($process)
+    $script:m17ServerProcess = $process
+    $script:m17ProcessRows.Add([ordered]@{
+        role = "server"
+        label = "qualification"
+        process_id = [uint32]$id
+        binary_sha256 = (Get-FileHash -LiteralPath $script:serverBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+        stdout = [IO.Path]::GetFileName($stdoutPath)
+        stderr = [IO.Path]::GetFileName($stderrPath)
+    })
+    Wait-TcpListener $script:m17ServerPort $process "m17-server"
+    Wait-UdpListener $script:m17ServerPort $process "m17-server"
+    Add-M17LiveRow "server-binary-ready" ([ordered]@{
+        process_id = [uint32]$id
+        tcp_listener = "127.0.0.1:$script:m17ServerPort"
+        udp_listener = "127.0.0.1:$script:m17ServerPort"
+        stable_udp_samples = 2
+    })
+}
+
+function Write-M17ClientConfig(
+    [string]$Path,
+    [string]$TunFields,
+    [ValidateSet("direct", "proxy")][string]$Outbound,
+    [int]$MetricsPort,
+    [string]$Additional = ""
+) {
+    $tunOutbound = if ([regex]::IsMatch($Additional, '(?m)^\[route\]\r?$')) {
+        ""
+    } else {
+        "outbound = `"$Outbound`""
+    }
+    $outboundText = if ($Outbound -eq "direct") {
+@"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+"@
+    } else {
+@"
+[[outbounds]]
+tag = "proxy"
+server = "127.0.0.1:$script:m17ServerPort"
+"@
+    }
+    $shadowsocks = if ($Outbound -eq "proxy") {
+@"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"@
+    } else { "" }
+    @"
+schema_version = 2
+[tun]
+tag = "tun-in"
+adapter_name = "$script:adapterName"
+$TunFields
+$tunOutbound
+$outboundText
+[udp]
+enabled = true
+max_sessions = 64
+max_buffered_bytes = 4194304
+idle_timeout_ms = 60000
+$Additional
+[runtime]
+shutdown_grace_ms = 1000
+idle_timeout_ms = 2000
+[metrics]
+listen = "127.0.0.1:$MetricsPort"
+$shadowsocks
+"@ | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+}
+
+function Assert-M17Config([string]$Path, [string]$Label, [bool]$ExpectDeprecatedWarning = $false) {
+    $result = Invoke-M17BoundedCommand "config-$Label" $script:binary @("--config", $Path, "--check-config") (Split-Path -Parent $script:binary) 30
+    Assert-True ($result.ExitCode -eq 0 -and $result.Stdout.TrimEnd([char[]]"`r`n") -ceq "configuration valid") "M17 live config validation failed: $Label"
+    if ($ExpectDeprecatedWarning) {
+        Assert-True ([regex]::Matches($result.Stderr, [regex]::Escape($script:m17ExpectedWarning)).Count -eq $script:m17ExpectedWarningCount -and
+            $result.Stderr.TrimEnd([char[]]"`r`n") -ceq $script:m17ExpectedWarning) "M17 live config warning changed: $Label"
+    } else {
+        Assert-True ([string]::IsNullOrEmpty($result.Stderr)) "M17 live config emitted stderr: $Label"
+    }
+}
+
+function Stop-M17Candidate([System.Diagnostics.Process]$Process, [string]$Label) {
+    Stop-Candidate $Process
+    $script:activeProcess = $null
+    Wait-AdapterAbsent $script:adapterName
+    Assert-InterfaceGone $script:adapterName $script:ownedInterfaceIndex
+    Add-M17LiveRow "client-$Label-graceful-stop" ([ordered]@{ exit_code = 0; adapter = "absent" })
+}
+
+function Add-M17ExternalRoute([string]$Prefix, [uint32]$Metric) {
+    $underlay = Get-Ipv4DefaultUnderlay
+    Assert-True (@(Get-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $Prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 external route baseline is not absent: $Prefix"
+    $intentPath = Get-M17RouteMutationIntentPath $Prefix
+    Write-M17DurableMutationIntent $intentPath ([ordered]@{
+        schema = "ferrum2.windows-tun.m17-route-intent.v1"
+        run_token = $script:runIdentity
+        source_mode = "route-detect"
+        work_path = [IO.Path]::GetFullPath($script:work)
+        interface_index = [uint32]$underlay.InterfaceIndex
+        destination_prefix = $Prefix
+        next_hop = [string]$underlay.Row.Route.NextHop
+        route_metric = $Metric
+    })
+    $route = New-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $Prefix `
+        -NextHop $underlay.Row.Route.NextHop -RouteMetric $Metric -PolicyStore ActiveStore -ErrorAction Stop
+    $script:ownedRoutes.Add($route)
+    $readback = @(Get-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $Prefix -PolicyStore ActiveStore -ErrorAction Stop |
+        Where-Object { $_.NextHop -ceq $underlay.Row.Route.NextHop -and [uint32]$_.RouteMetric -eq $Metric })
+    Assert-True ($readback.Count -eq 1) "M17 external route readback failed: $Prefix"
+    return $route
+}
+
+function Remove-M17ExternalRoute([object]$Route) {
+    $interfaceIndex = [int]$Route.InterfaceIndex
+    $prefix = [string]$Route.DestinationPrefix
+    $intentPath = Get-M17RouteMutationIntentPath $prefix
+    $intent = Read-M17RouteMutationIntent $intentPath
+    Assert-True ([int]$intent.interface_index -eq $interfaceIndex -and
+        [string]$intent.next_hop -ceq [string]$Route.NextHop -and
+        [uint32]$intent.route_metric -eq [uint32]$Route.RouteMetric) "M17 external route no longer matches its durable intent"
+    Remove-NetRoute -InputObject $Route -Confirm:$false -ErrorAction Stop
+    Assert-True (@(Get-NetRoute -InterfaceIndex $interfaceIndex -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 external route cleanup failed: $prefix"
+    [void]$script:ownedRoutes.Remove($Route)
+    Complete-M17MutationIntent $intentPath
+}
+
+function Get-M17ExactManagedRoute([int]$InterfaceIndex, [string]$Prefix) {
+    $routes = @(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $Prefix `
+        -PolicyStore ActiveStore -ErrorAction Stop)
+    Assert-True ($routes.Count -eq 1) "M17 managed restart route readback is not exact: $Prefix"
+    return $routes[0]
+}
+
+function Remove-M17ManagedRouteForRestart([int]$InterfaceIndex, [string]$Prefix) {
+    $route = Get-M17ExactManagedRoute $InterfaceIndex $Prefix
+    Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction Stop
+    Assert-True (@(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $Prefix `
+        -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 managed restart route mutation failed: $Prefix"
+}
+
+function Invoke-M17DnsQuery([string]$Source, [string]$Destination, [bool]$Tcp, [uint16]$Id) {
+    $query = New-DnsQuery $Id
+    $family = if ($Destination.Contains(":")) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
+    if ($Tcp) {
+        $client = [Net.Sockets.TcpClient]::new($family)
+        try {
+            $client.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Parse($Source), 0))
+            $connected = $client.ConnectAsync($Destination, 53)
+            Assert-True ($connected.Wait(5000) -and -not $connected.IsFaulted) "M17 synthetic DNS TCP connect failed"
+            $stream = $client.GetStream()
+            $frame = [byte[]]::new($query.Length + 2)
+            $frame[0] = [byte]($query.Length -shr 8)
+            $frame[1] = [byte]($query.Length -band 0xff)
+            [Array]::Copy($query, 0, $frame, 2, $query.Length)
+            $stream.Write($frame, 0, $frame.Length)
+            $lengthBytes = Read-ExactBytes $stream 2
+            $length = ([int]$lengthBytes[0] -shl 8) -bor [int]$lengthBytes[1]
+            $response = Read-ExactBytes $stream $length
+        } finally { $client.Dispose() }
+    } else {
+        $client = [Net.Sockets.UdpClient]::new($family)
+        try {
+            $client.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Parse($Source), 0))
+            [void]$client.Send($query, $query.Length, $Destination, 53)
+            $task = $client.ReceiveAsync()
+            Assert-True ($task.Wait(5000) -and -not $task.IsFaulted) "M17 synthetic DNS UDP response timeout"
+            $response = $task.Result.Buffer
+        } finally { $client.Dispose() }
+    }
+    Assert-True ($response.Length -ge 12 -and $response[0] -eq $query[0] -and $response[1] -eq $query[1] -and
+        ($response[2] -band 0x80) -ne 0) "M17 synthetic DNS response is invalid"
+}
+
+function Invoke-M17CandidateTests {
+    $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
+    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+    $usePrebuiltTests = $script:candidateTestDirectoryExplicit
+    if ($usePrebuiltTests) {
+        $testHashes = [ordered]@{}
+        foreach ($name in @("client", "tun", "wintun")) {
+            $file = switch ($name) {
+                "client" { "ferrum2-client-tests.exe" }
+                "tun" { "ferrum2-tun-tests.exe" }
+                "wintun" { "ferrum2-wintun-tests.exe" }
+            }
+            $testHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $script:resolvedCandidateTestDirectory $file) -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        Add-M17LiveRow "candidate-test-source" ([ordered]@{
+            git_head = [string]$script:capabilityIdentity.Ledger.candidate_sha
+            provenance = "host-built-rust-1.97.1-prebuilt-tests"
+            test_binaries = $testHashes
+        })
+    } else {
+        Assert-True ($null -ne $cargoCommand -and $null -ne $gitCommand) "M17 candidate tests require cargo/git or CandidateTestDirectory"
+        $cargo = $cargoCommand.Source
+        $git = $gitCommand.Source
+        $head = Invoke-M17BoundedCommand "source-head" $git @("rev-parse", "HEAD") $script:resolvedProductRoot 30
+        Assert-True ($head.ExitCode -eq 0 -and $head.Stdout.Trim() -ceq [string]$script:capabilityIdentity.Ledger.candidate_sha) "M17 candidate source HEAD does not match the identity ledger"
+        $status = Invoke-M17BoundedCommand "source-status" $git @("status", "--porcelain=v1", "--untracked-files=no") $script:resolvedProductRoot 30
+        Assert-True ($status.ExitCode -eq 0) "M17 candidate source status failed"
+        $diff = Invoke-M17BoundedCommand "source-diff" $git @("diff", "--binary", "--no-ext-diff", "HEAD", "--", "Cargo.lock", "bins/ferrum2-client", "crates/ferrum2-tun", "crates/ferrum2-wintun") $script:resolvedProductRoot 30
+        Assert-True ($diff.ExitCode -eq 0) "M17 candidate source diff capture failed"
+        Add-M17LiveRow "candidate-test-source" ([ordered]@{
+            git_head = $head.Stdout.Trim()
+            tracked_status_sha256 = (Get-FileHash -LiteralPath $status.StdoutPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            relevant_diff_sha256 = (Get-FileHash -LiteralPath $diff.StdoutPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+    }
+
+    $specs = switch ($script:Mode) {
+        "route-detect" { @(
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::route_integrity_detects_v4_and_v6_specificity_without_default_route_false_positives"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::equal_prefix_metric_is_closed_for_lower_equal_overflow_and_unknown"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::only_exact_managed_and_kernel_local_owned_rows_are_ignored"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dual_stack_target_binding_selects_actual_target_and_rejects_tun"; Witnesses = @("fixed_and_direct_dual_stack_underlay_binding") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::target_binding_excludes_tun_and_orders_prefix_then_effective_metric"; Witnesses = @("multihoming_prefix_and_metric_selection") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::network_change_notifications_cover_each_callback_and_runtime_owned_events"; Witnesses = @("route_interface_and_address_notifications") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_route_cleanup_preserves_replacements_and_audits_every_delete"; Witnesses = @("foreign_route_state_survives_cleanup") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_address_readback_and_cleanup_are_exact_and_foreign_safe"; Witnesses = @("foreign_address_state_survives_cleanup") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dad_failure_rolls_back_in_reverse_and_cleanup_conflicts_do_not_short_circuit"; Witnesses = @("dad_failure_rolls_back_in_reverse") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @() }
+        ) }
+        "restart-stress" { @(
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @("admission_quiesces_during_rebuild", "stale_flows_and_fragments_are_cleared") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "supervisor::tests::notification_burst_keeps_only_latest_generation_and_extends_debounce"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join"; Witnesses = @() }
+        ) }
+        "fragments" { @(
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::reassembles_ipv4_and_ipv6_strictly_out_of_order_then_reparses"; Witnesses = @("ipv4_udp_out_of_order") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::reassembles_three_fragment_tcp_and_preserves_initial_syn_semantics"; Witnesses = @("ipv4_tcp_out_of_order") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::ipv6_extensions_before_and_after_fragment_reassemble_canonically"; Witnesses = @("ipv6_extension_and_fragment") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::strips_atomic_ipv6_fragment_before_reparse"; Witnesses = @("ipv6_atomic_fragment") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::overlap_or_duplicate_drops_the_entire_entry"; Witnesses = @("overlap_drops_entry") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::timeout_and_generation_change_prevent_cross_epoch_completion"; Witnesses = @("timeout_drops_entry", "restart_rejects_stale_generation") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::fragmented_dns_reaches_post_reassembly_udp_dispatch_metadata"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::fragmented_udp_reaches_admission_only_after_out_of_order_reassembly"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::disabled_family_fragments_are_rejected_before_allocating_reassembly_state"; Witnesses = @("disabled_family_rejects_fragment") }
+        ) }
+        "dual-stack-dns" { @(
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::synthetic_dns_matches_each_configured_family_exactly"; Witnesses = @("exact_port_53_match", "ordinary_port_53_not_intercepted") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_dns_snapshots_reads_back_and_conditionally_restores"; Witnesses = @() }
+        ) }
+        "udp-policy" { @(
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::configured_ipv4_directed_broadcast_never_reaches_tcp_or_udp_admission"; Witnesses = @("directed_broadcast_never_allocates_association") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c19_eim_adf_eif_and_actual_response_source_are_enforced"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::adf_peer_reservations_are_bounded_and_authorize_only_on_commit"; Witnesses = @("rejected_target_never_authorizes_peer") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c8_lifecycle_control_is_reliable_when_data_queues_are_congested"; Witnesses = @("udp_queue_pressure_is_bounded_and_control_remains_live") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c10_hash_index_free_list_counts_and_generation_deadlines_are_exact"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @("restart_clears_udp_stale_generation_state") },
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_targets_independently_select_direct_proxy_dns_and_reject"; Witnesses = @("per_target_route_and_outbound_decision") },
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_authorizes_only_successful_send_or_dns_answer_and_adf_ignores_port"; Witnesses = @() },
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_target_children_have_isolated_bounded_queues"; Witnesses = @() }
+        ) }
+        "scheduler-ring-full" { @(
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::capacity_aware_rotation_drains_eight_sixteen_and_sixty_four_packets"; Witnesses = @("rx_bursts_8_16_64_have_no_structural_drop") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "scheduler::tests::rotation_is_stable_across_arbitrary_work_budget_boundaries"; Witnesses = @("work_stages_rotate_fairly") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c2_response_backpressure_preserves_current_event_and_does_not_consume_next"; Witnesses = @("udp_response_backpressure_is_lossless") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::ring_full_drops_exactly_one_complete_output_and_fatal_retains_it"; Witnesses = @("ring_full_drops_one_complete_packet", "ring_full_is_not_retried", "ring_full_does_not_restart_session") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::wintun_error_kinds_have_exact_owner_dispositions"; Witnesses = @("wintun_error_kinds_have_exact_owner_dispositions") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "tests::operation_error_kinds_are_closed_and_redacted"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::receive_null_distinguishes_empty_recoverable_eof_and_corruption"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::send_allocation_failure_distinguishes_ring_full_from_fatal_errors"; Witnesses = @() }
+        ) }
+    }
+    $ordinal = 0
+    foreach ($spec in $specs) {
+        $ordinal++
+        if ($usePrebuiltTests) {
+            $testFile = switch ($spec.Package) {
+                "ferrum2-client" { "ferrum2-client-tests.exe" }
+                "ferrum2-tun" { "ferrum2-tun-tests.exe" }
+                "ferrum2-wintun" { "ferrum2-wintun-tests.exe" }
+                default { throw "M17 prebuilt test package is not closed" }
+            }
+            $testRunner = Join-Path $script:resolvedCandidateTestDirectory $testFile
+            $arguments = @($spec.Test, "--exact", "--nocapture")
+            $runnerKind = "prebuilt-rust-1.97.1"
+        } else {
+            $targetArguments = if ($spec.Target -eq "bin") { @("--bin", $spec.Package) } else { @("--lib") }
+            $arguments = @("+1.97.1", "test", "-p", $spec.Package, "--locked") + $targetArguments + @($spec.Test, "--", "--exact", "--nocapture")
+            $testRunner = $cargo
+            $runnerKind = "cargo-rust-1.97.1"
+        }
+        $result = Invoke-M17BoundedCommand ("test-{0:D2}-{1}" -f $ordinal, $spec.Package) $testRunner $arguments $script:resolvedProductRoot 300
+        $testOutput = $result.Stdout + $result.Stderr
+        $ranExactlyOne = $testOutput -match '(?m)^running 1 test\r?$' -and
+            $testOutput -match '(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in .+\r?$'
+        Assert-True ($result.ExitCode -eq 0 -and $ranExactlyOne) "M17 exact candidate test failed or did not execute exactly once: $($spec.Test)"
+        $script:m17TestRows.Add([ordered]@{
+            package = $spec.Package
+            test = $spec.Test
+            status = "pass"
+            runner = $runnerKind
+            duration_ms = $result.DurationMilliseconds
+            stdout_sha256 = (Get-FileHash -LiteralPath $result.StdoutPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            stderr_sha256 = (Get-FileHash -LiteralPath $result.StderrPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+        foreach ($witness in $spec.Witnesses) {
+            Add-M17Witness $witness "deterministic-candidate-test" "$($spec.Package):$($spec.Test)"
+        }
+    }
+}
+
+function Wait-M17RouteConflict(
+    [int]$MetricsPort,
+    [string]$Reason,
+    [double]$Before,
+    [int]$TimeoutSeconds = 30
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $metrics = Get-Metrics $MetricsPort 2
+        $current = Get-M17LabeledMetricValue $metrics "ferrum2_tun_route_conflict" "reason" $Reason $true
+        $active = Get-M17MetricValue $metrics "ferrum2_tun_session_active"
+        if ($current -gt $Before -and $active -eq 0) {
+            return [pscustomobject]@{ Metrics = $metrics; Count = $current }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "M17 route conflict witness timeout: $Reason"
+}
+
+function Invoke-M17RouteDetect {
+    $script:m17MetricsPort = Get-UniqueTcpPort
+    $path = Join-Path $script:work "m17-route-detect.toml"
+    $physical = Get-Ipv4DefaultUnderlay
+    $lanSource = @($physical.Sources | Sort-Object IPAddress)[0]
+    $lanPrefix = Get-Ipv4ConnectedPrefix $lanSource
+    $lanSupernet = Get-Ipv4PrivateSupernet ([string]$lanSource.IPAddress)
+    Write-M17ClientConfig $path @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+route_address = ["203.0.113.0/24", "2001:db8:17::/48", "$lanSupernet"]
+route_exclude_address = ["2001:db8:17:8000::/49", "$lanPrefix"]
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ "direct" $script:m17MetricsPort
+    Assert-M17Config $path "route-detect"
+    $script:activeProcess = Start-M17Candidate $path "route-detect"
+    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    $initial = Wait-M17Session $script:m17MetricsPort 1 1
+    $script:m17CounterBefore = Get-M17CounterSnapshot $initial.Metrics
+    Assert-True ((Get-M17MetricValue $initial.Metrics "ferrum2_tun_route_detect") -ge 1) "M17 clean route scan was not observed"
+    $lanDecision = @(Find-NetRoute -RemoteIPAddress ([string]$physical.Row.Route.NextHop) -ErrorAction Stop |
+        Where-Object { $_.PSObject.Properties.Name -contains "DestinationPrefix" })[0]
+    Assert-True ($lanDecision -and [int]$lanDecision.InterfaceIndex -eq [int]$physical.InterfaceIndex -and
+        [int]$lanDecision.InterfaceIndex -ne $script:ownedInterfaceIndex) "M17 LAN exclude did not retain the physical route"
+    Add-M17Witness "clean_route_scan" "live-product" "active generation completed a route integrity scan"
+    Add-M17Witness "owned_route_exemption" "live-product" "managed capture rows remained Active after route detect"
+    Add-M17Witness "lan_exclude_remains_active" "live-product" "RFC1918 capture excluded the connected LAN and retained Active"
+    Add-M17LiveRow "lan-exclude" ([ordered]@{
+        status = "active"
+        route_conflicts = Get-M17MetricValue $initial.Metrics "ferrum2_tun_route_conflict" $true
+        physical_interface = [int]$physical.InterfaceIndex
+        tun_interface = $script:ownedInterfaceIndex
+    })
+
+    $moreBefore = Get-M17LabeledMetricValue $initial.Metrics "ferrum2_tun_route_conflict" "reason" "more_specific_route" $true
+    $moreSpecific = Add-M17ExternalRoute "203.0.113.128/25" 0
+    $conflict = Wait-M17RouteConflict $script:m17MetricsPort "more_specific_route" $moreBefore
+    Add-M17Witness "more_specific_external_conflict" "live-product" "external /25 quiesced a managed /24 session"
+    Add-M17Witness "admission_quiesced_before_conflicting_session" "live-product" "session_active reached zero before conflict recovery"
+    Remove-M17ExternalRoute $moreSpecific
+    $recovered = Wait-M17Session $script:m17MetricsPort ($initial.Generation + 1) 1 180
+    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+
+    $physical = Get-Ipv4DefaultUnderlay
+    $physicalInterface = Get-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+    $originalAutomaticMetric = [string]$physicalInterface.AutomaticMetric
+    $originalInterfaceMetric = [uint32]$physicalInterface.InterfaceMetric
+    $tunInterface = Get-NetIPInterface -InterfaceIndex $script:ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+    $tunRoutes = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -DestinationPrefix "203.0.113.0/24" -PolicyStore ActiveStore -ErrorAction Stop)
+    Assert-True ($tunRoutes.Count -eq 1) "M17 managed equal-prefix route readback is not exact"
+    $tunRoute = $tunRoutes[0]
+    $metricChanged = ([uint64]$originalInterfaceMetric -ge ([uint64]$tunInterface.InterfaceMetric + [uint64]$tunRoute.RouteMetric))
+    $equalPrefix = $null
+    $metricIntentPath = $null
+    try {
+        if ($metricChanged) {
+            $physicalAdapter = Get-NetAdapter -InterfaceIndex $physical.InterfaceIndex -IncludeHidden -ErrorAction Stop
+            $metricIntentPath = Join-Path $script:m17NetworkMutationJournal "physical-ipv4-metric.json"
+            Write-M17DurableMutationIntent $metricIntentPath ([ordered]@{
+                schema = "ferrum2.windows-tun.m17-metric-intent.v1"
+                run_token = $script:runIdentity
+                source_mode = "route-detect"
+                work_path = [IO.Path]::GetFullPath($script:work)
+                interface_index = [uint32]$physical.InterfaceIndex
+                interface_guid = ([Guid]$physicalAdapter.InterfaceGuid).ToString("D").ToLowerInvariant()
+                original_automatic_metric = $originalAutomaticMetric
+                original_interface_metric = $originalInterfaceMetric
+                applied_automatic_metric = "Disabled"
+                applied_interface_metric = 1
+            })
+            Set-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 `
+                -AutomaticMetric Disabled -InterfaceMetric 1 -PolicyStore ActiveStore -ErrorAction Stop
+            $minimumGeneration = $recovered.Generation
+            Start-Sleep -Milliseconds 500
+            $recovered = Wait-M17Session $script:m17MetricsPort $minimumGeneration 1 180
+            $adapter = Wait-M17AdapterReady $script:adapterName $true $true
+            $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+        }
+        $equalBefore = Get-M17LabeledMetricValue $recovered.Metrics "ferrum2_tun_route_conflict" "reason" "equal_prefix_preferred" $true
+        $equalPrefix = Add-M17ExternalRoute "203.0.113.0/24" 0
+        [void](Wait-M17RouteConflict $script:m17MetricsPort "equal_prefix_preferred" $equalBefore)
+        Add-M17Witness "equal_prefix_winning_metric_conflict" "live-product" "lower-effective-metric external /24 quiesced the session"
+        Remove-M17ExternalRoute $equalPrefix
+        $equalPrefix = $null
+        $recovered = Wait-M17Session $script:m17MetricsPort ($recovered.Generation + 1) 1 180
+    } finally {
+        if ($equalPrefix) { Remove-M17ExternalRoute $equalPrefix }
+        if ($metricChanged) {
+            if ($originalAutomaticMetric -ceq "Enabled") {
+                Set-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 `
+                    -AutomaticMetric Enabled -PolicyStore ActiveStore -ErrorAction Stop
+            } else {
+                Set-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 `
+                    -AutomaticMetric Disabled -InterfaceMetric $originalInterfaceMetric `
+                    -PolicyStore ActiveStore -ErrorAction Stop
+            }
+            $restoredInterface = Get-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+            $metricMatches = ($originalAutomaticMetric -ceq "Enabled") -or
+                ([uint32]$restoredInterface.InterfaceMetric -eq $originalInterfaceMetric)
+            Assert-True ([string]$restoredInterface.AutomaticMetric -ceq $originalAutomaticMetric -and
+                $metricMatches) "M17 physical interface metric restore failed"
+            Complete-M17MutationIntent $metricIntentPath
+        }
+    }
+    if ($metricChanged) {
+        $minimumGeneration = $recovered.Generation
+        Start-Sleep -Milliseconds 500
+        $recovered = Wait-M17Session $script:m17MetricsPort $minimumGeneration 1 180
+    }
+    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    $script:m17CounterAfter = Get-M17CounterSnapshot $recovered.Metrics
+    Add-M17LiveRow "route-conflict-recovery" ([ordered]@{
+        process_id = [uint32]$script:activeProcess.Id
+        final_generation = $recovered.Generation
+        more_specific_conflicts = Get-M17LabeledMetricValue $recovered.Metrics "ferrum2_tun_route_conflict" "reason" "more_specific_route"
+        equal_prefix_conflicts = Get-M17LabeledMetricValue $recovered.Metrics "ferrum2_tun_route_conflict" "reason" "equal_prefix_preferred"
+    })
+    Stop-M17Candidate $script:activeProcess "route-detect"
+}
+
+function Invoke-M17RestartStress {
+    $udpAssociationLimit = 32
+    $script:m17MetricsPort = Get-UniqueTcpPort
+    $path = Join-Path $script:work "m17-restart-stress.toml"
+    $physical = Get-Ipv4DefaultUnderlay
+    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverPort = Get-UniqueTcpPort
+    $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
+    $script:tcpResources.Add($dnsResponder)
+    $supportAddress = $script:capabilityIdentity.SupportAddress
+    Assert-True ($supportAddress -cne "198.51.100.254") "M17 restart notification prefix collides with the support listener"
+    Write-M17ClientConfig $path @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+route_address = ["$supportAddress/32"]
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+max_udp_mappings = $udpAssociationLimit
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+max_udp_buffered_bytes = 0
+"@ "direct" $script:m17MetricsPort @"
+[dns]
+timeout_ms = 1000
+max_inflight = 8
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:$(Get-UniqueTcpPort)"
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "${resolverAddress}:$resolverPort"
+detour = "direct"
+[dns.route]
+final = "resolver"
+"@
+    Assert-M17Config $path "restart-stress"
+    $script:activeProcess = Start-M17Candidate $path "restart-stress"
+    $candidatePid = [uint32]$script:activeProcess.Id
+    $adapter = Wait-M17AdapterReady $script:adapterName $true $true @("198.18.0.1") @("fd00::1")
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    $initial = Wait-M17Session $script:m17MetricsPort 1 1
+    $script:m17CounterBefore = Get-M17CounterSnapshot $initial.Metrics
+    $associationLimitBefore = Get-M17MetricValue $initial.Metrics "ferrum2_tun_udp_association_rejected_limit" $true
+    Assert-True ($associationLimitBefore -eq 0) "M17 restart baseline already exhausted the UDP association limit"
+    $preHealthBaseline = Wait-M17FlowDrain $script:m17MetricsPort $initial.Generation $udpAssociationLimit
+    Assert-True ((Get-M17MetricValue $preHealthBaseline.Metrics "ferrum2_tun_udp_association_rejected_limit" $true) -eq $associationLimitBefore) "M17 initial pre-health association limit changed"
+    Add-M17LiveRow "restart-initial-pre-health" ([ordered]@{
+        generation = $preHealthBaseline.Generation
+        udp_associations = $preHealthBaseline.UdpAssociations
+        udp_candidates = $preHealthBaseline.UdpCandidates
+        handler_tasks = $preHealthBaseline.HandlerTasks
+    })
+    Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-restart-before"))
+    Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-restart-before"))
+    $healthBaseline = Wait-M17FlowDrain $script:m17MetricsPort $initial.Generation $udpAssociationLimit
+    Assert-True ($healthBaseline.UdpCandidates -eq 0 -and
+        $healthBaseline.UdpAssociations -le $udpAssociationLimit -and
+        $healthBaseline.HandlerTasks -eq $healthBaseline.UdpAssociations -and
+        (Get-M17MetricValue $healthBaseline.Metrics "ferrum2_tun_udp_association_rejected_limit" $true) -eq $associationLimitBefore) "M17 initial handler/association baseline is not bounded"
+    $maxSettledUdpAssociations = [Math]::Max($preHealthBaseline.UdpAssociations, $healthBaseline.UdpAssociations)
+    $maxSettledHandlerTasks = [Math]::Max($preHealthBaseline.HandlerTasks, $healthBaseline.HandlerTasks)
+
+    $generation = $initial.Generation
+    $restartStartedBefore = Get-M17MetricValue $initial.Metrics "ferrum2_tun_session_restart_started"
+    $restartSucceededBefore = Get-M17MetricValue $initial.Metrics "ferrum2_tun_session_restart_succeeded"
+    foreach ($cycle in 1..$script:RestartCycles) {
+        Remove-M17ManagedRouteForRestart $script:ownedInterfaceIndex "$supportAddress/32"
+        $expectedGeneration = $generation + 1
+        $state = Wait-M17Session $script:m17MetricsPort $expectedGeneration 1 45
+        Start-Sleep -Milliseconds 500
+        $stableState = Wait-M17Session $script:m17MetricsPort $expectedGeneration 1 10
+        Assert-True ($stableState.Generation -eq $expectedGeneration -and
+            $stableState.Active -eq 1) "M17 restart produced more than one stable generation"
+        $script:activeProcess.Refresh()
+        Assert-True (-not $script:activeProcess.HasExited -and [uint32]$script:activeProcess.Id -eq $candidatePid) "M17 restart replaced the client process"
+        $adapter = Wait-M17AdapterReady $script:adapterName $true $true @("198.18.0.1") @("fd00::1")
+        $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+        [void](Get-M17ExactManagedRoute $script:ownedInterfaceIndex "$supportAddress/32")
+        $preHealthBaseline = Wait-M17FlowDrain $script:m17MetricsPort $expectedGeneration $udpAssociationLimit
+        Assert-True ((Get-M17MetricValue $preHealthBaseline.Metrics "ferrum2_tun_udp_association_rejected_limit" $true) -eq $associationLimitBefore) "M17 per-cycle pre-health association limit changed"
+        $maxSettledUdpAssociations = [Math]::Max($maxSettledUdpAssociations, $preHealthBaseline.UdpAssociations)
+        $maxSettledHandlerTasks = [Math]::Max($maxSettledHandlerTasks, $preHealthBaseline.HandlerTasks)
+        Add-M17LiveRow ("restart-cycle-{0:D4}-pre-health" -f $cycle) ([ordered]@{
+            cycle = $cycle
+            generation = $preHealthBaseline.Generation
+            process_id = $candidatePid
+            interface_index = $script:ownedInterfaceIndex
+            tcp_flows = $preHealthBaseline.TcpFlows
+            udp_associations = $preHealthBaseline.UdpAssociations
+            udp_candidates = $preHealthBaseline.UdpCandidates
+            reassembly_entries = $preHealthBaseline.ReassemblyEntries
+            handler_tasks = $preHealthBaseline.HandlerTasks
+        })
+        $payload = [Text.Encoding]::ASCII.GetBytes(("m17-restart-{0:D4}" -f $cycle))
+        Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex $payload
+        Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex $payload
+        $cycleBaseline = Wait-M17FlowDrain $script:m17MetricsPort $expectedGeneration $udpAssociationLimit
+        Assert-True ($cycleBaseline.UdpCandidates -eq 0 -and
+            $cycleBaseline.UdpAssociations -le $udpAssociationLimit -and
+            $cycleBaseline.HandlerTasks -eq $cycleBaseline.UdpAssociations -and
+            (Get-M17MetricValue $cycleBaseline.Metrics "ferrum2_tun_udp_association_rejected_limit" $true) -eq $associationLimitBefore) "M17 per-cycle handler/association baseline changed"
+        $maxSettledUdpAssociations = [Math]::Max($maxSettledUdpAssociations, $cycleBaseline.UdpAssociations)
+        $maxSettledHandlerTasks = [Math]::Max($maxSettledHandlerTasks, $cycleBaseline.HandlerTasks)
+        Add-M17LiveRow ("restart-cycle-{0:D4}-post-health" -f $cycle) ([ordered]@{
+            cycle = $cycle
+            generation = $cycleBaseline.Generation
+            process_id = $candidatePid
+            interface_index = $script:ownedInterfaceIndex
+            tcp_flows = $cycleBaseline.TcpFlows
+            udp_associations = $cycleBaseline.UdpAssociations
+            udp_candidates = $cycleBaseline.UdpCandidates
+            reassembly_entries = $cycleBaseline.ReassemblyEntries
+            handler_tasks = $cycleBaseline.HandlerTasks
+            tcp_health = "pass"
+            udp_health = "pass"
+        })
+        $generation = $expectedGeneration
+    }
+    Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-restart-after"))
+    Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-restart-after"))
+    $finalBaseline = Wait-M17FlowDrain $script:m17MetricsPort $generation $udpAssociationLimit
+    $maxSettledUdpAssociations = [Math]::Max($maxSettledUdpAssociations, $finalBaseline.UdpAssociations)
+    $maxSettledHandlerTasks = [Math]::Max($maxSettledHandlerTasks, $finalBaseline.HandlerTasks)
+    $finalMetrics = $finalBaseline.Metrics
+    $restartStarted = Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_started"
+    $restartSucceeded = Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_succeeded"
+    Assert-True ($generation -eq $initial.Generation + $script:RestartCycles -and
+        $restartStarted -eq $restartStartedBefore + $script:RestartCycles -and
+        $restartSucceeded -eq $restartSucceededBefore + $script:RestartCycles -and
+        (Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_failed") -eq 0 -and
+        (Get-M17MetricValue $finalMetrics "ferrum2_tun_udp_association_rejected_limit" $true) -eq $associationLimitBefore) "M17 restart stress counters changed"
+    $script:m17CounterAfter = Get-M17CounterSnapshot $finalMetrics
+    Add-M17Witness "same_process_for_every_restart" "live-product" "$script:RestartCycles observed notifications retained one PID"
+    Add-M17Witness "generation_advances_once_per_restart" "live-product" "each notification reached exactly the next stable generation"
+    Add-M17Witness "adapter_route_dns_and_handler_baselines_restore" "live-product" "dual-stack adapter, capture route, DNS, TCP and UDP recovered after every restart with zero candidates, exact handler/association parity and no capacity rejection"
+    Add-M17LiveRow "restart-stress" ([ordered]@{
+        cycles = $script:RestartCycles
+        process_id = $candidatePid
+        initial_generation = $initial.Generation
+        final_generation = $generation
+        restart_started = $restartStarted
+        restart_succeeded = $restartSucceeded
+        restart_failed = Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_failed"
+        udp_association_limit = $udpAssociationLimit
+        max_settled_udp_associations = $maxSettledUdpAssociations
+        max_settled_handler_tasks = $maxSettledHandlerTasks
+        udp_association_limit_rejections = Get-M17MetricValue $finalMetrics "ferrum2_tun_udp_association_rejected_limit" $true
+    })
+    Stop-M17Candidate $script:activeProcess "restart-stress"
+    $clientLog = @($script:m17ProcessRows | Where-Object { $_.role -ceq "client" -and $_.label -ceq "restart-stress" })[-1]
+    $stderr = Get-Content -LiteralPath (Join-Path $script:m17ArtifactRoot $clientLog.stderr) -Raw -Encoding utf8
+    Assert-True ([regex]::Matches($stderr, [regex]::Escape($script:m17ExpectedWarning)).Count -eq $script:m17ExpectedWarningCount) "M17 runtime deprecation warning count changed"
+    Add-M17Witness "one_fixed_deprecation_warning_on_normal_startup" "live-product" "captured one exact fixed warning on candidate stderr"
+}
+
+function New-M17PaddedDnsQuery([uint16]$Id, [int]$PaddingBytes = 2048) {
+    Assert-True ($PaddingBytes -ge 1200 -and $PaddingBytes -le 4096) "M17 DNS padding is outside the bounded witness range"
+    $query = [Collections.Generic.List[byte]]::new()
+    $baseQuery = [byte[]](New-DnsQuery $Id)
+    $query.AddRange($baseQuery)
+    $query[11] = 1
+    $query.Add(0)
+    $query.AddRange([byte[]](0, 41, 16, 0, 0, 0, 0, 0))
+    $optionLength = $PaddingBytes + 4
+    $query.Add([byte]($optionLength -shr 8))
+    $query.Add([byte]($optionLength -band 0xff))
+    $query.AddRange([byte[]](0, 12, [byte]($PaddingBytes -shr 8), [byte]($PaddingBytes -band 0xff)))
+    $query.AddRange([byte[]]::new($PaddingBytes))
+    return $query.ToArray()
+}
+
+function Invoke-M17DnsBytes([string]$Source, [string]$Destination, [byte[]]$Query) {
+    $family = if ($Destination.Contains(":")) { [Net.Sockets.AddressFamily]::InterNetworkV6 } else { [Net.Sockets.AddressFamily]::InterNetwork }
+    $client = [Net.Sockets.UdpClient]::new($family)
+    try {
+        $client.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Parse($Source), 0))
+        [void]$client.Send($Query, $Query.Length, $Destination, 53)
+        $task = $client.ReceiveAsync()
+        Assert-True ($task.Wait(10000) -and -not $task.IsFaulted) "M17 padded DNS response timeout"
+        $response = $task.Result.Buffer
+    } finally { $client.Dispose() }
+    Assert-True ($response.Length -ge 12 -and $response[0] -eq $Query[0] -and $response[1] -eq $Query[1] -and
+        ($response[2] -band 0x80) -ne 0) "M17 padded DNS response is invalid"
+}
+
+function Get-M17PayloadSha256([byte[]]$Payload) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($Payload))).Replace("-", "").ToLowerInvariant()
+    } finally { $algorithm.Dispose() }
+}
+
+function Assert-M17DnsQueryEnvelope([byte[]]$Payload, [uint16]$Id) {
+    Assert-True ($Payload.Length -eq 32 -and
+        $Payload[0] -eq [byte]($Id -shr 8) -and $Payload[1] -eq [byte]($Id -band 0xff) -and
+        $Payload[2] -eq 1 -and $Payload[3] -eq 0 -and
+        $Payload[4] -eq 0 -and $Payload[5] -eq 1 -and
+        $Payload[6] -eq 0 -and $Payload[7] -eq 0 -and
+        $Payload[8] -eq 0 -and $Payload[9] -eq 0 -and
+        $Payload[10] -eq 0 -and $Payload[11] -eq 0 -and
+        $Payload[27] -eq 0 -and $Payload[28] -eq 0 -and $Payload[29] -eq 1 -and
+        $Payload[30] -eq 0 -and $Payload[31] -eq 1) "M17 DNS query wire envelope is invalid"
+}
+
+function New-M17QuicV1InitialEnvelope {
+    # A deterministic 1,200-byte QUIC v1 Initial envelope. The protected body is opaque, but the
+    # long header, connection IDs, zero token, two-byte packet length, packet number length, and
+    # RFC minimum datagram size are independently parsed below before the live round trip.
+    $packet = [byte[]]::new(1200)
+    $packet[0] = 0xc3
+    $packet[4] = 1
+    $packet[5] = 8
+    [Array]::Copy([byte[]](0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08), 0, $packet, 6, 8)
+    $packet[14] = 8
+    [Array]::Copy([byte[]](0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5), 0, $packet, 15, 8)
+    $packet[23] = 0
+    $packet[24] = 0x44
+    $packet[25] = 0x96
+    [Array]::Copy([byte[]](0, 0, 0, 2), 0, $packet, 26, 4)
+    foreach ($index in 30..1199) { $packet[$index] = [byte](($index * 29 + 17) % 251) }
+    return $packet
+}
+
+function Assert-M17QuicV1InitialEnvelope([byte[]]$Payload) {
+    $declaredLength = (($Payload[24] -band 0x3f) -shl 8) -bor $Payload[25]
+    Assert-True ($Payload.Length -eq 1200 -and
+        ($Payload[0] -band 0xc0) -eq 0xc0 -and ($Payload[0] -band 0x30) -eq 0 -and
+        (($Payload[0] -band 3) + 1) -eq 4 -and
+        $Payload[1] -eq 0 -and $Payload[2] -eq 0 -and $Payload[3] -eq 0 -and $Payload[4] -eq 1 -and
+        $Payload[5] -eq 8 -and $Payload[14] -eq 8 -and $Payload[23] -eq 0 -and
+        ($Payload[24] -shr 6) -eq 1 -and $declaredLength -eq 1174 -and
+        26 + $declaredLength -eq $Payload.Length) "M17 QUIC v1 Initial envelope is not structurally parseable"
+}
+
+function Get-M17StunFingerprintCrc([byte[]]$Payload, [int]$Length) {
+    Assert-True ($Length -ge 20 -and $Length -le $Payload.Length) "M17 STUN fingerprint input length is invalid"
+    [uint32]$crc = [uint32]::MaxValue
+    foreach ($index in 0..($Length - 1)) {
+        $crc = [uint32]($crc -bxor [uint32]$Payload[$index])
+        foreach ($bit in 0..7) {
+            if (($crc -band 1) -ne 0) {
+                $crc = [uint32](($crc -shr 1) -bxor [uint32]3988292384)
+            } else {
+                $crc = [uint32]($crc -shr 1)
+            }
+        }
+    }
+    return [uint32](($crc -bxor [uint32]::MaxValue) -bxor [uint32]1398035790)
+}
+
+function Get-M17IceMessageIntegrity([byte[]]$Payload, [int]$MessageIntegrityOffset) {
+    Assert-True ($MessageIntegrityOffset -ge 20 -and $MessageIntegrityOffset + 24 -le $Payload.Length) "M17 ICE MESSAGE-INTEGRITY offset is invalid"
+    $input = [byte[]]::new($MessageIntegrityOffset)
+    [Array]::Copy($Payload, 0, $input, 0, $input.Length)
+    $lengthThroughIntegrity = $MessageIntegrityOffset + 24 - 20
+    $input[2] = [byte]($lengthThroughIntegrity -shr 8)
+    $input[3] = [byte]($lengthThroughIntegrity -band 0xff)
+    $key = [Text.Encoding]::ASCII.GetBytes("m17-ice-password-0123456789abcdef")
+    $algorithm = [Security.Cryptography.HMACSHA1]::new($key)
+    try { return $algorithm.ComputeHash($input) }
+    finally { $algorithm.Dispose() }
+}
+
+function New-M17StunBindingRequest([byte]$TransactionSeed, [bool]$IceCandidate) {
+    $message = [Collections.Generic.List[byte]]::new()
+    $message.AddRange([byte[]](0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42))
+    foreach ($index in 0..11) { $message.Add([byte](($TransactionSeed + $index) -band 0xff)) }
+    if ($IceCandidate) {
+        $username = [Text.Encoding]::ASCII.GetBytes("remote17:local17")
+        $message.AddRange([byte[]](0, 6, 0, $username.Length))
+        $message.AddRange($username)
+        while (($message.Count % 4) -ne 0) { $message.Add(0) }
+        $message.AddRange([byte[]](0, 0x24, 0, 4, 0x6e, 0, 1, 0xff))
+        $message.AddRange([byte[]](0x80, 0x2a, 0, 8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88))
+        $messageIntegrityOffset = $message.Count
+        $message.AddRange([byte[]](0, 8, 0, 20))
+        $message.AddRange([byte[]]::new(20))
+        $lengthThroughIntegrity = $message.Count - 20
+        $message[2] = [byte]($lengthThroughIntegrity -shr 8)
+        $message[3] = [byte]($lengthThroughIntegrity -band 0xff)
+        [byte[]]$integrity = Get-M17IceMessageIntegrity $message.ToArray() $messageIntegrityOffset
+        foreach ($index in 0..($integrity.Length - 1)) {
+            $message[$messageIntegrityOffset + 4 + $index] = $integrity[$index]
+        }
+        $fingerprintOffset = $message.Count
+        $message.AddRange([byte[]](0x80, 0x28, 0, 4, 0, 0, 0, 0))
+        $bodyLength = $message.Count - 20
+        $message[2] = [byte]($bodyLength -shr 8)
+        $message[3] = [byte]($bodyLength -band 0xff)
+        [uint32]$fingerprint = Get-M17StunFingerprintCrc $message.ToArray() $fingerprintOffset
+        $message[$fingerprintOffset + 4] = [byte](($fingerprint -shr 24) -band 0xff)
+        $message[$fingerprintOffset + 5] = [byte](($fingerprint -shr 16) -band 0xff)
+        $message[$fingerprintOffset + 6] = [byte](($fingerprint -shr 8) -band 0xff)
+        $message[$fingerprintOffset + 7] = [byte]($fingerprint -band 0xff)
+    }
+    $bodyLength = $message.Count - 20
+    $message[2] = [byte]($bodyLength -shr 8)
+    $message[3] = [byte]($bodyLength -band 0xff)
+    return $message.ToArray()
+}
+
+function Assert-M17StunBindingRequest([byte[]]$Payload, [bool]$IceCandidate) {
+    Assert-True ($Payload.Length -ge 20 -and $Payload[0] -eq 0 -and $Payload[1] -eq 1 -and
+        $Payload[4] -eq 0x21 -and $Payload[5] -eq 0x12 -and
+        $Payload[6] -eq 0xa4 -and $Payload[7] -eq 0x42) "M17 STUN Binding request header is invalid"
+    $declaredLength = ([int]$Payload[2] -shl 8) -bor [int]$Payload[3]
+    Assert-True (($declaredLength % 4) -eq 0 -and 20 + $declaredLength -eq $Payload.Length) "M17 STUN message length is invalid"
+    $attributes = [Collections.Generic.HashSet[int]]::new()
+    $attributeOffsets = @{}
+    $offset = 20
+    while ($offset -lt $Payload.Length) {
+        Assert-True ($offset + 4 -le $Payload.Length) "M17 STUN attribute header is truncated"
+        $attribute = ([int]$Payload[$offset] -shl 8) -bor [int]$Payload[$offset + 1]
+        $length = ([int]$Payload[$offset + 2] -shl 8) -bor [int]$Payload[$offset + 3]
+        $paddedLength = ($length + 3) -band (-bnot 3)
+        Assert-True ($offset + 4 + $paddedLength -le $Payload.Length) "M17 STUN attribute value is truncated"
+        [void]$attributes.Add($attribute)
+        $attributeOffsets[$attribute] = $offset
+        $offset += 4 + $paddedLength
+    }
+    if ($IceCandidate) {
+        Assert-True ($attributes.Contains(0x0006) -and $attributes.Contains(0x0024) -and
+            $attributes.Contains(0x802a) -and $attributes.Contains(0x0008) -and
+            $attributes.Contains(0x8028)) "M17 WebRTC ICE connectivity-check attributes are incomplete"
+        $messageIntegrityOffset = [int]$attributeOffsets[0x0008]
+        [byte[]]$expectedIntegrity = Get-M17IceMessageIntegrity $Payload $messageIntegrityOffset
+        [byte[]]$actualIntegrity = $Payload[($messageIntegrityOffset + 4)..($messageIntegrityOffset + 23)]
+        Assert-True (($actualIntegrity -join ",") -ceq ($expectedIntegrity -join ",")) "M17 ICE MESSAGE-INTEGRITY is invalid"
+        $fingerprintOffset = [int]$attributeOffsets[0x8028]
+        Assert-True ($fingerprintOffset + 8 -eq $Payload.Length) "M17 ICE FINGERPRINT is not the final attribute"
+        [uint32]$expectedFingerprint = Get-M17StunFingerprintCrc $Payload $fingerprintOffset
+        [uint32]$actualFingerprint = ([uint32]$Payload[$fingerprintOffset + 4] -shl 24) -bor
+            ([uint32]$Payload[$fingerprintOffset + 5] -shl 16) -bor
+            ([uint32]$Payload[$fingerprintOffset + 6] -shl 8) -bor
+            [uint32]$Payload[$fingerprintOffset + 7]
+        Assert-True ($actualFingerprint -eq $expectedFingerprint) "M17 ICE FINGERPRINT is invalid"
+    } else {
+        Assert-True ($attributes.Count -eq 0) "M17 bare STUN Binding request unexpectedly has attributes"
+    }
+}
+
+function New-M17GamePeerDatagram([byte]$Peer, [uint32]$Sequence) {
+    $packet = [byte[]]::new(24)
+    [Array]::Copy([Text.Encoding]::ASCII.GetBytes("F2GM"), 0, $packet, 0, 4)
+    $packet[4] = 1
+    $packet[5] = 1
+    $packet[6] = $Peer
+    $packet[8] = 0x17
+    $packet[9] = 0x06
+    $packet[10] = 0x20
+    $packet[11] = 0x26
+    $packet[12] = [byte]($Sequence -shr 24)
+    $packet[13] = [byte]($Sequence -shr 16)
+    $packet[14] = [byte]($Sequence -shr 8)
+    $packet[15] = [byte]($Sequence -band 0xff)
+    $packet[17] = 6
+    foreach ($index in 18..23) { $packet[$index] = [byte](($Peer * 31 + $index) -band 0xff) }
+    return $packet
+}
+
+function Assert-M17GamePeerDatagram([byte[]]$Payload, [byte]$Peer, [uint32]$Sequence) {
+    $decodedSequence = ([uint32]$Payload[12] -shl 24) -bor ([uint32]$Payload[13] -shl 16) -bor
+        ([uint32]$Payload[14] -shl 8) -bor [uint32]$Payload[15]
+    Assert-True ($Payload.Length -eq 24 -and
+        [Text.Encoding]::ASCII.GetString($Payload, 0, 4) -ceq "F2GM" -and
+        $Payload[4] -eq 1 -and $Payload[5] -eq 1 -and $Payload[6] -eq $Peer -and
+        $Payload[16] -eq 0 -and $Payload[17] -eq 6 -and
+        $decodedSequence -eq $Sequence) "M17 game-style binary datagram is invalid"
+}
+
+function Wait-M17MetricIncrease(
+    [int]$MetricsPort,
+    [string]$Name,
+    [double]$Before,
+    [int]$TimeoutSeconds = 5
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $metrics = Get-Metrics $MetricsPort 2
+        if ((Get-M17MetricValue $metrics $Name $true) -gt $Before) { return $metrics }
+        Start-Sleep -Milliseconds 20
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "M17 metric did not increase: $Name"
+}
+
+function New-M17TunUdpClient([string]$Source, [int]$InterfaceIndex) {
+    $address = [Net.IPAddress]::Parse($Source)
+    $client = [Net.Sockets.UdpClient]::new($address.AddressFamily)
+    [Ferrum2NetworkFeasibility]::Pin($client.Client, [uint32]$InterfaceIndex)
+    $client.Client.Bind([Net.IPEndPoint]::new($address, 0))
+    return $client
+}
+
+function Invoke-M17UdpEcho(
+    [Net.Sockets.UdpClient]$Client,
+    [string]$Address,
+    [int]$Port,
+    [byte[]]$Payload,
+    [int]$TimeoutMilliseconds = 10000
+) {
+    [void]$Client.Send($Payload, $Payload.Length, $Address, $Port)
+    $task = $Client.ReceiveAsync()
+    Assert-True ($task.Wait($TimeoutMilliseconds) -and -not $task.IsFaulted) "M17 TUN UDP echo timeout"
+    Assert-True (($task.Result.Buffer -join ",") -ceq ($Payload -join ",") -and
+        $task.Result.RemoteEndPoint.Address.ToString() -ceq ([Net.IPAddress]::Parse($Address)).ToString() -and
+        $task.Result.RemoteEndPoint.Port -eq $Port) "M17 TUN UDP response source or payload mismatch"
+}
+
+function Wait-M17ProbeRemoteEndpoint([Ferrum2UdpProbe]$Probe, [int]$TimeoutMilliseconds = 5000) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $endpoint = $Probe.RemoteEndpoint
+        if ($null -ne $endpoint) { return $endpoint }
+        Start-Sleep -Milliseconds 10
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "M17 target probe did not publish its remote endpoint"
+}
+
+function Receive-M17UdpIfReady(
+    [Net.Sockets.UdpClient]$Client,
+    [string]$Address,
+    [int]$Port,
+    [byte[]]$Payload,
+    [int]$TimeoutMilliseconds = 250
+) {
+    if (-not $Client.Client.Poll($TimeoutMilliseconds * 1000, [Net.Sockets.SelectMode]::SelectRead)) {
+        return $false
+    }
+    $task = $Client.ReceiveAsync()
+    Assert-True ($task.Wait(1000) -and -not $task.IsFaulted) "M17 readable UDP response could not be received"
+    Assert-True (($task.Result.Buffer -join ",") -ceq ($Payload -join ",") -and
+        $task.Result.RemoteEndPoint.Address.ToString() -ceq ([Net.IPAddress]::Parse($Address)).ToString() -and
+        $task.Result.RemoteEndPoint.Port -eq $Port) "M17 unsolicited UDP response source or payload mismatch"
+    return $true
+}
+
+function Assert-M17UdpQuiet([Net.Sockets.UdpClient]$Client, [int]$TimeoutMilliseconds = 1000) {
+    $ready = $Client.Client.Poll($TimeoutMilliseconds * 1000, [Net.Sockets.SelectMode]::SelectRead)
+    Assert-True (-not $ready) "M17 rejected UDP peer reached the TUN client"
+}
+
+function Add-M17LoopbackTarget(
+    [string]$Address,
+    [int]$Port,
+    [byte[]]$ResponsePayload = $null
+) {
+    [void](Add-TargetAddress $Address $false)
+    $probe = if ($null -eq $ResponsePayload) {
+        [Ferrum2UdpProbe]::new($Address, $Port)
+    } else {
+        [Ferrum2UdpProbe]::new($Address, $Port, $ResponsePayload)
+    }
+    $script:tcpResources.Add($probe)
+    return $probe
+}
+
+function Get-M17TargetRoutePreference([int]$InterfaceIndex, [string]$Address) {
+    $isV6 = $Address.Contains(":")
+    $family = if ($isV6) { "IPv6" } else { "IPv4" }
+    $prefix = if ($isV6) { "$Address/128" } else { "$Address/32" }
+    $tunRoutes = @(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $prefix `
+        -PolicyStore ActiveStore -ErrorAction Stop)
+    $localRoutes = @(Get-NetRoute -InterfaceIndex 1 -DestinationPrefix $prefix `
+        -PolicyStore ActiveStore -ErrorAction Stop)
+    Assert-True ($tunRoutes.Count -eq 1 -and $localRoutes.Count -eq 1) "M17 target route ownership is ambiguous: $prefix"
+    $tunInterface = Get-NetIPInterface -InterfaceIndex $InterfaceIndex -AddressFamily $family `
+        -PolicyStore ActiveStore -ErrorAction Stop
+    $localInterface = Get-NetIPInterface -InterfaceIndex 1 -AddressFamily $family `
+        -PolicyStore ActiveStore -ErrorAction Stop
+    [uint64]$tunEffective = [uint64]$tunRoutes[0].RouteMetric + [uint64]$tunInterface.InterfaceMetric
+    [uint64]$localEffective = [uint64]$localRoutes[0].RouteMetric + [uint64]$localInterface.InterfaceMetric
+    Assert-True ($localEffective -lt $tunEffective) "M17 unpinned server target route does not prefer loopback: $prefix"
+    return [ordered]@{
+        destination_prefix = $prefix
+        tun_interface_index = $InterfaceIndex
+        tun_route_metric = [uint32]$tunRoutes[0].RouteMetric
+        tun_interface_metric = [uint32]$tunInterface.InterfaceMetric
+        tun_effective_metric = $tunEffective
+        local_route_metric = [uint32]$localRoutes[0].RouteMetric
+        local_interface_metric = [uint32]$localInterface.InterfaceMetric
+        local_effective_metric = $localEffective
+    }
+}
+
+function Invoke-M17Fragments {
+    $v4Target = "192.0.2.241"
+    $v6Target = "2001:db8::241"
+    $v4Ack = [Text.Encoding]::ASCII.GetBytes("m17-fragment-v4-ack")
+    $v6Ack = [Text.Encoding]::ASCII.GetBytes("m17-fragment-v6-ack")
+    $v4Port = Get-UniqueTcpPort
+    $v6Port = Get-UniqueTcpPort
+    $v4Probe = Add-M17LoopbackTarget $v4Target $v4Port $v4Ack
+    $v6Probe = Add-M17LoopbackTarget $v6Target $v6Port $v6Ack
+    $script:m17MetricsPort = Get-UniqueTcpPort
+    $path = Join-Path $script:work "m17-fragments.toml"
+    Write-M17ClientConfig $path @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+mtu = 1280
+max_udp_mappings = 16
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ "proxy" $script:m17MetricsPort
+    Assert-M17Config $path "fragments"
+    $script:activeProcess = Start-M17Candidate $path "fragments"
+    $adapter = Wait-M17AdapterReady -Name $script:adapterName -Ipv4 $true -Ipv6 $true -ExpectedMtu 1280
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    [void](Add-TunRoute $script:ownedInterfaceIndex "$v4Target/32" 500)
+    [void](Add-TunRoute $script:ownedInterfaceIndex "$v6Target/128" 500)
+    Add-M17LiveRow "fragment-target-route-preference" ([ordered]@{
+        routes = @(
+            Get-M17TargetRoutePreference $script:ownedInterfaceIndex $v4Target
+            Get-M17TargetRoutePreference $script:ownedInterfaceIndex $v6Target
+        )
+    })
+    $initial = Wait-M17Session $script:m17MetricsPort 1 1
+    $script:m17CounterBefore = Get-M17CounterSnapshot $initial.Metrics
+    $completedBefore = Get-M17MetricValue $initial.Metrics "ferrum2_tun_reassembly_completed"
+    $v4Payload = [byte[]]::new(8192)
+    $v6Payload = [byte[]]::new(8192)
+    for ($index = 0; $index -lt $v4Payload.Length; $index++) {
+        $v4Payload[$index] = [byte]($index % 251)
+        $v6Payload[$index] = [byte](250 - ($index % 251))
+    }
+    $v4Client = Open-TunUdp $v4Target $v4Port $script:ownedInterfaceIndex
+    $v6Client = Open-TunUdp $v6Target $v6Port $script:ownedInterfaceIndex
+    try {
+        [void]$v4Client.Send($v4Payload, $v4Payload.Length)
+        $v4Echo = Receive-TunUdp $v4Client 10000
+        Assert-True (($v4Echo -join ",") -ceq ($v4Ack -join ",")) "M17 fragmented IPv4 UDP acknowledgement changed"
+        [void]$v6Client.Send($v6Payload, $v6Payload.Length)
+        $v6Echo = Receive-TunUdp $v6Client 10000
+        Assert-True (($v6Echo -join ",") -ceq ($v6Ack -join ",")) "M17 fragmented IPv6 UDP acknowledgement changed"
+    } finally { $v4Client.Dispose(); $v6Client.Dispose() }
+    Assert-True ($v4Probe.WaitRequests(1, 5000) -and $v6Probe.WaitRequests(1, 5000)) "M17 fragmented target did not observe both datagrams"
+    Assert-True (($v4Probe.Received -join ",") -ceq ($v4Payload -join ",") -and
+        ($v6Probe.Received -join ",") -ceq ($v6Payload -join ",")) "M17 fragmented target request payload changed"
+    $fragmentMetrics = Get-Metrics $script:m17MetricsPort
+    Assert-True ((Get-M17MetricValue $fragmentMetrics "ferrum2_tun_reassembly_completed") -ge $completedBefore + 2 -and
+        (Get-M17MetricValue $fragmentMetrics "ferrum2_tun_reassembly_entries_active") -eq 0) "M17 live fragment completion metrics changed"
+    Add-M17LiveRow "live-fragmented-udp" ([ordered]@{
+        ipv4_payload_bytes = $v4Payload.Length
+        ipv6_payload_bytes = $v6Payload.Length
+        ipv4_response_bytes = $v4Ack.Length
+        ipv6_response_bytes = $v6Ack.Length
+        completed_delta = (Get-M17MetricValue $fragmentMetrics "ferrum2_tun_reassembly_completed") - $completedBefore
+        active_entries = Get-M17MetricValue $fragmentMetrics "ferrum2_tun_reassembly_entries_active"
+    })
+    Stop-M17Candidate $script:activeProcess "fragments"
+
+    $physical = Get-Ipv4DefaultUnderlay
+    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverPort = Get-UniqueTcpPort
+    $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
+    $script:tcpResources.Add($dnsResponder)
+    $dnsMetricsPort = Get-UniqueTcpPort
+    $dnsPath = Join-Path $script:work "m17-fragmented-dns.toml"
+    Write-M17ClientConfig $dnsPath @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+mtu = 1280
+auto_route = true
+route_address = ["$($script:capabilityIdentity.SupportAddress)/32"]
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ "direct" $dnsMetricsPort @"
+[dns]
+timeout_ms = 2000
+max_inflight = 8
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:$(Get-UniqueTcpPort)"
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "${resolverAddress}:$resolverPort"
+detour = "direct"
+[dns.route]
+final = "resolver"
+"@
+    Assert-M17Config $dnsPath "fragmented-dns"
+    $script:activeProcess = Start-M17Candidate $dnsPath "fragmented-dns"
+    $adapter = Wait-M17AdapterReady -Name $script:adapterName -Ipv4 $true -Ipv6 $true `
+        -Ipv4Dns @("198.18.0.1") -Ipv6Dns @("fd00::1") -ExpectedMtu 1280
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    $dnsState = Wait-M17Session $dnsMetricsPort 1 1
+    $dnsCompletedBefore = Get-M17MetricValue $dnsState.Metrics "ferrum2_tun_reassembly_completed"
+    Invoke-M17DnsBytes "198.18.0.2" "198.18.0.1" (New-M17PaddedDnsQuery 0x1701)
+    $dnsMetrics = Get-Metrics $dnsMetricsPort
+    Assert-True ((Get-M17MetricValue $dnsMetrics "ferrum2_tun_reassembly_completed") -gt $dnsCompletedBefore) "M17 fragmented synthetic DNS did not complete reassembly"
+    Add-M17Witness "fragmented_synthetic_dns" "live-product" "padded UDP DNS query reassembled before synthetic DNS handling"
+    Add-M17LiveRow "fragmented-synthetic-dns" ([ordered]@{
+        query_bytes = (New-M17PaddedDnsQuery 0x1701).Length
+        resolver_requests = $dnsResponder.Requests
+    })
+    $script:m17CounterAfter = Get-M17CounterSnapshot $dnsMetrics
+    Stop-M17Candidate $script:activeProcess "fragmented-dns"
+}
+
+function Invoke-M17DualStackDns {
+    $physical = Get-Ipv4DefaultUnderlay
+    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverPort = Get-UniqueTcpPort
+    $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
+    $script:tcpResources.Add($dnsResponder)
+    $cases = @(
+        [ordered]@{ Name = "ipv4-only"; V4 = $true; V6 = $false; V4Dns = @("198.18.0.1"); V6Dns = @(); Fields = @"
+ipv4_address = "198.18.0.2/30"
+auto_route = true
+route_address = ["$($script:capabilityIdentity.SupportAddress)/32"]
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ },
+        [ordered]@{ Name = "ipv6-only"; V4 = $false; V6 = $true; V4Dns = @(); V6Dns = @("fd00::1"); Fields = @"
+ipv6_address = "fd00::2/126"
+auto_route = true
+route_address = ["2001:db8:17::/48"]
+auto_dns = true
+ipv6_dns_address = "fd00::1"
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ },
+        [ordered]@{ Name = "dual"; V4 = $true; V6 = $true; V4Dns = @("198.18.0.1"); V6Dns = @("fd00::1"); Fields = @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+route_address = ["$($script:capabilityIdentity.SupportAddress)/32", "2001:db8:17::/48"]
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ }
+    )
+    $caseOrdinal = 0
+    foreach ($case in $cases) {
+        $caseOrdinal++
+        $metricsPort = Get-UniqueTcpPort
+        $path = Join-Path $script:work "m17-dns-$($case.Name).toml"
+        Write-M17ClientConfig $path $case.Fields "direct" $metricsPort @"
+[dns]
+timeout_ms = 1000
+max_inflight = 8
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:$(Get-UniqueTcpPort)"
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "${resolverAddress}:$resolverPort"
+detour = "direct"
+[dns.route]
+final = "resolver"
+"@
+        Assert-M17Config $path "dns-$($case.Name)"
+        $script:activeProcess = Start-M17Candidate $path "dns-$($case.Name)"
+        $adapter = Wait-M17AdapterReady $script:adapterName $case.V4 $case.V6 $case.V4Dns $case.V6Dns
+        $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+        $state = Wait-M17Session $metricsPort 1 1
+        if ($caseOrdinal -eq 1) { $script:m17CounterBefore = Get-M17CounterSnapshot $state.Metrics }
+        if ($case.V4) {
+            Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false ([uint16](0x1710 + $caseOrdinal))
+            Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $true ([uint16](0x1720 + $caseOrdinal))
+            if (-not $script:m17WitnessRows.Contains("ipv4_udp_dns")) { Add-M17Witness "ipv4_udp_dns" "live-product" "IPv4 synthetic DNS UDP response validated" }
+            if (-not $script:m17WitnessRows.Contains("ipv4_tcp_dns")) { Add-M17Witness "ipv4_tcp_dns" "live-product" "IPv4 synthetic DNS TCP response validated" }
+        }
+        if ($case.V6) {
+            Invoke-M17DnsQuery "fd00::2" "fd00::1" $false ([uint16](0x1730 + $caseOrdinal))
+            Invoke-M17DnsQuery "fd00::2" "fd00::1" $true ([uint16](0x1740 + $caseOrdinal))
+            if (-not $script:m17WitnessRows.Contains("ipv6_udp_dns")) { Add-M17Witness "ipv6_udp_dns" "live-product" "IPv6 synthetic DNS UDP response validated" }
+            if (-not $script:m17WitnessRows.Contains("ipv6_tcp_dns")) { Add-M17Witness "ipv6_tcp_dns" "live-product" "IPv6 synthetic DNS TCP response validated" }
+        }
+        $activeMetrics = Get-Metrics $metricsPort
+        Add-M17LiveRow "dns-$($case.Name)" ([ordered]@{
+            ipv4 = $case.V4
+            ipv6 = $case.V6
+            ipv4_dns = $case.V4Dns
+            ipv6_dns = $case.V6Dns
+            ingress = Get-M17MetricValue $activeMetrics "ferrum2_tun_packets_ingress"
+            egress = Get-M17MetricValue $activeMetrics "ferrum2_tun_packets_egress"
+        })
+        if ($case.Name -ceq "dual") { $script:m17CounterAfter = Get-M17CounterSnapshot $activeMetrics }
+        $oldIndex = $script:ownedInterfaceIndex
+        Stop-M17Candidate $script:activeProcess "dns-$($case.Name)"
+        Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $oldIndex -ErrorAction SilentlyContinue).Count -eq 0) "M17 DNS rows remained after adapter cleanup"
+    }
+    Add-M17Witness "dual_dns_readback_and_restore" "live-product" "IPv4-only, IPv6-only and dual exact DNS readback followed by absent-row cleanup"
+}
+
+function Invoke-M17UdpPolicy {
+    Enable-M17UdpFirewallAdmission
+    Add-M17LiveRow "udp-firewall-scope" ([ordered]@{
+        policy_store = "ActiveStore"
+        direction = "inbound"
+        protocol = "udp"
+        local_address = "198.18.0.2"
+        remote_address = "any"
+        local_only_mapping = $true
+        program = $script:controllerProgram
+        purpose = "prevent Windows stateful endpoint filtering from masking product ADF/EIF while remaining controller-process scoped"
+    })
+    try {
+    $directTarget = [ordered]@{
+        Address = [string]$script:capabilityIdentity.SupportAddress
+        Port = [int]$script:capabilityIdentity.UdpPort
+    }
+    Assert-True ([Net.IPAddress]::Parse($directTarget.Address).AddressFamily -eq
+        [Net.Sockets.AddressFamily]::InterNetwork) "M17 UDP direct witness requires the approved IPv4 support listener"
+    $targets = @(
+        [ordered]@{ Address = "192.0.2.241"; Port = Get-UniqueTcpPort },
+        [ordered]@{ Address = "192.0.2.242"; Port = Get-UniqueTcpPort },
+        [ordered]@{ Address = "2001:db8::241"; Port = Get-UniqueTcpPort }
+    )
+    $probes = @(
+        Add-M17LoopbackTarget $targets[0].Address $targets[0].Port
+        Add-M17LoopbackTarget $targets[1].Address $targets[1].Port
+        Add-M17LoopbackTarget $targets[2].Address $targets[2].Port
+    )
+    $alternatePort = Get-UniqueTcpPort
+    $sameAddressAlternate = [Ferrum2UdpProbe]::new($targets[0].Address, $alternatePort)
+    $script:tcpResources.Add($sameAddressAlternate)
+    foreach ($filtering in @("address_dependent", "endpoint_independent")) {
+        $filterLabel = if ($filtering -ceq "address_dependent") { "adf" } else { "eif" }
+        $metricsPort = Get-UniqueTcpPort
+        $path = Join-Path $script:work "m17-udp-$filterLabel.toml"
+        Write-M17ClientConfig $path @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+max_udp_mappings = 2
+udp_filtering = "$filtering"
+ready_timeout_ms = 15000
+"@ "proxy" $metricsPort @"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[route]
+final = "proxy"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "$($directTarget.Address)"
+port = $($directTarget.Port)
+action = "route"
+outbound = "direct"
+"@
+        Assert-M17Config $path "udp-$filterLabel"
+        $script:activeProcess = Start-M17Candidate $path "udp-$filterLabel"
+        $adapter = Wait-M17AdapterReady $script:adapterName $true $true
+        $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+        foreach ($target in $targets) {
+            $prefix = if ($target.Address.Contains(":")) { "$($target.Address)/128" } else { "$($target.Address)/32" }
+            [void](Add-TunRoute $script:ownedInterfaceIndex $prefix 500)
+        }
+        [void](Add-TunRoute $script:ownedInterfaceIndex "$($directTarget.Address)/32" 500)
+        $targetRoutePreference = @($targets | ForEach-Object {
+            Get-M17TargetRoutePreference $script:ownedInterfaceIndex $_.Address
+        })
+        $directCaptureRoute = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex `
+            -DestinationPrefix "$($directTarget.Address)/32" -PolicyStore ActiveStore -ErrorAction Stop)
+        Assert-True ($directCaptureRoute.Count -eq 1) "M17 direct UDP capture route readback is not exact"
+        Add-M17LiveRow "udp-$filterLabel-target-route-preference" ([ordered]@{
+            client_socket_interface = $script:ownedInterfaceIndex
+            routes = $targetRoutePreference
+            direct_target = $directTarget
+            direct_capture_route_count = $directCaptureRoute.Count
+        })
+        $state = Wait-M17Session $metricsPort 1 1
+        Start-Sleep -Milliseconds 1000
+        $preTrafficMetrics = Get-Metrics $metricsPort
+        Assert-True ((Get-M17MetricValue $state.Metrics "ferrum2_tun_udp_associations_active") -eq 0 -and
+            (Get-M17MetricValue $state.Metrics "ferrum2_tun_udp_candidates_active") -eq 0 -and
+            (Get-M17MetricValue $preTrafficMetrics "ferrum2_tun_udp_associations_active") -eq 0 -and
+            (Get-M17MetricValue $preTrafficMetrics "ferrum2_tun_udp_candidates_active") -eq 0 -and
+            (Get-M17MetricValue $preTrafficMetrics "ferrum2_tun_udp_association_created" $true) -eq 0) "M17 background traffic allocated a UDP association before the test"
+        Add-M17LiveRow "udp-$filterLabel-pre-traffic-isolation" ([ordered]@{
+            samples = 2
+            interval_milliseconds = 1000
+            associations_active = Get-M17MetricValue $preTrafficMetrics "ferrum2_tun_udp_associations_active"
+            candidates_active = Get-M17MetricValue $preTrafficMetrics "ferrum2_tun_udp_candidates_active"
+            associations_created = Get-M17MetricValue $preTrafficMetrics "ferrum2_tun_udp_association_created" $true
+        })
+        if ($filtering -ceq "address_dependent") { $script:m17CounterBefore = Get-M17CounterSnapshot $state.Metrics }
+        $v4 = New-M17TunUdpClient "198.18.0.2" $script:ownedInterfaceIndex
+        $v6 = New-M17TunUdpClient "fd00::2" $script:ownedInterfaceIndex
+        try {
+            Invoke-M17UdpEcho $v4 $targets[0].Address $targets[0].Port ([Text.Encoding]::ASCII.GetBytes("m17-$filtering-v4-a"))
+            $relayEndpoint = Wait-M17ProbeRemoteEndpoint $probes[0]
+            if ($filtering -ceq "address_dependent") {
+                $sameIpBefore = Get-Metrics $metricsPort
+                $sameIpEgressBefore = Get-M17MetricValue $sameIpBefore "ferrum2_tun_packets_egress" $true
+                $sameIpFilteredBefore = Get-M17MetricValue $sameIpBefore "ferrum2_tun_udp_response_filtered" $true
+                $sameIpQueueBefore = Get-M17MetricValue $sameIpBefore "ferrum2_tun_udp_response_queue_full" $true
+                $sameIpPayload = [Text.Encoding]::ASCII.GetBytes("m17-adf-same-ip-other-port")
+                $sameAddressAlternate.SendTo($sameIpPayload, $relayEndpoint)
+                $sameIpMetrics = Wait-M17MetricIncrease $metricsPort "ferrum2_tun_packets_egress" $sameIpEgressBefore
+                Assert-True ((Get-M17MetricValue $sameIpMetrics "ferrum2_tun_packets_egress") - $sameIpEgressBefore -eq 1 -and
+                    (Get-M17MetricValue $sameIpMetrics "ferrum2_tun_udp_response_filtered" $true) -eq $sameIpFilteredBefore -and
+                    (Get-M17MetricValue $sameIpMetrics "ferrum2_tun_udp_response_queue_full" $true) -eq $sameIpQueueBefore) "M17 ADF same-IP alternate-port response did not cross the Wintun send boundary exactly once"
+                $sameIpPlatformDelivery = Receive-M17UdpIfReady $v4 $targets[0].Address $alternatePort $sameIpPayload
+                Add-M17LiveRow "udp-adf-same-ip-alternate-port" ([ordered]@{
+                    response_source = "$($targets[0].Address):$alternatePort"
+                    wintun_egress_delta = 1
+                    response_filtered_delta = 0
+                    response_queue_full_delta = 0
+                    windows_socket_delivery = $sameIpPlatformDelivery
+                    windows_boundary = "delivery is optional because the emulated target address is also owned by guest loopback"
+                })
+                Add-M17Witness "adf_allows_authorized_ip_any_port" "live-product" "authorized same-IP alternate-port response crossed the live ADF filter and Wintun send boundary; the exact candidate test verifies the emitted source tuple"
+
+                $unauthorizedBefore = Get-Metrics $metricsPort
+                $unauthorizedFilteredBefore = Get-M17MetricValue $unauthorizedBefore "ferrum2_tun_udp_response_filtered" $true
+                $unauthorizedPayload = [Text.Encoding]::ASCII.GetBytes("m17-adf-unauthorized-ip")
+                $probes[1].SendTo($unauthorizedPayload, $relayEndpoint)
+                $unauthorizedMetrics = Wait-M17MetricIncrease $metricsPort "ferrum2_tun_udp_response_filtered" $unauthorizedFilteredBefore
+                Assert-True ((Get-M17MetricValue $unauthorizedMetrics "ferrum2_tun_udp_response_filtered") - $unauthorizedFilteredBefore -eq 1) "M17 ADF unauthorized response was not filtered exactly once"
+                Assert-M17UdpQuiet $v4
+                Add-M17Witness "adf_rejects_unauthorized_ip" "live-product" "unseen IPv4 peer response was not delivered"
+            } else {
+                $eifBefore = Get-Metrics $metricsPort
+                $eifEgressBefore = Get-M17MetricValue $eifBefore "ferrum2_tun_packets_egress" $true
+                $eifFilteredBefore = Get-M17MetricValue $eifBefore "ferrum2_tun_udp_response_filtered" $true
+                $eifQueueBefore = Get-M17MetricValue $eifBefore "ferrum2_tun_udp_response_queue_full" $true
+                $eifPayload = [Text.Encoding]::ASCII.GetBytes("m17-eif-unseen-ip")
+                $probes[1].SendTo($eifPayload, $relayEndpoint)
+                $eifMetrics = Wait-M17MetricIncrease $metricsPort "ferrum2_tun_packets_egress" $eifEgressBefore
+                Assert-True ((Get-M17MetricValue $eifMetrics "ferrum2_tun_packets_egress") - $eifEgressBefore -eq 1 -and
+                    (Get-M17MetricValue $eifMetrics "ferrum2_tun_udp_response_filtered" $true) -eq $eifFilteredBefore -and
+                    (Get-M17MetricValue $eifMetrics "ferrum2_tun_udp_response_queue_full" $true) -eq $eifQueueBefore) "M17 EIF unseen-peer response did not cross the Wintun send boundary exactly once"
+                $eifPlatformDelivery = Receive-M17UdpIfReady $v4 $targets[1].Address $targets[1].Port $eifPayload
+                Add-M17LiveRow "udp-eif-unseen-peer" ([ordered]@{
+                    response_source = "$($targets[1].Address):$($targets[1].Port)"
+                    wintun_egress_delta = 1
+                    response_filtered_delta = 0
+                    response_queue_full_delta = 0
+                    windows_socket_delivery = $eifPlatformDelivery
+                    windows_boundary = "delivery is optional because the emulated target address is also owned by guest loopback"
+                })
+                Add-M17Witness "eif_allows_valid_same_family_peer" "live-product" "unseen same-family response crossed the live EIF filter and Wintun send boundary; the exact candidate test verifies the emitted source tuple"
+            }
+            if ($filtering -ceq "address_dependent") {
+                [uint16]$dnsId = 0x17d1
+                [byte[]]$dnsPayload = New-DnsQuery $dnsId
+                Assert-M17DnsQueryEnvelope $dnsPayload $dnsId
+                Invoke-M17UdpEcho $v4 $targets[0].Address $targets[0].Port $dnsPayload
+                Assert-M17DnsQueryEnvelope $probes[0].Received $dnsId
+
+                [byte[]]$quicPayload = New-M17QuicV1InitialEnvelope
+                Assert-M17QuicV1InitialEnvelope $quicPayload
+                Invoke-M17UdpEcho $v4 $targets[1].Address $targets[1].Port $quicPayload
+                Assert-M17QuicV1InitialEnvelope $probes[1].Received
+
+                [byte[]]$stunA = New-M17StunBindingRequest 0x11 $false
+                [byte[]]$stunB = New-M17StunBindingRequest 0x31 $false
+                Assert-M17StunBindingRequest $stunA $false
+                Assert-M17StunBindingRequest $stunB $false
+                Invoke-M17UdpEcho $v4 $targets[0].Address $targets[0].Port $stunA
+                Assert-M17StunBindingRequest $probes[0].Received $false
+                Invoke-M17UdpEcho $v4 $targets[1].Address $targets[1].Port $stunB
+                Assert-M17StunBindingRequest $probes[1].Received $false
+
+                [byte[]]$icePayload = New-M17StunBindingRequest 0x51 $true
+                Assert-M17StunBindingRequest $icePayload $true
+                Invoke-M17UdpEcho $v6 $targets[2].Address $targets[2].Port $icePayload
+                Assert-M17StunBindingRequest $probes[2].Received $true
+
+                [byte[]]$gameA = New-M17GamePeerDatagram 1 1001
+                [byte[]]$gameB = New-M17GamePeerDatagram 2 1002
+                Assert-M17GamePeerDatagram $gameA 1 1001
+                Assert-M17GamePeerDatagram $gameB 2 1002
+                Invoke-M17UdpEcho $v4 $targets[0].Address $targets[0].Port $gameA
+                Assert-M17GamePeerDatagram $probes[0].Received 1 1001
+                Invoke-M17UdpEcho $v4 $targets[1].Address $targets[1].Port $gameB
+                Assert-M17GamePeerDatagram $probes[1].Received 2 1002
+
+                [byte[]]$directPayload = New-M17StunBindingRequest 0x71 $false
+                Assert-M17StunBindingRequest $directPayload $false
+                Invoke-M17UdpEcho $v4 $directTarget.Address $directTarget.Port $directPayload
+
+                Add-M17LiveRow "udp-protocol-interoperability" ([ordered]@{
+                    dns = [ordered]@{ bytes = $dnsPayload.Length; sha256 = Get-M17PayloadSha256 $dnsPayload; target = "proxy-ipv4-a" }
+                    quic_v1_initial = [ordered]@{ bytes = $quicPayload.Length; sha256 = Get-M17PayloadSha256 $quicPayload; target = "proxy-ipv4-b" }
+                    stun_servers = @(
+                        [ordered]@{ family = "ipv4"; target = "proxy-ipv4-a"; sha256 = Get-M17PayloadSha256 $stunA },
+                        [ordered]@{ family = "ipv4"; target = "proxy-ipv4-b"; sha256 = Get-M17PayloadSha256 $stunB }
+                    )
+                    webrtc_ice = [ordered]@{ family = "ipv6"; bytes = $icePayload.Length; sha256 = Get-M17PayloadSha256 $icePayload }
+                    game_peers = @(
+                        [ordered]@{ peer = 1; target = "proxy-ipv4-a"; sequence = 1001; sha256 = Get-M17PayloadSha256 $gameA },
+                        [ordered]@{ peer = 2; target = "proxy-ipv4-b"; sequence = 1002; sha256 = Get-M17PayloadSha256 $gameB }
+                    )
+                    direct_stun = [ordered]@{ family = "ipv4"; bytes = $directPayload.Length; sha256 = Get-M17PayloadSha256 $directPayload }
+                })
+                Add-M17Witness "dns_udp_payload_round_trips" "live-product" "a parsed DNS A query crossed the TUN and Shadowsocks target unchanged"
+                Add-M17Witness "quic_v1_initial_envelope_round_trips" "live-product" "a parsed 1,200-byte QUIC v1 Initial envelope crossed the TUN unchanged"
+                Add-M17Witness "stun_binding_requests_reach_multiple_servers" "live-product" "distinct valid STUN Binding requests reached two IPv4 server endpoints from one local socket"
+                Add-M17Witness "webrtc_ice_candidate_check_round_trips" "live-product" "an IPv6 ICE Binding request with USERNAME, PRIORITY, ICE-CONTROLLING, valid short-term MESSAGE-INTEGRITY, and FINGERPRINT round-tripped unchanged"
+                Add-M17Witness "game_style_binary_datagrams_reach_multiple_peers" "live-product" "sequenced binary datagrams reached two peer endpoints from one local socket"
+            } else {
+                Invoke-M17UdpEcho $v4 $targets[1].Address $targets[1].Port ([Text.Encoding]::ASCII.GetBytes("m17-$filtering-v4-b"))
+                Invoke-M17UdpEcho $v6 $targets[2].Address $targets[2].Port ([Text.Encoding]::ASCII.GetBytes("m17-$filtering-v6"))
+            }
+
+            $capacityBeforeMetrics = Get-Metrics $metricsPort
+            $capacityBefore = Get-M17MetricValue $capacityBeforeMetrics "ferrum2_tun_udp_association_rejected_limit" $true
+            $capacityRequestsBefore = $probes[0].Requests
+            $capacityClient = New-M17TunUdpClient "198.18.0.2" $script:ownedInterfaceIndex
+            try {
+                $capacityPayload = [Text.Encoding]::ASCII.GetBytes("m17-$filterLabel-capacity-drop-new")
+                [void]$capacityClient.Send($capacityPayload, $capacityPayload.Length, $targets[0].Address, $targets[0].Port)
+                Assert-M17UdpQuiet $capacityClient
+                $capacityMetrics = Wait-M17MetricIncrease $metricsPort "ferrum2_tun_udp_association_rejected_limit" $capacityBefore
+                Assert-True ($probes[0].Requests -eq $capacityRequestsBefore -and
+                    (Get-M17MetricValue $capacityMetrics "ferrum2_tun_udp_associations_active") -eq 2 -and
+                    (Get-M17MetricValue $capacityMetrics "ferrum2_tun_udp_candidates_active") -eq 0) "M17 association capacity did not drop only the new source"
+                $livePayload = [Text.Encoding]::ASCII.GetBytes("m17-$filterLabel-capacity-live-source")
+                Invoke-M17UdpEcho $v4 $targets[0].Address $targets[0].Port $livePayload
+                Assert-True ($probes[0].WaitRequests($capacityRequestsBefore + 1, 5000)) "M17 live association was evicted under capacity pressure"
+            } finally { $capacityClient.Dispose() }
+            Add-M17LiveRow "udp-$filterLabel-capacity-drop-new" ([ordered]@{
+                configured_associations = 2
+                active_associations = Get-M17MetricValue $capacityMetrics "ferrum2_tun_udp_associations_active"
+                provisional_candidates = Get-M17MetricValue $capacityMetrics "ferrum2_tun_udp_candidates_active"
+                rejected_limit_delta = (Get-M17MetricValue $capacityMetrics "ferrum2_tun_udp_association_rejected_limit") - $capacityBefore
+                rejected_target_request_delta = $probes[0].Requests - $capacityRequestsBefore - 1
+                existing_association_recovery = "echo-pass"
+            })
+            if ($filtering -ceq "address_dependent") {
+                Add-M17Witness "association_capacity_drops_new_without_evicting_live" "live-product" "the third local source was rejected at capacity two while both live associations and an existing echo remained intact"
+            }
+        } catch {
+            $trafficFailure = $_
+            $failureMetrics = try { Get-Metrics $metricsPort 2 } catch { $null }
+            $script:m17ServerProcess.Refresh()
+            $script:m17LiveRows.Add([ordered]@{
+                name = "udp-$filterLabel-failure-diagnostic"
+                status = "failure"
+                evidence = [ordered]@{
+                    message = [string]$trafficFailure.Exception.Message
+                    client_ipv4_local = [string]$v4.Client.LocalEndPoint
+                    client_ipv4_available_bytes = $(try { [int]$v4.Client.Available } catch { -1 })
+                    client_ipv4_readable = $(try { [bool]$v4.Client.Poll(0, [Net.Sockets.SelectMode]::SelectRead) } catch { $false })
+                    client_ipv6_local = [string]$v6.Client.LocalEndPoint
+                    server_alive = -not $script:m17ServerProcess.HasExited
+                    server_udp_owner = @(
+                        Get-NetUDPEndpoint -LocalPort $script:m17ServerPort -ErrorAction SilentlyContinue |
+                            ForEach-Object { [uint32]$_.OwningProcess }
+                    )
+                    target_requests = @($probes | ForEach-Object { $_.Requests })
+                    target_responses = @($probes | ForEach-Object { $_.Responses })
+                    target_faults = @($probes | ForEach-Object { $_.Fault })
+                    target_remote_endpoints = @($probes | ForEach-Object { [string]$_.RemoteEndpoint })
+                    route_preference = $targetRoutePreference
+                    packets_ingress = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_packets_ingress" $true } else { $null }
+                    packets_egress = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_packets_egress" $true } else { $null }
+                    associations_active = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_udp_associations_active" $true } else { $null }
+                    candidates_active = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_udp_candidates_active" $true } else { $null }
+                    associations_created = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_udp_association_created" $true } else { $null }
+                    association_limit_rejections = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_udp_association_rejected_limit" $true } else { $null }
+                    response_filtered = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_udp_response_filtered" $true } else { $null }
+                    response_queue_full = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_tun_udp_response_queue_full" $true } else { $null }
+                    target_to_client_datagrams = if ($failureMetrics) { Get-M17MetricValue $failureMetrics "ferrum2_udp_datagrams" $true } else { $null }
+                }
+            })
+            throw $trafficFailure
+        } finally { $v4.Dispose(); $v6.Dispose() }
+        $metrics = Get-Metrics $metricsPort
+        Assert-True ((Get-M17MetricValue $metrics "ferrum2_tun_udp_associations_active") -eq 2 -and
+            (Get-M17MetricValue $metrics "ferrum2_tun_udp_candidates_active") -eq 0) "M17 EIM association/candidate gauges changed"
+        Add-M17LiveRow "udp-$filtering" ([ordered]@{
+            ipv4_targets = 3
+            shadowsocks_ipv4_targets = 2
+            direct_ipv4_targets = 1
+            ipv6_targets = 1
+            associations_active = Get-M17MetricValue $metrics "ferrum2_tun_udp_associations_active"
+            candidates_active = Get-M17MetricValue $metrics "ferrum2_tun_udp_candidates_active"
+            target_requests = @($probes | ForEach-Object { $_.Requests })
+            same_address_alternate_port = $alternatePort
+            unseen_peer = if ($filtering -ceq "address_dependent") { "dropped" } else { "accepted" }
+        })
+        if ($filtering -ceq "address_dependent") {
+            Add-M17Witness "one_eim_association_for_multiple_targets" "live-product" "one IPv4 local socket reached three targets while associations_active remained one per family"
+            Add-M17Witness "one_eim_association_mixes_direct_and_shadowsocks_targets" "live-product" "one IPv4 local socket round-tripped parsed STUN over Direct and protocol payloads over two Shadowsocks target children while only one IPv4 association remained active"
+            Add-M17Witness "mixed_ipv4_ipv6_target_children" "live-product" "IPv4 and IPv6 target children both completed through the candidate server"
+        } else {
+            $script:m17CounterAfter = Get-M17CounterSnapshot $metrics
+        }
+        Stop-M17Candidate $script:activeProcess "udp-$filterLabel"
+    }
+    } finally {
+        Restore-M17NetworkMutationJournal $script:work $script:m17NetworkMutationJournal
+        Assert-True (-not (Get-NetFirewallRule -Name $script:m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) "M17 UDP firewall scope was not removed"
+        Add-M17LiveRow "udp-firewall-cleanup" ([ordered]@{
+            rule_name = $script:m17UdpFirewallRuleName
+            active_store_rules = 0
+        })
+        Add-M17Witness "udp_firewall_scope_is_journaled_and_removed" "live-platform" "the address-scoped ActiveStore allow rule was durably journaled, removed, and read back absent"
+    }
+}
+
+function Invoke-M17SchedulerRingFull {
+    Enable-M17UdpFirewallAdmission
+    Add-M17LiveRow "scheduler-firewall-scope" ([ordered]@{
+        policy_store = "ActiveStore"
+        direction = "inbound"
+        protocol = "udp"
+        local_address = "198.18.0.2"
+        remote_address = "any"
+        local_only_mapping = $true
+        program = $script:controllerProgram
+        purpose = "prevent Windows stateful endpoint filtering from masking scheduler accounting while remaining controller-process scoped"
+    })
+    try {
+    $target = "192.0.2.241"
+    $port = Get-UniqueTcpPort
+    $probe = Add-M17LoopbackTarget $target $port
+    $script:m17MetricsPort = Get-UniqueTcpPort
+    $path = Join-Path $script:work "m17-scheduler-ring-full.toml"
+    Write-M17ClientConfig $path @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+ring_capacity = 131072
+max_tcp_flows = 256
+tcp_buffer_bytes = 32768
+max_udp_mappings = 1024
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ "proxy" $script:m17MetricsPort
+    Assert-M17Config $path "scheduler-ring-full"
+    $script:activeProcess = Start-M17Candidate $path "scheduler-ring-full"
+    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    [void](Add-TunRoute $script:ownedInterfaceIndex "$target/32" 500)
+    Add-M17LiveRow "scheduler-target-route-preference" ([ordered]@{
+        route = Get-M17TargetRoutePreference $script:ownedInterfaceIndex $target
+    })
+    $state = Wait-M17Session $script:m17MetricsPort 1 1
+    $script:m17CounterBefore = Get-M17CounterSnapshot $state.Metrics
+    $client = New-M17TunUdpClient "198.18.0.2" $script:ownedInterfaceIndex
+    try {
+        $client.Client.ReceiveBufferSize = 4MB
+        $warmupMetricsBefore = Get-Metrics $script:m17MetricsPort
+        $warmupIngressBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_ingress"
+        $warmupAcceptedBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_accepted"
+        $warmupRejectedBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_rejected" $true
+        $warmupEgressBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_egress"
+        $warmupRestartBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_session_restart_started"
+        $warmupRingBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_wintun_ring_full_dropped"
+        Invoke-M17UdpEcho $client $target $port ([Text.Encoding]::ASCII.GetBytes("m17-warmup"))
+        $warmupStableSamples = 0
+        $warmupDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $ordinaryMetricsBefore = Get-Metrics $script:m17MetricsPort
+            $warmupIngressAfter = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_ingress"
+            $warmupAcceptedAfter = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_accepted"
+            $warmupRejectedAfter = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_rejected" $true
+            $warmupEgressAfter = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_egress"
+            $warmupIngressDelta = $warmupIngressAfter - $warmupIngressBefore
+            $warmupAcceptedDelta = $warmupAcceptedAfter - $warmupAcceptedBefore
+            $warmupRejectedDelta = $warmupRejectedAfter - $warmupRejectedBefore
+            $warmupEgressDelta = $warmupEgressAfter - $warmupEgressBefore
+            Assert-True ($warmupIngressDelta -ge $warmupAcceptedDelta -and
+                $warmupAcceptedDelta -le 1 -and $warmupEgressDelta -le 1) "M17 scheduler accepted/egress counter overshoot: phase=warmup expected=1 raw_ingress_delta=$warmupIngressDelta accepted_before=$warmupAcceptedBefore accepted_after=$warmupAcceptedAfter accepted_delta=$warmupAcceptedDelta rejected_delta=$warmupRejectedDelta egress_before=$warmupEgressBefore egress_after=$warmupEgressAfter egress_delta=$warmupEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses)"
+            if ($warmupAcceptedDelta -eq 1 -and $warmupEgressDelta -eq 1 -and
+                $probe.Requests -eq 1 -and $probe.Responses -eq 1) {
+                $warmupStableSamples++
+                if ($warmupStableSamples -ge 2) { break }
+            } else {
+                $warmupStableSamples = 0
+            }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $warmupDeadline)
+        Assert-True ($warmupStableSamples -ge 2) "M17 scheduler counters did not stabilize: phase=warmup expected=1 raw_ingress_delta=$warmupIngressDelta accepted_before=$warmupAcceptedBefore accepted_after=$warmupAcceptedAfter accepted_delta=$warmupAcceptedDelta rejected_delta=$warmupRejectedDelta egress_before=$warmupEgressBefore egress_after=$warmupEgressAfter egress_delta=$warmupEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses) generation=$(Get-M17MetricValue $ordinaryMetricsBefore 'ferrum2_tun_session_generation') active=$(Get-M17MetricValue $ordinaryMetricsBefore 'ferrum2_tun_session_active')"
+        Assert-True ((Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_session_restart_started") -eq $warmupRestartBefore -and
+            (Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_wintun_ring_full_dropped") -eq $warmupRingBefore) "M17 scheduler warmup unexpectedly restarted or filled the Wintun ring"
+        Add-M17LiveRow "scheduler-warmup-counter-stability" ([ordered]@{
+            stable_samples = $warmupStableSamples
+            raw_ingress_delta = $warmupIngressDelta
+            accepted_delta = $warmupAcceptedDelta
+            rejected_delta = $warmupRejectedDelta
+            non_accepted_ingress_delta = $warmupIngressDelta - $warmupAcceptedDelta
+            egress_delta = $warmupEgressDelta
+            target_requests = $probe.Requests
+            target_responses = $probe.Responses
+        })
+        $ingressBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_ingress"
+        $acceptedBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_accepted"
+        $rejectedBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_rejected" $true
+        $egressBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_egress"
+        $restartBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_session_restart_started"
+        $ringBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_wintun_ring_full_dropped"
+        $burstSourceCount = 8
+        $burstClients = [Collections.Generic.List[Net.Sockets.UdpClient]]::new()
+        try {
+            foreach ($sourceIndex in 0..($burstSourceCount - 1)) {
+                $burstClients.Add((New-M17TunUdpClient "198.18.0.2" $script:ownedInterfaceIndex))
+            }
+            foreach ($burst in @(8, 16, 64)) {
+                $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                $actual = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                foreach ($round in 0..(($burst / $burstSourceCount) - 1)) {
+                    foreach ($sourceIndex in 0..($burstSourceCount - 1)) {
+                        $index = $round * $burstSourceCount + $sourceIndex
+                        $text = "m17-$burst-$index"
+                        [void]$expected.Add($text)
+                        $payload = [Text.Encoding]::ASCII.GetBytes($text)
+                        [void]$burstClients[$sourceIndex].Send($payload, $payload.Length, $target, $port)
+                    }
+                    foreach ($sourceIndex in 0..($burstSourceCount - 1)) {
+                        $task = $burstClients[$sourceIndex].ReceiveAsync()
+                        Assert-True ($task.Wait(10000) -and -not $task.IsFaulted) "M17 scheduler capacity-aware sequence response timeout: $burst/$round/$sourceIndex"
+                        [void]$actual.Add([Text.Encoding]::ASCII.GetString($task.Result.Buffer))
+                    }
+                }
+                Assert-True ($actual.SetEquals($expected)) "M17 scheduler capacity-aware sequence lost or duplicated a packet: $burst"
+            }
+        } finally {
+            foreach ($burstClient in $burstClients) { $burstClient.Dispose() }
+        }
+
+        Assert-True ($probe.Requests -eq 89 -and $probe.Responses -eq 89) "M17 scheduler warmup and ordinary target accounting was not exact"
+        $ordinaryStableSamples = 0
+        $ordinaryDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $ordinaryMetrics = Get-Metrics $script:m17MetricsPort
+            $ordinaryIngressAfter = Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_packets_ingress"
+            $ordinaryAcceptedAfter = Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_packets_accepted"
+            $ordinaryRejectedAfter = Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_packets_rejected" $true
+            $ordinaryEgressAfter = Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_packets_egress"
+            $ordinaryIngressDelta = $ordinaryIngressAfter - $ingressBefore
+            $ordinaryAcceptedDelta = $ordinaryAcceptedAfter - $acceptedBefore
+            $ordinaryRejectedDelta = $ordinaryRejectedAfter - $rejectedBefore
+            $ordinaryEgressDelta = $ordinaryEgressAfter - $egressBefore
+            Assert-True ($ordinaryIngressDelta -ge $ordinaryAcceptedDelta -and
+                $ordinaryAcceptedDelta -le 88 -and $ordinaryEgressDelta -le 88) "M17 scheduler accepted/egress counter overshoot: phase=burst expected=88 raw_ingress_delta=$ordinaryIngressDelta accepted_before=$acceptedBefore accepted_after=$ordinaryAcceptedAfter accepted_delta=$ordinaryAcceptedDelta rejected_delta=$ordinaryRejectedDelta egress_before=$egressBefore egress_after=$ordinaryEgressAfter egress_delta=$ordinaryEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses)"
+            if ($ordinaryAcceptedDelta -eq 88 -and $ordinaryEgressDelta -eq 88) {
+                $ordinaryStableSamples++
+                if ($ordinaryStableSamples -ge 2) { break }
+            } else {
+                $ordinaryStableSamples = 0
+            }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $ordinaryDeadline)
+        Assert-True ($ordinaryStableSamples -ge 2) "M17 scheduler counters did not stabilize: phase=burst expected=88 raw_ingress_delta=$ordinaryIngressDelta accepted_before=$acceptedBefore accepted_after=$ordinaryAcceptedAfter accepted_delta=$ordinaryAcceptedDelta rejected_delta=$ordinaryRejectedDelta egress_before=$egressBefore egress_after=$ordinaryEgressAfter egress_delta=$ordinaryEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses) restart_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_restart_started') - $restartBefore) ring_full_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_wintun_ring_full_dropped') - $ringBefore) generation=$(Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_generation') active=$(Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_active')"
+        Add-M17LiveRow "scheduler-burst-counter-stability" ([ordered]@{
+            stable_samples = $ordinaryStableSamples
+            raw_ingress_delta = $ordinaryIngressDelta
+            accepted_delta = $ordinaryAcceptedDelta
+            rejected_delta = $ordinaryRejectedDelta
+            non_accepted_ingress_delta = $ordinaryIngressDelta - $ordinaryAcceptedDelta
+            egress_delta = $ordinaryEgressDelta
+            target_requests = $probe.Requests
+            target_responses = $probe.Responses
+        })
+        Assert-True ((Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_session_restart_started") -eq $restartBefore -and
+            (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_wintun_ring_full_dropped") -eq $ringBefore) "M17 ordinary bursts unexpectedly restarted or filled the Wintun ring"
+
+        $pressurePackets = 256
+        $pressurePayloadBytes = 1200
+        $pressureTargetBefore = $probe.Requests
+        Assert-True ($pressureTargetBefore -eq 89 -and $probe.Responses -eq 89) "M17 scheduler target accounting changed after counter stabilization"
+        $pressureMetricsBefore = $ordinaryMetrics
+        $pressureEgressBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_tun_packets_egress"
+        $pressureRingBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_tun_wintun_ring_full_dropped"
+        $pressureRestartBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_tun_session_restart_started"
+        $pressureBatchPackets = 1
+        foreach ($batch in 0..(($pressurePackets / $pressureBatchPackets) - 1)) {
+            $batchStart = $batch * $pressureBatchPackets
+            foreach ($ordinal in $batchStart..($batchStart + $pressureBatchPackets - 1)) {
+                $payload = [byte[]]::new($pressurePayloadBytes)
+                [BitConverter]::GetBytes([uint32]$ordinal).CopyTo($payload, 0)
+                [void]$client.Send($payload, $payload.Length, $target, $port)
+            }
+            $expectedTargetCount = $pressureTargetBefore + $batchStart + $pressureBatchPackets
+            Assert-True ($probe.WaitRequests($expectedTargetCount, 5000)) "M17 pressure target request batch was incomplete"
+            Assert-True ($probe.Requests -eq $expectedTargetCount) "M17 pressure target request batch was not exact"
+            $responseDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            while ($probe.Responses -lt $expectedTargetCount -and [DateTime]::UtcNow -lt $responseDeadline) {
+                Start-Sleep -Milliseconds 5
+            }
+            Assert-True ($probe.Responses -eq $expectedTargetCount) "M17 pressure target response batch was not exact"
+        }
+
+        $pressureDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            $pressureMetrics = Get-Metrics $script:m17MetricsPort
+            $pressureEgressDelta = (Get-M17MetricValue $pressureMetrics "ferrum2_tun_packets_egress") - $pressureEgressBefore
+            $pressureRingDelta = (Get-M17MetricValue $pressureMetrics "ferrum2_tun_wintun_ring_full_dropped") - $pressureRingBefore
+            if ($pressureEgressDelta + $pressureRingDelta -ge $pressurePackets) { break }
+            Start-Sleep -Milliseconds 25
+        } while ([DateTime]::UtcNow -lt $pressureDeadline)
+        Assert-True ($pressureEgressDelta -ge 0 -and $pressureRingDelta -ge 0 -and
+            $pressureEgressDelta + $pressureRingDelta -eq $pressurePackets) "M17 pressure output accounting is not closed"
+        Assert-True ((Get-M17MetricValue $pressureMetrics "ferrum2_tun_session_restart_started") -eq $pressureRestartBefore) "M17 ring pressure restarted the session"
+
+        $pressureActual = [Collections.Generic.HashSet[uint32]]::new()
+        if ($pressureEgressDelta -gt 0) {
+            foreach ($ignored in 1..([int]$pressureEgressDelta)) {
+                $task = $client.ReceiveAsync()
+                Assert-True ($task.Wait(15000) -and -not $task.IsFaulted) "M17 accounted pressure response did not reach the TUN socket"
+                $response = $task.Result
+                Assert-True ($response.Buffer.Length -eq $pressurePayloadBytes -and
+                    $response.RemoteEndPoint.Address.ToString() -ceq $target -and
+                    $response.RemoteEndPoint.Port -eq $port) "M17 pressure response shape or source changed"
+                $ordinal = [BitConverter]::ToUInt32($response.Buffer, 0)
+                Assert-True ($ordinal -lt $pressurePackets -and $pressureActual.Add($ordinal)) "M17 pressure response was invalid or duplicated"
+            }
+        }
+        Assert-True ($pressureActual.Count -eq [int]$pressureEgressDelta) "M17 pressure delivery count changed"
+        $pressureReceiveBufferBytes = $client.Client.ReceiveBufferSize
+    } finally { $client.Dispose() }
+    Assert-True ($probe.WaitRequests(345, 10000)) "M17 scheduler target did not observe every burst and pressure packet"
+    Assert-True ($probe.Requests -eq 345 -and $probe.Responses -eq 345) "M17 scheduler target accounting was not exact"
+    Start-Sleep -Milliseconds 100
+    $metrics = Get-Metrics $script:m17MetricsPort
+    $finalPressureEgressDelta = (Get-M17MetricValue $metrics "ferrum2_tun_packets_egress") - $pressureEgressBefore
+    $finalPressureRingDelta = (Get-M17MetricValue $metrics "ferrum2_tun_wintun_ring_full_dropped") - $pressureRingBefore
+    Assert-True ($finalPressureEgressDelta -eq $pressureEgressDelta -and
+        $finalPressureRingDelta -eq $pressureRingDelta -and
+        $finalPressureEgressDelta + $finalPressureRingDelta -eq $pressurePackets) "M17 pressure output accounting did not remain stable after drain"
+    Assert-True ((Get-M17MetricValue $metrics "ferrum2_tun_session_restart_started") -eq $pressureRestartBefore) "M17 pressure caused a delayed session restart"
+    Add-M17LiveRow "scheduler-egress-pressure" ([ordered]@{
+        packets = $pressurePackets
+        batch_packets = $pressureBatchPackets
+        payload_bytes = $pressurePayloadBytes
+        delivered = [int]$finalPressureEgressDelta
+        ring_full_dropped = [int]$finalPressureRingDelta
+        receive_buffer_bytes = $pressureReceiveBufferBytes
+        restart_delta = 0
+    })
+    Add-M17Witness "live_egress_pressure_has_closed_accounting" "live-product" "256 1200-byte responses were exactly partitioned into delivered and explicit ring-full outcomes without restart"
+    Add-M17LiveRow "scheduler-bursts" ([ordered]@{
+        sequence_packets = @(8, 16, 64)
+        batch_packets = $burstSourceCount
+        sources = $burstSourceCount
+        packets = 88
+        ingress_delta = $ordinaryAcceptedDelta
+        raw_ingress_delta = $ordinaryIngressDelta
+        rejected_delta = $ordinaryRejectedDelta
+        non_accepted_ingress_delta = $ordinaryIngressDelta - $ordinaryAcceptedDelta
+        egress_delta = $ordinaryEgressAfter - $egressBefore
+        target_requests = $pressureTargetBefore
+        restart_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_session_restart_started") - $restartBefore
+        live_ring_full_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_wintun_ring_full_dropped") - $ringBefore
+    })
+    $script:m17CounterAfter = Get-M17CounterSnapshot $metrics
+    Stop-M17Candidate $script:activeProcess "scheduler-ring-full"
+    } finally {
+        Restore-M17NetworkMutationJournal $script:work $script:m17NetworkMutationJournal
+        Assert-True (-not (Get-NetFirewallRule -Name $script:m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) "M17 scheduler firewall scope was not removed"
+        Add-M17LiveRow "scheduler-firewall-cleanup" ([ordered]@{
+            rule_name = $script:m17UdpFirewallRuleName
+            active_store_rules = 0
+        })
+    }
+}
+
+function Invoke-M17Qualification([string]$SourceDll) {
+    Assert-True (-not (Test-Path -LiteralPath $script:siblingDll)) "M17 sibling DLL baseline not absent"
+    Write-OwnedSiblingDllIntent
+    Copy-Item -LiteralPath $SourceDll -Destination $script:siblingDll
+    $script:createdSiblingDll = $true
+    Assert-True ((Get-FileHash -LiteralPath $script:siblingDll -Algorithm SHA256).Hash -eq $script:expectedDllHash) "M17 sibling DLL identity changed"
+    Start-M17Server
+    switch ($script:Mode) {
+        "route-detect" { Invoke-M17RouteDetect }
+        "restart-stress" { Invoke-M17RestartStress }
+        "fragments" { Invoke-M17Fragments }
+        "dual-stack-dns" { Invoke-M17DualStackDns }
+        "udp-policy" { Invoke-M17UdpPolicy }
+        "scheduler-ring-full" { Invoke-M17SchedulerRingFull }
+        default { throw "M17 live dispatch received an invalid mode" }
+    }
+    Invoke-M17CandidateTests
+    $actualWitnesses = @($script:m17WitnessRows.Keys | Sort-Object)
+    $expectedWitnesses = @($script:m17Contract.witnesses | Sort-Object)
+    Assert-True (($actualWitnesses -join "`n") -ceq ($expectedWitnesses -join "`n")) "M17 witness set is incomplete"
+}
+
+function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object]$CleanupFailure) {
+    if (-not $script:m17ArtifactInitialized) { return }
+    $script:m17FinishedUtc = [DateTime]::UtcNow.ToString("o")
+    $failure = if ($PrimaryFailure) { $PrimaryFailure } else { $CleanupFailure }
+    $failureRecord = if ($failure) {
+        $message = [string]$failure.Exception.Message
+        if ($message.Length -gt 2048) { $message = $message.Substring(0, 2048) }
+        [ordered]@{ type = $failure.Exception.GetType().FullName; message = $message }
+    } else { $null }
+    $cleanupProcesses = @(Get-ExactRunProcesses -WorkPath $script:work).Count
+    $cleanupAdapters = @(Get-NetAdapter -Name $script:adapterName -IncludeHidden -ErrorAction SilentlyContinue).Count
+    $cleanupSibling = if (Test-Path -LiteralPath $script:siblingDll) { 1 } else { 0 }
+    $cleanupWork = if (Test-Path -LiteralPath $script:work) { 1 } else { 0 }
+    $cleanupPassed = -not $CleanupFailure -and $cleanupProcesses -eq 0 -and $cleanupAdapters -eq 0 -and
+        $cleanupSibling -eq 0 -and $cleanupWork -eq 0
+    $cleanup = [ordered]@{
+        status = if ($cleanupPassed) { "pass" } else { "fail" }
+        processes = $cleanupProcesses
+        adapters = $cleanupAdapters
+        sibling_dll = $cleanupSibling
+        work_directory = $cleanupWork
+        cleanup_failure_type = if ($CleanupFailure) { $CleanupFailure.Exception.GetType().FullName } else { $null }
+    }
+    if ($Succeeded) {
+        Assert-True $cleanupPassed "M17 cleanup evidence is not absent"
+    }
+    $document = [ordered]@{
+        schema = "ferrum2.windows-tun.m17-result.v1"
+        status = if ($Succeeded) { "pass" } else { "fail" }
+        mode = $script:Mode
+        run_token = $script:runIdentity
+        restart_cycles = if ($script:Mode -eq "restart-stress") { $script:RestartCycles } else { $null }
+        approved_vm_name = $script:expectedHyperVVmName
+        approved_vm_id = $script:expectedHyperVVmId
+        approved_checkpoint_name = $script:expectedHyperVCheckpointName
+        approved_checkpoint_id = $script:expectedHyperVCheckpointId
+        guest_build = [string]$script:capabilityIdentity.Ledger.guest_build
+        identity_sha256 = $script:capabilityIdentityHash
+        candidate_sha = [string]$script:capabilityIdentity.Ledger.candidate_sha
+        client_sha256 = [string]$script:capabilityIdentity.Ledger.client_sha256
+        server_sha256 = [string]$script:capabilityIdentity.Ledger.server_sha256
+        controller_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
+        wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
+        test_binaries = if ($script:capabilityIdentity.Ledger.PSObject.Properties.Name -ccontains "test_binaries") {
+            $script:capabilityIdentity.Ledger.test_binaries
+        } else { $null }
+        started_utc = $script:m17StartedUtc
+        finished_utc = $script:m17FinishedUtc
+        fixtures = $script:m17FixtureRows
+        processes = @($script:m17ProcessRows)
+        live_checks = @($script:m17LiveRows)
+        deterministic_tests = @($script:m17TestRows)
+        witnesses = @($script:m17WitnessRows.Values)
+        counters_before = $script:m17CounterBefore
+        counters_after = $script:m17CounterAfter
+        cleanup = $cleanup
+        failure = $failureRecord
+    }
+    $artifact = Join-Path $script:m17ArtifactRoot "m17-result.json"
+    [IO.File]::WriteAllText($artifact, (($document | ConvertTo-Json -Depth 12) + "`n"), [Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-Item -LiteralPath $artifact).Length -le 1048576) "M17 result artifact exceeded the 1 MiB cap"
+}
+
 try {
     Initialize-Tcp08Artifacts
     Assert-True (-not (Test-Path -LiteralPath $work)) "run work baseline not absent"
     Assert-True (@(Get-ExactRunProcesses $work).Count -eq 0) "run process baseline not absent"
     Assert-True (-not (Get-NetAdapter -Name $adapterName -IncludeHidden -ErrorAction SilentlyContinue)) "run adapter baseline not absent"
+    if ($Mode -in $m17Modes) {
+        Assert-True (-not (Get-NetFirewallRule -Name $m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) "M17 UDP firewall rule baseline not absent"
+    }
     if ($Mode -in @("managed-product", "full", "hard-kill")) {
         Assert-True (-not (Get-NetAdapter -Name $managedManualAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "manual product adapter baseline not absent"
         Assert-True (-not (Get-NetAdapter -Name $managedAutoAdapterName -IncludeHidden -ErrorAction SilentlyContinue)) "managed lifecycle adapter baseline not absent"
@@ -4721,7 +7909,7 @@ try {
     Assert-True (($exports -join "|") -eq ($expectedExports -join "|")) "DLL export set mismatch"
     $foundation++
 
-    if ($Mode -notin @("network-feasibility", "managed-product", "full", "hard-kill")) {
+    if ($Mode -notin (@("network-feasibility", "managed-product", "full", "hard-kill") + $m17Modes)) {
         $buildPackages = [System.Collections.Generic.List[string]]::new()
         if (-not $clientBinaryExplicit) {
             $buildPackages.Add("-p")
@@ -4741,10 +7929,14 @@ try {
         }
     }
     Assert-True (Test-Path -LiteralPath $binary) "candidate client binary is missing after selection/build"
-    if ($Mode -in @("tcp", "tcp08", "udp", "performance")) {
+    if ($Mode -in (@("tcp", "tcp08", "udp", "performance") + $m17Modes)) {
         Assert-True (Test-Path -LiteralPath $serverBinary) "candidate server binary is missing after selection/build"
     }
     if ($tcp08Enabled) { Write-Tcp08BinaryEvidence $sourceDll }
+    if ($Mode -in $m17Modes) {
+        [void](Invoke-M17ContractPreflight)
+        Invoke-M17Qualification $sourceDll
+    }
     if ($Mode -eq "managed-product") {
         Assert-PktMonAbsent
         $supportAddress = $capabilityIdentity.SupportAddress
@@ -5424,6 +8616,20 @@ listen = "127.0.0.1:$managedMetricsPort"
                 $hardKillConfigText = $managedRouteOnlyTemplate.Replace("127.0.0.1:$directSocksPort", "127.0.0.1:$hardKillDirectSocksPort")
                 $hardKillConfigText = $hardKillConfigText.Replace("127.0.0.1:$managedMetricsPort", "127.0.0.1:$hardKillMetricsPort")
             }
+            $hardKillCapturePrefix = "$supportAddress/32"
+            $autoRouteRows = @($hardKillConfigText -split '\r?\n' | Where-Object { $_ -ceq "auto_route = true" })
+            Assert-True ($autoRouteRows.Count -eq 1 -and
+                @($hardKillConfigText -split '\r?\n' | Where-Object {
+                    $_.StartsWith("route_address =", [StringComparison]::Ordinal)
+                }).Count -eq 0) "managed hard-kill capture template is ambiguous"
+            $hardKillRouteLine = "route_address = [`"$hardKillCapturePrefix`"]"
+            $hardKillConfigText = $hardKillConfigText.Replace(
+                "auto_route = true",
+                "auto_route = true`n$hardKillRouteLine"
+            )
+            Assert-True (@($hardKillConfigText -split '\r?\n' | Where-Object {
+                $_ -ceq $hardKillRouteLine
+            }).Count -eq 1) "managed hard-kill target capture generation mismatch"
             try {
                 Assert-True (-not (Test-Path -LiteralPath $hardKillConfiguration)) "managed hard-kill generated config baseline not absent"
                 Assert-True (-not $hardKillConfigText.Contains("127.0.0.1:$directSocksPort") -and
@@ -5438,8 +8644,22 @@ listen = "127.0.0.1:$managedMetricsPort"
                 Assert-True (@($offlineOutput | Where-Object { $_ -eq "configuration valid" }).Count -eq 1) "managed hard-kill generated config marker mismatch"
 
                 $activeProcess = Start-Candidate $binary $hardKillConfiguration
-                $adapter = Wait-AdapterReady $managedAutoAdapterName 20 $true $hardKill.Dns
+                $adapter = Wait-AdapterReady -Name $managedAutoAdapterName -TimeoutSeconds 20 `
+                    -Managed $true -ManagedDns ([bool]$hardKill.Dns) `
+                    -ManagedCapturePrefixes @($hardKillCapturePrefix)
                 $ownedInterfaceIndex = [int]$adapter.ifIndex
+                $hardKillCaptureRoutes = @(
+                    Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 `
+                        -PolicyStore ActiveStore -ErrorAction Stop |
+                        Where-Object { $_.DestinationPrefix -ceq $hardKillCapturePrefix }
+                )
+                Assert-True ($hardKillCaptureRoutes.Count -eq 1 -and
+                    $hardKillCaptureRoutes[0].NextHop -ceq "0.0.0.0" -and
+                    [uint32]$hardKillCaptureRoutes[0].RouteMetric -eq 1 -and
+                    @(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -AddressFamily IPv4 `
+                        -PolicyStore ActiveStore -ErrorAction Stop | Where-Object {
+                            $_.DestinationPrefix -in @("0.0.0.0/1", "128.0.0.0/1")
+                        }).Count -eq 0) "managed hard-kill target capture readback mismatch"
                 if ($hardKill.Dns) {
                     Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "hard-kill DNS active"
                 }
@@ -6753,6 +9973,7 @@ finally {
         Assert-InterfaceGone $managedAutoAdapterName $null
         Assert-InterfaceGone $managedManualAdapterName $null
     }
+    Restore-M17NetworkMutationJournal $work $m17NetworkMutationJournal
     foreach ($route in $ownedTargetRoutes) {
         Remove-NetRoute -InputObject $route -Confirm:$false -ErrorAction SilentlyContinue
     }
@@ -6796,6 +10017,14 @@ if ($tcp01Diagnostic) {
     $tcp01RunAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
     [Console]::Error.WriteLine("m15_windows_tun_tcp01_diag $tcp01Diagnostic cleanup=$tcp01Cleanup sha=$tcp01Sha run_id=$tcp01RunId run_attempt=$tcp01RunAttempt")
 }
+if ($Mode -in $m17Modes -and $m17ArtifactInitialized) {
+    $m17Succeeded = $completed -and -not $primaryError -and -not $outerCleanupError -and $tcp08CleanupSucceeded
+    try { Complete-M17Artifact $m17Succeeded $primaryError $outerCleanupError }
+    catch {
+        if (-not $primaryError) { $primaryError = $_ }
+        elseif (-not $outerCleanupError) { $outerCleanupError = $_ }
+    }
+}
 if ($outerCleanupError -and -not $primaryError) { $primaryError = $outerCleanupError }
 if ($primaryError) { throw $primaryError }
 
@@ -6803,7 +10032,15 @@ if ($completed) {
     $sha = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "local" }
     $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
     $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "local" }
-    if ($Mode -eq "lifecycle") {
+    if ($Mode -in $m17Modes) {
+        $artifact = Join-Path $m17ArtifactRoot "m17-result.json"
+        Assert-True (Test-Path -LiteralPath $artifact) "M17 result artifact is missing"
+        $witnessCount = @($m17WitnessRows.Keys).Count
+        $expectedWitnessCount = @($m17Contract.witnesses).Count
+        $testCount = $m17TestRows.Count
+        Assert-True ($witnessCount -eq $expectedWitnessCount) "M17 final witness count changed"
+        Write-Output "m17_windows_tun status=PASS mode=$Mode witnesses=$witnessCount/$expectedWitnessCount exact_tests=$testCount cleanup=PASS run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) artifact=$artifact"
+    } elseif ($Mode -eq "lifecycle") {
         Write-Output "m15_windows_tun_e2e status=PASS profile=foundation foundation=4/4 cleanup=PASS sha=$sha run_id=$runId run_attempt=$runAttempt"
     } elseif ($Mode -eq "tcp08") {
         Assert-True ($tcpRows -eq 1 -and $tcp08Result -eq "PASS" -and $tcp08CleanupSucceeded) "focused TCP-08 marker prerequisites mismatch"

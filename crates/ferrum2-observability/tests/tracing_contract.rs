@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use ferrum2_observability::{
     Event, LogLevel, Metrics, Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage,
-    TraceRecord, Transport, json_subscriber,
+    TraceRecord, Transport, TunDiagnosticReason, TunIpFamily, emit_tun_diagnostic, json_subscriber,
 };
 use serde_json::Value;
 use tracing::Dispatch;
@@ -245,4 +245,62 @@ fn sniff_trace_has_one_exact_closed_tuple_and_no_identity_channel() {
     assert_eq!(object["outcome"], "invalid");
     assert_eq!(object["protocol"], "none");
     assert_eq!(object["transport"], "udp");
+}
+
+#[test]
+fn tun_diagnostics_have_only_fixed_reason_and_family_fields() {
+    let capture = Captured::default();
+    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let dispatch = Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        emit_tun_diagnostic(
+            Role::Client,
+            TunDiagnosticReason::WintunRingFull,
+            TunIpFamily::Ipv4,
+        );
+        emit_tun_diagnostic(
+            Role::Client,
+            TunDiagnosticReason::EqualPrefixPreferred,
+            TunIpFamily::Ipv6,
+        );
+    });
+
+    let text = capture.text();
+    let values = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("TUN diagnostic JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    for value in &values {
+        assert_eq!(
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "event",
+                "family",
+                "level",
+                "outcome",
+                "reason",
+                "role",
+                "stage",
+                "timestamp",
+            ])
+        );
+        assert_eq!(value["event"], "tun");
+        assert_eq!(value["role"], "client");
+        assert_eq!(value["stage"], "tun");
+    }
+    assert_eq!(values[0]["outcome"], "dropped");
+    assert_eq!(values[0]["reason"], "wintun_ring_full");
+    assert_eq!(values[0]["family"], "ipv4");
+    assert_eq!(values[1]["outcome"], "rejected");
+    assert_eq!(values[1]["reason"], "equal_prefix_preferred");
+    assert_eq!(values[1]["family"], "ipv6");
+    for sentinel in ["192.0.2.99", "[2001:db8::99]:443", "TUN_ADAPTER_SENTINEL"] {
+        assert!(!text.contains(sentinel));
+    }
 }

@@ -670,10 +670,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     std::fs::remove_file(path).expect("remove TUN TCP config");
     let metrics = Metrics::new();
     publish_rule_program_metadata(&config, &metrics);
+    let selector = config.selector_control();
     let routing = ClientRouting {
         legacy: config.route,
         program: config.route_program,
         outbounds: Arc::from([]),
+        selector,
     };
     let target = TargetAddr::ip("192.0.2.1:80".parse().expect("target")).expect("target");
     let wire = b"GET / HTTP/1.1\r\nHost: replay.test\r\n\r\n";
@@ -864,6 +866,7 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
         legacy: route,
         program: None,
         outbounds,
+        selector: selector.clone(),
     };
     let target = TargetAddr::ip("192.0.2.1:443".parse().expect("target")).expect("target");
     let (mut first_flow, _) = tokio::io::duplex(1);
@@ -1306,10 +1309,12 @@ fn client_udp_route_publishes_program_and_match_observations() {
     std::fs::remove_file(path).expect("remove UDP route metrics config");
     let metrics = Metrics::new();
     publish_rule_program_metadata(&config, &metrics);
+    let selector = config.selector_control();
     let routing = ClientRouting {
         legacy: config.route,
         program: config.route_program,
         outbounds: Arc::from([]),
+        selector,
     };
     let target = TargetAddr::ip("192.0.2.1:53".parse().expect("UDP route target"))
         .expect("validated UDP route target");
@@ -1709,6 +1714,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
                         })
                     })
                     .into(),
+                selector: ferrum2_rule::SelectorControl::empty(),
             }),
         })
     });

@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Maximum number of selectors retained by one route table.
 pub const MAX_SELECTORS: usize = 64;
@@ -170,9 +170,17 @@ pub(super) struct Selector {
 #[derive(Default)]
 pub(super) struct SelectorState {
     pub(super) selectors: Vec<Selector>,
+    generation: AtomicU64,
 }
 
 impl SelectorState {
+    pub(super) fn new(selectors: Vec<Selector>) -> Self {
+        Self {
+            selectors,
+            generation: AtomicU64::new(0),
+        }
+    }
+
     pub(super) fn resolve(&self, mut action: OutboundAction) -> usize {
         for _ in 0..=self.selectors.len() {
             match action {
@@ -184,6 +192,63 @@ impl SelectorState {
             }
         }
         unreachable!("validated selector graph does not terminate")
+    }
+
+    fn generation(&self) -> u64 {
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if generation & 1 == 0 {
+                return generation;
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    fn begin_change(&self) -> SelectorChange<'_> {
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if generation & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            if self
+                .generation
+                .compare_exchange(
+                    generation,
+                    generation.wrapping_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return SelectorChange {
+                    generation: &self.generation,
+                    baseline: generation,
+                    changed: false,
+                };
+            }
+        }
+    }
+}
+
+struct SelectorChange<'a> {
+    generation: &'a AtomicU64,
+    baseline: u64,
+    changed: bool,
+}
+
+impl SelectorChange<'_> {
+    fn mark_changed(&mut self) {
+        self.changed = true;
+    }
+}
+
+impl Drop for SelectorChange<'_> {
+    fn drop(&mut self) {
+        self.generation.store(
+            self.baseline.wrapping_add(if self.changed { 2 } else { 0 }),
+            Ordering::Release,
+        );
     }
 }
 
@@ -212,6 +277,14 @@ impl SelectorControl {
         Ok(&selector.members[selector.selected.load(Ordering::SeqCst)].tag)
     }
 
+    /// Returns the last complete selector generation.
+    ///
+    /// Successful switches to a different immediate member advance this value.
+    /// Failed and no-op switches leave it unchanged.
+    pub fn generation(&self) -> u64 {
+        self.state.generation()
+    }
+
     /// Atomically selects one configured immediate member.
     pub fn switch(&self, selector_tag: &str, member_tag: &str) -> Result<(), SelectorError> {
         let selector = self
@@ -225,8 +298,13 @@ impl SelectorControl {
             .iter()
             .position(|member| member.tag.as_ref() == member_tag)
             .ok_or(SelectorError::UnknownMember)?;
+        if selector.selected.load(Ordering::SeqCst) == member {
+            return Ok(());
+        }
+        let mut change = self.state.begin_change();
         if selector.selected.load(Ordering::SeqCst) != member {
             selector.selected.store(member, Ordering::SeqCst);
+            change.mark_changed();
         }
         Ok(())
     }

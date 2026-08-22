@@ -394,7 +394,7 @@ type = "direct"
 }
 
 #[test]
-fn finished_tun_tracks_every_ipv4_dns_candidate_and_rechecks_listener_aliases() {
+fn finished_tun_tracks_every_dual_stack_dns_candidate_and_rechecks_listener_aliases() {
     let source = r#"
 schema_version = 2
 
@@ -421,7 +421,7 @@ tag = "bootstrap"
 transport = "udp"
 address = "bootstrap.example.test:5353"
 domain_resolver = "system"
-domain_strategy = "ipv4_only"
+domain_strategy = "prefer_ipv4"
 
 [dns.route]
 final = "bootstrap"
@@ -430,6 +430,7 @@ final = "bootstrap"
     let candidates = vec![
         "192.0.2.10:5353".parse().unwrap(),
         "192.0.2.11:5353".parse().unwrap(),
+        "[2001:db8::53]:5353".parse().unwrap(),
     ]
     .into_boxed_slice();
     let prepared = prepare_client_v2(&file.0).expect("prepare candidate TUN");
@@ -447,6 +448,7 @@ final = "bootstrap"
         [
             "192.0.2.10:5353".parse().unwrap(),
             "192.0.2.11:5353".parse().unwrap(),
+            "[2001:db8::53]:5353".parse().unwrap(),
         ]
     );
 

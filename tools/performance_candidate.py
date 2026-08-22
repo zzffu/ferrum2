@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 
@@ -135,6 +136,358 @@ UDP_DIRECT_PAYLOAD_BOUNDS = (
 )
 QUALIFICATION_GROUPS = frozenset(
     {"tcp-frame-capacity", "udp-payload-matrix", "udp-direct-payload-bounds"}
+)
+# These lifecycle selections remain correctness qualifications.  Do not use a
+# prefix match here: windows-tun-m17 is a real paired performance selection with
+# its own evidence and calibration contracts below.
+QUALIFICATION_ONLY_SELECTIONS = frozenset(
+    {
+        "windows-tun-route-detect",
+        "windows-tun-restart-10",
+        "windows-tun-restart-100",
+        "windows-tun-restart-1000",
+        "windows-tun-fragments",
+        "windows-tun-dual-stack-dns",
+        "windows-tun-udp-policy",
+        "windows-tun-scheduler-ring-full",
+    }
+)
+WINDOWS_TUN_SELECTION = "windows-tun-m17"
+WINDOWS_TUN_RUN_KINDS = frozenset({"comparison", "calibration-aa"})
+WINDOWS_TUN_PAIR_COUNT = 5
+WINDOWS_TUN_PLAN_SCHEMA_VERSION = 1
+WINDOWS_TUN_TRIAL_SCHEMA_VERSION = 1
+WINDOWS_TUN_SUMMARY_SCHEMA_VERSION = 1
+WINDOWS_TUN_CALIBRATION_SCHEMA_VERSION = 1
+WINDOWS_TUN_POLICY_SCHEMA_VERSION = 1
+WINDOWS_TUN_TRIAL_MAX_BYTES = 64 * 1024
+WINDOWS_TUN_PAIR_SCHEDULE = "alternating-parent-candidate"
+WINDOWS_TUN_GUEST = {
+    "runner_os": "Windows",
+    "runner_arch": "X64",
+    "runner_label": "ferrum2-hyperv-guest",
+    "vm_name": "Windows 10 MSIX packaging environment",
+    "vm_id": "82e20295-1d30-48e7-a751-e21d35d872d4",
+    "checkpoint_name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
+    "checkpoint_id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
+    "rust_toolchain": "1.97.1",
+    "cargo_profile": "profiling",
+    "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
+}
+WINDOWS_TUN_RUNTIME_RECIPE = {
+    "topology": "tun-shadowsocks-external-echo",
+    "tun_mtu_bytes": 1_420,
+    "tun_ring_capacity_bytes": 131_072,
+    "tun_max_tcp_flows": 4_096,
+    "tun_tcp_buffer_bytes": 32_768,
+    "tun_max_udp_mappings": 8_192,
+    "udp_max_sessions": 16_384,
+    "udp_idle_timeout_milliseconds": 60_000,
+    "gso": False,
+}
+
+# Each scenario owns a closed recipe, metric/unit set, and correctness check
+# set.  Values are intentionally measurement-free: reviewed thresholds live in
+# the policy and must come from an A/A artifact produced on the approved guest.
+WINDOWS_TUN_SCENARIOS = {
+    "tcp-single-flow": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 10,
+            "active_seconds": 60,
+            "flows": 1,
+            "payload_bytes": 65_536,
+            "cpu_measurement_window": "warmup_and_active",
+        },
+        "metrics": {
+            "throughput": {
+                "unit": "bytes_per_second",
+                "direction": "higher_is_better",
+            },
+            "cpu_cost": {
+                "unit": "cpu_nanoseconds_per_gibibyte",
+                "direction": "lower_is_better",
+            },
+        },
+        "checked_unit": "payload_bytes",
+        "minimum_checked_units": 67_108_864,
+        "correctness_checks": (
+            "single_flow_only",
+            "payload_exact",
+            "no_gso",
+            "tun_path_observed",
+            "clean_drain",
+        ),
+    },
+    "tcp-256-flow-fairness": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 10,
+            "active_seconds": 30,
+            "flows": 256,
+            "payload_bytes": 16_384,
+        },
+        "metrics": {
+            "fairness": {
+                "unit": "jain_index_parts_per_billion",
+                "direction": "higher_is_better",
+            },
+        },
+        "checked_unit": "completed_flows",
+        "minimum_checked_units": 256,
+        "correctness_checks": (
+            "all_256_flows_nonzero",
+            "payload_exact",
+            "no_gso",
+            "tun_path_observed",
+            "clean_drain",
+        ),
+    },
+    "udp-packets-per-second": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 5,
+            "active_seconds": 30,
+            "associations": 1,
+            "batch_datagrams": 64,
+            "payload_bytes": 1_200,
+        },
+        "metrics": {
+            "packet_rate": {
+                "unit": "datagrams_per_second",
+                "direction": "higher_is_better",
+            },
+        },
+        "checked_unit": "echoed_datagrams",
+        "minimum_checked_units": 4_096,
+        "correctness_checks": (
+            "every_reply_accounted",
+            "payload_exact",
+            "no_gso",
+            "tun_path_observed",
+            "clean_drain",
+        ),
+    },
+    "udp-8192-association-lookup-expiry": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 5,
+            "associations": 8_192,
+            "batch_associations": 256,
+            "lookup_rounds": 64,
+            "expiry_rounds": 1,
+        },
+        "metrics": {
+            "lookup_rate": {
+                "unit": "lookups_per_second",
+                "direction": "higher_is_better",
+            },
+            "expiry_cost": {
+                "unit": "nanoseconds_per_8192_expirations",
+                "direction": "lower_is_better",
+            },
+        },
+        "checked_unit": "association_lookups",
+        "minimum_checked_units": 524_288,
+        "correctness_checks": (
+            "exactly_8192_associations",
+            "all_lookups_hit",
+            "all_associations_expired",
+            "tun_path_observed",
+            "clean_drain",
+        ),
+    },
+    "fragment-reassembly-throughput": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 5,
+            "active_seconds": 30,
+            "ip_families": 1,
+            "fragments_per_datagram": 3,
+            "batch_datagrams": 16,
+            "payload_bytes": 4_096,
+        },
+        "metrics": {
+            "reassembly_rate": {
+                "unit": "reassembled_payload_bytes_per_second",
+                "direction": "higher_is_better",
+            },
+        },
+        "checked_unit": "reassembled_datagrams",
+        "minimum_checked_units": 4_096,
+        "correctness_checks": (
+            "fragment_packets_observed",
+            "no_reassembly_drop",
+            "payload_exact",
+            "tun_path_observed",
+            "clean_drain",
+        ),
+    },
+    "idle-cpu-wakeup": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "settle_seconds": 10,
+            "active_seconds": 60,
+            "sample_interval_milliseconds": 1_000,
+            "expected_traffic_packets": 0,
+        },
+        "metrics": {
+            "cpu_idle_cost": {
+                "unit": "cpu_nanoseconds_per_second",
+                "direction": "lower_is_better",
+            },
+            "wakeups": {
+                "unit": "process_context_switches_per_second",
+                "direction": "lower_is_better",
+            },
+        },
+        "checked_unit": "idle_samples",
+        "minimum_checked_units": 60,
+        "correctness_checks": (
+            "session_active_throughout",
+            "zero_test_traffic",
+            "no_busy_poll_fallback",
+            "clean_drain",
+        ),
+    },
+    "wintun-ring-full-drop-rate": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 5,
+            "burst_attempts": 1_000_000,
+            "packets_per_event": 1,
+            "drop_rate_denominator": "tun_response_attempts",
+        },
+        "metrics": {
+            "drop_rate": {
+                "unit": "dropped_packets_per_million_responses",
+                "direction": "lower_is_better",
+            },
+        },
+        "checked_unit": "ring_full_events",
+        "minimum_checked_units": 1,
+        "correctness_checks": (
+            "ring_full_counter_increased",
+            "drop_rate_denominator_bound",
+            "no_ring_full_retry",
+            "no_session_restart",
+            "tun_path_observed",
+        ),
+    },
+    "restart-recovery": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "warmup_seconds": 5,
+            "restart_cycles": 10,
+            "recovery_timeout_seconds": 30,
+            "probe_protocols": 2,
+        },
+        "metrics": {
+            "recovery": {
+                "unit": "p99_recovery_nanoseconds",
+                "direction": "lower_is_better",
+            },
+        },
+        "checked_unit": "successful_restart_cycles",
+        "minimum_checked_units": 10,
+        "correctness_checks": (
+            "same_process_all_cycles",
+            "generation_advanced_once_per_cycle",
+            "tcp_and_udp_recovered_each_cycle",
+            "tun_path_observed",
+            "clean_drain",
+        ),
+    },
+}
+WINDOWS_TUN_POLICY_DOCUMENT_FIELDS = frozenset(
+    {"schema_version", "policy_id", "selection", "scenarios"}
+)
+WINDOWS_TUN_POLICY_RUNTIME_FIELDS = frozenset(
+    {*WINDOWS_TUN_POLICY_DOCUMENT_FIELDS, "policy_sha256"}
+)
+WINDOWS_TUN_POLICY_SCENARIO_FIELDS = frozenset({"metrics"})
+WINDOWS_TUN_POLICY_METRIC_FIELDS = frozenset(
+    {
+        "unit",
+        "direction",
+        "noise_band_percent",
+        "regression_threshold_percent",
+        "adoption_threshold_percent",
+        "minimum_pairs",
+        "minimum_wins",
+        "minimum_losses",
+        "calibration_source",
+        "calibration_artifact_sha256",
+        "calibration_environment",
+    }
+)
+WINDOWS_TUN_CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
+    {
+        *WINDOWS_TUN_GUEST,
+        "recipe_sha256",
+        "guest_build",
+        "cpu_model",
+        "cpu_count",
+        "memory_bytes",
+        "power_plan_guid",
+    }
+)
+WINDOWS_TUN_PLAN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "selection",
+        "run_kind",
+        "pairs",
+        "pair_schedule",
+        "recipe_sha256",
+        "scenarios",
+        "trials",
+        "decision_policy",
+        "calibration_complete",
+        "adoption_eligible",
+    }
+)
+WINDOWS_TUN_TRIAL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "selection",
+        "run_kind",
+        "scenario",
+        "member",
+        "pair",
+        "order",
+        "sequence",
+        "started_utc",
+        "finished_utc",
+        "parent_sha",
+        "candidate_sha",
+        "sha",
+        "tree",
+        "client_sha256",
+        "server_sha256",
+        "harness_sha256",
+        "recipe_sha256",
+        "environment",
+        "measurements",
+        "correctness",
+        "status",
+    }
+)
+WINDOWS_TUN_ENVIRONMENT_FIELDS = frozenset(
+    {
+        *WINDOWS_TUN_GUEST,
+        "guest_build",
+        "cpu_model",
+        "cpu_count",
+        "memory_bytes",
+        "power_plan_guid",
+    }
+)
+WINDOWS_TUN_MEASUREMENT_FIELDS = frozenset({"unit", "value"})
+WINDOWS_TUN_CORRECTNESS_FIELDS = frozenset(
+    {"status", "checked_unit", "checked_units", "checks"}
 )
 PROFILE_FIELDS = frozenset(
     {
@@ -786,6 +1139,15 @@ def create_plan(
 
     if mode not in MODES:
         raise CandidateControlError("mode must be diagnostic or qualification")
+    if selection in QUALIFICATION_ONLY_SELECTIONS:
+        raise CandidateControlError(
+            "Windows TUN lifecycle selection is qualification-only; use "
+            "windows-tun-m17 for paired performance evidence"
+        )
+    if selection == WINDOWS_TUN_SELECTION:
+        raise CandidateControlError(
+            "windows-tun-m17 uses the dedicated windows-tun-plan command"
+        )
     if mode == "diagnostic" and selection not in SCENARIO_CATALOG:
         raise CandidateControlError("diagnostic selection must be one profile workload")
     if mode == "qualification" and selection not in (
@@ -2819,6 +3181,986 @@ def run_summary_command(parsed: argparse.Namespace) -> int:
     return 4
 
 
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+
+def windows_tun_scenario_contracts() -> dict[str, object]:
+    """Return the JSON-canonical eight-scenario recipe."""
+
+    return json.loads(_canonical_json_bytes(WINDOWS_TUN_SCENARIOS).decode("ascii"))
+
+
+def windows_tun_recipe_sha256() -> str:
+    return hashlib.sha256(
+        _canonical_json_bytes(windows_tun_scenario_contracts())
+    ).hexdigest()
+
+
+def _windows_tun_calibration_fields(entry: dict[str, object]) -> tuple[object, ...]:
+    return tuple(
+        entry[field]
+        for field in (
+            "noise_band_percent",
+            "regression_threshold_percent",
+            "adoption_threshold_percent",
+            "minimum_pairs",
+            "minimum_wins",
+            "minimum_losses",
+            "calibration_source",
+            "calibration_artifact_sha256",
+            "calibration_environment",
+        )
+    )
+
+
+def validate_windows_tun_policy(policy: dict[str, object]) -> None:
+    if type(policy) is not dict:
+        raise CandidateControlError("Windows TUN policy must be a JSON object")
+    _exact_fields(policy, WINDOWS_TUN_POLICY_RUNTIME_FIELDS, "Windows TUN policy")
+    if (
+        type(policy["schema_version"]) is not int
+        or policy["schema_version"] != WINDOWS_TUN_POLICY_SCHEMA_VERSION
+    ):
+        raise CandidateControlError("Windows TUN policy schema_version is unsupported")
+    if type(policy["policy_id"]) is not str or not policy["policy_id"].strip():
+        raise CandidateControlError("Windows TUN policy_id must be non-empty")
+    if policy["selection"] != WINDOWS_TUN_SELECTION:
+        raise CandidateControlError("Windows TUN policy selection is invalid")
+    digest = policy["policy_sha256"]
+    if digest is not None and (
+        type(digest) is not str or SHA256.fullmatch(digest) is None
+    ):
+        raise CandidateControlError("Windows TUN policy SHA-256 is invalid")
+    scenarios = policy["scenarios"]
+    if type(scenarios) is not dict or set(scenarios) != set(WINDOWS_TUN_SCENARIOS):
+        raise CandidateControlError(
+            "Windows TUN policy scenarios must exactly match the eight-scenario catalog"
+        )
+    calibration_states: list[bool] = []
+    calibration_identities: list[tuple[object, object, object]] = []
+    expected_recipe_sha256 = windows_tun_recipe_sha256()
+    for scenario, contract in WINDOWS_TUN_SCENARIOS.items():
+        scenario_policy = scenarios[scenario]
+        if type(scenario_policy) is not dict:
+            raise CandidateControlError(
+                f"Windows TUN policy scenario {scenario} must be an object"
+            )
+        _exact_fields(
+            scenario_policy,
+            WINDOWS_TUN_POLICY_SCENARIO_FIELDS,
+            f"Windows TUN policy scenario {scenario}",
+        )
+        metrics = scenario_policy["metrics"]
+        expected_metrics = contract["metrics"]
+        if type(metrics) is not dict or set(metrics) != set(expected_metrics):
+            raise CandidateControlError(
+                f"Windows TUN policy scenario {scenario} metrics are incomplete"
+            )
+        for metric, metric_contract in expected_metrics.items():
+            entry = metrics[metric]
+            if type(entry) is not dict:
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} must be an object"
+                )
+            _exact_fields(
+                entry,
+                WINDOWS_TUN_POLICY_METRIC_FIELDS,
+                f"Windows TUN policy metric {scenario}/{metric}",
+            )
+            if (
+                entry["unit"] != metric_contract["unit"]
+                or entry["direction"] != metric_contract["direction"]
+            ):
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} unit or direction mismatch"
+                )
+            calibrated = _windows_tun_calibration_fields(entry)
+            if all(value is None for value in calibrated):
+                calibration_states.append(False)
+                continue
+            if any(value is None for value in calibrated):
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} calibration "
+                    "must be complete or entirely null"
+                )
+            calibration_states.append(True)
+            noise = _policy_percent(entry["noise_band_percent"], "noise_band_percent")
+            regression = _policy_percent(
+                entry["regression_threshold_percent"],
+                "regression_threshold_percent",
+            )
+            adoption = _policy_percent(
+                entry["adoption_threshold_percent"],
+                "adoption_threshold_percent",
+            )
+            if noise < 0 or regression >= -noise or adoption <= noise:
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} thresholds "
+                    "must lie outside the noise band"
+                )
+            if (
+                type(entry["minimum_pairs"]) is not int
+                or entry["minimum_pairs"] != WINDOWS_TUN_PAIR_COUNT
+                or type(entry["minimum_wins"]) is not int
+                or not 1 <= entry["minimum_wins"] <= WINDOWS_TUN_PAIR_COUNT
+                or type(entry["minimum_losses"]) is not int
+                or not 1 <= entry["minimum_losses"] <= WINDOWS_TUN_PAIR_COUNT
+            ):
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} pair counts are invalid"
+                )
+            source = entry["calibration_source"]
+            artifact_digest = entry["calibration_artifact_sha256"]
+            if (
+                type(source) is not str
+                or re.fullmatch(r"artifact:\S+@sha256:[0-9a-f]{64}", source) is None
+                or type(artifact_digest) is not str
+                or SHA256.fullmatch(artifact_digest) is None
+                or not source.endswith(f"@sha256:{artifact_digest}")
+            ):
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} must bind one "
+                    "SHA-256 identified calibration artifact"
+                )
+            environment = entry["calibration_environment"]
+            if type(environment) is not dict:
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} calibration "
+                    "environment is invalid"
+                )
+            _exact_fields(
+                environment,
+                WINDOWS_TUN_CALIBRATION_ENVIRONMENT_FIELDS,
+                f"Windows TUN policy metric {scenario}/{metric} environment",
+            )
+            for field, expected in WINDOWS_TUN_GUEST.items():
+                if environment[field] != expected:
+                    raise CandidateControlError(
+                        f"Windows TUN calibration environment {field} is unsupported"
+                    )
+            if environment["recipe_sha256"] != expected_recipe_sha256:
+                raise CandidateControlError(
+                    "Windows TUN calibration recipe does not match this controller"
+                )
+            for field in ("guest_build", "cpu_model", "power_plan_guid"):
+                if type(environment[field]) is not str or not environment[field].strip():
+                    raise CandidateControlError(
+                        f"Windows TUN calibration environment {field} is invalid"
+                    )
+            for field in ("cpu_count", "memory_bytes"):
+                if type(environment[field]) is not int or environment[field] <= 0:
+                    raise CandidateControlError(
+                        f"Windows TUN calibration environment {field} is invalid"
+                    )
+            calibration_identities.append((source, artifact_digest, environment))
+    if any(calibration_states) and not all(calibration_states):
+        raise CandidateControlError(
+            "Windows TUN policy cannot mix calibrated and uncalibrated metrics"
+        )
+    if calibration_identities and any(
+        identity != calibration_identities[0] for identity in calibration_identities[1:]
+    ):
+        raise CandidateControlError(
+            "Windows TUN policy metrics must share one calibration artifact and environment"
+        )
+
+
+def load_windows_tun_policy(path: pathlib.Path) -> dict[str, object]:
+    try:
+        raw = path.read_bytes()
+        document = _strict_json(raw.decode("utf-8"), source="Windows TUN policy")
+    except (OSError, UnicodeError) as error:
+        raise CandidateControlError("unable to read Windows TUN policy") from error
+    if type(document) is not dict:
+        raise CandidateControlError("Windows TUN policy must be a JSON object")
+    _exact_fields(
+        document,
+        WINDOWS_TUN_POLICY_DOCUMENT_FIELDS,
+        "Windows TUN policy document",
+    )
+    policy = {**document, "policy_sha256": hashlib.sha256(raw).hexdigest()}
+    validate_windows_tun_policy(policy)
+    return policy
+
+
+def windows_tun_policy_is_calibrated(policy: dict[str, object]) -> bool:
+    validate_windows_tun_policy(policy)
+    first_scenario = next(iter(WINDOWS_TUN_SCENARIOS))
+    first_metric = next(iter(WINDOWS_TUN_SCENARIOS[first_scenario]["metrics"]))
+    entry = policy["scenarios"][first_scenario]["metrics"][first_metric]
+    return entry["calibration_environment"] is not None
+
+
+def create_windows_tun_plan(
+    *, run_kind: str, decision_policy: dict[str, object]
+) -> dict[str, object]:
+    if run_kind not in WINDOWS_TUN_RUN_KINDS:
+        raise CandidateControlError(
+            "Windows TUN run_kind must be comparison or calibration-aa"
+        )
+    policy = copy.deepcopy(decision_policy)
+    validate_windows_tun_policy(policy)
+    contracts = windows_tun_scenario_contracts()
+    trials: list[dict[str, object]] = []
+    sequence = 0
+    for scenario in contracts:
+        for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1):
+            members = ("parent", "candidate") if pair % 2 else ("candidate", "parent")
+            for order, member in enumerate(members, start=1):
+                sequence += 1
+                trials.append(
+                    {
+                        "sequence": sequence,
+                        "scenario": scenario,
+                        "pair": pair,
+                        "member": member,
+                        "order": order,
+                    }
+                )
+    calibrated = windows_tun_policy_is_calibrated(policy)
+    return {
+        "schema_version": WINDOWS_TUN_PLAN_SCHEMA_VERSION,
+        "kind": "windows_tun_performance_plan",
+        "selection": WINDOWS_TUN_SELECTION,
+        "run_kind": run_kind,
+        "pairs": WINDOWS_TUN_PAIR_COUNT,
+        "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
+        "recipe_sha256": windows_tun_recipe_sha256(),
+        "scenarios": contracts,
+        "trials": trials,
+        "decision_policy": policy,
+        "calibration_complete": calibrated,
+        # A plan can enable a calibrated decision, but evidence is the only
+        # thing that can make the resulting comparison adoption-eligible.
+        "adoption_eligible": False,
+    }
+
+
+def load_windows_tun_plan(
+    path: pathlib.Path, *, decision_policy: dict[str, object]
+) -> dict[str, object]:
+    try:
+        plan = _strict_json(
+            path.read_text(encoding="utf-8"), source="Windows TUN performance plan"
+        )
+        if type(plan) is not dict:
+            raise CandidateControlError("Windows TUN plan must be a JSON object")
+        _exact_fields(plan, WINDOWS_TUN_PLAN_FIELDS, "Windows TUN performance plan")
+        expected = create_windows_tun_plan(
+            run_kind=plan["run_kind"], decision_policy=decision_policy
+        )
+    except (OSError, KeyError, TypeError) as error:
+        raise CandidateControlError("Windows TUN performance plan is invalid") from error
+    if plan != expected:
+        raise CandidateControlError(
+            "Windows TUN performance plan does not match the canonical recipe or policy"
+        )
+    return plan
+
+
+def _windows_tun_required_digest(
+    row: dict[str, object], field: str, *, length: int
+) -> str:
+    value = row.get(field)
+    pattern = r"[0-9a-f]{%d}" % length
+    if type(value) is not str or re.fullmatch(pattern, value) is None:
+        raise CandidateControlError(
+            f"Windows TUN evidence {field} must be lowercase {length}-hex"
+        )
+    return value
+
+
+def _validate_windows_tun_environment(environment: object) -> dict[str, object]:
+    if type(environment) is not dict:
+        raise CandidateControlError("Windows TUN evidence environment must be an object")
+    _exact_fields(environment, WINDOWS_TUN_ENVIRONMENT_FIELDS, "Windows TUN environment")
+    for field, expected in WINDOWS_TUN_GUEST.items():
+        if environment[field] != expected:
+            raise CandidateControlError(
+                f"Windows TUN evidence environment {field} is unsupported"
+            )
+    for field in ("guest_build", "cpu_model", "power_plan_guid"):
+        if type(environment[field]) is not str or not environment[field].strip():
+            raise CandidateControlError(
+                f"Windows TUN evidence environment {field} is invalid"
+            )
+    for field in ("cpu_count", "memory_bytes"):
+        if type(environment[field]) is not int or environment[field] <= 0:
+            raise CandidateControlError(
+                f"Windows TUN evidence environment {field} is invalid"
+            )
+    return environment
+
+
+def _windows_tun_utc(value: object, field: str) -> datetime:
+    if type(value) is not str or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{7}Z",
+        value,
+    ) is None:
+        raise CandidateControlError(
+            f"Windows TUN evidence {field} must be canonical UTC"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError as error:
+        raise CandidateControlError(
+            f"Windows TUN evidence {field} is not a real timestamp"
+        ) from error
+    if parsed.tzinfo != timezone.utc:
+        raise CandidateControlError(f"Windows TUN evidence {field} is not UTC")
+    return parsed
+
+
+def validate_windows_tun_trial(
+    row: object,
+    *,
+    plan: dict[str, object],
+    parent_sha: str,
+    candidate_sha: str,
+) -> tuple[str, int, str]:
+    if type(row) is not dict:
+        raise CandidateControlError("Windows TUN trial must be a JSON object")
+    _exact_fields(row, WINDOWS_TUN_TRIAL_FIELDS, "Windows TUN trial")
+    if (
+        type(row["schema_version"]) is not int
+        or row["schema_version"] != WINDOWS_TUN_TRIAL_SCHEMA_VERSION
+        or row["kind"] != "windows_tun_performance_trial"
+    ):
+        raise CandidateControlError("Windows TUN trial schema is unsupported")
+    for field in ("selection", "run_kind", "recipe_sha256"):
+        if row[field] != plan[field]:
+            raise CandidateControlError(f"Windows TUN trial {field} does not match plan")
+    if row["parent_sha"] != parent_sha or row["candidate_sha"] != candidate_sha:
+        raise CandidateControlError("Windows TUN trial comparison identity mismatch")
+    scenario = row["scenario"]
+    if type(scenario) is not str or scenario not in WINDOWS_TUN_SCENARIOS:
+        raise CandidateControlError("Windows TUN trial scenario is not planned")
+    pair = row["pair"]
+    member = row["member"]
+    order = row["order"]
+    if (
+        type(pair) is not int
+        or not 1 <= pair <= WINDOWS_TUN_PAIR_COUNT
+        or member not in {"parent", "candidate"}
+        or type(order) is not int
+        or order not in {1, 2}
+    ):
+        raise CandidateControlError("Windows TUN trial pair/member/order is invalid")
+    expected_order = 1 if (member == "parent") == (pair % 2 == 1) else 2
+    if order != expected_order:
+        raise CandidateControlError(
+            "Windows TUN trial does not follow alternating parent/candidate order"
+        )
+    expected_sequence = (
+        list(WINDOWS_TUN_SCENARIOS).index(scenario) * WINDOWS_TUN_PAIR_COUNT * 2
+        + (pair - 1) * 2
+        + order
+    )
+    if type(row["sequence"]) is not int or row["sequence"] != expected_sequence:
+        raise CandidateControlError("Windows TUN trial sequence does not match the plan")
+    started = _windows_tun_utc(row["started_utc"], "started_utc")
+    finished = _windows_tun_utc(row["finished_utc"], "finished_utc")
+    if finished <= started:
+        raise CandidateControlError("Windows TUN trial finish must follow its start")
+    _windows_tun_required_digest(row, "parent_sha", length=40)
+    _windows_tun_required_digest(row, "candidate_sha", length=40)
+    expected_sha = parent_sha if member == "parent" else candidate_sha
+    if _windows_tun_required_digest(row, "sha", length=40) != expected_sha:
+        raise CandidateControlError("Windows TUN trial member SHA mismatch")
+    _windows_tun_required_digest(row, "tree", length=40)
+    for field in (
+        "client_sha256",
+        "server_sha256",
+        "harness_sha256",
+        "recipe_sha256",
+    ):
+        _windows_tun_required_digest(row, field, length=64)
+    _validate_windows_tun_environment(row["environment"])
+    contract = WINDOWS_TUN_SCENARIOS[scenario]
+    measurements = row["measurements"]
+    if type(measurements) is not dict or set(measurements) != set(contract["metrics"]):
+        raise CandidateControlError(
+            f"Windows TUN trial {scenario} measurements are incomplete"
+        )
+    for metric, metric_contract in contract["metrics"].items():
+        measurement = measurements[metric]
+        if type(measurement) is not dict:
+            raise CandidateControlError(
+                f"Windows TUN measurement {scenario}/{metric} must be an object"
+            )
+        _exact_fields(
+            measurement,
+            WINDOWS_TUN_MEASUREMENT_FIELDS,
+            f"Windows TUN measurement {scenario}/{metric}",
+        )
+        if measurement["unit"] != metric_contract["unit"]:
+            raise CandidateControlError(
+                f"Windows TUN measurement {scenario}/{metric} unit mismatch"
+            )
+        if (
+            type(measurement["value"]) is not int
+            or measurement["value"] <= 0
+            or measurement["value"] > U64_MAX
+        ):
+            raise CandidateControlError(
+                f"Windows TUN measurement {scenario}/{metric} must be a positive u64"
+            )
+    correctness = row["correctness"]
+    if type(correctness) is not dict:
+        raise CandidateControlError("Windows TUN correctness must be an object")
+    _exact_fields(correctness, WINDOWS_TUN_CORRECTNESS_FIELDS, "Windows TUN correctness")
+    if correctness["status"] != "PASS":
+        raise CandidateControlError("Windows TUN trial correctness did not pass")
+    if correctness["checked_unit"] != contract["checked_unit"]:
+        raise CandidateControlError("Windows TUN correctness unit mismatch")
+    if (
+        type(correctness["checked_units"]) is not int
+        or correctness["checked_units"] < contract["minimum_checked_units"]
+        or correctness["checked_units"] > U64_MAX
+    ):
+        raise CandidateControlError("Windows TUN correctness coverage is insufficient")
+    checks = correctness["checks"]
+    expected_checks = set(contract["correctness_checks"])
+    if type(checks) is not dict or set(checks) != expected_checks:
+        raise CandidateControlError("Windows TUN correctness checks are incomplete")
+    if any(value is not True for value in checks.values()):
+        raise CandidateControlError("Windows TUN correctness check failed")
+    if row["status"] != "PASS":
+        raise CandidateControlError("Windows TUN trial status did not pass")
+    return scenario, pair, member
+
+
+def _read_windows_tun_rows(
+    *,
+    evidence_root: pathlib.Path,
+    plan: dict[str, object],
+    parent_sha: str,
+    candidate_sha: str,
+) -> tuple[
+    dict[tuple[str, int, str], dict[str, object]],
+    list[dict[str, object]],
+    dict[str, tuple[object, ...]],
+    dict[str, object],
+]:
+    try:
+        paths = sorted(evidence_root.glob("*.json"))
+    except OSError as error:
+        raise CandidateControlError("unable to enumerate Windows TUN evidence") from error
+    expected_count = len(WINDOWS_TUN_SCENARIOS) * WINDOWS_TUN_PAIR_COUNT * 2
+    if len(paths) != expected_count:
+        raise CandidateControlError(
+            f"Windows TUN evidence requires exactly {expected_count} trial files"
+        )
+    rows: dict[tuple[str, int, str], dict[str, object]] = {}
+    evidence_files: list[dict[str, object]] = []
+    member_identity: dict[str, tuple[object, ...]] = {}
+    environment_identity: dict[str, object] | None = None
+    for path in paths:
+        try:
+            raw = path.read_bytes()
+        except OSError as error:
+            raise CandidateControlError("unable to read Windows TUN evidence") from error
+        if len(raw) > WINDOWS_TUN_TRIAL_MAX_BYTES:
+            raise CandidateControlError("Windows TUN trial exceeds the size bound")
+        try:
+            row = _strict_json(raw.decode("utf-8"), source=f"Windows TUN trial {path.name}")
+        except UnicodeError as error:
+            raise CandidateControlError("Windows TUN evidence must be UTF-8") from error
+        scenario, pair, member = validate_windows_tun_trial(
+            row,
+            plan=plan,
+            parent_sha=parent_sha,
+            candidate_sha=candidate_sha,
+        )
+        key = (scenario, pair, member)
+        if key in rows:
+            raise CandidateControlError(
+                f"duplicate Windows TUN evidence for {scenario}/{pair}/{member}"
+            )
+        rows[key] = row
+        identity = tuple(
+            row[field]
+            for field in ("sha", "tree", "client_sha256", "server_sha256")
+        )
+        if member in member_identity and member_identity[member] != identity:
+            raise CandidateControlError(
+                f"Windows TUN {member} build identity changed between trials"
+            )
+        member_identity[member] = identity
+        if environment_identity is None:
+            environment_identity = row["environment"]
+        elif environment_identity != row["environment"]:
+            raise CandidateControlError(
+                "Windows TUN guest environment changed between trials"
+            )
+        evidence_files.append(
+            {
+                "sequence": row["sequence"],
+                "file": path.name,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    expected_keys = {
+        (scenario, pair, member)
+        for scenario in WINDOWS_TUN_SCENARIOS
+        for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1)
+        for member in ("parent", "candidate")
+    }
+    if set(rows) != expected_keys:
+        raise CandidateControlError("Windows TUN evidence set is incomplete")
+    if environment_identity is None:
+        raise CandidateControlError("Windows TUN evidence environment is missing")
+    ordered_rows = sorted(rows.values(), key=lambda row: row["sequence"])
+    if [row["sequence"] for row in ordered_rows] != list(
+        range(1, expected_count + 1)
+    ):
+        raise CandidateControlError("Windows TUN evidence sequence is incomplete")
+    for previous, current in zip(ordered_rows, ordered_rows[1:], strict=False):
+        if _windows_tun_utc(
+            current["started_utc"], "started_utc"
+        ) < _windows_tun_utc(previous["finished_utc"], "finished_utc"):
+            raise CandidateControlError(
+                "Windows TUN trials overlap or were not executed in planned order"
+            )
+    if plan["run_kind"] == "calibration-aa":
+        if parent_sha != candidate_sha:
+            raise CandidateControlError("Windows TUN A/A requires identical commit SHAs")
+        if member_identity["parent"] != member_identity["candidate"]:
+            raise CandidateControlError("Windows TUN A/A requires identical binary identities")
+    elif parent_sha == candidate_sha:
+        raise CandidateControlError("Windows TUN comparison requires distinct commits")
+    harness_hashes = {row["harness_sha256"] for row in rows.values()}
+    if len(harness_hashes) != 1:
+        raise CandidateControlError("Windows TUN harness identity changed between trials")
+    return rows, evidence_files, member_identity, environment_identity
+
+
+def _windows_tun_policy_environment(
+    environment: dict[str, object], *, recipe_sha256: str
+) -> dict[str, object]:
+    return {
+        **environment,
+        "recipe_sha256": recipe_sha256,
+    }
+
+
+def _windows_tun_metric_decision(
+    *,
+    entry: dict[str, object],
+    observed_environment: dict[str, object],
+    improvements: Sequence[Decimal],
+) -> dict[str, object]:
+    median = _median(improvements)
+    wins = sum(value > 0 for value in improvements)
+    losses = sum(value < 0 for value in improvements)
+    common = {
+        "noise_band_percent": entry["noise_band_percent"],
+        "regression_threshold_percent": entry["regression_threshold_percent"],
+        "adoption_threshold_percent": entry["adoption_threshold_percent"],
+        "minimum_pairs": entry["minimum_pairs"],
+        "minimum_wins": entry["minimum_wins"],
+        "minimum_losses": entry["minimum_losses"],
+        "calibration_source": entry["calibration_source"],
+        "calibration_artifact_sha256": entry["calibration_artifact_sha256"],
+    }
+    if entry["calibration_environment"] is None:
+        return {
+            **common,
+            "decision_enabled": False,
+            "threshold_decision": "NO_CALIBRATION",
+            "status": "CALIBRATION_REQUIRED",
+        }
+    if entry["calibration_environment"] != observed_environment:
+        return {
+            **common,
+            "decision_enabled": False,
+            "threshold_decision": "CALIBRATION_ENVIRONMENT_MISMATCH",
+            "status": "CALIBRATION_REQUIRED",
+        }
+    regression = _policy_percent(
+        entry["regression_threshold_percent"], "regression_threshold_percent"
+    )
+    adoption = _policy_percent(
+        entry["adoption_threshold_percent"], "adoption_threshold_percent"
+    )
+    if median <= regression:
+        if losses >= entry["minimum_losses"]:
+            return {
+                **common,
+                "decision_enabled": True,
+                "threshold_decision": "CONFIRMED_REGRESSION",
+                "status": "REGRESSION",
+            }
+        return {
+            **common,
+            "decision_enabled": True,
+            "threshold_decision": "REGRESSION_WITHOUT_CONFIRMING_LOSSES",
+            "status": "INCONCLUSIVE",
+        }
+    if median >= adoption and wins >= entry["minimum_wins"]:
+        return {
+            **common,
+            "decision_enabled": True,
+            "threshold_decision": "CONFIRMED_IMPROVEMENT",
+            "status": "CANDIDATE_WIN",
+        }
+    return {
+        **common,
+        "decision_enabled": True,
+        "threshold_decision": "NO_REGRESSION",
+        "status": "NO_REGRESSION",
+    }
+
+
+def summarize_windows_tun_evidence(
+    *,
+    plan: dict[str, object],
+    evidence_root: pathlib.Path,
+    parent_sha: str,
+    candidate_sha: str,
+) -> dict[str, object]:
+    _windows_tun_required_digest({"sha": parent_sha}, "sha", length=40)
+    _windows_tun_required_digest({"sha": candidate_sha}, "sha", length=40)
+    rows, evidence_files, member_identity, environment = _read_windows_tun_rows(
+        evidence_root=evidence_root,
+        plan=plan,
+        parent_sha=parent_sha,
+        candidate_sha=candidate_sha,
+    )
+    policy_environment = _windows_tun_policy_environment(
+        environment, recipe_sha256=plan["recipe_sha256"]
+    )
+    scenario_summaries: list[dict[str, object]] = []
+    flat_metric_summaries: list[dict[str, object]] = []
+    for scenario, contract in WINDOWS_TUN_SCENARIOS.items():
+        metric_summaries: list[dict[str, object]] = []
+        for metric, metric_contract in contract["metrics"].items():
+            pair_summaries: list[dict[str, object]] = []
+            improvements: list[Decimal] = []
+            for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1):
+                parent = rows[(scenario, pair, "parent")]
+                candidate = rows[(scenario, pair, "candidate")]
+                parent_value = parent["measurements"][metric]["value"]
+                candidate_value = candidate["measurements"][metric]["value"]
+                improvement = _improvement(
+                    parent_value, candidate_value, metric_contract["direction"]
+                )
+                improvements.append(improvement)
+                pair_summaries.append(
+                    {
+                        "pair": pair,
+                        "parent_order": parent["order"],
+                        "candidate_order": candidate["order"],
+                        "parent_value": parent_value,
+                        "candidate_value": candidate_value,
+                        "improvement_percent": _display_decimal(improvement),
+                    }
+                )
+            wins = sum(value > 0 for value in improvements)
+            losses = sum(value < 0 for value in improvements)
+            ties = len(improvements) - wins - losses
+            policy_entry = plan["decision_policy"]["scenarios"][scenario][
+                "metrics"
+            ][metric]
+            spread, warnings = _stability_warnings(
+                improvements, noise_band=policy_entry["noise_band_percent"]
+            )
+            if plan["run_kind"] == "calibration-aa":
+                decision = {
+                    "noise_band_percent": None,
+                    "regression_threshold_percent": None,
+                    "adoption_threshold_percent": None,
+                    "minimum_pairs": None,
+                    "minimum_wins": None,
+                    "minimum_losses": None,
+                    "calibration_source": None,
+                    "calibration_artifact_sha256": None,
+                    "decision_enabled": False,
+                    "threshold_decision": "A_A_OBSERVATION_ONLY",
+                    "status": "MEASURED",
+                }
+            else:
+                decision = _windows_tun_metric_decision(
+                    entry=policy_entry,
+                    observed_environment=policy_environment,
+                    improvements=improvements,
+                )
+            metric_summary = {
+                "scenario": scenario,
+                "metric": metric,
+                "unit": metric_contract["unit"],
+                "direction": metric_contract["direction"],
+                "pairs": pair_summaries,
+                "wins": wins,
+                "losses": losses,
+                "ties": ties,
+                "median_improvement_percent": _display_decimal(
+                    _median(improvements)
+                ),
+                "minimum_improvement_percent": _display_decimal(min(improvements)),
+                "maximum_improvement_percent": _display_decimal(max(improvements)),
+                "spread_percent": _display_decimal(spread),
+                "warnings": warnings,
+                **decision,
+            }
+            metric_summaries.append(metric_summary)
+            flat_metric_summaries.append(metric_summary)
+        scenario_statuses = {metric["status"] for metric in metric_summaries}
+        if "REGRESSION" in scenario_statuses:
+            scenario_status = "REGRESSION"
+        elif "CALIBRATION_REQUIRED" in scenario_statuses:
+            scenario_status = "CALIBRATION_REQUIRED"
+        elif "INCONCLUSIVE" in scenario_statuses:
+            scenario_status = "INCONCLUSIVE"
+        elif plan["run_kind"] == "calibration-aa":
+            scenario_status = "MEASURED"
+        else:
+            scenario_status = "NO_REGRESSION"
+        scenario_summaries.append(
+            {
+                "scenario": scenario,
+                "recipe": windows_tun_scenario_contracts()[scenario]["recipe"],
+                "checked_unit": contract["checked_unit"],
+                "minimum_checked_units": contract["minimum_checked_units"],
+                "status": scenario_status,
+                "metrics": metric_summaries,
+            }
+        )
+    if plan["run_kind"] == "calibration-aa":
+        status = "CALIBRATION_EVIDENCE"
+        decision_reason = (
+            "A/A evidence is measurement-only and must be reviewed into a separate policy"
+        )
+        adoption_eligible = False
+    elif any(metric["status"] == "REGRESSION" for metric in flat_metric_summaries):
+        status = "REGRESSION"
+        decision_reason = "at least one calibrated Windows TUN metric regressed"
+        adoption_eligible = False
+    elif any(
+        metric["status"] == "CALIBRATION_REQUIRED"
+        for metric in flat_metric_summaries
+    ):
+        status = "CALIBRATION_REQUIRED"
+        decision_reason = (
+            "reviewed thresholds, artifact identity, or exact guest calibration are unavailable"
+        )
+        adoption_eligible = False
+    elif any(metric["status"] == "INCONCLUSIVE" for metric in flat_metric_summaries):
+        status = "INCONCLUSIVE"
+        decision_reason = "a threshold crossing lacks the required confirming pair count"
+        adoption_eligible = False
+    else:
+        status = "NO_REGRESSION"
+        decision_reason = "all calibrated metrics remain above their regression thresholds"
+        adoption_eligible = True
+    identity_fields = ("sha", "tree", "client_sha256", "server_sha256")
+    build_identities = {
+        member: dict(zip(identity_fields, member_identity[member], strict=True))
+        for member in ("parent", "candidate")
+    }
+    return {
+        "schema_version": WINDOWS_TUN_SUMMARY_SCHEMA_VERSION,
+        "kind": "windows_tun_performance_summary",
+        "selection": WINDOWS_TUN_SELECTION,
+        "run_kind": plan["run_kind"],
+        "parent_sha": parent_sha,
+        "candidate_sha": candidate_sha,
+        "pairs": WINDOWS_TUN_PAIR_COUNT,
+        "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
+        "recipe_sha256": plan["recipe_sha256"],
+        "decision_policy": plan["decision_policy"],
+        "calibration_complete": plan["calibration_complete"],
+        "environment": environment,
+        "build_identities": build_identities,
+        "correctness_complete": True,
+        "adoption_eligible": adoption_eligible,
+        "performance_improvement_claim": adoption_eligible
+        and all(metric["status"] == "CANDIDATE_WIN" for metric in flat_metric_summaries),
+        "status": status,
+        "decision_reason": decision_reason,
+        "mandatory_scenarios": list(WINDOWS_TUN_SCENARIOS),
+        "scenarios": scenario_summaries,
+        "evidence_files": evidence_files,
+    }
+
+
+def windows_tun_calibration_artifact(
+    summary: dict[str, object],
+) -> dict[str, object]:
+    if (
+        summary.get("kind") != "windows_tun_performance_summary"
+        or summary.get("run_kind") != "calibration-aa"
+        or summary.get("status") != "CALIBRATION_EVIDENCE"
+        or summary.get("adoption_eligible") is not False
+    ):
+        raise CandidateControlError(
+            "Windows TUN calibration artifact requires valid A/A evidence"
+        )
+    observations: dict[str, object] = {}
+    for scenario in summary["scenarios"]:
+        metric_observations: dict[str, object] = {}
+        for metric in scenario["metrics"]:
+            absolute = [
+                abs(Decimal(str(pair["improvement_percent"])))
+                for pair in metric["pairs"]
+            ]
+            metric_observations[metric["metric"]] = {
+                "unit": metric["unit"],
+                "direction": metric["direction"],
+                "paired_improvement_percent": [
+                    pair["improvement_percent"] for pair in metric["pairs"]
+                ],
+                "median_improvement_percent": metric[
+                    "median_improvement_percent"
+                ],
+                "median_absolute_improvement_percent": _display_decimal(
+                    _median(absolute)
+                ),
+                "maximum_absolute_improvement_percent": _display_decimal(max(absolute)),
+                "spread_percent": metric["spread_percent"],
+            }
+        observations[scenario["scenario"]] = {"metrics": metric_observations}
+    artifact = {
+        "schema_version": WINDOWS_TUN_CALIBRATION_SCHEMA_VERSION,
+        "kind": "windows_tun_performance_aa_calibration",
+        "selection": WINDOWS_TUN_SELECTION,
+        "source_summary_schema_version": summary["schema_version"],
+        "recipe_sha256": summary["recipe_sha256"],
+        "pairs": summary["pairs"],
+        "pair_schedule": summary["pair_schedule"],
+        "aa_sha": summary["parent_sha"],
+        "build_identity": summary["build_identities"]["parent"],
+        "environment": _windows_tun_policy_environment(
+            summary["environment"], recipe_sha256=summary["recipe_sha256"]
+        ),
+        "evidence_files": summary["evidence_files"],
+        "observations": observations,
+        "adoption_eligible": False,
+        "thresholds_reviewed": False,
+        "policy_action": (
+            "review repeated A/A artifacts, choose thresholds outside measured noise, "
+            "then bind the reviewed artifact SHA-256 in the policy"
+        ),
+    }
+    return {
+        **artifact,
+        "content_sha256": hashlib.sha256(_canonical_json_bytes(artifact)).hexdigest(),
+    }
+
+
+def windows_tun_summary_markdown(summary: dict[str, object]) -> str:
+    lines = [
+        "# Windows TUN paired performance",
+        "",
+        f"- Status: **{summary['status']}**",
+        f"- Run kind: `{summary['run_kind']}`",
+        f"- Recipe SHA-256: `{summary['recipe_sha256']}`",
+        f"- Adoption eligible: `{str(summary['adoption_eligible']).lower()}`",
+        f"- Decision: {summary['decision_reason']}",
+        "- Correctness and units are mandatory for every trial; GSO is disabled by recipe.",
+        "",
+    ]
+    if summary["status"] == "INVALID_EVIDENCE":
+        lines.append(f"- Error: {summary['error']}")
+        lines.append("")
+        return "\n".join(lines)
+    lines.extend(
+        [
+            "| Scenario | Metric | Unit | Median % | Wins | Losses | Decision |",
+            "|---|---|---|---:|---:|---:|---|",
+        ]
+    )
+    for scenario in summary["scenarios"]:
+        for metric in scenario["metrics"]:
+            lines.append(
+                f"| {scenario['scenario']} | {metric['metric']} | {metric['unit']} | "
+                f"{metric['median_improvement_percent']:.6f} | {metric['wins']} | "
+                f"{metric['losses']} | {metric['threshold_decision']} |"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_windows_tun_outputs(
+    summary: dict[str, object], *, output: pathlib.Path, markdown: pathlib.Path
+) -> None:
+    _atomic_text(
+        output,
+        json.dumps(summary, sort_keys=True, indent=2, allow_nan=False) + "\n",
+    )
+    _atomic_text(markdown, windows_tun_summary_markdown(summary))
+
+
+def run_windows_tun_summary_command(parsed: argparse.Namespace) -> int:
+    plan: dict[str, object] | None = None
+    try:
+        policy = load_windows_tun_policy(parsed.policy)
+        plan = load_windows_tun_plan(parsed.plan, decision_policy=policy)
+        if plan["run_kind"] == "calibration-aa" and parsed.calibration_output is None:
+            raise CandidateControlError(
+                "Windows TUN A/A requires --calibration-output"
+            )
+        if plan["run_kind"] == "comparison" and parsed.calibration_output is not None:
+            raise CandidateControlError(
+                "Windows TUN comparison cannot write a calibration artifact"
+            )
+        summary = summarize_windows_tun_evidence(
+            plan=plan,
+            evidence_root=parsed.evidence_root,
+            parent_sha=parsed.parent_sha,
+            candidate_sha=parsed.candidate_sha,
+        )
+        if parsed.calibration_output is not None:
+            calibration = windows_tun_calibration_artifact(summary)
+            _atomic_text(
+                parsed.calibration_output,
+                json.dumps(calibration, sort_keys=True, indent=2, allow_nan=False)
+                + "\n",
+            )
+    except CandidateControlError as error:
+        summary = {
+            "schema_version": WINDOWS_TUN_SUMMARY_SCHEMA_VERSION,
+            "kind": "windows_tun_performance_summary",
+            "selection": WINDOWS_TUN_SELECTION,
+            "run_kind": None if plan is None else plan["run_kind"],
+            "parent_sha": parsed.parent_sha,
+            "candidate_sha": parsed.candidate_sha,
+            "recipe_sha256": None if plan is None else plan["recipe_sha256"],
+            "adoption_eligible": False,
+            "correctness_complete": False,
+            "status": "INVALID_EVIDENCE",
+            "decision_reason": "invalid or incomplete Windows TUN evidence",
+            "error": str(error),
+        }
+        _write_windows_tun_outputs(
+            summary, output=parsed.output, markdown=parsed.markdown
+        )
+        print(f"performance-candidate: {error}", file=sys.stderr)
+        return 2
+    _write_windows_tun_outputs(summary, output=parsed.output, markdown=parsed.markdown)
+    if summary["status"] in {"CALIBRATION_EVIDENCE", "NO_REGRESSION"}:
+        return 0
+    if summary["status"] == "REGRESSION":
+        print(
+            "performance-candidate: calibrated Windows TUN regression",
+            file=sys.stderr,
+        )
+        return 3
+    print(
+        "performance-candidate: Windows TUN adoption is not eligible without "
+        "applicable reviewed calibration",
+        file=sys.stderr,
+    )
+    return 4
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2884,6 +4226,52 @@ def _parser() -> argparse.ArgumentParser:
     source_lineage.add_argument("--head-sha", required=True)
     source_lineage.add_argument("--parent-sha", required=True)
     source_lineage.add_argument("--candidate-sha", required=True)
+    windows_tun_plan = commands.add_parser(
+        "windows-tun-plan",
+        help="write the fixed eight-scenario Windows TUN paired plan",
+    )
+    windows_tun_plan.add_argument(
+        "--run-kind", required=True, choices=sorted(WINDOWS_TUN_RUN_KINDS)
+    )
+    windows_tun_plan.add_argument("--policy", required=True, type=pathlib.Path)
+    windows_tun_plan.add_argument("--output", required=True, type=pathlib.Path)
+    windows_tun_trials = commands.add_parser(
+        "windows-tun-trials",
+        help="emit scenario/member/pair/order rows from a canonical Windows TUN plan",
+    )
+    windows_tun_trials.add_argument("--plan", required=True, type=pathlib.Path)
+    windows_tun_trials.add_argument("--policy", required=True, type=pathlib.Path)
+    windows_tun_validate_trial = commands.add_parser(
+        "windows-tun-validate-trial",
+        help="validate one raw approved-guest Windows TUN trial",
+    )
+    windows_tun_validate_trial.add_argument(
+        "--plan", required=True, type=pathlib.Path
+    )
+    windows_tun_validate_trial.add_argument(
+        "--trial", required=True, type=pathlib.Path
+    )
+    windows_tun_validate_trial.add_argument("--parent-sha", required=True)
+    windows_tun_validate_trial.add_argument("--candidate-sha", required=True)
+    windows_tun_validate_trial.add_argument(
+        "--policy", required=True, type=pathlib.Path
+    )
+    windows_tun_summary = commands.add_parser(
+        "windows-tun-summarize",
+        help="validate and summarize paired Windows TUN evidence",
+    )
+    windows_tun_summary.add_argument("--plan", required=True, type=pathlib.Path)
+    windows_tun_summary.add_argument(
+        "--evidence-root", required=True, type=pathlib.Path
+    )
+    windows_tun_summary.add_argument("--parent-sha", required=True)
+    windows_tun_summary.add_argument("--candidate-sha", required=True)
+    windows_tun_summary.add_argument("--policy", required=True, type=pathlib.Path)
+    windows_tun_summary.add_argument("--output", required=True, type=pathlib.Path)
+    windows_tun_summary.add_argument("--markdown", required=True, type=pathlib.Path)
+    windows_tun_summary.add_argument(
+        "--calibration-output", type=pathlib.Path
+    )
     return parser
 
 
@@ -2891,6 +4279,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
     if parsed.command == "summarize":
         return run_summary_command(parsed)
+    if parsed.command == "windows-tun-summarize":
+        return run_windows_tun_summary_command(parsed)
     try:
         if parsed.command == "validate-inputs":
             validate_measurement_inputs(
@@ -2965,6 +4355,60 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 parsed.parent_sha,
                 parsed.candidate_sha,
             )
+            return 0
+        if parsed.command == "windows-tun-plan":
+            policy = load_windows_tun_policy(parsed.policy)
+            plan = create_windows_tun_plan(
+                run_kind=parsed.run_kind, decision_policy=policy
+            )
+            _atomic_text(
+                parsed.output,
+                json.dumps(plan, sort_keys=True, indent=2, allow_nan=False) + "\n",
+            )
+            return 0
+        if parsed.command == "windows-tun-trials":
+            policy = load_windows_tun_policy(parsed.policy)
+            plan = load_windows_tun_plan(parsed.plan, decision_policy=policy)
+            for trial in plan["trials"]:
+                print(
+                    "\t".join(
+                        str(trial[field])
+                        for field in (
+                            "sequence",
+                            "scenario",
+                            "member",
+                            "pair",
+                            "order",
+                        )
+                    )
+                )
+            return 0
+        if parsed.command == "windows-tun-validate-trial":
+            policy = load_windows_tun_policy(parsed.policy)
+            plan = load_windows_tun_plan(parsed.plan, decision_policy=policy)
+            try:
+                raw = parsed.trial.read_bytes()
+            except OSError as error:
+                raise CandidateControlError(
+                    "unable to read Windows TUN trial"
+                ) from error
+            if len(raw) > WINDOWS_TUN_TRIAL_MAX_BYTES:
+                raise CandidateControlError("Windows TUN trial exceeds the size bound")
+            try:
+                row = _strict_json(
+                    raw.decode("utf-8"), source="Windows TUN trial"
+                )
+            except UnicodeError as error:
+                raise CandidateControlError(
+                    "Windows TUN trial must be UTF-8"
+                ) from error
+            scenario, pair, member = validate_windows_tun_trial(
+                row,
+                plan=plan,
+                parent_sha=parsed.parent_sha,
+                candidate_sha=parsed.candidate_sha,
+            )
+            print(f"{scenario}\t{member}\t{pair}\t{row['order']}")
             return 0
         raise AssertionError(f"unhandled command: {parsed.command}")
     except CandidateControlError as error:

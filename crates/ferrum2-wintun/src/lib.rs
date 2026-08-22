@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -26,22 +26,112 @@ const ABI_EXPORTS: [&[u8]; 11] = [
     b"WintunSendPacket\0",
 ];
 
+/// Result of handing one complete packet to the Wintun send ring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SendOutcome {
+    /// Wintun accepted the packet into its send ring.
+    Sent,
+    /// The send ring was full, so Wintun did not accept the packet.
+    ///
+    /// This is an intentional, non-fatal drop. Callers must not retry the packet or restart the
+    /// session, and should account for it separately from a successful send.
+    DroppedRingFull,
+}
+
+/// Reason one bounded adapter wait completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaitOutcome {
+    /// Process-level stop was signalled.
+    Stop,
+    /// Wintun has at least one packet ready to receive.
+    Readable,
+    /// A network notification was observed and the current managed state still revalidated.
+    NetworkChanged,
+    /// A network notification exposed an external route that can supersede capture.
+    RouteConflict(RouteConflict),
+    /// The bounded wait elapsed without a signalled handle.
+    Timeout,
+    /// Adapter-owner work was explicitly signalled.
+    ///
+    /// Work uses its own auto-reset event and remains distinct from process-level stop.
+    Work,
+}
+
+/// Stable semantic result after one debounced network-notification burst.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkChangeOutcome {
+    /// Only irrelevant or Ferrum2-owned state changed; the current session remains valid.
+    Unchanged,
+    /// The frozen underlay, a managed row, or a managed DNS lease no longer matches.
+    Changed,
+    /// An external route can supersede one managed capture route.
+    RouteConflict(RouteConflict),
+}
+
+/// Closed address-family label for route-conflict diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IpFamily {
+    Ipv4,
+    Ipv6,
+}
+
+/// Fixed, redacted reason that a route-integrity scan rejected admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteConflictReason {
+    /// An external route overlaps a managed capture prefix and is more specific.
+    MoreSpecificRoute,
+    /// An equal-prefix external route can win or cannot be proven to lose by metric.
+    EqualPrefixPreferred,
+}
+
+/// Redacted route-conflict detail with only bounded reason and family fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteConflict {
+    reason: RouteConflictReason,
+    family: IpFamily,
+}
+
+impl RouteConflict {
+    pub(crate) const fn new(reason: RouteConflictReason, family: IpFamily) -> Self {
+        Self { reason, family }
+    }
+
+    pub const fn reason(self) -> RouteConflictReason {
+        self.reason
+    }
+
+    pub const fn family(self) -> IpFamily {
+        self.family
+    }
+}
+
+/// Closed result of one generation-stable route-integrity scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteIntegrityResult {
+    /// No external route can supersede a managed capture route.
+    Clean,
+    /// A stable snapshot contains a route that can supersede managed capture.
+    Conflict(RouteConflict),
+    /// Every bounded scan attempt raced a network-generation change.
+    UnstableGeneration,
+    /// The platform route or interface tables could not be acquired or validated.
+    PlatformError,
+}
+
 /// Complete validated setup input for one newly-created Wintun adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterConfig {
     pub name: Box<str>,
-    pub ipv4: Ipv4Addr,
-    pub ipv4_prefix: u8,
-    pub ipv6: Ipv6Addr,
-    pub ipv6_prefix: u8,
+    pub ipv4: Option<Ipv4Prefix>,
+    pub ipv6: Option<Ipv6Prefix>,
     pub mtu: u16,
     pub ring_capacity: u32,
     pub ready_timeout: Duration,
-    managed_ipv4: Option<ManagedIpv4Config>,
+    managed: Option<ManagedNetworkConfig>,
 }
 
-/// One canonical IPv4 capture prefix. Platform route fields remain private.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// One IPv4 address and prefix length. Platform route fields remain private.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Ipv4Prefix {
     address: Ipv4Addr,
     length: u8,
@@ -50,92 +140,159 @@ pub struct Ipv4Prefix {
 impl Ipv4Prefix {
     pub fn new(address: Ipv4Addr, length: u8) -> Result<Self, Error> {
         if length == 0 || length > 32 {
-            return Err(Error);
-        }
-        let mask = u32::MAX.checked_shl(u32::from(32 - length)).unwrap_or(0);
-        if u32::from(address) & mask != u32::from(address) {
-            return Err(Error);
+            return Err(Error::invalid_input());
         }
         Ok(Self { address, length })
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) const fn address(self) -> Ipv4Addr {
+    pub const fn address(self) -> Ipv4Addr {
         self.address
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) const fn length(self) -> u8 {
+    pub const fn length(self) -> u8 {
         self.length
+    }
+
+    fn is_canonical(self) -> bool {
+        let mask = u32::MAX
+            .checked_shl(u32::from(32 - self.length))
+            .unwrap_or(0);
+        u32::from(self.address) & mask == u32::from(self.address)
     }
 }
 
-/// Bounded managed IPv4 intent consumed by the existing Adapter transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedIpv4Config {
-    capture_routes: Vec<Ipv4Prefix>,
-    physical_endpoints: Vec<SocketAddrV4>,
-    default_binder: bool,
-    ipv4_dns_address: Option<Ipv4Addr>,
+/// One IPv6 address and prefix length. Platform route fields remain private.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Ipv6Prefix {
+    address: Ipv6Addr,
+    length: u8,
 }
 
-impl ManagedIpv4Config {
-    pub fn new(
-        capture_routes: Vec<Ipv4Prefix>,
-        mut physical_endpoints: Vec<SocketAddrV4>,
-        default_binder: bool,
-        ipv4_dns_address: Option<Ipv4Addr>,
-    ) -> Result<Self, Error> {
-        if capture_routes.len() > 256 || physical_endpoints.len() > 256 {
-            return Err(Error);
+impl Ipv6Prefix {
+    pub fn new(address: Ipv6Addr, length: u8) -> Result<Self, Error> {
+        if length == 0 || length > 128 {
+            return Err(Error::invalid_input());
         }
+        Ok(Self { address, length })
+    }
+
+    pub const fn address(self) -> Ipv6Addr {
+        self.address
+    }
+
+    pub const fn length(self) -> u8 {
+        self.length
+    }
+
+    fn is_canonical(self) -> bool {
+        let mask = u128::MAX
+            .checked_shl(u32::from(128 - self.length))
+            .unwrap_or(0);
+        u128::from(self.address) & mask == u128::from(self.address)
+    }
+}
+
+/// One canonical managed capture prefix.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum IpPrefix {
+    V4(Ipv4Prefix),
+    V6(Ipv6Prefix),
+}
+
+impl IpPrefix {
+    fn is_canonical(self) -> bool {
+        match self {
+            Self::V4(prefix) => prefix.is_canonical(),
+            Self::V6(prefix) => prefix.is_canonical(),
+        }
+    }
+
+    const fn is_ipv4(self) -> bool {
+        matches!(self, Self::V4(_))
+    }
+
+    const fn is_ipv6(self) -> bool {
+        matches!(self, Self::V6(_))
+    }
+}
+
+/// Bounded family-neutral managed network intent consumed by the Adapter transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedNetworkConfig {
+    capture_routes: Vec<IpPrefix>,
+    physical_endpoints: Vec<SocketAddr>,
+    target_binder: bool,
+    ipv4_dns_address: Option<Ipv4Addr>,
+    ipv6_dns_address: Option<Ipv6Addr>,
+}
+
+impl ManagedNetworkConfig {
+    pub fn new(
+        mut capture_routes: Vec<IpPrefix>,
+        mut physical_endpoints: Vec<SocketAddr>,
+        target_binder: bool,
+        ipv4_dns_address: Option<Ipv4Addr>,
+        ipv6_dns_address: Option<Ipv6Addr>,
+    ) -> Result<Self, Error> {
+        if capture_routes.len() > 256
+            || physical_endpoints.len() > 256
+            || capture_routes.iter().any(|prefix| !prefix.is_canonical())
+        {
+            return Err(Error::invalid_input());
+        }
+        capture_routes.sort_unstable();
+        capture_routes.dedup();
         physical_endpoints.sort_unstable();
         physical_endpoints.dedup();
         if capture_routes.is_empty()
             && physical_endpoints.is_empty()
-            && !default_binder
+            && !target_binder
             && ipv4_dns_address.is_none()
+            && ipv6_dns_address.is_none()
         {
-            return Err(Error);
+            return Err(Error::invalid_input());
         }
         Ok(Self {
             capture_routes,
             physical_endpoints,
-            default_binder,
+            target_binder,
             ipv4_dns_address,
+            ipv6_dns_address,
         })
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) fn capture_routes(&self) -> &[Ipv4Prefix] {
+    pub(crate) fn capture_routes(&self) -> &[IpPrefix] {
         &self.capture_routes
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) fn physical_endpoints(&self) -> &[SocketAddrV4] {
+    pub(crate) fn physical_endpoints(&self) -> &[SocketAddr] {
         &self.physical_endpoints
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) const fn needs_default_binder(&self) -> bool {
-        self.default_binder
+    pub(crate) const fn needs_target_binder(&self) -> bool {
+        self.target_binder
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn ipv4_dns_address(&self) -> Option<Ipv4Addr> {
         self.ipv4_dns_address
     }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub(crate) const fn ipv6_dns_address(&self) -> Option<Ipv6Addr> {
+        self.ipv6_dns_address
+    }
 }
 
 impl AdapterConfig {
     /// Checks the platform Adapter's trust-boundary invariants without touching the OS.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: Box<str>,
-        ipv4: Ipv4Addr,
-        ipv4_prefix: u8,
-        ipv6: Ipv6Addr,
-        ipv6_prefix: u8,
+        ipv4: Option<Ipv4Prefix>,
+        ipv6: Option<Ipv6Prefix>,
         mtu: u16,
         ring_capacity: u32,
         ready_timeout: Duration,
@@ -143,43 +300,95 @@ impl AdapterConfig {
         if name.is_empty()
             || name.encode_utf16().count() >= 128
             || name.chars().any(char::is_control)
-            || ipv4_prefix > 32
-            || ipv6_prefix > 128
+            || (ipv4.is_none() && ipv6.is_none())
             || !(1280..=1500).contains(&mtu)
             || !(131_072..=67_108_864).contains(&ring_capacity)
             || !ring_capacity.is_power_of_two()
             || !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&ready_timeout)
         {
-            return Err(Error);
+            return Err(Error::invalid_input());
         }
         Ok(Self {
             name,
             ipv4,
-            ipv4_prefix,
             ipv6,
-            ipv6_prefix,
             mtu,
             ring_capacity,
             ready_timeout,
-            managed_ipv4: None,
+            managed: None,
         })
     }
 
-    /// Adds the already-validated managed IPv4 plan without touching the OS.
-    pub fn with_managed_ipv4(mut self, managed: ManagedIpv4Config) -> Self {
-        self.managed_ipv4 = Some(managed);
-        self
+    /// Adds a managed network plan after checking it against the enabled address families.
+    pub fn with_managed_network(mut self, managed: ManagedNetworkConfig) -> Result<Self, Error> {
+        if managed.capture_routes.iter().any(|prefix| {
+            (prefix.is_ipv4() && self.ipv4.is_none()) || (prefix.is_ipv6() && self.ipv6.is_none())
+        }) || (managed.ipv4_dns_address.is_some() && self.ipv4.is_none())
+            || (managed.ipv6_dns_address.is_some() && self.ipv6.is_none())
+        {
+            return Err(Error::invalid_input());
+        }
+        self.managed = Some(managed);
+        Ok(self)
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) fn managed_ipv4(&self) -> Option<&ManagedIpv4Config> {
-        self.managed_ipv4.as_ref()
+    pub(crate) fn managed_network(&self) -> Option<&ManagedNetworkConfig> {
+        self.managed.as_ref()
     }
+}
+
+/// Closed, redacted category for one Wintun operation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorKind {
+    /// A caller supplied an invalid bounded configuration or operation input.
+    InvalidInput,
+    /// The current adapter session ended or became unusable and may be rebuilt.
+    RecoverableSession,
+    /// An invariant, handle, driver, or platform result was internally inconsistent.
+    UnrecoverableCorruption,
+    /// Reverse teardown could not prove that owned platform state was restored safely.
+    Cleanup,
 }
 
 /// Redacted platform failure. Raw paths, identities and Win32 text are never retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Error;
+pub struct Error {
+    kind: ErrorKind,
+}
+
+impl Error {
+    /// Constructs a redacted error from one of the fixed public categories.
+    pub const fn new(kind: ErrorKind) -> Self {
+        Self { kind }
+    }
+
+    /// Returns the fixed category without exposing platform error detail.
+    pub const fn kind(self) -> ErrorKind {
+        self.kind
+    }
+
+    const fn invalid_input() -> Self {
+        Self::new(ErrorKind::InvalidInput)
+    }
+
+    pub(crate) const fn recoverable_session() -> Self {
+        Self::new(ErrorKind::RecoverableSession)
+    }
+
+    const fn unrecoverable_corruption() -> Self {
+        Self::new(ErrorKind::UnrecoverableCorruption)
+    }
+
+    pub(crate) const fn cleanup() -> Self {
+        Self::new(ErrorKind::Cleanup)
+    }
+}
+
+// Existing trust-boundary code uses this conservative redacted value for failures that are not
+// explicitly proven to be invalid input, a recoverable session end, or a cleanup failure.
+#[allow(non_upper_case_globals)]
+pub(crate) const Error: Error = Error::unrecoverable_corruption();
 
 /// Redacted adapter-creation failure that preserves only rollback integrity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,19 +436,22 @@ impl std::error::Error for Error {}
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
-pub use windows::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy};
+pub use windows::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WorkSignal};
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 mod unsupported;
 #[cfg(not(all(windows, target_arch = "x86_64")))]
-pub use unsupported::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy};
+pub use unsupported::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WorkSignal};
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::time::Duration;
 
-    use super::{ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256};
+    use super::{
+        ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, ErrorKind, IpPrefix,
+        Ipv4Prefix, Ipv6Prefix, ManagedNetworkConfig,
+    };
 
     #[test]
     fn approved_artifact_and_required_exports_are_pinned() {
@@ -256,20 +468,133 @@ mod tests {
         let make = |name: &str, ring| {
             AdapterConfig::new(
                 name.into(),
-                Ipv4Addr::new(198, 18, 0, 2),
-                30,
-                Ipv6Addr::LOCALHOST,
-                126,
+                Some(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 2), 30).unwrap()),
+                Some(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 126).unwrap()),
                 1420,
                 ring,
                 Duration::from_secs(10),
             )
         };
         assert!(make("Ferrum2", 8_388_608).is_ok());
-        assert!(make("Ferrum2", 131_073).is_err());
-        assert!(make("Ferrum2\0", 8_388_608).is_err());
+        assert_eq!(
+            make("Ferrum2", 131_073).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            make("Ferrum2\0", 8_388_608).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
         assert!(!CreateError::operation().is_cleanup_failure());
         assert!(CreateError::cleanup().is_cleanup_failure());
+    }
+
+    #[test]
+    fn operation_error_kinds_are_closed_and_redacted() {
+        for kind in [
+            ErrorKind::InvalidInput,
+            ErrorKind::RecoverableSession,
+            ErrorKind::UnrecoverableCorruption,
+            ErrorKind::Cleanup,
+        ] {
+            let error = Error::new(kind);
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.to_string(), "Wintun operation failed");
+            assert!(!format!("{error:?}").is_empty());
+        }
+        assert_eq!(Error::cleanup().kind(), ErrorKind::Cleanup);
+    }
+
+    #[test]
+    fn optional_families_and_family_neutral_managed_intent_are_checked_without_os_work() {
+        let v4 = Ipv4Prefix::new("198.18.0.2".parse().unwrap(), 30).unwrap();
+        let v6 = Ipv6Prefix::new("fd00::2".parse().unwrap(), 126).unwrap();
+        let make = |ipv4, ipv6| {
+            AdapterConfig::new(
+                "Ferrum2".into(),
+                ipv4,
+                ipv6,
+                1420,
+                8_388_608,
+                Duration::from_secs(10),
+            )
+        };
+        assert!(make(None, None).is_err());
+        assert!(make(Some(v4), None).is_ok());
+        assert!(make(None, Some(v6)).is_ok());
+        assert!(make(Some(v4), Some(v6)).is_ok());
+
+        let routes = vec![
+            IpPrefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24).unwrap()),
+            IpPrefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32).unwrap()),
+        ];
+        let endpoints: Vec<SocketAddr> = vec![
+            "203.0.113.9:443".parse().unwrap(),
+            "[2001:db8::9]:443".parse().unwrap(),
+        ];
+        let managed = ManagedNetworkConfig::new(
+            routes,
+            endpoints,
+            true,
+            Some("198.18.0.1".parse().unwrap()),
+            Some("fd00::1".parse().unwrap()),
+        )
+        .unwrap();
+        assert!(
+            make(Some(v4), Some(v6))
+                .unwrap()
+                .with_managed_network(managed.clone())
+                .is_ok()
+        );
+        assert!(
+            make(Some(v4), None)
+                .unwrap()
+                .with_managed_network(managed.clone())
+                .is_err()
+        );
+        assert!(
+            make(None, Some(v6))
+                .unwrap()
+                .with_managed_network(managed)
+                .is_err()
+        );
+
+        let v4_managed_with_ipv6_underlay = ManagedNetworkConfig::new(
+            vec![IpPrefix::V4(
+                Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24).unwrap(),
+            )],
+            vec!["[2001:db8::9]:443".parse().unwrap()],
+            false,
+            Some("198.18.0.1".parse().unwrap()),
+            None,
+        )
+        .unwrap();
+        assert!(
+            make(Some(v4), None)
+                .unwrap()
+                .with_managed_network(v4_managed_with_ipv6_underlay)
+                .is_ok(),
+            "underlay endpoint family is independent from enabled tunnel families"
+        );
+
+        assert!(
+            ManagedNetworkConfig::new(
+                vec![IpPrefix::V4(
+                    Ipv4Prefix::new("203.0.113.1".parse().unwrap(), 24).unwrap()
+                )],
+                Vec::new(),
+                false,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(ManagedNetworkConfig::new(Vec::new(), Vec::new(), false, None, None).is_err());
+        assert!(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0).is_err());
+        assert!(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 129).is_err());
+
+        let too_many_routes =
+            vec![IpPrefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24).unwrap()); 257];
+        assert!(ManagedNetworkConfig::new(too_many_routes, Vec::new(), false, None, None).is_err());
     }
 
     fn hex_literal(value: &str) -> [u8; 32] {

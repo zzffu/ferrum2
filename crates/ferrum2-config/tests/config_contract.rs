@@ -9,7 +9,7 @@ use std::time::Duration;
 use ferrum2_config::{
     ClientOutboundConfig, ConfigErrorKind, ConfigField, DnsIngressId, DnsQueryType, DnsStrategy,
     DnsTransport, LoggingLevel, MAX_CONFIG_BYTES, RouteAction, RouteProtocol, RuntimeConfig,
-    SchemaVersion, Sniffers, load_client, load_server,
+    SchemaVersion, Sniffers, UdpFiltering, load_client, load_server,
 };
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::Network;
@@ -565,6 +565,47 @@ fn selector_graphs_compile_for_both_roles_and_share_live_route_state() {
     assert_eq!(
         (selected(&server.route, 0), selected(&server.route, 1)),
         (1, 1)
+    );
+}
+
+#[test]
+fn client_selector_generation_advances_only_for_successful_member_changes() {
+    let selectors =
+        "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"";
+    let source = with_selectors(
+        tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"manual\"", 1),
+        selectors,
+    );
+    let config = load_client(TempConfig::text(&source).path()).expect("client selector");
+    let control = config.selector_control();
+    let observer = config.route.selector_control();
+    let initial = observer.generation();
+
+    control.switch("manual", "o0").expect("same member");
+    assert_eq!(
+        observer.generation(),
+        initial,
+        "no-op switch changed generation"
+    );
+    assert!(control.switch("manual", "missing").is_err());
+    assert_eq!(
+        observer.generation(),
+        initial,
+        "rejected switch changed generation"
+    );
+
+    control.switch("manual", "o1").expect("switch to o1");
+    let second = observer.generation();
+    assert_ne!(second, initial);
+    assert_eq!(observer.selected("manual"), Ok("o1"));
+    control.switch("manual", "o1").expect("same o1 member");
+    assert_eq!(observer.generation(), second);
+
+    control.switch("manual", "o0").expect("switch back to o0");
+    assert_ne!(
+        observer.generation(),
+        second,
+        "switch-back reused generation"
     );
 }
 
@@ -2210,9 +2251,242 @@ fn tun_only_static_config_appends_one_validated_ordinary_inbound() {
         "TUN-only ordinary ID is zero"
     );
     assert_eq!(tun.adapter_name.as_ref(), "Ferrum2");
-    assert_eq!(tun.ipv4_address.to_string(), "198.18.0.2/30");
-    assert_eq!(tun.ipv6_address.to_string(), "fd00::2/126");
-    assert_eq!(tun.owned_buffer_bytes, 53_995_616);
+    assert_eq!(
+        tun.ipv4_address.expect("IPv4 address").to_string(),
+        "198.18.0.2/30"
+    );
+    assert_eq!(
+        tun.ipv6_address.expect("IPv6 address").to_string(),
+        "fd00::2/126"
+    );
+    assert_eq!(tun.udp_filtering, UdpFiltering::AddressDependent);
+    assert!(!tun.deprecated_max_udp_buffered_bytes_present);
+}
+
+#[test]
+fn tun_optional_families_routes_and_filtering_are_family_exact() {
+    let v4 = tun_client(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nauto_route = true\noutbound = \"proxy\"",
+    );
+    let tun = load_client(TempConfig::text(&v4).path())
+        .expect("IPv4-only TUN")
+        .tun
+        .unwrap();
+    assert!(tun.ipv4_address.is_some());
+    assert!(tun.ipv6_address.is_none());
+    assert_eq!(tun.udp_filtering, UdpFiltering::AddressDependent);
+    assert_eq!(
+        tun.capture_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["0.0.0.0/1", "128.0.0.0/1"]
+    );
+
+    let v6_default = tun_client(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"proxy\"",
+    );
+    let tun = load_client(TempConfig::text(&v6_default).path())
+        .expect("IPv6-only default routes")
+        .tun
+        .unwrap();
+    assert!(tun.ipv4_address.is_none());
+    assert!(tun.ipv6_address.is_some());
+    assert_eq!(
+        tun.capture_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["::/1", "8000::/1"]
+    );
+
+    let v6_subtracted = tun_client(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\nroute_address = [\"2001:db8:1::1/48\"]\nroute_exclude_address = [\"2001:db8:1:8000::1/49\"]\noutbound = \"proxy\"",
+    );
+    let tun = load_client(TempConfig::text(&v6_subtracted).path())
+        .expect("IPv6-only normalized route subtraction")
+        .tun
+        .unwrap();
+    assert!(tun.ipv4_address.is_none());
+    assert!(tun.ipv6_address.is_some());
+    assert_eq!(
+        tun.capture_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["2001:db8:1::/49"]
+    );
+
+    let dual = tun_client(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\nudp_filtering = \"endpoint_independent\"\noutbound = \"proxy\"",
+    );
+    let tun = load_client(TempConfig::text(&dual).path())
+        .expect("dual-stack EIF TUN")
+        .tun
+        .unwrap();
+    assert_eq!(tun.udp_filtering, UdpFiltering::EndpointIndependent);
+    assert_eq!(
+        tun.capture_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
+    );
+
+    for (name, tun, field) in [
+        (
+            "neither family",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\noutbound = \"proxy\"",
+            ConfigField::Tun,
+        ),
+        (
+            "IPv6 route in IPv4-only TUN",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nauto_route = true\nroute_address = [\"::/0\"]\noutbound = \"proxy\"",
+            ConfigField::TunRouteAddress,
+        ),
+        (
+            "IPv4 exclude in IPv6-only TUN",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\nroute_exclude_address = [\"10.0.0.0/8\"]\noutbound = \"proxy\"",
+            ConfigField::TunRouteExcludeAddress,
+        ),
+        (
+            "unknown UDP filtering",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nudp_filtering = \"port_dependent\"\noutbound = \"proxy\"",
+            ConfigField::TunUdpFiltering,
+        ),
+        (
+            "IPv6 network interface address",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::/126\"\noutbound = \"proxy\"",
+            ConfigField::TunIpv6Address,
+        ),
+    ] {
+        let error = load_client(TempConfig::text(&tun_client(tun)).path())
+            .err()
+            .unwrap_or_else(|| panic!("{name} passed"));
+        assert_eq!(error.field(), field, "{name}");
+    }
+
+    for field in [
+        "route_guard",
+        "on_network_change",
+        "dns_mode",
+        "udp_mapping",
+    ] {
+        let source = format!(
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\n{field} = \"disabled\"\noutbound = \"proxy\""
+        );
+        let error = load_client(TempConfig::text(&tun_client(&source)).path())
+            .err()
+            .unwrap_or_else(|| panic!("forbidden {field} passed"));
+        assert_eq!(
+            (error.kind(), error.field()),
+            (ConfigErrorKind::Syntax, ConfigField::Config),
+            "{field}"
+        );
+    }
+
+    let ipv6_endpoint_inside_tun = tun_client(
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"proxy\"",
+    )
+    .replace("192.0.2.10:8388", "[fd00::1]:8388");
+    let error = load_client(TempConfig::text(&ipv6_endpoint_inside_tun).path())
+        .err()
+        .expect("managed IPv6 endpoint inside TUN subnet");
+    assert_eq!(error.field(), ConfigField::TunIpv6Address);
+}
+
+#[test]
+fn tun_synthetic_dns_supports_each_enabled_family_and_rejects_mismatches() {
+    let dns = "[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"resolver\"\ntransport = \"udp\"\naddress = \"1.1.1.1:53\"\n[dns.route]\nfinal = \"resolver\"";
+    let valid = [
+        (
+            "IPv4-only DNS",
+            "ipv4_address = \"198.18.0.2/30\"",
+            "ipv4_dns_address = \"198.18.0.1\"",
+            Some("198.18.0.1"),
+            None,
+        ),
+        (
+            "IPv6-only DNS",
+            "ipv6_address = \"fd00::2/126\"",
+            "ipv6_dns_address = \"fd00::1\"",
+            None,
+            Some("fd00::1"),
+        ),
+        (
+            "dual DNS",
+            "ipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"",
+            "ipv4_dns_address = \"198.18.0.1\"\nipv6_dns_address = \"fd00::1\"",
+            Some("198.18.0.1"),
+            Some("fd00::1"),
+        ),
+    ];
+    for (name, addresses, dns_addresses, expected_v4, expected_v6) in valid {
+        let source = format!(
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\n{addresses}\nauto_route = true\nauto_dns = true\n{dns_addresses}\noutbound = \"proxy\"\n{dns}"
+        );
+        let tun = load_client(TempConfig::text(&tun_client(&source)).path())
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .tun
+            .unwrap();
+        assert_eq!(
+            tun.ipv4_dns_address.map(|address| address.to_string()),
+            expected_v4.map(str::to_owned),
+            "{name}"
+        );
+        assert_eq!(
+            tun.ipv6_dns_address.map(|address| address.to_string()),
+            expected_v6.map(str::to_owned),
+            "{name}"
+        );
+    }
+
+    for (name, addresses, dns_fields, field) in [
+        (
+            "IPv6 DNS on IPv4-only TUN",
+            "ipv4_address = \"198.18.0.2/30\"",
+            "ipv6_dns_address = \"fd00::1\"",
+            ConfigField::TunIpv6DnsAddress,
+        ),
+        (
+            "IPv4 DNS on IPv6-only TUN",
+            "ipv6_address = \"fd00::2/126\"",
+            "ipv4_dns_address = \"198.18.0.1\"",
+            ConfigField::TunIpv4DnsAddress,
+        ),
+        (
+            "no synthetic DNS",
+            "ipv6_address = \"fd00::2/126\"",
+            "",
+            ConfigField::TunAutoDns,
+        ),
+        (
+            "IPv6 DNS is interface address",
+            "ipv6_address = \"fd00::2/126\"",
+            "ipv6_dns_address = \"fd00::2\"",
+            ConfigField::TunIpv6DnsAddress,
+        ),
+        (
+            "IPv6 DNS is network address",
+            "ipv6_address = \"fd00::2/126\"",
+            "ipv6_dns_address = \"fd00::\"",
+            ConfigField::TunIpv6DnsAddress,
+        ),
+        (
+            "IPv6 DNS is outside subnet",
+            "ipv6_address = \"fd00::2/126\"",
+            "ipv6_dns_address = \"fd00::5\"",
+            ConfigField::TunIpv6DnsAddress,
+        ),
+    ] {
+        let source = format!(
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\n{addresses}\nauto_route = true\nauto_dns = true\n{dns_fields}\noutbound = \"proxy\"\n{dns}"
+        );
+        let error = load_client(TempConfig::text(&tun_client(&source)).path())
+            .err()
+            .unwrap_or_else(|| panic!("{name} passed"));
+        assert_eq!(error.field(), field, "{name}");
+    }
 }
 
 #[test]
@@ -2319,14 +2593,6 @@ fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
             ConfigField::TunMaxTcpFlows,
         ),
         (
-            "budget over ceiling",
-            base.replace(
-                "outbound =",
-                "ring_capacity = 67108864\nmax_udp_buffered_bytes = 134217728\noutbound =",
-            ),
-            ConfigField::TunMemory,
-        ),
-        (
             "IPv4 network address",
             base.replace("198.18.0.2/30", "198.18.0.0/30"),
             ConfigField::TunIpv4Address,
@@ -2399,10 +2665,10 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             minimums.replace("max_udp_mappings = 1", "max_udp_mappings = 8192"),
         ),
         (
-            "UDP bytes maximum",
+            "legacy UDP bytes value is ignored",
             minimums.replace(
                 "max_udp_buffered_bytes = 65536",
-                "max_udp_buffered_bytes = 134217728",
+                "max_udp_buffered_bytes = 0",
             ),
         ),
     ];
@@ -2474,16 +2740,6 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             "max_udp_mappings = 8193",
             ConfigField::TunMaxUdpMappings,
         ),
-        (
-            "UDP bytes low",
-            "max_udp_buffered_bytes = 65535",
-            ConfigField::TunMaxUdpBufferedBytes,
-        ),
-        (
-            "UDP bytes high",
-            "max_udp_buffered_bytes = 134217729",
-            ConfigField::TunMaxUdpBufferedBytes,
-        ),
     ];
     for (name, mutation, field) in mutations {
         let source = base.replace("outbound =", &format!("{mutation}\noutbound ="));
@@ -2495,30 +2751,22 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
         );
     }
 
-    for (name, udp_bytes, accepted) in [
-        ("256 MiB minus one", 113_776_543_u64, true),
-        ("256 MiB exact", 113_776_544, true),
-        ("256 MiB plus one", 113_776_545, false),
+    for (name, udp_bytes) in [
+        ("zero legacy value", 0_u64),
+        ("former minimum minus one", 65_535),
+        ("former maximum plus one", 134_217_729),
+        ("maximum integer", u64::MAX),
     ] {
         let source = base.replace(
             "outbound =",
-            &format!("ring_capacity = 67108864\nmax_udp_buffered_bytes = {udp_bytes}\noutbound ="),
+            &format!("max_udp_buffered_bytes = {udp_bytes}\noutbound ="),
         );
         let file = TempConfig::text(&tun_client(&source));
-        match load_client(file.path()) {
-            Ok(config) => {
-                assert!(accepted, "{name} unexpectedly passed");
-                assert_eq!(
-                    config.tun.expect(name).owned_buffer_bytes,
-                    268_435_456 - u64::from(name.ends_with("minus one")),
-                    "{name}"
-                );
-            }
-            Err(error) => {
-                assert!(!accepted, "{name}: {error}");
-                assert_eq!(error.field(), ConfigField::TunMemory, "{name}");
-            }
-        }
+        let tun = load_client(file.path())
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .tun
+            .expect(name);
+        assert!(tun.deprecated_max_udp_buffered_bytes_present, "{name}");
     }
 
     load_client(
@@ -2791,7 +3039,7 @@ fn m16_managed_tun_compiles_bounded_canonical_capture_and_dns_plan() {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
-        ["0.0.0.0/1", "128.0.0.0/1"]
+        ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
     );
     assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
 
@@ -2839,7 +3087,7 @@ fn m16_managed_tun_compiles_bounded_canonical_capture_and_dns_plan() {
 
 #[test]
 fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
-    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\noutbound = \"proxy\"";
     let managed =
         |fields: &str| tun_client(&base.replace("outbound =", &format!("{fields}\noutbound =")));
     for (name, fields, expected) in [
@@ -2869,11 +3117,6 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
             ConfigField::TunRouteExcludeAddress,
         ),
         (
-            "noncanonical include",
-            "auto_route = true\nroute_address = [\"10.1.0.0/8\"]",
-            ConfigField::TunRouteAddress,
-        ),
-        (
             "empty result",
             "auto_route = true\nroute_address = [\"10.0.0.0/8\"]\nroute_exclude_address = [\"10.0.0.0/8\"]",
             ConfigField::TunRouteAddress,
@@ -2886,7 +3129,7 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
         (
             "DNS missing address",
             "auto_route = true\nauto_dns = true",
-            ConfigField::TunIpv4DnsAddress,
+            ConfigField::TunAutoDns,
         ),
         (
             "DNS graph missing",
@@ -2946,6 +3189,23 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
         assert!(!format!("{error:?}").contains("198.18"), "{name}");
     }
 
+    let tun = load_client(
+        TempConfig::text(&managed(
+            "auto_route = true\nroute_address = [\"10.1.0.0/8\"]",
+        ))
+        .path(),
+    )
+    .expect("noncanonical include is normalized")
+    .tun
+    .unwrap();
+    assert_eq!(
+        tun.capture_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["10.0.0.0/8"]
+    );
+
     let includes = (0..65)
         .map(|index| format!("\"10.{index}.0.0/16\""))
         .collect::<Vec<_>>()
@@ -2998,12 +3258,12 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
             excludes.join(", ")
         ))
     };
-    let tun = load_client(TempConfig::text(&exact_output("0.32.0.0/32")).path())
+    let tun = load_client(TempConfig::text(&exact_output("10.0.0.0/18")).path())
         .expect("exactly 256 compiled rows")
         .tun
         .unwrap();
     assert_eq!(tun.capture_routes.len(), 256);
-    let error = load_client(TempConfig::text(&exact_output("0.64.0.0/32")).path())
+    let error = load_client(TempConfig::text(&exact_output("10.0.0.0/19")).path())
         .err()
         .expect("257 compiled rows");
     assert_eq!(error.field(), ConfigField::TunRouteAddress);
@@ -3049,21 +3309,32 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
     let ipv6_proxy = tun_client(base).replace("192.0.2.10:8388", "[2001:db8::10]:8388");
     let config = load_client(TempConfig::text(&ipv6_proxy).path()).expect("manual IPv6 proxy");
     assert!(config.tun.unwrap().physical_endpoints.is_empty());
-    let error = load_client(
+    let tun = load_client(
         TempConfig::text(&ipv6_proxy.replace("outbound =", "auto_route = true\noutbound =")).path(),
     )
-    .err()
-    .expect("managed IPv6 proxy");
-    assert_eq!(error.field(), ConfigField::OutboundsServer);
+    .expect("managed IPv6 proxy")
+    .tun
+    .unwrap();
+    assert_eq!(
+        tun.physical_endpoints,
+        ["[2001:db8::10]:8388".parse().unwrap()]
+    );
 
     let dns = "[dns]\n[[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"resolver\"\ntransport = \"udp\"\naddress = \"[2001:db8::53]:53\"\n[dns.route]\nfinal = \"resolver\"";
     let manual_dns = tun_client(&format!("{base}\n{dns}"));
     load_client(TempConfig::text(&manual_dns).path()).expect("manual IPv6 DNS");
     let managed_dns = manual_dns.replace("outbound =", "auto_route = true\noutbound =");
-    let error = load_client(TempConfig::text(&managed_dns).path())
-        .err()
-        .expect("managed direct IPv6 DNS");
-    assert_eq!(error.field(), ConfigField::DnsServersAddress);
+    let tun = load_client(TempConfig::text(&managed_dns).path())
+        .expect("managed direct IPv6 DNS")
+        .tun
+        .unwrap();
+    assert_eq!(
+        tun.physical_endpoints,
+        [
+            "192.0.2.10:8388".parse().unwrap(),
+            "[2001:db8::53]:53".parse().unwrap()
+        ]
+    );
 
     let detoured = managed_dns.replace(
         "address = \"[2001:db8::53]:53\"",
@@ -3086,10 +3357,17 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
     assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
 
     let selector_ipv6 = "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"manual\"\n[[outbounds]]\ntag = \"v4\"\nserver = \"192.0.2.10:8388\"\n[[outbounds]]\ntag = \"v6\"\nserver = \"[2001:db8::10]:8388\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"v4\", \"v6\"]\ndefault = \"v4\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
-    let error = load_client(TempConfig::text(selector_ipv6).path())
-        .err()
-        .expect("selector IPv6 physical first hop");
-    assert_eq!(error.field(), ConfigField::OutboundsServer);
+    let tun = load_client(TempConfig::text(selector_ipv6).path())
+        .expect("selector IPv6 physical first hop")
+        .tun
+        .unwrap();
+    assert_eq!(
+        tun.physical_endpoints,
+        [
+            "192.0.2.10:8388".parse().unwrap(),
+            "[2001:db8::10]:8388".parse().unwrap()
+        ]
+    );
 
     let chained = "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"chain\"\n[[outbounds]]\ntag = \"outer\"\nserver = \"192.0.2.10:8388\"\n[[outbounds]]\ntag = \"inner\"\nserver = \"[2001:db8::10]:8388\"\n[[chains]]\ntag = \"chain\"\nhops = [\"outer\", \"inner\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
     let tun = load_client(TempConfig::text(chained).path())

@@ -45,6 +45,7 @@ const TRACE_FIELDS_WITH_REASON: &[&str] = &[
     "bytes",
 ];
 const SNIFF_TRACE_FIELDS: &[&str] = &["event", "role", "transport", "stage", "outcome", "protocol"];
+const TUN_TRACE_FIELDS: &[&str] = &["event", "role", "stage", "outcome", "reason", "family"];
 
 /// Closed severity levels accepted by the tracing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +121,7 @@ pub enum Stage {
     Relay,
     Metrics,
     Shutdown,
+    Tun,
 }
 
 impl Stage {
@@ -134,6 +136,7 @@ impl Stage {
             Self::Relay => "relay",
             Self::Metrics => "metrics",
             Self::Shutdown => "shutdown",
+            Self::Tun => "tun",
         }
     }
 }
@@ -148,6 +151,7 @@ pub enum Outcome {
     Failed,
     Cancelled,
     Timeout,
+    Dropped,
 }
 
 impl Outcome {
@@ -159,6 +163,7 @@ impl Outcome {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
+            Self::Dropped => "dropped",
         }
     }
 }
@@ -219,6 +224,7 @@ pub enum Event {
     Lifecycle,
     ForcedShutdown,
     Sniff,
+    Tun,
 }
 
 impl Event {
@@ -232,6 +238,48 @@ impl Event {
             Self::Lifecycle => "lifecycle",
             Self::ForcedShutdown => "forced_shutdown",
             Self::Sniff => "sniff",
+            Self::Tun => "tun",
+        }
+    }
+}
+
+/// Closed address-family label for TUN diagnostics.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TunIpFamily {
+    Ipv4,
+    Ipv6,
+}
+
+impl TunIpFamily {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
+}
+
+/// Closed reasons for TUN events which require a structured diagnostic log.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TunDiagnosticReason {
+    WintunRingFull,
+    MoreSpecificRoute,
+    EqualPrefixPreferred,
+}
+
+impl TunDiagnosticReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WintunRingFull => "wintun_ring_full",
+            Self::MoreSpecificRoute => "more_specific_route",
+            Self::EqualPrefixPreferred => "equal_prefix_preferred",
+        }
+    }
+
+    const fn outcome(self) -> Outcome {
+        match self {
+            Self::WintunRingFull => Outcome::Dropped,
+            Self::MoreSpecificRoute | Self::EqualPrefixPreferred => Outcome::Rejected,
         }
     }
 }
@@ -341,6 +389,87 @@ impl Reason {
     }
 }
 
+/// Closed reasons for rejecting a packet at the TUN boundary.
+///
+/// The enum deliberately carries no packet, address, port, adapter, or route
+/// identity, keeping the corresponding metric family bounded.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TunPacketRejectReason {
+    InvalidIpVersion,
+    FamilyDisabled,
+    InvalidIpLength,
+    InvalidIpChecksum,
+    InvalidExtensionHeader,
+    UnsupportedIpProtocol,
+    IcmpEchoUnsupported,
+    FragmentMalformed,
+    FragmentOverlap,
+    FragmentTimeout,
+    FragmentLimit,
+    InvalidTransportLength,
+    InvalidTransportChecksum,
+    InvalidSource,
+    InvalidDestination,
+    IngressFull,
+    TcpFlowLimit,
+    UdpAssociationLimit,
+    UdpCandidateTimeout,
+    UdpQueueFull,
+    UdpResponseFiltered,
+    StaleGeneration,
+    InternalOutputBackpressured,
+    WintunRingFull,
+    RouteConflict,
+}
+
+impl TunPacketRejectReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidIpVersion => "invalid_ip_version",
+            Self::FamilyDisabled => "family_disabled",
+            Self::InvalidIpLength => "invalid_ip_length",
+            Self::InvalidIpChecksum => "invalid_ip_checksum",
+            Self::InvalidExtensionHeader => "invalid_extension_header",
+            Self::UnsupportedIpProtocol => "unsupported_ip_protocol",
+            Self::IcmpEchoUnsupported => "icmp_echo_unsupported",
+            Self::FragmentMalformed => "fragment_malformed",
+            Self::FragmentOverlap => "fragment_overlap",
+            Self::FragmentTimeout => "fragment_timeout",
+            Self::FragmentLimit => "fragment_limit",
+            Self::InvalidTransportLength => "invalid_transport_length",
+            Self::InvalidTransportChecksum => "invalid_transport_checksum",
+            Self::InvalidSource => "invalid_source",
+            Self::InvalidDestination => "invalid_destination",
+            Self::IngressFull => "ingress_full",
+            Self::TcpFlowLimit => "tcp_flow_limit",
+            Self::UdpAssociationLimit => "udp_association_limit",
+            Self::UdpCandidateTimeout => "udp_candidate_timeout",
+            Self::UdpQueueFull => "udp_queue_full",
+            Self::UdpResponseFiltered => "udp_response_filtered",
+            Self::StaleGeneration => "stale_generation",
+            Self::InternalOutputBackpressured => "internal_output_backpressured",
+            Self::WintunRingFull => "wintun_ring_full",
+            Self::RouteConflict => "route_conflict",
+        }
+    }
+}
+
+/// Closed reasons for an external route winning over a TUN capture route.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TunRouteConflictReason {
+    MoreSpecificRoute,
+    EqualPrefixPreferred,
+}
+
+impl TunRouteConflictReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MoreSpecificRoute => "more_specific_route",
+            Self::EqualPrefixPreferred => "equal_prefix_preferred",
+        }
+    }
+}
+
 macro_rules! impl_closed_display {
     ($type:ty) => {
         impl fmt::Display for $type {
@@ -359,6 +488,10 @@ impl_closed_display!(Event);
 impl_closed_display!(Reason);
 impl_closed_display!(SniffOutcome);
 impl_closed_display!(SniffProtocol);
+impl_closed_display!(TunPacketRejectReason);
+impl_closed_display!(TunRouteConflictReason);
+impl_closed_display!(TunIpFamily);
+impl_closed_display!(TunDiagnosticReason);
 
 /// One structured event containing only approved closed fields and numeric values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -453,7 +586,8 @@ fn approved_trace_metadata(metadata: &Metadata<'_>, max_level: LogLevel) -> bool
         && max_level.enables(metadata.level())
         && (has_exact_fields(metadata, TRACE_FIELDS)
             || has_exact_fields(metadata, TRACE_FIELDS_WITH_REASON)
-            || has_exact_fields(metadata, SNIFF_TRACE_FIELDS))
+            || has_exact_fields(metadata, SNIFF_TRACE_FIELDS)
+            || has_exact_fields(metadata, TUN_TRACE_FIELDS))
 }
 
 fn has_exact_fields(metadata: &Metadata<'_>, expected: &[&str]) -> bool {
@@ -503,6 +637,20 @@ pub fn emit(record: TraceRecord) {
         LogLevel::Debug => emit_at!(Level::DEBUG, record),
         LogLevel::Trace => emit_at!(Level::TRACE, record),
     }
+}
+
+/// Emits one redacted TUN diagnostic with only fixed low-cardinality fields.
+pub fn emit_tun_diagnostic(role: Role, reason: TunDiagnosticReason, family: TunIpFamily) {
+    tracing::event!(
+        target: CLOSED_TRACE_TARGET,
+        Level::WARN,
+        event = %Event::Tun,
+        role = %role,
+        stage = %Stage::Tun,
+        outcome = %reason.outcome(),
+        reason = %reason,
+        family = %family,
+    );
 }
 
 fn emit_sniff(role: Role, transport: Transport, outcome: SniffOutcome, protocol: SniffProtocol) {
@@ -848,6 +996,8 @@ impl_label_value!(DnsResolveResult);
 impl_label_value!(DnsQueryType);
 impl_label_value!(TargetResolutionComponent);
 impl_label_value!(TargetResolutionMode);
+impl_label_value!(TunPacketRejectReason);
+impl_label_value!(TunRouteConflictReason);
 
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ConnectionLabels {
@@ -962,6 +1112,16 @@ struct DnsResolvePurposeLabels {
 struct TargetResolutionLabels {
     component: TargetResolutionComponent,
     mode: TargetResolutionMode,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct TunPacketRejectLabels {
+    reason: TunPacketRejectReason,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct TunRouteConflictLabels {
+    reason: TunRouteConflictReason,
 }
 
 const ROLES: &[Role] = &[Role::Client, Role::Server];
@@ -1102,6 +1262,37 @@ const TARGET_RESOLUTION_MODES: &[TargetResolutionMode] = &[
     TargetResolutionMode::ClientResolvedConfigured,
     TargetResolutionMode::DeferredToDetour,
 ];
+const TUN_PACKET_REJECT_REASONS: &[TunPacketRejectReason] = &[
+    TunPacketRejectReason::InvalidIpVersion,
+    TunPacketRejectReason::FamilyDisabled,
+    TunPacketRejectReason::InvalidIpLength,
+    TunPacketRejectReason::InvalidIpChecksum,
+    TunPacketRejectReason::InvalidExtensionHeader,
+    TunPacketRejectReason::UnsupportedIpProtocol,
+    TunPacketRejectReason::IcmpEchoUnsupported,
+    TunPacketRejectReason::FragmentMalformed,
+    TunPacketRejectReason::FragmentOverlap,
+    TunPacketRejectReason::FragmentTimeout,
+    TunPacketRejectReason::FragmentLimit,
+    TunPacketRejectReason::InvalidTransportLength,
+    TunPacketRejectReason::InvalidTransportChecksum,
+    TunPacketRejectReason::InvalidSource,
+    TunPacketRejectReason::InvalidDestination,
+    TunPacketRejectReason::IngressFull,
+    TunPacketRejectReason::TcpFlowLimit,
+    TunPacketRejectReason::UdpAssociationLimit,
+    TunPacketRejectReason::UdpCandidateTimeout,
+    TunPacketRejectReason::UdpQueueFull,
+    TunPacketRejectReason::UdpResponseFiltered,
+    TunPacketRejectReason::StaleGeneration,
+    TunPacketRejectReason::InternalOutputBackpressured,
+    TunPacketRejectReason::WintunRingFull,
+    TunPacketRejectReason::RouteConflict,
+];
+const TUN_ROUTE_CONFLICT_REASONS: &[TunRouteConflictReason] = &[
+    TunRouteConflictReason::MoreSpecificRoute,
+    TunRouteConflictReason::EqualPrefixPreferred,
+];
 
 const RULE_PROGRAM_CANDIDATE_BUCKETS: &[f64] = &[
     0.0, 1.0, 4.0, 16.0, 64.0, 256.0, 1_024.0, 4_096.0, 16_384.0, 65_536.0,
@@ -1143,6 +1334,8 @@ const DNS_QUERY_TYPE_SERIES: usize = DNS_QUERY_TYPES.len();
 const DNS_RESOLVE_PURPOSE_SERIES: usize = DNS_RESOLVE_PURPOSES.len();
 const TARGET_RESOLUTION_SERIES: usize =
     TARGET_RESOLUTION_COMPONENTS.len() * TARGET_RESOLUTION_MODES.len();
+const TUN_PACKET_REJECT_SERIES: usize = TUN_PACKET_REJECT_REASONS.len();
+const TUN_ROUTE_CONFLICT_SERIES: usize = TUN_ROUTE_CONFLICT_REASONS.len();
 
 #[derive(Debug, Default)]
 struct CachedCounter {
@@ -1456,6 +1649,10 @@ type DnsResolvePurposeFamily =
     SharedClosedFamily<DnsResolvePurposeLabels, CachedCounter, DNS_RESOLVE_PURPOSE_SERIES>;
 type TargetResolutionFamily =
     SharedClosedFamily<TargetResolutionLabels, CachedCounter, TARGET_RESOLUTION_SERIES>;
+type TunPacketRejectFamily =
+    SharedClosedFamily<TunPacketRejectLabels, CachedCounter, TUN_PACKET_REJECT_SERIES>;
+type TunRouteConflictFamily =
+    SharedClosedFamily<TunRouteConflictLabels, CachedCounter, TUN_ROUTE_CONFLICT_SERIES>;
 
 fn record_rule_match(
     family: &RuleMatchFamily,
@@ -1509,6 +1706,40 @@ pub struct Metrics {
     sniff: SniffFamily,
     tun_packets_accepted: Counter,
     tun_packets_foundation_dropped: Counter,
+    tun_session_started: Counter,
+    tun_session_restart_started: Counter,
+    tun_session_restart_succeeded: Counter,
+    tun_session_restart_failed: Counter,
+    tun_session_generation: Gauge,
+    tun_session_active: Gauge,
+    tun_packets_ingress: Counter,
+    tun_packets_egress: Counter,
+    tun_packets_rejected: TunPacketRejectFamily,
+    tun_internal_egress_backpressured: Counter,
+    tun_wintun_ring_full_dropped: Counter,
+    tun_tcp_flows_active: Gauge,
+    tun_tcp_flows_rejected_limit: Counter,
+    tun_tcp_flows_reset_restart: Counter,
+    tun_tcp_bridge_blocked: Counter,
+    tun_udp_associations_active: Gauge,
+    tun_udp_candidates_active: Gauge,
+    tun_udp_association_created: Counter,
+    tun_udp_association_rejected_limit: Counter,
+    tun_udp_datagram_queue_full: Counter,
+    tun_udp_response_queue_full: Counter,
+    tun_udp_response_filtered: Counter,
+    tun_udp_stale_generation: Counter,
+    tun_reassembly_entries_active: Gauge,
+    tun_reassembly_started: Counter,
+    tun_reassembly_completed: Counter,
+    tun_reassembly_dropped_overlap: Counter,
+    tun_reassembly_dropped_timeout: Counter,
+    tun_reassembly_dropped_limit: Counter,
+    tun_reassembly_dropped_malformed: Counter,
+    tun_network_change: Counter,
+    tun_route_detect: Counter,
+    tun_route_conflict: TunRouteConflictFamily,
+    tun_underlay_bind_stale: Counter,
     ruleset_loads: RuleSetResultFamily,
     ruleset_refreshes: RuleSetResultFamily,
     ruleset_generation: Gauge,
@@ -1620,6 +1851,46 @@ impl Metrics {
         ));
         let tun_packets_accepted = Counter::default();
         let tun_packets_foundation_dropped = Counter::default();
+        let tun_session_started = Counter::default();
+        let tun_session_restart_started = Counter::default();
+        let tun_session_restart_succeeded = Counter::default();
+        let tun_session_restart_failed = Counter::default();
+        let tun_session_generation = Gauge::default();
+        let tun_session_active = Gauge::default();
+        let tun_packets_ingress = Counter::default();
+        let tun_packets_egress = Counter::default();
+        let tun_packets_rejected =
+            TunPacketRejectFamily::new(single_labels(TUN_PACKET_REJECT_REASONS, |reason| {
+                TunPacketRejectLabels { reason }
+            }));
+        let tun_internal_egress_backpressured = Counter::default();
+        let tun_wintun_ring_full_dropped = Counter::default();
+        let tun_tcp_flows_active = Gauge::default();
+        let tun_tcp_flows_rejected_limit = Counter::default();
+        let tun_tcp_flows_reset_restart = Counter::default();
+        let tun_tcp_bridge_blocked = Counter::default();
+        let tun_udp_associations_active = Gauge::default();
+        let tun_udp_candidates_active = Gauge::default();
+        let tun_udp_association_created = Counter::default();
+        let tun_udp_association_rejected_limit = Counter::default();
+        let tun_udp_datagram_queue_full = Counter::default();
+        let tun_udp_response_queue_full = Counter::default();
+        let tun_udp_response_filtered = Counter::default();
+        let tun_udp_stale_generation = Counter::default();
+        let tun_reassembly_entries_active = Gauge::default();
+        let tun_reassembly_started = Counter::default();
+        let tun_reassembly_completed = Counter::default();
+        let tun_reassembly_dropped_overlap = Counter::default();
+        let tun_reassembly_dropped_timeout = Counter::default();
+        let tun_reassembly_dropped_limit = Counter::default();
+        let tun_reassembly_dropped_malformed = Counter::default();
+        let tun_network_change = Counter::default();
+        let tun_route_detect = Counter::default();
+        let tun_route_conflict =
+            TunRouteConflictFamily::new(single_labels(TUN_ROUTE_CONFLICT_REASONS, |reason| {
+                TunRouteConflictLabels { reason }
+            }));
+        let tun_underlay_bind_stale = Counter::default();
         let ruleset_loads = RuleSetResultFamily::new(single_labels(RULESET_RESULTS, |result| {
             RuleSetResultLabels { result }
         }));
@@ -1779,6 +2050,176 @@ impl Metrics {
             tun_packets_foundation_dropped.clone(),
         );
         registry.register(
+            "ferrum2_tun_session_started",
+            "TUN sessions that reached their initial start",
+            tun_session_started.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_session_restart_started",
+            "TUN session restart attempts started",
+            tun_session_restart_started.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_session_restart_succeeded",
+            "TUN session restart attempts completed successfully",
+            tun_session_restart_succeeded.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_session_restart_failed",
+            "TUN session restart attempts that failed",
+            tun_session_restart_failed.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_session_generation",
+            "Current TUN session generation",
+            tun_session_generation.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_session_active",
+            "Whether a TUN session is active",
+            tun_session_active.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_packets_ingress",
+            "Packets received from Wintun by the TUN owner",
+            tun_packets_ingress.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_packets_egress",
+            "Packets sent successfully to Wintun by the TUN owner",
+            tun_packets_egress.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_packets_rejected",
+            "TUN packets rejected by a closed low-cardinality reason",
+            tun_packets_rejected.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_internal_egress_backpressured",
+            "TUN internal egress backpressure observations; packets are retained for retry",
+            tun_internal_egress_backpressured.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_wintun_ring_full_dropped",
+            "TUN packets dropped because the Wintun send ring was full",
+            tun_wintun_ring_full_dropped.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_tcp_flows_active",
+            "Active TUN TCP flows",
+            tun_tcp_flows_active.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_tcp_flows_rejected_limit",
+            "TUN TCP flows rejected by the configured flow limit",
+            tun_tcp_flows_rejected_limit.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_tcp_flows_reset_restart",
+            "TUN TCP flows reset during session restart",
+            tun_tcp_flows_reset_restart.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_tcp_bridge_blocked",
+            "TUN TCP bridge operations that observed bounded backpressure",
+            tun_tcp_bridge_blocked.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_associations_active",
+            "Active TUN UDP associations",
+            tun_udp_associations_active.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_candidates_active",
+            "Active uncommitted TUN UDP association candidates",
+            tun_udp_candidates_active.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_association_created",
+            "TUN UDP associations created",
+            tun_udp_association_created.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_association_rejected_limit",
+            "TUN UDP associations rejected by the configured limit",
+            tun_udp_association_rejected_limit.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_datagram_queue_full",
+            "TUN UDP datagrams dropped because an association queue was full",
+            tun_udp_datagram_queue_full.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_response_queue_full",
+            "TUN UDP responses dropped because the response queue was full",
+            tun_udp_response_queue_full.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_response_filtered",
+            "TUN UDP responses rejected by endpoint filtering",
+            tun_udp_response_filtered.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_stale_generation",
+            "TUN UDP work rejected after its session generation became stale",
+            tun_udp_stale_generation.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_entries_active",
+            "Active bounded TUN fragment reassembly entries",
+            tun_reassembly_entries_active.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_started",
+            "TUN fragment reassemblies started",
+            tun_reassembly_started.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_completed",
+            "TUN fragment reassemblies completed",
+            tun_reassembly_completed.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_dropped_overlap",
+            "TUN fragment reassemblies dropped for overlap",
+            tun_reassembly_dropped_overlap.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_dropped_timeout",
+            "TUN fragment reassemblies dropped after timeout",
+            tun_reassembly_dropped_timeout.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_dropped_limit",
+            "TUN fragment reassemblies dropped by a bounded limit",
+            tun_reassembly_dropped_limit.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_reassembly_dropped_malformed",
+            "Malformed TUN fragment reassemblies dropped",
+            tun_reassembly_dropped_malformed.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_network_change",
+            "Semantic network changes observed by the TUN session",
+            tun_network_change.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_route_detect",
+            "TUN route integrity scans completed",
+            tun_route_detect.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_route_conflict",
+            "TUN route conflicts by a closed low-cardinality reason",
+            tun_route_conflict.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_underlay_bind_stale",
+            "TUN underlay binds rejected because their generation was stale",
+            tun_underlay_bind_stale.clone(),
+        );
+        registry.register(
             "ferrum2_ruleset_load",
             "RuleSet initial load outcomes aggregated without RuleSet identity",
             ruleset_loads.clone(),
@@ -1888,6 +2329,40 @@ impl Metrics {
             sniff,
             tun_packets_accepted,
             tun_packets_foundation_dropped,
+            tun_session_started,
+            tun_session_restart_started,
+            tun_session_restart_succeeded,
+            tun_session_restart_failed,
+            tun_session_generation,
+            tun_session_active,
+            tun_packets_ingress,
+            tun_packets_egress,
+            tun_packets_rejected,
+            tun_internal_egress_backpressured,
+            tun_wintun_ring_full_dropped,
+            tun_tcp_flows_active,
+            tun_tcp_flows_rejected_limit,
+            tun_tcp_flows_reset_restart,
+            tun_tcp_bridge_blocked,
+            tun_udp_associations_active,
+            tun_udp_candidates_active,
+            tun_udp_association_created,
+            tun_udp_association_rejected_limit,
+            tun_udp_datagram_queue_full,
+            tun_udp_response_queue_full,
+            tun_udp_response_filtered,
+            tun_udp_stale_generation,
+            tun_reassembly_entries_active,
+            tun_reassembly_started,
+            tun_reassembly_completed,
+            tun_reassembly_dropped_overlap,
+            tun_reassembly_dropped_timeout,
+            tun_reassembly_dropped_limit,
+            tun_reassembly_dropped_malformed,
+            tun_network_change,
+            tun_route_detect,
+            tun_route_conflict,
+            tun_underlay_bind_stale,
             ruleset_loads,
             ruleset_refreshes,
             ruleset_generation,
@@ -2099,6 +2574,227 @@ impl Metrics {
     /// Records one accepted packet consumed by the foundation stack before policy.
     pub fn tun_packet_foundation_dropped(&self) {
         self.tun_packets_foundation_dropped.inc();
+    }
+
+    /// Records the first successful start of a TUN session.
+    pub fn tun_session_started(&self) {
+        self.tun_session_started.inc();
+    }
+
+    /// Records the beginning of one TUN session restart attempt.
+    pub fn tun_session_restart_started(&self) {
+        self.tun_session_restart_started.inc();
+    }
+
+    /// Records one successful TUN session restart attempt.
+    pub fn tun_session_restart_succeeded(&self) {
+        self.tun_session_restart_succeeded.inc();
+    }
+
+    /// Records one failed TUN session restart attempt.
+    pub fn tun_session_restart_failed(&self) {
+        self.tun_session_restart_failed.inc();
+    }
+
+    /// Sets the currently published TUN session generation.
+    pub fn set_tun_session_generation(&self, generation: u64) {
+        self.tun_session_generation.set(u64_gauge(generation));
+    }
+
+    /// Marks one TUN session active.
+    pub fn tun_session_active_inc(&self) {
+        self.tun_session_active.inc();
+    }
+
+    /// Marks one TUN session inactive after a matching increment.
+    pub fn tun_session_active_dec(&self) {
+        self.tun_session_active.dec();
+    }
+
+    /// Sets whether the single owned TUN session is active.
+    pub fn set_tun_session_active(&self, active: bool) {
+        self.tun_session_active.set(i64::from(active));
+    }
+
+    /// Records one packet received from Wintun by the TUN owner.
+    pub fn tun_packet_ingress(&self) {
+        self.tun_packets_ingress.inc();
+    }
+
+    /// Records one packet sent successfully to Wintun by the TUN owner.
+    pub fn tun_packet_egress(&self) {
+        self.tun_packets_egress.inc();
+    }
+
+    /// Records one TUN packet rejection using only a closed reason code.
+    pub fn tun_packet_rejected(&self, reason: TunPacketRejectReason) {
+        self.tun_packets_rejected.metric(reason as usize).inc();
+    }
+
+    /// Records one packet dropped at the bounded internal egress queue.
+    pub fn tun_internal_egress_backpressured(&self) {
+        self.tun_internal_egress_backpressured.inc();
+    }
+
+    /// Records one expected packet drop caused by a full Wintun send ring.
+    pub fn tun_wintun_ring_full_dropped(&self) {
+        self.tun_wintun_ring_full_dropped.inc();
+    }
+
+    /// Increments the active TUN TCP flow gauge.
+    pub fn tun_tcp_flows_active_inc(&self) {
+        self.tun_tcp_flows_active.inc();
+    }
+
+    /// Decrements the active TUN TCP flow gauge after a matching increment.
+    pub fn tun_tcp_flows_active_dec(&self) {
+        self.tun_tcp_flows_active.dec();
+    }
+
+    /// Sets the exact active TUN TCP flow count.
+    pub fn set_tun_tcp_flows_active(&self, flows: usize) {
+        self.tun_tcp_flows_active.set(usize_gauge(flows));
+    }
+
+    /// Records one TUN TCP flow rejected by the configured flow limit.
+    pub fn tun_tcp_flow_rejected_limit(&self) {
+        self.tun_tcp_flows_rejected_limit.inc();
+    }
+
+    /// Records one TUN TCP flow reset during session restart.
+    pub fn tun_tcp_flow_reset_restart(&self) {
+        self.tun_tcp_flows_reset_restart.inc();
+    }
+
+    /// Records one bounded wait caused by TUN TCP bridge backpressure.
+    pub fn tun_tcp_bridge_blocked(&self) {
+        self.tun_tcp_bridge_blocked.inc();
+    }
+
+    /// Increments the active TUN UDP association gauge.
+    pub fn tun_udp_associations_active_inc(&self) {
+        self.tun_udp_associations_active.inc();
+    }
+
+    /// Decrements the active TUN UDP association gauge after a matching increment.
+    pub fn tun_udp_associations_active_dec(&self) {
+        self.tun_udp_associations_active.dec();
+    }
+
+    /// Sets the exact active TUN UDP association count.
+    pub fn set_tun_udp_associations_active(&self, associations: usize) {
+        self.tun_udp_associations_active
+            .set(usize_gauge(associations));
+    }
+
+    /// Increments the active uncommitted TUN UDP candidate gauge.
+    pub fn tun_udp_candidates_active_inc(&self) {
+        self.tun_udp_candidates_active.inc();
+    }
+
+    /// Decrements the active TUN UDP candidate gauge after a matching increment.
+    pub fn tun_udp_candidates_active_dec(&self) {
+        self.tun_udp_candidates_active.dec();
+    }
+
+    /// Sets the exact active uncommitted TUN UDP candidate count.
+    pub fn set_tun_udp_candidates_active(&self, candidates: usize) {
+        self.tun_udp_candidates_active.set(usize_gauge(candidates));
+    }
+
+    /// Records one committed TUN UDP association.
+    pub fn tun_udp_association_created(&self) {
+        self.tun_udp_association_created.inc();
+    }
+
+    /// Records one TUN UDP association rejected by the configured limit.
+    pub fn tun_udp_association_rejected_limit(&self) {
+        self.tun_udp_association_rejected_limit.inc();
+    }
+
+    /// Records one TUN UDP datagram dropped because its queue was full.
+    pub fn tun_udp_datagram_queue_full(&self) {
+        self.tun_udp_datagram_queue_full.inc();
+    }
+
+    /// Records one TUN UDP response dropped because the owner queue was full.
+    pub fn tun_udp_response_queue_full(&self) {
+        self.tun_udp_response_queue_full.inc();
+    }
+
+    /// Records one TUN UDP response rejected by endpoint filtering.
+    pub fn tun_udp_response_filtered(&self) {
+        self.tun_udp_response_filtered.inc();
+    }
+
+    /// Records TUN UDP work rejected after its session generation became stale.
+    pub fn tun_udp_stale_generation(&self) {
+        self.tun_udp_stale_generation.inc();
+    }
+
+    /// Increments the active TUN fragment reassembly entry gauge.
+    pub fn tun_reassembly_entries_active_inc(&self) {
+        self.tun_reassembly_entries_active.inc();
+    }
+
+    /// Decrements the reassembly entry gauge after a matching increment.
+    pub fn tun_reassembly_entries_active_dec(&self) {
+        self.tun_reassembly_entries_active.dec();
+    }
+
+    /// Sets the exact active TUN fragment reassembly entry count.
+    pub fn set_tun_reassembly_entries_active(&self, entries: usize) {
+        self.tun_reassembly_entries_active.set(usize_gauge(entries));
+    }
+
+    /// Records one newly allocated TUN fragment reassembly entry.
+    pub fn tun_reassembly_started(&self) {
+        self.tun_reassembly_started.inc();
+    }
+
+    /// Records one completed TUN fragment reassembly.
+    pub fn tun_reassembly_completed(&self) {
+        self.tun_reassembly_completed.inc();
+    }
+
+    /// Records one TUN fragment reassembly dropped for overlap.
+    pub fn tun_reassembly_dropped_overlap(&self) {
+        self.tun_reassembly_dropped_overlap.inc();
+    }
+
+    /// Records one TUN fragment reassembly dropped after timeout.
+    pub fn tun_reassembly_dropped_timeout(&self) {
+        self.tun_reassembly_dropped_timeout.inc();
+    }
+
+    /// Records one TUN fragment reassembly dropped by a bounded limit.
+    pub fn tun_reassembly_dropped_limit(&self) {
+        self.tun_reassembly_dropped_limit.inc();
+    }
+
+    /// Records one malformed TUN fragment reassembly drop.
+    pub fn tun_reassembly_dropped_malformed(&self) {
+        self.tun_reassembly_dropped_malformed.inc();
+    }
+
+    /// Records one semantic network change delivered to the TUN session.
+    pub fn tun_network_change(&self) {
+        self.tun_network_change.inc();
+    }
+
+    /// Records one completed TUN route integrity scan.
+    pub fn tun_route_detect(&self) {
+        self.tun_route_detect.inc();
+    }
+
+    /// Records one TUN route conflict using only a closed reason code.
+    pub fn tun_route_conflict(&self, reason: TunRouteConflictReason) {
+        self.tun_route_conflict.metric(reason as usize).inc();
+    }
+
+    /// Records one underlay bind rejected because its generation was stale.
+    pub fn tun_underlay_bind_stale(&self) {
+        self.tun_underlay_bind_stale.inc();
     }
 
     pub fn connection(&self, role: Role, inbound: Inbound, outcome: Outcome) {

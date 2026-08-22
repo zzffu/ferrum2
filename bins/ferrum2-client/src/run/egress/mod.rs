@@ -52,8 +52,7 @@ enum SelectedEgress {
 enum TcpBinding {
     None,
     Fixed,
-    DefaultIfIpv4,
-    DefaultIpv4Only,
+    Target,
 }
 
 #[cfg(any(windows, test))]
@@ -63,14 +62,12 @@ fn direct_tcp_binding(
     application_target: &TargetAddr,
 ) -> TcpBinding {
     match (origin, auto_route) {
-        (ClientRequestOrigin::Tun, _) => TcpBinding::DefaultIpv4Only,
+        (ClientRequestOrigin::Tun, _) => TcpBinding::Target,
         (ClientRequestOrigin::Dns, true) if application_target.as_socket_addr().is_some() => {
             TcpBinding::Fixed
         }
-        (ClientRequestOrigin::Dns, true) => TcpBinding::DefaultIpv4Only,
-        (ClientRequestOrigin::Socks | ClientRequestOrigin::RuleSet, true) => {
-            TcpBinding::DefaultIfIpv4
-        }
+        (ClientRequestOrigin::Dns, true) => TcpBinding::Target,
+        (ClientRequestOrigin::Socks | ClientRequestOrigin::RuleSet, true) => TcpBinding::Target,
         (
             ClientRequestOrigin::Socks | ClientRequestOrigin::Dns | ClientRequestOrigin::RuleSet,
             false,
@@ -87,12 +84,6 @@ const fn proxy_tcp_binding(auto_route: bool) -> TcpBinding {
     }
 }
 
-#[cfg(windows)]
-const fn managed_direct_ipv6_is_unsupported(origin: ClientRequestOrigin, auto_route: bool) -> bool {
-    matches!(origin, ClientRequestOrigin::Tun)
-        || auto_route && matches!(origin, ClientRequestOrigin::Dns)
-}
-
 #[cfg(any(windows, test))]
 tokio::task_local! {
     static TCP_BINDING: TcpBinding;
@@ -105,12 +96,8 @@ trait ManagedTcpOperations {
 
     fn new_v4(&self) -> std::io::Result<Self::Socket>;
     fn new_v6(&self) -> std::io::Result<Self::Socket>;
-    fn bind_fixed(
-        &self,
-        socket: &Self::Socket,
-        endpoint: std::net::SocketAddrV4,
-    ) -> std::io::Result<()>;
-    fn bind_default(&self, socket: &Self::Socket) -> std::io::Result<()>;
+    fn bind_fixed(&self, socket: &Self::Socket, endpoint: SocketAddr) -> std::io::Result<()>;
+    fn bind_target(&self, socket: &Self::Socket, target: SocketAddr) -> std::io::Result<()>;
     async fn connect(
         &self,
         socket: Self::Socket,
@@ -128,21 +115,12 @@ async fn connect_managed_tcp<O: ManagedTcpOperations>(
         .map_err(|_| std::io::Error::other("managed TCP binding context missing"))?;
     let socket = match address {
         SocketAddr::V4(_) => operations.new_v4()?,
-        SocketAddr::V6(_) if matches!(binding, TcpBinding::None | TcpBinding::DefaultIfIpv4) => {
-            operations.new_v6()?
-        }
-        SocketAddr::V6(_) => return Err(std::io::Error::other("managed IPv4 required")),
+        SocketAddr::V6(_) => operations.new_v6()?,
     };
-    match (binding, address) {
-        (TcpBinding::Fixed, SocketAddr::V4(endpoint)) => {
-            operations.bind_fixed(&socket, endpoint)?
-        }
-        (TcpBinding::DefaultIfIpv4 | TcpBinding::DefaultIpv4Only, SocketAddr::V4(_)) => {
-            operations.bind_default(&socket)?
-        }
-        (TcpBinding::None, _) => {}
-        (TcpBinding::DefaultIfIpv4, SocketAddr::V6(_)) => {}
-        (_, SocketAddr::V6(_)) => unreachable!("managed IPv6 rejected before socket"),
+    match binding {
+        TcpBinding::Fixed => operations.bind_fixed(&socket, address)?,
+        TcpBinding::Target => operations.bind_target(&socket, address)?,
+        TcpBinding::None => {}
     }
     operations.connect(socket, address).await
 }
@@ -173,19 +151,15 @@ impl ManagedTcpOperations for ManagedTcpDialer {
         tokio::net::TcpSocket::new_v6()
     }
 
-    fn bind_fixed(
-        &self,
-        socket: &Self::Socket,
-        endpoint: std::net::SocketAddrV4,
-    ) -> std::io::Result<()> {
+    fn bind_fixed(&self, socket: &Self::Socket, endpoint: SocketAddr) -> std::io::Result<()> {
         self.underlay
             .bind_fixed(socket, endpoint)
             .map_err(|_| std::io::Error::other("managed TCP binding failed"))
     }
 
-    fn bind_default(&self, socket: &Self::Socket) -> std::io::Result<()> {
+    fn bind_target(&self, socket: &Self::Socket, target: SocketAddr) -> std::io::Result<()> {
         self.underlay
-            .bind_default(socket)
+            .bind_target(socket, target)
             .map_err(|_| std::io::Error::other("managed TCP binding failed"))
     }
 
@@ -404,7 +378,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         self.managed_udp_events.lock().unwrap().push(event);
         if matches!(
             event,
-            udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindDefault
+            udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindTarget(_)
         ) && self
             .managed_udp_binding_fails
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -424,7 +398,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             .filter(|event| {
                 matches!(
                     event,
-                    udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindDefault
+                    udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindTarget(_)
                 )
             })
             .count()
@@ -474,14 +448,6 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             }
         }
         if direct == 1 && hops.len() == 1 {
-            #[cfg(windows)]
-            if managed_direct_ipv6_is_unsupported(origin, self.auto_route)
-                && target
-                    .and_then(TargetAddr::as_socket_addr)
-                    .is_some_and(|target| target.is_ipv6())
-            {
-                return Err(ClientPlanFailure::DirectIpv6Unsupported);
-            }
             return Ok(SelectedEgress::Direct {
                 outbound: Some(hops[0]),
             });
@@ -695,8 +661,6 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ClientPlanFailure {
-    #[cfg(windows)]
-    DirectIpv6Unsupported,
     Invalid,
 }
 
@@ -745,11 +709,7 @@ mod m16_tests {
             tokio::net::TcpSocket::new_v6()
         }
 
-        fn bind_fixed(
-            &self,
-            _socket: &Self::Socket,
-            _endpoint: std::net::SocketAddrV4,
-        ) -> std::io::Result<()> {
+        fn bind_fixed(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> std::io::Result<()> {
             self.events.lock().unwrap().push("bind-fixed");
             if self.fail_binding {
                 Err(std::io::Error::other("injected binding failure"))
@@ -758,8 +718,8 @@ mod m16_tests {
             }
         }
 
-        fn bind_default(&self, _socket: &Self::Socket) -> std::io::Result<()> {
-            self.events.lock().unwrap().push("bind-default");
+        fn bind_target(&self, _socket: &Self::Socket, _target: SocketAddr) -> std::io::Result<()> {
+            self.events.lock().unwrap().push("bind-target");
             if self.fail_binding {
                 Err(std::io::Error::other("injected binding failure"))
             } else {
@@ -797,11 +757,7 @@ mod m16_tests {
             Ok(())
         }
 
-        fn bind_fixed(
-            &self,
-            _socket: &Self::Socket,
-            _endpoint: std::net::SocketAddrV4,
-        ) -> std::io::Result<()> {
+        fn bind_fixed(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> std::io::Result<()> {
             self.events.lock().unwrap().push("bind-fixed");
             if self.fail_binding {
                 Err(std::io::Error::other("injected binding failure"))
@@ -810,8 +766,8 @@ mod m16_tests {
             }
         }
 
-        fn bind_default(&self, _socket: &Self::Socket) -> std::io::Result<()> {
-            self.events.lock().unwrap().push("bind-default");
+        fn bind_target(&self, _socket: &Self::Socket, _target: SocketAddr) -> std::io::Result<()> {
+            self.events.lock().unwrap().push("bind-target");
             if self.fail_binding {
                 Err(std::io::Error::other("injected binding failure"))
             } else {
@@ -1196,34 +1152,45 @@ mod m16_tests {
         };
         assert!(
             TCP_BINDING
-                .scope(
-                    TcpBinding::DefaultIpv4Only,
-                    connect_managed_tcp(&failed, target)
-                )
+                .scope(TcpBinding::Target, connect_managed_tcp(&failed, target))
                 .await
                 .is_err()
         );
-        assert_eq!(
-            *failed.events.lock().unwrap(),
-            ["socket-v4", "bind-default"]
-        );
+        assert_eq!(*failed.events.lock().unwrap(), ["socket-v4", "bind-target"]);
 
         let default = InjectedManagedTcp::default();
         let none = InjectedManagedTcp::default();
         let (default_result, none_result) = tokio::join!(
-            TCP_BINDING.scope(
-                TcpBinding::DefaultIfIpv4,
-                connect_managed_tcp(&default, target)
-            ),
+            TCP_BINDING.scope(TcpBinding::Target, connect_managed_tcp(&default, target)),
             TCP_BINDING.scope(TcpBinding::None, connect_managed_tcp(&none, target)),
         );
         default_result.unwrap();
         none_result.unwrap();
         assert_eq!(
             *default.events.lock().unwrap(),
-            ["socket-v4", "bind-default", "connect"]
+            ["socket-v4", "bind-target", "connect"]
         );
         assert_eq!(*none.events.lock().unwrap(), ["socket-v4", "connect"]);
+
+        let ipv6: SocketAddr = "[2001:db8::8]:443".parse().unwrap();
+        let fixed_ipv6 = InjectedManagedTcp::default();
+        let target_ipv6 = InjectedManagedTcp::default();
+        TCP_BINDING
+            .scope(TcpBinding::Fixed, connect_managed_tcp(&fixed_ipv6, ipv6))
+            .await
+            .unwrap();
+        TCP_BINDING
+            .scope(TcpBinding::Target, connect_managed_tcp(&target_ipv6, ipv6))
+            .await
+            .unwrap();
+        assert_eq!(
+            *fixed_ipv6.events.lock().unwrap(),
+            ["socket-v6", "bind-fixed", "connect"]
+        );
+        assert_eq!(
+            *target_ipv6.events.lock().unwrap(),
+            ["socket-v6", "bind-target", "connect"]
+        );
     }
 
     #[tokio::test]
@@ -1322,7 +1289,7 @@ mod m16_tests {
         drop(deferred_accept.await.unwrap());
         assert_eq!(
             *deferred_events.lock().unwrap(),
-            ["socket-v4", "bind-default", "connect"]
+            ["socket-v4", "bind-target", "connect"]
         );
 
         let ruleset_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1365,7 +1332,7 @@ mod m16_tests {
         drop(ruleset_accept.await.unwrap());
         assert_eq!(
             *ruleset_events.lock().unwrap(),
-            ["socket-v4", "bind-default", "connect"]
+            ["socket-v4", "bind-target", "connect"]
         );
 
         let failed_events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1419,21 +1386,21 @@ mod m16_tests {
         );
         assert_eq!(
             direct_tcp_binding(ClientRequestOrigin::Dns, true, &domain),
-            TcpBinding::DefaultIpv4Only
+            TcpBinding::Target
         );
         assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
         assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
         assert_eq!(
             direct_tcp_binding(ClientRequestOrigin::Socks, true, &numeric),
-            TcpBinding::DefaultIfIpv4
+            TcpBinding::Target
         );
         assert_eq!(
             direct_tcp_binding(ClientRequestOrigin::Tun, false, &numeric),
-            TcpBinding::DefaultIpv4Only
+            TcpBinding::Target
         );
         assert_eq!(
             direct_tcp_binding(ClientRequestOrigin::RuleSet, true, &numeric),
-            TcpBinding::DefaultIfIpv4
+            TcpBinding::Target
         );
     }
 
@@ -1716,11 +1683,11 @@ mod m16_tests {
             let numeric = TargetAddr::ip("198.51.100.8:53".parse().unwrap()).unwrap();
             assert_eq!(
                 direct_tcp_binding(ClientRequestOrigin::Socks, true, &numeric),
-                TcpBinding::DefaultIfIpv4
+                TcpBinding::Target
             );
             assert_eq!(
                 direct_tcp_binding(ClientRequestOrigin::Tun, false, &numeric),
-                TcpBinding::DefaultIpv4Only
+                TcpBinding::Target
             );
             assert_eq!(
                 direct_tcp_binding(ClientRequestOrigin::Dns, true, &numeric),
@@ -1732,60 +1699,21 @@ mod m16_tests {
             );
             assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
             assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
-            assert!(managed_direct_ipv6_is_unsupported(
-                ClientRequestOrigin::Tun,
-                false
-            ));
-            assert!(managed_direct_ipv6_is_unsupported(
-                ClientRequestOrigin::Dns,
-                true
-            ));
-            assert!(!managed_direct_ipv6_is_unsupported(
-                ClientRequestOrigin::Dns,
-                false
-            ));
-            assert!(!managed_direct_ipv6_is_unsupported(
-                ClientRequestOrigin::Socks,
-                true
-            ));
-            assert!(super::udp::managed_direct_udp_ipv6_allowed(
-                ClientRequestOrigin::Socks
-            ));
-            assert!(!super::udp::managed_direct_udp_ipv6_allowed(
-                ClientRequestOrigin::Tun
-            ));
-            assert!(!super::udp::managed_direct_udp_ipv6_allowed(
-                ClientRequestOrigin::Dns
-            ));
             let ipv6 = TargetAddr::ip("[2001:db8::1]:443".parse().unwrap()).unwrap();
             let plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
-            let tcp = engine
-                .open_tcp(
-                    ClientRequestOrigin::Tun,
-                    Some(plan.clone()),
-                    &ipv6,
-                    None,
-                    None,
-                )
-                .await;
             assert!(
                 matches!(
-                    tcp,
-                    Err(ClientOpenFailure::Plan(
-                        ClientPlanFailure::DirectIpv6Unsupported
-                    ))
+                    engine.classify_selected(ClientRequestOrigin::Tun, Some(&plan), Some(&ipv6)),
+                    Ok(SelectedEgress::Direct { .. })
                 ),
-                "TUN TCP direct IPv6"
+                "TUN TCP direct IPv6 is a valid managed target"
             );
-            assert_eq!(
-                engine
-                    .prepare_udp(ClientRequestOrigin::Tun, Some(plan), Some(&ipv6))
-                    .await
-                    .err(),
-                Some(ClientUdpPrepareFailure::Plan(
-                    ClientPlanFailure::DirectIpv6Unsupported
-                )),
-                "TUN UDP direct IPv6"
+            assert!(
+                matches!(
+                    engine.classify_selected(ClientRequestOrigin::Dns, Some(&plan), Some(&ipv6)),
+                    Ok(SelectedEgress::Direct { .. })
+                ),
+                "DNS UDP direct IPv6 is a valid managed target"
             );
             assert_eq!(connector_calls.load(Ordering::SeqCst), 1);
             assert_eq!(registry.snapshot(), baseline);

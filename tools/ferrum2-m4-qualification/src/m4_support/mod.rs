@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod tcp_scale;
+mod windows_tun;
 
 use ferrum2_core::TargetAddr;
 use ferrum2_crypto::MethodProfile;
@@ -103,8 +104,11 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         .next()
         .and_then(|value| value.into_string().ok())
         .ok_or_else(|| {
-            "expected mode: throughput, resource, dns-resource, profile-workload, or self-check"
-                .to_owned()
+            concat!(
+                "expected mode: throughput, resource, dns-resource, profile-workload, ",
+                "windows-tun-workload, windows-tun-probe, windows-tun-support, or self-check"
+            )
+            .to_owned()
         })?;
     let rest: Vec<_> = arguments.collect();
     match mode.as_str() {
@@ -112,12 +116,16 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         "resource" => run_resource(parse_hosted_args(&rest, false)?),
         "dns-resource" => run_dns_resource(parse_hosted_args(&rest, false)?),
         "profile-workload" => run_profile_workload(parse_profile_args(&rest)?),
+        "windows-tun-workload" => windows_tun::run_workload(&rest),
+        "windows-tun-probe" => windows_tun::run_probe(&rest),
+        "windows-tun-support" => windows_tun::run_support(&rest),
         "self-check" if rest.is_empty() => run_self_check(),
         "self-check" => Err("self-check accepts no arguments".to_owned()),
-        _ => Err(
-            "expected mode: throughput, resource, dns-resource, profile-workload, or self-check"
-                .to_owned(),
-        ),
+        _ => Err(concat!(
+            "expected mode: throughput, resource, dns-resource, profile-workload, ",
+            "windows-tun-workload, windows-tun-probe, windows-tun-support, or self-check"
+        )
+        .to_owned()),
     }
 }
 
@@ -3903,7 +3911,8 @@ fn validate_drain(sample: &PairSample, baseline: &PairSample) -> Result<(), Stri
 }
 
 fn run_self_check() -> Result<String, String> {
-    const MUTATION_COUNT: u64 = 40;
+    const MUTATION_COUNT: u64 = 42;
+    windows_tun::self_check()?;
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let good = EnvironmentIdentity {
         github_actions: "true".to_owned(),

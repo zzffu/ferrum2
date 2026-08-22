@@ -12,7 +12,7 @@ use ferrum2_rule::{
     SelectorCompileError, SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan,
     TaggedRoute, TaggedRouteRule, TaggedStaticBinding, compile_selector_plans_with_roots,
 };
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
@@ -21,7 +21,8 @@ use crate::model::{
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsRuntimeConfig,
     DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig,
     ReplayConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig,
-    ServerOutboundConfig, TunConfig, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+    ServerOutboundConfig, TunConfig, UdpConfig, UdpFiltering, ValidatedClientConfig,
+    ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClient, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging,
@@ -468,60 +469,61 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
     {
         return Err(ConfigError::semantic(ConfigField::TunAdapterName));
     }
-    let ipv4_address: Ipv4Net = raw
+    let ipv4_address = raw
         .ipv4_address
-        .parse()
-        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv4Address))?;
-    let ipv4 = ipv4_address.addr();
-    if ipv4.is_unspecified()
-        || ipv4.is_loopback()
-        || ipv4.is_multicast()
-        || ipv4 == ipv4_address.network()
-        || ipv4 == ipv4_address.broadcast()
-    {
-        return Err(ConfigError::semantic(ConfigField::TunIpv4Address));
-    }
-    let ipv6_address: Ipv6Net = raw
+        .as_deref()
+        .map(validate_tun_ipv4_address)
+        .transpose()?;
+    let ipv6_address = raw
         .ipv6_address
-        .parse()
-        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv6Address))?;
-    let ipv6 = ipv6_address.addr();
-    if ipv6.is_unspecified() || ipv6.is_loopback() || ipv6.is_multicast() {
-        return Err(ConfigError::semantic(ConfigField::TunIpv6Address));
+        .as_deref()
+        .map(validate_tun_ipv6_address)
+        .transpose()?;
+    if ipv4_address.is_none() && ipv6_address.is_none() {
+        return Err(ConfigError::semantic(ConfigField::Tun));
     }
     let capture_routes = compile_capture_routes(
         raw.auto_route,
         raw.route_address.as_deref(),
         raw.route_exclude_address.as_deref(),
+        ipv4_address.is_some(),
+        ipv6_address.is_some(),
     )?;
     if raw.auto_dns && !raw.auto_route {
         return Err(ConfigError::semantic(ConfigField::TunAutoDns));
     }
-    if raw.ipv6_dns_address.is_some() {
-        return Err(ConfigError::semantic(ConfigField::TunIpv6DnsAddress));
-    }
-    let ipv4_dns_address = match (raw.auto_dns, raw.ipv4_dns_address.as_deref()) {
-        (false, None) => None,
-        (false, Some(_)) | (true, None) => {
+    if !raw.auto_dns {
+        if raw.ipv4_dns_address.is_some() {
             return Err(ConfigError::semantic(ConfigField::TunIpv4DnsAddress));
         }
-        (true, Some(address)) => {
-            let address: Ipv4Addr = address
-                .parse()
-                .map_err(|_| ConfigError::semantic(ConfigField::TunIpv4DnsAddress))?;
-            if address.is_unspecified()
-                || address.is_loopback()
-                || address.is_multicast()
-                || !ipv4_address.contains(&address)
-                || address == ipv4
-                || address == ipv4_address.network()
-                || address == ipv4_address.broadcast()
-            {
-                return Err(ConfigError::semantic(ConfigField::TunIpv4DnsAddress));
-            }
-            Some(address)
+        if raw.ipv6_dns_address.is_some() {
+            return Err(ConfigError::semantic(ConfigField::TunIpv6DnsAddress));
         }
-    };
+    } else if raw.ipv4_dns_address.is_none() && raw.ipv6_dns_address.is_none() {
+        return Err(ConfigError::semantic(ConfigField::TunAutoDns));
+    }
+    let ipv4_dns_address = raw
+        .ipv4_dns_address
+        .as_deref()
+        .map(|address| {
+            validate_tun_ipv4_dns(
+                address,
+                ipv4_address
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::TunIpv4DnsAddress))?,
+            )
+        })
+        .transpose()?;
+    let ipv6_dns_address = raw
+        .ipv6_dns_address
+        .as_deref()
+        .map(|address| {
+            validate_tun_ipv6_dns(
+                address,
+                ipv6_address
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::TunIpv6DnsAddress))?,
+            )
+        })
+        .transpose()?;
     if !(1_280..=1_500).contains(&raw.mtu) {
         return Err(ConfigError::semantic(ConfigField::TunMtu));
     }
@@ -541,21 +543,11 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
     if !(1..=8_192).contains(&raw.max_udp_mappings) {
         return Err(ConfigError::semantic(ConfigField::TunMaxUdpMappings));
     }
-    if !(65_536..=134_217_728).contains(&raw.max_udp_buffered_bytes) {
-        return Err(ConfigError::semantic(ConfigField::TunMaxUdpBufferedBytes));
-    }
-    let owned_buffer_bytes = checked_tun_memory(
-        raw.mtu,
-        raw.ring_capacity,
-        raw.max_tcp_flows,
-        raw.tcp_buffer_bytes,
-        raw.max_udp_mappings,
-        raw.max_udp_buffered_bytes,
-    )
-    .ok_or_else(|| ConfigError::semantic(ConfigField::TunMemory))?;
-    if owned_buffer_bytes > 268_435_456 {
-        return Err(ConfigError::semantic(ConfigField::TunMemory));
-    }
+    let udp_filtering = match raw.udp_filtering.as_str() {
+        "address_dependent" => UdpFiltering::AddressDependent,
+        "endpoint_independent" => UdpFiltering::EndpointIndependent,
+        _ => return Err(ConfigError::semantic(ConfigField::TunUdpFiltering)),
+    };
 
     Ok(ValidatedTun {
         tag: raw.tag,
@@ -568,6 +560,7 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             capture_routes,
             auto_dns: raw.auto_dns,
             ipv4_dns_address,
+            ipv6_dns_address,
             physical_endpoints: Vec::new(),
             mtu: raw.mtu as u16,
             ring_capacity: raw.ring_capacity as u32,
@@ -575,17 +568,83 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             max_tcp_flows: raw.max_tcp_flows as usize,
             tcp_buffer_bytes: raw.tcp_buffer_bytes as usize,
             max_udp_mappings: raw.max_udp_mappings as usize,
-            max_udp_buffered_bytes: raw.max_udp_buffered_bytes as usize,
-            owned_buffer_bytes,
+            udp_filtering,
+            deprecated_max_udp_buffered_bytes_present: raw.max_udp_buffered_bytes.is_some(),
         },
     })
+}
+
+fn validate_tun_ipv4_address(value: &str) -> Result<Ipv4Net, ConfigError> {
+    let network: Ipv4Net = value
+        .parse()
+        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv4Address))?;
+    let address = network.addr();
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || address == network.network()
+        || address == network.broadcast()
+    {
+        return Err(ConfigError::semantic(ConfigField::TunIpv4Address));
+    }
+    Ok(network)
+}
+
+fn validate_tun_ipv6_address(value: &str) -> Result<Ipv6Net, ConfigError> {
+    let network: Ipv6Net = value
+        .parse()
+        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv6Address))?;
+    let address = network.addr();
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || address == network.network()
+    {
+        return Err(ConfigError::semantic(ConfigField::TunIpv6Address));
+    }
+    Ok(network)
+}
+
+fn validate_tun_ipv4_dns(value: &str, network: Ipv4Net) -> Result<Ipv4Addr, ConfigError> {
+    let address: Ipv4Addr = value
+        .parse()
+        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv4DnsAddress))?;
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || !network.contains(&address)
+        || address == network.addr()
+        || address == network.network()
+        || address == network.broadcast()
+    {
+        return Err(ConfigError::semantic(ConfigField::TunIpv4DnsAddress));
+    }
+    Ok(address)
+}
+
+fn validate_tun_ipv6_dns(value: &str, network: Ipv6Net) -> Result<std::net::Ipv6Addr, ConfigError> {
+    let address: std::net::Ipv6Addr = value
+        .parse()
+        .map_err(|_| ConfigError::semantic(ConfigField::TunIpv6DnsAddress))?;
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || !network.contains(&address)
+        || address == network.addr()
+        || address == network.network()
+    {
+        return Err(ConfigError::semantic(ConfigField::TunIpv6DnsAddress));
+    }
+    Ok(address)
 }
 
 fn compile_capture_routes(
     auto_route: bool,
     includes: Option<&[String]>,
     excludes: Option<&[String]>,
-) -> Result<Vec<Ipv4Net>, ConfigError> {
+    ipv4_enabled: bool,
+    ipv6_enabled: bool,
+) -> Result<Vec<IpNet>, ConfigError> {
     if !auto_route {
         if includes.is_some() {
             return Err(ConfigError::semantic(ConfigField::TunRouteAddress));
@@ -600,11 +659,18 @@ fn compile_capture_routes(
         values
             .iter()
             .map(|value| {
-                let network: Ipv4Net = value.parse().map_err(|_| ConfigError::semantic(field))?;
-                if network.addr() != network.network() {
-                    return Err(ConfigError::semantic(field));
+                let network: IpNet = value.parse().map_err(|_| ConfigError::semantic(field))?;
+                match network {
+                    IpNet::V4(network) if ipv4_enabled => Ok(IpNet::V4(
+                        Ipv4Net::new(network.network(), network.prefix_len())
+                            .expect("parsed IPv4 prefix remains valid when normalized"),
+                    )),
+                    IpNet::V6(network) if ipv6_enabled => Ok(IpNet::V6(
+                        Ipv6Net::new(network.network(), network.prefix_len())
+                            .expect("parsed IPv6 prefix remains valid when normalized"),
+                    )),
+                    IpNet::V4(_) | IpNet::V6(_) => Err(ConfigError::semantic(field)),
                 }
-                Ok(network)
             })
             .collect::<Result<Vec<_>, _>>()
     };
@@ -616,7 +682,15 @@ fn compile_capture_routes(
         return Err(ConfigError::semantic(ConfigField::TunRouteAddress));
     }
     let mut includes = if includes.is_empty() {
-        vec!["0.0.0.0/0".parse().expect("fixed IPv4 prefix")]
+        let mut defaults =
+            Vec::with_capacity(usize::from(ipv4_enabled) + usize::from(ipv6_enabled));
+        if ipv4_enabled {
+            defaults.push(IpNet::V4("0.0.0.0/0".parse().expect("fixed IPv4 prefix")));
+        }
+        if ipv6_enabled {
+            defaults.push(IpNet::V6("::/0".parse().expect("fixed IPv6 prefix")));
+        }
+        defaults
     } else {
         parse(includes, ConfigField::TunRouteAddress)?
     };
@@ -624,63 +698,105 @@ fn compile_capture_routes(
     if excludes.len() > 64 {
         return Err(ConfigError::semantic(ConfigField::TunRouteExcludeAddress));
     }
-    let excludes = Ipv4Net::aggregate(&parse(excludes, ConfigField::TunRouteExcludeAddress)?);
-    includes = Ipv4Net::aggregate(&includes);
-
-    fn subtract(route: Ipv4Net, exclude: Ipv4Net, output: &mut Vec<Ipv4Net>) {
-        if !route.contains(&exclude.network()) && !exclude.contains(&route.network()) {
-            output.push(route);
-        } else if !exclude.contains(&route.broadcast()) {
-            for child in route
-                .subnets(route.prefix_len() + 1)
-                .expect("an intersecting non-contained IPv4 prefix can split")
-            {
-                subtract(child, exclude, output);
-            }
-        }
-    }
+    let excludes = aggregate_ip_nets(parse(excludes, ConfigField::TunRouteExcludeAddress)?);
+    includes = aggregate_ip_nets(includes);
 
     for exclude in excludes {
         let mut next = Vec::new();
         for route in includes {
-            subtract(route, exclude, &mut next);
+            subtract_ip_net(route, exclude, &mut next);
         }
         includes = next;
     }
-    includes = Ipv4Net::aggregate(&includes);
-    if includes.len() == 1 && includes[0].prefix_len() == 0 {
-        includes = includes[0]
-            .subnets(1)
-            .expect("IPv4 default route has /1 children")
-            .collect();
-    }
+    includes = aggregate_ip_nets(includes);
+    includes = split_default_routes(includes);
+    includes.sort_unstable();
     if !(1..=256).contains(&includes.len()) {
         return Err(ConfigError::semantic(ConfigField::TunRouteAddress));
     }
     Ok(includes)
 }
 
-fn checked_tun_memory(
-    mtu: u64,
-    ring_capacity: u64,
-    max_tcp_flows: u64,
-    tcp_buffer_bytes: u64,
-    max_udp_mappings: u64,
-    max_udp_buffered_bytes: u64,
-) -> Option<u64> {
-    [
-        ring_capacity.checked_mul(2),
-        max_tcp_flows
-            .checked_mul(tcp_buffer_bytes)
-            .and_then(|value| value.checked_mul(2)),
-        Some(max_udp_buffered_bytes),
-        max_tcp_flows.checked_mul(mtu.checked_add(1_024)?),
-        max_udp_mappings.checked_mul(mtu.checked_add(512)?),
-        mtu.checked_mul(8),
-        Some(1_048_576),
-    ]
-    .into_iter()
-    .try_fold(0_u64, |total, term| total.checked_add(term?))
+fn aggregate_ip_nets(routes: Vec<IpNet>) -> Vec<IpNet> {
+    let mut ipv4 = Vec::new();
+    let mut ipv6 = Vec::new();
+    for route in routes {
+        match route {
+            IpNet::V4(route) => ipv4.push(route),
+            IpNet::V6(route) => ipv6.push(route),
+        }
+    }
+    Ipv4Net::aggregate(&ipv4)
+        .into_iter()
+        .map(IpNet::V4)
+        .chain(Ipv6Net::aggregate(&ipv6).into_iter().map(IpNet::V6))
+        .collect()
+}
+
+fn subtract_ip_net(route: IpNet, exclude: IpNet, output: &mut Vec<IpNet>) {
+    match (route, exclude) {
+        (IpNet::V4(route), IpNet::V4(exclude)) => {
+            subtract_ipv4_net(route, exclude, output);
+        }
+        (IpNet::V6(route), IpNet::V6(exclude)) => {
+            subtract_ipv6_net(route, exclude, output);
+        }
+        (route, _) => output.push(route),
+    }
+}
+
+fn subtract_ipv4_net(route: Ipv4Net, exclude: Ipv4Net, output: &mut Vec<IpNet>) {
+    if exclude.prefix_len() <= route.prefix_len() && exclude.contains(&route.network()) {
+        return;
+    }
+    if !route.contains(&exclude.network()) {
+        output.push(IpNet::V4(route));
+        return;
+    }
+    for child in route
+        .subnets(route.prefix_len() + 1)
+        .expect("a partially excluded IPv4 prefix can split")
+    {
+        subtract_ipv4_net(child, exclude, output);
+    }
+}
+
+fn subtract_ipv6_net(route: Ipv6Net, exclude: Ipv6Net, output: &mut Vec<IpNet>) {
+    if exclude.prefix_len() <= route.prefix_len() && exclude.contains(&route.network()) {
+        return;
+    }
+    if !route.contains(&exclude.network()) {
+        output.push(IpNet::V6(route));
+        return;
+    }
+    for child in route
+        .subnets(route.prefix_len() + 1)
+        .expect("a partially excluded IPv6 prefix can split")
+    {
+        subtract_ipv6_net(child, exclude, output);
+    }
+}
+
+fn split_default_routes(routes: Vec<IpNet>) -> Vec<IpNet> {
+    let mut output = Vec::with_capacity(routes.len().saturating_add(2));
+    for route in routes {
+        match route {
+            IpNet::V4(route) if route.prefix_len() == 0 => output.extend(
+                route
+                    .subnets(1)
+                    .expect("IPv4 default route has /1 children")
+                    .map(IpNet::V4),
+            ),
+            IpNet::V6(route) if route.prefix_len() == 0 => output.extend(
+                route
+                    .subnets(1)
+                    .expect("IPv6 default route has /1 children")
+                    .map(IpNet::V6),
+            ),
+            route => output.push(route),
+        }
+    }
+    output
 }
 
 fn validate_tun_targets(
@@ -698,12 +814,7 @@ fn validate_tun_targets(
         .filter_map(|index| outbounds.get(*index))
     {
         if let ClientOutboundConfig::Shadowsocks { server, .. } = outbound {
-            match server {
-                SocketAddr::V4(server) => tun.physical_endpoints.push(*server),
-                SocketAddr::V6(_) => {
-                    return Err(ConfigError::semantic(ConfigField::OutboundsServer));
-                }
-            }
+            tun.physical_endpoints.push(*server);
         }
     }
     if let Some(dns) = dns {
@@ -721,25 +832,10 @@ fn validate_tun_targets(
                     let Some(address) = server.target.as_socket_addr() else {
                         continue;
                     };
-                    match address {
-                        SocketAddr::V4(address) => tun.physical_endpoints.push(address),
-                        SocketAddr::V6(_) => {
-                            return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
-                        }
-                    }
+                    tun.physical_endpoints.push(address);
                 } else {
-                    if server
-                        .resolved_targets
-                        .first()
-                        .is_some_and(SocketAddr::is_ipv6)
-                    {
-                        return Err(ConfigError::semantic(ConfigField::DnsServersAddress));
-                    }
-                    for address in &server.resolved_targets {
-                        if let SocketAddr::V4(address) = address {
-                            tun.physical_endpoints.push(*address);
-                        }
-                    }
+                    tun.physical_endpoints
+                        .extend(server.resolved_targets.iter().copied());
                 }
             }
         }
@@ -749,12 +845,24 @@ fn validate_tun_targets(
     if tun.physical_endpoints.len() > 256 {
         return Err(ConfigError::semantic(ConfigField::TunAutoRoute));
     }
-    if tun
-        .physical_endpoints
-        .iter()
-        .any(|endpoint| tun.ipv4_address.contains(endpoint.ip()))
-    {
-        return Err(ConfigError::semantic(ConfigField::TunIpv4Address));
+    for endpoint in &tun.physical_endpoints {
+        match endpoint {
+            SocketAddr::V4(endpoint)
+                if tun
+                    .ipv4_address
+                    .is_some_and(|network| network.contains(endpoint.ip())) =>
+            {
+                return Err(ConfigError::semantic(ConfigField::TunIpv4Address));
+            }
+            SocketAddr::V6(endpoint)
+                if tun
+                    .ipv6_address
+                    .is_some_and(|network| network.contains(endpoint.ip())) =>
+            {
+                return Err(ConfigError::semantic(ConfigField::TunIpv6Address));
+            }
+            SocketAddr::V4(_) | SocketAddr::V6(_) => {}
+        }
     }
     Ok(())
 }
@@ -2328,33 +2436,4 @@ fn validate_metrics(
         return Err(ConfigError::semantic(ConfigField::MetricsListen));
     }
     Ok(Some(MetricsConfig { listen }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::checked_tun_memory;
-
-    #[test]
-    fn tun_memory_formula_is_exact_and_every_overflow_fails_closed() {
-        assert_eq!(
-            checked_tun_memory(1420, 8_388_608, 256, 32_768, 1024, 16_777_216),
-            Some(53_995_616)
-        );
-        for (name, values) in [
-            ("MTU staging", [u64::MAX, 1, 1, 1, 1, 1]),
-            ("ring product", [1, u64::MAX, 1, 1, 1, 1]),
-            ("flow count product", [1, 1, u64::MAX, 2, 1, 1]),
-            ("flow buffer product", [1, 1, 2, u64::MAX, 1, 1]),
-            ("mapping product", [1, 1, 1, 1, u64::MAX, 1]),
-            ("sum", [1, 1, 1, 1, 1, u64::MAX]),
-        ] {
-            assert_eq!(
-                checked_tun_memory(
-                    values[0], values[1], values[2], values[3], values[4], values[5]
-                ),
-                None,
-                "{name}"
-            );
-        }
-    }
 }

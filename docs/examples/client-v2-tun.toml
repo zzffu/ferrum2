@@ -1,0 +1,73 @@
+schema_version = 2
+
+# A dual-stack, direct-egress managed TUN example. Run the client elevated on
+# Windows after replacing the example DNS resolvers and reviewing LAN excludes.
+[tun]
+tag = "tun-in"
+adapter_name = "Ferrum2"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00:f2::2/126"
+mtu = 1420
+ring_capacity = 8388608
+ready_timeout_ms = 10000
+max_tcp_flows = 256
+tcp_buffer_bytes = 32768
+max_udp_mappings = 1024
+udp_filtering = "address_dependent"
+auto_route = true
+route_address = ["0.0.0.0/0", "::/0"]
+route_exclude_address = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "fc00::/7",
+]
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00:f2::1"
+
+[[outbounds]]
+tag = "direct-out"
+type = "direct"
+
+[route]
+final = "direct-out"
+
+[[route.rules]]
+inbound = "tun-in"
+network = ["tcp", "udp"]
+port = 53
+action = "hijack-dns"
+
+[dns]
+timeout_ms = 5000
+max_inflight = 256
+strategy = "prefer_ipv6"
+
+[dns.cache]
+enabled = true
+max_entries = 8192
+
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:5353"
+
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "1.1.1.1:53"
+
+[dns.route]
+final = "resolver"
+
+[udp]
+enabled = true
+max_sessions = 4096
+# This shared byte budget still meters ordinary SOCKS/DNS/RuleSet UDP. Managed
+# TUN Direct/Shadowsocks target-child requests and responses do not charge it;
+# their association, packet-queue, payload, timeout, and generation bounds remain.
+max_buffered_bytes = 16777216
+idle_timeout_ms = 300000
+
+[logging]
+level = "info"

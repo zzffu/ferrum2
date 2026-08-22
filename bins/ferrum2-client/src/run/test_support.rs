@@ -564,6 +564,7 @@ pub(in crate::run) fn test_routing(
             },
         )]
         .into(),
+        selector: ferrum2_rule::SelectorControl::empty(),
     }
 }
 

@@ -1,0 +1,41 @@
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "ferrum2-tun-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+# Keep ordinary and Windows Cargo invocations free of sanitizer-linked targets.
+# The bounded Linux fuzz job opts in explicitly with `--features libfuzzer`.
+default = []
+libfuzzer = ["dep:libfuzzer-sys"]
+
+[dependencies]
+libfuzzer-sys = { version = "=0.4.12", optional = true }
+
+[[bin]]
+name = "packet_reassembly"
+path = "fuzz_targets/packet_reassembly.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "smoke"
+path = "src/bin/smoke.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

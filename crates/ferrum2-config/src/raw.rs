@@ -10,9 +10,9 @@ use crate::{
     DEFAULT_HANDSHAKE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_LISTEN_BACKLOG,
     DEFAULT_MAX_CONNECTIONS, DEFAULT_REPLAY_CAPACITY, DEFAULT_ROUTE_SNIFF_MAX_BYTES,
     DEFAULT_ROUTE_SNIFF_TIMEOUT_MS, DEFAULT_SHUTDOWN_GRACE_MS, DEFAULT_TUN_MAX_TCP_FLOWS,
-    DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES, DEFAULT_TUN_MAX_UDP_MAPPINGS, DEFAULT_TUN_MTU,
-    DEFAULT_TUN_READY_TIMEOUT_MS, DEFAULT_TUN_RING_CAPACITY, DEFAULT_TUN_TCP_BUFFER_BYTES,
-    DEFAULT_UDP_IDLE_TIMEOUT_MS, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
+    DEFAULT_TUN_MAX_UDP_MAPPINGS, DEFAULT_TUN_MTU, DEFAULT_TUN_READY_TIMEOUT_MS,
+    DEFAULT_TUN_RING_CAPACITY, DEFAULT_TUN_TCP_BUFFER_BYTES, DEFAULT_UDP_IDLE_TIMEOUT_MS,
+    DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
 };
 
 #[derive(Deserialize)]
@@ -67,8 +67,8 @@ pub(super) struct RawServerRoot {
 pub(super) struct RawTun {
     pub(super) tag: String,
     pub(super) adapter_name: String,
-    pub(super) ipv4_address: String,
-    pub(super) ipv6_address: String,
+    pub(super) ipv4_address: Option<String>,
+    pub(super) ipv6_address: Option<String>,
     pub(super) outbound: Option<String>,
     #[serde(default)]
     pub(super) auto_route: bool,
@@ -90,8 +90,10 @@ pub(super) struct RawTun {
     pub(super) tcp_buffer_bytes: u64,
     #[serde(default = "default_tun_max_udp_mappings")]
     pub(super) max_udp_mappings: u64,
-    #[serde(default = "default_tun_max_udp_buffered_bytes")]
-    pub(super) max_udp_buffered_bytes: u64,
+    #[serde(default = "default_tun_udp_filtering")]
+    pub(super) udp_filtering: String,
+    /// Compatibility-only marker. Validation intentionally ignores the value.
+    pub(super) max_udp_buffered_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -567,8 +569,8 @@ const fn default_tun_max_udp_mappings() -> u64 {
     DEFAULT_TUN_MAX_UDP_MAPPINGS
 }
 
-const fn default_tun_max_udp_buffered_bytes() -> u64 {
-    DEFAULT_TUN_MAX_UDP_BUFFERED_BYTES
+fn default_tun_udp_filtering() -> String {
+    "address_dependent".to_owned()
 }
 
 fn default_logging_level() -> String {
