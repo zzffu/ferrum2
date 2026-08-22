@@ -119,6 +119,7 @@ $serverBinary = if ($serverBinaryExplicit) {
 $siblingDll = Join-Path (Split-Path -Parent $binary) "wintun.dll"
 $tcp08Enabled = $Mode -in @("tcp08", "performance")
 $tcp08PressureStableWaitMilliseconds = 1000
+$runtimeIdleTimeoutMilliseconds = if ($tcp08Enabled) { 60000 } else { 2000 }
 if ($RequireTcp08ProductMetrics -and -not $tcp08Enabled) { throw "RequireTcp08ProductMetrics requires tcp08 or performance mode" }
 $tcp08ArtifactPath = if ($tcp08Enabled) {
     if ($ArtifactDirectory) {
@@ -1458,6 +1459,7 @@ function Write-Tcp08Metadata([string]$Target, [int]$TargetPort, [int]$GatePort, 
             pressure_attempt_limit = 128
             pressure_attempt_wait_ms = 100
             pressure_stable_wait_ms = $script:tcp08PressureStableWaitMilliseconds
+            runtime_idle_timeout_ms = $script:runtimeIdleTimeoutMilliseconds
             ctrl_break_internal_wait_ms = 250
             controller_grace_probe_ms = 300
             shutdown_grace_ms = 1000
@@ -9551,7 +9553,7 @@ address = "127.0.0.1:$dnsPort"
 final = "resolver"
 [runtime]
 shutdown_grace_ms = 1000
-idle_timeout_ms = 2000
+idle_timeout_ms = $runtimeIdleTimeoutMilliseconds
 [metrics]
 listen = "127.0.0.1:$metricsPort"
 [shadowsocks]
