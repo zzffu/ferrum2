@@ -6,6 +6,7 @@ mod owner_harness_tests;
 mod packet;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 mod reassembly;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 mod scheduler;
 mod supervisor;
 mod tcp;
@@ -56,13 +57,16 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address,
 use packet::{
     ControlContext, ControlRateLimiter, Families, IpFamily, LocalControlKind, PacketParser,
     ParsedIpPacket, ParsedPacket, TransportMetadata, internet_checksum as checksum,
-    ipv4_directed_broadcast, ipv4_unicast, ipv6_unicast, oversized_ingress_control,
-    write_local_control_error,
+    ipv4_directed_broadcast, oversized_ingress_control, write_local_control_error,
 };
+#[cfg(all(windows, target_arch = "x86_64"))]
+use packet::{ipv4_unicast, ipv6_unicast};
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use reassembly::{ReassemblyDropReason, ReassemblyOutcome, ReassemblyTable};
+#[cfg(all(windows, target_arch = "x86_64"))]
+use scheduler::StepOutcome;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-use scheduler::{BudgetOutcome, FairScheduler, StepOutcome, WorkStage};
+use scheduler::{BudgetOutcome, FairScheduler, WorkStage};
 #[cfg(all(windows, target_arch = "x86_64"))]
 use supervisor::{NetworkDebounce, RestartBackoff, session_cancellation};
 
@@ -219,7 +223,7 @@ impl Default for TunEventSink {
 }
 
 /// Generation-aware bridge from the current private Wintun session to client egress.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct UnderlayPublisher {
     #[cfg(all(windows, target_arch = "x86_64"))]
     state: Arc<std::sync::RwLock<UnderlayState>>,
@@ -228,25 +232,11 @@ pub struct UnderlayPublisher {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[derive(Default)]
 struct UnderlayState {
     generation: u64,
     ready: bool,
     policy: Option<ferrum2_wintun::UnderlayPolicy>,
-}
-
-impl Default for UnderlayPublisher {
-    fn default() -> Self {
-        Self {
-            #[cfg(all(windows, target_arch = "x86_64"))]
-            state: Arc::new(std::sync::RwLock::new(UnderlayState {
-                generation: 0,
-                ready: false,
-                policy: None,
-            })),
-            #[cfg(all(windows, target_arch = "x86_64"))]
-            events: Arc::new(std::sync::RwLock::new(TunEventSink::default())),
-        }
-    }
 }
 
 impl UnderlayPublisher {
@@ -479,7 +469,7 @@ struct RootServices {
     events: TunEventSink,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn config_is_exact(config: &Config) -> bool {
     if config.adapter_name.is_empty()
         || config.adapter_name.encode_utf16().count() >= 128
@@ -522,7 +512,7 @@ fn config_is_exact(config: &Config) -> bool {
     true
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn valid_ipv4_interface((address, prefix): (Ipv4Addr, u8)) -> bool {
     if prefix > 32 || !ipv4_unicast(address) {
         return false;
@@ -533,7 +523,7 @@ fn valid_ipv4_interface((address, prefix): (Ipv4Addr, u8)) -> bool {
     numeric != network && numeric != network | !mask
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn valid_ipv6_interface((address, prefix): (Ipv6Addr, u8)) -> bool {
     if prefix > 128 || !ipv6_unicast(address) {
         return false;
@@ -543,7 +533,7 @@ fn valid_ipv6_interface((address, prefix): (Ipv6Addr, u8)) -> bool {
     numeric != numeric & mask
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn valid_ipv4_dns(address: Option<Ipv4Addr>, interface: Option<(Ipv4Addr, u8)>) -> bool {
     let Some(address) = address else {
         return true;
@@ -561,7 +551,7 @@ fn valid_ipv4_dns(address: Option<Ipv4Addr>, interface: Option<(Ipv4Addr, u8)>) 
         && numeric != network | !mask
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn valid_ipv6_dns(address: Option<Ipv6Addr>, interface: Option<(Ipv6Addr, u8)>) -> bool {
     let Some(address) = address else {
         return true;
@@ -577,7 +567,7 @@ fn valid_ipv6_dns(address: Option<Ipv6Addr>, interface: Option<(Ipv6Addr, u8)>) 
         && numeric != numeric & mask
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn valid_capture_route(
     (address, prefix): (IpAddr, u8),
     ipv4_enabled: bool,
@@ -763,7 +753,7 @@ enum OwnerExit {
     CleanupFailed,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterErrorDisposition {
     RestartSession,
@@ -771,7 +761,7 @@ enum AdapterErrorDisposition {
     CleanupFailed,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(all(windows, target_arch = "x86_64"))]
 const fn classify_adapter_error(error: ferrum2_wintun::Error) -> AdapterErrorDisposition {
     match error.kind() {
         ferrum2_wintun::ErrorKind::RecoverableSession => AdapterErrorDisposition::RestartSession,
@@ -3184,13 +3174,14 @@ mod tests {
 
     use super::reassembly::REASSEMBLY_TIMEOUT_MILLIS;
     use super::tcp::tcp_flow_pair;
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    use super::{AdapterErrorDisposition, classify_adapter_error};
     use super::{
-        AdapterErrorDisposition, Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx,
-        OutputFlushOutcome, OutputSendOutcome, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread,
-        OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent,
-        TunEventSink, TunRejectReason, TunRoot, UdpFiltering, UdpPeerAuthorization, UdpTuple,
-        classify_adapter_error, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
-        reported_owner_exit,
+        Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, OutputFlushOutcome,
+        OutputSendOutcome, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread, OwnerWake,
+        PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink,
+        TunRejectReason, TunRoot, UdpFiltering, UdpPeerAuthorization, UdpTuple, finish_stack_setup,
+        map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -5567,6 +5558,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(windows, target_arch = "x86_64"))]
     #[test]
     fn wintun_error_kinds_have_exact_owner_dispositions() {
         for (kind, expected) in [

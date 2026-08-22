@@ -92,6 +92,7 @@ pub struct RouteConflict {
 }
 
 impl RouteConflict {
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn new(reason: RouteConflictReason, family: IpFamily) -> Self {
         Self { reason, family }
     }
@@ -372,14 +373,17 @@ impl Error {
         Self::new(ErrorKind::InvalidInput)
     }
 
+    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn recoverable_session() -> Self {
         Self::new(ErrorKind::RecoverableSession)
     }
 
+    #[cfg(all(windows, target_arch = "x86_64"))]
     const fn unrecoverable_corruption() -> Self {
         Self::new(ErrorKind::UnrecoverableCorruption)
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     pub(crate) const fn cleanup() -> Self {
         Self::new(ErrorKind::Cleanup)
     }
@@ -388,6 +392,7 @@ impl Error {
 // Existing trust-boundary code uses this conservative redacted value for failures that are not
 // explicitly proven to be invalid input, a recoverable session end, or a cleanup failure.
 #[allow(non_upper_case_globals)]
+#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) const Error: Error = Error::unrecoverable_corruption();
 
 /// Redacted adapter-creation failure that preserves only rollback integrity.

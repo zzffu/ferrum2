@@ -1,12 +1,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use crate::OwnerWake;
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const RESTART_BACKOFF_MILLIS: [u64; 5] = [250, 500, 1_000, 2_000, 5_000];
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) const NETWORK_DEBOUNCE: Duration = Duration::from_millis(350);
 
 /// Cancellation token scoped to exactly one TUN session generation.
@@ -45,14 +49,17 @@ impl SessionCancellation {
 struct SessionCancellationState {
     cancelled: AtomicBool,
     notify: Notify,
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     owner_wake: OwnerWake,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct SessionCancelHandle {
     generation: u64,
     shared: Arc<SessionCancellationState>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl SessionCancelHandle {
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
@@ -69,12 +76,14 @@ impl SessionCancelHandle {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Drop for SessionCancelHandle {
     fn drop(&mut self) {
         self.cancel();
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) fn session_cancellation(
     generation: u64,
     owner_wake: OwnerWake,
@@ -96,10 +105,12 @@ pub(crate) fn session_cancellation(
 /// Bounded exponential retry schedule used only after an initial session has
 /// reached Active. Startup remains bounded by `ready_timeout`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct RestartBackoff {
     attempt: usize,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl RestartBackoff {
     pub(crate) fn next_delay(&mut self) -> Duration {
         let index = self.attempt.min(RESTART_BACKOFF_MILLIS.len() - 1);
@@ -116,11 +127,13 @@ impl RestartBackoff {
 /// observed platform generation. Time is supplied by the owner for
 /// deterministic tests and a single clock domain.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct NetworkDebounce {
     generation: Option<u64>,
     deadline_millis: Option<i64>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl NetworkDebounce {
     pub(crate) fn observe(&mut self, generation: u64, now_millis: i64) {
         self.generation = Some(generation);
