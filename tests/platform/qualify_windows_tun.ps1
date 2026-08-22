@@ -118,6 +118,7 @@ $serverBinary = if ($serverBinaryExplicit) {
 } else { [IO.Path]::GetFullPath((Join-Path $resolvedProductRoot "target\debug\ferrum2-server.exe")) }
 $siblingDll = Join-Path (Split-Path -Parent $binary) "wintun.dll"
 $tcp08Enabled = $Mode -in @("tcp08", "performance")
+$tcp08PressureStableWaitMilliseconds = 1000
 if ($RequireTcp08ProductMetrics -and -not $tcp08Enabled) { throw "RequireTcp08ProductMetrics requires tcp08 or performance mode" }
 $tcp08ArtifactPath = if ($tcp08Enabled) {
     if ($ArtifactDirectory) {
@@ -1456,6 +1457,7 @@ function Write-Tcp08Metadata([string]$Target, [int]$TargetPort, [int]$GatePort, 
             pressure_chunk_bytes = 1048576
             pressure_attempt_limit = 128
             pressure_attempt_wait_ms = 100
+            pressure_stable_wait_ms = $script:tcp08PressureStableWaitMilliseconds
             ctrl_break_internal_wait_ms = 250
             controller_grace_probe_ms = 300
             shutdown_grace_ms = 1000
@@ -4279,6 +4281,7 @@ function Get-Tcp08LiveEvidence(
             available_bytes = $pressureAvailable
         }
         pressure_write = [ordered]@{
+            task_id = if ($PressureWrite) { $PressureWrite.Id } else { $null }
             status = if ($PressureWrite) { $PressureWrite.Status.ToString() } else { "missing" }
             is_completed = if ($PressureWrite) { $PressureWrite.IsCompleted } else { $null }
             is_faulted = if ($PressureWrite) { $PressureWrite.IsFaulted } else { $null }
@@ -5247,6 +5250,7 @@ function Invoke-Tcp08(
             $stall.StallWaitActive -and $stall.ReadAttempts -eq 0) "backpressure target was not stably non-reading before pressure write"
 
         $pressureChunk = [byte[]]::new(1024 * 1024)
+        $pressureStream = $pressure.Client.GetStream()
         Add-Tcp08Event "pressure_write_started" ([ordered]@{
             pressure_gate_index = $pressureGate
             chunk_bytes = $pressureChunk.Length
@@ -5255,7 +5259,7 @@ function Invoke-Tcp08(
         })
         $pendingAttempt = $null
         for ($attempt = 0; $attempt -lt 128; $attempt++) {
-            $pressureWrite = $pressure.Client.GetStream().WriteAsync($pressureChunk, 0, $pressureChunk.Length)
+            $pressureWrite = $pressureStream.WriteAsync($pressureChunk, 0, $pressureChunk.Length)
             if (-not $pressureWrite.Wait(100)) {
                 $pendingAttempt = $attempt + 1
                 break
@@ -5264,11 +5268,38 @@ function Invoke-Tcp08(
         Assert-True ($pressureWrite -and -not $pressureWrite.IsCompleted) "backpressure write unexpectedly drained"
         Add-Tcp08Event "pressure_write_became_pending" ([ordered]@{
             attempt = $pendingAttempt
+            task_id = $pressureWrite.Id
             task_status = $pressureWrite.Status.ToString()
+            observation_wait_ms = 100
         })
         if ($CollectPerformance) { Complete-PerformanceSample $script:activeProcess $MetricsPort }
 
-        $beforeSignal = Get-Tcp08LiveEvidence "before_ctrl_break" $Target $Port $GatePort $ServerPort $MetricsPort $script:activeProcess $pressure $pressureWrite $stall $Gate $pressureGate
+        $beforeSignal = $null
+        while (-not $beforeSignal) {
+            while ($pressureWrite.Wait($script:tcp08PressureStableWaitMilliseconds)) {
+                Assert-True ($pendingAttempt -lt 128) "TCP-08 pressure write never became stably pending"
+                $pendingAttempt++
+                $pressureWrite = $pressureStream.WriteAsync($pressureChunk, 0, $pressureChunk.Length)
+            }
+            Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 pressure write did not remain pending for the stable observation window"
+            Add-Tcp08Event "pressure_write_stably_pending" ([ordered]@{
+                phase = "before_live_evidence"
+                attempt = $pendingAttempt
+                task_id = $pressureWrite.Id
+                task_status = $pressureWrite.Status.ToString()
+                observation_wait_ms = $script:tcp08PressureStableWaitMilliseconds
+            })
+            $evidenceCandidate = Get-Tcp08LiveEvidence "before_ctrl_break" $Target $Port $GatePort $ServerPort $MetricsPort $script:activeProcess $pressure $pressureWrite $stall $Gate $pressureGate
+            if (-not $evidenceCandidate.pressure_write.is_completed) {
+                $beforeSignal = $evidenceCandidate
+            } else {
+                Add-Tcp08Event "pressure_write_completed_during_live_evidence" ([ordered]@{
+                    attempt = $pendingAttempt
+                    task_id = $pressureWrite.Id
+                    task_status = $pressureWrite.Status.ToString()
+                })
+            }
+        }
         $script:tcp08Samples.Add($beforeSignal)
         if ($RequireTcp08ProductMetrics -or $beforeSignal.metrics.available) {
             Assert-Tcp08ProductOwnerMetrics $beforeSignal.metrics "before CTRL_BREAK"
@@ -5294,6 +5325,27 @@ function Invoke-Tcp08(
                 lower_exclusive_candidate_ordinal = $reportSnapshotBeforeSignal.candidate_count
             })
         }
+
+        while ($pressureWrite.Wait($script:tcp08PressureStableWaitMilliseconds)) {
+            Assert-True ($pendingAttempt -lt 128) "TCP-08 pressure write never became stably pending"
+            $pendingAttempt++
+            $pressureWrite = $pressureStream.WriteAsync($pressureChunk, 0, $pressureChunk.Length)
+        }
+        Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 pressure write did not remain pending for the stable observation window"
+        Assert-True (Test-Tcp08ClientSocketOpen $pressure.Client) "TCP-08 pressure client socket closed before CTRL_BREAK"
+        Assert-True ($stall.ListenerActive -and $stall.AcceptedSocketOpen -and $stall.StallWaitActive -and
+            $stall.ReadAttempts -eq 0) "TCP-08 target stopped being an open non-reading peer before CTRL_BREAK"
+        Add-Tcp08Event "pressure_write_stably_pending" ([ordered]@{
+            phase = "before_ctrl_break"
+            attempt = $pendingAttempt
+            task_id = $pressureWrite.Id
+            task_status = $pressureWrite.Status.ToString()
+            observation_wait_ms = $script:tcp08PressureStableWaitMilliseconds
+            local_endpoint = Get-Tcp08Endpoint $pressure.Client $true
+            remote_endpoint = Get-Tcp08Endpoint $pressure.Client $false
+        })
+        Assert-True (-not $pressureWrite.IsCompleted) "TCP-08 stable pressure write completed before CTRL_BREAK dispatch"
+
         $forcedShutdown = [Diagnostics.Stopwatch]::StartNew()
         $breakResult = [Ferrum2ProcessGroup]::BreakDetailed([uint32]$script:activeProcess.Id)
         $script:tcp08CtrlBreak = Convert-Tcp08CtrlBreakResult $breakResult
@@ -5327,6 +5379,8 @@ function Invoke-Tcp08(
             wait_ms = 300
             process_exited = $exitedDuringGrace
             pressure_write_pending = -not $pressureWrite.IsCompleted
+            pressure_write_attempt = $pendingAttempt
+            pressure_write_task_id = $pressureWrite.Id
             target_socket_open = $stall.AcceptedSocketOpen
         })
         if ($exitedDuringGrace) {
