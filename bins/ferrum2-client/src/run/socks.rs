@@ -400,7 +400,6 @@ async fn client_connection(
         Ok(flow) => flow,
         Err(ClientOpenFailure::Plan(failure)) => {
             let kind = match failure {
-                #[cfg(windows)]
                 super::egress::ClientPlanFailure::Invalid => ConnectErrorKind::Other,
             };
             let _ = reply.failed(kind).await;
