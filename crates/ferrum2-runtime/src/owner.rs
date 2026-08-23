@@ -48,6 +48,12 @@ pub struct OwnerSnapshot {
     pub udp_forced_shutdowns: usize,
     /// Bounded TCP sniff capacity currently held by owned prefix collectors.
     pub sniff_buffered_bytes: usize,
+    /// Registered generation-aware network reset hooks.
+    pub network_reset_hooks: usize,
+    /// Generation-bound runtime owners awaiting normal completion or reset cancellation.
+    pub network_runtime_owners: usize,
+    /// Reset coordinator drivers currently holding serialized reset ownership.
+    pub network_reset_drivers: usize,
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +80,9 @@ struct OwnerCounters {
     udp_scratch_buffers: AtomicUsize,
     udp_forced_shutdowns: AtomicUsize,
     sniff_buffered_bytes: AtomicUsize,
+    network_reset_hooks: AtomicUsize,
+    network_runtime_owners: AtomicUsize,
+    network_reset_drivers: AtomicUsize,
 }
 
 /// Cloneable owner accounting used by deterministic lifecycle tests.
@@ -120,6 +129,9 @@ impl OwnerRegistry {
             udp_scratch_buffers: self.counters.udp_scratch_buffers.load(Ordering::Relaxed),
             udp_forced_shutdowns: self.counters.udp_forced_shutdowns.load(Ordering::Relaxed),
             sniff_buffered_bytes: self.counters.sniff_buffered_bytes.load(Ordering::Relaxed),
+            network_reset_hooks: self.counters.network_reset_hooks.load(Ordering::Relaxed),
+            network_runtime_owners: self.counters.network_runtime_owners.load(Ordering::Relaxed),
+            network_reset_drivers: self.counters.network_reset_drivers.load(Ordering::Relaxed),
         }
     }
 
@@ -210,6 +222,18 @@ impl OwnerRegistry {
         OwnerGuard::new(self, OwnerKind::UdpScratch)
     }
 
+    pub(crate) fn track_network_reset_hook(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::NetworkResetHook)
+    }
+
+    pub(crate) fn track_network_runtime_owner(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::NetworkRuntimeOwner)
+    }
+
+    pub(crate) fn track_network_reset_driver(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::NetworkResetDriver)
+    }
+
     pub(crate) fn add_udp_buffered_bytes(&self, bytes: usize) {
         self.counters
             .udp_buffered_bytes
@@ -272,6 +296,9 @@ enum OwnerKind {
     UdpTask,
     UdpQueueEntry,
     UdpScratch,
+    NetworkResetHook,
+    NetworkRuntimeOwner,
+    NetworkResetDriver,
 }
 
 /// Drop guard for one TCP flow owned by a TUN foundation stack.
@@ -338,6 +365,9 @@ fn counter(counters: &OwnerCounters, kind: OwnerKind) -> &AtomicUsize {
         OwnerKind::UdpTask => &counters.udp_tasks,
         OwnerKind::UdpQueueEntry => &counters.udp_queued_datagrams,
         OwnerKind::UdpScratch => &counters.udp_scratch_buffers,
+        OwnerKind::NetworkResetHook => &counters.network_reset_hooks,
+        OwnerKind::NetworkRuntimeOwner => &counters.network_runtime_owners,
+        OwnerKind::NetworkResetDriver => &counters.network_reset_drivers,
     }
 }
 
@@ -360,5 +390,8 @@ impl OwnerSnapshot {
             && self.udp_buffered_bytes == other.udp_buffered_bytes
             && self.udp_scratch_buffers == other.udp_scratch_buffers
             && self.sniff_buffered_bytes == other.sniff_buffered_bytes
+            && self.network_reset_hooks == other.network_reset_hooks
+            && self.network_runtime_owners == other.network_runtime_owners
+            && self.network_reset_drivers == other.network_reset_drivers
     }
 }
