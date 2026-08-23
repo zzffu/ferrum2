@@ -23,7 +23,7 @@ ready_timeout_ms = 10000
 max_tcp_flows = 256
 tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
-udp_filtering = "address_dependent"
+udp_filtering = "endpoint_independent"
 auto_route = true
 route_address = ["0.0.0.0/0", "::/0"]
 route_exclude_address = ["192.168.0.0/16", "fc00::/7"]
@@ -52,9 +52,9 @@ route and outbound decision.
 
 `udp_filtering` accepts exactly two values:
 
-- `address_dependent` (default) accepts responses only from a remote IP to which the association
+- `endpoint_independent` (default) accepts responses from any valid, same-family unicast endpoint.
+- `address_dependent` accepts responses only from a remote IP to which the association
   successfully sent an accepted datagram. The remote port is not part of this check.
-- `endpoint_independent` accepts responses from any valid, same-family unicast endpoint.
 
 Capacity remains drop-new. A new source association is dropped when `max_udp_mappings` is full;
 Ferrum2 does not evict an active association.
@@ -167,7 +167,8 @@ route, outbound, or adapter identity is exposed as a label.
 ## Migration from earlier schema-v2 TUN configuration
 
 - Existing dual-stack address fields and IPv4 synthetic DNS remain valid.
-- `udp_filtering` defaults to `address_dependent` when omitted.
+- `udp_filtering` now defaults to `endpoint_independent` when omitted. Set it to
+  `address_dependent` explicitly to retain source-address filtering.
 - Ferrum2 no longer estimates or rejects aggregate TUN-owned memory. Flow, association, queue,
   fragment, timeout, and protocol-length bounds still apply; extreme combinations can therefore be
   limited by the operating system's available memory. This does not remove the shared runtime UDP

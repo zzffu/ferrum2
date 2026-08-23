@@ -54,8 +54,8 @@ pub struct TunConfig {
 /// Source-address filtering applied to one endpoint-independent UDP association.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UdpFiltering {
-    #[default]
     AddressDependent,
+    #[default]
     EndpointIndependent,
 }
 

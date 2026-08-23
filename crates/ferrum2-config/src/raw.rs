@@ -540,7 +540,7 @@ const fn default_tun_max_udp_mappings() -> u64 {
 }
 
 fn default_tun_udp_filtering() -> String {
-    "address_dependent".to_owned()
+    "endpoint_independent".to_owned()
 }
 
 fn default_logging_level() -> String {

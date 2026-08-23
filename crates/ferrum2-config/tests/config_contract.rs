@@ -2301,13 +2301,40 @@ fn tun_only_static_config_appends_one_validated_ordinary_inbound() {
         tun.ipv6_address.expect("IPv6 address").to_string(),
         "fd00::2/126"
     );
-    assert_eq!(tun.udp_filtering, UdpFiltering::AddressDependent);
+}
+
+#[test]
+fn tun_udp_filtering_defaults_to_eif_and_preserves_explicit_choices() {
+    assert_eq!(UdpFiltering::default(), UdpFiltering::EndpointIndependent);
+
+    for (name, setting, expected) in [
+        ("omitted", "", UdpFiltering::EndpointIndependent),
+        (
+            "explicit address-dependent",
+            "udp_filtering = \"address_dependent\"\n",
+            UdpFiltering::AddressDependent,
+        ),
+        (
+            "explicit endpoint-independent",
+            "udp_filtering = \"endpoint_independent\"\n",
+            UdpFiltering::EndpointIndependent,
+        ),
+    ] {
+        let source = format!(
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\n{setting}outbound = \"proxy\""
+        );
+        let tun = load_client(TempConfig::text(&tun_client(&source)).path())
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .tun
+            .expect(name);
+        assert_eq!(tun.udp_filtering, expected, "{name}");
+    }
 }
 
 #[test]
 fn tun_optional_families_routes_and_filtering_are_family_exact() {
     let v4 = tun_client(
-        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nauto_route = true\noutbound = \"proxy\"",
+        "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nauto_route = true\nudp_filtering = \"address_dependent\"\noutbound = \"proxy\"",
     );
     let tun = load_client(TempConfig::text(&v4).path())
         .expect("IPv4-only TUN")
