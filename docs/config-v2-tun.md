@@ -199,7 +199,7 @@ ICMP Echo is not proxied to a remote endpoint. `ping` therefore does not measure
 connectivity; use a TCP or UDP health check.
 
 When the Wintun send ring is full, the complete outgoing packet is dropped immediately and counted
-as a ring-full drop. It is not retried and does not restart the session.
+as a ring-full drop. It is not retried and does not trigger ResetNetwork or a full rebuild.
 
 ## Operational metrics
 

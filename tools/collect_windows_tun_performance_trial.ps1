@@ -123,6 +123,110 @@ function Get-LabeledMetric(
     )
 }
 
+function Get-NetworkLifecycleMetrics([string]$Metrics) {
+    return [ordered]@{
+        network_generation = [uint64](
+            Get-Metric $Metrics "ferrum2_network_generation"
+        )
+        session_generation = [uint64](
+            Get-Metric $Metrics "ferrum2_tun_session_generation"
+        )
+        network_reset_total = [uint64](
+            Get-Metric $Metrics "ferrum2_network_reset" $true
+        )
+        network_reset_started = [uint64](
+            Get-LabeledMetric $Metrics "ferrum2_network_reset" @{
+                reason = "network_change"; result = "started"
+            } $true
+        )
+        network_reset_succeeded = [uint64](
+            Get-LabeledMetric $Metrics "ferrum2_network_reset" @{
+                reason = "network_change"; result = "succeeded"
+            } $true
+        )
+        network_reset_failed = [uint64](
+            Get-LabeledMetric $Metrics "ferrum2_network_reset" @{
+                reason = "network_change"; result = "failed"
+            } $true
+        )
+        full_rebuild_total = [uint64](
+            Get-Metric $Metrics "ferrum2_network_full_rebuild" $true
+        )
+        full_rebuild_started = [uint64](
+            Get-LabeledMetric $Metrics "ferrum2_network_full_rebuild" @{
+                reason = "route_damage"; result = "started"
+            } $true
+        )
+        full_rebuild_succeeded = [uint64](
+            Get-LabeledMetric $Metrics "ferrum2_network_full_rebuild" @{
+                reason = "route_damage"; result = "succeeded"
+            } $true
+        )
+        full_rebuild_failed = [uint64](
+            Get-LabeledMetric $Metrics "ferrum2_network_full_rebuild" @{
+                reason = "route_damage"; result = "failed"
+            } $true
+        )
+    }
+}
+
+function Assert-NetworkLifecycleMetricsEqual(
+    [object]$Expected,
+    [object]$Actual,
+    [string]$Message
+) {
+    foreach ($name in @(
+        "network_generation", "session_generation",
+        "network_reset_total", "network_reset_started", "network_reset_succeeded",
+        "network_reset_failed", "full_rebuild_total", "full_rebuild_started",
+        "full_rebuild_succeeded", "full_rebuild_failed"
+    )) {
+        Assert-Condition ([uint64]$Actual[$name] -eq [uint64]$Expected[$name]) `
+            "$Message ($name)"
+    }
+}
+
+function Assert-NetworkLifecycleTransition(
+    [ValidateSet("reset_network", "full_rebuild")][string]$Operation,
+    [object]$Before,
+    [object]$After
+) {
+    Assert-Condition (
+        [uint64]$Before.network_generation -eq [uint64]$Before.session_generation -and
+        [uint64]$After.network_generation -eq [uint64]$After.session_generation -and
+        [uint64]$After.network_generation -eq [uint64]$Before.network_generation + 1
+    ) "$Operation did not advance both generations exactly once"
+    $activeFamily = if ($Operation -ceq "reset_network") {
+        "network_reset"
+    } else {
+        "full_rebuild"
+    }
+    $inactiveFamily = if ($Operation -ceq "reset_network") {
+        "full_rebuild"
+    } else {
+        "network_reset"
+    }
+    foreach ($family in @($activeFamily, $inactiveFamily)) {
+        foreach ($result in @("started", "succeeded", "failed", "total")) {
+            [uint64]$expectedDelta = if ($family -ceq $activeFamily) {
+                if ($result -ceq "started" -or $result -ceq "succeeded") {
+                    1
+                } elseif ($result -ceq "total") {
+                    2
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+            $name = "${family}_${result}"
+            [uint64]$actualDelta = [uint64]$After[$name] - [uint64]$Before[$name]
+            Assert-Condition ($actualDelta -eq $expectedDelta) `
+                "$Operation metric delta mismatch: $name"
+        }
+    }
+}
+
 function Get-ElapsedNanoseconds([Diagnostics.Stopwatch]$Timer) {
     return [uint64][Math]::Ceiling(
         ([decimal]$Timer.ElapsedTicks * [decimal]1000000000) /
@@ -333,39 +437,59 @@ function Get-PhysicalDefaultRoute {
 
 function Wait-LifecycleTransition(
     [ValidateSet("reset_network", "full_rebuild")][string]$Operation,
-    [double]$GenerationBefore,
-    [double]$SuccessBefore,
+    [object]$Before,
     [int]$TimeoutSeconds = 30
 ) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 25
         $metrics = Get-Metrics $script:MetricsPort 2
-        $generation = Get-Metric $metrics "ferrum2_network_generation"
+        $current = Get-NetworkLifecycleMetrics $metrics
         $active = Get-Metric $metrics "ferrum2_tun_session_active"
         if ($Operation -ceq "reset_network") {
-            $success = Get-LabeledMetric $metrics "ferrum2_network_reset" @{
-                reason = "network_change"; result = "succeeded"
-            } $true
+            $activeFamily = "network_reset"
+            $inactiveFamily = "full_rebuild"
         } else {
-            $success = Get-LabeledMetric $metrics "ferrum2_network_full_rebuild" @{
-                reason = "route_damage"; result = "succeeded"
-            } $true
+            $activeFamily = "full_rebuild"
+            $inactiveFamily = "network_reset"
         }
-        if (
-            $generation -eq $GenerationBefore + 1 -and
-            $success -eq $SuccessBefore + 1 -and
+        $ready = (
+            [uint64]$current.network_generation -eq [uint64]$Before.network_generation + 1 -and
+            [uint64]$current.session_generation -eq [uint64]$Before.session_generation + 1 -and
+            [uint64]$current["${activeFamily}_started"] -eq
+                [uint64]$Before["${activeFamily}_started"] + 1 -and
+            [uint64]$current["${activeFamily}_succeeded"] -eq
+                [uint64]$Before["${activeFamily}_succeeded"] + 1 -and
+            [uint64]$current["${activeFamily}_total"] -eq
+                [uint64]$Before["${activeFamily}_total"] + 2 -and
             $active -eq 1
-        ) {
-            return [pscustomobject]@{
-                Metrics = $metrics
-                Generation = $generation
-                Success = $success
-            }
+        )
+        foreach ($name in @(
+            "network_generation", "session_generation",
+            "${activeFamily}_started", "${activeFamily}_succeeded"
+        )) {
+            Assert-Condition (
+                [uint64]$current[$name] -ge [uint64]$Before[$name] -and
+                [uint64]$current[$name] -le [uint64]$Before[$name] + 1
+            ) "network lifecycle transition advanced $name more than once"
         }
         Assert-Condition (
-            $generation -le $GenerationBefore + 1 -and $success -le $SuccessBefore + 1
-        ) "network lifecycle transition advanced more than once"
+            [uint64]$current["${activeFamily}_failed"] -eq
+                [uint64]$Before["${activeFamily}_failed"] -and
+            [uint64]$current["${activeFamily}_total"] -ge
+                [uint64]$Before["${activeFamily}_total"] -and
+            [uint64]$current["${activeFamily}_total"] -le
+                [uint64]$Before["${activeFamily}_total"] + 2 -and
+            [uint64]$current["${inactiveFamily}_total"] -eq
+                [uint64]$Before["${inactiveFamily}_total"]
+        ) "network lifecycle transition escaped its closed metric family"
+        if ($ready) {
+            Assert-NetworkLifecycleTransition $Operation $Before $current
+            return [pscustomobject]@{
+                Metrics = $metrics
+                LifecycleMetrics = $current
+            }
+        }
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "$Operation recovery exceeded $TimeoutSeconds seconds"
 }
@@ -698,7 +822,7 @@ try {
             $before = Get-Metrics $MetricsPort 5
             $ringBefore = Get-Metric $before "ferrum2_tun_wintun_ring_full_dropped" $true
             $egressBefore = Get-Metric $before "ferrum2_tun_packets_egress" $true
-            $restartBefore = Get-Metric $before "ferrum2_tun_session_restart_started" $true
+            $lifecycleBefore = Get-NetworkLifecycleMetrics $before
             $observation = Invoke-Workload $Scenario 600
             Start-Sleep -Seconds 5
             $after = Get-Metrics $MetricsPort 5
@@ -708,7 +832,9 @@ try {
             [uint64]$responseAttempts = $drops + $egress
             Assert-Condition ($drops -gt 0) "real workload did not trigger Wintun ring-full"
             Assert-Condition ($responseAttempts -gt 0 -and $responseAttempts -le $attempts) "ring-full response accounting exceeds the request denominator"
-            Assert-Condition ((Get-Metric $after "ferrum2_tun_session_restart_started" $true) -eq $restartBefore) "ring-full restarted the TUN session"
+            $lifecycleAfter = Get-NetworkLifecycleMetrics $after
+            Assert-NetworkLifecycleMetricsEqual $lifecycleBefore $lifecycleAfter `
+                "ring-full triggered a network lifecycle transition"
             $checkedUnits = $drops
             $measurements.drop_rate = [ordered]@{
                 unit = "dropped_packets_per_million_responses"
@@ -717,7 +843,7 @@ try {
             $checks.ring_full_counter_increased = $true
             $checks.drop_rate_denominator_bound = $true
             $checks.no_ring_full_retry = $true
-            $checks.no_session_restart = $true
+            $checks.no_network_reset_or_full_rebuild = $true
         }
         "network-lifecycle" {
             Start-Sleep -Seconds 5
@@ -753,17 +879,12 @@ try {
                 throw "physical route metric has no bounded three-state mutation"
             }
             $initial = Get-Metrics $MetricsPort 5
-            [double]$generation = Get-Metric $initial "ferrum2_network_generation"
-            Assert-Condition ($generation -ge 1) "published network generation is unavailable"
-            [double]$resetSucceeded = Get-LabeledMetric $initial "ferrum2_network_reset" @{
-                reason = "network_change"; result = "succeeded"
-            } $true
-            [double]$rebuildSucceeded = Get-LabeledMetric $initial `
-                "ferrum2_network_full_rebuild" @{
-                    reason = "route_damage"; result = "succeeded"
-                } $true
-            [double]$restartStarted = Get-Metric $initial `
-                "ferrum2_tun_session_restart_started" $true
+            $lifecycleMetrics = Get-NetworkLifecycleMetrics $initial
+            Assert-Condition (
+                [uint64]$lifecycleMetrics.network_generation -ge 1 -and
+                [uint64]$lifecycleMetrics.network_generation -eq
+                    [uint64]$lifecycleMetrics.session_generation
+            ) "published network/session generations are unavailable or inconsistent"
             $managedIdentity = Get-ManagedIdentity
             $baselineResources = Get-LifecycleResources $initial
             Assert-Condition (
@@ -782,10 +903,9 @@ try {
                 [uint64]$udpBefore = Get-Metric $before "ferrum2_tun_udp_associations_active"
                 Assert-Condition ($udpBefore -ge 1) "reset cycle lacks a live UDP association"
                 $identityBefore = $managedIdentity
-                [double]$generationBefore = $generation
-                [double]$successBefore = $resetSucceeded
-                [double]$restartBefore = Get-Metric $before `
-                    "ferrum2_tun_session_restart_started" $true
+                $lifecycleBefore = Get-NetworkLifecycleMetrics $before
+                Assert-NetworkLifecycleMetricsEqual $lifecycleMetrics $lifecycleBefore `
+                    "network lifecycle metrics advanced between reset cycles"
                 $timer = [Diagnostics.Stopwatch]::StartNew()
                 $reason = "route_change"
                 if ($cycle -eq 500) {
@@ -815,8 +935,7 @@ try {
                     Set-NetRoute -InputObject $currentRoutes[0] -RouteMetric $nextMetric `
                         -ErrorAction Stop
                 }
-                $transition = Wait-LifecycleTransition "reset_network" `
-                    $generationBefore $successBefore 30
+                $transition = Wait-LifecycleTransition "reset_network" $lifecycleBefore 30
                 $identityAfter = Get-ManagedIdentity
                 $resourcesAfter = Get-LifecycleResources $transition.Metrics
                 Assert-Condition (
@@ -826,23 +945,19 @@ try {
                 Invoke-Probe
                 $timer.Stop()
                 $afterProbe = Get-Metrics $MetricsPort 5
-                [double]$restartAfter = Get-Metric $afterProbe `
-                    "ferrum2_tun_session_restart_started" $true
-                Assert-Condition ($restartAfter -eq $restartBefore) `
-                    "ordinary ResetNetwork used the session-restart path"
+                $lifecycleAfter = Get-NetworkLifecycleMetrics $afterProbe
+                Assert-NetworkLifecycleMetricsEqual `
+                    $transition.LifecycleMetrics $lifecycleAfter `
+                    "probe traffic triggered an extra lifecycle transition after ResetNetwork"
                 $elapsed = Get-ElapsedNanoseconds $timer
                 $resetLatencies.Add($elapsed)
                 $cycles.Add([ordered]@{
                     sequence = [uint64]$cycle
                     operation = "reset_network"
                     reason = $reason
-                    generation_before = [uint64]$generationBefore
-                    generation_after = [uint64]$transition.Generation
                     elapsed_nanoseconds = $elapsed
-                    operation_counter_before = [uint64]$successBefore
-                    operation_counter_after = [uint64]$transition.Success
-                    session_restart_started_before = [uint64]$restartBefore
-                    session_restart_started_after = [uint64]$restartAfter
+                    lifecycle_metrics_before = $lifecycleBefore
+                    lifecycle_metrics_after = $lifecycleAfter
                     managed_identity_before = $identityBefore
                     managed_identity_after = $identityAfter
                     tcp_flows_before = $tcpBefore
@@ -854,9 +969,7 @@ try {
                     resources_after = $resourcesAfter
                 })
                 $managedIdentity = $identityAfter
-                $generation = $transition.Generation
-                $resetSucceeded = $transition.Success
-                $restartStarted = $restartAfter
+                $lifecycleMetrics = $lifecycleAfter
                 if ($cycle -eq 500) {
                     $currentAdapter = Get-NetAdapter -Name $physicalRouteIdentity.interface_name `
                         -IncludeHidden -ErrorAction Stop
@@ -891,10 +1004,9 @@ try {
                 [uint64]$udpBefore = Get-Metric $before "ferrum2_tun_udp_associations_active"
                 Assert-Condition ($udpBefore -ge 1) "full rebuild cycle lacks a live UDP association"
                 $identityBefore = $managedIdentity
-                [double]$generationBefore = $generation
-                [double]$successBefore = $rebuildSucceeded
-                [double]$restartBefore = Get-Metric $before `
-                    "ferrum2_tun_session_restart_started" $true
+                $lifecycleBefore = Get-NetworkLifecycleMetrics $before
+                Assert-NetworkLifecycleMetricsEqual $lifecycleMetrics $lifecycleBefore `
+                    "network lifecycle metrics advanced between full-rebuild cycles"
                 $managed = Get-ManagedAdapter
                 $prefix = "$script:TargetAddress/32"
                 $managedRoutes = @(
@@ -917,8 +1029,7 @@ try {
                 )
                 $timer = [Diagnostics.Stopwatch]::StartNew()
                 $managedRoutes[0] | Remove-NetRoute -Confirm:$false -ErrorAction Stop
-                $transition = Wait-LifecycleTransition "full_rebuild" `
-                    $generationBefore $successBefore 30
+                $transition = Wait-LifecycleTransition "full_rebuild" $lifecycleBefore 30
                 $identityAfter = Get-ManagedIdentity
                 $resourcesAfter = Get-LifecycleResources $transition.Metrics
                 Assert-Condition (
@@ -940,23 +1051,19 @@ try {
                 Invoke-Probe
                 $timer.Stop()
                 $afterProbe = Get-Metrics $MetricsPort 5
-                [double]$restartAfter = Get-Metric $afterProbe `
-                    "ferrum2_tun_session_restart_started" $true
-                Assert-Condition ($restartAfter -eq $restartBefore) `
-                    "managed full rebuild used the session-restart path"
+                $lifecycleAfter = Get-NetworkLifecycleMetrics $afterProbe
+                Assert-NetworkLifecycleMetricsEqual `
+                    $transition.LifecycleMetrics $lifecycleAfter `
+                    "probe traffic triggered an extra lifecycle transition after full rebuild"
                 $elapsed = Get-ElapsedNanoseconds $timer
                 $rebuildLatencies.Add($elapsed)
                 $cycles.Add([ordered]@{
                     sequence = [uint64](1000 + $rebuild)
                     operation = "full_rebuild"
                     reason = "route_damage"
-                    generation_before = [uint64]$generationBefore
-                    generation_after = [uint64]$transition.Generation
                     elapsed_nanoseconds = $elapsed
-                    operation_counter_before = [uint64]$successBefore
-                    operation_counter_after = [uint64]$transition.Success
-                    session_restart_started_before = [uint64]$restartBefore
-                    session_restart_started_after = [uint64]$restartAfter
+                    lifecycle_metrics_before = $lifecycleBefore
+                    lifecycle_metrics_after = $lifecycleAfter
                     managed_identity_before = $identityBefore
                     managed_identity_after = $identityAfter
                     tcp_flows_before = $tcpBefore
@@ -968,9 +1075,7 @@ try {
                     resources_after = $resourcesAfter
                 })
                 $managedIdentity = $identityAfter
-                $generation = $transition.Generation
-                $rebuildSucceeded = $transition.Success
-                $restartStarted = $restartAfter
+                $lifecycleMetrics = $lifecycleAfter
             }
 
             $resolverBefore = Get-Metrics $MetricsPort 5
@@ -1085,6 +1190,7 @@ try {
             $checks.generation_advanced_once_per_cycle = $true
             $checks.managed_identity_preserved_across_resets = $true
             $checks.damage_only_full_rebuild = $true
+            $checks.reset_and_full_rebuild_metrics_are_exact = $true
             $checks.resource_growth_zero_after_1000_resets = (
                 $resetFinal.process_handles -le $baselineResources.process_handles -and
                 $resetFinal.process_threads -le $baselineResources.process_threads -and

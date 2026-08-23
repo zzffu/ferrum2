@@ -171,7 +171,9 @@ QUALIFICATION_GROUPS = frozenset(
 # its own evidence and calibration contracts below.
 QUALIFICATION_ONLY_SELECTIONS = frozenset(
     {
-        "windows-tun-route-detect",
+        "windows-tun-network-reset-10",
+        "windows-tun-network-reset-100",
+        "windows-tun-network-reset-1000",
         "windows-tun-restart-10",
         "windows-tun-restart-100",
         "windows-tun-restart-1000",
@@ -399,7 +401,7 @@ WINDOWS_TUN_SCENARIOS = {
             "ring_full_counter_increased",
             "drop_rate_denominator_bound",
             "no_ring_full_retry",
-            "no_session_restart",
+            "no_network_reset_or_full_rebuild",
             "tun_path_observed",
         ),
     },
@@ -459,6 +461,7 @@ WINDOWS_TUN_SCENARIOS = {
             "generation_advanced_once_per_cycle",
             "managed_identity_preserved_across_resets",
             "damage_only_full_rebuild",
+            "reset_and_full_rebuild_metrics_are_exact",
             "resource_growth_zero_after_1000_resets",
             "tcp_and_udp_recovered_after_interface_switch",
             "interface_resolver_cache_hit_observed",
@@ -3877,6 +3880,9 @@ def _validate_windows_tun_network_model_sidecars(
                     "managed_identity_preserved_across_resets"
                 ],
                 "damage_only_full_rebuild": summary["damage_only_full_rebuild"],
+                "reset_and_full_rebuild_metrics_are_exact": summary[
+                    "reset_and_full_rebuild_metrics_are_exact"
+                ],
                 "resource_growth_zero_after_1000_resets": all(
                     value <= 0 for value in reset_growth.values()
                 ),

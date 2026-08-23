@@ -43,6 +43,23 @@ def route_once_observation(*, elapsed_nanoseconds: int = 1_000_000_000) -> dict[
     }
 
 
+def lifecycle_metrics(
+    *, generation: int, reset_cycles: int, rebuild_cycles: int
+) -> dict[str, int]:
+    return {
+        "network_generation": generation,
+        "session_generation": generation,
+        "network_reset_total": reset_cycles * 2,
+        "network_reset_started": reset_cycles,
+        "network_reset_succeeded": reset_cycles,
+        "network_reset_failed": 0,
+        "full_rebuild_total": rebuild_cycles * 2,
+        "full_rebuild_started": rebuild_cycles,
+        "full_rebuild_succeeded": rebuild_cycles,
+        "full_rebuild_failed": 0,
+    }
+
+
 def lifecycle_observation() -> dict[str, object]:
     resources = {
         "process_handles": 120,
@@ -54,6 +71,13 @@ def lifecycle_observation() -> dict[str, object]:
     identity = "a" * 64
     total_cycles = MODEL.RESET_CYCLES + MODEL.FULL_REBUILD_CYCLES
     for sequence in range(1, total_cycles + 1):
+        completed_resets = min(sequence - 1, MODEL.RESET_CYCLES)
+        completed_rebuilds = max(0, sequence - MODEL.RESET_CYCLES - 1)
+        metrics_before = lifecycle_metrics(
+            generation=sequence,
+            reset_cycles=completed_resets,
+            rebuild_cycles=completed_rebuilds,
+        )
         if sequence <= MODEL.RESET_CYCLES:
             operation = "reset_network"
             reason = (
@@ -63,12 +87,19 @@ def lifecycle_observation() -> dict[str, object]:
             )
             elapsed = sequence * 1_000
             identity_after = identity
+            completed_resets += 1
         else:
             rebuild_index = sequence - MODEL.RESET_CYCLES - 1
             operation = "full_rebuild"
             reason = MODEL.FULL_REBUILD_DAMAGE_REASON
             elapsed = (11 + rebuild_index) * 1_000_000
             identity_after = f"{rebuild_index + 1:064x}"
+            completed_rebuilds += 1
+        metrics_after = lifecycle_metrics(
+            generation=sequence + 1,
+            reset_cycles=completed_resets,
+            rebuild_cycles=completed_rebuilds,
+        )
         tcp_before = sequence % 8
         udp_before = sequence % 16 + 1
         cycles.append(
@@ -76,13 +107,9 @@ def lifecycle_observation() -> dict[str, object]:
                 "sequence": sequence,
                 "operation": operation,
                 "reason": reason,
-                "generation_before": sequence,
-                "generation_after": sequence + 1,
                 "elapsed_nanoseconds": elapsed,
-                "operation_counter_before": sequence - 1,
-                "operation_counter_after": sequence,
-                "session_restart_started_before": 0,
-                "session_restart_started_after": 0,
+                "lifecycle_metrics_before": metrics_before,
+                "lifecycle_metrics_after": metrics_after,
                 "managed_identity_before": identity,
                 "managed_identity_after": identity_after,
                 "tcp_flows_before": tcp_before,
@@ -291,6 +318,7 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         self.assertTrue(summary["managed_identity_preserved_across_resets"])
         self.assertTrue(summary["connections_closed"])
         self.assertTrue(summary["damage_only_full_rebuild"])
+        self.assertTrue(summary["reset_and_full_rebuild_metrics_are_exact"])
         self.assertEqual(
             summary["interface_switch_recovery_nanoseconds"],
             MODEL.INTERFACE_SWITCH_SEQUENCE * 1_000,
@@ -300,13 +328,39 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
             968_750,
         )
 
-    def test_lifecycle_contract_rejects_restart_identity_leak_and_reason_errors(
+    def test_lifecycle_contract_rejects_metric_identity_leak_and_reason_errors(
         self,
     ) -> None:
         cases = []
-        restart = lifecycle_observation()
-        restart["cycles"][0]["operation"] = "restart_session"
-        cases.append((restart, "ordinary ResetNetwork schedule"))
+        wrong_operation = lifecycle_observation()
+        wrong_operation["cycles"][0]["operation"] = "full_rebuild"
+        cases.append((wrong_operation, "ordinary ResetNetwork schedule"))
+        rebuild_during_reset = lifecycle_observation()
+        rebuild_during_reset["cycles"][0]["lifecycle_metrics_after"][
+            "full_rebuild_started"
+        ] += 1
+        rebuild_during_reset["cycles"][0]["lifecycle_metrics_after"][
+            "full_rebuild_total"
+        ] += 1
+        cases.append((rebuild_during_reset, "full_rebuild_started delta must be 0"))
+        reset_failure = lifecycle_observation()
+        reset_failure["cycles"][0]["lifecycle_metrics_after"][
+            "network_reset_failed"
+        ] += 1
+        reset_failure["cycles"][0]["lifecycle_metrics_after"][
+            "network_reset_total"
+        ] += 1
+        cases.append((reset_failure, "network_reset_failed delta must be 0"))
+        generation_mismatch = lifecycle_observation()
+        generation_mismatch["cycles"][0]["lifecycle_metrics_after"][
+            "session_generation"
+        ] += 1
+        cases.append((generation_mismatch, "generations must match"))
+        discontinuous_metrics = lifecycle_observation()
+        discontinuous_metrics["cycles"][1]["lifecycle_metrics_before"][
+            "network_reset_total"
+        ] += 1
+        cases.append((discontinuous_metrics, "do not continue the prior cycle"))
         identity_changed = lifecycle_observation()
         identity_changed["cycles"][0]["managed_identity_after"] = "b" * 64
         cases.append((identity_changed, "changed managed identity"))

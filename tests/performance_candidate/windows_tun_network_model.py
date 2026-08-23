@@ -57,6 +57,19 @@ RESOURCE_LIMITS = {
     "udp_associations_active": 65_536,
     "managed_adapters_active": 16,
 }
+LIFECYCLE_METRIC_FIELDS = (
+    "network_generation",
+    "session_generation",
+    "network_reset_total",
+    "network_reset_started",
+    "network_reset_succeeded",
+    "network_reset_failed",
+    "full_rebuild_total",
+    "full_rebuild_started",
+    "full_rebuild_succeeded",
+    "full_rebuild_failed",
+)
+MAX_LIFECYCLE_METRIC = 10_000_000
 IDENTITY = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_IDENTITY = re.compile(r"^[0-9a-f]{40}$")
 RUN_KINDS = frozenset({"comparison", "calibration-aa"})
@@ -165,6 +178,57 @@ def _resource_snapshot(value: object, *, label: str) -> dict[str, int]:
         )
         for field in RESOURCE_FIELDS
     }
+
+
+def _lifecycle_metric_snapshot(value: object, *, label: str) -> dict[str, int]:
+    row = _exact_fields(value, set(LIFECYCLE_METRIC_FIELDS), label)
+    snapshot = {
+        field: _integer(
+            row[field],
+            label=f"{label}.{field}",
+            minimum=1 if field.endswith("_generation") else 0,
+            maximum=MAX_LIFECYCLE_METRIC,
+        )
+        for field in LIFECYCLE_METRIC_FIELDS
+    }
+    if snapshot["network_generation"] != snapshot["session_generation"]:
+        _fail(f"{label} network and session generations must match")
+    for family in ("network_reset", "full_rebuild"):
+        known = sum(
+            snapshot[f"{family}_{result}"]
+            for result in ("started", "succeeded", "failed")
+        )
+        if snapshot[f"{family}_total"] < known:
+            _fail(f"{label}.{family}_total is smaller than its expected reason series")
+    return snapshot
+
+
+def _validate_lifecycle_metric_transition(
+    before: dict[str, int],
+    after: dict[str, int],
+    *,
+    operation: str,
+    label: str,
+) -> None:
+    if after["network_generation"] != before["network_generation"] + 1:
+        _fail(f"{label} must advance the network generation exactly once")
+    if after["session_generation"] != before["session_generation"] + 1:
+        _fail(f"{label} must advance the session generation exactly once")
+
+    active_family = "network_reset" if operation == "reset_network" else "full_rebuild"
+    inactive_family = "full_rebuild" if operation == "reset_network" else "network_reset"
+    expected_deltas: dict[str, int] = {}
+    for family in (active_family, inactive_family):
+        expected_deltas[f"{family}_started"] = 1 if family == active_family else 0
+        expected_deltas[f"{family}_succeeded"] = 1 if family == active_family else 0
+        expected_deltas[f"{family}_failed"] = 0
+        expected_deltas[f"{family}_total"] = 2 if family == active_family else 0
+    for field, expected_delta in expected_deltas.items():
+        actual_delta = after[field] - before[field]
+        if actual_delta != expected_delta:
+            _fail(
+                f"{label}.{field} delta must be {expected_delta}, got {actual_delta}"
+            )
 
 
 def _observation_identity(value: object) -> dict[str, object]:
@@ -376,7 +440,7 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
     reset_resources: list[dict[str, int]] = []
     rebuild_resources: list[dict[str, int]] = []
     previous_identity: str | None = None
-    previous_generation: int | None = None
+    previous_lifecycle_metrics: dict[str, int] | None = None
     for index, cycle_value in enumerate(cycles):
         label = f"lifecycle cycle[{index}]"
         cycle = _exact_fields(
@@ -385,13 +449,9 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
                 "sequence",
                 "operation",
                 "reason",
-                "generation_before",
-                "generation_after",
                 "elapsed_nanoseconds",
-                "operation_counter_before",
-                "operation_counter_after",
-                "session_restart_started_before",
-                "session_restart_started_after",
+                "lifecycle_metrics_before",
+                "lifecycle_metrics_after",
                 "managed_identity_before",
                 "managed_identity_after",
                 "tcp_flows_before",
@@ -412,23 +472,20 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
         )
         if sequence != index + 1:
             _fail(f"{label}.sequence is not contiguous")
-        generation_before = _integer(
-            cycle["generation_before"],
-            label=f"{label}.generation_before",
-            minimum=1,
-            maximum=expected_count + 1,
+        lifecycle_before = _lifecycle_metric_snapshot(
+            cycle["lifecycle_metrics_before"],
+            label=f"{label}.lifecycle_metrics_before",
         )
-        generation_after = _integer(
-            cycle["generation_after"],
-            label=f"{label}.generation_after",
-            minimum=2,
-            maximum=expected_count + 2,
+        lifecycle_after = _lifecycle_metric_snapshot(
+            cycle["lifecycle_metrics_after"],
+            label=f"{label}.lifecycle_metrics_after",
         )
-        if generation_after != generation_before + 1:
-            _fail(f"{label} must advance the network generation exactly once")
-        if previous_generation is not None and generation_before != previous_generation:
-            _fail(f"{label} generation does not continue the prior cycle")
-        previous_generation = generation_after
+        if (
+            previous_lifecycle_metrics is not None
+            and lifecycle_before != previous_lifecycle_metrics
+        ):
+            _fail(f"{label} lifecycle metrics do not continue the prior cycle")
+        previous_lifecycle_metrics = lifecycle_after
         identity_before = _identity(
             cycle["managed_identity_before"], label=f"{label}.managed_identity_before"
         )
@@ -444,31 +501,6 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             minimum=1,
             maximum=MAX_ELAPSED_NANOSECONDS,
         )
-        operation_before = _integer(
-            cycle["operation_counter_before"],
-            label=f"{label}.operation_counter_before",
-            maximum=1_000_000,
-        )
-        operation_after = _integer(
-            cycle["operation_counter_after"],
-            label=f"{label}.operation_counter_after",
-            minimum=1,
-            maximum=1_000_001,
-        )
-        if operation_after != operation_before + 1:
-            _fail(f"{label} must advance its lifecycle success counter exactly once")
-        restart_before = _integer(
-            cycle["session_restart_started_before"],
-            label=f"{label}.session_restart_started_before",
-            maximum=1_000_000,
-        )
-        restart_after = _integer(
-            cycle["session_restart_started_after"],
-            label=f"{label}.session_restart_started_after",
-            maximum=1_000_000,
-        )
-        if restart_after != restart_before:
-            _fail(f"{label} used the obsolete session-restart path")
         tcp_before = _integer(
             cycle["tcp_flows_before"],
             label=f"{label}.tcp_flows_before",
@@ -503,6 +535,12 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             )
             if cycle["operation"] != "reset_network" or cycle["reason"] != expected_reason:
                 _fail(f"{label} does not match the ordinary ResetNetwork schedule")
+            _validate_lifecycle_metric_transition(
+                lifecycle_before,
+                lifecycle_after,
+                operation="reset_network",
+                label=label,
+            )
             if identity_before != identity_after:
                 _fail(f"{label} changed managed identity during ResetNetwork")
             reset_latencies.append(elapsed)
@@ -511,6 +549,12 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             expected_reason = FULL_REBUILD_DAMAGE_REASON
             if cycle["operation"] != "full_rebuild" or cycle["reason"] != expected_reason:
                 _fail(f"{label} does not match the managed-damage rebuild schedule")
+            _validate_lifecycle_metric_transition(
+                lifecycle_before,
+                lifecycle_after,
+                operation="full_rebuild",
+                label=label,
+            )
             rebuild_latencies.append(elapsed)
             rebuild_resources.append(resources)
 
@@ -569,6 +613,7 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
         "managed_identity_preserved_across_resets": True,
         "connections_closed": True,
         "damage_only_full_rebuild": True,
+        "reset_and_full_rebuild_metrics_are_exact": True,
         "tcp_and_udp_recovered_each_cycle": True,
         "interface_switch_recovery_nanoseconds": switch_cycle["elapsed_nanoseconds"],
         "interface_switch_kind": "approved_underlay_disable_enable",

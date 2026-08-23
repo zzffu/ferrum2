@@ -686,10 +686,20 @@ class ScenarioPlanTests(unittest.TestCase):
     def test_only_named_windows_tun_lifecycle_profiles_are_qualification_only(
         self,
     ) -> None:
-        with self.assertRaisesRegex(
-            CONTROL.CandidateControlError, "lifecycle selection is qualification-only"
+        for selection in (
+            "windows-tun-network-reset-10",
+            "windows-tun-network-reset-100",
+            "windows-tun-network-reset-1000",
+            "windows-tun-scheduler-ring-full",
         ):
-            self.plan("qualification", "windows-tun-scheduler-ring-full")
+            with self.subTest(selection=selection):
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError,
+                    "lifecycle selection is qualification-only",
+                ):
+                    self.plan("qualification", selection)
+        with self.assertRaisesRegex(CONTROL.CandidateControlError, "selection"):
+            self.plan("qualification", "windows-tun-route-detect")
         with self.assertRaisesRegex(
             CONTROL.CandidateControlError, "dedicated windows-tun-plan"
         ):
@@ -765,6 +775,23 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "power_plan_guid": "381b4222-f694-41f0-9685-ff5bb260df2e",
         }
 
+    @staticmethod
+    def network_lifecycle_metrics(
+        *, generation: int, reset_cycles: int, rebuild_cycles: int
+    ) -> dict[str, int]:
+        return {
+            "network_generation": generation,
+            "session_generation": generation,
+            "network_reset_total": reset_cycles * 2,
+            "network_reset_started": reset_cycles,
+            "network_reset_succeeded": reset_cycles,
+            "network_reset_failed": 0,
+            "full_rebuild_total": rebuild_cycles * 2,
+            "full_rebuild_started": rebuild_cycles,
+            "full_rebuild_succeeded": rebuild_cycles,
+            "full_rebuild_failed": 0,
+        }
+
     def network_model_observation(
         self, *, row: dict[str, object]
     ) -> dict[str, object]:
@@ -779,6 +806,13 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         identity = "a" * 64
         for sequence in range(1, model.RESET_CYCLES + model.FULL_REBUILD_CYCLES + 1):
             reset = sequence <= model.RESET_CYCLES
+            completed_resets = min(sequence - 1, model.RESET_CYCLES)
+            completed_rebuilds = max(0, sequence - model.RESET_CYCLES - 1)
+            metrics_before = self.network_lifecycle_metrics(
+                generation=sequence,
+                reset_cycles=completed_resets,
+                rebuild_cycles=completed_rebuilds,
+            )
             if reset:
                 reason = (
                     "interface_change"
@@ -788,12 +822,19 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 operation = "reset_network"
                 identity_after = identity
                 elapsed = sequence * 1_000
+                completed_resets += 1
             else:
                 operation = "full_rebuild"
                 reason = model.FULL_REBUILD_DAMAGE_REASON
                 rebuild = sequence - model.RESET_CYCLES
                 identity_after = f"{rebuild:064x}"
                 elapsed = (10 + rebuild) * 1_000_000
+                completed_rebuilds += 1
+            metrics_after = self.network_lifecycle_metrics(
+                generation=sequence + 1,
+                reset_cycles=completed_resets,
+                rebuild_cycles=completed_rebuilds,
+            )
             udp_before = sequence % 16 + 1
             tcp_before = sequence % 8
             cycles.append(
@@ -801,13 +842,9 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     "sequence": sequence,
                     "operation": operation,
                     "reason": reason,
-                    "generation_before": sequence,
-                    "generation_after": sequence + 1,
                     "elapsed_nanoseconds": elapsed,
-                    "operation_counter_before": sequence - 1,
-                    "operation_counter_after": sequence,
-                    "session_restart_started_before": 0,
-                    "session_restart_started_after": 0,
+                    "lifecycle_metrics_before": metrics_before,
+                    "lifecycle_metrics_after": metrics_after,
                     "managed_identity_before": identity,
                     "managed_identity_after": identity_after,
                     "tcp_flows_before": tcp_before,
@@ -951,6 +988,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 "generation_advanced_once_per_cycle": True,
                 "managed_identity_preserved_across_resets": True,
                 "damage_only_full_rebuild": True,
+                "reset_and_full_rebuild_metrics_are_exact": True,
                 "resource_growth_zero_after_1000_resets": True,
                 "tcp_and_udp_recovered_after_interface_switch": True,
                 "interface_resolver_cache_hit_observed": True,
