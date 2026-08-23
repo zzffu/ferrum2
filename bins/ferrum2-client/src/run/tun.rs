@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ferrum2_config::TunConfig;
@@ -8,16 +8,18 @@ use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
-    Direction, Metrics, NetworkLifecycleOperation, NetworkLifecycleResult, NetworkResetReason,
-    Outcome, Role, StrictRouteDiagnosticStatus, StrictRouteFilterInstallResult, Transport,
-    TunDiagnosticReason, TunIpFamily, TunPacketRejectReason, TunUdpAssociationRouteResult,
-    TunUdpResponseDropReason, emit_strict_route_diagnostic, emit_tun_diagnostic,
+    Direction, Metrics, NetworkFullRebuildReason, NetworkLifecycleOperation,
+    NetworkLifecycleResult, NetworkResetReason, Outcome, Role, StrictRouteDiagnosticStatus,
+    StrictRouteFilterInstallResult, Transport, TunDiagnosticReason, TunIpFamily,
+    TunPacketRejectReason, TunUdpAssociationRouteResult, TunUdpResponseDropReason,
+    emit_network_full_rebuild_diagnostic, emit_strict_route_diagnostic, emit_tun_diagnostic,
 };
 use ferrum2_runtime::{
-    NetworkResetCoordinator, NetworkResetHookRegistration, NetworkResetHookStage,
-    NetworkResetIntent, NetworkResetLimits, NetworkResetOutcome,
+    ManagedNetworkDamage, NetworkResetCoordinator, NetworkResetHookRegistration,
+    NetworkResetHookStage, NetworkResetIntent, NetworkResetLimits, NetworkResetOutcome,
     NetworkResetReason as RuntimeNetworkResetReason, NetworkRuntimeOwnerKind, NetworkSnapshot,
-    NetworkSnapshotPublisher, ProcessCancellation, ProcessRoot, ResetNetwork, relay_lifecycle,
+    NetworkSnapshotPublisher, OwnerRegistry, ProcessCancellation, ProcessRoot, ResetNetwork,
+    relay_lifecycle,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
@@ -32,15 +34,35 @@ use super::routing::{
 };
 use super::tokio_io::TokioFramed;
 
+pub(super) fn network_reset_coordinator(
+    initial_snapshot: Arc<NetworkSnapshot>,
+    registry: OwnerRegistry,
+) -> NetworkResetCoordinator {
+    NetworkResetCoordinator::new(
+        NetworkSnapshotPublisher::new(initial_snapshot),
+        NetworkResetLimits::default(),
+        registry,
+    )
+}
+
+pub(super) struct TunNetworkServices {
+    pub(super) coordinator: NetworkResetCoordinator,
+    pub(super) underlay: ferrum2_tun::UnderlayPublisher,
+}
+
 pub(super) fn process_root(
     config: TunConfig,
     udp_idle_timeout: Duration,
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
-    underlay: ferrum2_tun::UnderlayPublisher,
+    network: TunNetworkServices,
     direct_binder: bool,
 ) -> ProcessRoot<RunError> {
+    let TunNetworkServices {
+        coordinator: network_reset_coordinator,
+        underlay,
+    } = network;
     let strict_route_requested = config.strict_route_requested();
     let strict_route = config.strict_route_effective();
     let synthetic_dns = SyntheticDns {
@@ -58,10 +80,13 @@ pub(super) fn process_root(
             StrictRouteDiagnosticStatus::RequestedIneffective,
         );
     }
-    let network_reset = Arc::new(OnceLock::new());
+    let initial_network_generation = network_reset_coordinator.status().published_generation();
+    let network_reset = Arc::new(ClientNetworkResetRuntime::new(
+        &context,
+        network_reset_coordinator,
+    ));
     let handler_context = Arc::clone(&context);
     let udp_context = Arc::clone(&context);
-    let reset_context = Arc::clone(&context);
     let tcp_routing = Arc::clone(&routing);
     let tcp_network_reset = Arc::clone(&network_reset);
     let udp_network_reset = Arc::clone(&network_reset);
@@ -102,6 +127,7 @@ pub(super) fn process_root(
             ipv6_dns_address: synthetic_dns.ipv6,
             strict_route,
         },
+        initial_network_generation,
         underlay,
         RunError::StartupProtocol,
         RunError::RuntimeRoot,
@@ -112,10 +138,6 @@ pub(super) fn process_root(
             let routing = Arc::clone(&tcp_routing);
             let network_reset = Arc::clone(&tcp_network_reset);
             Box::pin(async move {
-                let network_reset = Arc::clone(
-                    network_reset
-                        .get_or_init(|| Arc::new(ClientNetworkResetRuntime::new(&context))),
-                );
                 let generation = network_reset.coordinator.status().published_generation();
                 let Ok(mut owner) = network_reset
                     .coordinator
@@ -143,10 +165,6 @@ pub(super) fn process_root(
             let routing = Arc::clone(&routing);
             let network_reset = Arc::clone(&udp_network_reset);
             Box::pin(async move {
-                let network_reset = Arc::clone(
-                    network_reset
-                        .get_or_init(|| Arc::new(ClientNetworkResetRuntime::new(&context))),
-                );
                 let generation = network_reset.coordinator.status().published_generation();
                 let Ok(mut owner) = network_reset
                     .coordinator
@@ -168,12 +186,9 @@ pub(super) fn process_root(
                 }
             })
         },
-        move |snapshot, reason| {
-            let network_reset = Arc::clone(
-                reset_driver
-                    .get_or_init(|| Arc::new(ClientNetworkResetRuntime::new(&reset_context))),
-            );
-            Box::pin(async move { network_reset.reset(snapshot, reason).await })
+        move |snapshot, lifecycle| {
+            let network_reset = Arc::clone(&reset_driver);
+            Box::pin(async move { network_reset.transition(snapshot, lifecycle).await })
         },
         move |event| record_tun_event(&metrics, event),
     )
@@ -219,75 +234,114 @@ impl ResetNetwork for ClientNetworkResetHook {
 
 struct ClientNetworkResetRuntime {
     coordinator: NetworkResetCoordinator,
+    hooks: [Arc<ClientNetworkResetHook>; 4],
     _registrations: [NetworkResetHookRegistration; 4],
+    hook_udp_associations: Arc<AtomicUsize>,
+    pending_full_rebuild_udp_associations: AtomicUsize,
+    egress: Arc<super::egress::ClientEgressEngine>,
+    metrics: Arc<Metrics>,
 }
 
 impl ClientNetworkResetRuntime {
-    fn new(context: &Arc<ClientContext>) -> Self {
-        const INITIAL_GENERATION: u64 = 1;
-
-        let initial = Arc::new(
-            NetworkSnapshot::new(INITIAL_GENERATION, None, None)
-                .expect("empty initial client network snapshot is valid"),
-        );
-        let coordinator = NetworkResetCoordinator::new(
-            NetworkSnapshotPublisher::new(initial),
-            NetworkResetLimits::default(),
-            context.registry.clone(),
-        );
+    fn new(context: &Arc<ClientContext>, coordinator: NetworkResetCoordinator) -> Self {
+        let initial_generation = coordinator.status().published_generation();
         let accept: ClientNetworkResetAction = Arc::new(|_| Ok(()));
         // The owner has already constructed the stack when it crosses the bounded bridge.
         // Router and inbound listeners retain no interface-bound cache today, so their hooks are
         // generation acceptance barriers. Outbound owns the shared UDP sessions (including DNS
         // UDP egress) and cancels them below; TUN TCP work is acknowledged by runtime owners.
         let stack = Arc::new(ClientNetworkResetHook::new(
-            INITIAL_GENERATION,
+            initial_generation,
             Arc::clone(&accept),
         ));
         let router = Arc::new(ClientNetworkResetHook::new(
-            INITIAL_GENERATION,
+            initial_generation,
             Arc::clone(&accept),
         ));
         let egress = Arc::clone(&context.egress);
-        let reset_metrics = Arc::clone(&context.metrics);
+        let hook_udp_associations = Arc::new(AtomicUsize::new(0));
+        let reset_associations = Arc::clone(&hook_udp_associations);
+        let outbound_egress = Arc::clone(&egress);
         let outbound = Arc::new(ClientNetworkResetHook::new(
-            INITIAL_GENERATION,
+            initial_generation,
             Arc::new(move |_| {
-                let udp_associations = egress.reset_network();
-                reset_metrics.network_associations_reset(
-                    NetworkLifecycleOperation::ResetNetwork,
-                    Transport::Udp,
-                    udp_associations,
-                );
+                let udp_associations = outbound_egress.reset_network();
+                reset_associations.fetch_add(udp_associations, Ordering::AcqRel);
                 Ok(())
             }),
         ));
-        let metrics = Arc::clone(&context.metrics);
         let inbound_dns = Arc::new(ClientNetworkResetHook::new(
-            INITIAL_GENERATION,
-            Arc::new(move |generation| {
-                metrics.set_network_generation(generation);
-                Ok(())
-            }),
+            initial_generation,
+            Arc::clone(&accept),
         ));
+        let hooks = [stack, router, outbound, inbound_dns];
         let registrations = [
             coordinator
-                .register_reset_hook(NetworkResetHookStage::Stack, stack)
-                .expect("fresh client reset coordinator accepts stack hook"),
+                .register_reset_hook(NetworkResetHookStage::Stack, hooks[0].clone())
+                .expect("client reset coordinator accepts stack hook"),
             coordinator
-                .register_reset_hook(NetworkResetHookStage::Router, router)
-                .expect("fresh client reset coordinator accepts router hook"),
+                .register_reset_hook(NetworkResetHookStage::Router, hooks[1].clone())
+                .expect("client reset coordinator accepts router hook"),
             coordinator
-                .register_reset_hook(NetworkResetHookStage::Outbound, outbound)
-                .expect("fresh client reset coordinator accepts outbound hook"),
+                .register_reset_hook(NetworkResetHookStage::Outbound, hooks[2].clone())
+                .expect("client reset coordinator accepts outbound hook"),
             coordinator
-                .register_reset_hook(NetworkResetHookStage::Inbound, inbound_dns)
-                .expect("fresh client reset coordinator accepts inbound/DNS hook"),
+                .register_reset_hook(NetworkResetHookStage::Inbound, hooks[3].clone())
+                .expect("client reset coordinator accepts inbound/DNS hook"),
         ];
         Self {
             coordinator,
+            hooks,
             _registrations: registrations,
+            hook_udp_associations,
+            pending_full_rebuild_udp_associations: AtomicUsize::new(0),
+            egress,
+            metrics: Arc::clone(&context.metrics),
         }
+    }
+
+    fn require_next_generation(
+        &self,
+        snapshot: &NetworkSnapshot,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        let Some(expected) = self
+            .coordinator
+            .status()
+            .published_generation()
+            .checked_add(1)
+        else {
+            return Err(ferrum2_tun::TunNetworkResetError);
+        };
+        if snapshot.generation() == expected {
+            Ok(())
+        } else {
+            Err(ferrum2_tun::TunNetworkResetError)
+        }
+    }
+
+    fn take_hook_udp_associations(&self) -> usize {
+        self.hook_udp_associations.swap(0, Ordering::AcqRel)
+    }
+
+    async fn initialize(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        self.require_next_generation(&snapshot)?;
+        let report = self
+            .coordinator
+            .reset_network(
+                Arc::clone(&snapshot),
+                NetworkResetIntent::Ordinary(RuntimeNetworkResetReason::ExplicitRequest),
+            )
+            .await
+            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+        if report.outcome() != NetworkResetOutcome::ResetCompleted {
+            return Err(ferrum2_tun::TunNetworkResetError);
+        }
+        let _ = self.take_hook_udp_associations();
+        self.metrics.set_network_generation(snapshot.generation());
+        Ok(())
     }
 
     async fn reset(
@@ -295,6 +349,7 @@ impl ClientNetworkResetRuntime {
         snapshot: Arc<NetworkSnapshot>,
         reason: ferrum2_tun::TunNetworkResetReason,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        self.require_next_generation(&snapshot)?;
         let reason = match reason {
             ferrum2_tun::TunNetworkResetReason::NetworkChange => {
                 RuntimeNetworkResetReason::InterfaceChanged
@@ -303,14 +358,102 @@ impl ClientNetworkResetRuntime {
         };
         let report = self
             .coordinator
-            .reset_network(snapshot, NetworkResetIntent::Ordinary(reason))
+            .reset_network(Arc::clone(&snapshot), NetworkResetIntent::Ordinary(reason))
             .await
             .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         match report.outcome() {
-            NetworkResetOutcome::Noop | NetworkResetOutcome::ResetCompleted => Ok(()),
-            NetworkResetOutcome::FullRebuildRequired(_)
+            NetworkResetOutcome::ResetCompleted => {
+                self.metrics.network_associations_reset(
+                    NetworkLifecycleOperation::ResetNetwork,
+                    Transport::Udp,
+                    self.take_hook_udp_associations(),
+                );
+                self.metrics.set_network_generation(snapshot.generation());
+                Ok(())
+            }
+            NetworkResetOutcome::Noop
+            | NetworkResetOutcome::FullRebuildRequired(_)
             | NetworkResetOutcome::FullRebuildAcknowledged => {
                 Err(ferrum2_tun::TunNetworkResetError)
+            }
+        }
+    }
+
+    async fn start_full_rebuild(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+        reason: ferrum2_tun::TunNetworkFullRebuildReason,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        self.require_next_generation(&snapshot)?;
+        let report = self
+            .coordinator
+            .reset_network(
+                snapshot,
+                NetworkResetIntent::FullRebuild(map_runtime_full_rebuild_reason(reason)),
+            )
+            .await
+            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+        match report.outcome() {
+            NetworkResetOutcome::FullRebuildRequired(_) => {
+                let udp_associations = self.egress.reset_network();
+                self.pending_full_rebuild_udp_associations
+                    .fetch_add(udp_associations, Ordering::AcqRel);
+                Ok(())
+            }
+            NetworkResetOutcome::Noop
+            | NetworkResetOutcome::ResetCompleted
+            | NetworkResetOutcome::FullRebuildAcknowledged => {
+                Err(ferrum2_tun::TunNetworkResetError)
+            }
+        }
+    }
+
+    async fn complete_full_rebuild(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        self.require_next_generation(&snapshot)?;
+        for hook in &self.hooks {
+            hook.reset_network(Arc::clone(&snapshot))
+                .await
+                .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+        }
+        let report = self
+            .coordinator
+            .acknowledge_full_rebuild(Arc::clone(&snapshot))
+            .await
+            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+        if report.outcome() != NetworkResetOutcome::FullRebuildAcknowledged {
+            return Err(ferrum2_tun::TunNetworkResetError);
+        }
+        let udp_associations = self
+            .pending_full_rebuild_udp_associations
+            .swap(0, Ordering::AcqRel)
+            .saturating_add(self.take_hook_udp_associations());
+        self.metrics.network_associations_reset(
+            NetworkLifecycleOperation::FullRebuild,
+            Transport::Udp,
+            udp_associations,
+        );
+        self.metrics.set_network_generation(snapshot.generation());
+        Ok(())
+    }
+
+    async fn transition(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+        lifecycle: ferrum2_tun::TunNetworkLifecycle,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        match lifecycle {
+            ferrum2_tun::TunNetworkLifecycle::Initialize => self.initialize(snapshot).await,
+            ferrum2_tun::TunNetworkLifecycle::ResetNetwork(reason) => {
+                self.reset(snapshot, reason).await
+            }
+            ferrum2_tun::TunNetworkLifecycle::FullRebuildStarted(reason) => {
+                self.start_full_rebuild(snapshot, reason).await
+            }
+            ferrum2_tun::TunNetworkLifecycle::FullRebuildCompleted(_) => {
+                self.complete_full_rebuild(snapshot).await
             }
         }
     }
@@ -342,6 +485,45 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
         TunEvent::NetworkResetFailed(reason) => metrics.network_reset(
             map_network_reset_reason(reason),
             NetworkLifecycleResult::Failed,
+        ),
+        TunEvent::NetworkFullRebuildStarted {
+            reason,
+            generation,
+            tcp_associations,
+            udp_associations,
+        } => record_network_full_rebuild_event(
+            metrics,
+            reason,
+            NetworkLifecycleResult::Started,
+            generation,
+            tcp_associations,
+            udp_associations,
+        ),
+        TunEvent::NetworkFullRebuildSucceeded {
+            reason,
+            generation,
+            tcp_associations,
+            udp_associations,
+        } => record_network_full_rebuild_event(
+            metrics,
+            reason,
+            NetworkLifecycleResult::Succeeded,
+            generation,
+            tcp_associations,
+            udp_associations,
+        ),
+        TunEvent::NetworkFullRebuildFailed {
+            reason,
+            generation,
+            tcp_associations,
+            udp_associations,
+        } => record_network_full_rebuild_event(
+            metrics,
+            reason,
+            NetworkLifecycleResult::Failed,
+            generation,
+            tcp_associations,
+            udp_associations,
         ),
         TunEvent::SessionRestartStarted => metrics.tun_session_restart_started(),
         TunEvent::SessionRestartSucceeded => metrics.tun_session_restart_succeeded(),
@@ -472,12 +654,98 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
     }
 }
 
+fn record_network_full_rebuild_event(
+    metrics: &Metrics,
+    reason: ferrum2_tun::TunNetworkFullRebuildReason,
+    result: NetworkLifecycleResult,
+    generation: u64,
+    tcp_associations: usize,
+    udp_associations: usize,
+) {
+    let reason = map_observability_full_rebuild_reason(reason);
+    metrics.network_full_rebuild(reason, result);
+    if result == NetworkLifecycleResult::Succeeded {
+        metrics.network_associations_reset(
+            NetworkLifecycleOperation::FullRebuild,
+            Transport::Tcp,
+            tcp_associations,
+        );
+        metrics.network_associations_reset(
+            NetworkLifecycleOperation::FullRebuild,
+            Transport::Udp,
+            udp_associations,
+        );
+    }
+    emit_network_full_rebuild_diagnostic(
+        Role::Client,
+        reason,
+        result,
+        generation,
+        tcp_associations,
+        udp_associations,
+    );
+}
+
 const fn map_network_reset_reason(
     reason: ferrum2_tun::TunNetworkResetReason,
 ) -> NetworkResetReason {
     match reason {
         ferrum2_tun::TunNetworkResetReason::NetworkChange => NetworkResetReason::NetworkChange,
         ferrum2_tun::TunNetworkResetReason::Retry => NetworkResetReason::Retry,
+    }
+}
+
+const fn map_runtime_full_rebuild_reason(
+    reason: ferrum2_tun::TunNetworkFullRebuildReason,
+) -> ManagedNetworkDamage {
+    match reason {
+        ferrum2_tun::TunNetworkFullRebuildReason::AdapterDamage => {
+            ManagedNetworkDamage::AdapterInvalid
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::SessionDamage => {
+            ManagedNetworkDamage::DeviceSessionFatal
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::AddressDamage => {
+            ManagedNetworkDamage::ManagedAddressDamaged
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::RouteDamage => {
+            ManagedNetworkDamage::ManagedRouteDamaged
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::DnsDamage => {
+            ManagedNetworkDamage::ManagedDnsDamaged
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::StrictRouteDamage => {
+            ManagedNetworkDamage::StrictRouteDamaged
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::OwnershipLedgerDamage => {
+            ManagedNetworkDamage::OwnershipLedgerUntrusted
+        }
+    }
+}
+
+const fn map_observability_full_rebuild_reason(
+    reason: ferrum2_tun::TunNetworkFullRebuildReason,
+) -> NetworkFullRebuildReason {
+    match reason {
+        ferrum2_tun::TunNetworkFullRebuildReason::AdapterDamage => {
+            NetworkFullRebuildReason::AdapterDamage
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::SessionDamage => {
+            NetworkFullRebuildReason::SessionDamage
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::AddressDamage => {
+            NetworkFullRebuildReason::AddressDamage
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::RouteDamage => {
+            NetworkFullRebuildReason::RouteDamage
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::DnsDamage => NetworkFullRebuildReason::DnsDamage,
+        ferrum2_tun::TunNetworkFullRebuildReason::StrictRouteDamage => {
+            NetworkFullRebuildReason::StrictRouteDamage
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::OwnershipLedgerDamage => {
+            NetworkFullRebuildReason::OwnershipLedgerDamage
+        }
     }
 }
 
@@ -1597,8 +1865,8 @@ mod tests {
     #[test]
     fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         use ferrum2_tun::{
-            TunDiagnosticReason, TunEvent, TunIpFamily, TunNetworkResetReason, TunRejectReason,
-            UdpResponseDropReason,
+            TunDiagnosticReason, TunEvent, TunIpFamily, TunNetworkFullRebuildReason,
+            TunNetworkResetReason, TunRejectReason, UdpResponseDropReason,
         };
 
         let metrics = ferrum2_observability::Metrics::new();
@@ -1614,6 +1882,24 @@ mod tests {
             TunEvent::NetworkResetStarted(TunNetworkResetReason::Retry),
             TunEvent::NetworkResetSucceeded(TunNetworkResetReason::Retry),
             TunEvent::NetworkResetFailed(TunNetworkResetReason::Retry),
+            TunEvent::NetworkFullRebuildStarted {
+                reason: TunNetworkFullRebuildReason::RouteDamage,
+                generation: 7,
+                tcp_associations: 5,
+                udp_associations: 6,
+            },
+            TunEvent::NetworkFullRebuildSucceeded {
+                reason: TunNetworkFullRebuildReason::RouteDamage,
+                generation: 7,
+                tcp_associations: 5,
+                udp_associations: 6,
+            },
+            TunEvent::NetworkFullRebuildFailed {
+                reason: TunNetworkFullRebuildReason::RouteDamage,
+                generation: 7,
+                tcp_associations: 5,
+                udp_associations: 6,
+            },
             TunEvent::SessionRestartStarted,
             TunEvent::SessionRestartSucceeded,
             TunEvent::SessionRestartFailed,
@@ -1695,6 +1981,11 @@ mod tests {
             "ferrum2_network_reset_total{reason=\"retry\",result=\"started\"} 1",
             "ferrum2_network_reset_total{reason=\"retry\",result=\"succeeded\"} 1",
             "ferrum2_network_reset_total{reason=\"retry\",result=\"failed\"} 1",
+            "ferrum2_network_full_rebuild_total{reason=\"route_damage\",result=\"started\"} 1",
+            "ferrum2_network_full_rebuild_total{reason=\"route_damage\",result=\"succeeded\"} 1",
+            "ferrum2_network_full_rebuild_total{reason=\"route_damage\",result=\"failed\"} 1",
+            "ferrum2_network_associations_reset_total{operation=\"full_rebuild\",transport=\"tcp\"} 5",
+            "ferrum2_network_associations_reset_total{operation=\"full_rebuild\",transport=\"udp\"} 6",
             "ferrum2_tun_session_restart_started_total 1",
             "ferrum2_tun_session_restart_succeeded_total 1",
             "ferrum2_tun_session_restart_failed_total 1",

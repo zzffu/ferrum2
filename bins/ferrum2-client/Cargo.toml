@@ -23,6 +23,7 @@ ferrum2-shadowsocks.workspace = true
 ferrum2-sniff.workspace = true
 ferrum2-socks5.workspace = true
 ferrum2-tun.workspace = true
+ferrum2-wintun.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

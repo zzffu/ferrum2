@@ -477,6 +477,7 @@ dependencies = [
  "ferrum2-sniff",
  "ferrum2-socks5",
  "ferrum2-tun",
+ "ferrum2-wintun",
  "hickory-proto",
  "serde_json",
  "tokio",

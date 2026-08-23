@@ -27,10 +27,10 @@ use ferrum2_observability::{
 use ferrum2_rule::{RuleCompileError, RuleEngineRegistry};
 use ferrum2_runtime::{
     ApplicationResolverAdapter, BoundedSupervisor, MAX_UDP_MAX_BUFFERED_BYTES,
-    MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, OwnerSnapshot, ProcessCause,
-    ProcessCleanupFailure, ProcessReport, ProcessRoot, ProcessRootEventPhase, ProcessRootExit,
-    ProcessRootExitCategory, ProcessRootId, ProcessState, ProcessSupervisor, UdpRuntimeLimits,
-    UdpSessionManager,
+    MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, NetworkSnapshot, OwnerRegistry,
+    OwnerSnapshot, ProcessCause, ProcessCleanupFailure, ProcessReport, ProcessRoot,
+    ProcessRootEventPhase, ProcessRootExit, ProcessRootExitCategory, ProcessRootId, ProcessState,
+    ProcessSupervisor, UdpRuntimeLimits, UdpSessionManager,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
@@ -61,6 +61,22 @@ use tokio_io::{TokioConnector, bind_listener, shutdown_signal};
 #[cfg(test)]
 use egress::IdSequenceRandom;
 use egress::{ClientEgressEngine, ClientUdpContext, prepare_client_outbounds};
+
+fn initial_network_snapshot() -> Result<Arc<NetworkSnapshot>, RunError> {
+    #[cfg(windows)]
+    {
+        let catalog = ferrum2_wintun::WindowsNetworkInterfaceCatalog::system();
+        NetworkSnapshot::capture(1, &catalog)
+            .map(Arc::new)
+            .map_err(|_| RunError::StartupProtocol)
+    }
+    #[cfg(not(windows))]
+    {
+        NetworkSnapshot::new(1, None, None)
+            .map(Arc::new)
+            .map_err(|_| RunError::StartupProtocol)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -943,6 +959,8 @@ where
                 )
             });
         let underlay = materialized_underlay.unwrap_or_default();
+        let network_reset_coordinator =
+            tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone());
         let mut dns = match (config.dns, config.dns_route, dns_specs) {
             (
                 Some(DnsConfig {
@@ -1283,7 +1301,10 @@ where
                     Arc::clone(&context),
                     routing,
                     tun_inbound,
-                    underlay,
+                    tun::TunNetworkServices {
+                        coordinator: network_reset_coordinator,
+                        underlay,
+                    },
                     tun_direct,
                 ),
             );
