@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW,
-    ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_NOT_FOUND, ERROR_SUCCESS, FreeLibrary,
-    GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_NOT_FOUND, ERROR_SUCCESS, FWP_E_FILTER_NOT_FOUND,
+    FWP_E_SESSION_ABORTED, FWP_E_SUBLAYER_NOT_FOUND, FreeLibrary, GetLastError, HANDLE, HMODULE,
+    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     CancelMibChangeNotify2, ConvertInterfaceLuidToGuid, ConvertInterfaceLuidToIndex,
@@ -31,6 +32,17 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
+};
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
+    FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_UINT8, FWP_UINT16, FWP_UINT64, FWP_VALUE0,
+    FWP_VALUE0_0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_LOCAL_INTERFACE,
+    FWPM_CONDITION_IP_PROTOCOL, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0,
+    FWPM_FILTER_CONDITION0, FWPM_FILTER0, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_SESSION_FLAG_DYNAMIC, FWPM_SESSION0, FWPM_SUBLAYER0,
+    FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterGetById0, FwpmFreeMemory0,
+    FwpmGetAppIdFromFileName0, FwpmSubLayerAdd0, FwpmSubLayerGetByKey0, FwpmTransactionAbort0,
+    FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IP_UNICAST_IF,
@@ -52,6 +64,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
+use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 use windows_sys::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects,
 };
@@ -859,6 +872,694 @@ fn classify_notification_luid(
     }
 }
 
+const STRICT_ROUTE_SESSION_KEY: GUID = GUID::from_u128(0x8ea35b4e_6629_4e26_9776_95c5bf9c6b01);
+const STRICT_ROUTE_SUBLAYER_KEY: GUID = GUID::from_u128(0xddbc2fa2_d52f_4a79_8a63_8446c308cf02);
+const STRICT_ROUTE_SUBLAYER_WEIGHT: u16 = 0x7fff;
+const STRICT_ROUTE_PERMIT_WEIGHT: u8 = 15;
+const STRICT_ROUTE_BLOCK_WEIGHT: u8 = 5;
+const STRICT_ROUTE_SESSION_NAME: &str = "Ferrum2 strict route dynamic session";
+const STRICT_ROUTE_SUBLAYER_NAME: &str = "Ferrum2 strict route";
+const MAX_WFP_APP_ID_BYTES: usize = 131_072;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StrictRouteLayer {
+    V4,
+    V6,
+}
+
+impl StrictRouteLayer {
+    const fn key(self) -> GUID {
+        match self {
+            Self::V4 => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            Self::V6 => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StrictRouteAction {
+    Permit,
+    Block,
+}
+
+impl StrictRouteAction {
+    const fn raw(self) -> u32 {
+        match self {
+            Self::Permit => FWP_ACTION_PERMIT,
+            Self::Block => FWP_ACTION_BLOCK,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StrictRouteRuleKind {
+    AppPermitV4,
+    AppPermitV6,
+    TunPermitV4,
+    TunPermitV6,
+    FamilyBlockV4,
+    FamilyBlockV6,
+    DnsTcpBlockV4,
+    DnsUdpBlockV4,
+    DnsTcpBlockV6,
+    DnsUdpBlockV6,
+}
+
+impl StrictRouteRuleKind {
+    const fn key(self) -> GUID {
+        let value = match self {
+            Self::AppPermitV4 => 0xa158b31d_7a59_40bc_9339_38b5e8701001,
+            Self::AppPermitV6 => 0xa158b31d_7a59_40bc_9339_38b5e8701002,
+            Self::TunPermitV4 => 0xa158b31d_7a59_40bc_9339_38b5e8701003,
+            Self::TunPermitV6 => 0xa158b31d_7a59_40bc_9339_38b5e8701004,
+            Self::FamilyBlockV4 => 0xa158b31d_7a59_40bc_9339_38b5e8701005,
+            Self::FamilyBlockV6 => 0xa158b31d_7a59_40bc_9339_38b5e8701006,
+            Self::DnsTcpBlockV4 => 0xa158b31d_7a59_40bc_9339_38b5e8701007,
+            Self::DnsUdpBlockV4 => 0xa158b31d_7a59_40bc_9339_38b5e8701008,
+            Self::DnsTcpBlockV6 => 0xa158b31d_7a59_40bc_9339_38b5e8701009,
+            Self::DnsUdpBlockV6 => 0xa158b31d_7a59_40bc_9339_38b5e870100a,
+        };
+        GUID::from_u128(value)
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::AppPermitV4 => "Ferrum2 app permit IPv4",
+            Self::AppPermitV6 => "Ferrum2 app permit IPv6",
+            Self::TunPermitV4 => "Ferrum2 TUN permit IPv4",
+            Self::TunPermitV6 => "Ferrum2 TUN permit IPv6",
+            Self::FamilyBlockV4 => "Ferrum2 family block IPv4",
+            Self::FamilyBlockV6 => "Ferrum2 family block IPv6",
+            Self::DnsTcpBlockV4 => "Ferrum2 DNS TCP block IPv4",
+            Self::DnsUdpBlockV4 => "Ferrum2 DNS UDP block IPv4",
+            Self::DnsTcpBlockV6 => "Ferrum2 DNS TCP block IPv6",
+            Self::DnsUdpBlockV6 => "Ferrum2 DNS UDP block IPv6",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StrictRouteCondition {
+    AppId(Box<[u8]>),
+    LocalInterfaceLuid(u64),
+    IpProtocol(u8),
+    RemotePort(u16),
+}
+
+impl StrictRouteCondition {
+    const fn field_key(&self) -> GUID {
+        match self {
+            Self::AppId(_) => FWPM_CONDITION_ALE_APP_ID,
+            Self::LocalInterfaceLuid(_) => FWPM_CONDITION_IP_LOCAL_INTERFACE,
+            Self::IpProtocol(_) => FWPM_CONDITION_IP_PROTOCOL,
+            Self::RemotePort(_) => FWPM_CONDITION_IP_REMOTE_PORT,
+        }
+    }
+
+    const fn data_type(&self) -> i32 {
+        match self {
+            Self::AppId(_) => FWP_BYTE_BLOB_TYPE,
+            Self::LocalInterfaceLuid(_) => FWP_UINT64,
+            Self::IpProtocol(_) => FWP_UINT8,
+            Self::RemotePort(_) => FWP_UINT16,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StrictRouteRule {
+    kind: StrictRouteRuleKind,
+    layer: StrictRouteLayer,
+    action: StrictRouteAction,
+    weight: u8,
+    conditions: Box<[StrictRouteCondition]>,
+}
+
+fn strict_route_rules(
+    has_ipv4: bool,
+    has_ipv6: bool,
+    has_managed_dns: bool,
+    app_id: &[u8],
+    interface_luid: u64,
+) -> Result<Vec<StrictRouteRule>, Error> {
+    if (!has_ipv4 && !has_ipv6)
+        || app_id.is_empty()
+        || app_id.len() > MAX_WFP_APP_ID_BYTES
+        || interface_luid == 0
+    {
+        return Err(Error);
+    }
+    let mut rules = Vec::with_capacity(10);
+    let mut push = |kind, layer, action, weight, conditions| {
+        rules.push(StrictRouteRule {
+            kind,
+            layer,
+            action,
+            weight,
+            conditions,
+        });
+    };
+    push(
+        StrictRouteRuleKind::AppPermitV4,
+        StrictRouteLayer::V4,
+        StrictRouteAction::Permit,
+        STRICT_ROUTE_PERMIT_WEIGHT,
+        Box::new([StrictRouteCondition::AppId(app_id.into())]),
+    );
+    push(
+        StrictRouteRuleKind::AppPermitV6,
+        StrictRouteLayer::V6,
+        StrictRouteAction::Permit,
+        STRICT_ROUTE_PERMIT_WEIGHT,
+        Box::new([StrictRouteCondition::AppId(app_id.into())]),
+    );
+    push(
+        StrictRouteRuleKind::TunPermitV4,
+        StrictRouteLayer::V4,
+        StrictRouteAction::Permit,
+        STRICT_ROUTE_PERMIT_WEIGHT,
+        Box::new([StrictRouteCondition::LocalInterfaceLuid(interface_luid)]),
+    );
+    push(
+        StrictRouteRuleKind::TunPermitV6,
+        StrictRouteLayer::V6,
+        StrictRouteAction::Permit,
+        STRICT_ROUTE_PERMIT_WEIGHT,
+        Box::new([StrictRouteCondition::LocalInterfaceLuid(interface_luid)]),
+    );
+    if !has_ipv4 {
+        push(
+            StrictRouteRuleKind::FamilyBlockV4,
+            StrictRouteLayer::V4,
+            StrictRouteAction::Block,
+            STRICT_ROUTE_BLOCK_WEIGHT,
+            Box::new([]),
+        );
+    }
+    if !has_ipv6 {
+        push(
+            StrictRouteRuleKind::FamilyBlockV6,
+            StrictRouteLayer::V6,
+            StrictRouteAction::Block,
+            STRICT_ROUTE_BLOCK_WEIGHT,
+            Box::new([]),
+        );
+    }
+    if has_managed_dns {
+        for (kind, layer, protocol) in [
+            (StrictRouteRuleKind::DnsTcpBlockV4, StrictRouteLayer::V4, 6),
+            (StrictRouteRuleKind::DnsUdpBlockV4, StrictRouteLayer::V4, 17),
+            (StrictRouteRuleKind::DnsTcpBlockV6, StrictRouteLayer::V6, 6),
+            (StrictRouteRuleKind::DnsUdpBlockV6, StrictRouteLayer::V6, 17),
+        ] {
+            push(
+                kind,
+                layer,
+                StrictRouteAction::Block,
+                STRICT_ROUTE_BLOCK_WEIGHT,
+                Box::new([
+                    StrictRouteCondition::IpProtocol(protocol),
+                    StrictRouteCondition::RemotePort(53),
+                ]),
+            );
+        }
+    }
+    Ok(rules)
+}
+
+trait StrictRouteOperations {
+    type Session;
+
+    fn open_dynamic_session(&mut self) -> Result<Self::Session, Error>;
+    fn app_id(&mut self) -> Result<Box<[u8]>, Error>;
+    fn begin_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error>;
+    fn add_sublayer(&mut self, session: &mut Self::Session) -> Result<(), Error>;
+    fn add_filter(
+        &mut self,
+        session: &mut Self::Session,
+        rule: &StrictRouteRule,
+    ) -> Result<u64, Error>;
+    fn commit_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error>;
+    fn abort_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error>;
+    fn sublayer_matches(&self, session: &Self::Session) -> Result<bool, Error>;
+    fn filter_matches(
+        &self,
+        session: &Self::Session,
+        id: u64,
+        rule: &StrictRouteRule,
+    ) -> Result<bool, Error>;
+    fn close_dynamic_session(&mut self, session: &mut Self::Session) -> Result<(), Error>;
+}
+
+struct StrictRouteSession<O: StrictRouteOperations> {
+    operations: O,
+    session: Option<O::Session>,
+    expected_filters: Vec<(u64, StrictRouteRule)>,
+}
+
+impl<O: StrictRouteOperations> StrictRouteSession<O> {
+    fn open(mut operations: O) -> Result<Self, Error> {
+        let session = operations.open_dynamic_session()?;
+        Ok(Self {
+            operations,
+            session: Some(session),
+            expected_filters: Vec::new(),
+        })
+    }
+
+    fn install(
+        &mut self,
+        has_ipv4: bool,
+        has_ipv6: bool,
+        has_managed_dns: bool,
+        interface_luid: u64,
+    ) -> Result<(), Error> {
+        if !self.expected_filters.is_empty() {
+            return Err(Error);
+        }
+        let app_id = self.operations.app_id()?;
+        let rules =
+            strict_route_rules(has_ipv4, has_ipv6, has_managed_dns, &app_id, interface_luid)?;
+        let session = self.session.as_mut().ok_or(Error)?;
+        self.operations.begin_transaction(session)?;
+        let mut installed = Vec::with_capacity(rules.len());
+        let transaction = (|| {
+            self.operations.add_sublayer(session)?;
+            for rule in rules {
+                let id = self.operations.add_filter(session, &rule)?;
+                if id == 0 {
+                    return Err(Error);
+                }
+                installed.push((id, rule));
+            }
+            self.operations.commit_transaction(session)
+        })();
+        if transaction.is_err() {
+            let _ = self.operations.abort_transaction(session);
+            return Err(Error);
+        }
+        self.expected_filters = installed;
+        Ok(())
+    }
+
+    fn health(&self) -> Result<bool, Error> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(false);
+        };
+        if self.expected_filters.is_empty() || !self.operations.sublayer_matches(session)? {
+            return Ok(false);
+        }
+        for (id, rule) in &self.expected_filters {
+            if !self.operations.filter_matches(session, *id, rule)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn close(&mut self) -> Result<(), Error> {
+        let Some(session) = self.session.as_mut() else {
+            return Ok(());
+        };
+        self.operations.close_dynamic_session(session)?;
+        self.session = None;
+        self.expected_filters.clear();
+        Ok(())
+    }
+}
+
+impl<O: StrictRouteOperations> Drop for StrictRouteSession<O> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+fn strict_route_state_matches<O: StrictRouteOperations>(
+    intent: bool,
+    session: Option<&StrictRouteSession<O>>,
+) -> Result<bool, Error> {
+    match (intent, session) {
+        (false, None) => Ok(true),
+        (true, Some(session)) => session.health(),
+        _ => Ok(false),
+    }
+}
+
+type PlatformStrictRouteSession = StrictRouteSession<PlatformStrictRouteOperations>;
+
+struct PlatformStrictRouteOperations;
+
+struct FwpmOwned<T>(*mut T);
+
+impl<T> FwpmOwned<T> {
+    fn get(&self) -> Result<&T, Error> {
+        unsafe { self.0.as_ref() }.ok_or(Error)
+    }
+}
+
+impl<T> Drop for FwpmOwned<T> {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        let mut allocation = self.0.cast::<c_void>();
+        unsafe { FwpmFreeMemory0(&mut allocation) };
+        self.0 = null_mut();
+    }
+}
+
+fn guid_matches(left: &GUID, right: &GUID) -> bool {
+    left.data1 == right.data1
+        && left.data2 == right.data2
+        && left.data3 == right.data3
+        && left.data4 == right.data4
+}
+
+fn wfp_readback_present(status: u32, not_found: i32) -> Result<bool, Error> {
+    match status {
+        ERROR_SUCCESS => Ok(true),
+        value if value == not_found as u32 || value == FWP_E_SESSION_ABORTED as u32 => Ok(false),
+        _ => Err(Error),
+    }
+}
+
+fn wide_string(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
+fn raw_wide_matches(raw: *const u16, expected: &str) -> bool {
+    if raw.is_null() {
+        return false;
+    }
+    let expected = expected.encode_utf16().chain(Some(0));
+    expected
+        .enumerate()
+        .all(|(index, unit)| unsafe { *raw.add(index) } == unit)
+}
+
+fn raw_strict_route_condition_matches(
+    raw: &FWPM_FILTER_CONDITION0,
+    expected: &StrictRouteCondition,
+) -> bool {
+    if raw.matchType != FWP_MATCH_EQUAL {
+        return false;
+    }
+    match expected {
+        StrictRouteCondition::AppId(expected) => {
+            if !guid_matches(&raw.fieldKey, &FWPM_CONDITION_ALE_APP_ID)
+                || raw.conditionValue.r#type != FWP_BYTE_BLOB_TYPE
+            {
+                return false;
+            }
+            let blob = unsafe { raw.conditionValue.Anonymous.byteBlob };
+            let Some(blob) = (unsafe { blob.as_ref() }) else {
+                return false;
+            };
+            let Ok(size) = usize::try_from(blob.size) else {
+                return false;
+            };
+            if size != expected.len() || size > MAX_WFP_APP_ID_BYTES || blob.data.is_null() {
+                return false;
+            }
+            (unsafe { std::slice::from_raw_parts(blob.data, size) }) == expected.as_ref()
+        }
+        StrictRouteCondition::LocalInterfaceLuid(expected) => {
+            if !guid_matches(&raw.fieldKey, &FWPM_CONDITION_IP_LOCAL_INTERFACE)
+                || raw.conditionValue.r#type != FWP_UINT64
+            {
+                return false;
+            }
+            let luid = unsafe { raw.conditionValue.Anonymous.uint64 };
+            unsafe { luid.as_ref() }.is_some_and(|current| current == expected)
+        }
+        StrictRouteCondition::IpProtocol(expected) => {
+            guid_matches(&raw.fieldKey, &FWPM_CONDITION_IP_PROTOCOL)
+                && raw.conditionValue.r#type == FWP_UINT8
+                && unsafe { raw.conditionValue.Anonymous.uint8 } == *expected
+        }
+        StrictRouteCondition::RemotePort(expected) => {
+            guid_matches(&raw.fieldKey, &FWPM_CONDITION_IP_REMOTE_PORT)
+                && raw.conditionValue.r#type == FWP_UINT16
+                && unsafe { raw.conditionValue.Anonymous.uint16 } == *expected
+        }
+    }
+}
+
+fn raw_strict_route_filter_matches(
+    id: u64,
+    raw: &FWPM_FILTER0,
+    expected: &StrictRouteRule,
+) -> bool {
+    let Ok(condition_count) = usize::try_from(raw.numFilterConditions) else {
+        return false;
+    };
+    if raw.filterId != id
+        || !guid_matches(&raw.filterKey, &expected.kind.key())
+        || !raw_wide_matches(raw.displayData.name, expected.kind.name())
+        || raw.flags != 0
+        || !raw.providerKey.is_null()
+        || raw.providerData.size != 0
+        || !raw.providerData.data.is_null()
+        || !guid_matches(&raw.layerKey, &expected.layer.key())
+        || !guid_matches(&raw.subLayerKey, &STRICT_ROUTE_SUBLAYER_KEY)
+        || raw.weight.r#type != FWP_UINT8
+        || unsafe { raw.weight.Anonymous.uint8 } != expected.weight
+        || raw.action.r#type != expected.action.raw()
+        || condition_count != expected.conditions.len()
+        || condition_count > 2
+        || (condition_count != 0 && raw.filterCondition.is_null())
+    {
+        return false;
+    }
+    let raw_conditions = if condition_count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(raw.filterCondition, condition_count) }
+    };
+    expected.conditions.iter().all(|expected| {
+        raw_conditions
+            .iter()
+            .any(|raw| raw_strict_route_condition_matches(raw, expected))
+    })
+}
+
+impl StrictRouteOperations for PlatformStrictRouteOperations {
+    type Session = HANDLE;
+
+    fn open_dynamic_session(&mut self) -> Result<Self::Session, Error> {
+        let mut session_name = wide_string(STRICT_ROUTE_SESSION_NAME);
+        let session = FWPM_SESSION0 {
+            sessionKey: STRICT_ROUTE_SESSION_KEY,
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: session_name.as_mut_ptr(),
+                description: null_mut(),
+            },
+            flags: FWPM_SESSION_FLAG_DYNAMIC,
+            ..FWPM_SESSION0::default()
+        };
+        let mut engine = null_mut();
+        let status =
+            unsafe { FwpmEngineOpen0(null(), RPC_C_AUTHN_WINNT, null(), &session, &mut engine) };
+        if status != ERROR_SUCCESS {
+            if !engine.is_null() {
+                let _ = unsafe { FwpmEngineClose0(engine) };
+            }
+            return Err(Error);
+        }
+        if engine.is_null() {
+            Err(Error)
+        } else {
+            Ok(engine)
+        }
+    }
+
+    fn app_id(&mut self) -> Result<Box<[u8]>, Error> {
+        let executable = current_executable()?;
+        let executable = wide(&executable);
+        let mut raw = null_mut();
+        let status = unsafe { FwpmGetAppIdFromFileName0(executable.as_ptr(), &mut raw) };
+        let allocation = FwpmOwned(raw);
+        if status != ERROR_SUCCESS {
+            return Err(Error);
+        }
+        let blob = allocation.get()?;
+        let size = usize::try_from(blob.size).map_err(|_| Error)?;
+        if size == 0 || size > MAX_WFP_APP_ID_BYTES || blob.data.is_null() {
+            return Err(Error);
+        }
+        Ok(unsafe { std::slice::from_raw_parts(blob.data, size) }
+            .to_vec()
+            .into_boxed_slice())
+    }
+
+    fn begin_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error> {
+        if unsafe { FwpmTransactionBegin0(*session, 0) } == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(Error)
+        }
+    }
+
+    fn add_sublayer(&mut self, session: &mut Self::Session) -> Result<(), Error> {
+        let mut name = wide_string(STRICT_ROUTE_SUBLAYER_NAME);
+        let sublayer = FWPM_SUBLAYER0 {
+            subLayerKey: STRICT_ROUTE_SUBLAYER_KEY,
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: name.as_mut_ptr(),
+                description: null_mut(),
+            },
+            weight: STRICT_ROUTE_SUBLAYER_WEIGHT,
+            ..FWPM_SUBLAYER0::default()
+        };
+        if unsafe { FwpmSubLayerAdd0(*session, &sublayer, null_mut()) } == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(Error)
+        }
+    }
+
+    fn add_filter(
+        &mut self,
+        session: &mut Self::Session,
+        rule: &StrictRouteRule,
+    ) -> Result<u64, Error> {
+        let mut luid_values = Vec::<Box<u64>>::new();
+        let mut app_blobs = Vec::<Box<FWP_BYTE_BLOB>>::new();
+        let mut conditions = Vec::with_capacity(rule.conditions.len());
+        for condition in &rule.conditions {
+            let value = match condition {
+                StrictRouteCondition::AppId(app_id) => {
+                    let size = u32::try_from(app_id.len()).map_err(|_| Error)?;
+                    let mut blob = Box::new(FWP_BYTE_BLOB {
+                        size,
+                        data: app_id.as_ptr().cast_mut(),
+                    });
+                    let value = FWP_CONDITION_VALUE0_0 {
+                        byteBlob: blob.as_mut(),
+                    };
+                    app_blobs.push(blob);
+                    value
+                }
+                StrictRouteCondition::LocalInterfaceLuid(luid) => {
+                    let mut luid = Box::new(*luid);
+                    let value = FWP_CONDITION_VALUE0_0 {
+                        uint64: luid.as_mut(),
+                    };
+                    luid_values.push(luid);
+                    value
+                }
+                StrictRouteCondition::IpProtocol(protocol) => {
+                    FWP_CONDITION_VALUE0_0 { uint8: *protocol }
+                }
+                StrictRouteCondition::RemotePort(port) => FWP_CONDITION_VALUE0_0 { uint16: *port },
+            };
+            conditions.push(FWPM_FILTER_CONDITION0 {
+                fieldKey: condition.field_key(),
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: condition.data_type(),
+                    Anonymous: value,
+                },
+            });
+        }
+        let mut name = wide_string(rule.kind.name());
+        let filter = FWPM_FILTER0 {
+            filterKey: rule.kind.key(),
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: name.as_mut_ptr(),
+                description: null_mut(),
+            },
+            layerKey: rule.layer.key(),
+            subLayerKey: STRICT_ROUTE_SUBLAYER_KEY,
+            weight: FWP_VALUE0 {
+                r#type: FWP_UINT8,
+                Anonymous: FWP_VALUE0_0 { uint8: rule.weight },
+            },
+            numFilterConditions: u32::try_from(conditions.len()).map_err(|_| Error)?,
+            filterCondition: if conditions.is_empty() {
+                null_mut()
+            } else {
+                conditions.as_mut_ptr()
+            },
+            action: FWPM_ACTION0 {
+                r#type: rule.action.raw(),
+                ..FWPM_ACTION0::default()
+            },
+            ..FWPM_FILTER0::default()
+        };
+        let mut id = 0_u64;
+        let status = unsafe { FwpmFilterAdd0(*session, &filter, null_mut(), &mut id) };
+        drop((luid_values, app_blobs));
+        if status == ERROR_SUCCESS && id != 0 {
+            Ok(id)
+        } else {
+            Err(Error)
+        }
+    }
+
+    fn commit_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error> {
+        if unsafe { FwpmTransactionCommit0(*session) } == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(Error)
+        }
+    }
+
+    fn abort_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error> {
+        if unsafe { FwpmTransactionAbort0(*session) } == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(Error)
+        }
+    }
+
+    fn sublayer_matches(&self, session: &Self::Session) -> Result<bool, Error> {
+        let mut raw = null_mut();
+        let status =
+            unsafe { FwpmSubLayerGetByKey0(*session, &STRICT_ROUTE_SUBLAYER_KEY, &mut raw) };
+        let allocation = FwpmOwned(raw);
+        if !wfp_readback_present(status, FWP_E_SUBLAYER_NOT_FOUND)? {
+            return Ok(false);
+        }
+        let sublayer = allocation.get()?;
+        Ok(
+            guid_matches(&sublayer.subLayerKey, &STRICT_ROUTE_SUBLAYER_KEY)
+                && raw_wide_matches(sublayer.displayData.name, STRICT_ROUTE_SUBLAYER_NAME)
+                && sublayer.flags == 0
+                && sublayer.providerKey.is_null()
+                && sublayer.providerData.size == 0
+                && sublayer.providerData.data.is_null()
+                && sublayer.weight == STRICT_ROUTE_SUBLAYER_WEIGHT,
+        )
+    }
+
+    fn filter_matches(
+        &self,
+        session: &Self::Session,
+        id: u64,
+        rule: &StrictRouteRule,
+    ) -> Result<bool, Error> {
+        let mut raw = null_mut();
+        let status = unsafe { FwpmFilterGetById0(*session, id, &mut raw) };
+        let allocation = FwpmOwned(raw);
+        if !wfp_readback_present(status, FWP_E_FILTER_NOT_FOUND)? {
+            return Ok(false);
+        }
+        Ok(raw_strict_route_filter_matches(id, allocation.get()?, rule))
+    }
+
+    fn close_dynamic_session(&mut self, session: &mut Self::Session) -> Result<(), Error> {
+        if session.is_null() {
+            return Err(Error);
+        }
+        if unsafe { FwpmEngineClose0(*session) } != ERROR_SUCCESS {
+            return Err(Error);
+        }
+        *session = null_mut();
+        Ok(())
+    }
+}
+
 struct ManagedState {
     notifications: NotificationOwners,
     validated_generation: u64,
@@ -871,6 +1572,9 @@ struct ManagedState {
     dns_interface: Option<GUID>,
     ipv4_dns: Option<ManagedDnsLease<Ipv4DnsSettings>>,
     ipv6_dns: Option<ManagedDnsLease<Ipv6DnsSettings>>,
+    strict_route_intent: bool,
+    // The dynamic engine belongs to the long-lived managed plane and closes only in full cleanup.
+    strict_route: Option<PlatformStrictRouteSession>,
 }
 
 /// Safe RAII owner of the exact Wintun adapter, address, MTU, session and DLL transaction.
@@ -954,7 +1658,7 @@ impl Adapter {
         self.managed.as_ref().map(|state| state.policy.clone())
     }
 
-    /// Reads back only Ferrum2-owned adapter, address, route, and DNS state.
+    /// Reads back only Ferrum2-owned adapter, address, route, DNS, and strict-route state.
     pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
         let device_health = self.managed_device_health();
         if device_health != ManagedTunHealth::Healthy {
@@ -968,25 +1672,32 @@ impl Adapter {
             dns_interface,
             ipv4_dns,
             ipv6_dns,
+            strict_route_intent,
+            strict_route,
             ..
         } = state;
         let dns_interface = *dns_interface;
-        managed_state_health(routes, &mut PlatformManagedRouteCleanup, || {
-            let Some(interface) = dns_interface else {
-                return Ok(ipv4_dns.is_none() && ipv6_dns.is_none());
-            };
-            if let Some(lease) = ipv4_dns
-                && !managed_dns_matches(&mut PlatformManagedIpv4Dns(interface), lease)?
-            {
-                return Ok(false);
-            }
-            if let Some(lease) = ipv6_dns
-                && !managed_dns_matches(&mut PlatformManagedIpv6Dns(interface), lease)?
-            {
-                return Ok(false);
-            }
-            Ok(true)
-        })
+        managed_state_health(
+            routes,
+            &mut PlatformManagedRouteCleanup,
+            || {
+                let Some(interface) = dns_interface else {
+                    return Ok(ipv4_dns.is_none() && ipv6_dns.is_none());
+                };
+                if let Some(lease) = ipv4_dns
+                    && !managed_dns_matches(&mut PlatformManagedIpv4Dns(interface), lease)?
+                {
+                    return Ok(false);
+                }
+                if let Some(lease) = ipv6_dns
+                    && !managed_dns_matches(&mut PlatformManagedIpv6Dns(interface), lease)?
+                {
+                    return Ok(false);
+                }
+                Ok(true)
+            },
+            || strict_route_state_matches(*strict_route_intent, strict_route.as_ref()),
+        )
     }
 
     fn managed_device_health(&self) -> ManagedTunHealth {
@@ -1214,6 +1925,7 @@ impl Adapter {
             capture_routes,
             ipv4_dns_address,
             ipv6_dns_address,
+            strict_route_intent,
         )) = prepare_managed_intent(self.config.managed_network(), |config| {
             let notifications = subscribe_network_changes(self.network_change.clone())?;
             let snapshot_generation = notifications.generation();
@@ -1229,6 +1941,7 @@ impl Adapter {
                 config.capture_routes().to_vec(),
                 config.ipv4_dns_address(),
                 config.ipv6_dns_address(),
+                config.strict_route(),
             ))
         })?
         else {
@@ -1247,11 +1960,15 @@ impl Adapter {
             dns_interface: None,
             ipv4_dns: None,
             ipv6_dns: None,
+            strict_route_intent,
+            strict_route: None,
         });
         Ok(())
     }
 
     fn finish_managed(&mut self, deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
+        let has_ipv4 = self.config.ipv4.is_some();
+        let has_ipv6 = self.config.ipv6.is_some();
         let Some(state) = self.managed.as_mut() else {
             return Ok(());
         };
@@ -1294,11 +2011,22 @@ impl Adapter {
                 &mut state.ipv6_dns,
             )?;
         }
+        if state.strict_route_intent {
+            state.strict_route = Some(StrictRouteSession::open(PlatformStrictRouteOperations)?);
+            state.strict_route.as_mut().ok_or(Error)?.install(
+                has_ipv4,
+                has_ipv6,
+                state.ipv4_dns.is_some() || state.ipv6_dns.is_some(),
+                owned.luid,
+            )?;
+        }
         state
             .notifications
             .wait_until_quiescent(deadline, cancelled)?;
         state.notifications.monitor_runtime();
         let dns_interface = state.dns_interface;
+        let strict_route_intent = state.strict_route_intent;
+        let strict_route = state.strict_route.as_ref();
         if revalidate_managed_network(
             ManagedNetworkValidation {
                 policy: &state.policy,
@@ -1326,6 +2054,7 @@ impl Adapter {
                 }
                 Ok(true)
             },
+            || strict_route_state_matches(strict_route_intent, strict_route),
         )? != ManagedNetworkValidationOutcome::Unchanged
         {
             return Err(Error);
@@ -1352,6 +2081,8 @@ impl Adapter {
             dns_interface,
             ipv4_dns,
             ipv6_dns,
+            strict_route_intent,
+            strict_route,
             ..
         } = state;
         let dns_interface = *dns_interface;
@@ -1382,6 +2113,7 @@ impl Adapter {
                 }
                 Ok(true)
             },
+            || strict_route_state_matches(*strict_route_intent, strict_route.as_ref()),
         )
     }
 
@@ -2397,12 +3129,16 @@ fn managed_state_health<O: ManagedRouteCleanupOperations>(
     routes: &[O::Row],
     route_operations: &mut O,
     mut dns_matches: impl FnMut() -> Result<bool, Error>,
+    mut strict_route_matches: impl FnMut() -> Result<bool, Error>,
 ) -> Result<ManagedTunHealth, Error> {
     if !managed_routes_match(routes, route_operations) {
         return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Route));
     }
     if !dns_matches()? {
         return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Dns));
+    }
+    if !strict_route_matches()? {
+        return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::StrictRoute));
     }
     Ok(ManagedTunHealth::Healthy)
 }
@@ -2425,6 +3161,7 @@ fn revalidate_managed_network<
     U: UnderlayOperations,
     O: ManagedRouteCleanupOperations,
     F: FnMut() -> Result<bool, Error>,
+    S: FnMut() -> Result<bool, Error>,
 >(
     validation: ManagedNetworkValidation<'_, O::Row>,
     force: bool,
@@ -2432,6 +3169,7 @@ fn revalidate_managed_network<
     underlay: &mut U,
     route_operations: &mut O,
     mut dns_matches: F,
+    mut strict_route_matches: S,
 ) -> Result<ManagedNetworkValidationOutcome, Error> {
     let ManagedNetworkValidation {
         policy,
@@ -2451,7 +3189,12 @@ fn revalidate_managed_network<
                 return Err(error);
             }
         };
-        let health = match managed_state_health(routes, route_operations, &mut dns_matches) {
+        let health = match managed_state_health(
+            routes,
+            route_operations,
+            &mut dns_matches,
+            &mut strict_route_matches,
+        ) {
             Ok(health) => health,
             Err(error) => {
                 policy.invalidate();
@@ -2530,6 +3273,9 @@ trait CleanupOperations {
     fn cancel_notifications(&mut self) -> Option<bool> {
         None
     }
+    fn close_strict_route(&mut self) -> Option<bool> {
+        None
+    }
     fn delete_last_route(&mut self) -> Option<bool> {
         None
     }
@@ -2548,6 +3294,7 @@ fn cleanup_transaction(cleanup: &mut impl CleanupOperations) -> bool {
         return true;
     }
     let mut failed = cleanup.cancel_notifications().unwrap_or(false);
+    failed |= cleanup.close_strict_route().unwrap_or(false);
     while let Some(step_failed) = cleanup.restore_last_dns() {
         failed |= step_failed;
     }
@@ -2599,6 +3346,16 @@ impl CleanupOperations for PlatformCleanup<'_> {
             state.policy.invalidate();
             state.notifications.cancel_all()
         })
+    }
+
+    fn close_strict_route(&mut self) -> Option<bool> {
+        let state = self.0.managed.as_mut()?;
+        let session = state.strict_route.as_mut()?;
+        let failed = session.close().is_err();
+        if !failed {
+            state.strict_route = None;
+        }
+        Some(failed)
     }
 
     fn delete_last_route(&mut self) -> Option<bool> {
@@ -3143,22 +3900,25 @@ mod tests {
         ManagedNetworkValidationOutcome, ManagedRouteCleanupOperations, ManagedRouteOperations,
         ManagedRouteRead, NET_LUID_LH, NotificationContext, NotificationOwners, OwnedHandle,
         RouteFingerprint, SessionJournal, SetupOperations, SocketBindingOperations, StopSignal,
-        UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WaitForMultipleObjects,
-        WorkSignal, address_changed, bind_fixed_with, bind_target_with,
-        cancel_notification_handles, capture_route_row, classify_adapter_create_failure,
-        classify_notification_luid, classify_receive_null, classify_send_allocation_failure,
-        classify_wait_result, cleanup_transaction, copy_bounded_wide, create_event, dad_snapshot,
-        delete_managed_address, delete_managed_route, dns_settings_query_flags,
-        eligible_interface_identity, finish_setup_transaction, initialize_managed_address,
-        install_managed_dns, install_managed_routes, interface_changed, interface_socket_option,
+        StrictRouteAction, StrictRouteCondition, StrictRouteLayer, StrictRouteOperations,
+        StrictRouteRule, StrictRouteRuleKind, StrictRouteSession, UnderlayOperations, WAIT_FAILED,
+        WAIT_OBJECT_0, WAIT_TIMEOUT, WaitForMultipleObjects, WorkSignal, address_changed,
+        bind_fixed_with, bind_target_with, cancel_notification_handles, capture_route_row,
+        classify_adapter_create_failure, classify_notification_luid, classify_receive_null,
+        classify_send_allocation_failure, classify_wait_result, cleanup_transaction,
+        copy_bounded_wide, create_event, dad_snapshot, delete_managed_address,
+        delete_managed_route, dns_settings_query_flags, eligible_interface_identity,
+        finish_setup_transaction, initialize_managed_address, install_managed_dns,
+        install_managed_routes, interface_changed, interface_socket_option,
         ipv4_dns_settings_input, ipv4_interface_index_option_value, ipv4_sockaddr,
         ipv6_dns_settings_input, ipv6_interface_index_option_value, ipv6_sockaddr,
         leak_notification_owners, load_transaction, managed_address_matches, managed_device_health,
         managed_dns_matches, managed_notification_family, managed_state_health,
         normalize_dns_settings, prepare_managed_intent, require_exports, restore_managed_dns,
         revalidate_managed_network, route_changed, route_matches, setup_transaction,
-        snapshot_underlay_at, snapshot_underlay_with, subscribe_notification_sequence,
-        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        snapshot_underlay_at, snapshot_underlay_with, strict_route_rules,
+        strict_route_state_matches, subscribe_notification_sequence, take_last_owned_route,
+        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
     use crate::{
         ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix, ManagedStateDamage, ManagedTunHealth,
@@ -4041,7 +4801,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_state_health_reports_owned_route_and_dns_damage_only() {
+    fn managed_state_health_reports_owned_route_dns_and_strict_route_damage() {
         for readback in [
             ManagedRouteRead::Absent,
             ManagedRouteRead::Present(2),
@@ -4053,7 +4813,7 @@ mod tests {
                 calls: Vec::new(),
             };
             assert_eq!(
-                managed_state_health(&[1], &mut routes, || Ok(true)).unwrap(),
+                managed_state_health(&[1], &mut routes, || Ok(true), || Ok(true)).unwrap(),
                 ManagedTunHealth::Damaged(ManagedStateDamage::Route)
             );
         }
@@ -4064,7 +4824,7 @@ mod tests {
             calls: Vec::new(),
         };
         assert_eq!(
-            managed_state_health(&[1], &mut healthy_route, || Ok(false)).unwrap(),
+            managed_state_health(&[1], &mut healthy_route, || Ok(false), || Ok(true)).unwrap(),
             ManagedTunHealth::Damaged(ManagedStateDamage::Dns)
         );
 
@@ -4074,9 +4834,386 @@ mod tests {
             calls: Vec::new(),
         };
         assert_eq!(
-            managed_state_health(&[1], &mut healthy_route, || Ok(true)).unwrap(),
+            managed_state_health(&[1], &mut healthy_route, || Ok(true), || Ok(false)).unwrap(),
+            ManagedTunHealth::Damaged(ManagedStateDamage::StrictRoute)
+        );
+
+        let mut healthy_route = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            managed_state_health(&[1], &mut healthy_route, || Ok(true), || Ok(true)).unwrap(),
             ManagedTunHealth::Healthy
         );
+    }
+
+    #[derive(Default)]
+    struct InjectedStrictRouteState {
+        calls: Vec<String>,
+        installed: Vec<(u64, StrictRouteRule)>,
+        sublayer_present: bool,
+        damaged_filter: Option<u64>,
+        fail_at: Option<String>,
+        close_calls: usize,
+    }
+
+    struct InjectedStrictRoute {
+        state: std::rc::Rc<std::cell::RefCell<InjectedStrictRouteState>>,
+    }
+
+    impl InjectedStrictRoute {
+        fn step(&self, name: String) -> Result<(), Error> {
+            let mut state = self.state.borrow_mut();
+            state.calls.push(name.clone());
+            if state.fail_at.as_deref() == Some(name.as_str()) {
+                Err(Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl StrictRouteOperations for InjectedStrictRoute {
+        type Session = u64;
+
+        fn open_dynamic_session(&mut self) -> Result<Self::Session, Error> {
+            self.step("open".into())?;
+            Ok(7)
+        }
+
+        fn app_id(&mut self) -> Result<Box<[u8]>, Error> {
+            self.step("app-id".into())?;
+            Ok(Box::from(&b"ferrum2-app"[..]))
+        }
+
+        fn begin_transaction(&mut self, _session: &mut Self::Session) -> Result<(), Error> {
+            self.step("begin".into())
+        }
+
+        fn add_sublayer(&mut self, _session: &mut Self::Session) -> Result<(), Error> {
+            self.step("sublayer".into())?;
+            self.state.borrow_mut().sublayer_present = true;
+            Ok(())
+        }
+
+        fn add_filter(
+            &mut self,
+            _session: &mut Self::Session,
+            rule: &StrictRouteRule,
+        ) -> Result<u64, Error> {
+            let index = self.state.borrow().installed.len();
+            self.step(format!("filter-{index}"))?;
+            let id = 100 + u64::try_from(index).unwrap();
+            self.state.borrow_mut().installed.push((id, rule.clone()));
+            Ok(id)
+        }
+
+        fn commit_transaction(&mut self, _session: &mut Self::Session) -> Result<(), Error> {
+            self.step("commit".into())
+        }
+
+        fn abort_transaction(&mut self, _session: &mut Self::Session) -> Result<(), Error> {
+            self.step("abort".into())?;
+            let mut state = self.state.borrow_mut();
+            state.sublayer_present = false;
+            state.installed.clear();
+            Ok(())
+        }
+
+        fn sublayer_matches(&self, _session: &Self::Session) -> Result<bool, Error> {
+            self.step("health-sublayer".into())?;
+            Ok(self.state.borrow().sublayer_present)
+        }
+
+        fn filter_matches(
+            &self,
+            _session: &Self::Session,
+            id: u64,
+            rule: &StrictRouteRule,
+        ) -> Result<bool, Error> {
+            self.step(format!("health-filter-{id}"))?;
+            let state = self.state.borrow();
+            Ok(state.damaged_filter != Some(id)
+                && state
+                    .installed
+                    .iter()
+                    .any(|(current_id, current)| *current_id == id && current == rule))
+        }
+
+        fn close_dynamic_session(&mut self, session: &mut Self::Session) -> Result<(), Error> {
+            {
+                let mut state = self.state.borrow_mut();
+                state.close_calls += 1;
+            }
+            self.step("close".into())?;
+            let mut state = self.state.borrow_mut();
+            state.sublayer_present = false;
+            state.installed.clear();
+            *session = 0;
+            Ok(())
+        }
+    }
+
+    fn injected_strict_route(
+        fail_at: Option<&str>,
+    ) -> (
+        InjectedStrictRoute,
+        std::rc::Rc<std::cell::RefCell<InjectedStrictRouteState>>,
+    ) {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(InjectedStrictRouteState {
+            fail_at: fail_at.map(str::to_owned),
+            ..InjectedStrictRouteState::default()
+        }));
+        (
+            InjectedStrictRoute {
+                state: state.clone(),
+            },
+            state,
+        )
+    }
+
+    #[test]
+    fn strict_route_rule_plan_is_family_and_managed_dns_bounded() {
+        let app_id = b"opaque-app-id";
+        let luid = 0x1122_3344_5566_7788;
+        assert!(super::guid_matches(
+            &StrictRouteLayer::V4.key(),
+            &super::FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        ));
+        assert!(super::guid_matches(
+            &StrictRouteLayer::V6.key(),
+            &super::FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        ));
+        assert_eq!(StrictRouteAction::Permit.raw(), super::FWP_ACTION_PERMIT);
+        assert_eq!(StrictRouteAction::Block.raw(), super::FWP_ACTION_BLOCK);
+        let dual = strict_route_rules(true, true, false, app_id, luid).unwrap();
+        assert_eq!(dual.len(), 4);
+        assert!(dual.iter().all(|rule| {
+            rule.action == StrictRouteAction::Permit
+                && rule.weight > super::STRICT_ROUTE_BLOCK_WEIGHT
+        }));
+        assert_eq!(
+            dual.iter()
+                .filter(|rule| rule.layer == StrictRouteLayer::V4)
+                .count(),
+            2
+        );
+        assert_eq!(
+            dual.iter()
+                .filter(|rule| rule.layer == StrictRouteLayer::V6)
+                .count(),
+            2
+        );
+        assert!(dual.iter().any(|rule| {
+            rule.kind == StrictRouteRuleKind::TunPermitV4
+                && rule.conditions.as_ref() == [StrictRouteCondition::LocalInterfaceLuid(luid)]
+        }));
+        let luid_condition = StrictRouteCondition::LocalInterfaceLuid(luid);
+        assert_eq!(luid_condition.data_type(), super::FWP_UINT64);
+        assert!(super::guid_matches(
+            &luid_condition.field_key(),
+            &super::FWPM_CONDITION_IP_LOCAL_INTERFACE,
+        ));
+        assert!(dual.iter().any(|rule| {
+            rule.kind == StrictRouteRuleKind::AppPermitV6
+                && rule.conditions.as_ref() == [StrictRouteCondition::AppId(Box::from(&app_id[..]))]
+        }));
+
+        let ipv4_only = strict_route_rules(true, false, false, app_id, luid).unwrap();
+        assert_eq!(ipv4_only.len(), 5);
+        assert!(ipv4_only.iter().any(|rule| {
+            rule.kind == StrictRouteRuleKind::FamilyBlockV6
+                && rule.layer == StrictRouteLayer::V6
+                && rule.action == StrictRouteAction::Block
+                && rule.conditions.is_empty()
+        }));
+        let ipv6_only = strict_route_rules(false, true, false, app_id, luid).unwrap();
+        assert_eq!(ipv6_only.len(), 5);
+        assert!(ipv6_only.iter().any(|rule| {
+            rule.kind == StrictRouteRuleKind::FamilyBlockV4
+                && rule.layer == StrictRouteLayer::V4
+                && rule.action == StrictRouteAction::Block
+                && rule.conditions.is_empty()
+        }));
+
+        let dual_with_dns = strict_route_rules(true, true, true, app_id, luid).unwrap();
+        assert_eq!(dual_with_dns.len(), 8);
+        let dns = dual_with_dns
+            .iter()
+            .filter(|rule| {
+                matches!(
+                    rule.kind,
+                    StrictRouteRuleKind::DnsTcpBlockV4
+                        | StrictRouteRuleKind::DnsUdpBlockV4
+                        | StrictRouteRuleKind::DnsTcpBlockV6
+                        | StrictRouteRuleKind::DnsUdpBlockV6
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dns.len(), 4);
+        assert!(dns.iter().all(|rule| {
+            rule.action == StrictRouteAction::Block
+                && rule.weight == super::STRICT_ROUTE_BLOCK_WEIGHT
+                && rule
+                    .conditions
+                    .contains(&StrictRouteCondition::RemotePort(53))
+                && rule
+                    .conditions
+                    .iter()
+                    .any(|condition| matches!(condition, StrictRouteCondition::IpProtocol(6 | 17)))
+        }));
+        for (kind, layer, protocol) in [
+            (StrictRouteRuleKind::DnsTcpBlockV4, StrictRouteLayer::V4, 6),
+            (StrictRouteRuleKind::DnsUdpBlockV4, StrictRouteLayer::V4, 17),
+            (StrictRouteRuleKind::DnsTcpBlockV6, StrictRouteLayer::V6, 6),
+            (StrictRouteRuleKind::DnsUdpBlockV6, StrictRouteLayer::V6, 17),
+        ] {
+            assert!(dns.iter().any(|rule| {
+                rule.kind == kind
+                    && rule.layer == layer
+                    && rule.conditions.as_ref()
+                        == [
+                            StrictRouteCondition::IpProtocol(protocol),
+                            StrictRouteCondition::RemotePort(53),
+                        ]
+            }));
+        }
+        assert_eq!(
+            strict_route_rules(true, false, true, app_id, luid)
+                .unwrap()
+                .len(),
+            9
+        );
+        assert!(strict_route_rules(false, false, false, app_id, luid).is_err());
+        assert!(strict_route_rules(true, false, false, &[], luid).is_err());
+        assert!(strict_route_rules(true, false, false, app_id, 0).is_err());
+    }
+
+    #[test]
+    fn strict_route_transaction_is_atomic_and_raii_closes_the_dynamic_session() {
+        assert!(strict_route_state_matches::<InjectedStrictRoute>(false, None).unwrap());
+        assert!(!strict_route_state_matches::<InjectedStrictRoute>(true, None).unwrap());
+        let (operations, state) = injected_strict_route(None);
+        {
+            let mut session = StrictRouteSession::open(operations).unwrap();
+            session
+                .install(true, false, true, 0x1122_3344_5566_7788)
+                .unwrap();
+            assert!(session.health().unwrap());
+            assert!(strict_route_state_matches(true, Some(&session)).unwrap());
+            assert!(!strict_route_state_matches(false, Some(&session)).unwrap());
+            assert_eq!(state.borrow().installed.len(), 9);
+            assert_eq!(state.borrow().close_calls, 0);
+        }
+        let state = state.borrow();
+        assert_eq!(state.close_calls, 1);
+        assert_eq!(state.calls.last().map(String::as_str), Some("close"));
+        assert!(
+            state
+                .calls
+                .iter()
+                .position(|call| call == "commit")
+                .unwrap()
+                < state
+                    .calls
+                    .iter()
+                    .position(|call| call == "health-sublayer")
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn strict_route_install_failure_aborts_then_dynamic_close_removes_partial_state() {
+        for failure in ["sublayer", "filter-3", "commit"] {
+            let (operations, state) = injected_strict_route(Some(failure));
+            {
+                let mut session = StrictRouteSession::open(operations).unwrap();
+                assert!(session.install(true, false, true, 7).is_err(), "{failure}");
+            }
+            let state = state.borrow();
+            let failure_position = state.calls.iter().position(|call| call == failure).unwrap();
+            let abort_position = state.calls.iter().position(|call| call == "abort").unwrap();
+            let close_position = state.calls.iter().position(|call| call == "close").unwrap();
+            assert!(failure_position < abort_position && abort_position < close_position);
+            assert_eq!(state.close_calls, 1);
+            assert!(state.installed.is_empty());
+        }
+    }
+
+    #[test]
+    fn strict_route_failed_explicit_close_is_retained_for_raii_retry() {
+        let (operations, state) = injected_strict_route(Some("close"));
+        let mut session = StrictRouteSession::open(operations).unwrap();
+        session.install(true, true, false, 7).unwrap();
+        assert!(session.close().is_err());
+        state.borrow_mut().fail_at = None;
+        drop(session);
+        assert_eq!(state.borrow().close_calls, 2);
+        assert!(state.borrow().installed.is_empty());
+        assert_eq!(
+            state
+                .borrow()
+                .calls
+                .iter()
+                .filter(|call| call.as_str() == "close")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn strict_route_health_reads_every_exact_filter_id_and_rejects_damage() {
+        let (operations, state) = injected_strict_route(None);
+        let mut session = StrictRouteSession::open(operations).unwrap();
+        session.install(true, true, false, 7).unwrap();
+        assert!(session.health().unwrap());
+        let expected_ids = state
+            .borrow()
+            .installed
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in &expected_ids {
+            assert!(
+                state
+                    .borrow()
+                    .calls
+                    .contains(&format!("health-filter-{id}"))
+            );
+        }
+        state.borrow_mut().damaged_filter = expected_ids.get(2).copied();
+        assert!(!session.health().unwrap());
+        {
+            let mut state = state.borrow_mut();
+            state.damaged_filter = None;
+            state.installed[2].1.weight = super::STRICT_ROUTE_BLOCK_WEIGHT;
+        }
+        assert!(!session.health().unwrap());
+    }
+
+    #[test]
+    fn strict_route_readback_classifies_missing_and_aborted_sessions_as_damage() {
+        assert!(
+            super::wfp_readback_present(super::ERROR_SUCCESS, super::FWP_E_FILTER_NOT_FOUND)
+                .unwrap()
+        );
+        assert!(
+            !super::wfp_readback_present(
+                super::FWP_E_FILTER_NOT_FOUND as u32,
+                super::FWP_E_FILTER_NOT_FOUND,
+            )
+            .unwrap()
+        );
+        assert!(
+            !super::wfp_readback_present(
+                super::FWP_E_SESSION_ABORTED as u32,
+                super::FWP_E_FILTER_NOT_FOUND,
+            )
+            .unwrap()
+        );
+        assert!(super::wfp_readback_present(0xdead_beef, super::FWP_E_FILTER_NOT_FOUND).is_err());
     }
 
     #[test]
@@ -4210,6 +5347,7 @@ mod tests {
                 &mut underlay.clone(),
                 &mut owned_routes,
                 || Ok(true),
+                || Ok(true),
             )
             .unwrap(),
             ManagedNetworkValidationOutcome::Unchanged
@@ -4261,6 +5399,7 @@ mod tests {
                     &mut changed,
                     &mut owned_routes,
                     || Ok(true),
+                    || Ok(true),
                 )
                 .unwrap(),
                 expected,
@@ -4291,6 +5430,7 @@ mod tests {
                 &mut underlay.clone(),
                 &mut owned_routes,
                 || Ok(true),
+                || Ok(true),
             )
             .unwrap(),
             ManagedNetworkValidationOutcome::Unchanged,
@@ -4316,6 +5456,7 @@ mod tests {
                 || generation.next().unwrap(),
                 &mut underlay.clone(),
                 &mut owned_routes,
+                || Ok(true),
                 || Ok(true),
             )
             .unwrap(),
@@ -4349,6 +5490,7 @@ mod tests {
                     additional_checks += 1;
                     Ok(false)
                 },
+                || Ok(true),
             )
             .unwrap(),
             ManagedNetworkValidationOutcome::ManagedStateDamaged(ManagedStateDamage::Dns),
@@ -4692,6 +5834,7 @@ mod tests {
                 || generation.load(std::sync::atomic::Ordering::Acquire),
                 &mut make_operations(),
                 &mut no_routes,
+                || Ok(true),
                 || Ok(true),
             )
             .unwrap(),
@@ -5222,6 +6365,7 @@ mod tests {
         calls: Vec<&'static str>,
         resources: Vec<&'static str>,
         notifications: bool,
+        strict_route: bool,
         routes: Vec<&'static str>,
         dns: Vec<&'static str>,
         cleanup_calls: Vec<&'static str>,
@@ -5322,6 +6466,15 @@ mod tests {
             }
             let position = self.cleanup_calls.len();
             self.cleanup_calls.push("notifications");
+            Some(self.cleanup_fail_at == Some(position))
+        }
+
+        fn close_strict_route(&mut self) -> Option<bool> {
+            if !std::mem::take(&mut self.strict_route) {
+                return None;
+            }
+            let position = self.cleanup_calls.len();
+            self.cleanup_calls.push("strict-route");
             Some(self.cleanup_fail_at == Some(position))
         }
 
@@ -5541,6 +6694,7 @@ mod tests {
                     calls: Vec::new(),
                     resources: Vec::new(),
                     notifications: false,
+                    strict_route: false,
                     routes: Vec::new(),
                     dns: Vec::new(),
                     cleanup_calls: Vec::new(),
@@ -5577,6 +6731,7 @@ mod tests {
                 calls: Vec::new(),
                 resources: Vec::new(),
                 notifications: false,
+                strict_route: false,
                 routes: Vec::new(),
                 dns: Vec::new(),
                 cleanup_calls: Vec::new(),
@@ -5762,6 +6917,7 @@ mod tests {
                 calls: Vec::new(),
                 resources: Vec::new(),
                 notifications: false,
+                strict_route: false,
                 routes: Vec::new(),
                 dns: Vec::new(),
                 cleanup_calls: Vec::new(),
@@ -5781,6 +6937,7 @@ mod tests {
             calls: Vec::new(),
             resources: Vec::new(),
             notifications: false,
+            strict_route: false,
             routes: Vec::new(),
             dns: Vec::new(),
             cleanup_calls: Vec::new(),
@@ -5804,6 +6961,7 @@ mod tests {
             cleanup_fail_at: None,
             resources: Vec::new(),
             notifications: false,
+            strict_route: false,
             routes: Vec::new(),
             dns: Vec::new(),
             cleanup_calls: Vec::new(),
@@ -5919,12 +7077,14 @@ mod tests {
             calls: Vec::new(),
             resources: Vec::new(),
             notifications: false,
+            strict_route: false,
             routes: Vec::new(),
             dns: Vec::new(),
             cleanup_calls: Vec::new(),
         };
         setup_transaction(&mut cleanup).expect("complete adapter setup");
         cleanup.notifications = true;
+        cleanup.strict_route = true;
         cleanup.routes.extend(["low-route", "high-route"]);
         cleanup.dns.extend(["ipv4-dns", "ipv6-dns"]);
         assert!(
@@ -5935,6 +7095,7 @@ mod tests {
             cleanup.cleanup_calls,
             [
                 "notifications",
+                "strict-route",
                 "ipv6-dns",
                 "ipv4-dns",
                 "high-route",

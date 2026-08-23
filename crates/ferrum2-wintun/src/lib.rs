@@ -86,6 +86,8 @@ pub enum ManagedStateDamage {
     Route,
     /// One or more managed DNS leases are absent or no longer exact.
     Dns,
+    /// One or more owned strict-route WFP objects are absent or no longer exact.
+    StrictRoute,
 }
 
 /// Complete validated setup input for one newly-created Wintun adapter.
@@ -194,6 +196,7 @@ pub struct ManagedNetworkConfig {
     target_binder: bool,
     ipv4_dns_address: Option<Ipv4Addr>,
     ipv6_dns_address: Option<Ipv6Addr>,
+    strict_route: bool,
 }
 
 impl ManagedNetworkConfig {
@@ -228,7 +231,17 @@ impl ManagedNetworkConfig {
             target_binder,
             ipv4_dns_address,
             ipv6_dns_address,
+            strict_route: false,
         })
+    }
+
+    /// Requests scoped family and managed-DNS Windows Filtering Platform guards.
+    ///
+    /// The intent defaults to disabled. Callers should enable it only after resolving any
+    /// higher-level platform and compatibility policy.
+    pub fn with_strict_route(mut self, enabled: bool) -> Self {
+        self.strict_route = enabled;
+        self
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -254,6 +267,11 @@ impl ManagedNetworkConfig {
     #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn ipv6_dns_address(&self) -> Option<Ipv6Addr> {
         self.ipv6_dns_address
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub(crate) const fn strict_route(&self) -> bool {
+        self.strict_route
     }
 }
 
@@ -513,6 +531,8 @@ mod tests {
             Some("fd00::1".parse().unwrap()),
         )
         .unwrap();
+        assert_eq!(managed.clone().with_strict_route(false), managed);
+        assert_ne!(managed.clone().with_strict_route(true), managed);
         assert!(
             make(Some(v4), Some(v6))
                 .unwrap()
