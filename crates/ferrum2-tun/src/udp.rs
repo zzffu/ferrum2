@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{OwnerWake, TunEvent, TunEventSink, TunRejectReason};
+use crate::{OwnerWake, TunEvent, TunEventSink, TunRejectReason, UdpResponseDropReason};
 
 const DATAGRAM_QUEUE_PACKETS: usize = 8;
 const RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION: usize = 8;
@@ -476,6 +476,15 @@ struct OwnerResponse {
     payload: Vec<u8>,
 }
 
+fn emit_response_drop(
+    events: &TunEventSink,
+    reason: UdpResponseDropReason,
+    reject_reason: TunRejectReason,
+) {
+    events.emit(TunEvent::UdpResponseDropped(reason));
+    events.emit(TunEvent::PacketRejected(reject_reason));
+}
+
 /// Cloneable, generation-bound response path for one EIM association.
 #[derive(Clone)]
 pub struct UdpResponseSink {
@@ -497,30 +506,45 @@ impl UdpResponseSink {
     pub fn send(&self, source: SocketAddr, payload: &[u8]) -> UdpResponseSendOutcome {
         if self.lease.is_stale() {
             self.events.emit(TunEvent::UdpStaleGeneration);
-            self.events
-                .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
+            emit_response_drop(
+                &self.events,
+                UdpResponseDropReason::StaleGeneration,
+                TunRejectReason::StaleGeneration,
+            );
             return UdpResponseSendOutcome::StaleGeneration;
         }
         if self.lease.phase() != LeasePhase::Association {
+            emit_response_drop(
+                &self.events,
+                UdpResponseDropReason::AssociationClosed,
+                TunRejectReason::UdpResponseClosed,
+            );
             return UdpResponseSendOutcome::Closed;
         }
         if payload.len() > self.payload_bound {
-            self.events.emit(TunEvent::PacketRejected(
+            emit_response_drop(
+                &self.events,
+                UdpResponseDropReason::MalformedResponse,
                 TunRejectReason::InvalidTransportLength,
-            ));
+            );
             return UdpResponseSendOutcome::PayloadTooLarge;
         }
         match self.peer_policy.allows(source) {
             Err(()) => {
-                self.events
-                    .emit(TunEvent::PacketRejected(TunRejectReason::InvalidSource));
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::MalformedResponse,
+                    TunRejectReason::InvalidSource,
+                );
                 return UdpResponseSendOutcome::InvalidSource;
             }
             Ok(false) => {
                 self.events.emit(TunEvent::UdpResponseFiltered);
-                self.events.emit(TunEvent::PacketRejected(
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::Filtered,
                     TunRejectReason::UdpResponseFiltered,
-                ));
+                );
                 return UdpResponseSendOutcome::Filtered;
             }
             Ok(true) => {}
@@ -539,11 +563,21 @@ impl UdpResponseSink {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.events.emit(TunEvent::UdpResponseQueueFull);
-                self.events
-                    .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::QueueFull,
+                    TunRejectReason::UdpQueueFull,
+                );
                 UdpResponseSendOutcome::QueueFull
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => UdpResponseSendOutcome::Closed,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::AssociationClosed,
+                    TunRejectReason::UdpResponseClosed,
+                );
+                UdpResponseSendOutcome::Closed
+            }
         }
     }
 }
@@ -731,8 +765,8 @@ pub(crate) struct EventOutcome {
 pub(crate) enum ResponseProcessOutcome {
     Idle,
     Injected,
-    Backpressured,
-    Dropped,
+    Deferred,
+    Dropped(UdpResponseDropReason),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1104,8 +1138,8 @@ impl UdpTable {
         match self.process_one_response(now_millis, inject) {
             ResponseProcessOutcome::Idle => {}
             ResponseProcessOutcome::Injected => outcome.injected += 1,
-            ResponseProcessOutcome::Backpressured => outcome.backpressured += 1,
-            ResponseProcessOutcome::Dropped => outcome.dropped += 1,
+            ResponseProcessOutcome::Deferred => outcome.backpressured += 1,
+            ResponseProcessOutcome::Dropped(_) => outcome.dropped += 1,
         }
         outcome
     }
@@ -1225,41 +1259,85 @@ impl UdpTable {
             },
         };
         let id = response.lease.id;
-        let valid = response.lease.session_generation == self.session_generation
-            && !response.lease.is_stale()
-            && response.lease.phase() == LeasePhase::Association
-            && self.generations.current(id.slot) == Some(id)
-            && matches!(
-                self.slots.get(id.slot).and_then(Option::as_ref),
+        let stale = response.lease.session_generation != self.session_generation
+            || response.lease.is_stale()
+            || self.generations.current(id.slot) != Some(id);
+        if stale {
+            if was_pending {
+                self.events.emit(TunEvent::UdpPendingResponses(0));
+            }
+            self.events.emit(TunEvent::UdpStaleGeneration);
+            emit_response_drop(
+                &self.events,
+                UdpResponseDropReason::StaleGeneration,
+                TunRejectReason::StaleGeneration,
+            );
+            return ResponseProcessOutcome::Dropped(UdpResponseDropReason::StaleGeneration);
+        }
+        let (association_matches, payload_bound) =
+            match self.slots.get(id.slot).and_then(Option::as_ref) {
                 Some(Slot::Association {
                     source,
                     payload_bound,
                     lease,
                     peer_policy,
                     ..
-                }) if *source == response.association_source
-                    && response.payload.len() <= *payload_bound
-                    && Arc::ptr_eq(lease, &response.lease)
-                    && Arc::ptr_eq(peer_policy, &response.peer_policy)
+                }) => (
+                    response.lease.phase() == LeasePhase::Association
+                        && *source == response.association_source
+                        && Arc::ptr_eq(lease, &response.lease)
+                        && Arc::ptr_eq(peer_policy, &response.peer_policy),
+                    *payload_bound,
+                ),
+                _ => (false, 0),
+            };
+        if !association_matches {
+            if was_pending {
+                self.events.emit(TunEvent::UdpPendingResponses(0));
+            }
+            emit_response_drop(
+                &self.events,
+                UdpResponseDropReason::AssociationClosed,
+                TunRejectReason::UdpResponseClosed,
             );
-        if !valid {
-            if was_pending {
-                self.events.emit(TunEvent::UdpPendingResponses(0));
-            }
-            self.events.emit(TunEvent::UdpStaleGeneration);
-            self.events
-                .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
-            return ResponseProcessOutcome::Dropped;
+            return ResponseProcessOutcome::Dropped(UdpResponseDropReason::AssociationClosed);
         }
-        if response.peer_policy.allows(response.response_source) != Ok(true) {
+        if response.payload.len() > payload_bound {
             if was_pending {
                 self.events.emit(TunEvent::UdpPendingResponses(0));
             }
-            self.events.emit(TunEvent::UdpResponseFiltered);
-            self.events.emit(TunEvent::PacketRejected(
-                TunRejectReason::UdpResponseFiltered,
-            ));
-            return ResponseProcessOutcome::Dropped;
+            emit_response_drop(
+                &self.events,
+                UdpResponseDropReason::MalformedResponse,
+                TunRejectReason::InvalidTransportLength,
+            );
+            return ResponseProcessOutcome::Dropped(UdpResponseDropReason::MalformedResponse);
+        }
+        match response.peer_policy.allows(response.response_source) {
+            Err(()) => {
+                if was_pending {
+                    self.events.emit(TunEvent::UdpPendingResponses(0));
+                }
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::MalformedResponse,
+                    TunRejectReason::InvalidSource,
+                );
+                return ResponseProcessOutcome::Dropped(UdpResponseDropReason::MalformedResponse);
+            }
+            Ok(false) => {
+                if was_pending {
+                    self.events.emit(TunEvent::UdpPendingResponses(0));
+                }
+                self.events.emit(TunEvent::UdpResponseFiltered);
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::Filtered,
+                    TunRejectReason::UdpResponseFiltered,
+                );
+                return ResponseProcessOutcome::Dropped(UdpResponseDropReason::Filtered);
+            }
+            Ok(true) => {}
         }
         let tuple = UdpTuple::new(response.association_source, response.response_source);
         match inject(tuple, &response.payload) {
@@ -1283,14 +1361,18 @@ impl UdpTable {
                 if !was_pending {
                     self.events.emit(TunEvent::UdpPendingResponses(1));
                 }
-                ResponseProcessOutcome::Backpressured
+                ResponseProcessOutcome::Deferred
             }
             InjectOutcome::Rejected(reason) => {
                 if was_pending {
                     self.events.emit(TunEvent::UdpPendingResponses(0));
                 }
-                self.events.emit(TunEvent::PacketRejected(reason));
-                ResponseProcessOutcome::Dropped
+                emit_response_drop(
+                    &self.events,
+                    UdpResponseDropReason::InjectionRejected,
+                    reason,
+                );
+                ResponseProcessOutcome::Dropped(UdpResponseDropReason::InjectionRejected)
             }
         }
     }
@@ -1405,7 +1487,11 @@ impl UdpTable {
 
     /// Invalidates every old-session handle before a rebuilt session admits work.
     #[allow(dead_code)]
-    pub(crate) fn invalidate_session(&mut self, new_generation: u64) {
+    pub(crate) fn invalidate_session(
+        &mut self,
+        new_generation: u64,
+        response_drop_reason: UdpResponseDropReason,
+    ) {
         self.session_epoch.store(new_generation, Ordering::Release);
         for slot in 0..self.slots.len() {
             if self.slots[slot].is_some()
@@ -1414,12 +1500,34 @@ impl UdpTable {
                 self.remove(id);
             }
         }
-        if self.pending_response.take().is_some() {
-            self.events.emit(TunEvent::UdpPendingResponses(0));
-        }
-        while self.responses.try_recv().is_ok() {}
+        self.drop_retained_responses(response_drop_reason);
         self.deadlines.clear();
         self.session_generation = new_generation;
+    }
+
+    fn drop_retained_responses(&mut self, reason: UdpResponseDropReason) {
+        let reject_reason = match reason {
+            UdpResponseDropReason::SessionReset | UdpResponseDropReason::StaleGeneration => {
+                TunRejectReason::StaleGeneration
+            }
+            UdpResponseDropReason::Shutdown
+            | UdpResponseDropReason::OwnerFatal
+            | UdpResponseDropReason::AssociationClosed => TunRejectReason::UdpResponseClosed,
+            UdpResponseDropReason::QueueFull
+            | UdpResponseDropReason::MalformedResponse
+            | UdpResponseDropReason::Filtered
+            | UdpResponseDropReason::InjectionRejected => {
+                debug_assert!(false, "non-lifecycle UDP response drop reason");
+                TunRejectReason::UdpResponseClosed
+            }
+        };
+        if self.pending_response.take().is_some() {
+            self.events.emit(TunEvent::UdpPendingResponses(0));
+            emit_response_drop(&self.events, reason, reject_reason);
+        }
+        while self.responses.try_recv().is_ok() {
+            emit_response_drop(&self.events, reason, reject_reason);
+        }
     }
 
     fn remove(&mut self, id: GenerationId) {
@@ -1450,14 +1558,13 @@ impl UdpTable {
 
 impl Drop for UdpTable {
     fn drop(&mut self) {
-        if self.pending_response.is_some() {
-            self.events.emit(TunEvent::UdpPendingResponses(0));
-        }
         self.session_epoch
             .store(self.session_generation.wrapping_add(1), Ordering::Release);
+        self.responses.close();
         for slot in self.slots.iter().flatten() {
             slot.lease().owner_close();
         }
+        self.drop_retained_responses(UdpResponseDropReason::Shutdown);
     }
 }
 
@@ -1618,7 +1725,7 @@ mod tests {
                 observed.push((tuple.target(), payload.to_vec()));
                 InjectOutcome::Backpressured
             }),
-            ResponseProcessOutcome::Backpressured
+            ResponseProcessOutcome::Deferred
         );
         assert!(table.has_pending_response());
         assert_eq!(observed, [(v4("192.0.2.1:53"), b"first".to_vec())]);
@@ -1648,7 +1755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_injection_preserves_the_specific_packet_reject_reason() {
+    async fn delayed_then_rejected_response_counts_one_terminal_drop_and_reject() {
         let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
         let observed = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&observed);
@@ -1668,14 +1775,23 @@ mod tests {
         observed.lock().expect("UDP events").clear();
 
         assert_eq!(
-            table.process_one_response(2, |_, _| {
+            table.process_one_response(2, |_, _| InjectOutcome::Backpressured),
+            ResponseProcessOutcome::Deferred
+        );
+        assert_eq!(
+            table.process_one_response(3, |_, _| {
                 InjectOutcome::Rejected(TunRejectReason::InvalidIpChecksum)
             }),
-            ResponseProcessOutcome::Dropped
+            ResponseProcessOutcome::Dropped(UdpResponseDropReason::InjectionRejected)
         );
         assert_eq!(
             *observed.lock().expect("UDP events"),
-            [TunEvent::PacketRejected(TunRejectReason::InvalidIpChecksum)]
+            [
+                TunEvent::UdpPendingResponses(1),
+                TunEvent::UdpPendingResponses(0),
+                TunEvent::UdpResponseDropped(UdpResponseDropReason::InjectionRejected),
+                TunEvent::PacketRejected(TunRejectReason::InvalidIpChecksum),
+            ]
         );
     }
 
@@ -1712,8 +1828,191 @@ mod tests {
             *observed.lock().expect("UDP events"),
             [
                 TunEvent::UdpResponseQueueFull,
+                TunEvent::UdpResponseDropped(UdpResponseDropReason::QueueFull),
                 TunEvent::PacketRejected(TunRejectReason::UdpQueueFull),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_response_counts_one_terminal_drop_and_reject() {
+        let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::AddressDependent, 1);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        table.set_event_sink(TunEventSink::new(move |event| {
+            captured.lock().expect("UDP events").push(event);
+        }));
+        assert_eq!(
+            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
+        observed.lock().expect("UDP events").clear();
+
+        assert_eq!(
+            association.send_response(v4("203.0.113.1:53"), b"filtered"),
+            UdpResponseSendOutcome::Filtered
+        );
+        assert_eq!(
+            *observed.lock().expect("UDP events"),
+            [
+                TunEvent::UdpResponseFiltered,
+                TunEvent::UdpResponseDropped(UdpResponseDropReason::Filtered),
+                TunEvent::PacketRejected(TunRejectReason::UdpResponseFiltered),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_response_counts_one_terminal_drop_and_reject() {
+        let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        table.set_event_sink(TunEventSink::new(move |event| {
+            captured.lock().expect("UDP events").push(event);
+        }));
+        assert_eq!(
+            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
+        assert_eq!(
+            association.send_response(v4("203.0.113.1:53"), b"stale"),
+            UdpResponseSendOutcome::Queued
+        );
+        table.session_epoch.store(2, Ordering::Release);
+        observed.lock().expect("UDP events").clear();
+
+        assert_eq!(
+            table.process_one_response(2, |_, _| InjectOutcome::Injected),
+            ResponseProcessOutcome::Dropped(UdpResponseDropReason::StaleGeneration)
+        );
+        assert_eq!(
+            *observed.lock().expect("UDP events"),
+            [
+                TunEvent::UdpStaleGeneration,
+                TunEvent::UdpResponseDropped(UdpResponseDropReason::StaleGeneration),
+                TunEvent::PacketRejected(TunRejectReason::StaleGeneration),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_consumes_pending_response_once_before_table_drop() {
+        let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        table.set_event_sink(TunEventSink::new(move |event| {
+            captured.lock().expect("UDP events").push(event);
+        }));
+        assert_eq!(
+            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
+        assert_eq!(
+            association.send_response(v4("203.0.113.1:53"), b"pending"),
+            UdpResponseSendOutcome::Queued
+        );
+        observed.lock().expect("UDP events").clear();
+        assert_eq!(
+            table.process_one_response(2, |_, _| InjectOutcome::Backpressured),
+            ResponseProcessOutcome::Deferred
+        );
+
+        table.invalidate_session(2, UdpResponseDropReason::SessionReset);
+        let after_reset = observed.lock().expect("UDP events").clone();
+        assert_eq!(
+            after_reset
+                .iter()
+                .filter(|event| matches!(event, TunEvent::UdpResponseDropped(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_reset
+                .iter()
+                .filter(|event| matches!(event, TunEvent::PacketRejected(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_reset
+                .iter()
+                .filter_map(|event| match event {
+                    TunEvent::UdpPendingResponses(pending) => Some(*pending),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert!(after_reset.contains(&TunEvent::UdpResponseDropped(
+            UdpResponseDropReason::SessionReset
+        )));
+        assert!(after_reset.contains(&TunEvent::PacketRejected(TunRejectReason::StaleGeneration)));
+
+        drop(table);
+        assert_eq!(
+            *observed.lock().expect("UDP events"),
+            after_reset,
+            "UdpTable::drop must not recount a response consumed by reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn table_drop_counts_pending_response_once_as_shutdown() {
+        let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        table.set_event_sink(TunEventSink::new(move |event| {
+            captured.lock().expect("UDP events").push(event);
+        }));
+        assert_eq!(
+            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
+        assert_eq!(
+            association.send_response(v4("203.0.113.1:53"), b"pending"),
+            UdpResponseSendOutcome::Queued
+        );
+        observed.lock().expect("UDP events").clear();
+        assert_eq!(
+            table.process_one_response(2, |_, _| InjectOutcome::Backpressured),
+            ResponseProcessOutcome::Deferred
+        );
+
+        drop(table);
+        let shutdown = observed.lock().expect("UDP events").clone();
+        assert_eq!(
+            shutdown
+                .iter()
+                .filter(|event| matches!(event, TunEvent::UdpResponseDropped(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            shutdown
+                .iter()
+                .filter(|event| matches!(event, TunEvent::PacketRejected(_)))
+                .count(),
+            1
+        );
+        assert!(shutdown.contains(&TunEvent::UdpResponseDropped(
+            UdpResponseDropReason::Shutdown
+        )));
+        assert!(shutdown.contains(&TunEvent::PacketRejected(
+            TunRejectReason::UdpResponseClosed
+        )));
+        assert_eq!(
+            shutdown
+                .iter()
+                .filter_map(|event| match event {
+                    TunEvent::UdpPendingResponses(pending) => Some(*pending),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [1, 0]
         );
     }
 
@@ -1901,7 +2200,7 @@ mod tests {
             Admission::Provisional
         );
         let stale_candidate = candidates.recv().await.unwrap();
-        table.invalidate_session(42);
+        table.invalidate_session(42, UdpResponseDropReason::SessionReset);
         assert!(matches!(
             stale_candidate.commit_association().await,
             Err(UdpCommitError::Rejected)
@@ -1917,7 +2216,7 @@ mod tests {
             stale_sink.send(v4("203.0.113.1:53"), b"queued"),
             UdpResponseSendOutcome::Queued
         );
-        table.invalidate_session(43);
+        table.invalidate_session(43, UdpResponseDropReason::SessionReset);
         assert_eq!(
             stale_sink.send(v4("203.0.113.1:53"), b"late"),
             UdpResponseSendOutcome::StaleGeneration

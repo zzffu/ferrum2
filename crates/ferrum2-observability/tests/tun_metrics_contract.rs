@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use ferrum2_observability::{Metrics, TunPacketRejectReason, TunRouteConflictReason};
+use ferrum2_observability::{
+    Metrics, TunPacketRejectReason, TunRouteConflictReason, TunUdpResponseDropReason,
+};
 
 const PACKET_REJECT_REASONS: &[(TunPacketRejectReason, &str)] = &[
     (
@@ -60,9 +62,37 @@ const PACKET_REJECT_REASONS: &[(TunPacketRejectReason, &str)] = &[
         TunPacketRejectReason::UdpResponseFiltered,
         "udp_response_filtered",
     ),
+    (
+        TunPacketRejectReason::UdpResponseClosed,
+        "udp_response_closed",
+    ),
     (TunPacketRejectReason::StaleGeneration, "stale_generation"),
     (TunPacketRejectReason::WintunRingFull, "wintun_ring_full"),
     (TunPacketRejectReason::RouteConflict, "route_conflict"),
+];
+
+const UDP_RESPONSE_DROP_REASONS: &[(TunUdpResponseDropReason, &str)] = &[
+    (
+        TunUdpResponseDropReason::StaleGeneration,
+        "stale_generation",
+    ),
+    (
+        TunUdpResponseDropReason::AssociationClosed,
+        "association_closed",
+    ),
+    (TunUdpResponseDropReason::QueueFull, "queue_full"),
+    (
+        TunUdpResponseDropReason::MalformedResponse,
+        "malformed_response",
+    ),
+    (TunUdpResponseDropReason::Filtered, "filtered"),
+    (
+        TunUdpResponseDropReason::InjectionRejected,
+        "injection_rejected",
+    ),
+    (TunUdpResponseDropReason::SessionReset, "session_reset"),
+    (TunUdpResponseDropReason::Shutdown, "shutdown"),
+    (TunUdpResponseDropReason::OwnerFatal, "owner_fatal"),
 ];
 
 const ROUTE_CONFLICT_REASONS: &[(TunRouteConflictReason, &str)] = &[
@@ -106,6 +136,9 @@ fn record_one_of_every_tun_event(metrics: &Metrics) {
     }
     metrics.tun_internal_egress_backpressured();
     metrics.set_tun_pending_udp_responses(1);
+    for (reason, _) in UDP_RESPONSE_DROP_REASONS {
+        metrics.tun_udp_response_dropped(*reason);
+    }
     metrics.tun_wintun_ring_full_dropped();
 
     metrics.set_tun_tcp_flows_active(11);
@@ -196,6 +229,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_udp_candidates_active Active uncommitted TUN UDP association candidates.",
             "ferrum2_tun_udp_datagram_queue_full TUN UDP datagrams dropped because an association queue was full.",
             "ferrum2_tun_udp_response_filtered TUN UDP responses rejected by endpoint filtering.",
+            "ferrum2_tun_udp_response_dropped Terminal TUN UDP response drops by a closed low-cardinality reason.",
             "ferrum2_tun_udp_response_queue_full TUN UDP responses dropped because the response queue was full.",
             "ferrum2_tun_udp_stale_generation TUN UDP work rejected after its session generation became stale.",
             "ferrum2_tun_underlay_bind_stale TUN underlay binds rejected because their generation was stale.",
@@ -243,6 +277,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_udp_candidates_active gauge",
             "ferrum2_tun_udp_datagram_queue_full counter",
             "ferrum2_tun_udp_response_filtered counter",
+            "ferrum2_tun_udp_response_dropped counter",
             "ferrum2_tun_udp_response_queue_full counter",
             "ferrum2_tun_udp_stale_generation counter",
             "ferrum2_tun_underlay_bind_stale counter",
@@ -280,6 +315,18 @@ fn tun_reason_series_are_closed_and_identity_free() {
         assert_eq!(reason.to_string(), *encoded);
         assert!(rejected.contains(&format!(
             "ferrum2_tun_packets_rejected_total{{reason=\"{encoded}\"}}"
+        )));
+    }
+
+    let response_drops = samples
+        .iter()
+        .filter(|sample| sample.starts_with("ferrum2_tun_udp_response_dropped_total{"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(response_drops.len(), UDP_RESPONSE_DROP_REASONS.len());
+    for (reason, encoded) in UDP_RESPONSE_DROP_REASONS {
+        assert_eq!(reason.to_string(), *encoded);
+        assert!(response_drops.contains(&format!(
+            "ferrum2_tun_udp_response_dropped_total{{reason=\"{encoded}\"}}"
         )));
     }
 

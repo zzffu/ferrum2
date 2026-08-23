@@ -13,8 +13,8 @@ use crate::supervisor::{NETWORK_DEBOUNCE, NetworkDebounce};
 use crate::udp::ResponseProcessOutcome;
 use crate::{
     OutputFlushOutcome, OutputSendOutcome, OwnerWake, Stack, TcpFlow, TunEvent, TunEventSink,
-    TunRejectReason, UdpCandidate, UdpFiltering, UdpInjectOutcome, UdpResponseSendOutcome,
-    bounded_network_wait, owner_wait_after_budget,
+    TunRejectReason, UdpCandidate, UdpFiltering, UdpInjectOutcome, UdpResponseDropReason,
+    UdpResponseSendOutcome, bounded_network_wait, owner_wait_after_budget,
 };
 
 const TEST_WORK_BUDGET: usize = 64;
@@ -180,7 +180,12 @@ impl OwnerSessionHarness {
             return;
         }
         self.admitting = false;
-        self.stack.quiesce(2);
+        let response_drop_reason = match exit {
+            HarnessExit::Stop => UdpResponseDropReason::Shutdown,
+            HarnessExit::NetworkChanged => UdpResponseDropReason::SessionReset,
+            HarnessExit::Fatal => UdpResponseDropReason::OwnerFatal,
+        };
+        self.stack.quiesce(2, response_drop_reason);
         self.exit = Some(exit);
     }
 
@@ -248,11 +253,11 @@ impl OwnerSessionHarness {
                 WorkStage::Receive => StepOutcome::Idle,
                 WorkStage::UdpResponse => match stack.process_one_udp_response(now_millis) {
                     ResponseProcessOutcome::Idle => StepOutcome::Idle,
-                    ResponseProcessOutcome::Backpressured => {
+                    ResponseProcessOutcome::Deferred => {
                         emit(events, TunEvent::InternalEgressBackpressured);
                         StepOutcome::Worked
                     }
-                    ResponseProcessOutcome::Injected | ResponseProcessOutcome::Dropped => {
+                    ResponseProcessOutcome::Injected | ResponseProcessOutcome::Dropped(_) => {
                         StepOutcome::Worked
                     }
                 },
@@ -713,4 +718,75 @@ fn fatal_send_is_classified_separately_from_ring_full() {
     assert!(outcome.fatal);
     assert_eq!(harness.exit, Some(HarnessExit::Fatal));
     assert!(!harness.events().contains(&TunEvent::WintunRingFullDropped));
+}
+
+#[tokio::test]
+async fn owner_fatal_counts_one_pending_udp_response_drop_and_reject() {
+    let mut harness = OwnerSessionHarness::new();
+    assert!(
+        harness
+            .stack
+            .enqueue_at(&ipv4_udp(b"request", &[]), true, 0)
+    );
+    let candidate = harness
+        .candidates
+        .try_recv()
+        .expect("one deterministic UDP candidate");
+    let commit = tokio::spawn(async move { candidate.commit_association().await });
+    tokio::task::yield_now().await;
+    assert_eq!(harness.run_single_stage(WorkStage::Control).work_units, 1);
+    let association = commit
+        .await
+        .expect("commit task")
+        .expect("owner accepted commit");
+    let remote: SocketAddr = "192.0.2.1:53".parse().unwrap();
+    assert_eq!(
+        association.send_response(remote, b"occupies-output"),
+        UdpResponseSendOutcome::Queued
+    );
+    assert_eq!(
+        harness.run_single_stage(WorkStage::UdpResponse).work_units,
+        1
+    );
+    assert_eq!(
+        association.send_response(remote, b"pending"),
+        UdpResponseSendOutcome::Queued
+    );
+    assert_eq!(
+        harness.run_single_stage(WorkStage::UdpResponse).work_units,
+        1
+    );
+
+    harness.adapter.sends.push_back(FakeSendOutcome::Fatal);
+    assert!(harness.run_single_stage(WorkStage::FlushOutput).fatal);
+    assert_eq!(harness.exit, Some(HarnessExit::Fatal));
+    let events = harness.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                **event == TunEvent::UdpResponseDropped(UdpResponseDropReason::OwnerFatal)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                **event == TunEvent::PacketRejected(TunRejectReason::UdpResponseClosed)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TunEvent::UdpPendingResponses(pending) => Some(*pending),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [1, 0]
+    );
 }

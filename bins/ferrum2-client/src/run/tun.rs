@@ -9,7 +9,7 @@ use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_dns::{ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Metrics, Outcome, Role, TunDiagnosticReason, TunIpFamily, TunPacketRejectReason,
-    TunRouteConflictReason, emit_tun_diagnostic,
+    TunRouteConflictReason, TunUdpResponseDropReason, emit_tun_diagnostic,
 };
 use ferrum2_runtime::{ProcessCancellation, ProcessRoot, relay_lifecycle};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -173,6 +173,9 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
             ferrum2_tun::TunRejectReason::UdpResponseFiltered => {
                 TunPacketRejectReason::UdpResponseFiltered
             }
+            ferrum2_tun::TunRejectReason::UdpResponseClosed => {
+                TunPacketRejectReason::UdpResponseClosed
+            }
             ferrum2_tun::TunRejectReason::StaleGeneration => TunPacketRejectReason::StaleGeneration,
             ferrum2_tun::TunRejectReason::WintunRingFull => TunPacketRejectReason::WintunRingFull,
             ferrum2_tun::TunRejectReason::RouteConflict => TunPacketRejectReason::RouteConflict,
@@ -194,6 +197,27 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
         TunEvent::UdpDatagramQueueFull => metrics.tun_udp_datagram_queue_full(),
         TunEvent::UdpResponseQueueFull => metrics.tun_udp_response_queue_full(),
         TunEvent::UdpResponseFiltered => metrics.tun_udp_response_filtered(),
+        TunEvent::UdpResponseDropped(reason) => metrics.tun_udp_response_dropped(match reason {
+            ferrum2_tun::UdpResponseDropReason::StaleGeneration => {
+                TunUdpResponseDropReason::StaleGeneration
+            }
+            ferrum2_tun::UdpResponseDropReason::AssociationClosed => {
+                TunUdpResponseDropReason::AssociationClosed
+            }
+            ferrum2_tun::UdpResponseDropReason::QueueFull => TunUdpResponseDropReason::QueueFull,
+            ferrum2_tun::UdpResponseDropReason::MalformedResponse => {
+                TunUdpResponseDropReason::MalformedResponse
+            }
+            ferrum2_tun::UdpResponseDropReason::Filtered => TunUdpResponseDropReason::Filtered,
+            ferrum2_tun::UdpResponseDropReason::InjectionRejected => {
+                TunUdpResponseDropReason::InjectionRejected
+            }
+            ferrum2_tun::UdpResponseDropReason::SessionReset => {
+                TunUdpResponseDropReason::SessionReset
+            }
+            ferrum2_tun::UdpResponseDropReason::Shutdown => TunUdpResponseDropReason::Shutdown,
+            ferrum2_tun::UdpResponseDropReason::OwnerFatal => TunUdpResponseDropReason::OwnerFatal,
+        }),
         TunEvent::UdpPendingResponses(responses) => {
             metrics.set_tun_pending_udp_responses(responses);
         }
@@ -1161,6 +1185,7 @@ mod tests {
     fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         use ferrum2_tun::{
             TunDiagnosticReason, TunEvent, TunIpFamily, TunRejectReason, TunRouteConflictReason,
+            UdpResponseDropReason,
         };
 
         let metrics = ferrum2_observability::Metrics::new();
@@ -1188,6 +1213,7 @@ mod tests {
             TunEvent::UdpDatagramQueueFull,
             TunEvent::UdpResponseQueueFull,
             TunEvent::UdpResponseFiltered,
+            TunEvent::UdpResponseDropped(UdpResponseDropReason::OwnerFatal),
             TunEvent::UdpPendingResponses(1),
             TunEvent::UdpStaleGeneration,
             TunEvent::ReassemblyEntriesActive(19),
@@ -1232,6 +1258,7 @@ mod tests {
             TunRejectReason::UdpCandidateTimeout,
             TunRejectReason::UdpQueueFull,
             TunRejectReason::UdpResponseFiltered,
+            TunRejectReason::UdpResponseClosed,
             TunRejectReason::StaleGeneration,
             TunRejectReason::WintunRingFull,
             TunRejectReason::RouteConflict,
@@ -1266,6 +1293,7 @@ mod tests {
             "ferrum2_tun_pending_udp_responses 1",
             "ferrum2_tun_udp_response_queue_full_total 1",
             "ferrum2_tun_udp_response_filtered_total 1",
+            "ferrum2_tun_udp_response_dropped_total{reason=\"owner_fatal\"} 1",
             "ferrum2_tun_udp_stale_generation_total 1",
             "ferrum2_tun_reassembly_entries_active 19",
             "ferrum2_tun_reassembly_started_total 1",
@@ -1328,6 +1356,56 @@ mod tests {
         assert!(
             rejected.iter().all(|line| line.ends_with(" 0")),
             "a delayed response that is later injected is not rejected: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_then_dropped_udp_response_counts_each_terminal_metric_once() {
+        let metrics = ferrum2_observability::Metrics::new();
+        record_tun_event(&metrics, ferrum2_tun::TunEvent::InternalEgressBackpressured);
+        record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(1));
+        record_tun_event(
+            &metrics,
+            ferrum2_tun::TunEvent::UdpResponseDropped(
+                ferrum2_tun::UdpResponseDropReason::InjectionRejected,
+            ),
+        );
+        record_tun_event(
+            &metrics,
+            ferrum2_tun::TunEvent::PacketRejected(ferrum2_tun::TunRejectReason::InvalidIpChecksum),
+        );
+        record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(0));
+
+        let output = metrics.encode_text().expect("terminal TUN UDP metrics");
+        assert!(output.lines().any(|line| {
+            line == "ferrum2_tun_udp_response_dropped_total{reason=\"injection_rejected\"} 1"
+        }));
+        assert!(output.lines().any(|line| {
+            line == "ferrum2_tun_packets_rejected_total{reason=\"invalid_ip_checksum\"} 1"
+        }));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| {
+                    line.starts_with("ferrum2_tun_udp_response_dropped_total{")
+                        && line.ends_with(" 1")
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| {
+                    line.starts_with("ferrum2_tun_packets_rejected_total{") && line.ends_with(" 1")
+                })
+                .count(),
+            1
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "ferrum2_tun_pending_udp_responses 0")
         );
     }
 

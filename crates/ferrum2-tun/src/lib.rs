@@ -126,9 +126,24 @@ pub enum TunRejectReason {
     UdpCandidateTimeout,
     UdpQueueFull,
     UdpResponseFiltered,
+    UdpResponseClosed,
     StaleGeneration,
     WintunRingFull,
     RouteConflict,
+}
+
+/// Closed, identity-free reasons why one UDP response became terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UdpResponseDropReason {
+    StaleGeneration,
+    AssociationClosed,
+    QueueFull,
+    MalformedResponse,
+    Filtered,
+    InjectionRejected,
+    SessionReset,
+    Shutdown,
+    OwnerFatal,
 }
 
 /// Closed reason for an external route winning over a managed capture route.
@@ -180,6 +195,7 @@ pub enum TunEvent {
     UdpDatagramQueueFull,
     UdpResponseQueueFull,
     UdpResponseFiltered,
+    UdpResponseDropped(UdpResponseDropReason),
     UdpPendingResponses(usize),
     UdpStaleGeneration,
     ReassemblyEntriesActive(usize),
@@ -1316,7 +1332,10 @@ fn owner_main(
         stack.set_event_sink(events.clone());
         if first_session && std::time::Instant::now() >= initial_deadline {
             session_cancel_handle.cancel();
-            stack.quiesce(generation.wrapping_add(1).max(1));
+            stack.quiesce(
+                generation.wrapping_add(1).max(1),
+                UdpResponseDropReason::OwnerFatal,
+            );
             if let Ok(mut work) = current_work.lock() {
                 *work = None;
             }
@@ -1337,7 +1356,10 @@ fn owner_main(
                 emit_route_conflict(&events, reason);
             }
             session_cancel_handle.cancel();
-            stack.quiesce(generation.wrapping_add(1).max(1));
+            stack.quiesce(
+                generation.wrapping_add(1).max(1),
+                UdpResponseDropReason::SessionReset,
+            );
             if let Ok(mut work) = current_work.lock() {
                 *work = None;
             }
@@ -1369,7 +1391,10 @@ fn owner_main(
         }
         if underlay.publish(adapter.underlay_policy()).is_err() {
             session_cancel_handle.cancel();
-            stack.quiesce(generation.wrapping_add(1).max(1));
+            stack.quiesce(
+                generation.wrapping_add(1).max(1),
+                UdpResponseDropReason::OwnerFatal,
+            );
             if let Ok(mut work) = current_work.lock() {
                 *work = None;
             }
@@ -1571,12 +1596,12 @@ fn owner_main(
                 WorkStage::Receive => StepOutcome::Idle,
                 WorkStage::UdpResponse => match stack.process_one_udp_response(elapsed) {
                     udp::ResponseProcessOutcome::Idle => StepOutcome::Idle,
-                    udp::ResponseProcessOutcome::Backpressured => {
+                    udp::ResponseProcessOutcome::Deferred => {
                         events.emit(TunEvent::InternalEgressBackpressured);
                         StepOutcome::Worked
                     }
                     udp::ResponseProcessOutcome::Injected
-                    | udp::ResponseProcessOutcome::Dropped => StepOutcome::Worked,
+                    | udp::ResponseProcessOutcome::Dropped(_) => StepOutcome::Worked,
                 },
                 WorkStage::Expire => StepOutcome::from_work(stack.expire_deadlines(elapsed)),
             });
@@ -1646,7 +1671,14 @@ fn owner_main(
         events.emit(TunEvent::SessionActive(false));
         let underlay_failed = underlay.invalidate().is_err();
         session_cancel_handle.cancel();
-        stack.quiesce(generation.wrapping_add(1).max(1));
+        let response_drop_reason = if terminal_exit.is_some() || underlay_failed {
+            UdpResponseDropReason::OwnerFatal
+        } else if restart {
+            UdpResponseDropReason::SessionReset
+        } else {
+            UdpResponseDropReason::Shutdown
+        };
+        stack.quiesce(generation.wrapping_add(1).max(1), response_drop_reason);
         control.association_count.store(0, Ordering::Release);
         drop(pending_flow);
         drop(pending_datagram);
@@ -2783,7 +2815,11 @@ impl Stack {
         }
     }
 
-    fn quiesce(&mut self, next_generation: u64) -> usize {
+    fn quiesce(
+        &mut self,
+        next_generation: u64,
+        udp_response_drop_reason: UdpResponseDropReason,
+    ) -> usize {
         let mut sockets = Vec::new();
         let mut reset = 0_usize;
         while let Some(slot) = self.active_flow_head {
@@ -2806,7 +2842,8 @@ impl Stack {
                 self.events.emit(TunEvent::TcpFlowResetRestart);
             }
         }
-        self.udp.invalidate_session(next_generation);
+        self.udp
+            .invalidate_session(next_generation, udp_response_drop_reason);
         self.reassembly.clear();
         self.device.clear_session_buffers();
         self.packet_generation = next_generation;
@@ -3177,8 +3214,8 @@ mod tests {
         Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, OutputFlushOutcome,
         OutputSendOutcome, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread, OwnerWake,
         PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink,
-        TunRejectReason, TunRoot, UdpFiltering, UdpPeerAuthorization, UdpTuple, finish_stack_setup,
-        map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
+        TunRejectReason, TunRoot, UdpFiltering, UdpPeerAuthorization, UdpResponseDropReason,
+        UdpTuple, finish_stack_setup, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -5081,7 +5118,11 @@ mod tests {
             "fatal egress cannot report the FIN as sent"
         );
 
-        assert_eq!(stack.quiesce(1), 1, "session reset reaps the live flow");
+        assert_eq!(
+            stack.quiesce(1, UdpResponseDropReason::SessionReset),
+            1,
+            "session reset reaps the live flow"
+        );
         let error = tokio::time::timeout(Duration::from_millis(10), &mut shutdown)
             .await
             .expect("session reset wakes shutdown")
@@ -5450,8 +5491,12 @@ mod tests {
         stack.device.output_len = 1;
         assert!(stack.pending() != 0 && stack.has_output());
 
-        assert_eq!(stack.quiesce(8), 1);
-        assert_eq!(stack.quiesce(8), 0, "quiesce is idempotent");
+        assert_eq!(stack.quiesce(8, UdpResponseDropReason::SessionReset), 1);
+        assert_eq!(
+            stack.quiesce(8, UdpResponseDropReason::SessionReset),
+            0,
+            "quiesce is idempotent"
+        );
         assert_eq!(flow_count.load(Ordering::Acquire), 0);
         assert_eq!(stack.live_tcp_flows(), 0);
         assert_eq!(stack.live_udp_associations(), 0);

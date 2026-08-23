@@ -145,7 +145,7 @@ The principal counters and gauges are `ferrum2_tun_session_started_total`,
 `ferrum2_tun_session_active`, `ferrum2_tun_packets_ingress_total`,
 `ferrum2_tun_packets_egress_total`, `ferrum2_tun_packets_rejected_total`,
 `ferrum2_tun_internal_egress_backpressured_total`, `ferrum2_tun_pending_udp_responses`,
-`ferrum2_tun_wintun_ring_full_dropped_total`,
+`ferrum2_tun_udp_response_dropped_total{reason}`, `ferrum2_tun_wintun_ring_full_dropped_total`,
 `ferrum2_tun_tcp_flows_active`, `ferrum2_tun_udp_associations_active`,
 `ferrum2_tun_udp_candidates_active`, `ferrum2_tun_reassembly_entries_active`,
 `ferrum2_tun_network_change_total`, `ferrum2_tun_route_detect_total`,
@@ -157,6 +157,12 @@ after the occupied output is flushed. Its dedicated counter records retry observ
 permanent packet drops. The pending-response gauge is one while that response awaits retry and
 returns to zero after injection or terminal removal. A deferred response does not increment the
 general packet-rejection counter.
+
+Terminal UDP response removal increments both the general rejection counter and exactly one
+`ferrum2_tun_udp_response_dropped_total` series. Its closed reason set is
+`stale_generation`, `association_closed`, `queue_full`, `malformed_response`, `filtered`,
+`injection_rejected`, `session_reset`, `shutdown`, and `owner_fatal`; no endpoint, association,
+route, outbound, or adapter identity is exposed as a label.
 
 ## Migration from earlier schema-v2 TUN configuration
 

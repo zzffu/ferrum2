@@ -416,6 +416,7 @@ pub enum TunPacketRejectReason {
     UdpCandidateTimeout,
     UdpQueueFull,
     UdpResponseFiltered,
+    UdpResponseClosed,
     StaleGeneration,
     WintunRingFull,
     RouteConflict,
@@ -445,9 +446,40 @@ impl TunPacketRejectReason {
             Self::UdpCandidateTimeout => "udp_candidate_timeout",
             Self::UdpQueueFull => "udp_queue_full",
             Self::UdpResponseFiltered => "udp_response_filtered",
+            Self::UdpResponseClosed => "udp_response_closed",
             Self::StaleGeneration => "stale_generation",
             Self::WintunRingFull => "wintun_ring_full",
             Self::RouteConflict => "route_conflict",
+        }
+    }
+}
+
+/// Closed reasons why one TUN UDP response became terminal before injection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TunUdpResponseDropReason {
+    StaleGeneration,
+    AssociationClosed,
+    QueueFull,
+    MalformedResponse,
+    Filtered,
+    InjectionRejected,
+    SessionReset,
+    Shutdown,
+    OwnerFatal,
+}
+
+impl TunUdpResponseDropReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleGeneration => "stale_generation",
+            Self::AssociationClosed => "association_closed",
+            Self::QueueFull => "queue_full",
+            Self::MalformedResponse => "malformed_response",
+            Self::Filtered => "filtered",
+            Self::InjectionRejected => "injection_rejected",
+            Self::SessionReset => "session_reset",
+            Self::Shutdown => "shutdown",
+            Self::OwnerFatal => "owner_fatal",
         }
     }
 }
@@ -961,6 +993,7 @@ impl_closed_display!(DnsResolveResult);
 impl_closed_display!(DnsQueryType);
 impl_closed_display!(TargetResolutionComponent);
 impl_closed_display!(TargetResolutionMode);
+impl_closed_display!(TunUdpResponseDropReason);
 
 macro_rules! impl_label_value {
     ($type:ty) => {
@@ -995,6 +1028,7 @@ impl_label_value!(DnsQueryType);
 impl_label_value!(TargetResolutionComponent);
 impl_label_value!(TargetResolutionMode);
 impl_label_value!(TunPacketRejectReason);
+impl_label_value!(TunUdpResponseDropReason);
 impl_label_value!(TunRouteConflictReason);
 
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
@@ -1115,6 +1149,11 @@ struct TargetResolutionLabels {
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct TunPacketRejectLabels {
     reason: TunPacketRejectReason,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct TunUdpResponseDropLabels {
+    reason: TunUdpResponseDropReason,
 }
 
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
@@ -1282,9 +1321,21 @@ const TUN_PACKET_REJECT_REASONS: &[TunPacketRejectReason] = &[
     TunPacketRejectReason::UdpCandidateTimeout,
     TunPacketRejectReason::UdpQueueFull,
     TunPacketRejectReason::UdpResponseFiltered,
+    TunPacketRejectReason::UdpResponseClosed,
     TunPacketRejectReason::StaleGeneration,
     TunPacketRejectReason::WintunRingFull,
     TunPacketRejectReason::RouteConflict,
+];
+const TUN_UDP_RESPONSE_DROP_REASONS: &[TunUdpResponseDropReason] = &[
+    TunUdpResponseDropReason::StaleGeneration,
+    TunUdpResponseDropReason::AssociationClosed,
+    TunUdpResponseDropReason::QueueFull,
+    TunUdpResponseDropReason::MalformedResponse,
+    TunUdpResponseDropReason::Filtered,
+    TunUdpResponseDropReason::InjectionRejected,
+    TunUdpResponseDropReason::SessionReset,
+    TunUdpResponseDropReason::Shutdown,
+    TunUdpResponseDropReason::OwnerFatal,
 ];
 const TUN_ROUTE_CONFLICT_REASONS: &[TunRouteConflictReason] = &[
     TunRouteConflictReason::MoreSpecificRoute,
@@ -1332,6 +1383,7 @@ const DNS_RESOLVE_PURPOSE_SERIES: usize = DNS_RESOLVE_PURPOSES.len();
 const TARGET_RESOLUTION_SERIES: usize =
     TARGET_RESOLUTION_COMPONENTS.len() * TARGET_RESOLUTION_MODES.len();
 const TUN_PACKET_REJECT_SERIES: usize = TUN_PACKET_REJECT_REASONS.len();
+const TUN_UDP_RESPONSE_DROP_SERIES: usize = TUN_UDP_RESPONSE_DROP_REASONS.len();
 const TUN_ROUTE_CONFLICT_SERIES: usize = TUN_ROUTE_CONFLICT_REASONS.len();
 
 #[derive(Debug, Default)]
@@ -1648,6 +1700,8 @@ type TargetResolutionFamily =
     SharedClosedFamily<TargetResolutionLabels, CachedCounter, TARGET_RESOLUTION_SERIES>;
 type TunPacketRejectFamily =
     SharedClosedFamily<TunPacketRejectLabels, CachedCounter, TUN_PACKET_REJECT_SERIES>;
+type TunUdpResponseDropFamily =
+    SharedClosedFamily<TunUdpResponseDropLabels, CachedCounter, TUN_UDP_RESPONSE_DROP_SERIES>;
 type TunRouteConflictFamily =
     SharedClosedFamily<TunRouteConflictLabels, CachedCounter, TUN_ROUTE_CONFLICT_SERIES>;
 
@@ -1714,6 +1768,7 @@ pub struct Metrics {
     tun_packets_rejected: TunPacketRejectFamily,
     tun_internal_egress_backpressured: Counter,
     tun_pending_udp_responses: Gauge,
+    tun_udp_response_dropped: TunUdpResponseDropFamily,
     tun_wintun_ring_full_dropped: Counter,
     tun_tcp_flows_active: Gauge,
     tun_tcp_flows_rejected_limit: Counter,
@@ -1863,6 +1918,10 @@ impl Metrics {
             }));
         let tun_internal_egress_backpressured = Counter::default();
         let tun_pending_udp_responses = Gauge::default();
+        let tun_udp_response_dropped =
+            TunUdpResponseDropFamily::new(single_labels(TUN_UDP_RESPONSE_DROP_REASONS, |reason| {
+                TunUdpResponseDropLabels { reason }
+            }));
         let tun_wintun_ring_full_dropped = Counter::default();
         let tun_tcp_flows_active = Gauge::default();
         let tun_tcp_flows_rejected_limit = Counter::default();
@@ -2102,6 +2161,11 @@ impl Metrics {
             "ferrum2_tun_pending_udp_responses",
             "TUN UDP responses retained for owner-thread injection",
             tun_pending_udp_responses.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_response_dropped",
+            "Terminal TUN UDP response drops by a closed low-cardinality reason",
+            tun_udp_response_dropped.clone(),
         );
         registry.register(
             "ferrum2_tun_wintun_ring_full_dropped",
@@ -2344,6 +2408,7 @@ impl Metrics {
             tun_packets_rejected,
             tun_internal_egress_backpressured,
             tun_pending_udp_responses,
+            tun_udp_response_dropped,
             tun_wintun_ring_full_dropped,
             tun_tcp_flows_active,
             tun_tcp_flows_rejected_limit,
@@ -2645,6 +2710,11 @@ impl Metrics {
     pub fn set_tun_pending_udp_responses(&self, responses: usize) {
         debug_assert!(responses <= 1);
         self.tun_pending_udp_responses.set(usize_gauge(responses));
+    }
+
+    /// Records one terminal TUN UDP response drop.
+    pub fn tun_udp_response_dropped(&self, reason: TunUdpResponseDropReason) {
+        self.tun_udp_response_dropped.metric(reason as usize).inc();
     }
 
     /// Records one expected packet drop caused by a full Wintun send ring.
