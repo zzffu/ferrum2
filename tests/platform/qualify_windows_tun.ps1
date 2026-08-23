@@ -24,13 +24,19 @@ $tcp08ClockOriginUtc = [DateTime]::UtcNow.ToString("o")
 $tcp08ClockOriginTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
 $controllerStartedUtc = $tcp08ClockOriginUtc
 $m17Modes = @(
-    "route-detect", "restart-stress", "fragments", "dual-stack-dns", "udp-policy",
-    "scheduler-ring-full"
+    "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
 )
 $expectedHyperVVmName = "Windows 10 MSIX packaging environment"
 $expectedHyperVVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
 $expectedHyperVCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
 $expectedHyperVCheckpointId = "1e570209-faf7-4248-8167-aa0687cdb8cf"
+
+if ($Mode -ceq "route-detect") {
+    throw "route-detect qualification is unsupported after removal of external route-conflict detection"
+}
+if ($Mode -in $m17Modes -and [string]::IsNullOrWhiteSpace($CandidateTestDirectory)) {
+    throw "M17 qualification requires host-built CandidateTestDirectory artifacts"
+}
 
 if ($Mode -ne "restart-stress" -and $PSBoundParameters.ContainsKey("RestartCycles")) {
     throw "RestartCycles is valid only with restart-stress mode"
@@ -5718,14 +5724,14 @@ outbound = "direct"
                 witnesses = @(
                     "one_eim_association_for_multiple_targets", "adf_allows_authorized_ip_any_port",
                     "adf_rejects_unauthorized_ip", "eif_allows_valid_same_family_peer",
-                    "rejected_target_never_authorizes_peer", "per_target_route_and_outbound_decision",
-                    "mixed_ipv4_ipv6_target_children", "directed_broadcast_never_allocates_association",
+                    "rejected_target_never_authorizes_peer", "first_ordinary_datagram_freezes_route_and_outbound",
+                    "ipv4_and_ipv6_sources_form_distinct_associations", "directed_broadcast_never_allocates_association",
                     "udp_firewall_scope_is_journaled_and_removed",
                     "dns_udp_payload_round_trips", "quic_v1_initial_envelope_round_trips",
                     "stun_binding_requests_reach_multiple_servers",
                     "webrtc_ice_candidate_check_round_trips",
                     "game_style_binary_datagrams_reach_multiple_peers",
-                    "one_eim_association_mixes_direct_and_shadowsocks_targets",
+                    "one_eim_association_reuses_first_outbound_for_all_targets",
                     "association_capacity_drops_new_without_evicting_live",
                     "udp_queue_pressure_is_bounded_and_control_remains_live",
                     "restart_clears_udp_stale_generation_state"
@@ -6308,40 +6314,21 @@ function Invoke-M17DnsQuery([string]$Source, [string]$Destination, [bool]$Tcp, [
 }
 
 function Invoke-M17CandidateTests {
-    $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
-    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
-    $usePrebuiltTests = $script:candidateTestDirectoryExplicit
-    if ($usePrebuiltTests) {
-        $testHashes = [ordered]@{}
-        foreach ($name in @("client", "tun", "wintun")) {
-            $file = switch ($name) {
-                "client" { "ferrum2-client-tests.exe" }
-                "tun" { "ferrum2-tun-tests.exe" }
-                "wintun" { "ferrum2-wintun-tests.exe" }
-            }
-            $testHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $script:resolvedCandidateTestDirectory $file) -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True $script:candidateTestDirectoryExplicit "M17 candidate tests require host-built artifacts"
+    $testHashes = [ordered]@{}
+    foreach ($name in @("client", "tun", "wintun")) {
+        $file = switch ($name) {
+            "client" { "ferrum2-client-tests.exe" }
+            "tun" { "ferrum2-tun-tests.exe" }
+            "wintun" { "ferrum2-wintun-tests.exe" }
         }
-        Add-M17LiveRow "candidate-test-source" ([ordered]@{
-            git_head = [string]$script:capabilityIdentity.Ledger.candidate_sha
-            provenance = "host-built-rust-1.97.1-prebuilt-tests"
-            test_binaries = $testHashes
-        })
-    } else {
-        Assert-True ($null -ne $cargoCommand -and $null -ne $gitCommand) "M17 candidate tests require cargo/git or CandidateTestDirectory"
-        $cargo = $cargoCommand.Source
-        $git = $gitCommand.Source
-        $head = Invoke-M17BoundedCommand "source-head" $git @("rev-parse", "HEAD") $script:resolvedProductRoot 30
-        Assert-True ($head.ExitCode -eq 0 -and $head.Stdout.Trim() -ceq [string]$script:capabilityIdentity.Ledger.candidate_sha) "M17 candidate source HEAD does not match the identity ledger"
-        $status = Invoke-M17BoundedCommand "source-status" $git @("status", "--porcelain=v1", "--untracked-files=no") $script:resolvedProductRoot 30
-        Assert-True ($status.ExitCode -eq 0) "M17 candidate source status failed"
-        $diff = Invoke-M17BoundedCommand "source-diff" $git @("diff", "--binary", "--no-ext-diff", "HEAD", "--", "Cargo.lock", "bins/ferrum2-client", "crates/ferrum2-tun", "crates/ferrum2-wintun") $script:resolvedProductRoot 30
-        Assert-True ($diff.ExitCode -eq 0) "M17 candidate source diff capture failed"
-        Add-M17LiveRow "candidate-test-source" ([ordered]@{
-            git_head = $head.Stdout.Trim()
-            tracked_status_sha256 = (Get-FileHash -LiteralPath $status.StdoutPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            relevant_diff_sha256 = (Get-FileHash -LiteralPath $diff.StdoutPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        })
+        $testHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $script:resolvedCandidateTestDirectory $file) -Algorithm SHA256).Hash.ToLowerInvariant()
     }
+    Add-M17LiveRow "candidate-test-source" ([ordered]@{
+        git_head = [string]$script:capabilityIdentity.Ledger.candidate_sha
+        provenance = "host-built-rust-1.97.1-prebuilt-tests"
+        test_binaries = $testHashes
+    })
 
     $specs = switch ($script:Mode) {
         "route-detect" { @(
@@ -6384,9 +6371,9 @@ function Invoke-M17CandidateTests {
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c8_lifecycle_control_is_reliable_when_data_queues_are_congested"; Witnesses = @("udp_queue_pressure_is_bounded_and_control_remains_live") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c10_hash_index_free_list_counts_and_generation_deadlines_are_exact"; Witnesses = @() },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @("restart_clears_udp_stale_generation_state") },
-            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_targets_independently_select_direct_proxy_dns_and_reject"; Witnesses = @("per_target_route_and_outbound_decision") },
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::synthetic_dns_precedes_one_frozen_ordinary_udp_route"; Witnesses = @("first_ordinary_datagram_freezes_route_and_outbound") },
             @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_authorizes_only_successful_send_or_dns_answer_and_adf_ignores_port"; Witnesses = @() },
-            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_target_children_have_isolated_bounded_queues"; Witnesses = @() }
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_route_snapshot_is_bounded_and_immutable_after_selection"; Witnesses = @("one_eim_association_reuses_first_outbound_for_all_targets") }
         ) }
         "scheduler-ring-full" { @(
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::capacity_aware_rotation_drains_eight_sixteen_and_sixty_four_packets"; Witnesses = @("rx_bursts_8_16_64_have_no_structural_drop") },
@@ -6402,22 +6389,15 @@ function Invoke-M17CandidateTests {
     $ordinal = 0
     foreach ($spec in $specs) {
         $ordinal++
-        if ($usePrebuiltTests) {
-            $testFile = switch ($spec.Package) {
-                "ferrum2-client" { "ferrum2-client-tests.exe" }
-                "ferrum2-tun" { "ferrum2-tun-tests.exe" }
-                "ferrum2-wintun" { "ferrum2-wintun-tests.exe" }
-                default { throw "M17 prebuilt test package is not closed" }
-            }
-            $testRunner = Join-Path $script:resolvedCandidateTestDirectory $testFile
-            $arguments = @($spec.Test, "--exact", "--nocapture")
-            $runnerKind = "prebuilt-rust-1.97.1"
-        } else {
-            $targetArguments = if ($spec.Target -eq "bin") { @("--bin", $spec.Package) } else { @("--lib") }
-            $arguments = @("+1.97.1", "test", "-p", $spec.Package, "--locked") + $targetArguments + @($spec.Test, "--", "--exact", "--nocapture")
-            $testRunner = $cargo
-            $runnerKind = "cargo-rust-1.97.1"
+        $testFile = switch ($spec.Package) {
+            "ferrum2-client" { "ferrum2-client-tests.exe" }
+            "ferrum2-tun" { "ferrum2-tun-tests.exe" }
+            "ferrum2-wintun" { "ferrum2-wintun-tests.exe" }
+            default { throw "M17 prebuilt test package is not closed" }
         }
+        $testRunner = Join-Path $script:resolvedCandidateTestDirectory $testFile
+        $arguments = @($spec.Test, "--exact", "--nocapture")
+        $runnerKind = "prebuilt-rust-1.97.1"
         $result = Invoke-M17BoundedCommand ("test-{0:D2}-{1}" -f $ordinal, $spec.Package) $testRunner $arguments $script:resolvedProductRoot 300
         $testOutput = $result.Stdout + $result.Stderr
         $ranExactlyOne = $testOutput -match '(?m)^running 1 test\r?$' -and
@@ -7459,9 +7439,9 @@ outbound = "direct"
                 Invoke-M17UdpEcho $v4 $targets[1].Address $targets[1].Port $gameB
                 Assert-M17GamePeerDatagram $probes[1].Received 2 1002
 
-                [byte[]]$directPayload = New-M17StunBindingRequest 0x71 $false
-                Assert-M17StunBindingRequest $directPayload $false
-                Invoke-M17UdpEcho $v4 $directTarget.Address $directTarget.Port $directPayload
+                [byte[]]$laterRulePayload = New-M17StunBindingRequest 0x71 $false
+                Assert-M17StunBindingRequest $laterRulePayload $false
+                Invoke-M17UdpEcho $v4 $directTarget.Address $directTarget.Port $laterRulePayload
 
                 Add-M17LiveRow "udp-protocol-interoperability" ([ordered]@{
                     dns = [ordered]@{ bytes = $dnsPayload.Length; sha256 = Get-M17PayloadSha256 $dnsPayload; target = "proxy-ipv4-a" }
@@ -7475,7 +7455,12 @@ outbound = "direct"
                         [ordered]@{ peer = 1; target = "proxy-ipv4-a"; sequence = 1001; sha256 = Get-M17PayloadSha256 $gameA },
                         [ordered]@{ peer = 2; target = "proxy-ipv4-b"; sequence = 1002; sha256 = Get-M17PayloadSha256 $gameB }
                     )
-                    direct_stun = [ordered]@{ family = "ipv4"; bytes = $directPayload.Length; sha256 = Get-M17PayloadSha256 $directPayload }
+                    later_rule_target = [ordered]@{
+                        family = "ipv4"
+                        bytes = $laterRulePayload.Length
+                        sha256 = Get-M17PayloadSha256 $laterRulePayload
+                        independent_rule_outbound = "direct"
+                    }
                 })
                 Add-M17Witness "dns_udp_payload_round_trips" "live-product" "a parsed DNS A query crossed the TUN and Shadowsocks target unchanged"
                 Add-M17Witness "quic_v1_initial_envelope_round_trips" "live-product" "a parsed 1,200-byte QUIC v1 Initial envelope crossed the TUN unchanged"
@@ -7555,8 +7540,8 @@ outbound = "direct"
             (Get-M17MetricValue $metrics "ferrum2_tun_udp_candidates_active") -eq 0) "M17 EIM association/candidate gauges changed"
         Add-M17LiveRow "udp-$filtering" ([ordered]@{
             ipv4_targets = 3
-            shadowsocks_ipv4_targets = 2
-            direct_ipv4_targets = 1
+            first_ordinary_route_outbound = "proxy"
+            later_ipv4_target_with_independent_direct_rule = 1
             ipv6_targets = 1
             associations_active = Get-M17MetricValue $metrics "ferrum2_tun_udp_associations_active"
             candidates_active = Get-M17MetricValue $metrics "ferrum2_tun_udp_candidates_active"
@@ -7566,8 +7551,7 @@ outbound = "direct"
         })
         if ($filtering -ceq "address_dependent") {
             Add-M17Witness "one_eim_association_for_multiple_targets" "live-product" "one IPv4 local socket reached three targets while associations_active remained one per family"
-            Add-M17Witness "one_eim_association_mixes_direct_and_shadowsocks_targets" "live-product" "one IPv4 local socket round-tripped parsed STUN over Direct and protocol payloads over two Shadowsocks target children while only one IPv4 association remained active"
-            Add-M17Witness "mixed_ipv4_ipv6_target_children" "live-product" "IPv4 and IPv6 target children both completed through the candidate server"
+            Add-M17Witness "ipv4_and_ipv6_sources_form_distinct_associations" "live-product" "IPv4 and IPv6 local sources each completed through one source-keyed association"
         } else {
             $script:m17CounterAfter = Get-M17CounterSnapshot $metrics
         }
