@@ -512,6 +512,23 @@ impl NetworkSnapshotPublisher {
         }
         Ok(std::mem::replace(&mut *current, next))
     }
+
+    /// Commits a prepared resource only while its network generation is still current.
+    ///
+    /// The callback should only perform the bounded synchronous registration that makes the
+    /// resource visible to its owner. Snapshot publication is excluded until it returns.
+    pub fn commit_resource_if_current<T, R>(
+        &self,
+        generation: u64,
+        resource: T,
+        commit: impl FnOnce(T) -> R,
+    ) -> Result<R, T> {
+        let current = read_unpoisoned(&self.current);
+        if current.generation() != generation {
+            return Err(resource);
+        }
+        Ok(commit(resource))
+    }
 }
 
 fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -741,6 +758,57 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
         })
     }
 
+    /// Resolves, prepares, and atomically registers one generation-bound resource.
+    ///
+    /// If the generation changes during preparation, the uncommitted resource is dropped and the
+    /// full operation is retried exactly once against the newly published snapshot.
+    pub fn prepare_and_commit<T, R, E>(
+        &self,
+        outbound: &DialOptions,
+        route: &RouteNetworkOptions,
+        destination: SocketAddr,
+        snapshots: &NetworkSnapshotPublisher,
+        mut prepare: impl FnMut(&ResolvedInterface) -> Result<T, E>,
+        mut commit: impl FnMut(T, &ResolvedInterface) -> R,
+    ) -> Result<R, GenerationStableResourceError<E>> {
+        for attempt in 0..2 {
+            let snapshot = snapshots.snapshot();
+            let resolved = match self.resolve(outbound, route, destination, &snapshot) {
+                Ok(resolved) => resolved,
+                Err(_) if !snapshots.is_current(snapshot.generation()) && attempt == 0 => {
+                    continue;
+                }
+                Err(error) => return Err(GenerationStableResourceError::Resolution(error)),
+            };
+            if !snapshots.is_current(resolved.snapshot_generation()) {
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(GenerationStableResourceError::NetworkGenerationChanged);
+            }
+            let resource = match prepare(&resolved) {
+                Ok(resource) => resource,
+                Err(_) if !snapshots.is_current(resolved.snapshot_generation()) && attempt == 0 => {
+                    continue;
+                }
+                Err(error) => return Err(GenerationStableResourceError::Preparation(error)),
+            };
+            match snapshots.commit_resource_if_current(
+                resolved.snapshot_generation(),
+                resource,
+                |resource| commit(resource, &resolved),
+            ) {
+                Ok(result) => return Ok(result),
+                Err(resource) if attempt == 0 => drop(resource),
+                Err(resource) => {
+                    drop(resource);
+                    return Err(GenerationStableResourceError::NetworkGenerationChanged);
+                }
+            }
+        }
+        unreachable!("the generation-stable operation has exactly two attempts")
+    }
+
     fn resolve_after_auto(
         &self,
         route: &RouteNetworkOptions,
@@ -765,9 +833,18 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
     }
 }
 
+/// Failure from generation-stable resource preparation and registration.
+#[derive(Debug, Eq, PartialEq)]
+pub enum GenerationStableResourceError<E> {
+    Resolution(InterfaceResolutionError),
+    Preparation(E),
+    NetworkGenerationChanged,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -1195,6 +1272,103 @@ mod tests {
                 .unwrap_err(),
             InterfaceResolutionError::SystemBestRouteUnavailable
         );
+    }
+
+    #[derive(Debug)]
+    struct TrackedResource {
+        generation: u64,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for TrackedResource {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn generation_change_drops_stale_resource_and_retries_once() {
+        let initial = Arc::new(NetworkSnapshot::new(1, Some(v4("old", 1, 1, 1)), None).unwrap());
+        let next = Arc::new(NetworkSnapshot::new(2, Some(v4("new", 2, 2, 2)), None).unwrap());
+        let snapshots = NetworkSnapshotPublisher::new(initial);
+        let resolver = NetworkInterfaceResolver::new(Catalog::default());
+        let attempts = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        let resource = resolver
+            .prepare_and_commit(
+                &DialOptions::default(),
+                &RouteNetworkOptions::new(true, None::<&str>),
+                SocketAddr::from(([203, 0, 113, 1], 443)),
+                &snapshots,
+                |resolved| {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        snapshots.publish_if_current(1, Arc::clone(&next)).unwrap();
+                    }
+                    Ok::<_, ()>(TrackedResource {
+                        generation: resolved.snapshot_generation(),
+                        drops: Arc::clone(&drops),
+                    })
+                },
+                |resource, resolved| {
+                    assert_eq!(resource.generation, resolved.snapshot_generation());
+                    resource
+                },
+            )
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(resource.generation, 2);
+        drop(resource);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_second_generation_change_fails_without_publishing_stale_resource() {
+        let snapshots = NetworkSnapshotPublisher::new(Arc::new(
+            NetworkSnapshot::new(1, Some(v4("one", 1, 1, 1)), None).unwrap(),
+        ));
+        let second = Arc::new(NetworkSnapshot::new(2, Some(v4("two", 2, 2, 2)), None).unwrap());
+        let third = Arc::new(NetworkSnapshot::new(3, Some(v4("three", 3, 3, 3)), None).unwrap());
+        let resolver = NetworkInterfaceResolver::new(Catalog::default());
+        let attempts = AtomicUsize::new(0);
+        let commits = AtomicUsize::new(0);
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        let error = resolver
+            .prepare_and_commit(
+                &DialOptions::default(),
+                &RouteNetworkOptions::new(true, None::<&str>),
+                SocketAddr::from(([203, 0, 113, 1], 443)),
+                &snapshots,
+                |resolved| {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    let (expected, next) = if attempt == 0 {
+                        (1, Arc::clone(&second))
+                    } else {
+                        (2, Arc::clone(&third))
+                    };
+                    snapshots.publish_if_current(expected, next).unwrap();
+                    Ok::<_, ()>(TrackedResource {
+                        generation: resolved.snapshot_generation(),
+                        drops: Arc::clone(&drops),
+                    })
+                },
+                |resource, _| {
+                    commits.fetch_add(1, Ordering::SeqCst);
+                    resource
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            GenerationStableResourceError::NetworkGenerationChanged
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(commits.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
     }
 
     #[test]
