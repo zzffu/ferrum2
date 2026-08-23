@@ -110,9 +110,6 @@ fn series(output: &str) -> BTreeSet<String> {
 
 fn record_one_of_every_tun_event(metrics: &Metrics) {
     metrics.tun_session_started();
-    metrics.tun_session_restart_started();
-    metrics.tun_session_restart_succeeded();
-    metrics.tun_session_restart_failed();
     metrics.set_tun_session_generation(7);
     metrics.set_tun_session_active(true);
     metrics.tun_session_active_inc();
@@ -210,9 +207,6 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_reassembly_started TUN fragment reassemblies started.",
             "ferrum2_tun_session_active Whether a TUN session is active.",
             "ferrum2_tun_session_generation Current TUN session generation.",
-            "ferrum2_tun_session_restart_failed TUN session restart attempts that failed.",
-            "ferrum2_tun_session_restart_started TUN session restart attempts started.",
-            "ferrum2_tun_session_restart_succeeded TUN session restart attempts completed successfully.",
             "ferrum2_tun_session_started TUN sessions that reached their initial start.",
             "ferrum2_tun_strict_route_effective Whether strict route is effective under the auto-route gate.",
             "ferrum2_tun_strict_route_filter_install Windows strict-route filter installation outcomes.",
@@ -260,9 +254,6 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_reassembly_started counter",
             "ferrum2_tun_session_active gauge",
             "ferrum2_tun_session_generation gauge",
-            "ferrum2_tun_session_restart_failed counter",
-            "ferrum2_tun_session_restart_started counter",
-            "ferrum2_tun_session_restart_succeeded counter",
             "ferrum2_tun_session_started counter",
             "ferrum2_tun_strict_route_effective gauge",
             "ferrum2_tun_strict_route_filter_install counter",

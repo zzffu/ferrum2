@@ -2194,9 +2194,6 @@ pub struct Metrics {
     tun_packets_accepted: Counter,
     tun_packets_foundation_dropped: Counter,
     tun_session_started: Counter,
-    tun_session_restart_started: Counter,
-    tun_session_restart_succeeded: Counter,
-    tun_session_restart_failed: Counter,
     tun_session_generation: Gauge,
     tun_session_active: Gauge,
     tun_packets_ingress: Counter,
@@ -2349,9 +2346,6 @@ impl Metrics {
         let tun_packets_accepted = Counter::default();
         let tun_packets_foundation_dropped = Counter::default();
         let tun_session_started = Counter::default();
-        let tun_session_restart_started = Counter::default();
-        let tun_session_restart_succeeded = Counter::default();
-        let tun_session_restart_failed = Counter::default();
         let tun_session_generation = Gauge::default();
         let tun_session_active = Gauge::default();
         let tun_packets_ingress = Counter::default();
@@ -2585,21 +2579,6 @@ impl Metrics {
             "ferrum2_tun_session_started",
             "TUN sessions that reached their initial start",
             tun_session_started.clone(),
-        );
-        registry.register(
-            "ferrum2_tun_session_restart_started",
-            "TUN session restart attempts started",
-            tun_session_restart_started.clone(),
-        );
-        registry.register(
-            "ferrum2_tun_session_restart_succeeded",
-            "TUN session restart attempts completed successfully",
-            tun_session_restart_succeeded.clone(),
-        );
-        registry.register(
-            "ferrum2_tun_session_restart_failed",
-            "TUN session restart attempts that failed",
-            tun_session_restart_failed.clone(),
         );
         registry.register(
             "ferrum2_tun_session_generation",
@@ -2912,9 +2891,6 @@ impl Metrics {
             tun_packets_accepted,
             tun_packets_foundation_dropped,
             tun_session_started,
-            tun_session_restart_started,
-            tun_session_restart_succeeded,
-            tun_session_restart_failed,
             tun_session_generation,
             tun_session_active,
             tun_packets_ingress,
@@ -3171,21 +3147,6 @@ impl Metrics {
     /// Records the first successful start of a TUN session.
     pub fn tun_session_started(&self) {
         self.tun_session_started.inc();
-    }
-
-    /// Records the beginning of one TUN session restart attempt.
-    pub fn tun_session_restart_started(&self) {
-        self.tun_session_restart_started.inc();
-    }
-
-    /// Records one successful TUN session restart attempt.
-    pub fn tun_session_restart_succeeded(&self) {
-        self.tun_session_restart_succeeded.inc();
-    }
-
-    /// Records one failed TUN session restart attempt.
-    pub fn tun_session_restart_failed(&self) {
-        self.tun_session_restart_failed.inc();
     }
 
     /// Sets the currently published TUN session generation.
