@@ -4,7 +4,11 @@ The repository-level `AGENTS.md` remains in force. This crate is the closed tele
 
 Keep trace and metric dimensions closed and low-cardinality. Never add free-form messages, error sources, configuration text, keys, salts, nonces, wire/session identities, peers, destinations, targets, or sniffed identity data. Add a typed enum variant when a new category is necessary, and update the exact metadata whitelist with its contract tests. Preserve existing metric family names, types, and label meanings; additions are allowed, but insertion order must not affect encoded output. `Metrics` exposes manual lifecycle gauges, so callers remain responsible for balanced increments, decrements, and final values.
 
-TUN telemetry distinguishes session restart, parser rejection, internal backpressure, Wintun ring-full drop, association/filtering, reassembly, network change, and route-conflict outcomes with fixed low-cardinality reasons. Do not expose aggregate owned/buffered-memory budget metrics, and do not use addresses, ports, adapter names, or route prefixes as labels.
+TUN telemetry distinguishes lightweight reset, full rebuild, managed-state damage, parser rejection,
+internal backpressure, Wintun ring-full drop, association/filtering, reassembly, strict-route, network
+generation, and interface-resolution outcomes with fixed low-cardinality reasons. Do not expose
+aggregate owned/buffered-memory budget metrics, external-route conflict scans, or addresses, ports,
+adapter names, and route prefixes as labels.
 
 Use these focused gates:
 

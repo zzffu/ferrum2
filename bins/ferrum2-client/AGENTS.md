@@ -11,17 +11,29 @@ Preserve the separation between validated configuration and runtime resources. `
 Run the package checks while iterating:
 
 ```text
-cargo test -p ferrum2-client --locked
+cargo test -p ferrum2-client --locked --no-run
 cargo run -p ferrum2-client --locked -- --help
 cargo build -p ferrum2-client --bin ferrum2-client --locked
 ```
 
 Add focused unit tests beside the affected `run/` module. Changes visible across processes, configuration versions, SOCKS, UDP, DNS, or TUN also require the relevant `tests/m0-harness` integration test.
+Execute every TUN-related test binary and privileged qualification profile only in the pinned local
+Hyper-V guest. Host iteration may compile those tests with `--no-run`, but must not create or alter a
+host TUN, route, DNS lease, firewall rule, or WFP object.
 
 ## Safety and Observability
 
 Keep peer addresses, keys, and configuration secrets out of logs and error chains. Use the shared observability facilities and stable error categories. Maintain bounded queues, timeouts, and explicit ownership; do not add detached tasks or fallback paths that bypass validated routing policy. The repository-level `AGENTS.md` continues to apply.
 
-Managed TUN handlers are session-bound and must stop when their session generation is cancelled. A logical UDP TUN association uses endpoint-independent mapping, but every destination still receives an independent route decision and compatible child outbound/underlay binding; never reuse the first destination's terminal for a later destination. Synthetic DNS matching remains exact per datagram or TCP destination and supports either configured address family.
+Managed TUN handlers are reset-generation-bound and must stop when their generation is cancelled. A
+logical UDP TUN association uses endpoint-independent mapping. Its first ordinary datagram performs
+the only route decision and freezes the terminal, outbound chain, interface policy, and route
+generation for every later target on that local source. Synthetic DNS matching remains exact per
+datagram or TCP destination, supports either configured address family, and runs before an ordinary
+UDP association is frozen.
 
-Managed-TUN UDP target children use `reserve_unmetered_datagram` for both request and response buffers, regardless of Direct or Shadowsocks egress. “Unmetered” means only that these buffers do not charge or fail against the shared runtime UDP byte budget; association/session capacity, packet-queue depth, payload length, timeout, and generation checks remain mandatory. SOCKS, DNS, and RuleSet UDP must continue using metered reservations and must retain their existing `BufferLimit` behavior.
+Managed-TUN UDP associations use `reserve_unmetered_datagram` for request and response buffers,
+regardless of Direct or Shadowsocks egress. “Unmetered” means only that these buffers do not charge
+or fail against the shared runtime UDP byte budget; association/session capacity, packet-queue
+depth, payload length, timeout, and generation checks remain mandatory. SOCKS, DNS, and RuleSet UDP
+must continue using metered reservations and must retain their existing `BufferLimit` behavior.
