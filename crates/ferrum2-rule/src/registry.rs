@@ -3,7 +3,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 
-use ferrum2_core::CanonicalDomain;
+use ferrum2_core::{CanonicalDomain, GenerationChange, GenerationSignal};
 
 use crate::candidate::{MatchCandidateIndex, MatchCandidateIndexBuilder, MatchCategories};
 use crate::{CompiledMatchSet, MatchSetCapabilities, RuleCompileError};
@@ -413,12 +413,15 @@ impl Error for RegistryPublishError {}
 /// Lock-safe atomic publication point for complete immutable snapshots.
 pub struct RuleEngineRegistry {
     current: RwLock<Arc<RuleEngineSnapshot>>,
+    changes: GenerationSignal,
 }
 
 impl RuleEngineRegistry {
     pub fn new(initial: RuleEngineSnapshot) -> Self {
+        let generation = initial.generation();
         Self {
             current: RwLock::new(Arc::new(initial)),
+            changes: GenerationSignal::new(generation),
         }
     }
 
@@ -433,6 +436,31 @@ impl RuleEngineRegistry {
 
     pub fn generation(&self) -> u64 {
         self.snapshot().generation()
+    }
+
+    /// Subscribes to the next successfully published snapshot generation.
+    ///
+    /// The returned runtime-neutral future is independent from every other
+    /// subscriber and completes with the newly published generation.
+    pub fn watch_generation(&self) -> GenerationChange {
+        let _current = self
+            .current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.changes.watch()
+    }
+
+    /// Subscribes from a generation captured by an earlier route evaluation.
+    ///
+    /// If a successful publication has already replaced that generation, the
+    /// returned future is immediately ready. This closes the interval between
+    /// route selection and subscription construction.
+    pub fn watch_generation_from(&self, generation: u64) -> GenerationChange {
+        let _current = self
+            .current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.changes.watch_from(generation)
     }
 
     /// Publishes a complete compatible successor or leaves the old snapshot untouched.
@@ -450,7 +478,12 @@ impl RuleEngineRegistry {
         if !current.is_compatible_successor(&next) {
             return Err(RegistryPublishError::IncompatibleLayout);
         }
-        Ok(std::mem::replace(&mut *current, Arc::new(next)))
+        let generation = next.generation();
+        let previous = std::mem::replace(&mut *current, Arc::new(next));
+        let notification = self.changes.prepare_notification(generation);
+        drop(current);
+        notification.wake();
+        Ok(previous)
     }
 }
 

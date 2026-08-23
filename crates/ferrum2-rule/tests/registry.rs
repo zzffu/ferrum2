@@ -1,13 +1,33 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
 use ferrum2_core::{DomainName, TargetAddr};
 use ferrum2_rule::{
-    CompiledMatchSet, MatchSetBuilder, MatchSetCapabilities, MatchSetId, Network,
+    CompiledMatchSet, GenerationChange, MatchSetBuilder, MatchSetCapabilities, MatchSetId, Network,
     OrderedRouteProgram, OrderedRouteRule, RegistryPublishError, RouteMatchField, RouteMatcher,
     RouteMetadata, RouteProgramAction, RouteRuleAction, RuleCompileError, RuleEngineRegistry,
     RuleEngineSnapshot, RuleEngineSnapshotBuilder, RuleProgramMode, RuleSetId,
 };
+
+struct WakeCount(AtomicUsize);
+
+impl Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn poll_change(change: &mut GenerationChange, waker: &Waker) -> Poll<u64> {
+    Future::poll(Pin::new(change), &mut Context::from_waker(waker))
+}
 
 fn exact(value: &str) -> CompiledMatchSet {
     let mut builder = MatchSetBuilder::new();
@@ -99,6 +119,72 @@ fn publication_is_monotonic_compatible_and_failure_keeps_the_old_snapshot() {
         RegistryPublishError::IncompatibleLayout
     );
     assert!(Arc::ptr_eq(&registry.snapshot(), &current));
+}
+
+#[test]
+fn registry_change_subscriptions_wake_only_after_successful_publication() {
+    let (initial, _, _) = two_rule_sets(4, exact("a.example"), exact("b.example"));
+    let registry = RuleEngineRegistry::new(initial);
+    let held = registry.snapshot();
+    let first_wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let second_wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let first_waker = Waker::from(Arc::clone(&first_wakes));
+    let second_waker = Waker::from(Arc::clone(&second_wakes));
+    let mut first = registry.watch_generation();
+    let mut second = registry.watch_generation();
+    assert_eq!(first.baseline(), 4);
+    assert_eq!(poll_change(&mut first, &first_waker), Poll::Pending);
+    assert_eq!(poll_change(&mut second, &second_waker), Poll::Pending);
+
+    let successor = held.builder_for_generation(5).unwrap().build().unwrap();
+    registry.publish(successor).unwrap();
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(poll_change(&mut first, &first_waker), Poll::Ready(5));
+    assert_eq!(poll_change(&mut second, &second_waker), Poll::Ready(5));
+
+    let mut after_success = registry.watch_generation();
+    assert_eq!(poll_change(&mut after_success, &first_waker), Poll::Pending);
+    let stale = held.builder_for_generation(5).unwrap().build().unwrap();
+    assert_eq!(
+        registry.publish(stale).unwrap_err(),
+        RegistryPublishError::StaleGeneration
+    );
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(poll_change(&mut after_success, &first_waker), Poll::Pending);
+
+    let successor = registry
+        .snapshot()
+        .builder_for_generation(6)
+        .unwrap()
+        .build()
+        .unwrap();
+    registry.publish(successor).unwrap();
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        poll_change(&mut after_success, &first_waker),
+        Poll::Ready(6)
+    );
+}
+
+#[test]
+fn registry_publication_before_post_selection_subscription_is_observed() {
+    let (initial, _, _) = two_rule_sets(8, exact("a.example"), exact("b.example"));
+    let registry = RuleEngineRegistry::new(initial);
+    let selected_generation = registry.generation();
+    let next = registry
+        .snapshot()
+        .builder_for_next_generation()
+        .unwrap()
+        .build()
+        .unwrap();
+    registry.publish(next).unwrap();
+    let mut change = registry.watch_generation_from(selected_generation);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+
+    assert_eq!(poll_change(&mut change, &waker), Poll::Ready(9));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
 }
 
 #[test]

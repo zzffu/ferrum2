@@ -40,6 +40,7 @@ pub use registry::{
     RuleEngineSnapshotBuilder, RuleSetDescriptor, RuleSetId,
 };
 
+pub use ferrum2_core::GenerationChange;
 pub use ferrum2_core::route::{EgressPlan, EgressPlanHandle, EgressPlanSnapshot, Network};
 pub use ferrum2_core::selector::{
     SelectorCompileError, SelectorControl, SelectorDefinition, SelectorError, TaggedInbound,
