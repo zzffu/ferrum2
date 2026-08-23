@@ -2255,7 +2255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_tun_udp_request_and_response_ignore_an_exhausted_global_byte_budget() {
+    async fn one_proxy_tun_udp_association_serves_multiple_targets_without_global_budget() {
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
         let budget_limit = ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES;
@@ -2293,86 +2293,108 @@ mod tests {
         let server = UdpServer::new(&server_keys).expect("proxy protocol");
         let server_clock = ferrum2_crypto::SystemClock::new();
         let server_random = ferrum2_crypto::SystemRandom;
-        let target =
-            TargetAddr::ip("192.0.2.25:53".parse().expect("target address")).expect("target");
+        let targets = [
+            TargetAddr::ip("192.0.2.25:53".parse().expect("first target address"))
+                .expect("first target"),
+            TargetAddr::ip("198.51.100.25:5353".parse().expect("second target address"))
+                .expect("second target"),
+        ];
         let mut association = engine
             .prepare_udp(
                 ClientRequestOrigin::Tun,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
-                Some(&target),
+                Some(&targets[0]),
             )
             .await
             .expect("proxy TUN association with exhausted budget");
         assert_eq!(budget.reserved_bytes(), budget_limit);
         association.activate(&engine).expect("proxy activation");
 
-        let request_len = association
-            .prepare_application_request(
-                &engine,
-                &engine.outbounds,
-                target.clone(),
-                b"proxy-request",
-                Instant::now(),
-            )
-            .unwrap_or_else(|_| panic!("proxy TUN request with exhausted budget"));
-        assert_eq!(budget.reserved_bytes(), budget_limit);
-        association
-            .send_encoded_request(request_len)
-            .await
-            .expect("proxy request send");
         let mut request_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-        let (request_wire_len, peer) = proxy_socket
-            .recv_from(&mut request_wire)
-            .await
-            .expect("proxy request receive");
         let mut server_scratch = UdpPacketScratch::new();
-        let pending = server
-            .prepare_request(
-                &server_clock,
-                &request_wire[..request_wire_len],
-                &mut server_scratch,
-            )
-            .expect("proxy request decode");
-        let (request, commit) = pending.into_parts();
-        assert_eq!(request.target(), &target);
-        assert_eq!(request.payload(), b"proxy-request");
-        let capability = server
-            .commit_request(commit, peer, server_clock.monotonic_now(), &server_random)
-            .expect("proxy request commit")
-            .capability();
-
-        let response_payload = BytesMut::from(&b"proxy-response"[..]);
-        let response_capacity = response_payload.capacity();
-        let response = Datagram::new(target.clone(), response_payload, response_capacity)
-            .expect("proxy response datagram");
         let mut response_wire = vec![0_u8; MAX_UDP_WIRE_LEN];
-        let encoded = server
-            .encode_response(
-                capability,
-                &server_clock,
-                &server_random,
-                &response,
-                0,
-                &mut response_wire,
-                &mut server_scratch,
-            )
-            .expect("proxy response encode");
-        proxy_socket
-            .send_to(&response_wire[..encoded.wire_len()], encoded.peer())
-            .await
-            .expect("proxy response send");
-        let response_wire_len = association
-            .receive_response_wire()
-            .await
-            .expect("proxy response receive");
-        let response = association
-            .prepare_application_response(&engine, &engine.outbounds, response_wire_len)
-            .unwrap_or_else(|_| panic!("proxy TUN response with exhausted budget"));
-        assert_eq!(response.datagram().target(), &target);
-        assert_eq!(response.datagram().payload(), b"proxy-response");
-        assert_eq!(budget.reserved_bytes(), budget_limit);
-        association.recycle_application_response(response);
-        assert_eq!(budget.reserved_bytes(), budget_limit);
+        let mut association_peer = None;
+        for (target, request_payload, expected_response) in [
+            (
+                &targets[0],
+                b"first-request".as_slice(),
+                b"first-response".as_slice(),
+            ),
+            (
+                &targets[1],
+                b"second-request".as_slice(),
+                b"second-response".as_slice(),
+            ),
+        ] {
+            let request_len = association
+                .prepare_application_request(
+                    &engine,
+                    &engine.outbounds,
+                    target.clone(),
+                    request_payload,
+                    Instant::now(),
+                )
+                .unwrap_or_else(|_| panic!("proxy TUN request with exhausted budget"));
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+            association
+                .send_encoded_request(request_len)
+                .await
+                .expect("proxy request send");
+            let (request_wire_len, peer) = proxy_socket
+                .recv_from(&mut request_wire)
+                .await
+                .expect("proxy request receive");
+            match association_peer {
+                Some(expected) => assert_eq!(peer, expected, "one proxy socket serves all targets"),
+                None => association_peer = Some(peer),
+            }
+            let pending = server
+                .prepare_request(
+                    &server_clock,
+                    &request_wire[..request_wire_len],
+                    &mut server_scratch,
+                )
+                .expect("proxy request decode");
+            let (request, commit) = pending.into_parts();
+            assert_eq!(request.target(), target);
+            assert_eq!(request.payload(), request_payload);
+            let capability = server
+                .commit_request(commit, peer, server_clock.monotonic_now(), &server_random)
+                .expect("proxy request commit")
+                .capability();
+
+            let response_payload = BytesMut::from(expected_response);
+            let response_capacity = response_payload.capacity();
+            let response = Datagram::new(target.clone(), response_payload, response_capacity)
+                .expect("proxy response datagram");
+            let encoded = server
+                .encode_response(
+                    capability,
+                    &server_clock,
+                    &server_random,
+                    &response,
+                    0,
+                    &mut response_wire,
+                    &mut server_scratch,
+                )
+                .expect("proxy response encode");
+            proxy_socket
+                .send_to(&response_wire[..encoded.wire_len()], encoded.peer())
+                .await
+                .expect("proxy response send");
+            let response_wire_len = association
+                .receive_response_wire()
+                .await
+                .expect("proxy response receive");
+            let response = association
+                .prepare_application_response(&engine, &engine.outbounds, response_wire_len)
+                .unwrap_or_else(|_| panic!("proxy TUN response with exhausted budget"));
+            assert_eq!(response.datagram().target(), target);
+            assert_eq!(response.datagram().payload(), expected_response);
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+            association.recycle_application_response(response);
+            assert_eq!(budget.reserved_bytes(), budget_limit);
+        }
 
         drop(association);
         drop(held_budget);
