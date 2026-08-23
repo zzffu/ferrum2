@@ -231,7 +231,7 @@ pub(super) fn prepare_client_outbounds(
         .into_iter()
         .map(|outbound| {
             Ok(match outbound {
-                ferrum2_config::ClientOutboundConfig::Shadowsocks { server, psk } => {
+                ferrum2_config::ClientOutboundConfig::Shadowsocks { server, psk, .. } => {
                     ClientOutboundContext::Shadowsocks(ClientShadowsocksContext {
                         tcp_server: TargetAddr::ip(server)
                             .map_err(|_| RunError::StartupProtocol)?,
@@ -1425,6 +1425,7 @@ mod m16_tests {
         ferrum2_config::ClientOutboundConfig::Shadowsocks {
             server: "198.51.100.222:62016".parse().unwrap(),
             psk: Arc::new(ferrum2_crypto::MethodPsk::aes128(*b"m16-secret-key!!")),
+            dial_options: Default::default(),
         }
     }
 
@@ -1459,9 +1460,11 @@ mod m16_tests {
         let outbounds = prepare_client_outbounds(vec![
             ferrum2_config::ClientOutboundConfig::Direct {
                 domain_resolver: ferrum2_config::DirectDomainResolver::System,
+                dial_options: Default::default(),
             },
             ferrum2_config::ClientOutboundConfig::Direct {
                 domain_resolver: ferrum2_config::DirectDomainResolver::System,
+                dial_options: Default::default(),
             },
             proxy(),
         ])
@@ -1568,6 +1571,7 @@ mod m16_tests {
         let packet_engine = ClientEgressEngine::new(
             prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct {
                 domain_resolver: ferrum2_config::DirectDomainResolver::System,
+                dial_options: Default::default(),
             }])
             .expect("packet direct outbound"),
             TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),

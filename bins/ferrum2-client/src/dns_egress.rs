@@ -901,6 +901,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 .map(|_| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                     server: first_server.into(),
                     psk: Arc::new(default_test_psk()),
+                    dial_options: Default::default(),
                 })
                 .collect(),
         )
@@ -1437,6 +1438,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .map(|server| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: server.into(),
                 psk: Arc::new(default_test_psk()),
+                dial_options: Default::default(),
             })
             .collect();
         let (route, selector, mut dns_roots) = compile_selector_plans_with_roots(

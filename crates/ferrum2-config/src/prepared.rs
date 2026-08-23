@@ -22,8 +22,8 @@ use crate::error::{ConfigError, ConfigField};
 use crate::load::{parse_v2_toml, read_bounded_utf8};
 use crate::model::{
     ClientOutboundConfig, DirectDomainResolver, DnsCacheConfig, DnsEndpointMode, DnsQueryType,
-    DnsRuntimeConfig, DnsStrategy, DnsTransport, ResolverRef, RouteNetworkConfig, RuntimeConfig,
-    UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+    DnsRuntimeConfig, DnsStrategy, DnsTransport, OutboundDialOptions, ResolverRef,
+    RouteNetworkConfig, RuntimeConfig, UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClientOutbound, RawClientRoot, RawDns, RawDnsRouteRule, RawRoute, RawRuleSet,
@@ -248,6 +248,7 @@ pub struct PreparedClientOutboundDescriptor<'a> {
     psk: Option<&'a Arc<MethodPsk>>,
     endpoint: Option<&'a DialEndpoint>,
     domain_resolver: Option<DirectDomainResolver>,
+    dial_options: &'a OutboundDialOptions,
 }
 
 impl<'a> PreparedClientOutboundDescriptor<'a> {
@@ -275,6 +276,10 @@ impl<'a> PreparedClientOutboundDescriptor<'a> {
     pub const fn domain_resolver(self) -> Option<DirectDomainResolver> {
         self.domain_resolver
     }
+
+    pub const fn dial_options(self) -> &'a OutboundDialOptions {
+        self.dial_options
+    }
 }
 
 impl std::fmt::Debug for PreparedClientOutboundDescriptor<'_> {
@@ -287,24 +292,30 @@ impl std::fmt::Debug for PreparedClientOutboundDescriptor<'_> {
             .field("psk", &self.psk.map(|_| "[redacted]"))
             .field("endpoint", &self.endpoint.map(|_| "[redacted]"))
             .field("domain_resolver", &self.domain_resolver)
+            .field("dial_options", &"[redacted]")
             .finish()
     }
 }
 
 /// Redacted bootstrap description of one server Direct outbound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PreparedServerOutboundDescriptor {
+pub struct PreparedServerOutboundDescriptor<'a> {
     index: u32,
     domain_resolver: DirectDomainResolver,
+    dial_options: &'a OutboundDialOptions,
 }
 
-impl PreparedServerOutboundDescriptor {
+impl<'a> PreparedServerOutboundDescriptor<'a> {
     pub const fn index(self) -> u32 {
         self.index
     }
 
     pub const fn domain_resolver(self) -> DirectDomainResolver {
         self.domain_resolver
+    }
+
+    pub const fn dial_options(self) -> &'a OutboundDialOptions {
+        self.dial_options
     }
 }
 
@@ -860,6 +871,7 @@ impl PreparedClientV2 {
             psk,
             endpoint,
             domain_resolver: outbound.direct_domain_resolver(),
+            dial_options: outbound.dial_options(),
         })
     }
 
@@ -902,11 +914,12 @@ impl PreparedServerV2 {
         self.validated.outbounds.len()
     }
 
-    pub fn outbound(&self, index: u32) -> Option<PreparedServerOutboundDescriptor> {
+    pub fn outbound(&self, index: u32) -> Option<PreparedServerOutboundDescriptor<'_>> {
         let outbound = self.validated.outbounds.get(usize::try_from(index).ok()?)?;
         Some(PreparedServerOutboundDescriptor {
             index,
             domain_resolver: outbound.domain_resolver,
+            dial_options: &outbound.dial_options,
         })
     }
 

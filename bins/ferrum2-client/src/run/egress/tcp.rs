@@ -1101,6 +1101,7 @@ mod tests {
             .push(ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: dead.into(),
                 psk: Arc::new(psk_for_method(MethodProfile::Blake3Aes128Gcm2022)),
+                dial_options: Default::default(),
             });
         let rule = |inbound, target, outbound| {
             TaggedRouteRule::new(inbound, Some(Network::Tcp), target, Some(outbound))

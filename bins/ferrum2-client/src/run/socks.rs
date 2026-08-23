@@ -2793,6 +2793,7 @@ pub(in crate::run) mod tests {
                 |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                     server: server.into(),
                     psk: Arc::new(psk_for_method(method)),
+                    dial_options: Default::default(),
                 },
             )
             .collect();
@@ -2873,6 +2874,7 @@ pub(in crate::run) mod tests {
                     |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                         server: server.into(),
                         psk: Arc::new(psk_for_method(method)),
+                        dial_options: Default::default(),
                     },
                 )
                 .collect(),
@@ -3035,6 +3037,7 @@ pub(in crate::run) mod tests {
                     |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                         server: server.into(),
                         psk: Arc::new(psk_for_method(method)),
+                        dial_options: Default::default(),
                     },
                 )
                 .collect(),
@@ -3266,6 +3269,7 @@ pub(in crate::run) mod tests {
                     |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                         server: server.into(),
                         psk: Arc::new(psk_for_method(method)),
+                        dial_options: Default::default(),
                     },
                 )
                 .collect(),

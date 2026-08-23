@@ -1858,10 +1858,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let outbounds = prepare_client_outbounds(vec![
             ferrum2_config::ClientOutboundConfig::Direct {
                 domain_resolver: ferrum2_config::DirectDomainResolver::System,
+                dial_options: Default::default(),
             },
             ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: "192.0.2.77:8388".parse().unwrap(),
                 psk: Arc::new(default_test_psk()),
+                dial_options: Default::default(),
             },
         ])
         .expect("direct and proxy outbounds");
@@ -2329,6 +2331,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let direct_outbounds =
             prepare_client_outbounds(vec![ferrum2_config::ClientOutboundConfig::Direct {
                 domain_resolver: ferrum2_config::DirectDomainResolver::System,
+                dial_options: Default::default(),
             }])
             .expect("direct TUN outbound");
         let direct_routing = Arc::new(ClientRouting {

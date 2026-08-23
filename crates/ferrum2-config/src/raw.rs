@@ -137,6 +137,9 @@ pub(super) struct RawClientOutbound {
     pub(super) psk: Option<SecretString>,
     pub(super) domain_resolver: Option<String>,
     pub(super) domain_strategy: Option<String>,
+    pub(super) bind_interface: Option<String>,
+    pub(super) inet4_bind_address: Option<String>,
+    pub(super) inet6_bind_address: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +163,9 @@ pub(super) struct RawServerOutbound {
     pub(super) tag: String,
     pub(super) domain_resolver: Option<String>,
     pub(super) domain_strategy: Option<String>,
+    pub(super) bind_interface: Option<String>,
+    pub(super) inet4_bind_address: Option<String>,
+    pub(super) inet6_bind_address: Option<String>,
 }
 
 #[derive(Deserialize)]

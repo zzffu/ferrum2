@@ -361,6 +361,7 @@ pub(in crate::run) fn chain_test_setup(
                 |(server, psk)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                     server: server.into(),
                     psk: Arc::new(psk),
+                    dial_options: Default::default(),
                 },
             )
             .collect(),
@@ -500,6 +501,7 @@ pub(in crate::run) fn client_udp_chain_test_config(
             |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: server.into(),
                 psk: Arc::new(psk_for_method(method)),
+                dial_options: Default::default(),
             },
         )
         .collect();
@@ -537,6 +539,7 @@ pub(in crate::run) fn tagged_client_test_config(
             |(_, server)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: (*server).into(),
                 psk: Arc::new(psk_for_method(MethodProfile::Blake3Aes128Gcm2022)),
+                dial_options: Default::default(),
             },
         )
         .collect();

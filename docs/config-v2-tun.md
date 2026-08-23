@@ -142,6 +142,27 @@ values through configuration preparation and finishing but does not connect them
 code units and no control characters. Invalid names fail with the closed
 `route.default_interface` configuration field and are not included in the error text.
 
+### Outbound-level dial constraints
+
+Every socket-owning client Direct or Shadowsocks outbound, and every server Direct outbound,
+accepts the same optional constraints:
+
+```toml
+[[outbounds]]
+tag = "proxy"
+server = "192.0.2.10:8388"
+bind_interface = "Ethernet"
+inet4_bind_address = "192.0.2.20"
+inet6_bind_address = "2001:db8::20"
+```
+
+`bind_interface` uses the same exact 1-through-256 UTF-16-unit name contract as
+`route.default_interface`. The two address fields are strict IPv4 and IPv6 literals respectively;
+putting an address in the wrong family is an error. Selectors and chains are composition nodes, not
+socket owners, and reject these fields. The values survive configuration preparation and finishing.
+Runtime socket binding and interface/address membership checks land with the unified interface
+resolver; until then these fields do not change socket creation.
+
 ## Network changes
 
 A semantic route, interface, address, DNS-lease, or underlay change rebuilds the managed TUN session

@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,9 +20,9 @@ use crate::model::{
     ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, DirectDomainResolver,
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsRuntimeConfig,
     DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig,
-    ReplayConfig, RouteNetworkConfig, RuntimeConfig, ServerDnsRoute, ServerInboundConfig,
-    ServerOutboundConfig, TunConfig, UdpConfig, UdpFiltering, ValidatedClientConfig,
-    ValidatedServerConfig,
+    OutboundDialOptions, ReplayConfig, RouteNetworkConfig, RuntimeConfig, ServerDnsRoute,
+    ServerInboundConfig, ServerOutboundConfig, TunConfig, UdpConfig, UdpFiltering,
+    ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging, RawMetrics,
@@ -1304,22 +1304,56 @@ fn validate_route_network(raw: Option<&RawRoute>) -> Result<RouteNetworkConfig, 
     let Some(raw) = raw else {
         return Ok(RouteNetworkConfig::default());
     };
-    let default_interface = raw
-        .default_interface
-        .as_deref()
-        .map(|name| {
-            if name.is_empty()
-                || name.encode_utf16().count() > MAX_INTERFACE_NAME_UTF16_UNITS
-                || name.chars().any(char::is_control)
-            {
-                return Err(ConfigError::semantic(ConfigField::RouteDefaultInterface));
-            }
-            Ok(name.to_owned().into_boxed_str())
-        })
-        .transpose()?;
+    let default_interface = validate_interface_name(
+        raw.default_interface.as_deref(),
+        ConfigField::RouteDefaultInterface,
+    )?;
     Ok(RouteNetworkConfig {
         auto_detect_interface: raw.auto_detect_interface,
         default_interface,
+    })
+}
+
+fn validate_interface_name(
+    raw: Option<&str>,
+    field: ConfigField,
+) -> Result<Option<Box<str>>, ConfigError> {
+    raw.map(|name| {
+        if name.is_empty()
+            || name.encode_utf16().count() > MAX_INTERFACE_NAME_UTF16_UNITS
+            || name.chars().any(char::is_control)
+        {
+            return Err(ConfigError::semantic(field));
+        }
+        Ok(name.to_owned().into_boxed_str())
+    })
+    .transpose()
+}
+
+fn validate_outbound_dial_options(
+    bind_interface: Option<&str>,
+    inet4_bind_address: Option<&str>,
+    inet6_bind_address: Option<&str>,
+) -> Result<OutboundDialOptions, ConfigError> {
+    Ok(OutboundDialOptions {
+        bind_interface: validate_interface_name(
+            bind_interface,
+            ConfigField::OutboundsBindInterface,
+        )?,
+        inet4_bind_address: inet4_bind_address
+            .map(|address| {
+                address
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| ConfigError::semantic(ConfigField::OutboundsInet4BindAddress))
+            })
+            .transpose()?,
+        inet6_bind_address: inet6_bind_address
+            .map(|address| {
+                address
+                    .parse::<Ipv6Addr>()
+                    .map_err(|_| ConfigError::semantic(ConfigField::OutboundsInet6BindAddress))
+            })
+            .transpose()?,
     })
 }
 
@@ -1395,6 +1429,11 @@ fn validate_client_graph(
         {
             return Err(ConfigError::semantic(ConfigField::OutboundsTag));
         }
+        let dial_options = validate_outbound_dial_options(
+            outbound.bind_interface.as_deref(),
+            outbound.inet4_bind_address.as_deref(),
+            outbound.inet6_bind_address.as_deref(),
+        )?;
         match outbound.outbound_type.as_deref().unwrap_or("shadowsocks") {
             "direct" => {
                 if outbound.server.is_some() {
@@ -1411,7 +1450,10 @@ fn validate_client_graph(
                     .copied()
                     .flatten()
                     .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-                validated_outbounds.push(ClientOutboundConfig::Direct { domain_resolver });
+                validated_outbounds.push(ClientOutboundConfig::Direct {
+                    domain_resolver,
+                    dial_options,
+                });
             }
             "shadowsocks" => {
                 global.as_ref().ok_or_else(|| {
@@ -1445,7 +1487,11 @@ fn validate_client_graph(
                 {
                     return Err(ConfigError::semantic(ConfigField::OutboundsServer));
                 }
-                validated_outbounds.push(ClientOutboundConfig::Shadowsocks { server, psk });
+                validated_outbounds.push(ClientOutboundConfig::Shadowsocks {
+                    server,
+                    psk,
+                    dial_options,
+                });
             }
             _ => return Err(ConfigError::semantic(ConfigField::OutboundsType)),
         }
@@ -1753,11 +1799,20 @@ fn validate_server_graph(
     Ok((
         validated_inbounds[0].listen,
         validated_inbounds,
-        direct_domain_resolvers
+        outbounds
             .iter()
-            .copied()
-            .map(|domain_resolver| ServerOutboundConfig { domain_resolver })
-            .collect(),
+            .zip(direct_domain_resolvers.iter().copied())
+            .map(|(outbound, domain_resolver)| {
+                Ok(ServerOutboundConfig {
+                    domain_resolver,
+                    dial_options: validate_outbound_dial_options(
+                        outbound.bind_interface.as_deref(),
+                        outbound.inet4_bind_address.as_deref(),
+                        outbound.inet6_bind_address.as_deref(),
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, ConfigError>>()?,
         route,
         detours,
     ))

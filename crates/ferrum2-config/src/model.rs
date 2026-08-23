@@ -85,9 +85,11 @@ pub enum ClientOutboundConfig {
     Shadowsocks {
         server: SocketAddr,
         psk: Arc<MethodPsk>,
+        dial_options: OutboundDialOptions,
     },
     Direct {
         domain_resolver: DirectDomainResolver,
+        dial_options: OutboundDialOptions,
     },
 }
 
@@ -109,8 +111,19 @@ impl ClientOutboundConfig {
     /// Returns the fixed resolver identity captured by one Direct outbound.
     pub const fn direct_domain_resolver(&self) -> Option<DirectDomainResolver> {
         match self {
-            Self::Direct { domain_resolver } => Some(*domain_resolver),
+            Self::Direct {
+                domain_resolver, ..
+            } => Some(*domain_resolver),
             Self::Shadowsocks { .. } => None,
+        }
+    }
+
+    /// Returns the interface and source-address constraints for this socket owner.
+    pub const fn dial_options(&self) -> &OutboundDialOptions {
+        match self {
+            Self::Shadowsocks { dial_options, .. } | Self::Direct { dial_options, .. } => {
+                dial_options
+            }
         }
     }
 }
@@ -139,6 +152,48 @@ impl ValidatedClientConfig {
 pub struct RouteNetworkConfig {
     pub auto_detect_interface: bool,
     pub default_interface: Option<Box<str>>,
+}
+
+/// Validated interface and family-specific source-address constraints for one socket owner.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct OutboundDialOptions {
+    pub bind_interface: Option<Box<str>>,
+    pub inet4_bind_address: Option<Ipv4Addr>,
+    pub inet6_bind_address: Option<Ipv6Addr>,
+}
+
+impl std::fmt::Debug for OutboundDialOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OutboundDialOptions")
+            .field(
+                "bind_interface",
+                &self.bind_interface.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "inet4_bind_address",
+                &self.inet4_bind_address.map(|_| "[redacted]"),
+            )
+            .field(
+                "inet6_bind_address",
+                &self.inet6_bind_address.map(|_| "[redacted]"),
+            )
+            .finish()
+    }
+}
+
+impl OutboundDialOptions {
+    pub fn bind_interface(&self) -> Option<&str> {
+        self.bind_interface.as_deref()
+    }
+
+    pub const fn inet4_bind_address(&self) -> Option<Ipv4Addr> {
+        self.inet4_bind_address
+    }
+
+    pub const fn inet6_bind_address(&self) -> Option<Ipv6Addr> {
+        self.inet6_bind_address
+    }
 }
 
 impl RouteNetworkConfig {
@@ -173,9 +228,16 @@ pub struct ServerInboundConfig {
 }
 
 /// One validated direct server outbound.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerOutboundConfig {
     pub domain_resolver: DirectDomainResolver,
+    pub dial_options: OutboundDialOptions,
+}
+
+impl ServerOutboundConfig {
+    pub const fn dial_options(&self) -> &OutboundDialOptions {
+        &self.dial_options
+    }
 }
 
 /// Explicit fixed-endpoint resolver; `System` is never an implicit fallback.

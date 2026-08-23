@@ -2274,6 +2274,7 @@ mod tests {
             ferrum2_config::ClientOutboundConfig::Shadowsocks {
                 server: proxy_endpoint,
                 psk: Arc::new(default_test_psk()),
+                dial_options: Default::default(),
             },
         ])
         .expect("proxy outbound");

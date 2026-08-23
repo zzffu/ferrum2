@@ -32,6 +32,10 @@ ipv6_dns_address = "fd00:f2::1"
 [[outbounds]]
 tag = "direct-out"
 type = "direct"
+# Optional outbound-specific dial constraints are preserved exactly.
+# bind_interface = "Ethernet"
+# inet4_bind_address = "192.0.2.10"
+# inet6_bind_address = "2001:db8::10"
 
 [route]
 # Route-level interface selection is configuration-only until client dial wiring lands.

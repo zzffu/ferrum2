@@ -168,6 +168,7 @@ pub(in crate::run) fn tagged_server_test_config<const N: usize>(
     if selector {
         config.outbounds.push(ferrum2_config::ServerOutboundConfig {
             domain_resolver: ferrum2_config::DirectDomainResolver::System,
+            dial_options: Default::default(),
         });
         let (route, _) = compile_selector_route(
             &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],

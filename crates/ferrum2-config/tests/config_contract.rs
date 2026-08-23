@@ -1050,6 +1050,169 @@ fn route_network_defaults_and_combinations_are_role_neutral() {
 }
 
 #[test]
+fn outbound_dial_options_default_and_apply_to_socket_owning_outbounds() {
+    let client = load_client(TempConfig::text(CLIENT_BASE).path()).expect("client dial defaults");
+    assert_eq!(
+        client.outbounds[0].dial_options(),
+        &ferrum2_config::OutboundDialOptions::default()
+    );
+    let server = load_server(TempConfig::text(SERVER_BASE).path()).expect("server dial defaults");
+    assert_eq!(
+        server.outbounds[0].dial_options(),
+        &ferrum2_config::OutboundDialOptions::default()
+    );
+
+    let fields = concat!(
+        "bind_interface = \"Ethernet 2\"\n",
+        "inet4_bind_address = \"192.0.2.10\"\n",
+        "inet6_bind_address = \"2001:db8::10\"\n",
+    );
+    let client_proxy = CLIENT_BASE.replace(
+        "server = \"127.0.0.1:8388\"\n",
+        &format!("server = \"127.0.0.1:8388\"\n{fields}"),
+    );
+    let client_proxy =
+        load_client(TempConfig::text(&client_proxy).path()).expect("client proxy dial options");
+    let options = client_proxy.outbounds[0].dial_options();
+    assert_eq!(options.bind_interface(), Some("Ethernet 2"));
+    assert_eq!(
+        options.inet4_bind_address(),
+        Some("192.0.2.10".parse().unwrap())
+    );
+    assert_eq!(
+        options.inet6_bind_address(),
+        Some("2001:db8::10".parse().unwrap())
+    );
+    let debug = format!("{options:?}");
+    for sensitive in ["Ethernet 2", "192.0.2.10", "2001:db8::10"] {
+        assert!(!debug.contains(sensitive));
+    }
+
+    let client_direct = CLIENT_BASE.replace(
+        "server = \"127.0.0.1:8388\"\n",
+        &format!("type = \"direct\"\n{fields}"),
+    );
+    let client_direct =
+        load_client(TempConfig::text(&client_direct).path()).expect("client Direct dial options");
+    assert_eq!(
+        client_direct.outbounds[0].dial_options(),
+        client_proxy.outbounds[0].dial_options()
+    );
+
+    let server_direct =
+        SERVER_BASE.replace("tag = \"direct\"\n", &format!("tag = \"direct\"\n{fields}"));
+    let server_direct =
+        load_server(TempConfig::text(&server_direct).path()).expect("server Direct dial options");
+    assert_eq!(
+        server_direct.outbounds[0].dial_options(),
+        client_proxy.outbounds[0].dial_options()
+    );
+}
+
+#[test]
+fn outbound_dial_fields_validate_family_interface_and_owner_precisely() {
+    for (name, setting, field) in [
+        (
+            "IPv6 in IPv4 field",
+            "inet4_bind_address = \"2001:db8::1\"\n",
+            ConfigField::OutboundsInet4BindAddress,
+        ),
+        (
+            "malformed IPv4",
+            "inet4_bind_address = \"sensitive-v4-address\"\n",
+            ConfigField::OutboundsInet4BindAddress,
+        ),
+        (
+            "IPv4 in IPv6 field",
+            "inet6_bind_address = \"192.0.2.1\"\n",
+            ConfigField::OutboundsInet6BindAddress,
+        ),
+        (
+            "malformed IPv6",
+            "inet6_bind_address = \"sensitive-v6-address\"\n",
+            ConfigField::OutboundsInet6BindAddress,
+        ),
+        (
+            "empty interface",
+            "bind_interface = \"\"\n",
+            ConfigField::OutboundsBindInterface,
+        ),
+    ] {
+        for (role, base, anchor) in [
+            (
+                ConfigRole::Client,
+                CLIENT_BASE,
+                "server = \"127.0.0.1:8388\"\n",
+            ),
+            (ConfigRole::Server, SERVER_BASE, "tag = \"direct\"\n"),
+        ] {
+            let source = base.replace(anchor, &format!("{anchor}{setting}"));
+            let file = TempConfig::text(&source);
+            let error = match role {
+                ConfigRole::Client => load_client(file.path()).err(),
+                ConfigRole::Server => load_server(file.path()).err(),
+            }
+            .unwrap_or_else(|| panic!("{name} passed"));
+            assert_eq!(
+                (error.kind(), error.field()),
+                (ConfigErrorKind::Semantic, field),
+                "{name}"
+            );
+            let rendered = format!("{error}\n{error:?}");
+            assert!(!rendered.contains("sensitive-"), "{name}");
+        }
+    }
+
+    for interface in [
+        "x".repeat(257),
+        "🛜".repeat(129),
+        "private\tinterface".to_owned(),
+    ] {
+        let source = CLIENT_BASE.replace(
+            "server = \"127.0.0.1:8388\"\n",
+            &format!("server = \"127.0.0.1:8388\"\nbind_interface = {interface:?}\n"),
+        );
+        let error = load_client(TempConfig::text(&source).path())
+            .err()
+            .expect("invalid outbound interface");
+        assert_eq!(error.field(), ConfigField::OutboundsBindInterface);
+        assert!(!format!("{error}\n{error:?}").contains(&interface));
+    }
+
+    let accepted = "🛜".repeat(128);
+    let source = CLIENT_BASE.replace(
+        "server = \"127.0.0.1:8388\"\n",
+        &format!("server = \"127.0.0.1:8388\"\nbind_interface = {accepted:?}\n"),
+    );
+    let config = load_client(TempConfig::text(&source).path()).expect("256-unit interface name");
+    assert_eq!(
+        config.outbounds[0].dial_options().bind_interface(),
+        Some(accepted.as_str())
+    );
+
+    for (owner, declaration) in [
+        (
+            "selector",
+            "[[selectors]]\ntag = \"manual\"\noutbounds = [\"proxy-out\"]\ndefault = \"proxy-out\"\nbind_interface = \"Ethernet\"\n",
+        ),
+        (
+            "chain",
+            "[[chains]]\ntag = \"chain\"\nhops = [\"proxy-out\"]\nbind_interface = \"Ethernet\"\n",
+        ),
+    ] {
+        let source =
+            CLIENT_BASE.replacen("[shadowsocks]", &format!("{declaration}[shadowsocks]"), 1);
+        let error = load_client(TempConfig::text(&source).path())
+            .err()
+            .unwrap_or_else(|| panic!("{owner} accepted outbound dial fields"));
+        assert_eq!(
+            (error.kind(), error.field()),
+            (ConfigErrorKind::Syntax, ConfigField::Config)
+        );
+    }
+}
+
+#[test]
 fn route_default_interface_is_bounded_preserved_and_redacted_on_failure() {
     let accepted = ["E".to_owned(), "x".repeat(256), "🛜".repeat(128)];
     for interface in accepted {

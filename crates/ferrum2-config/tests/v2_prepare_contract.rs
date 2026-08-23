@@ -470,6 +470,89 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 
 #[test]
+fn outbound_dial_options_survive_client_and_server_prepare_finish() {
+    let client_source = r#"
+schema_version = 2
+
+[[inbounds]]
+tag = "client"
+listen = "127.0.0.1:1080"
+
+[[outbounds]]
+tag = "direct"
+type = "direct"
+bind_interface = "Client Ethernet"
+inet4_bind_address = "192.0.2.10"
+inet6_bind_address = "2001:db8::10"
+
+[route]
+final = "direct"
+"#;
+    let client_file = TempConfig::new(client_source);
+    let client = prepare_client_v2(&client_file.0).expect("prepare client dial options");
+    let descriptor = client.outbound(0).expect("client outbound descriptor");
+    assert_eq!(
+        descriptor.dial_options().bind_interface(),
+        Some("Client Ethernet")
+    );
+    assert_eq!(
+        descriptor.dial_options().inet4_bind_address(),
+        Some("192.0.2.10".parse().unwrap())
+    );
+    assert_eq!(
+        descriptor.dial_options().inet6_bind_address(),
+        Some("2001:db8::10".parse().unwrap())
+    );
+    let debug = format!("{descriptor:?}");
+    assert!(!debug.contains("Client Ethernet"));
+    assert!(!debug.contains("192.0.2.10"));
+    let client =
+        finish_client_v2(client, ClientV2Resources::default()).expect("finish client dial options");
+    assert_eq!(
+        client.outbounds[0].dial_options().bind_interface(),
+        Some("Client Ethernet")
+    );
+
+    let server_source = r#"
+schema_version = 2
+
+[[inbounds]]
+tag = "server"
+listen = "127.0.0.1:8388"
+
+[[outbounds]]
+tag = "direct"
+bind_interface = "Server Ethernet"
+inet4_bind_address = "198.51.100.10"
+inet6_bind_address = "2001:db8::20"
+
+[route]
+final = "direct"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#;
+    let server_file = TempConfig::new(server_source);
+    let server = prepare_server_v2(&server_file.0).expect("prepare server dial options");
+    let descriptor = server.outbound(0).expect("server outbound descriptor");
+    assert_eq!(
+        descriptor.dial_options().bind_interface(),
+        Some("Server Ethernet")
+    );
+    assert_eq!(
+        descriptor.dial_options().inet4_bind_address(),
+        Some("198.51.100.10".parse().unwrap())
+    );
+    let server =
+        finish_server_v2(server, ServerV2Resources::default()).expect("finish server dial options");
+    assert_eq!(
+        server.outbounds[0].dial_options().bind_interface(),
+        Some("Server Ethernet")
+    );
+}
+
+#[test]
 fn finished_tun_tracks_every_dual_stack_dns_candidate_and_rechecks_listener_aliases() {
     let source = r#"
 schema_version = 2
