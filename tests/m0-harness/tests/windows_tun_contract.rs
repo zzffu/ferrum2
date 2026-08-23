@@ -4,7 +4,7 @@ const APPROVED_HYPER_V_GUEST: &str = "Windows 10 MSIX packaging environment";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Feature {
-    InProcessRestart,
+    ResetNetwork,
     FragmentReassembly,
     DualStackDns,
     UdpEimAdfEifRouting,
@@ -15,17 +15,18 @@ enum Feature {
 struct ModeSpec {
     id: &'static str,
     feature: Feature,
-    restart_cycles: Option<usize>,
+    reset_cycles: Option<usize>,
     workflow_only: bool,
     approved_guest: &'static str,
     witnesses: &'static [&'static str],
     counters: &'static [&'static str],
 }
 
-const RESTART_WITNESSES: &[&str] = &[
-    "same_process_for_every_restart",
-    "generation_advances_once_per_restart",
-    "adapter_route_dns_and_handler_baselines_restore",
+const RESET_WITNESSES: &[&str] = &[
+    "same_process_for_every_reset",
+    "generation_advances_once_per_reset",
+    "adapter_address_route_dns_wfp_identity_is_preserved",
+    "tcp_udp_fragment_and_pending_runtime_is_replaced",
 ];
 
 const UDP_INTEROPERABILITY_WITNESSES: &[&str] = &[
@@ -34,8 +35,8 @@ const UDP_INTEROPERABILITY_WITNESSES: &[&str] = &[
     "adf_rejects_unauthorized_ip",
     "eif_allows_valid_same_family_peer",
     "rejected_target_never_authorizes_peer",
-    "per_target_route_and_outbound_decision",
-    "mixed_ipv4_ipv6_target_children",
+    "first_datagram_routes_exactly_once",
+    "later_targets_reuse_the_frozen_direct_or_proxy_egress",
     "directed_broadcast_never_allocates_association",
     "udp_firewall_scope_is_journaled_and_removed",
     "dns_udp_payload_round_trips",
@@ -43,56 +44,53 @@ const UDP_INTEROPERABILITY_WITNESSES: &[&str] = &[
     "stun_binding_requests_reach_multiple_servers",
     "webrtc_ice_candidate_check_round_trips",
     "game_style_binary_datagrams_reach_multiple_peers",
-    "one_eim_association_mixes_direct_and_shadowsocks_targets",
+    "one_eim_association_has_no_per_target_children",
     "association_capacity_drops_new_without_evicting_live",
     "udp_queue_pressure_is_bounded_and_control_remains_live",
-    "restart_clears_udp_stale_generation_state",
+    "reset_clears_udp_stale_generation_state",
 ];
 
 const MODES: &[ModeSpec] = &[
     ModeSpec {
-        id: "restart-stress-10",
-        feature: Feature::InProcessRestart,
-        restart_cycles: Some(10),
+        id: "network-reset-10",
+        feature: Feature::ResetNetwork,
+        reset_cycles: Some(10),
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
-        witnesses: RESTART_WITNESSES,
+        witnesses: RESET_WITNESSES,
         counters: &[
-            "ferrum2_tun_session_restart_started_total",
-            "ferrum2_tun_session_restart_succeeded_total",
+            "ferrum2_network_reset_total",
             "ferrum2_tun_session_generation",
         ],
     },
     ModeSpec {
-        id: "restart-stress-100",
-        feature: Feature::InProcessRestart,
-        restart_cycles: Some(100),
+        id: "network-reset-100",
+        feature: Feature::ResetNetwork,
+        reset_cycles: Some(100),
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
-        witnesses: RESTART_WITNESSES,
+        witnesses: RESET_WITNESSES,
         counters: &[
-            "ferrum2_tun_session_restart_started_total",
-            "ferrum2_tun_session_restart_succeeded_total",
+            "ferrum2_network_reset_total",
             "ferrum2_tun_session_generation",
         ],
     },
     ModeSpec {
-        id: "restart-stress-1000",
-        feature: Feature::InProcessRestart,
-        restart_cycles: Some(1000),
+        id: "network-reset-1000",
+        feature: Feature::ResetNetwork,
+        reset_cycles: Some(1000),
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
-        witnesses: RESTART_WITNESSES,
+        witnesses: RESET_WITNESSES,
         counters: &[
-            "ferrum2_tun_session_restart_started_total",
-            "ferrum2_tun_session_restart_succeeded_total",
+            "ferrum2_network_reset_total",
             "ferrum2_tun_session_generation",
         ],
     },
     ModeSpec {
         id: "fragments",
         feature: Feature::FragmentReassembly,
-        restart_cycles: None,
+        reset_cycles: None,
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
         witnesses: &[
@@ -111,7 +109,7 @@ const MODES: &[ModeSpec] = &[
     ModeSpec {
         id: "dual-stack-dns",
         feature: Feature::DualStackDns,
-        restart_cycles: None,
+        reset_cycles: None,
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
         witnesses: &[
@@ -129,7 +127,7 @@ const MODES: &[ModeSpec] = &[
     ModeSpec {
         id: "udp-policy",
         feature: Feature::UdpEimAdfEifRouting,
-        restart_cycles: None,
+        reset_cycles: None,
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
         witnesses: UDP_INTEROPERABILITY_WITNESSES,
@@ -145,7 +143,7 @@ const MODES: &[ModeSpec] = &[
     ModeSpec {
         id: "scheduler-ring-full",
         feature: Feature::SchedulerRingFull,
-        restart_cycles: None,
+        reset_cycles: None,
         workflow_only: true,
         approved_guest: APPROVED_HYPER_V_GUEST,
         witnesses: &[
@@ -182,7 +180,7 @@ fn privileged_mode_contract_is_closed_guest_only_and_feature_complete() {
         .map(|mode| mode.feature)
         .collect::<BTreeSet<_>>();
     let expected_features = BTreeSet::from([
-        Feature::InProcessRestart,
+        Feature::ResetNetwork,
         Feature::FragmentReassembly,
         Feature::DualStackDns,
         Feature::UdpEimAdfEifRouting,
@@ -190,14 +188,16 @@ fn privileged_mode_contract_is_closed_guest_only_and_feature_complete() {
     ]);
     assert_eq!(actual_features, expected_features);
 
-    let restart_cycles = MODES
+    let reset_cycles = MODES
         .iter()
-        .filter_map(|mode| mode.restart_cycles)
+        .filter_map(|mode| mode.reset_cycles)
         .collect::<BTreeSet<_>>();
-    assert_eq!(restart_cycles, BTreeSet::from([10, 100, 1000]));
-    assert!(MODES.iter().all(|mode| {
-        (mode.feature == Feature::InProcessRestart) == mode.restart_cycles.is_some()
-    }));
+    assert_eq!(reset_cycles, BTreeSet::from([10, 100, 1000]));
+    assert!(
+        MODES
+            .iter()
+            .all(|mode| { (mode.feature == Feature::ResetNetwork) == mode.reset_cycles.is_some() })
+    );
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn fixed_counter_names_are_low_cardinality() {
         .flat_map(|mode| mode.counters.iter().copied())
         .collect::<BTreeSet<_>>();
     assert!(counters.iter().all(|name| {
-        name.starts_with("ferrum2_tun_")
+        (name.starts_with("ferrum2_tun_") || name.starts_with("ferrum2_network_"))
             && name
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
@@ -229,11 +229,11 @@ fn udp_policy_contract_covers_the_complete_interoperability_matrix() {
         "game_style_binary_datagrams_reach_multiple_peers",
         "adf_allows_authorized_ip_any_port",
         "eif_allows_valid_same_family_peer",
-        "one_eim_association_mixes_direct_and_shadowsocks_targets",
-        "mixed_ipv4_ipv6_target_children",
+        "one_eim_association_has_no_per_target_children",
+        "later_targets_reuse_the_frozen_direct_or_proxy_egress",
         "association_capacity_drops_new_without_evicting_live",
         "udp_queue_pressure_is_bounded_and_control_remains_live",
-        "restart_clears_udp_stale_generation_state",
+        "reset_clears_udp_stale_generation_state",
     ]);
     assert!(required.is_subset(&actual));
     assert_eq!(actual.len(), UDP_INTEROPERABILITY_WITNESSES.len());
