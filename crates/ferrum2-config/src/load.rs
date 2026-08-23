@@ -20,14 +20,14 @@ struct RawSchemaRoot {
 pub fn load_client(path: impl AsRef<Path>) -> Result<ValidatedClientConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
     let raw: RawClientRoot = parse_v2_toml(&source)?;
-    validate_client(raw, &source)
+    validate_client(raw)
 }
 
 /// Reads and fully validates a server configuration without creating runtime resources.
 pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
     let raw: RawServerRoot = parse_v2_toml(&source)?;
-    validate_server(raw, &source)
+    validate_server(raw)
 }
 
 pub(super) fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, ConfigError> {

@@ -8,7 +8,6 @@ use ferrum2_rule::{
     RouteMatcher, RouteRuleAction, RuleSetId,
 };
 
-use super::validate_route_target;
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{
     ClientDnsRoute, CompiledRoute, DnsQueryType, RouteAction, RouteProtocol, RouteSniffConfig,
@@ -58,7 +57,6 @@ struct TargetCoverage {
     ip_cidr: Option<Vec<String>>,
     port: Option<Vec<NonZeroU16>>,
     port_range: Option<Vec<String>>,
-    legacy: Option<ferrum2_core::TargetAddr>,
 }
 
 enum SniffersCoverage {
@@ -115,7 +113,6 @@ pub(super) fn compile_route_draft(
     tun_inbound: Option<usize>,
     has_dns: bool,
     max_connections: u32,
-    source: &str,
 ) -> Result<Option<RouteDraft>, ConfigError> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -155,7 +152,7 @@ pub(super) fn compile_route_draft(
         if rule.server.is_some() {
             return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
         }
-        let (matcher, mut current) = compile_route_matcher(rule, inbounds, rule_set_tags, source)?;
+        let (matcher, mut current) = compile_route_matcher(rule, inbounds, rule_set_tags)?;
         let action = rule
             .action
             .as_deref()
@@ -235,19 +232,7 @@ fn compile_route_matcher(
     raw: &RawRouteRule,
     inbounds: &[String],
     rule_set_tags: &[&str],
-    source: &str,
 ) -> Result<(RouteMatcher<RouteProtocol>, Coverage), ConfigError> {
-    if raw.target.is_some()
-        && (raw.domain.is_some()
-            || raw.domain_suffix.is_some()
-            || raw.domain_keyword.is_some()
-            || raw.ip.is_some()
-            || raw.ip_cidr.is_some()
-            || raw.port.is_some()
-            || raw.port_range.is_some())
-    {
-        return Err(ConfigError::semantic(ConfigField::RouteRulesTarget));
-    }
     let mut fields = Vec::new();
     let inbound = raw
         .inbound
@@ -376,14 +361,6 @@ fn compile_route_matcher(
             |value| parse_port_range(value, ConfigField::RouteRulesPortRange),
         )?));
     }
-    let legacy_target = raw
-        .target
-        .as_ref()
-        .map(|target| validate_route_target(target, source, ConfigField::RouteRulesTarget))
-        .transpose()?;
-    if let Some(target) = &legacy_target {
-        fields.push(RouteMatchField::Target(vec![target.clone()]));
-    }
     let matcher = RouteMatcher::try_new(fields)
         .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::RouteRules))?;
     Ok((
@@ -410,7 +387,6 @@ fn compile_route_matcher(
                     raw.port_range.as_ref(),
                     ConfigField::RouteRulesPortRange,
                 )?,
-                legacy: legacy_target,
             },
         },
     ))
@@ -544,7 +520,7 @@ fn validate_protocol_coverage(rows: &[Coverage], role: Role) -> Result<(), Confi
             continue;
         };
         for protocol in protocols {
-            // Only typed match values prove disjointness; textual target aliases stay overlapping.
+            // Only typed match values prove disjointness.
             let covered = rows[..index]
                 .iter()
                 .find(|earlier| {
@@ -571,10 +547,6 @@ fn validate_protocol_coverage(rows: &[Coverage], role: Role) -> Result<(), Confi
                                 earlier.target.port_range.as_deref(),
                                 row.target.port_range.as_deref(),
                             )
-                            && covers_one(
-                                earlier.target.legacy.as_ref(),
-                                row.target.legacy.as_ref(),
-                            )
                             && sniffer_covers(sniffers, *protocol, row.network.as_deref(), role)
                     })
                 });
@@ -590,14 +562,6 @@ fn disjoint<T: Eq>(left: Option<&[T]>, right: Option<&[T]>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => !left.iter().any(|value| right.contains(value)),
         _ => false,
-    }
-}
-
-fn covers_one<T: Eq>(wider: Option<&T>, narrower: Option<&T>) -> bool {
-    match (wider, narrower) {
-        (None, _) => true,
-        (Some(wider), Some(narrower)) => wider == narrower,
-        (Some(_), None) => false,
     }
 }
 
@@ -637,7 +601,6 @@ fn matcher_value_count(rule: &RawRouteRule) -> usize {
         rule.ip_cidr.as_ref().map_or(0, ScalarOrList::len),
         rule.port.as_ref().map_or(0, ScalarOrList::len),
         rule.port_range.as_ref().map_or(0, ScalarOrList::len),
-        usize::from(rule.target.is_some()),
     ]
     .into_iter()
     .sum()
@@ -735,7 +698,6 @@ where
 pub(super) fn compile_client_dns(
     raw: &RawDns,
     ordinary_inbounds: &[String],
-    source: &str,
 ) -> Result<ClientDnsRoute, ConfigError> {
     let listeners = raw
         .inbounds
@@ -770,14 +732,6 @@ pub(super) fn compile_client_dns(
                 ConfigField::DnsRouteRulesPortRange
             };
             return Err(ConfigError::semantic(field));
-        }
-        if rule.target.is_some()
-            && (rule.qname.is_some()
-                || rule.qname_suffix.is_some()
-                || rule.domain_keyword.is_some()
-                || rule.qtype.is_some())
-        {
-            return Err(ConfigError::semantic(ConfigField::DnsRouteRulesTarget));
         }
         let mut fields = Vec::new();
         if let Some(values) = &rule.inbound {
@@ -826,13 +780,6 @@ pub(super) fn compile_client_dns(
                 |value| parse_qtype(value),
             )?));
         }
-        if let Some(target) = &rule.target {
-            fields.push(RouteMatchField::Target(vec![validate_route_target(
-                target,
-                source,
-                ConfigField::DnsRouteRulesTarget,
-            )?]));
-        }
         let matcher = RouteMatcher::try_new(fields)
             .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::DnsRouteRules))?;
         let server = resolve_dns_server(rule, servers)?;
@@ -854,7 +801,6 @@ pub(super) fn compile_client_dns(
 pub(super) fn compile_server_dns(
     raw: &RawDns,
     inbounds: &[String],
-    source: &str,
 ) -> Result<ServerDnsRoute, ConfigError> {
     let servers = raw
         .servers
@@ -879,15 +825,6 @@ pub(super) fn compile_server_dns(
                 ConfigField::DnsRouteRulesQtype
             };
             return Err(ConfigError::semantic(field));
-        }
-        if rule.target.is_some()
-            && (rule.domain.is_some()
-                || rule.domain_suffix.is_some()
-                || rule.domain_keyword.is_some()
-                || rule.port.is_some()
-                || rule.port_range.is_some())
-        {
-            return Err(ConfigError::semantic(ConfigField::DnsRouteRulesTarget));
         }
         let mut fields = Vec::new();
         if let Some(values) = &rule.inbound {
@@ -944,13 +881,6 @@ pub(super) fn compile_server_dns(
                 ConfigField::DnsRouteRulesPortRange,
                 |value| parse_port_range(value, ConfigField::DnsRouteRulesPortRange),
             )?));
-        }
-        if let Some(target) = &rule.target {
-            fields.push(RouteMatchField::Target(vec![validate_route_target(
-                target,
-                source,
-                ConfigField::DnsRouteRulesTarget,
-            )?]));
         }
         let matcher = RouteMatcher::try_new(fields)
             .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::DnsRouteRules))?;

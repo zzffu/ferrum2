@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrum2_core::{CanonicalDomain, DomainName, TargetAddr, TargetHostRef};
+use ferrum2_core::{CanonicalDomain, DomainName, TargetAddr};
 use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
 use ferrum2_rule::{
     CompiledMatchSet, DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, DnsPolicyBlueprint,
@@ -31,8 +31,7 @@ use crate::raw::{
 };
 use crate::validation::{
     finish_client_tun_targets, validate_client_prepared, validate_direct_domain_resolver,
-    validate_finished_client_endpoints, validate_route_target, validate_server_prepared,
-    validate_tag,
+    validate_finished_client_endpoints, validate_server_prepared, validate_tag,
 };
 
 const DEFAULT_RULE_SET_CACHE_DIR: &str = "./rule-set-cache";
@@ -451,7 +450,6 @@ struct PreparedDnsMatcherDraft {
     qtypes: Vec<u16>,
     ports: Vec<NonZeroU16>,
     port_ranges: Vec<PortRange>,
-    dns_eligible: bool,
 }
 
 /// One statically compiled DNS row whose RuleSet matcher is deferred.
@@ -915,7 +913,7 @@ pub fn prepare_client(path: impl AsRef<Path>) -> Result<PreparedClientV2, Config
     let source = read_bounded_utf8(path.as_ref())?;
     let raw: RawClientRoot = parse_v2_toml(&source)?;
     let validation_raw: RawClientRoot = parse_v2_toml(&source)?;
-    prepare_client_inner(raw, validation_raw, &source)
+    prepare_client_inner(raw, validation_raw)
 }
 
 /// Reads and prepares a server schema-v2 config without external I/O.
@@ -923,7 +921,7 @@ pub fn prepare_server(path: impl AsRef<Path>) -> Result<PreparedServerV2, Config
     let source = read_bounded_utf8(path.as_ref())?;
     let raw: RawServerRoot = parse_v2_toml(&source)?;
     let validation_raw: RawServerRoot = parse_v2_toml(&source)?;
-    prepare_server_inner(raw, validation_raw, &source)
+    prepare_server_inner(raw, validation_raw)
 }
 
 /// Reads and prepares a client V2 config without DNS, download, socket, or listener I/O.
@@ -1084,9 +1082,6 @@ fn build_dns_policy_blueprint(
         .try_reserve_exact(prepared.len())
         .map_err(|_| ConfigError::rule_allocation(ConfigField::DnsRouteRules))?;
     for prepared in prepared {
-        if !prepared.matcher.dns_eligible {
-            continue;
-        }
         let mut rule_sets = Vec::new();
         rule_sets
             .try_reserve_exact(prepared.rule_sets.len())
@@ -1476,7 +1471,6 @@ fn prepared_dependency_dns_servers(
 fn prepare_client_inner(
     raw: RawClientRoot,
     mut validation_raw: RawClientRoot,
-    source: &str,
 ) -> Result<PreparedClientV2, ConfigError> {
     let dns = prepare_dns(raw.dns.as_ref())?;
     let outbound_endpoints = prepare_client_outbounds(
@@ -1526,7 +1520,6 @@ fn prepare_client_inner(
         common.dns_strategy,
         PreparedDnsRole::Client,
         &ordinary_inbounds,
-        source,
     )?;
     common.dns_rules = dns_policy.rules;
     common.dns_final_server = dns_policy.final_server;
@@ -1542,7 +1535,6 @@ fn prepare_client_inner(
     sanitize_client(&mut validation_raw);
     let validation = validate_client_prepared(
         validation_raw,
-        source,
         &rule_set_tags,
         &dependency_egress.tags,
         &dependency_dns_servers,
@@ -1576,7 +1568,6 @@ fn prepare_client_inner(
 fn prepare_server_inner(
     raw: RawServerRoot,
     mut validation_raw: RawServerRoot,
-    source: &str,
 ) -> Result<PreparedServerV2, ConfigError> {
     let dns = prepare_dns(raw.dns.as_ref())?;
     let outbound_tags = raw
@@ -1618,7 +1609,6 @@ fn prepare_server_inner(
         common.dns_strategy,
         PreparedDnsRole::Server,
         &ordinary_inbounds,
-        source,
     )?;
     common.dns_rules = dns_policy.rules;
     common.dns_final_server = dns_policy.final_server;
@@ -1634,7 +1624,6 @@ fn prepare_server_inner(
     sanitize_server(&mut validation_raw);
     let validation = validate_server_prepared(
         validation_raw,
-        source,
         &rule_set_tags,
         &dependency_egress.tags,
         &dependency_dns_servers,
@@ -2483,7 +2472,6 @@ fn prepare_dns_rules(
     strategy: Option<DnsStrategy>,
     role: PreparedDnsRole,
     ordinary_inbounds: &[&str],
-    source: &str,
 ) -> Result<PreparedDnsPolicyDraft, ConfigError> {
     let Some(dns) = dns else {
         return Ok(PreparedDnsPolicyDraft {
@@ -2510,7 +2498,7 @@ fn prepare_dns_rules(
         if !dns_matcher_present(rule) {
             return Err(ConfigError::semantic(ConfigField::DnsRouteRules));
         }
-        let matcher = prepare_dns_matcher(rule, dns, role, ordinary_inbounds, source)?;
+        let matcher = prepare_dns_matcher(rule, dns, role, ordinary_inbounds)?;
         let rule_sets = rule
             .rule_set
             .as_ref()
@@ -2568,7 +2556,6 @@ fn prepare_dns_matcher(
     dns: &RawDns,
     role: PreparedDnsRole,
     ordinary_inbounds: &[&str],
-    source: &str,
 ) -> Result<PreparedDnsMatcherDraft, ConfigError> {
     match role {
         PreparedDnsRole::Client => {
@@ -2586,14 +2573,6 @@ fn prepare_dns_matcher(
             if rule.port_range.is_some() {
                 return Err(ConfigError::semantic(ConfigField::DnsRouteRulesPortRange));
             }
-            if rule.target.is_some()
-                && (rule.qname.is_some()
-                    || rule.qname_suffix.is_some()
-                    || rule.domain_keyword.is_some()
-                    || rule.qtype.is_some())
-            {
-                return Err(ConfigError::semantic(ConfigField::DnsRouteRulesTarget));
-            }
         }
         PreparedDnsRole::Server => {
             if rule.qname.is_some() {
@@ -2604,15 +2583,6 @@ fn prepare_dns_matcher(
             }
             if rule.qtype.is_some() {
                 return Err(ConfigError::semantic(ConfigField::DnsRouteRulesQtype));
-            }
-            if rule.target.is_some()
-                && (rule.domain.is_some()
-                    || rule.domain_suffix.is_some()
-                    || rule.domain_keyword.is_some()
-                    || rule.port.is_some()
-                    || rule.port_range.is_some())
-            {
-                return Err(ConfigError::semantic(ConfigField::DnsRouteRulesTarget));
             }
         }
     }
@@ -2710,7 +2680,7 @@ fn prepare_dns_matcher(
         })
         .transpose()?
         .unwrap_or_default();
-    let mut ports = rule
+    let ports = rule
         .port
         .as_ref()
         .map(|values| {
@@ -2734,29 +2704,6 @@ fn prepare_dns_matcher(
         .transpose()?
         .unwrap_or_default();
 
-    let mut dns_eligible = true;
-    if let Some(target) = &rule.target {
-        let target = validate_route_target(target, source, ConfigField::DnsRouteRulesTarget)?;
-        match target.host() {
-            TargetHostRef::Ip(_) => dns_eligible = false,
-            TargetHostRef::Domain(domain) => {
-                if matches!(role, PreparedDnsRole::Client) && target.port().get() != 53 {
-                    dns_eligible = false;
-                } else {
-                    push_prepared_dns_domain_field(
-                        &mut query_fields,
-                        Some(&ScalarOrList::Scalar(domain.to_owned())),
-                        ConfigField::DnsRouteRulesTarget,
-                        PreparedDomainField::Exact,
-                    )?;
-                    if matches!(role, PreparedDnsRole::Server) {
-                        ports.push(target.port());
-                    }
-                }
-            }
-        }
-    }
-
     Ok(PreparedDnsMatcherDraft {
         query_fields,
         inbounds,
@@ -2764,7 +2711,6 @@ fn prepare_dns_matcher(
         qtypes,
         ports,
         port_ranges,
-        dns_eligible,
     })
 }
 
@@ -2895,7 +2841,6 @@ fn resolve_rule_set_refs(
 fn dns_matcher_present(rule: &RawDnsRouteRule) -> bool {
     rule.inbound.is_some()
         || rule.network.is_some()
-        || rule.target.is_some()
         || rule.qname.is_some()
         || rule.qname_suffix.is_some()
         || rule.qtype.is_some()

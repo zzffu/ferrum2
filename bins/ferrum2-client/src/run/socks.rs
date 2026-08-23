@@ -2013,7 +2013,8 @@ pub(in crate::run) mod tests {
              [[route.rules]]\n\
              inbound = \"i0\"\n\
              network = \"udp\"\n\
-             target = {{ host = \"query.example\", port = 53 }}\n\
+             domain = \"query.example\"\n\
+             port = 53\n\
              action = \"route\"\n\
              outbound = \"manual\"\n\
              [shadowsocks]\n\

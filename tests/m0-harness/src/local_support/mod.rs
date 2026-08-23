@@ -1065,8 +1065,8 @@ pub fn write_two_hop_client_config(
                 String::new(),
                 format!(
                     "[route]\nfinal = \"{fallback}\"\n\
-                     [[route.rules]]\nnetwork = \"{network}\"\ntarget = {{ host = \"{}\", port = {} }}\noutbound = \"two-hop\"\n\
-                     [[route.rules]]\nnetwork = \"{network}\"\ntarget = {{ host = \"{}\", port = {} }}\noutbound = \"{fallback}\"\n",
+                     [[route.rules]]\nnetwork = \"{network}\"\nip = \"{}\"\nport = {}\noutbound = \"two-hop\"\n\
+                     [[route.rules]]\nnetwork = \"{network}\"\nip = \"{}\"\nport = {}\noutbound = \"{fallback}\"\n",
                     target.ip(),
                     target.port(),
                     target.ip(),
@@ -1293,7 +1293,7 @@ pub fn write_tagged_dns_server_matrix_config(
     config.push_str(&format!("[dns.route]\nfinal = \"{final_server}\"\n"));
     for (name, port, server) in rules {
         config.push_str(&format!(
-            "[[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ntarget = {{ host = \"{name}\", port = {port} }}\nserver = \"{server}\"\n"
+            "[[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ndomain = \"{name}\"\nport = {port}\nserver = \"{server}\"\n"
         ));
     }
     config.push_str(&format!(

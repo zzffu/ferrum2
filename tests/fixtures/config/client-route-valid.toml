@@ -26,12 +26,14 @@ final = "o0"
 [[route.rules]]
 inbound = "i0"
 network = "tcp"
-target = { host = "example.test", port = 443 }
+domain = "example.test"
+port = 443
 outbound = "o1"
 
 [[route.rules]]
 network = "udp"
-target = { host = "192.0.2.1", port = 53 }
+ip = "192.0.2.1"
+port = 53
 outbound = "o2"
 
 [shadowsocks]

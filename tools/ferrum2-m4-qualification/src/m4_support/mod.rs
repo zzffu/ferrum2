@@ -2865,9 +2865,9 @@ fn m14_udp_client_config(
          [[outbounds]]\ntag = \"unselected\"\nserver = \"{unselected}\"\n\
          [route]\nfinal = \"unselected\"\n\
          [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\n\
-         target = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"selected\"\n\
+         ip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"selected\"\n\
          [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\n\
-         target = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"unselected\"\n\
+         ip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"unselected\"\n\
          [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
          [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\

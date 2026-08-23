@@ -209,7 +209,6 @@ pub(super) struct RawRuleSetLoader {
 pub(super) struct RawRouteRule {
     pub(super) inbound: Option<ScalarOrList<String>>,
     pub(super) network: Option<ScalarOrList<String>>,
-    pub(super) target: Option<toml::Spanned<RawRouteTarget>>,
     pub(super) protocol: Option<ScalarOrList<String>>,
     pub(super) domain: Option<ScalarOrList<String>>,
     pub(super) domain_suffix: Option<ScalarOrList<String>>,
@@ -291,7 +290,6 @@ pub(super) struct RawDnsRoute {
 pub(super) struct RawDnsRouteRule {
     pub(super) inbound: Option<ScalarOrList<String>>,
     pub(super) network: Option<ScalarOrList<String>>,
-    pub(super) target: Option<toml::Spanned<RawRouteTarget>>,
     pub(super) qname: Option<ScalarOrList<String>>,
     pub(super) qname_suffix: Option<ScalarOrList<String>>,
     pub(super) qtype: Option<ScalarOrList<String>>,
@@ -305,13 +303,6 @@ pub(super) struct RawDnsRouteRule {
     pub(super) outbound: Option<String>,
     pub(super) action: Option<String>,
     pub(super) strategy: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawRouteTarget {
-    pub(super) host: Option<String>,
-    pub(super) port: Option<i64>,
 }
 
 #[derive(Clone, Deserialize)]

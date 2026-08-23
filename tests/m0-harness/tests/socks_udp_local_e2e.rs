@@ -350,9 +350,9 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
              [[outbounds]]\ntag = \"{unselected_tag}\"\nserver = \"{unselected_server_address}\"\n\
              [[selectors]]\ntag = \"{selector_tag}\"\noutbounds = [\"{selected_tag}\", \"{unselected_tag}\"]\ndefault = \"{selected_tag}\"\n\
              [route]\nfinal = \"{unselected_tag}\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"{selector_tag}\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"route\"\noutbound = \"{unselected_tag}\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\ntarget = {{ host = \"{}\", port = {} }}\naction = \"reject\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"{selector_tag}\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"{unselected_tag}\"\n\
+             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nip = \"{}\"\nport = {}\naction = \"reject\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\naction = \"sniff\"\nsniffers = \"dns\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\nprotocol = \"dns\"\naction = \"hijack-dns\"\n\
              [dns]\nmax_inflight = 4\n\

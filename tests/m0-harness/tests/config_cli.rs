@@ -376,7 +376,7 @@ fn routed_tagged(source: String) -> String {
         .join("\n")
         .replacen(
             "[shadowsocks]",
-            "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\ntarget = { host = \"example.test\", port = 443 }\noutbound = \"o1\"\n[shadowsocks]",
+            "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\ndomain = \"example.test\"\nport = 443\noutbound = \"o1\"\n[shadowsocks]",
             1,
         )
         + "\n"

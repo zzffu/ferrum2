@@ -1011,7 +1011,6 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
         ("zero port range", ConfigRole::Server, server("[[route.rules]]\nport_range = \"0:53\"\naction = \"reject\""), ConfigField::RouteRulesPortRange),
         ("reversed port range", ConfigRole::Server, server("[[route.rules]]\nport_range = \"54:53\"\naction = \"reject\""), ConfigField::RouteRulesPortRange),
         ("overflow port range", ConfigRole::Server, server("[[route.rules]]\nport_range = \"1:65536\"\naction = \"reject\""), ConfigField::RouteRulesPortRange),
-        ("legacy target mixed with port", ConfigRole::Server, server("[[route.rules]]\ntarget = { host = \"example.test\", port = 443 }\nport = 443\naction = \"reject\""), ConfigField::RouteRulesTarget),
         ("route requires outbound", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\""), ConfigField::RouteRulesOutbound),
         ("route forbids sniffers", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"o0\"\nsniffers = \"tls\""), ConfigField::RouteRulesSniffers),
         ("sniff forbids outbound", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"\noutbound = \"o0\""), ConfigField::RouteRulesOutbound),
@@ -1041,6 +1040,65 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
             source,
             (ConfigErrorKind::Semantic, field),
             100 + index,
+        );
+    }
+}
+
+#[test]
+fn removed_composite_target_is_unknown_for_route_and_dns_roles() {
+    let client_dns = with_dns(
+        tagged_client(1, 1),
+        "[dns]\n\
+         [[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n\
+         [[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n\
+         [dns.route]\nfinal = \"s0\"\n\
+         [[dns.route.rules]]\ntarget = { host = \"old-client.example\", port = 53 }\nserver = \"s0\"",
+    );
+    let server_dns = with_dns(
+        tagged_server(1, 1),
+        "[dns]\n\
+         [[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n\
+         [dns.route]\nfinal = \"s0\"\n\
+         [[dns.route.rules]]\ntarget = { host = \"old-server.example\", port = 443 }\nserver = \"s0\"",
+    );
+    let cases = [
+        (
+            "client ordinary route composite target",
+            ConfigRole::Client,
+            routed(
+                tagged_client(1, 1),
+                "[route]\nfinal = \"o0\"\n\
+                 [[route.rules]]\ntarget = { host = \"old-route.example\", port = 443 }\naction = \"reject\"",
+            ),
+        ),
+        (
+            "server ordinary route target subtable",
+            ConfigRole::Server,
+            routed(
+                tagged_server(1, 1),
+                "[route]\nfinal = \"o0\"\n\
+                 [[route.rules]]\naction = \"reject\"\n\
+                 [route.rules.target]\nhost = \"old-subtable.example\"\nport = 443",
+            ),
+        ),
+        (
+            "client DNS composite target",
+            ConfigRole::Client,
+            client_dns,
+        ),
+        (
+            "server DNS composite target",
+            ConfigRole::Server,
+            server_dns,
+        ),
+    ];
+    for (index, (name, role, source)) in cases.into_iter().enumerate() {
+        assert_tagged_error(
+            name,
+            role,
+            source,
+            (ConfigErrorKind::Syntax, ConfigField::Config),
+            330 + index,
         );
     }
 }
@@ -1132,14 +1190,14 @@ final = "https"
 [[dns.route.rules]]
 inbound = "local-dns"
 network = "udp"
-target = { host = "plain.example.", port = 53 }
+qname = "plain.example."
 server = "plain"
 [[dns.route.rules]]
 network = "tcp"
-target = { host = "tcp.example.", port = 53 }
+qname = "tcp.example."
 server = "tcp-v6"
 [[dns.route.rules]]
-target = { host = "tls.example.", port = 53 }
+qname = "tls.example."
 server = "tls""#;
     let source =
         with_dns(with_selectors(tagged_client(1, 3), graph), dns) + "\n[udp]\nenabled = false\n";
@@ -1509,8 +1567,6 @@ fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
         ("case-insensitive duplicate qtype", ConfigRole::Client, client("[[dns.route.rules]]\nqtype = [\"a\", \"A\"]\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQtype),
         ("duplicate normalized qname suffix", ConfigRole::Client, client("[[dns.route.rules]]\nqname_suffix = [\"Example.COM.\", \"example.com\"]\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQnameSuffix),
         ("normalized empty qname", ConfigRole::Client, client("[[dns.route.rules]]\nqname = \".\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesQname),
-        ("client legacy target mixing", ConfigRole::Client, client("[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 53 }\nqname = \"example.test\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesTarget),
-        ("server legacy target mixing", ConfigRole::Server, server("[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 443 }\nport = 443\nserver = \"s0\""), ConfigField::DnsRouteRulesTarget),
         ("server reversed port range", ConfigRole::Server, server("[[dns.route.rules]]\nport_range = \"54:53\"\nserver = \"s0\""), ConfigField::DnsRouteRulesPortRange),
     ];
     for (index, (name, role, source, field)) in cases.into_iter().enumerate() {
@@ -1617,7 +1673,6 @@ final = "s0""#;
         ("unreachable server", with_dns(CLIENT_BASE.to_owned(), &two_servers), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("unknown route inbound", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ninbound = \"missing\"\nserver = \"s0\""), ConfigField::DnsRouteRulesInbound, ConfigRole::Client),
         ("unknown route network", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"quic\"\nserver = \"s0\""), ConfigField::DnsRouteRulesNetwork, ConfigRole::Client),
-        ("invalid route target", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\ntarget = { host = \"example.test\", port = 0 }\nserver = \"s0\""), ConfigField::DnsRouteRulesTarget, ConfigRole::Client),
         ("unknown rule server", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"tcp\"\nserver = \"missing\""), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("DNS outbound action", client().replace("final = \"s0\"", "final = \"s0\"\n[[dns.route.rules]]\nnetwork = \"tcp\"\noutbound = \"s0\""), ConfigField::DnsRouteRulesServer, ConfigRole::Client),
         ("legacy detour", with_dns(CLIENT_BASE.to_owned(), &base_dns.replace("address = \"192.0.2.53:53\"", "address = \"192.0.2.53:53\"\ndetour = \"legacy\"")), ConfigField::DnsServersDetour, ConfigRole::Client),
@@ -1734,7 +1789,9 @@ final = "s0""#;
         .map(|index| format!("[[dns.servers]]\ntag = \"s{index}\"\ntransport = \"udp\"\naddress = \"192.0.2.53:{}\"\n", 1_000 + index))
         .collect::<String>();
     let rules_64 = (0..63)
-        .map(|index| format!("[[dns.route.rules]]\ntarget = {{ host = \"s{index}.example.\", port = 53 }}\nserver = \"s{index}\"\n"))
+        .map(|index| {
+            format!("[[dns.route.rules]]\nqname = \"s{index}.example.\"\nserver = \"s{index}\"\n")
+        })
         .collect::<String>();
     let maximum = with_dns(
         CLIENT_BASE.to_owned(),
@@ -1763,14 +1820,6 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         ("missing outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\""), ConfigField::RouteRulesAction),
         ("wrong outbound namespace", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
         ("unreferenced outbound", routed(base.clone(), "[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
-        ("ordinary target subtable", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\noutbound = \"o1\"\n[route.rules.target]\nhost = \"example.test\"\nport = 53"), ConfigField::RouteRulesTarget),
-        ("missing target host", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
-        ("missing target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\" }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
-        ("empty target", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"\", port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
-        ("non ASCII target", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"é.test\", port = 53 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
-        ("zero target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 0 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
-        ("high target port", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 65536 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
-        ("long target", routed(base.clone(), &format!("[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = {{ host = \"{}\", port = 53 }}\noutbound = \"o1\"", "a".repeat(256))), ConfigField::RouteRulesTarget),
     ];
     for (index, (name, source, field)) in cases.into_iter().enumerate() {
         assert_tagged_error(
@@ -1800,7 +1849,6 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         ("server wrong inbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"o0\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
         ("server wrong outbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
         ("server wrong final namespace", server_routed("[route]\nfinal = \"i0\""), ConfigField::RouteFinal),
-        ("server invalid target", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ntarget = { host = \"example.test\", port = 0 }\noutbound = \"o1\""), ConfigField::RouteRulesTarget),
         ("server unreferenced outbound", server_routed("[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
     ];
     load_server(
@@ -1825,7 +1873,6 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         ConfigField::RouteRules,
         ConfigField::RouteRulesInbound,
         ConfigField::RouteRulesNetwork,
-        ConfigField::RouteRulesTarget,
         ConfigField::RouteRulesOutbound,
         ConfigField::RouteFinal,
     ];
@@ -1836,7 +1883,6 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
             "route.rules",
             "route.rules.inbound",
             "route.rules.network",
-            "route.rules.target",
             "route.rules.outbound",
             "route.final"
         ]
@@ -3365,4 +3411,51 @@ fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
         .tun
         .unwrap();
     assert_eq!(tun.physical_endpoints, ["192.0.2.10:8388".parse().unwrap()]);
+}
+
+#[test]
+fn production_config_and_public_docs_cannot_reintroduce_composite_target() {
+    fn scan(path: &Path, extensions: &[&str], violations: &mut Vec<String>) {
+        if path.is_dir() {
+            for entry in fs::read_dir(path).expect("read anti-regression directory") {
+                let path = entry.expect("read anti-regression entry").path();
+                scan(&path, extensions, violations);
+            }
+            return;
+        }
+        if !extensions
+            .iter()
+            .any(|extension| path.extension().and_then(|value| value.to_str()) == Some(extension))
+        {
+            return;
+        }
+        let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
+        if normalized.contains("migration") {
+            return;
+        }
+        let source = fs::read_to_string(path).expect("read anti-regression source");
+        for (index, line) in source.lines().enumerate() {
+            let compact = line
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            if compact.contains("target={")
+                || line.contains("RawRouteTarget")
+                || line.contains("LegacyTarget")
+                || line.contains("RawTarget")
+            {
+                violations.push(format!("{}:{}", path.display(), index + 1));
+            }
+        }
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository = manifest.join("../..");
+    let mut violations = Vec::new();
+    scan(&manifest.join("src"), &["rs"], &mut violations);
+    scan(&repository.join("docs"), &["md", "toml"], &mut violations);
+    assert!(
+        violations.is_empty(),
+        "removed composite target reappeared in production config or public docs: {violations:?}"
+    );
 }

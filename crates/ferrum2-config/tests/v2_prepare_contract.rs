@@ -1286,7 +1286,7 @@ action = "route"
 server = "keyword-dns"
 
 [[dns.route.rules]]
-target = { host = "legacy-target.example", port = 53 }
+qname = "exact.example"
 action = "route"
 server = "keyword-dns"
 "#;
@@ -1343,7 +1343,7 @@ server = "keyword-dns"
     for (rule, domain) in blueprint
         .rules()
         .iter()
-        .zip(["has-needle.example", "legacy-target.example"])
+        .zip(["has-needle.example", "exact.example"])
     {
         assert!(
             rule.matcher().query_fields()[0]
@@ -1596,7 +1596,8 @@ server = "local"
 strategy = "ipv6_only"
 
 [[dns.route.rules]]
-target = { host = "legacy-target.invalid", port = 8443 }
+domain = "exact.invalid"
+port = 8443
 action = "route"
 server = "local"
 
@@ -1659,7 +1660,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     let target = &blueprint.rules()[1];
     assert!(
         target.matcher().query_fields()[0]
-            .matches_domain(&CanonicalDomain::new("legacy-target.invalid").expect("target probe"))
+            .matches_domain(&CanonicalDomain::new("exact.invalid").expect("target probe"))
     );
     assert_eq!(target.matcher().ports()[0].get(), 8443);
     assert_eq!(
