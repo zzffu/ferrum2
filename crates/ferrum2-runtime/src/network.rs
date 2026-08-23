@@ -512,23 +512,6 @@ impl NetworkSnapshotPublisher {
         }
         Ok(std::mem::replace(&mut *current, next))
     }
-
-    /// Commits a prepared resource only while its network generation is still current.
-    ///
-    /// The callback should only perform the bounded synchronous registration that makes the
-    /// resource visible to its owner. Snapshot publication is excluded until it returns.
-    pub fn commit_resource_if_current<T, R>(
-        &self,
-        generation: u64,
-        resource: T,
-        commit: impl FnOnce(T) -> R,
-    ) -> Result<R, T> {
-        let current = read_unpoisoned(&self.current);
-        if current.generation() != generation {
-            return Err(resource);
-        }
-        Ok(commit(resource))
-    }
 }
 
 fn read_unpoisoned<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -677,9 +660,9 @@ impl ResolvedInterface {
     }
 }
 
-/// Closed interface-resolution failure safe for runtime boundaries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InterfaceResolutionError {
+/// Closed reason for an interface-resolution failure.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InterfaceResolutionErrorKind {
     ExplicitInterfaceMissing,
     ExplicitInterfaceAmbiguous,
     ExplicitInterfaceUnavailable,
@@ -687,6 +670,38 @@ pub enum InterfaceResolutionError {
     SystemBestRouteUnavailable,
     SelectedInterfaceWrongFamily,
     SourceAddressUnavailable,
+}
+
+/// Closed interface-resolution failure safe for runtime boundaries.
+///
+/// The attempted source is retained separately from the reason so telemetry can use the same
+/// low-cardinality source labels for successful and failed resolutions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterfaceResolutionError {
+    kind: InterfaceResolutionErrorKind,
+    attempted_source: InterfaceSelectionSource,
+}
+
+impl InterfaceResolutionError {
+    const fn new(
+        kind: InterfaceResolutionErrorKind,
+        attempted_source: InterfaceSelectionSource,
+    ) -> Self {
+        Self {
+            kind,
+            attempted_source,
+        }
+    }
+
+    /// Returns the closed reason for the failure.
+    pub const fn kind(self) -> InterfaceResolutionErrorKind {
+        self.kind
+    }
+
+    /// Returns the low-cardinality selection source attempted by the failed resolution.
+    pub const fn attempted_source(self) -> InterfaceSelectionSource {
+        self.attempted_source
+    }
 }
 
 /// The one shared implementation of outbound interface priority.
@@ -720,16 +735,28 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
             let binding = match snapshot.resolve_named(name, family) {
                 NamedInterfaceResolution::Available(binding) => binding,
                 NamedInterfaceResolution::Missing => {
-                    return Err(InterfaceResolutionError::ExplicitInterfaceMissing);
+                    return Err(InterfaceResolutionError::new(
+                        InterfaceResolutionErrorKind::ExplicitInterfaceMissing,
+                        InterfaceSelectionSource::OutboundExplicit,
+                    ));
                 }
                 NamedInterfaceResolution::Ambiguous => {
-                    return Err(InterfaceResolutionError::ExplicitInterfaceAmbiguous);
+                    return Err(InterfaceResolutionError::new(
+                        InterfaceResolutionErrorKind::ExplicitInterfaceAmbiguous,
+                        InterfaceSelectionSource::OutboundExplicit,
+                    ));
                 }
                 NamedInterfaceResolution::Unavailable => {
-                    return Err(InterfaceResolutionError::ExplicitInterfaceUnavailable);
+                    return Err(InterfaceResolutionError::new(
+                        InterfaceResolutionErrorKind::ExplicitInterfaceUnavailable,
+                        InterfaceSelectionSource::OutboundExplicit,
+                    ));
                 }
                 NamedInterfaceResolution::WrongFamily => {
-                    return Err(InterfaceResolutionError::ExplicitInterfaceWrongFamily);
+                    return Err(InterfaceResolutionError::new(
+                        InterfaceResolutionErrorKind::ExplicitInterfaceWrongFamily,
+                        InterfaceSelectionSource::OutboundExplicit,
+                    ));
                 }
             };
             (binding, InterfaceSelectionSource::OutboundExplicit)
@@ -744,11 +771,17 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
         };
 
         if !binding.supports(family) {
-            return Err(InterfaceResolutionError::SelectedInterfaceWrongFamily);
+            return Err(InterfaceResolutionError::new(
+                InterfaceResolutionErrorKind::SelectedInterfaceWrongFamily,
+                selection_source,
+            ));
         }
         let source_address = outbound.source_address(family);
         if source_address.is_some_and(|address| !binding.owns(address)) {
-            return Err(InterfaceResolutionError::SourceAddressUnavailable);
+            return Err(InterfaceResolutionError::new(
+                InterfaceResolutionErrorKind::SourceAddressUnavailable,
+                selection_source,
+            ));
         }
         Ok(ResolvedInterface {
             snapshot_generation: snapshot.generation(),
@@ -756,57 +789,6 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
             source_address,
             selection_source,
         })
-    }
-
-    /// Resolves, prepares, and atomically registers one generation-bound resource.
-    ///
-    /// If the generation changes during preparation, the uncommitted resource is dropped and the
-    /// full operation is retried exactly once against the newly published snapshot.
-    pub fn prepare_and_commit<T, R, E>(
-        &self,
-        outbound: &DialOptions,
-        route: &RouteNetworkOptions,
-        destination: SocketAddr,
-        snapshots: &NetworkSnapshotPublisher,
-        mut prepare: impl FnMut(&ResolvedInterface) -> Result<T, E>,
-        mut commit: impl FnMut(T, &ResolvedInterface) -> R,
-    ) -> Result<R, GenerationStableResourceError<E>> {
-        for attempt in 0..2 {
-            let snapshot = snapshots.snapshot();
-            let resolved = match self.resolve(outbound, route, destination, &snapshot) {
-                Ok(resolved) => resolved,
-                Err(_) if !snapshots.is_current(snapshot.generation()) && attempt == 0 => {
-                    continue;
-                }
-                Err(error) => return Err(GenerationStableResourceError::Resolution(error)),
-            };
-            if !snapshots.is_current(resolved.snapshot_generation()) {
-                if attempt == 0 {
-                    continue;
-                }
-                return Err(GenerationStableResourceError::NetworkGenerationChanged);
-            }
-            let resource = match prepare(&resolved) {
-                Ok(resource) => resource,
-                Err(_) if !snapshots.is_current(resolved.snapshot_generation()) && attempt == 0 => {
-                    continue;
-                }
-                Err(error) => return Err(GenerationStableResourceError::Preparation(error)),
-            };
-            match snapshots.commit_resource_if_current(
-                resolved.snapshot_generation(),
-                resource,
-                |resource| commit(resource, &resolved),
-            ) {
-                Ok(result) => return Ok(result),
-                Err(resource) if attempt == 0 => drop(resource),
-                Err(resource) => {
-                    drop(resource);
-                    return Err(GenerationStableResourceError::NetworkGenerationChanged);
-                }
-            }
-        }
-        unreachable!("the generation-stable operation has exactly two attempts")
     }
 
     fn resolve_after_auto(
@@ -822,29 +804,27 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
         {
             return Ok((binding, InterfaceSelectionSource::RouteDefault));
         }
-        let route = self
-            .catalog
-            .system_best_route(destination)
-            .map_err(|_| InterfaceResolutionError::SystemBestRouteUnavailable)?;
+        let route = self.catalog.system_best_route(destination).map_err(|_| {
+            InterfaceResolutionError::new(
+                InterfaceResolutionErrorKind::SystemBestRouteUnavailable,
+                InterfaceSelectionSource::SystemBestRoute,
+            )
+        })?;
         let binding = snapshot
             .resolve_system_route(route, family)
-            .ok_or(InterfaceResolutionError::SystemBestRouteUnavailable)?;
+            .ok_or_else(|| {
+                InterfaceResolutionError::new(
+                    InterfaceResolutionErrorKind::SystemBestRouteUnavailable,
+                    InterfaceSelectionSource::SystemBestRoute,
+                )
+            })?;
         Ok((binding, InterfaceSelectionSource::SystemBestRoute))
     }
-}
-
-/// Failure from generation-stable resource preparation and registration.
-#[derive(Debug, Eq, PartialEq)]
-pub enum GenerationStableResourceError<E> {
-    Resolution(InterfaceResolutionError),
-    Preparation(E),
-    NetworkGenerationChanged,
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -1028,13 +1008,16 @@ mod tests {
     #[test]
     fn explicit_lookup_failure_never_falls_back() {
         for (interfaces, expected) in [
-            (vec![], InterfaceResolutionError::ExplicitInterfaceMissing),
+            (
+                vec![],
+                InterfaceResolutionErrorKind::ExplicitInterfaceMissing,
+            ),
             (
                 vec![
                     available(v4("explicit", 1, 11, 11), NetworkFamily::Ipv4),
                     available(v4("explicit", 2, 12, 12), NetworkFamily::Ipv4),
                 ],
-                InterfaceResolutionError::ExplicitInterfaceAmbiguous,
+                InterfaceResolutionErrorKind::ExplicitInterfaceAmbiguous,
             ),
             (
                 vec![observation(
@@ -1046,11 +1029,11 @@ mod tests {
                     1,
                     None,
                 )],
-                InterfaceResolutionError::ExplicitInterfaceUnavailable,
+                InterfaceResolutionErrorKind::ExplicitInterfaceUnavailable,
             ),
             (
                 vec![available(v6("explicit", 1, 11, 11), NetworkFamily::Ipv6)],
-                InterfaceResolutionError::ExplicitInterfaceWrongFamily,
+                InterfaceResolutionErrorKind::ExplicitInterfaceWrongFamily,
             ),
         ] {
             let resolver = NetworkInterfaceResolver::new(Catalog {
@@ -1066,7 +1049,11 @@ mod tests {
                     &NetworkSnapshot::from_interfaces(1, interfaces).unwrap(),
                 )
                 .unwrap_err();
-            assert_eq!(error, expected);
+            assert_eq!(error.kind(), expected);
+            assert_eq!(
+                error.attempted_source(),
+                InterfaceSelectionSource::OutboundExplicit
+            );
             assert!(
                 resolver
                     .catalog()
@@ -1124,25 +1111,55 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_source_or_family_is_rejected() {
+    fn mismatched_source_retains_each_selected_tier_and_family_is_rejected() {
         assert_eq!(
             NetworkSnapshot::new(1, Some(v6("wrong", 1, 1, 1)), None).unwrap_err(),
             NetworkSnapshotError
         );
 
-        let resolver = NetworkInterfaceResolver::new(Catalog::default());
         let snapshot = NetworkSnapshot::new(1, Some(v4("v4", 1, 1, 1)), None).unwrap();
-        assert_eq!(
-            resolver
+        let resolver = NetworkInterfaceResolver::new(Catalog {
+            interfaces: Vec::new(),
+            system: Some(SystemBestRoute::new(1, 1).unwrap()),
+            system_destinations: Mutex::default(),
+        });
+        let source = Some(Ipv4Addr::new(192, 0, 2, 99));
+        for (outbound, route, expected_source) in [
+            (
+                DialOptions::new(Some("v4"), source, None),
+                RouteNetworkOptions::new(true, None::<&str>),
+                InterfaceSelectionSource::OutboundExplicit,
+            ),
+            (
+                DialOptions::new(None::<&str>, source, None),
+                RouteNetworkOptions::new(true, None::<&str>),
+                InterfaceSelectionSource::AutoDetected,
+            ),
+            (
+                DialOptions::new(None::<&str>, source, None),
+                RouteNetworkOptions::new(false, Some("v4")),
+                InterfaceSelectionSource::RouteDefault,
+            ),
+            (
+                DialOptions::new(None::<&str>, source, None),
+                RouteNetworkOptions::new(false, None::<&str>),
+                InterfaceSelectionSource::SystemBestRoute,
+            ),
+        ] {
+            let error = resolver
                 .resolve(
-                    &DialOptions::new(None::<&str>, Some(Ipv4Addr::new(192, 0, 2, 99)), None,),
-                    &RouteNetworkOptions::new(true, None::<&str>),
+                    &outbound,
+                    &route,
                     SocketAddr::from(([203, 0, 113, 9], 443)),
                     &snapshot,
                 )
-                .unwrap_err(),
-            InterfaceResolutionError::SourceAddressUnavailable
-        );
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                InterfaceResolutionErrorKind::SourceAddressUnavailable
+            );
+            assert_eq!(error.attempted_source(), expected_source);
+        }
     }
 
     #[test]
@@ -1261,114 +1278,22 @@ mod tests {
             system_destinations: Mutex::default(),
         });
 
-        assert_eq!(
-            resolver
-                .resolve(
-                    &DialOptions::default(),
-                    &RouteNetworkOptions::default(),
-                    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443),
-                    &snapshot,
-                )
-                .unwrap_err(),
-            InterfaceResolutionError::SystemBestRouteUnavailable
-        );
-    }
-
-    #[derive(Debug)]
-    struct TrackedResource {
-        generation: u64,
-        drops: Arc<AtomicUsize>,
-    }
-
-    impl Drop for TrackedResource {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    #[test]
-    fn generation_change_drops_stale_resource_and_retries_once() {
-        let initial = Arc::new(NetworkSnapshot::new(1, Some(v4("old", 1, 1, 1)), None).unwrap());
-        let next = Arc::new(NetworkSnapshot::new(2, Some(v4("new", 2, 2, 2)), None).unwrap());
-        let snapshots = NetworkSnapshotPublisher::new(initial);
-        let resolver = NetworkInterfaceResolver::new(Catalog::default());
-        let attempts = AtomicUsize::new(0);
-        let drops = Arc::new(AtomicUsize::new(0));
-
-        let resource = resolver
-            .prepare_and_commit(
-                &DialOptions::default(),
-                &RouteNetworkOptions::new(true, None::<&str>),
-                SocketAddr::from(([203, 0, 113, 1], 443)),
-                &snapshots,
-                |resolved| {
-                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                        snapshots.publish_if_current(1, Arc::clone(&next)).unwrap();
-                    }
-                    Ok::<_, ()>(TrackedResource {
-                        generation: resolved.snapshot_generation(),
-                        drops: Arc::clone(&drops),
-                    })
-                },
-                |resource, resolved| {
-                    assert_eq!(resource.generation, resolved.snapshot_generation());
-                    resource
-                },
-            )
-            .unwrap();
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert_eq!(resource.generation, 2);
-        drop(resource);
-        assert_eq!(drops.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn a_second_generation_change_fails_without_publishing_stale_resource() {
-        let snapshots = NetworkSnapshotPublisher::new(Arc::new(
-            NetworkSnapshot::new(1, Some(v4("one", 1, 1, 1)), None).unwrap(),
-        ));
-        let second = Arc::new(NetworkSnapshot::new(2, Some(v4("two", 2, 2, 2)), None).unwrap());
-        let third = Arc::new(NetworkSnapshot::new(3, Some(v4("three", 3, 3, 3)), None).unwrap());
-        let resolver = NetworkInterfaceResolver::new(Catalog::default());
-        let attempts = AtomicUsize::new(0);
-        let commits = AtomicUsize::new(0);
-        let drops = Arc::new(AtomicUsize::new(0));
-
         let error = resolver
-            .prepare_and_commit(
+            .resolve(
                 &DialOptions::default(),
-                &RouteNetworkOptions::new(true, None::<&str>),
-                SocketAddr::from(([203, 0, 113, 1], 443)),
-                &snapshots,
-                |resolved| {
-                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                    let (expected, next) = if attempt == 0 {
-                        (1, Arc::clone(&second))
-                    } else {
-                        (2, Arc::clone(&third))
-                    };
-                    snapshots.publish_if_current(expected, next).unwrap();
-                    Ok::<_, ()>(TrackedResource {
-                        generation: resolved.snapshot_generation(),
-                        drops: Arc::clone(&drops),
-                    })
-                },
-                |resource, _| {
-                    commits.fetch_add(1, Ordering::SeqCst);
-                    resource
-                },
+                &RouteNetworkOptions::default(),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443),
+                &snapshot,
             )
             .unwrap_err();
-
         assert_eq!(
-            error,
-            GenerationStableResourceError::NetworkGenerationChanged
+            error.kind(),
+            InterfaceResolutionErrorKind::SystemBestRouteUnavailable
         );
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(commits.load(Ordering::SeqCst), 0);
-        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            error.attempted_source(),
+            InterfaceSelectionSource::SystemBestRoute
+        );
     }
 
     #[test]

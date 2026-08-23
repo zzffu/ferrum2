@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -7,7 +8,9 @@ use futures_util::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use crate::network::{
-    NetworkSnapshot, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,
+    DialOptions, InterfaceResolutionError, InterfaceSelectionSource, NetworkInterfaceCatalog,
+    NetworkInterfaceResolver, NetworkSnapshot, NetworkSnapshotPublishError,
+    NetworkSnapshotPublisher, ResetNetwork, ResolvedInterface, RouteNetworkOptions,
 };
 use crate::owner::{OwnerGuard, OwnerRegistry};
 
@@ -288,6 +291,120 @@ pub enum NetworkRuntimeOwnerRegistrationError {
     IdentifierExhausted,
 }
 
+/// One prepared resource admitted under an exact network generation.
+#[must_use = "the runtime owner must be retained for the admitted resource lifetime"]
+pub struct AdmittedNetworkRuntimeResource<T> {
+    resource: T,
+    resolved_interface: ResolvedInterface,
+    owner: NetworkRuntimeOwner,
+}
+
+impl<T> AdmittedNetworkRuntimeResource<T> {
+    /// Returns the prepared resource.
+    pub const fn resource(&self) -> &T {
+        &self.resource
+    }
+
+    /// Returns mutable access to the prepared resource.
+    pub const fn resource_mut(&mut self) -> &mut T {
+        &mut self.resource
+    }
+
+    /// Returns the interface decision used while preparing the resource.
+    pub const fn resolved_interface(&self) -> &ResolvedInterface {
+        &self.resolved_interface
+    }
+
+    /// Returns the generation owner that must remain alive with the resource.
+    pub const fn owner(&self) -> &NetworkRuntimeOwner {
+        &self.owner
+    }
+
+    /// Returns mutable access to the owner for cancellation waits.
+    pub const fn owner_mut(&mut self) -> &mut NetworkRuntimeOwner {
+        &mut self.owner
+    }
+
+    /// Splits the admitted value into its resource, interface decision, and exclusive owner.
+    pub fn into_parts(self) -> (T, ResolvedInterface, NetworkRuntimeOwner) {
+        (self.resource, self.resolved_interface, self.owner)
+    }
+}
+
+impl<T> fmt::Debug for AdmittedNetworkRuntimeResource<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedNetworkRuntimeResource")
+            .field("resource", &"[closed]")
+            .field("resolved_interface", &self.resolved_interface)
+            .field("owner", &self.owner)
+            .finish()
+    }
+}
+
+/// Closed failure from preparing and admitting one generation-bound runtime resource.
+#[derive(Eq, PartialEq)]
+pub enum NetworkRuntimeResourceAdmissionError<E> {
+    InterfaceResolution(InterfaceResolutionError),
+    Preparation {
+        attempted_source: InterfaceSelectionSource,
+        error: E,
+    },
+    NetworkGenerationChanged {
+        attempted_source: InterfaceSelectionSource,
+    },
+    RuntimeOwnerRegistration {
+        attempted_source: InterfaceSelectionSource,
+        error: NetworkRuntimeOwnerRegistrationError,
+    },
+}
+
+impl<E> fmt::Debug for NetworkRuntimeResourceAdmissionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InterfaceResolution(error) => formatter
+                .debug_tuple("InterfaceResolution")
+                .field(error)
+                .finish(),
+            Self::Preparation {
+                attempted_source, ..
+            } => formatter
+                .debug_struct("Preparation")
+                .field("attempted_source", attempted_source)
+                .field("error", &"[closed]")
+                .finish(),
+            Self::NetworkGenerationChanged { attempted_source } => formatter
+                .debug_struct("NetworkGenerationChanged")
+                .field("attempted_source", attempted_source)
+                .finish(),
+            Self::RuntimeOwnerRegistration {
+                attempted_source,
+                error,
+            } => formatter
+                .debug_struct("RuntimeOwnerRegistration")
+                .field("attempted_source", attempted_source)
+                .field("error", error)
+                .finish(),
+        }
+    }
+}
+
+impl<E> NetworkRuntimeResourceAdmissionError<E> {
+    /// Returns the low-cardinality interface source attempted by the failed operation.
+    pub const fn attempted_source(&self) -> InterfaceSelectionSource {
+        match self {
+            Self::InterfaceResolution(error) => error.attempted_source(),
+            Self::Preparation {
+                attempted_source, ..
+            }
+            | Self::NetworkGenerationChanged { attempted_source }
+            | Self::RuntimeOwnerRegistration {
+                attempted_source, ..
+            } => *attempted_source,
+        }
+    }
+}
+
 /// Cancellation delivered to one generation-bound owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NetworkResetSignal {
@@ -439,6 +556,118 @@ impl NetworkResetCoordinator {
             cancellation: receiver,
             _owner: self.inner.owners.track_network_runtime_owner(),
         })
+    }
+
+    /// Resolves, prepares, and admits one resource under an exact network generation.
+    ///
+    /// Preparation is never performed while holding the snapshot publisher or coordinator state
+    /// lock. After preparation, the generation is checked explicitly and runtime-owner
+    /// registration is the final admission step. A stale generation drops the prepared resource
+    /// and retries the complete operation at most once.
+    pub fn prepare_and_admit_runtime_resource<C, T, E>(
+        &self,
+        resolver: &NetworkInterfaceResolver<C>,
+        outbound: &DialOptions,
+        route: &RouteNetworkOptions,
+        destination: SocketAddr,
+        kind: NetworkRuntimeOwnerKind,
+        mut prepare: impl FnMut(&ResolvedInterface) -> Result<T, E>,
+    ) -> Result<AdmittedNetworkRuntimeResource<T>, NetworkRuntimeResourceAdmissionError<E>>
+    where
+        C: NetworkInterfaceCatalog,
+    {
+        for attempt in 0..2 {
+            let snapshot = self.inner.snapshots.snapshot();
+            let resolved = match resolver.resolve(outbound, route, destination, &snapshot) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    if !self.inner.snapshots.is_current(snapshot.generation()) {
+                        if attempt == 0 {
+                            continue;
+                        }
+                        return Err(
+                            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                                attempted_source: error.attempted_source(),
+                            },
+                        );
+                    }
+                    return Err(NetworkRuntimeResourceAdmissionError::InterfaceResolution(
+                        error,
+                    ));
+                }
+            };
+            let attempted_source = resolved.selection_source();
+            let resource = match prepare(&resolved) {
+                Ok(resource) => resource,
+                Err(error) => {
+                    if !self
+                        .inner
+                        .snapshots
+                        .is_current(resolved.snapshot_generation())
+                    {
+                        if attempt == 0 {
+                            continue;
+                        }
+                        return Err(
+                            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                                attempted_source,
+                            },
+                        );
+                    }
+                    return Err(NetworkRuntimeResourceAdmissionError::Preparation {
+                        attempted_source,
+                        error,
+                    });
+                }
+            };
+
+            if !self
+                .inner
+                .snapshots
+                .is_current(resolved.snapshot_generation())
+            {
+                drop(resource);
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(
+                    NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                        attempted_source,
+                    },
+                );
+            }
+
+            match self.register_runtime_owner(resolved.snapshot_generation(), kind) {
+                Ok(owner) => {
+                    return Ok(AdmittedNetworkRuntimeResource {
+                        resource,
+                        resolved_interface: resolved,
+                        owner,
+                    });
+                }
+                Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration) => {
+                    drop(resource);
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(
+                        NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                            attempted_source,
+                        },
+                    );
+                }
+                Err(error) => {
+                    drop(resource);
+                    return Err(
+                        NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration {
+                            attempted_source,
+                            error,
+                        },
+                    );
+                }
+            }
+        }
+        unreachable!("generation-bound admission has exactly two complete attempts")
     }
 
     /// Queues and serially drives one ordinary reset or full-rebuild intent.

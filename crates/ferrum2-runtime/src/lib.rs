@@ -27,9 +27,9 @@ pub use metrics::{
     MetricsEndpointError, serve_metrics_connection,
 };
 pub use network::{
-    DialOptions, GenerationStableResourceError, InterfaceBinding, InterfaceBindingError,
-    InterfaceResolutionError, InterfaceSelectionSource, NamedInterfaceResolution, NetworkFamily,
-    NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
+    DialOptions, InterfaceBinding, InterfaceBindingError, InterfaceResolutionError,
+    InterfaceResolutionErrorKind, InterfaceSelectionSource, NamedInterfaceResolution,
+    NetworkFamily, NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
     NetworkInterfaceObservation, NetworkInterfaceObservationError, NetworkInterfaceResolver,
     NetworkResetError, NetworkResetFuture, NetworkSnapshot, NetworkSnapshotCaptureError,
     NetworkSnapshotError, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,
@@ -48,13 +48,15 @@ pub use relay::{
     relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
 };
 pub use reset::{
-    DEFAULT_NETWORK_RESET_HOOKS, DEFAULT_NETWORK_RUNTIME_OWNERS, MAX_NETWORK_RESET_HOOKS,
-    MAX_NETWORK_RUNTIME_OWNERS, ManagedNetworkDamage, NetworkResetCoordinator,
-    NetworkResetCoordinatorError, NetworkResetHookRegistration, NetworkResetHookRegistrationError,
-    NetworkResetHookStage, NetworkResetIntent, NetworkResetLimits, NetworkResetLimitsError,
-    NetworkResetOutcome, NetworkResetReason, NetworkResetReport, NetworkResetRequestDisposition,
-    NetworkResetSignal, NetworkResetState, NetworkResetStatus, NetworkRuntimeOwner,
-    NetworkRuntimeOwnerCancellation, NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
+    AdmittedNetworkRuntimeResource, DEFAULT_NETWORK_RESET_HOOKS, DEFAULT_NETWORK_RUNTIME_OWNERS,
+    MAX_NETWORK_RESET_HOOKS, MAX_NETWORK_RUNTIME_OWNERS, ManagedNetworkDamage,
+    NetworkResetCoordinator, NetworkResetCoordinatorError, NetworkResetHookRegistration,
+    NetworkResetHookRegistrationError, NetworkResetHookStage, NetworkResetIntent,
+    NetworkResetLimits, NetworkResetLimitsError, NetworkResetOutcome, NetworkResetReason,
+    NetworkResetReport, NetworkResetRequestDisposition, NetworkResetSignal, NetworkResetState,
+    NetworkResetStatus, NetworkRuntimeOwner, NetworkRuntimeOwnerCancellation,
+    NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
+    NetworkRuntimeResourceAdmissionError,
 };
 pub use ruleset::{
     BoxedRuleSetBody, LoadedRuleSet, PreparedRuleSetRefreshRoot, RuleSetBody, RuleSetCacheName,
