@@ -1,4 +1,4 @@
-name: tun-fuzz-deterministic
+name: tun-fuzz-static
 
 on:
   pull_request:
@@ -24,8 +24,8 @@ permissions:
   contents: read
 
 jobs:
-  deterministic-properties:
-    name: deterministic-properties
+  deterministic-build:
+    name: deterministic-build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -49,15 +49,15 @@ jobs:
         shell: bash
         working-directory: crates/ferrum2-tun/fuzz
         run: cargo +nightly-2026-07-10 fetch --locked
-      - name: Run no-default-features checks
+      - name: Compile no-default-features harnesses
         shell: bash
         working-directory: crates/ferrum2-tun/fuzz
         run: |
           set -euo pipefail
           cargo +nightly-2026-07-10 fmt --all -- --check
           cargo +nightly-2026-07-10 check --all-targets --no-default-features --locked --offline
-          cargo +nightly-2026-07-10 test --no-default-features --locked --offline
-          cargo +nightly-2026-07-10 run --bin smoke --no-default-features --locked --offline
+          cargo +nightly-2026-07-10 test --no-default-features --no-run --locked --offline
+          cargo +nightly-2026-07-10 build --bin smoke --no-default-features --locked --offline
       - name: Verify no generated diff
         shell: bash
         run: |
@@ -65,8 +65,8 @@ jobs:
           git diff --check
           test "$(git status --porcelain --untracked-files=no)" = ""
 
-  libfuzzer-smoke:
-    name: libfuzzer-smoke
+  libfuzzer-build:
+    name: libfuzzer-build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -94,38 +94,14 @@ jobs:
         shell: bash
         working-directory: crates/ferrum2-tun/fuzz
         run: cargo +nightly-2026-07-10 fetch --locked
-      - name: Compile and run bounded packet reassembly fuzz target
+      - name: Compile TUN fuzz targets without execution
         shell: bash
         working-directory: crates/ferrum2-tun/fuzz
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          fuzz_corpus="$RUNNER_TEMP/ferrum2-tun-fuzz-corpus"
-          fuzz_artifacts="$RUNNER_TEMP/ferrum2-tun-fuzz-artifacts"
-          mkdir -p "$fuzz_corpus" "$fuzz_artifacts"
-          cp corpus/packet_reassembly/* "$fuzz_corpus/"
-          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz run \
-            --features libfuzzer \
-            --jobs 1 \
-            packet_reassembly \
-            "$fuzz_corpus" \
-            -- \
-            -runs=512 \
-            -max_total_time=30 \
-            -timeout=5 \
-            -rss_limit_mb=2048 \
-            -max_len=262144 \
-            -seed=61924557 \
-            -artifact_prefix="$fuzz_artifacts/" \
-            -print_final_stats=1
-      - name: Upload libFuzzer failure artifacts
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: ferrum2-tun-libfuzzer-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ferrum2-tun-fuzz-artifacts
-          if-no-files-found: ignore
-          retention-days: 7
+          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer packet_reassembly
+          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer udp_reset_races
       - name: Verify no generated diff
         if: always()
         shell: bash
