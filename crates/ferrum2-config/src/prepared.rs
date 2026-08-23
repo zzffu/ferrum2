@@ -810,6 +810,22 @@ impl PreparedClientV2 {
             .is_some_and(|tun| tun.auto_route)
     }
 
+    /// Reports the source-level strict-route request, including an ineffective request.
+    pub fn tun_strict_route_requested(&self) -> bool {
+        self.validated
+            .tun
+            .as_ref()
+            .is_some_and(|tun| tun.strict_route_requested())
+    }
+
+    /// Reports the effective strict-route value after applying the automatic-route gate.
+    pub fn tun_strict_route_effective(&self) -> bool {
+        self.validated
+            .tun
+            .as_ref()
+            .is_some_and(|tun| tun.strict_route_effective())
+    }
+
     pub fn outbound_endpoints(&self) -> &[Option<DialEndpoint>] {
         &self.outbound_endpoints
     }

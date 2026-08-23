@@ -25,6 +25,7 @@ tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
 udp_filtering = "endpoint_independent"
 auto_route = true
+strict_route = false
 route_address = ["0.0.0.0/0", "::/0"]
 route_exclude_address = ["192.168.0.0/16", "fc00::/7"]
 auto_dns = true
@@ -97,16 +98,24 @@ live TUN. It also proves mixed Direct/Shadowsocks and IPv4/IPv6 target children,
 drop-new without eviction, and binds deterministic candidate tests to congested queues and stale
 restart generations.
 
-## Route integrity and network changes
+## Automatic and strict routing
 
-Managed routing always detects conflicting external routes. A more-specific route inside a capture
-prefix, or an equal prefix with a winning or indeterminate metric, prevents admission. Loopback,
-link-local, control ranges, and Ferrum2-owned rows are exempt; private LAN, ULA, container, Hyper-V,
-and other VPN routes are not implicitly exempt. Add every intentionally bypassed LAN prefix to
-`route_exclude_address`.
+`auto_route` controls automatic TUN route installation. It does not detect external overlapping
+routes, prove that every packet is captured, or provide a kill switch.
 
-Detection is fail-closed but is not a kernel WFP kill switch. A small user-space notification race
-can exist between an operating-system route change and Ferrum2's response.
+`strict_route` is a separate request and defaults to `false`. Its effective configuration value is
+exactly `auto_route && strict_route`. A configuration with `strict_route = true` and
+`auto_route = false` remains valid so startup diagnostics can report the retained request and an
+effective value of `false`; it must not claim that strict routing is enabled.
+
+This change establishes only that configuration and diagnostic contract. The current runtime does
+not yet install WFP rules from the effective value, so setting `strict_route = true` is not yet a
+traffic-leak guarantee. The planned Windows enforcement is limited to unsupported-address-family
+unreachable handling and traditional TCP/UDP port-53 protection on non-TUN paths when managed DNS
+is enabled. It is not an external route-overlap detector, general physical-interface blocker, DoH
+or DoT detector, or complete kill switch.
+
+## Network changes
 
 A semantic route, interface, address, DNS-lease, or underlay change rebuilds the managed TUN session
 inside the same Ferrum2 process. Existing TCP flows are reset and UDP associations are closed; new
@@ -167,6 +176,10 @@ route, outbound, or adapter identity is exposed as a label.
 ## Migration from earlier schema-v2 TUN configuration
 
 - Existing dual-stack address fields and IPv4 synthetic DNS remain valid.
+- `strict_route` is new and defaults to `false`. Its requested value is retained, but it is
+  effective only with `auto_route = true`; requesting it without automatic routing requires a
+  fixed startup warning from the eventual runtime consumer. This configuration-only change does
+  not install WFP rules.
 - `udp_filtering` now defaults to `endpoint_independent` when omitted. Set it to
   `address_dependent` explicitly to retain source-address filtering.
 - Ferrum2 no longer estimates or rejects aggregate TUN-owned memory. Flow, association, queue,

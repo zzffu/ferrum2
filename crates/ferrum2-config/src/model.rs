@@ -37,6 +37,8 @@ pub struct TunConfig {
     pub ipv4_address: Option<Ipv4Net>,
     pub ipv6_address: Option<Ipv6Net>,
     pub auto_route: bool,
+    /// The source-level strict-route request, retained even when automatic routing is disabled.
+    pub strict_route: bool,
     pub capture_routes: Vec<IpNet>,
     pub auto_dns: bool,
     pub ipv4_dns_address: Option<Ipv4Addr>,
@@ -49,6 +51,18 @@ pub struct TunConfig {
     pub tcp_buffer_bytes: usize,
     pub max_udp_mappings: usize,
     pub udp_filtering: UdpFiltering,
+}
+
+impl TunConfig {
+    /// Reports the source-level strict-route request without applying its `auto_route` gate.
+    pub const fn strict_route_requested(&self) -> bool {
+        self.strict_route
+    }
+
+    /// Reports whether strict routing is effective under the closed configuration contract.
+    pub const fn strict_route_effective(&self) -> bool {
+        self.auto_route && self.strict_route
+    }
 }
 
 /// Source-address filtering applied to one endpoint-independent UDP association.

@@ -70,6 +70,8 @@ pub(super) struct RawTun {
     pub(super) outbound: Option<String>,
     #[serde(default)]
     pub(super) auto_route: bool,
+    #[serde(default)]
+    pub(super) strict_route: bool,
     pub(super) route_address: Option<Vec<String>>,
     pub(super) route_exclude_address: Option<Vec<String>>,
     #[serde(default)]

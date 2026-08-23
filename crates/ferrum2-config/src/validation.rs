@@ -520,6 +520,7 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             ipv4_address,
             ipv6_address,
             auto_route: raw.auto_route,
+            strict_route: raw.strict_route,
             capture_routes,
             auto_dns: raw.auto_dns,
             ipv4_dns_address,

@@ -2332,6 +2332,68 @@ fn tun_udp_filtering_defaults_to_eif_and_preserves_explicit_choices() {
 }
 
 #[test]
+fn tun_strict_route_retains_the_request_and_is_effective_only_with_auto_route() {
+    for (name, settings, auto_route, requested, effective) in [
+        ("omitted defaults", "", false, false, false),
+        (
+            "both explicitly disabled",
+            "auto_route = false\nstrict_route = false\n",
+            false,
+            false,
+            false,
+        ),
+        (
+            "requested without automatic routing",
+            "auto_route = false\nstrict_route = true\n",
+            false,
+            true,
+            false,
+        ),
+        (
+            "automatic routing without strict routing",
+            "auto_route = true\nstrict_route = false\n",
+            true,
+            false,
+            false,
+        ),
+        (
+            "strict routing effective",
+            "auto_route = true\nstrict_route = true\n",
+            true,
+            true,
+            true,
+        ),
+    ] {
+        let source = format!(
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\n{settings}outbound = \"proxy\""
+        );
+        let tun = load_client(TempConfig::text(&tun_client(&source)).path())
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .tun
+            .expect(name);
+        assert_eq!(tun.auto_route, auto_route, "{name}");
+        assert_eq!(tun.strict_route, requested, "{name}");
+        assert_eq!(tun.strict_route_requested(), requested, "{name}");
+        assert_eq!(tun.strict_route_effective(), effective, "{name}");
+    }
+}
+
+#[test]
+fn tun_strict_route_rejects_non_boolean_values() {
+    for value in ["\"definitely-not-a-bool\"", "1", "[]"] {
+        let source = format!(
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nstrict_route = {value}\noutbound = \"proxy\""
+        );
+        let error = load_client(TempConfig::text(&tun_client(&source)).path())
+            .err()
+            .expect("non-boolean strict_route must fail");
+        assert_eq!(error.kind(), ConfigErrorKind::Syntax);
+        assert_eq!(error.field(), ConfigField::Config);
+        assert!(!format!("{error}\n{error:?}").contains("definitely-not-a-bool"));
+    }
+}
+
+#[test]
 fn tun_optional_families_routes_and_filtering_are_family_exact() {
     let v4 = tun_client(
         "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nauto_route = true\nudp_filtering = \"address_dependent\"\noutbound = \"proxy\"",

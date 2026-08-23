@@ -364,14 +364,22 @@ fn load_and_prepare_reject_missing_and_unsupported_schema_versions() {
 }
 
 #[test]
-fn prepared_client_reports_only_validated_tun_auto_route() {
+fn prepared_and_finished_client_preserve_strict_route_request_and_effective_state() {
     let without_tun = TempConfig::new(CLIENT_V2_MINIMAL);
     let without_tun = prepare_client_v2(&without_tun.0).expect("prepare client without TUN");
     assert!(!without_tun.has_tun());
     assert!(!without_tun.tun_auto_route());
+    assert!(!without_tun.tun_strict_route_requested());
+    assert!(!without_tun.tun_strict_route_effective());
 
-    let with_tun = TempConfig::new(
-        r#"
+    for (auto_route, strict_route, effective) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let source = format!(
+            r#"
 schema_version = 2
 
 [tun]
@@ -379,17 +387,29 @@ tag = "tun-in"
 adapter_name = "Ferrum2"
 ipv4_address = "198.18.0.2/30"
 ipv6_address = "fd00::2/126"
-auto_route = true
+auto_route = {auto_route}
+strict_route = {strict_route}
 outbound = "direct"
 
 [[outbounds]]
 tag = "direct"
 type = "direct"
 "#,
-    );
-    let with_tun = prepare_client_v2(&with_tun.0).expect("prepare auto-route TUN");
-    assert!(with_tun.has_tun());
-    assert!(with_tun.tun_auto_route());
+        );
+        let file = TempConfig::new(&source);
+        let prepared = prepare_client_v2(&file.0).expect("prepare strict-route combination");
+        assert!(prepared.has_tun());
+        assert_eq!(prepared.tun_auto_route(), auto_route);
+        assert_eq!(prepared.tun_strict_route_requested(), strict_route);
+        assert_eq!(prepared.tun_strict_route_effective(), effective);
+
+        let finished = finish_client_v2(prepared, ClientV2Resources::default())
+            .expect("finish strict-route combination");
+        let tun = finished.tun.expect("finished TUN");
+        assert_eq!(tun.auto_route, auto_route);
+        assert_eq!(tun.strict_route_requested(), strict_route);
+        assert_eq!(tun.strict_route_effective(), effective);
+    }
 }
 
 #[test]

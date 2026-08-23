@@ -15,6 +15,9 @@ tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
 udp_filtering = "endpoint_independent"
 auto_route = true
+# The strict-route configuration contract defaults to false. Runtime WFP enforcement
+# is intentionally not part of the current configuration-only implementation.
+strict_route = false
 route_address = ["0.0.0.0/0", "::/0"]
 route_exclude_address = [
   "10.0.0.0/8",
