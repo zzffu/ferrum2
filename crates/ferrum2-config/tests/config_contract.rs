@@ -985,6 +985,122 @@ action = "reject""#;
 }
 
 #[test]
+fn route_network_defaults_and_combinations_are_role_neutral() {
+    let client = load_client(TempConfig::text(CLIENT_BASE).path()).expect("client route defaults");
+    assert!(!client.route_network.auto_detect_interface);
+    assert_eq!(client.route_network.default_interface(), None);
+    let server = load_server(TempConfig::text(SERVER_BASE).path()).expect("server route defaults");
+    assert!(!server.route_network.auto_detect_interface);
+    assert_eq!(server.route_network.default_interface(), None);
+
+    for (name, settings, auto_detect, default_interface) in [
+        (
+            "explicit defaults",
+            "auto_detect_interface = false\n",
+            false,
+            None,
+        ),
+        (
+            "automatic only",
+            "auto_detect_interface = true\n",
+            true,
+            None,
+        ),
+        (
+            "fallback only",
+            "default_interface = \"Ethernet 2\"\n",
+            false,
+            Some("Ethernet 2"),
+        ),
+        (
+            "automatic with fallback",
+            "auto_detect_interface = true\ndefault_interface = \"Wi-Fi Ω\"\n",
+            true,
+            Some("Wi-Fi Ω"),
+        ),
+    ] {
+        let route = format!("[route]\n{settings}final = \"o0\"");
+        for role in [ConfigRole::Client, ConfigRole::Server] {
+            let source = match role {
+                ConfigRole::Client => routed(tagged_client(1, 1), &route),
+                ConfigRole::Server => routed(tagged_server(1, 1), &route),
+            };
+            let actual = match role {
+                ConfigRole::Client => {
+                    let config = load_client(TempConfig::text(&source).path())
+                        .unwrap_or_else(|error| panic!("{name} client: {error}"));
+                    (
+                        config.route_network.auto_detect_interface,
+                        config.route_network.default_interface,
+                    )
+                }
+                ConfigRole::Server => {
+                    let config = load_server(TempConfig::text(&source).path())
+                        .unwrap_or_else(|error| panic!("{name} server: {error}"));
+                    (
+                        config.route_network.auto_detect_interface,
+                        config.route_network.default_interface,
+                    )
+                }
+            };
+            assert_eq!(actual.0, auto_detect, "{name}");
+            assert_eq!(actual.1.as_deref(), default_interface, "{name}");
+        }
+    }
+}
+
+#[test]
+fn route_default_interface_is_bounded_preserved_and_redacted_on_failure() {
+    let accepted = ["E".to_owned(), "x".repeat(256), "🛜".repeat(128)];
+    for interface in accepted {
+        let route = format!("[route]\ndefault_interface = \"{interface}\"\nfinal = \"o0\"");
+        let source = routed(tagged_client(1, 1), &route);
+        let config =
+            load_client(TempConfig::text(&source).path()).expect("bounded route default interface");
+        assert_eq!(
+            config.route_network.default_interface(),
+            Some(interface.as_str())
+        );
+    }
+
+    for (name, interface) in [
+        ("empty", String::new()),
+        ("257 UTF-16 units", "x".repeat(257)),
+        ("258 UTF-16 units", "🛜".repeat(129)),
+        ("control character", "sensitive-interface\tname".to_owned()),
+    ] {
+        let route = format!("[route]\ndefault_interface = \"{interface}\"\nfinal = \"o0\"");
+        let source = routed(tagged_client(1, 1), &route);
+        let error = load_client(TempConfig::text(&source).path())
+            .err()
+            .unwrap_or_else(|| panic!("{name} passed"));
+        assert_eq!(
+            (error.kind(), error.field()),
+            (
+                ConfigErrorKind::Semantic,
+                ConfigField::RouteDefaultInterface
+            ),
+            "{name}"
+        );
+        let rendered = format!("{error}\n{error:?}");
+        if !interface.is_empty() {
+            assert!(!rendered.contains(&interface), "{name}");
+        }
+    }
+
+    let route = "[route]\nauto_detect_interface = \"enabled\"\nfinal = \"o0\"";
+    let source = routed(tagged_client(1, 1), route);
+    let error = load_client(TempConfig::text(&source).path())
+        .err()
+        .expect("non-boolean automatic interface detection must fail");
+    assert_eq!(
+        (error.kind(), error.field()),
+        (ConfigErrorKind::Syntax, ConfigField::Config)
+    );
+    assert!(!format!("{error}\n{error:?}").contains("enabled"));
+}
+
+#[test]
 fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
     let client = |rules: &str| {
         routed(

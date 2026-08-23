@@ -413,6 +413,63 @@ type = "direct"
 }
 
 #[test]
+fn route_network_values_survive_client_and_server_prepare_finish() {
+    let client_source = CLIENT_V2_MINIMAL.replacen(
+        "[route]\n",
+        "[route]\nauto_detect_interface = true\ndefault_interface = \"Client Ethernet\"\n",
+        1,
+    );
+    let client_file = TempConfig::new(&client_source);
+    let client = prepare_client_v2(&client_file.0).expect("prepare client route network");
+    assert!(client.route_network().auto_detect_interface);
+    assert_eq!(
+        client.route_network().default_interface(),
+        Some("Client Ethernet")
+    );
+    let client = finish_client_v2(client, ClientV2Resources::default())
+        .expect("finish client route network");
+    assert!(client.route_network.auto_detect_interface);
+    assert_eq!(
+        client.route_network.default_interface(),
+        Some("Client Ethernet")
+    );
+
+    let server_source = r#"
+schema_version = 2
+
+[[inbounds]]
+tag = "server"
+listen = "127.0.0.1:8388"
+
+[[outbounds]]
+tag = "direct"
+
+[route]
+auto_detect_interface = true
+default_interface = "Server Ethernet"
+final = "direct"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#;
+    let server_file = TempConfig::new(server_source);
+    let server = prepare_server_v2(&server_file.0).expect("prepare server route network");
+    assert!(server.route_network().auto_detect_interface);
+    assert_eq!(
+        server.route_network().default_interface(),
+        Some("Server Ethernet")
+    );
+    let server = finish_server_v2(server, ServerV2Resources::default())
+        .expect("finish server route network");
+    assert!(server.route_network.auto_detect_interface);
+    assert_eq!(
+        server.route_network.default_interface(),
+        Some("Server Ethernet")
+    );
+}
+
+#[test]
 fn finished_tun_tracks_every_dual_stack_dns_candidate_and_rechecks_listener_aliases() {
     let source = r#"
 schema_version = 2

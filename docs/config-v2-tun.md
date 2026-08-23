@@ -115,6 +115,25 @@ unreachable handling and traditional TCP/UDP port-53 protection on non-TUN paths
 is enabled. It is not an external route-overlap detector, general physical-interface blocker, DoH
 or DoT detector, or complete kill switch.
 
+### Route-level interface selection
+
+Schema v2 also accepts the following route-level interface contract:
+
+```toml
+[route]
+auto_detect_interface = true
+default_interface = "Ethernet"
+```
+
+`auto_detect_interface` defaults to `false`, while `default_interface` defaults to absent. Both may
+be configured together: a runtime consumer must prefer a usable family-aware automatically detected
+interface and use `default_interface` only as its route-level fallback. This change preserves those
+values through configuration preparation and finishing but does not connect them to socket creation.
+
+`default_interface` is preserved exactly without trimming. It must contain 1 through 256 UTF-16
+code units and no control characters. Invalid names fail with the closed
+`route.default_interface` configuration field and are not included in the error text.
+
 ## Network changes
 
 A semantic route, interface, address, DNS-lease, or underlay change rebuilds the managed TUN session
@@ -180,6 +199,9 @@ route, outbound, or adapter identity is exposed as a label.
   effective only with `auto_route = true`; requesting it without automatic routing requires a
   fixed startup warning from the eventual runtime consumer. This configuration-only change does
   not install WFP rules.
+- `[route].auto_detect_interface` and `[route].default_interface` are new and default to `false`
+  and absent respectively. They may coexist; automatic detection has priority over the named
+  fallback. This configuration-only change does not yet alter runtime socket binding.
 - `udp_filtering` now defaults to `endpoint_independent` when omitted. Set it to
   `address_dependent` explicitly to retain source-address filtering.
 - Ferrum2 no longer estimates or rejects aggregate TUN-owned memory. Flow, association, queue,

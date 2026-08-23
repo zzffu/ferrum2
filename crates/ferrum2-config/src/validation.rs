@@ -20,8 +20,9 @@ use crate::model::{
     ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, DirectDomainResolver,
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsRuntimeConfig,
     DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig,
-    ReplayConfig, RuntimeConfig, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig,
-    TunConfig, UdpConfig, UdpFiltering, ValidatedClientConfig, ValidatedServerConfig,
+    ReplayConfig, RouteNetworkConfig, RuntimeConfig, ServerDnsRoute, ServerInboundConfig,
+    ServerOutboundConfig, TunConfig, UdpConfig, UdpFiltering, ValidatedClientConfig,
+    ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging, RawMetrics,
@@ -31,6 +32,8 @@ use crate::raw::{
 
 pub(super) mod v2;
 pub(crate) use v2::validate_version;
+
+const MAX_INTERFACE_NAME_UTF16_UNITS: usize = 256;
 
 fn client_global_tags(raw: &RawClientRoot) -> Vec<String> {
     raw.inbounds
@@ -951,6 +954,7 @@ fn validate_client_inner(
     compile_dns_compatibility: bool,
 ) -> Result<PreparedClientValidation, ConfigError> {
     let schema_version = v2::validate_version(raw.schema_version)?;
+    let route_network = validate_route_network(raw.route.as_ref())?;
     let default_direct_strategy = raw
         .dns
         .as_ref()
@@ -1108,6 +1112,7 @@ fn validate_client_inner(
             inbounds,
             outbounds,
             route,
+            route_network,
             route_program,
             tun: tun.map(|tun| tun.config),
             dns,
@@ -1154,6 +1159,7 @@ fn validate_server_inner(
         return Err(ConfigError::semantic(ConfigField::Tun));
     }
     let schema_version = v2::validate_version(raw.schema_version)?;
+    let route_network = validate_route_network(raw.route.as_ref())?;
     let default_direct_strategy = raw
         .dns
         .as_ref()
@@ -1267,6 +1273,7 @@ fn validate_server_inner(
             inbounds,
             outbounds,
             route,
+            route_network,
             route_program,
             dns,
             dns_route,
@@ -1284,11 +1291,36 @@ fn validate_server_inner(
 
 fn v2_graph_route(route: &RawRoute) -> RawRoute {
     RawRoute {
+        auto_detect_interface: route.auto_detect_interface,
+        default_interface: route.default_interface.clone(),
         final_outbound: route.final_outbound.clone(),
         sniff: None,
         rules: Vec::new(),
         rule_set: Vec::new(),
     }
+}
+
+fn validate_route_network(raw: Option<&RawRoute>) -> Result<RouteNetworkConfig, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(RouteNetworkConfig::default());
+    };
+    let default_interface = raw
+        .default_interface
+        .as_deref()
+        .map(|name| {
+            if name.is_empty()
+                || name.encode_utf16().count() > MAX_INTERFACE_NAME_UTF16_UNITS
+                || name.chars().any(char::is_control)
+            {
+                return Err(ConfigError::semantic(ConfigField::RouteDefaultInterface));
+            }
+            Ok(name.to_owned().into_boxed_str())
+        })
+        .transpose()?;
+    Ok(RouteNetworkConfig {
+        auto_detect_interface: raw.auto_detect_interface,
+        default_interface,
+    })
 }
 
 type ValidatedClientGraph = (

@@ -22,8 +22,8 @@ use crate::error::{ConfigError, ConfigField};
 use crate::load::{parse_v2_toml, read_bounded_utf8};
 use crate::model::{
     ClientOutboundConfig, DirectDomainResolver, DnsCacheConfig, DnsEndpointMode, DnsQueryType,
-    DnsRuntimeConfig, DnsStrategy, DnsTransport, ResolverRef, RuntimeConfig, UdpConfig,
-    ValidatedClientConfig, ValidatedServerConfig,
+    DnsRuntimeConfig, DnsStrategy, DnsTransport, ResolverRef, RouteNetworkConfig, RuntimeConfig,
+    UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClientOutbound, RawClientRoot, RawDns, RawDnsRouteRule, RawRoute, RawRuleSet,
@@ -736,6 +736,11 @@ macro_rules! prepared_accessors {
 
             pub const fn runtime(&self) -> RuntimeConfig {
                 self.validated.runtime
+            }
+
+            /// Returns the retained route-level interface-selection contract.
+            pub const fn route_network(&self) -> &RouteNetworkConfig {
+                &self.validated.route_network
             }
 
             pub fn dns_server_count(&self) -> usize {

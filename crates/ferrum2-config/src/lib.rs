@@ -39,9 +39,9 @@ pub use model::{
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsIngressId,
     DnsPolicyBlueprintBinding, DnsQueryType, DnsRuntimeConfig, DnsServerConfig, DnsStrategy,
     DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, ReplayConfig, ResolverRef,
-    RouteAction, RouteProtocol, RouteSniffConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute,
-    ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig, UdpConfig, UdpFiltering,
-    ValidatedClientConfig, ValidatedServerConfig,
+    RouteAction, RouteNetworkConfig, RouteProtocol, RouteSniffConfig, RuntimeConfig, SchemaVersion,
+    ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig, UdpConfig,
+    UdpFiltering, ValidatedClientConfig, ValidatedServerConfig,
 };
 pub use prepared::{
     ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,

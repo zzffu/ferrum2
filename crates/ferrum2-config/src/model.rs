@@ -20,6 +20,7 @@ pub struct ValidatedClientConfig {
     pub inbounds: Vec<ClientInboundConfig>,
     pub outbounds: Vec<ClientOutboundConfig>,
     pub route: RouteTable,
+    pub route_network: RouteNetworkConfig,
     pub route_program: Option<CompiledRoute>,
     pub tun: Option<TunConfig>,
     pub dns: Option<DnsConfig>,
@@ -130,6 +131,22 @@ impl ValidatedClientConfig {
     }
 }
 
+/// Validated route-level network-interface selection contract.
+///
+/// Runtime consumers must prefer an automatically detected interface over
+/// `default_interface` when both values are configured.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RouteNetworkConfig {
+    pub auto_detect_interface: bool,
+    pub default_interface: Option<Box<str>>,
+}
+
+impl RouteNetworkConfig {
+    pub fn default_interface(&self) -> Option<&str> {
+        self.default_interface.as_deref()
+    }
+}
+
 /// A validated server configuration with no retained source text.
 pub struct ValidatedServerConfig {
     pub schema_version: SchemaVersion,
@@ -137,6 +154,7 @@ pub struct ValidatedServerConfig {
     pub inbounds: Vec<ServerInboundConfig>,
     pub outbounds: Vec<ServerOutboundConfig>,
     pub route: RouteTable,
+    pub route_network: RouteNetworkConfig,
     pub route_program: Option<CompiledRoute>,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ServerDnsRoute>,

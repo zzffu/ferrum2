@@ -174,6 +174,9 @@ pub(super) struct RawSelector {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRoute {
+    #[serde(default)]
+    pub(super) auto_detect_interface: bool,
+    pub(super) default_interface: Option<String>,
     #[serde(rename = "final")]
     pub(super) final_outbound: Option<String>,
     pub(super) sniff: Option<RawRouteSniff>,

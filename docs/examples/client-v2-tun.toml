@@ -34,6 +34,10 @@ tag = "direct-out"
 type = "direct"
 
 [route]
+# Route-level interface selection is configuration-only until client dial wiring lands.
+auto_detect_interface = false
+# default_interface is absent by default; set a validated Windows interface name when needed.
+# default_interface = "Ethernet"
 final = "direct-out"
 
 [[route.rules]]
