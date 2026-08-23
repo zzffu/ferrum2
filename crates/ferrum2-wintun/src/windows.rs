@@ -4589,24 +4589,27 @@ fn wide(path: &Path) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_EXPORTS, AF_INET6, AF_UNSPEC, AdapterCreateFailure, CleanupOperations, DLL_BYTES,
-        DLL_SHA256, DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER, DadProgress, DnsFamily,
-        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF,
-        ERROR_NO_MORE_ITEMS, Error, InterfaceIdentity, IpDadStateDeprecated, IpDadStateDuplicate,
-        IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, Ipv4DnsSettings,
-        Ipv6DnsSettings, LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
-        MIB_UNICASTIPADDRESS_ROW, ManagedAddressCleanupOperations, ManagedAddressRead,
-        ManagedDnsLease, ManagedDnsOperations, ManagedNetworkValidation,
-        ManagedNetworkValidationOutcome, ManagedRouteCleanupOperations, ManagedRouteOperations,
-        ManagedRouteRead, NET_LUID_LH, NotificationContext, NotificationOwners, OwnedHandle,
-        RouteFingerprint, SessionJournal, SetupOperations, SocketBindingOperations, StopSignal,
-        StrictRouteAction, StrictRouteCondition, StrictRouteLayer, StrictRouteOperations,
-        StrictRouteRule, StrictRouteRuleKind, StrictRouteSession, UnderlayOperations, WAIT_FAILED,
-        WAIT_OBJECT_0, WAIT_TIMEOUT, WaitForMultipleObjects, WorkSignal, address_changed,
-        bind_fixed_with, bind_target_with, cancel_notification_handles, capture_route_row,
+        ABI_EXPORTS, AF_INET6, AF_UNSPEC, AdapterCreateFailure, CatalogFamilyRow,
+        CatalogInterfaceRow, CleanupOperations, DLL_BYTES, DLL_SHA256, DNS_SETTING_IPV6,
+        DNS_SETTING_NAMESERVER, DadProgress, DnsFamily, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS,
+        ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, Error, InterfaceIdentity,
+        IpDadStateDeprecated, IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred,
+        IpDadStateTentative, Ipv4DnsSettings, Ipv6DnsSettings, LoaderOperations, MIB_IF_ROW2,
+        MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
+        ManagedAddressCleanupOperations, ManagedAddressRead, ManagedDnsLease, ManagedDnsOperations,
+        ManagedNetworkValidation, ManagedNetworkValidationOutcome, ManagedRouteCleanupOperations,
+        ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH, NotificationContext,
+        NotificationOwners, OwnedHandle, ResolvedSocketBindingOperations, RouteFingerprint,
+        SessionJournal, SetupOperations, SocketBindingOperations, StopSignal, StrictRouteAction,
+        StrictRouteCondition, StrictRouteLayer, StrictRouteOperations, StrictRouteRule,
+        StrictRouteRuleKind, StrictRouteSession, UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT, WaitForMultipleObjects, WindowsNetworkInterfaceCatalog, WorkSignal,
+        address_changed, bind_fixed_with, bind_resolved_socket_with, bind_target_with,
+        build_network_interface_observations, cancel_notification_handles, capture_route_row,
+        catalog_default_route, catalog_fallback_interface_identity,
         classify_adapter_create_failure, classify_notification_luid, classify_receive_null,
-        classify_send_allocation_failure, classify_wait_result, cleanup_transaction,
-        copy_bounded_wide, create_event, dad_snapshot, delete_managed_address,
+        classify_send_allocation_failure, classify_underlay_refresh, classify_wait_result,
+        cleanup_transaction, copy_bounded_wide, create_event, dad_snapshot, delete_managed_address,
         delete_managed_route, dns_settings_query_flags, eligible_interface_identity,
         finish_setup_transaction, initialize_managed_address, install_managed_dns,
         install_managed_routes, interface_changed, interface_socket_option,
@@ -4616,13 +4619,18 @@ mod tests {
         managed_dns_matches, managed_notification_family, managed_state_health,
         normalize_dns_settings, prepare_managed_intent, refresh_underlay_with, require_exports,
         restore_managed_dns, revalidate_managed_network, route_changed, route_matches,
-        setup_transaction, snapshot_underlay_at, snapshot_underlay_with, strict_route_rules,
-        strict_route_state_matches, subscribe_notification_sequence, take_last_owned_route,
-        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        setup_transaction, snapshot_underlay_at, snapshot_underlay_with, socket_addr_sockaddr,
+        strict_route_rules, strict_route_state_matches, subscribe_notification_sequence,
+        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
     use crate::{
         ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix, ManagedStateDamage, ManagedTunHealth,
         SendOutcome, WaitOutcome,
+    };
+    use ferrum2_runtime::{
+        DialOptions, InterfaceBinding, NetworkFamily, NetworkInterfaceCatalog,
+        NetworkInterfaceCatalogError, NetworkInterfaceKind, NetworkInterfaceObservation,
+        NetworkInterfaceResolver, NetworkSnapshot, RouteNetworkOptions, SystemBestRoute,
     };
 
     enum PublicationObservation<T> {
@@ -6557,7 +6565,7 @@ mod tests {
     }
 
     #[test]
-    fn underlay_refresh_replaces_only_the_frozen_policy_after_complete_capture() {
+    fn underlay_refresh_is_transactional_and_temporary_capture_failure_is_recoverable() {
         let physical_a = InterfaceIdentity { luid: 7, index: 17 };
         let physical_b = InterfaceIdentity { luid: 8, index: 18 };
         let wintun = InterfaceIdentity { luid: 9, index: 19 };
@@ -6621,17 +6629,19 @@ mod tests {
             fail_at: Some("route"),
             ..refreshed_operations
         };
-        assert!(
-            refresh_underlay_with(
-                &config,
-                &refreshed,
-                wintun,
-                &mut validated_generation,
-                generation,
-                &mut failed_operations,
-            )
-            .is_err()
-        );
+        let result = classify_underlay_refresh(refresh_underlay_with(
+            &config,
+            &refreshed,
+            wintun,
+            &mut validated_generation,
+            generation,
+            &mut failed_operations,
+        ));
+        let error = match result {
+            Ok(_) => panic!("temporary route capture failure must fail the refresh"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::RecoverableSession);
         assert!(refreshed.valid.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(validated_generation, 2);
     }
@@ -7911,6 +7921,293 @@ mod tests {
         assert_eq!(
             interface_socket_option("2001:db8::1".parse().unwrap(), index),
             (super::IPPROTO_IPV6, super::IPV6_UNICAST_IF, index)
+        );
+
+        let ipv4 = socket_addr_sockaddr("192.0.2.1:443".parse().unwrap());
+        assert_eq!(u16::from_be(unsafe { ipv4.Ipv4.sin_port }), 443);
+        let ipv6 = socket_addr_sockaddr("[fe80::1%19]:853".parse().unwrap());
+        assert_eq!(u16::from_be(unsafe { ipv6.Ipv6.sin6_port }), 853);
+        assert_eq!(unsafe { ipv6.Ipv6.Anonymous.sin6_scope_id }, 19);
+    }
+
+    #[test]
+    fn windows_catalog_is_family_aware_and_marks_the_exact_managed_tun() {
+        let physical_v4 = InterfaceIdentity {
+            luid: 10,
+            index: 20,
+        };
+        let physical_v6 = InterfaceIdentity {
+            luid: 11,
+            index: 21,
+        };
+        let managed = InterfaceIdentity {
+            luid: 12,
+            index: 22,
+        };
+        let unavailable = InterfaceIdentity {
+            luid: 13,
+            index: 23,
+        };
+        let interfaces = vec![
+            CatalogInterfaceRow {
+                identity: physical_v4,
+                name: "physical-v4".into(),
+                operational: true,
+                connected: true,
+                kind: NetworkInterfaceKind::Underlay,
+            },
+            CatalogInterfaceRow {
+                identity: physical_v6,
+                name: "physical-v6".into(),
+                operational: true,
+                connected: true,
+                kind: NetworkInterfaceKind::Underlay,
+            },
+            CatalogInterfaceRow {
+                identity: managed,
+                name: "managed-tun-sentinel".into(),
+                operational: true,
+                connected: true,
+                kind: NetworkInterfaceKind::Underlay,
+            },
+            CatalogInterfaceRow {
+                identity: unavailable,
+                name: "down".into(),
+                operational: false,
+                connected: true,
+                kind: NetworkInterfaceKind::Underlay,
+            },
+        ];
+        let families = vec![
+            CatalogFamilyRow {
+                identity: physical_v4,
+                family: NetworkFamily::Ipv4,
+                addresses: vec!["192.0.2.10".parse().unwrap()],
+                connected: true,
+                interface_metric: 20,
+                default_route_metric: Some(10),
+            },
+            CatalogFamilyRow {
+                identity: physical_v6,
+                family: NetworkFamily::Ipv6,
+                addresses: vec!["2001:db8::10".parse().unwrap()],
+                connected: true,
+                interface_metric: 30,
+                default_route_metric: Some(5),
+            },
+            CatalogFamilyRow {
+                identity: managed,
+                family: NetworkFamily::Ipv4,
+                addresses: vec!["198.18.0.2".parse().unwrap()],
+                connected: true,
+                interface_metric: 0,
+                default_route_metric: Some(0),
+            },
+            CatalogFamilyRow {
+                identity: unavailable,
+                family: NetworkFamily::Ipv4,
+                addresses: vec!["192.0.2.23".parse().unwrap()],
+                connected: true,
+                interface_metric: 0,
+                default_route_metric: Some(0),
+            },
+        ];
+
+        let observations =
+            build_network_interface_observations(&interfaces, &families, Some(managed)).unwrap();
+        assert_eq!(observations.len(), 4);
+        assert_eq!(
+            observations
+                .iter()
+                .find(|row| row.binding().stable_id() == managed.luid)
+                .unwrap()
+                .kind(),
+            NetworkInterfaceKind::ManagedTun
+        );
+        let snapshot = NetworkSnapshot::from_interfaces(41, observations).unwrap();
+        assert_eq!(
+            snapshot
+                .auto_interface("0.0.0.0".parse().unwrap())
+                .unwrap()
+                .stable_id(),
+            physical_v4.luid
+        );
+        assert_eq!(
+            snapshot
+                .auto_interface("::".parse().unwrap())
+                .unwrap()
+                .stable_id(),
+            physical_v6.luid
+        );
+
+        let catalog =
+            WindowsNetworkInterfaceCatalog::excluding_managed_tun(managed.luid, managed.index)
+                .unwrap();
+        let debug = format!("{catalog:?}");
+        assert!(debug.contains("managed_tun: true"));
+        assert!(!debug.contains(&managed.luid.to_string()));
+        assert!(!debug.contains(&managed.index.to_string()));
+        assert!(WindowsNetworkInterfaceCatalog::excluding_managed_tun(0, 1).is_err());
+
+        let virtual_underlay = MIB_IF_ROW2 {
+            InterfaceLuid: NET_LUID_LH { Value: 91 },
+            InterfaceIndex: 92,
+            Type: 53,
+            OperStatus: super::IfOperStatusUp,
+            AdminStatus: super::NET_IF_ADMIN_STATUS_UP,
+            MediaConnectState: super::MediaConnectStateConnected,
+            ..MIB_IF_ROW2::default()
+        };
+        let virtual_identity = InterfaceIdentity {
+            luid: 91,
+            index: 92,
+        };
+        assert_eq!(
+            catalog_fallback_interface_identity(&virtual_underlay, None),
+            Some(virtual_identity),
+            "target-aware fallback may use a connected virtual underlay"
+        );
+        assert_eq!(
+            catalog_fallback_interface_identity(&virtual_underlay, Some(virtual_identity)),
+            None,
+            "the exact managed TUN is never a fallback"
+        );
+    }
+
+    #[test]
+    fn catalog_default_route_requires_an_unspecified_zero_prefix() {
+        let identity = InterfaceIdentity {
+            luid: 44,
+            index: 54,
+        };
+        let mut row = MIB_IPFORWARD_ROW2 {
+            InterfaceLuid: NET_LUID_LH {
+                Value: identity.luid,
+            },
+            InterfaceIndex: identity.index,
+            Metric: 17,
+            ..MIB_IPFORWARD_ROW2::default()
+        };
+        row.DestinationPrefix.Prefix = ipv4_sockaddr(std::net::Ipv4Addr::UNSPECIFIED);
+        row.DestinationPrefix.PrefixLength = 0;
+        let route = catalog_default_route(&row).unwrap();
+        assert_eq!(route.identity, identity);
+        assert_eq!(route.family, NetworkFamily::Ipv4);
+        assert_eq!(route.metric, 17);
+
+        row.DestinationPrefix.PrefixLength = 1;
+        assert!(catalog_default_route(&row).is_none());
+        row.DestinationPrefix.PrefixLength = 0;
+        row.DestinationPrefix.Prefix = ipv4_sockaddr("192.0.2.0".parse().unwrap());
+        assert!(catalog_default_route(&row).is_none());
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum ResolvedBindCall {
+        Interface(std::net::IpAddr, u32),
+        Source(std::net::SocketAddr),
+    }
+
+    #[derive(Default)]
+    struct InjectedResolvedBinder {
+        calls: Vec<ResolvedBindCall>,
+    }
+
+    impl ResolvedSocketBindingOperations for InjectedResolvedBinder {
+        fn bind_interface(
+            &mut self,
+            family: std::net::IpAddr,
+            interface_index: u32,
+        ) -> Result<(), Error> {
+            self.calls
+                .push(ResolvedBindCall::Interface(family, interface_index));
+            Ok(())
+        }
+
+        fn bind_source(&mut self, source: std::net::SocketAddr) -> Result<(), Error> {
+            self.calls.push(ResolvedBindCall::Source(source));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRouteCatalog;
+
+    impl NetworkInterfaceCatalog for NoRouteCatalog {
+        fn read_interfaces(
+            &self,
+        ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
+            Err(NetworkInterfaceCatalogError)
+        }
+
+        fn system_best_route(
+            &self,
+            _: std::net::SocketAddr,
+        ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError> {
+            Err(NetworkInterfaceCatalogError)
+        }
+    }
+
+    #[test]
+    fn resolved_socket_binding_applies_interface_then_family_source() {
+        let source = "192.0.2.44".parse().unwrap();
+        let destination = "203.0.113.9:443".parse().unwrap();
+        let binding =
+            InterfaceBinding::new("Ethernet", 64, 74, vec![std::net::IpAddr::V4(source)]).unwrap();
+        let snapshot = NetworkSnapshot::new(7, Some(binding), None).unwrap();
+        let resolved = NetworkInterfaceResolver::new(NoRouteCatalog)
+            .resolve(
+                &DialOptions::new(None::<&str>, Some(source), None),
+                &RouteNetworkOptions::new(true, None::<&str>),
+                destination,
+                &snapshot,
+            )
+            .unwrap();
+        let mut binder = InjectedResolvedBinder::default();
+        bind_resolved_socket_with(destination, &resolved, &mut binder).unwrap();
+        assert_eq!(
+            binder.calls,
+            [
+                ResolvedBindCall::Interface(destination.ip(), 74),
+                ResolvedBindCall::Source("192.0.2.44:0".parse().unwrap()),
+            ]
+        );
+
+        let mut wrong_family = InjectedResolvedBinder::default();
+        let error = bind_resolved_socket_with(
+            "[2001:db8::9]:443".parse().unwrap(),
+            &resolved,
+            &mut wrong_family,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(wrong_family.calls.is_empty());
+    }
+
+    #[test]
+    fn resolved_link_local_source_carries_the_selected_ipv6_scope() {
+        let source = "fe80::44".parse().unwrap();
+        let destination = "[2001:db8::9]:443".parse().unwrap();
+        let binding =
+            InterfaceBinding::new("Ethernet v6", 65, 75, vec![std::net::IpAddr::V6(source)])
+                .unwrap();
+        let snapshot = NetworkSnapshot::new(8, None, Some(binding)).unwrap();
+        let resolved = NetworkInterfaceResolver::new(NoRouteCatalog)
+            .resolve(
+                &DialOptions::new(None::<&str>, None, Some(source)),
+                &RouteNetworkOptions::new(true, None::<&str>),
+                destination,
+                &snapshot,
+            )
+            .unwrap();
+        let mut binder = InjectedResolvedBinder::default();
+        bind_resolved_socket_with(destination, &resolved, &mut binder).unwrap();
+        assert_eq!(
+            binder.calls,
+            [
+                ResolvedBindCall::Interface(destination.ip(), 75),
+                ResolvedBindCall::Source("[fe80::44%75]:0".parse().unwrap()),
+            ]
         );
     }
 }
