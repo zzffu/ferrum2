@@ -4,7 +4,7 @@
 
 This package composes the Shadowsocks server. Keep `main.rs` and `cli.rs` limited to argument handling, configuration validation, diagnostics setup, and delegation. Runtime ownership belongs under `run/`: TCP and UDP listeners, DNS egress, observation, I/O, shutdown, and rollback. Move reusable cipher, framing, resolver, routing, or relay behavior into the appropriate `crates/ferrum2-*` package.
 
-`--check-config` is an offline contract. It must validate schema version 1 without opening listeners, resolving peers, or creating runtime resources. Preserve fail-closed startup: if one listener or worker fails, previously acquired resources must be released before exit.
+`--check-config` is an offline contract. It must accept schema version 2 only, reject older or missing schema versions, and never open listeners, resolve peers, or create runtime resources. Preserve fail-closed startup: if one listener or worker fails, previously acquired resources must be released before exit.
 
 ## Testing and Local Commands
 
