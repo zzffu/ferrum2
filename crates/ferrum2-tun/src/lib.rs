@@ -165,6 +165,9 @@ pub enum TunEvent {
     PacketAccepted,
     PacketFoundationDropped,
     SessionStarted,
+    NetworkResetStarted(TunNetworkResetReason),
+    NetworkResetSucceeded(TunNetworkResetReason),
+    NetworkResetFailed(TunNetworkResetReason),
     SessionRestartStarted,
     SessionRestartSucceeded,
     SessionRestartFailed,
@@ -202,6 +205,15 @@ pub enum TunEvent {
         reason: TunDiagnosticReason,
         family: TunIpFamily,
     },
+}
+
+/// Closed reason for one lightweight network-runtime reset attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TunNetworkResetReason {
+    /// A debounced route, interface, address, or DNS notification changed the underlay.
+    NetworkChange,
+    /// A prior reset attempt could not publish a complete replacement runtime.
+    Retry,
 }
 
 #[derive(Clone)]
@@ -1087,6 +1099,71 @@ fn packet_ip_family(packet: &[u8]) -> Option<TunIpFamily> {
 const MANAGED_DNS_AUDIT_MILLIS: i64 = 5_000;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkChangeTransition {
+    Unchanged,
+    ResetNetwork,
+    FullRebuild,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkResetHealthDisposition {
+    Healthy,
+    Retry,
+    FullRebuild,
+    RuntimeFailed,
+    CleanupFailed,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+const fn classify_network_reset_health(
+    health: Result<ferrum2_wintun::ManagedTunHealth, ferrum2_wintun::Error>,
+) -> NetworkResetHealthDisposition {
+    match health {
+        Ok(ferrum2_wintun::ManagedTunHealth::Healthy) => NetworkResetHealthDisposition::Healthy,
+        Ok(ferrum2_wintun::ManagedTunHealth::Damaged(_)) => {
+            NetworkResetHealthDisposition::FullRebuild
+        }
+        Err(error) => match error.kind() {
+            ferrum2_wintun::ErrorKind::RecoverableSession => NetworkResetHealthDisposition::Retry,
+            ferrum2_wintun::ErrorKind::InvalidInput
+            | ferrum2_wintun::ErrorKind::UnrecoverableCorruption => {
+                NetworkResetHealthDisposition::RuntimeFailed
+            }
+            ferrum2_wintun::ErrorKind::Cleanup => NetworkResetHealthDisposition::CleanupFailed,
+        },
+    }
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+const fn classify_network_reset_refresh_error(
+    error: ferrum2_wintun::Error,
+) -> NetworkResetHealthDisposition {
+    match error.kind() {
+        ferrum2_wintun::ErrorKind::RecoverableSession => NetworkResetHealthDisposition::Retry,
+        ferrum2_wintun::ErrorKind::InvalidInput
+        | ferrum2_wintun::ErrorKind::UnrecoverableCorruption => {
+            NetworkResetHealthDisposition::RuntimeFailed
+        }
+        ferrum2_wintun::ErrorKind::Cleanup => NetworkResetHealthDisposition::CleanupFailed,
+    }
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+const fn classify_network_change(
+    outcome: ferrum2_wintun::NetworkChangeOutcome,
+) -> NetworkChangeTransition {
+    match outcome {
+        ferrum2_wintun::NetworkChangeOutcome::Unchanged => NetworkChangeTransition::Unchanged,
+        ferrum2_wintun::NetworkChangeOutcome::Changed => NetworkChangeTransition::ResetNetwork,
+        ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(_) => {
+            NetworkChangeTransition::FullRebuild
+        }
+    }
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn bounded_network_wait(
     base: Duration,
     now_millis: i64,
@@ -1114,24 +1191,110 @@ fn owner_wait_after_budget(budget: BudgetOutcome, bounded_wait: Duration) -> Dur
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-fn semantic_network_change_requires_restart(
+fn semantic_network_change_transition(
     adapter: &mut ferrum2_wintun::Adapter,
     events: &TunEventSink,
-) -> Result<bool, AdapterErrorDisposition> {
+) -> Result<NetworkChangeTransition, AdapterErrorDisposition> {
     match adapter.revalidate_network_change() {
-        Ok(ferrum2_wintun::NetworkChangeOutcome::Unchanged) => Ok(false),
-        Ok(
-            ferrum2_wintun::NetworkChangeOutcome::Changed
-            | ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(_),
-        ) => {
-            events.emit(TunEvent::NetworkChange);
-            Ok(true)
+        Ok(outcome) => {
+            let transition = classify_network_change(outcome);
+            if transition != NetworkChangeTransition::Unchanged {
+                events.emit(TunEvent::NetworkChange);
+            }
+            Ok(transition)
         }
         Err(error) => {
             events.emit(TunEvent::NetworkChange);
-            Err(classify_adapter_error(error))
+            match classify_adapter_error(error) {
+                AdapterErrorDisposition::RestartSession => {
+                    Ok(NetworkChangeTransition::ResetNetwork)
+                }
+                disposition => Err(disposition),
+            }
         }
     }
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkResetRefreshOutcome {
+    Refreshed(TunNetworkResetReason),
+    FullRebuild,
+    RuntimeFailed,
+    CleanupFailed,
+    Stopped,
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn refresh_network_runtime(
+    adapter: &mut ferrum2_wintun::Adapter,
+    control: &OwnerControl,
+    backoff: &mut RestartBackoff,
+    events: &TunEventSink,
+    mut reason: TunNetworkResetReason,
+) -> NetworkResetRefreshOutcome {
+    loop {
+        if control.stop.load(Ordering::Acquire) || control.shutdown.load(Ordering::Acquire) {
+            events.emit(TunEvent::NetworkResetFailed(reason));
+            return NetworkResetRefreshOutcome::Stopped;
+        }
+        match classify_network_reset_health(adapter.managed_health()) {
+            NetworkResetHealthDisposition::Healthy => {}
+            NetworkResetHealthDisposition::FullRebuild => {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                return NetworkResetRefreshOutcome::FullRebuild;
+            }
+            NetworkResetHealthDisposition::RuntimeFailed => {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                return NetworkResetRefreshOutcome::RuntimeFailed;
+            }
+            NetworkResetHealthDisposition::CleanupFailed => {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                return NetworkResetRefreshOutcome::CleanupFailed;
+            }
+            NetworkResetHealthDisposition::Retry => {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                if !wait_owner_delay(control, backoff.next_delay()) {
+                    return NetworkResetRefreshOutcome::Stopped;
+                }
+                reason = TunNetworkResetReason::Retry;
+                events.emit(TunEvent::NetworkResetStarted(reason));
+                continue;
+            }
+        }
+        match adapter.refresh_underlay() {
+            Ok(_) => return NetworkResetRefreshOutcome::Refreshed(reason),
+            Err(error) => match classify_network_reset_refresh_error(error) {
+                NetworkResetHealthDisposition::RuntimeFailed => {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    return NetworkResetRefreshOutcome::RuntimeFailed;
+                }
+                NetworkResetHealthDisposition::CleanupFailed => {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    return NetworkResetRefreshOutcome::CleanupFailed;
+                }
+                NetworkResetHealthDisposition::Retry => {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    if !wait_owner_delay(control, backoff.next_delay()) {
+                        return NetworkResetRefreshOutcome::Stopped;
+                    }
+                    reason = TunNetworkResetReason::Retry;
+                    events.emit(TunEvent::NetworkResetStarted(reason));
+                }
+                NetworkResetHealthDisposition::Healthy
+                | NetworkResetHealthDisposition::FullRebuild => {
+                    unreachable!("refresh errors have an exact retry or terminal disposition")
+                }
+            },
+        }
+    }
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn adapter_underlay_is_current(adapter: &ferrum2_wintun::Adapter) -> bool {
+    adapter
+        .underlay_policy()
+        .is_none_or(|policy| policy.generation_is_current())
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -1174,20 +1337,53 @@ fn owner_main(
     let supervisor_origin = std::time::Instant::now();
     let mut debounce = NetworkDebounce::default();
     let mut retry_delay = None;
+    let mut retained_adapter: Option<(ferrum2_wintun::Adapter, TunNetworkResetReason, bool)> = None;
 
-    loop {
+    'owner: loop {
         if control.stop.load(Ordering::Acquire) || control.shutdown.load(Ordering::Acquire) {
             let _ = underlay.invalidate();
-            return OwnerExit::Stopped;
+            let cleanup_failed =
+                retained_adapter
+                    .take()
+                    .is_some_and(|(adapter, reason, start_pending)| {
+                        if !start_pending {
+                            events.emit(TunEvent::NetworkResetFailed(reason));
+                        }
+                        adapter.cleanup().is_err()
+                    });
+            return if cleanup_failed {
+                OwnerExit::CleanupFailed
+            } else {
+                OwnerExit::Stopped
+            };
         }
         if let Some(delay) = retry_delay.take()
             && !wait_owner_delay(&control, delay)
         {
             let _ = underlay.invalidate();
-            return OwnerExit::Stopped;
+            let cleanup_failed =
+                retained_adapter
+                    .take()
+                    .is_some_and(|(adapter, reason, start_pending)| {
+                        if !start_pending {
+                            events.emit(TunEvent::NetworkResetFailed(reason));
+                        }
+                        adapter.cleanup().is_err()
+                    });
+            return if cleanup_failed {
+                OwnerExit::CleanupFailed
+            } else {
+                OwnerExit::Stopped
+            };
         }
         let first_session = ready.is_some();
-        if !first_session {
+        let retained = retained_adapter.take();
+        let reset_reason = retained.as_ref().map(|(_, reason, _)| *reason);
+        let reset_runtime = retained.is_some();
+        if let Some((_, reason, true)) = retained.as_ref() {
+            events.emit(TunEvent::NetworkResetStarted(*reason));
+        }
+        if !first_session && !reset_runtime {
             events.emit(TunEvent::SessionRestartStarted);
         }
         let deadline = if first_session {
@@ -1197,45 +1393,46 @@ fn owner_main(
                 .checked_add(config.ready_timeout)
                 .unwrap_or_else(std::time::Instant::now)
         };
-        let mut adapter = match ferrum2_wintun::Adapter::create(
-            adapter_config.clone(),
-            deadline,
-            &control.stop,
-        ) {
-            Ok(adapter) => adapter,
-            Err(error) => {
-                if control.stop.load(Ordering::Acquire) || control.shutdown.load(Ordering::Acquire)
-                {
-                    let _ = underlay.invalidate();
-                    return OwnerExit::Stopped;
-                }
-                if error.is_cleanup_failure() {
-                    if !first_session {
-                        events.emit(TunEvent::SessionRestartFailed);
+        let mut adapter = if let Some((adapter, _, _)) = retained {
+            adapter
+        } else {
+            match ferrum2_wintun::Adapter::create(adapter_config.clone(), deadline, &control.stop) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    if control.stop.load(Ordering::Acquire)
+                        || control.shutdown.load(Ordering::Acquire)
+                    {
+                        let _ = underlay.invalidate();
+                        return OwnerExit::Stopped;
+                    }
+                    if error.is_cleanup_failure() {
+                        if !first_session {
+                            events.emit(TunEvent::SessionRestartFailed);
+                        }
+                        if let Some(ready) = ready.take() {
+                            let _ = ready.send(OwnerReady::Failed);
+                        }
+                        return OwnerExit::CleanupFailed;
+                    }
+                    if first_session {
+                        let now = std::time::Instant::now();
+                        if now < initial_deadline {
+                            retry_delay = Some(
+                                backoff
+                                    .next_delay()
+                                    .min(initial_deadline.saturating_duration_since(now)),
+                            );
+                            continue;
+                        }
                     }
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(OwnerReady::Failed);
+                        return OwnerExit::RuntimeFailed;
                     }
-                    return OwnerExit::CleanupFailed;
+                    events.emit(TunEvent::SessionRestartFailed);
+                    retry_delay = Some(backoff.next_delay());
+                    continue;
                 }
-                if first_session {
-                    let now = std::time::Instant::now();
-                    if now < initial_deadline {
-                        retry_delay = Some(
-                            backoff
-                                .next_delay()
-                                .min(initial_deadline.saturating_duration_since(now)),
-                        );
-                        continue;
-                    }
-                }
-                if let Some(ready) = ready.take() {
-                    let _ = ready.send(OwnerReady::Failed);
-                    return OwnerExit::RuntimeFailed;
-                }
-                events.emit(TunEvent::SessionRestartFailed);
-                retry_delay = Some(backoff.next_delay());
-                continue;
             }
         };
         if let Ok(mut work) = current_work.lock() {
@@ -1248,6 +1445,52 @@ fn owner_main(
                 Ok(()) => OwnerExit::RuntimeFailed,
                 Err(_) => OwnerExit::CleanupFailed,
             };
+        }
+
+        if let Some(reason) = reset_reason
+            && !adapter_underlay_is_current(&adapter)
+        {
+            match refresh_network_runtime(&mut adapter, &control, &mut backoff, &events, reason) {
+                NetworkResetRefreshOutcome::Refreshed(reason) => {
+                    retained_adapter = Some((adapter, reason, false));
+                    continue;
+                }
+                NetworkResetRefreshOutcome::FullRebuild => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    if adapter.cleanup().is_err() {
+                        return OwnerExit::CleanupFailed;
+                    }
+                    retry_delay = Some(backoff.next_delay());
+                    continue;
+                }
+                NetworkResetRefreshOutcome::RuntimeFailed => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    return match adapter.cleanup() {
+                        Ok(()) => OwnerExit::RuntimeFailed,
+                        Err(_) => OwnerExit::CleanupFailed,
+                    };
+                }
+                NetworkResetRefreshOutcome::CleanupFailed => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    let _ = adapter.cleanup();
+                    return OwnerExit::CleanupFailed;
+                }
+                NetworkResetRefreshOutcome::Stopped => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    return match adapter.cleanup() {
+                        Ok(()) => OwnerExit::Stopped,
+                        Err(_) => OwnerExit::CleanupFailed,
+                    };
+                }
+            }
         }
 
         generation = generation.wrapping_add(1).max(1);
@@ -1272,6 +1515,12 @@ fn owner_main(
             Ok(ready_stack) => ready_stack,
             Err(()) => {
                 session_cancel_handle.cancel();
+                if let Some(reason) = reset_reason {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    retained_adapter = Some((adapter, TunNetworkResetReason::Retry, true));
+                    retry_delay = Some(backoff.next_delay());
+                    continue;
+                }
                 if let Ok(mut work) = current_work.lock() {
                     *work = None;
                 }
@@ -1311,12 +1560,30 @@ fn owner_main(
                 OwnerExit::RuntimeFailed
             };
         }
-        if adapter.managed_health() != Ok(ferrum2_wintun::ManagedTunHealth::Healthy) {
+        let managed_health = classify_network_reset_health(adapter.managed_health());
+        if managed_health != NetworkResetHealthDisposition::Healthy {
             session_cancel_handle.cancel();
             stack.quiesce(
                 generation.wrapping_add(1).max(1),
                 UdpResponseDropReason::SessionReset,
             );
+            if let Some(reason) = reset_reason {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                if managed_health == NetworkResetHealthDisposition::Retry {
+                    retained_adapter = Some((adapter, TunNetworkResetReason::Retry, true));
+                    retry_delay = Some(backoff.next_delay());
+                    continue;
+                }
+                if managed_health == NetworkResetHealthDisposition::RuntimeFailed {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    return match adapter.cleanup() {
+                        Ok(()) => OwnerExit::RuntimeFailed,
+                        Err(_) => OwnerExit::CleanupFailed,
+                    };
+                }
+            }
             if let Ok(mut work) = current_work.lock() {
                 *work = None;
             }
@@ -1342,8 +1609,24 @@ fn owner_main(
                 let _ = ready.send(OwnerReady::Failed);
                 return OwnerExit::RuntimeFailed;
             }
-            events.emit(TunEvent::SessionRestartFailed);
+            if reset_reason.is_none() {
+                events.emit(TunEvent::SessionRestartFailed);
+            }
             retry_delay = Some(backoff.next_delay());
+            continue;
+        }
+        if let Some(reason) = reset_reason
+            && !adapter_underlay_is_current(&adapter)
+        {
+            session_cancel_handle.cancel();
+            stack.quiesce(
+                generation.wrapping_add(1).max(1),
+                UdpResponseDropReason::SessionReset,
+            );
+            drop(flows);
+            drop(datagrams);
+            drop(stack);
+            retained_adapter = Some((adapter, reason, false));
             continue;
         }
         if underlay.publish(adapter.underlay_policy()).is_err() {
@@ -1352,6 +1635,9 @@ fn owner_main(
                 generation.wrapping_add(1).max(1),
                 UdpResponseDropReason::OwnerFatal,
             );
+            if let Some(reason) = reset_reason {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+            }
             if let Ok(mut work) = current_work.lock() {
                 *work = None;
             }
@@ -1365,10 +1651,37 @@ fn owner_main(
                 OwnerExit::RuntimeFailed
             };
         }
+        if let Some(reason) = reset_reason
+            && !adapter_underlay_is_current(&adapter)
+        {
+            let underlay_failed = underlay.invalidate().is_err();
+            session_cancel_handle.cancel();
+            stack.quiesce(
+                generation.wrapping_add(1).max(1),
+                UdpResponseDropReason::SessionReset,
+            );
+            drop(flows);
+            drop(datagrams);
+            drop(stack);
+            if underlay_failed {
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                if let Ok(mut work) = current_work.lock() {
+                    *work = None;
+                }
+                return match adapter.cleanup() {
+                    Ok(()) => OwnerExit::RuntimeFailed,
+                    Err(_) => OwnerExit::CleanupFailed,
+                };
+            }
+            retained_adapter = Some((adapter, reason, false));
+            continue;
+        }
         events.emit(TunEvent::SessionGeneration(generation));
         events.emit(TunEvent::SessionActive(true));
         if first_session {
             events.emit(TunEvent::SessionStarted);
+        } else if let Some(reason) = reset_reason {
+            events.emit(TunEvent::NetworkResetSucceeded(reason));
         } else {
             events.emit(TunEvent::SessionRestartSucceeded);
         }
@@ -1401,22 +1714,33 @@ fn owner_main(
         });
         let mut raw_notification_generation = 0_u64;
         debounce.clear();
+        let mut reset_network = false;
         let mut restart = false;
         let mut terminal_exit = None;
         'session: while !control.stop.load(Ordering::Acquire) {
             let supervisor_now =
                 i64::try_from(supervisor_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
+            let underlay_stale = !adapter_underlay_is_current(&adapter);
             let debounced = debounce.take_ready(supervisor_now).is_some();
-            let periodic_audit = !debounced
+            let periodic_audit = !underlay_stale
+                && !debounced
                 && debounce.deadline_millis().is_none()
                 && next_dns_audit.is_some_and(|deadline| supervisor_now >= deadline);
-            if debounced || periodic_audit {
+            if underlay_stale || debounced || periodic_audit {
                 if audit_dns {
                     next_dns_audit = Some(supervisor_now.saturating_add(MANAGED_DNS_AUDIT_MILLIS));
                 }
-                match semantic_network_change_requires_restart(&mut adapter, &events) {
-                    Ok(false) => {}
-                    Ok(true) | Err(AdapterErrorDisposition::RestartSession) => {
+                match semantic_network_change_transition(&mut adapter, &events) {
+                    Ok(NetworkChangeTransition::Unchanged) => {}
+                    Ok(NetworkChangeTransition::ResetNetwork)
+                    | Err(AdapterErrorDisposition::RestartSession) => {
+                        events.emit(TunEvent::NetworkResetStarted(
+                            TunNetworkResetReason::NetworkChange,
+                        ));
+                        reset_network = true;
+                        break;
+                    }
+                    Ok(NetworkChangeTransition::FullRebuild) => {
                         restart = true;
                         break;
                     }
@@ -1616,7 +1940,7 @@ fn owner_main(
         session_cancel_handle.cancel();
         let response_drop_reason = if terminal_exit.is_some() || underlay_failed {
             UdpResponseDropReason::OwnerFatal
-        } else if restart {
+        } else if restart || reset_network {
             UdpResponseDropReason::SessionReset
         } else {
             UdpResponseDropReason::Shutdown
@@ -1628,24 +1952,95 @@ fn owner_main(
         drop(flows);
         drop(datagrams);
         drop(stack);
-        if let Ok(mut work) = current_work.lock() {
-            *work = None;
-        }
-        let cleanup = adapter.cleanup();
-        if cleanup.is_err() {
-            return OwnerExit::CleanupFailed;
-        }
         if underlay_failed {
-            return OwnerExit::RuntimeFailed;
+            if reset_network {
+                events.emit(TunEvent::NetworkResetFailed(
+                    TunNetworkResetReason::NetworkChange,
+                ));
+            }
+            if let Ok(mut work) = current_work.lock() {
+                *work = None;
+            }
+            return match adapter.cleanup() {
+                Ok(()) => OwnerExit::RuntimeFailed,
+                Err(_) => OwnerExit::CleanupFailed,
+            };
         }
         if let Some(exit) = terminal_exit {
-            return exit;
+            if let Ok(mut work) = current_work.lock() {
+                *work = None;
+            }
+            return match adapter.cleanup() {
+                Ok(()) => exit,
+                Err(_) => OwnerExit::CleanupFailed,
+            };
         }
         if control.stop.load(Ordering::Acquire)
             || control.shutdown.load(Ordering::Acquire)
-            || !restart
+            || (!restart && !reset_network)
         {
-            return OwnerExit::Stopped;
+            if reset_network {
+                events.emit(TunEvent::NetworkResetFailed(
+                    TunNetworkResetReason::NetworkChange,
+                ));
+            }
+            if let Ok(mut work) = current_work.lock() {
+                *work = None;
+            }
+            return match adapter.cleanup() {
+                Ok(()) => OwnerExit::Stopped,
+                Err(_) => OwnerExit::CleanupFailed,
+            };
+        }
+        if reset_network {
+            match refresh_network_runtime(
+                &mut adapter,
+                &control,
+                &mut backoff,
+                &events,
+                TunNetworkResetReason::NetworkChange,
+            ) {
+                NetworkResetRefreshOutcome::Refreshed(reason) => {
+                    if session_started.elapsed() >= Duration::from_secs(5) {
+                        backoff.reset();
+                    }
+                    debounce.clear();
+                    retained_adapter = Some((adapter, reason, false));
+                    continue 'owner;
+                }
+                NetworkResetRefreshOutcome::FullRebuild => {}
+                NetworkResetRefreshOutcome::RuntimeFailed => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    return match adapter.cleanup() {
+                        Ok(()) => OwnerExit::RuntimeFailed,
+                        Err(_) => OwnerExit::CleanupFailed,
+                    };
+                }
+                NetworkResetRefreshOutcome::CleanupFailed => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    let _ = adapter.cleanup();
+                    return OwnerExit::CleanupFailed;
+                }
+                NetworkResetRefreshOutcome::Stopped => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    return match adapter.cleanup() {
+                        Ok(()) => OwnerExit::Stopped,
+                        Err(_) => OwnerExit::CleanupFailed,
+                    };
+                }
+            }
+        }
+        if let Ok(mut work) = current_work.lock() {
+            *work = None;
+        }
+        if adapter.cleanup().is_err() {
+            return OwnerExit::CleanupFailed;
         }
         if session_started.elapsed() >= Duration::from_secs(5) {
             backoff.reset();

@@ -7,8 +7,9 @@ use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
-    Direction, Metrics, Outcome, Role, TunDiagnosticReason, TunIpFamily, TunPacketRejectReason,
-    TunUdpResponseDropReason, emit_tun_diagnostic,
+    Direction, Metrics, NetworkLifecycleResult, NetworkResetReason, Outcome, Role,
+    TunDiagnosticReason, TunIpFamily, TunPacketRejectReason, TunUdpResponseDropReason,
+    emit_tun_diagnostic,
 };
 use ferrum2_runtime::{ProcessCancellation, ProcessRoot, relay_lifecycle};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -121,6 +122,18 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
         TunEvent::PacketAccepted => metrics.tun_packet_accepted(),
         TunEvent::PacketFoundationDropped => metrics.tun_packet_foundation_dropped(),
         TunEvent::SessionStarted => metrics.tun_session_started(),
+        TunEvent::NetworkResetStarted(reason) => metrics.network_reset(
+            map_network_reset_reason(reason),
+            NetworkLifecycleResult::Started,
+        ),
+        TunEvent::NetworkResetSucceeded(reason) => metrics.network_reset(
+            map_network_reset_reason(reason),
+            NetworkLifecycleResult::Succeeded,
+        ),
+        TunEvent::NetworkResetFailed(reason) => metrics.network_reset(
+            map_network_reset_reason(reason),
+            NetworkLifecycleResult::Failed,
+        ),
         TunEvent::SessionRestartStarted => metrics.tun_session_restart_started(),
         TunEvent::SessionRestartSucceeded => metrics.tun_session_restart_succeeded(),
         TunEvent::SessionRestartFailed => metrics.tun_session_restart_failed(),
@@ -247,6 +260,15 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
                 ferrum2_tun::TunIpFamily::Ipv6 => TunIpFamily::Ipv6,
             },
         ),
+    }
+}
+
+const fn map_network_reset_reason(
+    reason: ferrum2_tun::TunNetworkResetReason,
+) -> NetworkResetReason {
+    match reason {
+        ferrum2_tun::TunNetworkResetReason::NetworkChange => NetworkResetReason::NetworkChange,
+        ferrum2_tun::TunNetworkResetReason::Retry => NetworkResetReason::Retry,
     }
 }
 
