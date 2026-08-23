@@ -429,6 +429,46 @@ pub enum NetworkRuntimeOwnerCancellation {
     CoordinatorDropped,
 }
 
+/// Cloneable reset-cancellation observer that does not acknowledge owner completion.
+///
+/// The exclusive [`NetworkRuntimeOwner`] must still be retained until its resource is closed.
+#[derive(Clone)]
+pub struct NetworkRuntimeCancellation {
+    cancellation: watch::Receiver<Option<NetworkResetSignal>>,
+}
+
+impl NetworkRuntimeCancellation {
+    /// Returns an already-delivered reset without registering an async waiter.
+    pub fn cancellation_now(&self) -> Option<NetworkResetSignal> {
+        *self.cancellation.borrow()
+    }
+
+    /// Returns an already-observable terminal state without registering an async waiter.
+    pub fn terminal_now(&self) -> Option<NetworkRuntimeOwnerCancellation> {
+        if let Some(signal) = self.cancellation_now() {
+            Some(NetworkRuntimeOwnerCancellation::Reset(signal))
+        } else if self.cancellation.has_changed().is_err() {
+            Some(NetworkRuntimeOwnerCancellation::CoordinatorDropped)
+        } else {
+            None
+        }
+    }
+
+    /// Waits for reset cancellation or coordinator destruction without acknowledging it.
+    pub async fn cancelled(&mut self) -> NetworkRuntimeOwnerCancellation {
+        wait_for_runtime_owner_cancellation(&mut self.cancellation).await
+    }
+}
+
+impl fmt::Debug for NetworkRuntimeCancellation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkRuntimeCancellation")
+            .field("cancelled", &self.cancellation_now().is_some())
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct NetworkResetCoordinator {
     inner: Arc<CoordinatorInner>,
@@ -1247,15 +1287,33 @@ impl NetworkRuntimeOwner {
         *self.cancellation.borrow()
     }
 
+    /// Returns a cloneable cancellation observer without transferring acknowledgement ownership.
+    pub fn cancellation(&self) -> NetworkRuntimeCancellation {
+        NetworkRuntimeCancellation {
+            cancellation: self.cancellation.clone(),
+        }
+    }
+
+    /// Returns an already-observable terminal state without registering an async waiter.
+    pub fn cancellation_status_now(&self) -> Option<NetworkRuntimeOwnerCancellation> {
+        self.cancellation().terminal_now()
+    }
+
     /// Waits for reset cancellation or coordinator destruction.
     pub async fn cancelled(&mut self) -> NetworkRuntimeOwnerCancellation {
-        loop {
-            if let Some(signal) = *self.cancellation.borrow_and_update() {
-                return NetworkRuntimeOwnerCancellation::Reset(signal);
-            }
-            if self.cancellation.changed().await.is_err() {
-                return NetworkRuntimeOwnerCancellation::CoordinatorDropped;
-            }
+        wait_for_runtime_owner_cancellation(&mut self.cancellation).await
+    }
+}
+
+async fn wait_for_runtime_owner_cancellation(
+    cancellation: &mut watch::Receiver<Option<NetworkResetSignal>>,
+) -> NetworkRuntimeOwnerCancellation {
+    loop {
+        if let Some(signal) = *cancellation.borrow_and_update() {
+            return NetworkRuntimeOwnerCancellation::Reset(signal);
+        }
+        if cancellation.changed().await.is_err() {
+            return NetworkRuntimeOwnerCancellation::CoordinatorDropped;
         }
     }
 }

@@ -5,6 +5,7 @@ mod connector;
 mod deadline;
 mod metrics;
 mod network;
+mod network_socket;
 mod owner;
 mod process;
 mod relay;
@@ -35,6 +36,11 @@ pub use network::{
     NetworkSnapshotError, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,
     ResolvedInterface, RouteNetworkOptions, SystemBestRoute, SystemBestRouteError,
 };
+pub use network_socket::{
+    GenerationBoundSocketError, GenerationBoundTcpStream, GenerationBoundUdpSocket,
+    NetworkSocketOperations, NetworkSocketService, NetworkSocketServiceError, ResolvedSocketBinder,
+    SystemNetworkSocketError, SystemNetworkSocketOperations,
+};
 pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
 pub use process::{
     PreparedProcessRoot, ProcessCancellation, ProcessCancellationPhase, ProcessCause,
@@ -54,8 +60,8 @@ pub use reset::{
     NetworkResetHookRegistrationError, NetworkResetHookStage, NetworkResetIntent,
     NetworkResetLimits, NetworkResetLimitsError, NetworkResetOutcome, NetworkResetReason,
     NetworkResetReport, NetworkResetRequestDisposition, NetworkResetSignal, NetworkResetState,
-    NetworkResetStatus, NetworkRuntimeOwner, NetworkRuntimeOwnerCancellation,
-    NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
+    NetworkResetStatus, NetworkRuntimeCancellation, NetworkRuntimeOwner,
+    NetworkRuntimeOwnerCancellation, NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
     NetworkRuntimeResourceAdmissionError,
 };
 pub use ruleset::{
