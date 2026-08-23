@@ -32,6 +32,14 @@ const FRAGMENT_ACTIVE: Duration = Duration::from_secs(30);
 const FRAGMENT_PAYLOAD: usize = 4_096;
 const FRAGMENT_BATCH: usize = 16;
 const FRAGMENT_MINIMUM_DATAGRAMS: u64 = 4_096;
+const FRAGMENT_REQUEST_TAG: [u8; 8] = *b"F2FRQ001";
+const FRAGMENT_ACK_TAG: [u8; 8] = *b"F2FAK001";
+const FRAGMENT_ACK_LEN: usize = 24;
+const FRAGMENT_REPLY_BUFFER: usize = FRAGMENT_ACK_LEN + 1;
+const PERFORMANCE_TUN_MTU: usize = 1_420;
+const IPV4_HEADER_LEN: usize = 20;
+const UDP_HEADER_LEN: usize = 8;
+const FRAGMENT_IPV4_RESPONSE_BOUND: usize = PERFORMANCE_TUN_MTU - IPV4_HEADER_LEN - UDP_HEADER_LEN;
 const RING_BURST_ATTEMPTS: u64 = 1_000_000;
 const ROUTE_SOURCE_SLOTS: usize = 64;
 const ROUTE_TARGET_SLOTS: usize = 4;
@@ -229,9 +237,13 @@ fn parse_support(arguments: &[OsString]) -> Result<SupportArgs, String> {
     })
 }
 
+fn checked_payload_byte(index: usize, seed: u64) -> u8 {
+    ((index as u64).wrapping_mul(131).wrapping_add(seed) & 0xff) as u8
+}
+
 fn checked_payload(length: usize, seed: u64) -> Vec<u8> {
     (0..length)
-        .map(|index| ((index as u64).wrapping_mul(131).wrapping_add(seed) & 0xff) as u8)
+        .map(|index| checked_payload_byte(index, seed))
         .collect()
 }
 
@@ -489,6 +501,66 @@ fn sequenced_payload(length: usize, sequence: u64) -> Result<Vec<u8>, String> {
     Ok(payload)
 }
 
+fn fragment_request(sequence: u64) -> Vec<u8> {
+    let mut payload = checked_payload(FRAGMENT_PAYLOAD, sequence);
+    payload[..8].copy_from_slice(&FRAGMENT_REQUEST_TAG);
+    payload[8..16].copy_from_slice(&sequence.to_be_bytes());
+    payload
+}
+
+fn fragment_request_sequence(payload: &[u8]) -> Result<u64, String> {
+    if payload.len() != FRAGMENT_PAYLOAD {
+        return Err("fragment request payload length mismatch".to_owned());
+    }
+    if !payload.starts_with(&FRAGMENT_REQUEST_TAG) {
+        return Err("fragment request protocol tag mismatch".to_owned());
+    }
+    let mut encoded_sequence = [0_u8; 8];
+    encoded_sequence.copy_from_slice(&payload[8..16]);
+    let sequence = u64::from_be_bytes(encoded_sequence);
+    if payload[16..]
+        .iter()
+        .enumerate()
+        .any(|(offset, byte)| *byte != checked_payload_byte(offset + 16, sequence))
+    {
+        return Err("fragment request payload mismatch".to_owned());
+    }
+    Ok(sequence)
+}
+
+fn fragment_ack(sequence: u64) -> [u8; FRAGMENT_ACK_LEN] {
+    let mut ack = [0_u8; FRAGMENT_ACK_LEN];
+    ack[..8].copy_from_slice(&FRAGMENT_ACK_TAG);
+    ack[8..16].copy_from_slice(&sequence.to_be_bytes());
+    ack[16..24].copy_from_slice(&(FRAGMENT_PAYLOAD as u64).to_be_bytes());
+    ack
+}
+
+fn fragment_ack_sequence(payload: &[u8]) -> Result<u64, String> {
+    if payload.len() != FRAGMENT_ACK_LEN {
+        return Err("fragment ACK payload length mismatch".to_owned());
+    }
+    if !payload.starts_with(&FRAGMENT_ACK_TAG) {
+        return Err("fragment ACK protocol tag mismatch".to_owned());
+    }
+    let mut encoded_sequence = [0_u8; 8];
+    encoded_sequence.copy_from_slice(&payload[8..16]);
+    let mut encoded_request_len = [0_u8; 8];
+    encoded_request_len.copy_from_slice(&payload[16..24]);
+    if u64::from_be_bytes(encoded_request_len) != FRAGMENT_PAYLOAD as u64 {
+        return Err("fragment ACK request length mismatch".to_owned());
+    }
+    Ok(u64::from_be_bytes(encoded_sequence))
+}
+
+fn fragment_ack_for_request(payload: &[u8]) -> Result<Option<[u8; FRAGMENT_ACK_LEN]>, String> {
+    if !payload.starts_with(&FRAGMENT_REQUEST_TAG) {
+        return Ok(None);
+    }
+    let sequence = fragment_request_sequence(payload)?;
+    Ok(Some(fragment_ack(sequence)))
+}
+
 fn udp_batch_round_trip(
     socket: &UdpSocket,
     payload_len: usize,
@@ -532,6 +604,45 @@ fn udp_batch_round_trip(
         }
         if reply[..received] != sequenced_payload(payload_len, sequence)? {
             return Err("UDP batch payload mismatch".to_owned());
+        }
+    }
+    Ok(end_sequence)
+}
+
+fn fragment_batch_round_trip(
+    socket: &UdpSocket,
+    batch: usize,
+    first_sequence: u64,
+    reply: &mut [u8],
+) -> Result<u64, String> {
+    if batch == 0 || reply.len() < FRAGMENT_REPLY_BUFFER {
+        return Err("fragment batch bounds are invalid".to_owned());
+    }
+    let end_sequence = first_sequence
+        .checked_add(batch as u64)
+        .ok_or_else(|| "fragment batch sequence overflow".to_owned())?;
+    for sequence in first_sequence..end_sequence {
+        let payload = fragment_request(sequence);
+        if socket
+            .send(&payload)
+            .map_err(|error| format!("fragment batch send failed: {error}"))?
+            != payload.len()
+        {
+            return Err("fragment batch sent a partial datagram".to_owned());
+        }
+    }
+    let mut seen = vec![false; batch];
+    for _ in 0..batch {
+        let received = socket
+            .recv(reply)
+            .map_err(|error| format!("fragment ACK receive failed: {error}"))?;
+        let sequence = fragment_ack_sequence(&reply[..received])?;
+        if !(first_sequence..end_sequence).contains(&sequence) {
+            return Err("fragment ACK sequence is outside the request set".to_owned());
+        }
+        let offset = (sequence - first_sequence) as usize;
+        if std::mem::replace(&mut seen[offset], true) {
+            return Err("fragment batch contained a duplicate ACK".to_owned());
         }
     }
     Ok(end_sequence)
@@ -824,29 +935,17 @@ fn udp_route_once(target_ip: IpAddr, base_port: u16) -> Result<Value, String> {
 
 fn fragments(address: SocketAddr) -> Result<Value, String> {
     let socket = connected_udp(address)?;
-    let mut reply = vec![0; FRAGMENT_PAYLOAD];
+    let mut reply = [0_u8; FRAGMENT_REPLY_BUFFER];
     let mut sequence = 0_u64;
     let warmup_deadline = Instant::now() + FRAGMENT_WARMUP;
     while Instant::now() < warmup_deadline {
-        sequence = udp_batch_round_trip(
-            &socket,
-            FRAGMENT_PAYLOAD,
-            FRAGMENT_BATCH,
-            sequence,
-            &mut reply,
-        )?;
+        sequence = fragment_batch_round_trip(&socket, FRAGMENT_BATCH, sequence, &mut reply)?;
     }
     let start = Instant::now();
     let deadline = start + FRAGMENT_ACTIVE;
     let mut datagrams = 0_u64;
     while Instant::now() < deadline || datagrams < FRAGMENT_MINIMUM_DATAGRAMS {
-        sequence = udp_batch_round_trip(
-            &socket,
-            FRAGMENT_PAYLOAD,
-            FRAGMENT_BATCH,
-            sequence,
-            &mut reply,
-        )?;
+        sequence = fragment_batch_round_trip(&socket, FRAGMENT_BATCH, sequence, &mut reply)?;
         datagrams = datagrams
             .checked_add(FRAGMENT_BATCH as u64)
             .ok_or_else(|| "fragment datagram count overflow".to_owned())?;
@@ -1010,10 +1109,16 @@ pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
                         let (read, peer) = udp
                             .recv_from(&mut buffer)
                             .map_err(|error| format!("support UDP receive failed: {error}"))?;
-                        let sent = udp
-                            .send_to(&buffer[..read], peer)
-                            .map_err(|error| format!("support UDP send failed: {error}"))?;
-                        if sent != read {
+                        let request = &buffer[..read];
+                        let (sent, response_len) = match fragment_ack_for_request(request) {
+                            Ok(Some(ack)) => udp.send_to(&ack, peer).map(|sent| (sent, ack.len())),
+                            Ok(None) => {
+                                udp.send_to(request, peer).map(|sent| (sent, request.len()))
+                            }
+                            Err(_) => continue,
+                        }
+                        .map_err(|error| format!("support UDP send failed: {error}"))?;
+                        if sent != response_len {
                             return Err("support UDP sent a partial datagram".to_owned());
                         }
                     }
@@ -1103,6 +1208,63 @@ pub(super) fn self_check() -> Result<(), String> {
         || payload == sequenced_payload(32, 0x0102_0304_0506_0709)?
     {
         return Err("Windows TUN sequenced UDP payload is invalid".to_owned());
+    }
+    let fragment_sequence = 0x1112_1314_1516_1718_u64;
+    let fragment_request = fragment_request(fragment_sequence);
+    let expected_ack = fragment_ack(fragment_sequence);
+    let support_ack = fragment_ack_for_request(&fragment_request)?
+        .ok_or_else(|| "fragment request was classified as an ordinary echo".to_owned())?;
+    if fragment_request.len() != FRAGMENT_PAYLOAD
+        || fragment_request_sequence(&fragment_request)? != fragment_sequence
+        || support_ack != expected_ack
+        || fragment_ack_sequence(&support_ack)? != fragment_sequence
+    {
+        return Err("Windows TUN fragment request/ACK round trip is invalid".to_owned());
+    }
+    if fragment_ack_for_request(&payload)?.is_some() {
+        return Err("ordinary UDP echo payload was classified as a fragment request".to_owned());
+    }
+    if FRAGMENT_ACK_LEN != 24
+        || FRAGMENT_REPLY_BUFFER != FRAGMENT_ACK_LEN + 1
+        || FRAGMENT_ACK_LEN > FRAGMENT_IPV4_RESPONSE_BOUND
+    {
+        return Err("Windows TUN fragment ACK bound is invalid".to_owned());
+    }
+    let fragment_data_capacity = ((PERFORMANCE_TUN_MTU - IPV4_HEADER_LEN) / 8) * 8;
+    let fragment_count = (FRAGMENT_PAYLOAD + UDP_HEADER_LEN).div_ceil(fragment_data_capacity);
+    if fragment_count != 3 {
+        return Err("Windows TUN fragment request is not exactly three IPv4 fragments".to_owned());
+    }
+    if fragment_ack_for_request(&fragment_request[..FRAGMENT_PAYLOAD - 1]).is_ok() {
+        return Err("truncated fragment request was accepted".to_owned());
+    }
+    let mut extended_request = fragment_request.clone();
+    extended_request.push(0);
+    if fragment_ack_for_request(&extended_request).is_ok() {
+        return Err("extended fragment request was accepted".to_owned());
+    }
+    let mut corrupted_request = fragment_request.clone();
+    corrupted_request[FRAGMENT_PAYLOAD - 1] ^= 1;
+    if fragment_ack_for_request(&corrupted_request).is_ok() {
+        return Err("corrupted fragment request was accepted".to_owned());
+    }
+    if fragment_ack_sequence(&expected_ack[..FRAGMENT_ACK_LEN - 1]).is_ok() {
+        return Err("truncated fragment ACK was accepted".to_owned());
+    }
+    let mut extended_ack = expected_ack.to_vec();
+    extended_ack.push(0);
+    if fragment_ack_sequence(&extended_ack).is_ok() {
+        return Err("extended fragment ACK was accepted".to_owned());
+    }
+    let mut invalid_ack_tag = expected_ack;
+    invalid_ack_tag[0] ^= 1;
+    if fragment_ack_sequence(&invalid_ack_tag).is_ok() {
+        return Err("fragment ACK with an invalid tag was accepted".to_owned());
+    }
+    let mut invalid_ack_request_len = expected_ack;
+    invalid_ack_request_len[16..24].copy_from_slice(&4_095_u64.to_be_bytes());
+    if fragment_ack_sequence(&invalid_ack_request_len).is_ok() {
+        return Err("fragment ACK with an invalid request length was accepted".to_owned());
     }
     let labels = [
         "tcp-single-flow",

@@ -3913,7 +3913,7 @@ fn validate_drain(sample: &PairSample, baseline: &PairSample) -> Result<(), Stri
 }
 
 fn run_self_check() -> Result<String, String> {
-    const MUTATION_COUNT: u64 = 42;
+    const MUTATION_COUNT: u64 = 49;
     windows_tun::self_check()?;
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let good = EnvironmentIdentity {
