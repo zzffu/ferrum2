@@ -166,6 +166,8 @@ pub enum TunEvent {
     PacketAccepted,
     PacketFoundationDropped,
     SessionStarted,
+    StrictRouteFilterInstalled,
+    StrictRouteFilterInstallFailed,
     NetworkResetStarted(TunNetworkResetReason),
     NetworkResetSucceeded(TunNetworkResetReason),
     NetworkResetFailed(TunNetworkResetReason),
@@ -1500,8 +1502,16 @@ fn owner_main(
             adapter
         } else {
             match ferrum2_wintun::Adapter::create(adapter_config.clone(), deadline, &control.stop) {
-                Ok(adapter) => adapter,
+                Ok(adapter) => {
+                    if config.strict_route {
+                        events.emit(TunEvent::StrictRouteFilterInstalled);
+                    }
+                    adapter
+                }
                 Err(error) => {
+                    if error.is_strict_route_install_failure() {
+                        events.emit(TunEvent::StrictRouteFilterInstallFailed);
+                    }
                     if control.stop.load(Ordering::Acquire)
                         || control.shutdown.load(Ordering::Acquire)
                     {

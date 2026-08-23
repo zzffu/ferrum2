@@ -9,8 +9,9 @@ use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Metrics, NetworkLifecycleOperation, NetworkLifecycleResult, NetworkResetReason,
-    Outcome, Role, Transport, TunDiagnosticReason, TunIpFamily, TunPacketRejectReason,
-    TunUdpAssociationRouteResult, TunUdpResponseDropReason, emit_tun_diagnostic,
+    Outcome, Role, StrictRouteDiagnosticStatus, StrictRouteFilterInstallResult, Transport,
+    TunDiagnosticReason, TunIpFamily, TunPacketRejectReason, TunUdpAssociationRouteResult,
+    TunUdpResponseDropReason, emit_strict_route_diagnostic, emit_tun_diagnostic,
 };
 use ferrum2_runtime::{
     NetworkResetCoordinator, NetworkResetHookRegistration, NetworkResetHookStage,
@@ -40,12 +41,23 @@ pub(super) fn process_root(
     underlay: ferrum2_tun::UnderlayPublisher,
     direct_binder: bool,
 ) -> ProcessRoot<RunError> {
+    let strict_route_requested = config.strict_route_requested();
     let strict_route = config.strict_route_effective();
     let synthetic_dns = SyntheticDns {
         ipv4: config.ipv4_dns_address,
         ipv6: config.ipv6_dns_address,
     };
     let metrics = Arc::clone(&context.metrics);
+    metrics.set_tun_strict_route_requested(strict_route_requested);
+    metrics.set_tun_strict_route_effective(strict_route);
+    if !strict_route_requested {
+        emit_strict_route_diagnostic(Role::Client, StrictRouteDiagnosticStatus::NotRequested);
+    } else if !strict_route {
+        emit_strict_route_diagnostic(
+            Role::Client,
+            StrictRouteDiagnosticStatus::RequestedIneffective,
+        );
+    }
     let network_reset = Arc::new(OnceLock::new());
     let handler_context = Arc::clone(&context);
     let udp_context = Arc::clone(&context);
@@ -311,6 +323,14 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
         TunEvent::PacketAccepted => metrics.tun_packet_accepted(),
         TunEvent::PacketFoundationDropped => metrics.tun_packet_foundation_dropped(),
         TunEvent::SessionStarted => metrics.tun_session_started(),
+        TunEvent::StrictRouteFilterInstalled => {
+            metrics.tun_strict_route_filter_install(StrictRouteFilterInstallResult::Success);
+            emit_strict_route_diagnostic(Role::Client, StrictRouteDiagnosticStatus::Installed);
+        }
+        TunEvent::StrictRouteFilterInstallFailed => {
+            metrics.tun_strict_route_filter_install(StrictRouteFilterInstallResult::Failure);
+            emit_strict_route_diagnostic(Role::Client, StrictRouteDiagnosticStatus::InstallFailed);
+        }
         TunEvent::NetworkResetStarted(reason) => metrics.network_reset(
             map_network_reset_reason(reason),
             NetworkLifecycleResult::Started,
@@ -1586,6 +1606,8 @@ mod tests {
             TunEvent::PacketAccepted,
             TunEvent::PacketFoundationDropped,
             TunEvent::SessionStarted,
+            TunEvent::StrictRouteFilterInstalled,
+            TunEvent::StrictRouteFilterInstallFailed,
             TunEvent::NetworkResetStarted(TunNetworkResetReason::NetworkChange),
             TunEvent::NetworkResetSucceeded(TunNetworkResetReason::NetworkChange),
             TunEvent::NetworkResetFailed(TunNetworkResetReason::NetworkChange),
