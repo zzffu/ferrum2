@@ -1035,8 +1035,15 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             warmup_unique = 8
             retransmissions = 1
             total_unique = warmup_unique + active_unique
+            total_request_attempts = total_unique + retransmissions
+            expected_fragment_packets = total_request_attempts * 2
+            background_family_disabled = 2
+            background_invalid_destination = 1
+            background_packets = (
+                background_family_disabled + background_invalid_destination
+            )
             row["diagnostics"] = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "kind": "fragment_ack_accounting",
                 "batch_datagrams": 8,
                 "ack_window_milliseconds": 500,
@@ -1051,17 +1058,28 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     "active_unique_datagrams": active_unique,
                     "active_request_attempts": active_unique + retransmissions,
                     "total_unique_datagrams": total_unique,
-                    "total_request_attempts": total_unique + retransmissions,
+                    "total_request_attempts": total_request_attempts,
                     "retransmissions": retransmissions,
                     "ack_window_expirations": retransmissions,
                     "duplicate_or_stale_acks": 0,
                     "retry_budget": 1,
                 },
+                "packet_counter_deltas": {
+                    "accepted_packets": expected_fragment_packets,
+                    "ingress_packets": expected_fragment_packets
+                    + background_packets,
+                    "background_family_disabled": background_family_disabled,
+                    "background_invalid_destination": (
+                        background_invalid_destination
+                    ),
+                    "background_packets": background_packets,
+                },
                 "adapter_counter_deltas": {
-                    "ReceivedUnicastPackets": total_unique + retransmissions,
+                    "ReceivedUnicastPackets": total_request_attempts,
                     "ReceivedDiscardedPackets": 0,
                     "ReceivedPacketErrors": 0,
-                    "SentUnicastPackets": (total_unique + retransmissions) * 2,
+                    "SentUnicastPackets": expected_fragment_packets
+                    + background_packets,
                     "OutboundDiscardedPackets": 0,
                     "OutboundPacketErrors": 0,
                 },
@@ -1647,8 +1665,14 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         extra_field["diagnostics"]["unexpected"] = 0
         cases.append((extra_field, "fragment diagnostics schema mismatch"))
 
+        packet_container_missing = copy.deepcopy(row)
+        packet_container_missing["diagnostics"].pop("packet_counter_deltas")
+        cases.append(
+            (packet_container_missing, "fragment diagnostics schema mismatch")
+        )
+
         wrong_schema = copy.deepcopy(row)
-        wrong_schema["diagnostics"]["schema_version"] = 2
+        wrong_schema["diagnostics"]["schema_version"] = 1
         cases.append((wrong_schema, "schema_version is unsupported"))
 
         wrong_kind = copy.deepcopy(row)
@@ -1658,6 +1682,26 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         accounting_extra = copy.deepcopy(row)
         accounting_extra["diagnostics"]["accounting"]["unexpected"] = 0
         cases.append((accounting_extra, "diagnostics accounting schema mismatch"))
+
+        packet_missing = copy.deepcopy(row)
+        packet_missing["diagnostics"]["packet_counter_deltas"].pop(
+            "background_invalid_destination"
+        )
+        cases.append((packet_missing, "packet counter deltas schema mismatch"))
+
+        packet_extra = copy.deepcopy(row)
+        packet_extra["diagnostics"]["packet_counter_deltas"]["unexpected"] = 0
+        cases.append((packet_extra, "packet counter deltas schema mismatch"))
+
+        packet_not_object = copy.deepcopy(row)
+        packet_not_object["diagnostics"]["packet_counter_deltas"] = []
+        cases.append((packet_not_object, "packet counter deltas must be an object"))
+
+        packet_boolean = copy.deepcopy(row)
+        packet_boolean["diagnostics"]["packet_counter_deltas"][
+            "background_packets"
+        ] = False
+        cases.append((packet_boolean, "non-negative u64"))
 
         adapter_missing = copy.deepcopy(row)
         adapter_missing["diagnostics"]["adapter_counter_deltas"].pop(
@@ -1749,6 +1793,24 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         exceeded_accounting["ack_window_expirations"] += 1
         cases.append((exceeded_budget, "exceeded the retry budget"))
 
+        background_sum = copy.deepcopy(row)
+        background_sum["diagnostics"]["packet_counter_deltas"][
+            "background_packets"
+        ] += 1
+        cases.append((background_sum, "background packet accounting"))
+
+        accepted_packets = copy.deepcopy(row)
+        accepted_packets["diagnostics"]["packet_counter_deltas"][
+            "accepted_packets"
+        ] -= 1
+        cases.append((accepted_packets, "accepted-packet accounting"))
+
+        ingress_packets = copy.deepcopy(row)
+        ingress_packets["diagnostics"]["packet_counter_deltas"][
+            "ingress_packets"
+        ] -= 1
+        cases.append((ingress_packets, "ingress/background accounting"))
+
         adapter_loss = copy.deepcopy(row)
         adapter_loss["diagnostics"]["adapter_counter_deltas"][
             "ReceivedDiscardedPackets"
@@ -1803,9 +1865,15 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             + accounting["active_request_attempts"]
         )
         accounting["retry_budget"] = 2
+        packet_counters = row["diagnostics"]["packet_counter_deltas"]
+        expected_fragment_packets = accounting["total_request_attempts"] * 2
+        packet_counters["accepted_packets"] = expected_fragment_packets
+        packet_counters["ingress_packets"] = (
+            expected_fragment_packets + packet_counters["background_packets"]
+        )
         adapter = row["diagnostics"]["adapter_counter_deltas"]
         adapter["ReceivedUnicastPackets"] = accounting["total_request_attempts"]
-        adapter["SentUnicastPackets"] = accounting["total_request_attempts"] * 2
+        adapter["SentUnicastPackets"] = packet_counters["ingress_packets"]
         CONTROL.validate_windows_tun_trial(
             row,
             plan=plan,

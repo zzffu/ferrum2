@@ -682,6 +682,7 @@ WINDOWS_TUN_MEASUREMENT_FIELDS = frozenset({"unit", "value"})
 WINDOWS_TUN_CORRECTNESS_FIELDS = frozenset(
     {"status", "checked_unit", "checked_units", "checks"}
 )
+WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_SCHEMA_VERSION = 2
 WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_PARAMETER_FIELDS = frozenset(
     {
         "batch_datagrams",
@@ -699,6 +700,7 @@ WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_FIELDS = frozenset(
         "kind",
         *WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_PARAMETER_FIELDS,
         "accounting",
+        "packet_counter_deltas",
         "adapter_counter_deltas",
     }
 )
@@ -714,6 +716,15 @@ WINDOWS_TUN_FRAGMENT_ACCOUNTING_FIELDS = frozenset(
         "ack_window_expirations",
         "duplicate_or_stale_acks",
         "retry_budget",
+    }
+)
+WINDOWS_TUN_FRAGMENT_PACKET_COUNTER_FIELDS = frozenset(
+    {
+        "accepted_packets",
+        "ingress_packets",
+        "background_family_disabled",
+        "background_invalid_destination",
+        "background_packets",
     }
 )
 WINDOWS_TUN_FRAGMENT_ADAPTER_COUNTER_FIELDS = frozenset(
@@ -3831,7 +3842,10 @@ def _validate_windows_tun_diagnostics(
         WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_FIELDS,
         "Windows TUN fragment diagnostics",
     )
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_SCHEMA_VERSION
+    ):
         raise CandidateControlError(
             "Windows TUN fragment diagnostics schema_version is unsupported"
         )
@@ -3936,6 +3950,43 @@ def _validate_windows_tun_diagnostics(
             "Windows TUN fragment diagnostics retransmissions exceeded the retry budget"
         )
 
+    packet_counters = value["packet_counter_deltas"]
+    if type(packet_counters) is not dict:
+        raise CandidateControlError(
+            "Windows TUN fragment packet counter deltas must be an object"
+        )
+    _exact_fields(
+        packet_counters,
+        WINDOWS_TUN_FRAGMENT_PACKET_COUNTER_FIELDS,
+        "Windows TUN fragment packet counter deltas",
+    )
+    packet_counts = {
+        field: _windows_tun_diagnostic_u64(
+            packet_counters[field], f"packet_counter_deltas.{field}"
+        )
+        for field in WINDOWS_TUN_FRAGMENT_PACKET_COUNTER_FIELDS
+    }
+    if packet_counts["background_packets"] != (
+        packet_counts["background_family_disabled"]
+        + packet_counts["background_invalid_destination"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN fragment background packet accounting is inconsistent"
+        )
+    expected_fragment_packets = (
+        counts["total_request_attempts"] * recipe["fragments_per_datagram"]
+    )
+    if packet_counts["accepted_packets"] != expected_fragment_packets:
+        raise CandidateControlError(
+            "Windows TUN fragment accepted-packet accounting is inconsistent"
+        )
+    if packet_counts["ingress_packets"] != (
+        expected_fragment_packets + packet_counts["background_packets"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN fragment ingress/background accounting is inconsistent"
+        )
+
     adapter = value["adapter_counter_deltas"]
     if type(adapter) is not dict:
         raise CandidateControlError(
@@ -3962,9 +4013,7 @@ def _validate_windows_tun_diagnostics(
             raise CandidateControlError(
                 f"Windows TUN fragment adapter counter {field} recorded packet loss"
             )
-    if adapter_counts["SentUnicastPackets"] != (
-        counts["total_request_attempts"] * recipe["fragments_per_datagram"]
-    ):
+    if adapter_counts["SentUnicastPackets"] != packet_counts["ingress_packets"]:
         raise CandidateControlError(
             "Windows TUN fragment adapter sent-packet accounting is inconsistent"
         )

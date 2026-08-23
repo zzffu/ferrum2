@@ -411,11 +411,16 @@ function Wait-CleanDrain([bool]$Udp) {
         $tcp = Get-Metric $metrics "ferrum2_tun_tcp_flows_active"
         $fragments = Get-Metric $metrics "ferrum2_tun_reassembly_entries_active"
         $udpAssociations = Get-Metric $metrics "ferrum2_tun_udp_associations_active"
+        $udpCandidates = Get-Metric $metrics "ferrum2_tun_udp_candidates_active"
         $pendingUdpResponses = Get-Metric $metrics "ferrum2_tun_pending_udp_responses"
         if (
             $tcp -eq 0 -and
             $fragments -eq 0 -and
-            ((-not $Udp) -or ($udpAssociations -eq 0 -and $pendingUdpResponses -eq 0))
+            ((-not $Udp) -or (
+                $udpAssociations -eq 0 -and
+                $udpCandidates -eq 0 -and
+                $pendingUdpResponses -eq 0
+            ))
         ) {
             return $metrics
         }
@@ -444,6 +449,127 @@ function Get-ManagedAdapterCounter {
     }
 }
 
+function Get-FragmentCounterSignature(
+    [string]$Metrics,
+    [object]$AdapterCounters,
+    [string]$AdapterIdentity
+) {
+    $packetReject = Get-PacketRejectCounter -Metrics $Metrics
+    $dropCounters = Get-ProductDropCounter -Metrics $Metrics
+    $signature = [ordered]@{
+        ingress = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_packets_ingress" -AllowAbsent $true)
+        accepted = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_packets_accepted" -AllowAbsent $true)
+        session_active = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_session_active")
+        session_generation = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_session_generation")
+        tcp_flows_active = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_tcp_flows_active")
+        reassembly_entries_active = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_reassembly_entries_active")
+        udp_associations_active = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_udp_associations_active")
+        udp_candidates_active = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_udp_candidates_active")
+        pending_udp_responses = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_pending_udp_responses")
+        reassembly_completed = [uint64](Get-Metric -Metrics $Metrics `
+            -Name "ferrum2_tun_reassembly_completed" -AllowAbsent $true)
+        packet_rejected_total = [uint64]$packetReject.total
+        packet_rejected_family_disabled = [uint64]$packetReject.family_disabled
+        packet_rejected_invalid_destination = [uint64]$packetReject.invalid_destination
+        packet_rejected_unexpected = [uint64]$packetReject.unexpected
+        adapter_identity = $AdapterIdentity
+    }
+    foreach ($name in $dropCounters.Keys) {
+        $signature[$name] = [uint64]$dropCounters[$name]
+    }
+    foreach ($name in $AdapterCounters.Keys) {
+        $signature["adapter_$name"] = [uint64]$AdapterCounters[$name]
+    }
+    return ($signature | ConvertTo-Json -Compress -Depth 3)
+}
+
+function Get-CoherentFragmentCounterSnapshot([int]$TimeoutSeconds = 5) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $stableSignature = $null
+    [uint64]$lastIngress = 0
+    [uint64]$lastSent = 0
+    do {
+        # Sandwich the Wintun counters between two product scrapes, then require
+        # two identical sandwiches separated by a quiet window. Wintun publishes
+        # the ring tail just before its send statistic, so a single equality is
+        # not a sufficient stable boundary.
+        $metricsBefore = Get-Metrics $script:MetricsPort 2
+        $clientProcess.Refresh()
+        Assert-Condition (-not $clientProcess.HasExited) `
+            "client exited before a coherent fragment counter snapshot"
+        $managedAdapter = Get-ManagedAdapter
+        $parsedAdapterGuid = [guid]::Empty
+        Assert-Condition (
+            [guid]::TryParse([string]$managedAdapter.InterfaceGuid, [ref]$parsedAdapterGuid) -and
+            $parsedAdapterGuid -ne [guid]::Empty -and
+            [uint32]$managedAdapter.ifIndex -gt 0
+        ) "managed performance adapter identity is invalid"
+        $adapterIdentity = (
+            $parsedAdapterGuid.ToString("D").ToLowerInvariant() + "|" +
+                [string]$managedAdapter.ifIndex
+        )
+        $adapterCounters = Get-ManagedAdapterCounter
+        $metricsAfter = Get-Metrics $script:MetricsPort 2
+        [uint64]$lastIngress = Get-Metric -Metrics $metricsAfter `
+            -Name "ferrum2_tun_packets_ingress" -AllowAbsent $true
+        [uint64]$lastSent = $adapterCounters.SentUnicastPackets
+        $fragmentStateDrained = (
+            (Get-Metric -Metrics $metricsAfter -Name "ferrum2_tun_tcp_flows_active") -eq 0 -and
+            (Get-Metric -Metrics $metricsAfter `
+                -Name "ferrum2_tun_reassembly_entries_active") -eq 0 -and
+            (Get-Metric -Metrics $metricsAfter `
+                -Name "ferrum2_tun_udp_associations_active") -eq 0 -and
+            (Get-Metric -Metrics $metricsAfter `
+                -Name "ferrum2_tun_udp_candidates_active") -eq 0 -and
+            (Get-Metric -Metrics $metricsAfter `
+                -Name "ferrum2_tun_pending_udp_responses") -eq 0
+        )
+        foreach ($name in @(
+            "ReceivedDiscardedPackets", "ReceivedPacketErrors",
+            "OutboundDiscardedPackets", "OutboundPacketErrors"
+        )) {
+            Assert-Condition ([uint64]$adapterCounters[$name] -eq 0) `
+                "managed performance adapter recorded packet loss before a coherent snapshot: $name"
+        }
+        $beforeSignature = Get-FragmentCounterSignature `
+            -Metrics $metricsBefore -AdapterCounters $adapterCounters `
+            -AdapterIdentity $adapterIdentity
+        $afterSignature = Get-FragmentCounterSignature `
+            -Metrics $metricsAfter -AdapterCounters $adapterCounters `
+            -AdapterIdentity $adapterIdentity
+        if (
+            $beforeSignature -ceq $afterSignature -and
+            $lastIngress -eq $lastSent -and
+            $fragmentStateDrained
+        ) {
+            if ($null -ne $stableSignature -and $stableSignature -ceq $afterSignature) {
+                return [pscustomobject]@{
+                    Metrics = $metricsAfter
+                    AdapterCounters = $adapterCounters
+                    AdapterIdentity = $adapterIdentity
+                }
+            }
+            $stableSignature = $afterSignature
+        } else {
+            $stableSignature = $null
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw (
+        "fragment counters did not reach a coherent snapshot: " +
+            "ingress=$lastIngress sent=$lastSent"
+    )
+}
+
 function Get-AdapterCounterDelta([object]$Before, [object]$After) {
     $deltas = [ordered]@{}
     foreach ($name in @(
@@ -457,6 +583,29 @@ function Get-AdapterCounterDelta([object]$Before, [object]$After) {
         $deltas[$name] = [uint64]($afterValue - $beforeValue)
     }
     return $deltas
+}
+
+function Get-PacketRejectCounter([string]$Metrics) {
+    # Windows emits unrelated IPv6 and non-test-destination background traffic
+    # into the managed adapter. Subtract only those two closed reasons; any
+    # current or future rejection reason remains in the fail-closed anomaly sum.
+    [uint64]$packetRejected = Get-Metric `
+        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" -AllowAbsent $true
+    [uint64]$familyDisabled = Get-LabeledMetric `
+        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" `
+        -Labels @{ reason = "family_disabled" } -AllowAbsent $true
+    [uint64]$invalidDestination = Get-LabeledMetric `
+        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" `
+        -Labels @{ reason = "invalid_destination" } -AllowAbsent $true
+    [decimal]$backgroundRejected = [decimal]$familyDisabled + $invalidDestination
+    Assert-Condition ([decimal]$packetRejected -ge $backgroundRejected) `
+        "packet rejection reason accounting is inconsistent"
+    return [ordered]@{
+        total = $packetRejected
+        family_disabled = $familyDisabled
+        invalid_destination = $invalidDestination
+        unexpected = [uint64]([decimal]$packetRejected - $backgroundRejected)
+    }
 }
 
 function Get-ProductDropCounter([string]$Metrics) {
@@ -484,23 +633,9 @@ function Get-ProductDropCounter([string]$Metrics) {
             -Metrics $Metrics -Name $name -AllowAbsent $true
         )
     }
-    # Windows emits unrelated IPv6 and non-test-destination background traffic
-    # into the managed adapter. Subtract only those two closed reasons; any
-    # current or future rejection reason remains in the fail-closed anomaly sum.
-    [uint64]$packetRejected = Get-Metric `
-        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" -AllowAbsent $true
-    [uint64]$familyDisabled = Get-LabeledMetric `
-        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" `
-        -Labels @{ reason = "family_disabled" } -AllowAbsent $true
-    [uint64]$invalidDestination = Get-LabeledMetric `
-        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" `
-        -Labels @{ reason = "invalid_destination" } -AllowAbsent $true
-    [decimal]$backgroundRejected = [decimal]$familyDisabled + $invalidDestination
-    Assert-Condition ([decimal]$packetRejected -ge $backgroundRejected) `
-        "packet rejection reason accounting is inconsistent"
-    $counters["ferrum2_tun_packets_rejected_unexpected"] = [uint64](
-        [decimal]$packetRejected - $backgroundRejected
-    )
+    $packetReject = Get-PacketRejectCounter -Metrics $Metrics
+    $counters["ferrum2_tun_packets_rejected_unexpected"] = `
+        [uint64]$packetReject.unexpected
     return $counters
 }
 
@@ -911,13 +1046,24 @@ try {
             $checks.clean_drain = $true
         }
         "fragment-reassembly-throughput" {
-            $before = Get-Metrics $MetricsPort 5
-            $adapterCountersBefore = Get-ManagedAdapterCounter
+            $counterSnapshotBefore = Get-CoherentFragmentCounterSnapshot
+            $before = $counterSnapshotBefore.Metrics
+            $adapterCountersBefore = $counterSnapshotBefore.AdapterCounters
+            $adapterIdentityBefore = [string]$counterSnapshotBefore.AdapterIdentity
             $dropCountersBefore = Get-ProductDropCounter -Metrics $before
+            $packetRejectBefore = Get-PacketRejectCounter -Metrics $before
             [uint64]$fragmentIngressBefore = Get-Metric -Metrics $before `
                 -Name "ferrum2_tun_packets_ingress" -AllowAbsent $true
+            [uint64]$fragmentAcceptedBefore = Get-Metric -Metrics $before `
+                -Name "ferrum2_tun_packets_accepted" -AllowAbsent $true
             [uint64]$completedBefore = Get-Metric -Metrics $before `
                 -Name "ferrum2_tun_reassembly_completed" -AllowAbsent $true
+            [uint64]$fragmentGenerationBefore = Get-Metric -Metrics $before `
+                -Name "ferrum2_tun_session_generation"
+            Assert-Condition (
+                $fragmentGenerationBefore -ge 1 -and
+                (Get-Metric -Metrics $before -Name "ferrum2_tun_session_active") -eq 1
+            ) "TUN session is not active before fragment workload"
             $observation = Invoke-Workload $Scenario 120
             Assert-ExactProperties -Value $observation -Expected @(
                 "measurements", "checked_units", "accounting", "checks"
@@ -998,31 +1144,79 @@ try {
 
             [void](Wait-CleanDrain $true)
             $checks.clean_drain = $true
-            $after = Get-Metrics $MetricsPort 5
-            $adapterCountersAfter = Get-ManagedAdapterCounter
+            $counterSnapshotAfter = Get-CoherentFragmentCounterSnapshot
+            $after = $counterSnapshotAfter.Metrics
+            $adapterCountersAfter = $counterSnapshotAfter.AdapterCounters
+            Assert-Condition (
+                [string]$counterSnapshotAfter.AdapterIdentity -ceq $adapterIdentityBefore
+            ) "managed performance adapter identity changed during fragment workload"
             $dropCountersAfter = Get-ProductDropCounter -Metrics $after
+            $packetRejectAfter = Get-PacketRejectCounter -Metrics $after
             Assert-ProductDropCounterUnchanged `
                 -Before $dropCountersBefore -After $dropCountersAfter
             [uint64]$fragmentIngressAfter = Get-Metric -Metrics $after `
                 -Name "ferrum2_tun_packets_ingress" -AllowAbsent $true
+            [uint64]$fragmentAcceptedAfter = Get-Metric -Metrics $after `
+                -Name "ferrum2_tun_packets_accepted" -AllowAbsent $true
             [uint64]$completedAfter = Get-Metric -Metrics $after `
                 -Name "ferrum2_tun_reassembly_completed" -AllowAbsent $true
+            [uint64]$fragmentGenerationAfter = Get-Metric -Metrics $after `
+                -Name "ferrum2_tun_session_generation"
+            Assert-Condition (
+                $fragmentGenerationAfter -eq $fragmentGenerationBefore -and
+                (Get-Metric -Metrics $after -Name "ferrum2_tun_session_active") -eq 1
+            ) "TUN session changed during fragment workload"
             Assert-Condition (
                 $fragmentIngressAfter -ge $fragmentIngressBefore -and
+                $fragmentAcceptedAfter -ge $fragmentAcceptedBefore -and
                 $completedAfter -ge $completedBefore
             ) "fragment product counters decreased"
+            Assert-Condition (
+                [uint64]$packetRejectAfter.family_disabled -ge
+                    [uint64]$packetRejectBefore.family_disabled -and
+                [uint64]$packetRejectAfter.invalid_destination -ge
+                    [uint64]$packetRejectBefore.invalid_destination
+            ) "fragment background rejection counters decreased"
             [uint64]$fragmentIngressDelta = $fragmentIngressAfter - $fragmentIngressBefore
+            [uint64]$fragmentAcceptedDelta = `
+                $fragmentAcceptedAfter - $fragmentAcceptedBefore
             [uint64]$completedDelta = $completedAfter - $completedBefore
+            [uint64]$familyDisabledDelta = `
+                [uint64]$packetRejectAfter.family_disabled - `
+                [uint64]$packetRejectBefore.family_disabled
+            [uint64]$invalidDestinationDelta = `
+                [uint64]$packetRejectAfter.invalid_destination - `
+                [uint64]$packetRejectBefore.invalid_destination
+            [decimal]$backgroundPacketCount = `
+                [decimal]$familyDisabledDelta + $invalidDestinationDelta
+            Assert-Condition ($backgroundPacketCount -le [decimal][uint64]::MaxValue) `
+                "fragment background packet count overflowed"
             Assert-Condition (
                 [decimal]$accounting.total_request_attempts -le
                     [decimal][uint64]::MaxValue / [decimal]2
             ) "fragment request attempt count exceeds the packet denominator"
             [uint64]$expectedFragmentPackets = [uint64]$accounting.total_request_attempts * 2
-            Assert-Condition ($fragmentIngressDelta -eq $expectedFragmentPackets) `
-                "fragment workload did not produce exactly two fragments per request attempt"
+            Assert-Condition (
+                [decimal]$expectedFragmentPackets + $backgroundPacketCount -le
+                    [decimal][uint64]::MaxValue
+            ) "fragment ingress packet accounting overflowed"
+            [uint64]$expectedIngressPackets = [uint64](
+                [decimal]$expectedFragmentPackets + $backgroundPacketCount
+            )
+            Assert-Condition ($fragmentAcceptedDelta -eq $expectedFragmentPackets) `
+                "fragment workload accepted-packet accounting is inconsistent"
+            Assert-Condition ($fragmentIngressDelta -eq $expectedIngressPackets) `
+                "fragment workload ingress/background accounting is inconsistent"
             Assert-Condition (
                 $completedDelta -eq [uint64]$accounting.total_request_attempts
             ) "fragment request attempts did not all reach product reassembly"
+            $packetCounterDeltas = [ordered]@{
+                accepted_packets = $fragmentAcceptedDelta
+                ingress_packets = $fragmentIngressDelta
+                background_family_disabled = $familyDisabledDelta
+                background_invalid_destination = $invalidDestinationDelta
+                background_packets = [uint64]$backgroundPacketCount
+            }
 
             $adapterCounterDeltas = Get-AdapterCounterDelta `
                 -Before $adapterCountersBefore -After $adapterCountersAfter
@@ -1035,14 +1229,18 @@ try {
             }
             Assert-Condition (
                 [uint64]$adapterCounterDeltas.SentUnicastPackets -eq
-                    $expectedFragmentPackets
-            ) "fragment workload adapter sent-packet accounting is inconsistent"
+                    $expectedIngressPackets
+            ) (
+                "fragment workload adapter sent-packet accounting is inconsistent: " +
+                    "expected=$expectedIngressPackets actual=" +
+                    [uint64]$adapterCounterDeltas.SentUnicastPackets
+            )
             Assert-Condition (
                 [uint64]$adapterCounterDeltas.ReceivedUnicastPackets -ge
                     [uint64]$accounting.total_unique_datagrams
             ) "fragment workload adapter received-packet accounting is inconsistent"
             $diagnostics = [ordered]@{
-                schema_version = 1
+                schema_version = 2
                 kind = "fragment_ack_accounting"
                 batch_datagrams = 8
                 ack_window_milliseconds = 500
@@ -1052,6 +1250,7 @@ try {
                 minimum_retry_budget = 1
                 retry_scope = "missing-sequence-only"
                 accounting = $accounting
+                packet_counter_deltas = $packetCounterDeltas
                 adapter_counter_deltas = $adapterCounterDeltas
             }
             $measurements.reassembly_rate = [ordered]@{
