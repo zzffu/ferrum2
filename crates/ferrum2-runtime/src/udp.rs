@@ -991,8 +991,11 @@ pub trait DirectUdpSocketFactory: Send + Sync + 'static {
     /// Owned direct socket.
     type Socket: DirectUdpSocket;
 
-    /// Opens one unconnected dual-family datagram socket.
-    fn open(&self) -> impl Future<Output = io::Result<Self::Socket>> + Send;
+    /// Opens one unconnected datagram socket selected for the first concrete destination.
+    fn open(
+        &self,
+        selection_destination: SocketAddr,
+    ) -> impl Future<Output = io::Result<Self::Socket>> + Send;
 }
 
 /// Production one-socket-per-session factory.
@@ -1000,7 +1003,7 @@ pub trait DirectUdpSocketFactory: Send + Sync + 'static {
 pub struct SystemDirectUdpSocketFactory;
 
 impl DirectUdpSocketFactory for SystemDirectUdpSocketFactory {
-    async fn open(&self) -> io::Result<Self::Socket> {
+    async fn open(&self, _selection_destination: SocketAddr) -> io::Result<Self::Socket> {
         let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_only_v6(false)?;
         socket.set_nonblocking(true)?;
@@ -1173,6 +1176,7 @@ where
         &mut self,
         now: Instant,
         first_allocated_capacity: usize,
+        selection_destination: SocketAddr,
     ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
         while self.tasks.try_join_next().is_some() {}
         let session = self.manager.reserve_session(now)?;
@@ -1183,7 +1187,7 @@ where
             session.reserve_datagram(UdpDirection::ToTarget, first_allocated_capacity)?;
         let socket = self
             .socket_factory
-            .open()
+            .open(selection_destination)
             .await
             .map_err(|_| UdpRuntimeError::Send)?;
         let socket_guard = self.registry.track_udp_socket();
