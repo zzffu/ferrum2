@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use ferrum2_observability::{Metrics, TunPacketRejectReason, TunUdpResponseDropReason};
+use ferrum2_observability::{
+    Metrics, StrictRouteFilterInstallResult, TunPacketRejectReason, TunUdpAssociationRouteResult,
+    TunUdpResponseDropReason,
+};
 
 const PACKET_REJECT_REASONS: &[(TunPacketRejectReason, &str)] = &[
     (
@@ -159,6 +162,18 @@ fn record_one_of_every_tun_event(metrics: &Metrics) {
 
     metrics.tun_network_change();
     metrics.tun_underlay_bind_stale();
+    metrics.set_tun_strict_route_requested(true);
+    metrics.set_tun_strict_route_effective(true);
+    metrics.tun_strict_route_filter_install(StrictRouteFilterInstallResult::Success);
+    metrics.tun_strict_route_filter_install(StrictRouteFilterInstallResult::Failure);
+    for result in [
+        TunUdpAssociationRouteResult::Success,
+        TunUdpAssociationRouteResult::Rejected,
+        TunUdpAssociationRouteResult::Failure,
+        TunUdpAssociationRouteResult::StaleGeneration,
+    ] {
+        metrics.tun_udp_association_route(result);
+    }
 }
 
 #[test]
@@ -199,12 +214,16 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_session_restart_started TUN session restart attempts started.",
             "ferrum2_tun_session_restart_succeeded TUN session restart attempts completed successfully.",
             "ferrum2_tun_session_started TUN sessions that reached their initial start.",
+            "ferrum2_tun_strict_route_effective Whether strict route is effective under the auto-route gate.",
+            "ferrum2_tun_strict_route_filter_install Windows strict-route filter installation outcomes.",
+            "ferrum2_tun_strict_route_requested Whether strict route was requested by validated configuration.",
             "ferrum2_tun_tcp_bridge_blocked TUN TCP bridge operations that observed bounded backpressure.",
             "ferrum2_tun_tcp_flows_active Active TUN TCP flows.",
             "ferrum2_tun_tcp_flows_rejected_limit TUN TCP flows rejected by the configured flow limit.",
             "ferrum2_tun_tcp_flows_reset_restart TUN TCP flows reset during session restart.",
             "ferrum2_tun_udp_association_created TUN UDP associations created.",
             "ferrum2_tun_udp_association_rejected_limit TUN UDP associations rejected by the configured limit.",
+            "ferrum2_tun_udp_association_route Single route evaluations for TUN UDP associations by closed result.",
             "ferrum2_tun_udp_associations_active Active TUN UDP associations.",
             "ferrum2_tun_udp_candidates_active Active uncommitted TUN UDP association candidates.",
             "ferrum2_tun_udp_datagram_queue_full TUN UDP datagrams dropped because an association queue was full.",
@@ -245,12 +264,16 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_session_restart_started counter",
             "ferrum2_tun_session_restart_succeeded counter",
             "ferrum2_tun_session_started counter",
+            "ferrum2_tun_strict_route_effective gauge",
+            "ferrum2_tun_strict_route_filter_install counter",
+            "ferrum2_tun_strict_route_requested gauge",
             "ferrum2_tun_tcp_bridge_blocked counter",
             "ferrum2_tun_tcp_flows_active gauge",
             "ferrum2_tun_tcp_flows_rejected_limit counter",
             "ferrum2_tun_tcp_flows_reset_restart counter",
             "ferrum2_tun_udp_association_created counter",
             "ferrum2_tun_udp_association_rejected_limit counter",
+            "ferrum2_tun_udp_association_route counter",
             "ferrum2_tun_udp_associations_active gauge",
             "ferrum2_tun_udp_candidates_active gauge",
             "ferrum2_tun_udp_datagram_queue_full counter",
@@ -266,6 +289,8 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
     for expected in [
         "ferrum2_tun_session_generation 7",
         "ferrum2_tun_session_active 1",
+        "ferrum2_tun_strict_route_requested 1",
+        "ferrum2_tun_strict_route_effective 1",
         "ferrum2_tun_pending_udp_responses 1",
         "ferrum2_tun_tcp_flows_active 11",
         "ferrum2_tun_udp_associations_active 13",
@@ -312,7 +337,7 @@ fn tun_reason_series_are_closed_and_identity_free() {
         .iter()
         .filter(|sample| sample.starts_with("ferrum2_tun_") && sample.contains('{'))
     {
-        assert!(sample.contains("{reason=\""));
+        assert!(sample.contains("{reason=\"") || sample.contains("{result=\""));
         assert_eq!(sample.matches('=').count(), 1);
     }
     for forbidden_label in ["ip=", "port=", "adapter=", "prefix="] {

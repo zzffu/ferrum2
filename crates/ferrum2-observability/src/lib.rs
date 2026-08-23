@@ -46,6 +46,21 @@ const TRACE_FIELDS_WITH_REASON: &[&str] = &[
 ];
 const SNIFF_TRACE_FIELDS: &[&str] = &["event", "role", "transport", "stage", "outcome", "protocol"];
 const TUN_TRACE_FIELDS: &[&str] = &["event", "role", "stage", "outcome", "reason", "family"];
+const NETWORK_LIFECYCLE_TRACE_FIELDS: &[&str] = &[
+    "event",
+    "role",
+    "stage",
+    "operation",
+    "reason",
+    "result",
+    "generation",
+    "tcp_associations",
+    "udp_associations",
+];
+const STRICT_ROUTE_TRACE_FIELDS: &[&str] =
+    &["event", "role", "stage", "requested", "effective", "status"];
+const INTERFACE_RESOLUTION_TRACE_FIELDS: &[&str] =
+    &["event", "role", "stage", "source", "result", "cache_hit"];
 
 /// Closed severity levels accepted by the tracing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -593,7 +608,10 @@ fn approved_trace_metadata(metadata: &Metadata<'_>, max_level: LogLevel) -> bool
         && (has_exact_fields(metadata, TRACE_FIELDS)
             || has_exact_fields(metadata, TRACE_FIELDS_WITH_REASON)
             || has_exact_fields(metadata, SNIFF_TRACE_FIELDS)
-            || has_exact_fields(metadata, TUN_TRACE_FIELDS))
+            || has_exact_fields(metadata, TUN_TRACE_FIELDS)
+            || has_exact_fields(metadata, NETWORK_LIFECYCLE_TRACE_FIELDS)
+            || has_exact_fields(metadata, STRICT_ROUTE_TRACE_FIELDS)
+            || has_exact_fields(metadata, INTERFACE_RESOLUTION_TRACE_FIELDS))
 }
 
 fn has_exact_fields(metadata: &Metadata<'_>, expected: &[&str]) -> bool {
@@ -657,6 +675,163 @@ pub fn emit_tun_diagnostic(role: Role, reason: TunDiagnosticReason, family: TunI
         reason = %reason,
         family = %family,
     );
+}
+
+macro_rules! emit_network_lifecycle_at {
+    ($level:expr, $role:expr, $operation:expr, $reason:expr, $result:expr, $generation:expr, $tcp:expr, $udp:expr) => {
+        tracing::event!(
+            target: CLOSED_TRACE_TARGET,
+            $level,
+            event = %Event::Lifecycle,
+            role = %$role,
+            stage = %Stage::Tun,
+            operation = %$operation,
+            reason = %$reason,
+            result = %$result,
+            generation = $generation,
+            tcp_associations = $tcp,
+            udp_associations = $udp,
+        );
+    };
+}
+
+/// Emits one redacted lightweight-network-reset diagnostic.
+///
+/// Association counts are numeric observations; no connection, interface, route, or peer identity
+/// is accepted by this API.
+pub fn emit_network_reset_diagnostic(
+    role: Role,
+    reason: NetworkResetReason,
+    result: NetworkLifecycleResult,
+    generation: u64,
+    tcp_associations: usize,
+    udp_associations: usize,
+) {
+    match result {
+        NetworkLifecycleResult::Started | NetworkLifecycleResult::Succeeded => {
+            emit_network_lifecycle_at!(
+                Level::INFO,
+                role,
+                NetworkLifecycleOperation::ResetNetwork,
+                reason,
+                result,
+                generation,
+                tcp_associations,
+                udp_associations
+            );
+        }
+        NetworkLifecycleResult::Failed => {
+            emit_network_lifecycle_at!(
+                Level::WARN,
+                role,
+                NetworkLifecycleOperation::ResetNetwork,
+                reason,
+                result,
+                generation,
+                tcp_associations,
+                udp_associations
+            );
+        }
+    }
+}
+
+/// Emits one redacted managed-plane full-rebuild diagnostic.
+pub fn emit_network_full_rebuild_diagnostic(
+    role: Role,
+    reason: NetworkFullRebuildReason,
+    result: NetworkLifecycleResult,
+    generation: u64,
+    tcp_associations: usize,
+    udp_associations: usize,
+) {
+    match result {
+        NetworkLifecycleResult::Started | NetworkLifecycleResult::Succeeded => {
+            emit_network_lifecycle_at!(
+                Level::INFO,
+                role,
+                NetworkLifecycleOperation::FullRebuild,
+                reason,
+                result,
+                generation,
+                tcp_associations,
+                udp_associations
+            );
+        }
+        NetworkLifecycleResult::Failed => {
+            emit_network_lifecycle_at!(
+                Level::ERROR,
+                role,
+                NetworkLifecycleOperation::FullRebuild,
+                reason,
+                result,
+                generation,
+                tcp_associations,
+                udp_associations
+            );
+        }
+    }
+}
+
+/// Emits one redacted strict-route startup or filter-install diagnostic.
+pub fn emit_strict_route_diagnostic(role: Role, status: StrictRouteDiagnosticStatus) {
+    macro_rules! emit_at {
+        ($level:expr) => {
+            tracing::event!(
+                target: CLOSED_TRACE_TARGET,
+                $level,
+                event = %Event::Lifecycle,
+                role = %role,
+                stage = %Stage::Tun,
+                requested = status.requested(),
+                effective = status.effective(),
+                status = %status,
+            );
+        };
+    }
+
+    match status {
+        StrictRouteDiagnosticStatus::NotRequested | StrictRouteDiagnosticStatus::Installed => {
+            emit_at!(Level::INFO);
+        }
+        StrictRouteDiagnosticStatus::RequestedIneffective => {
+            emit_at!(Level::WARN);
+        }
+        StrictRouteDiagnosticStatus::InstallFailed => {
+            emit_at!(Level::ERROR);
+        }
+    }
+}
+
+/// Emits one redacted shared-interface-resolution diagnostic.
+pub fn emit_interface_resolution_diagnostic(
+    role: Role,
+    source: InterfaceResolutionSource,
+    result: InterfaceResolutionResult,
+    cache_hit: bool,
+) {
+    macro_rules! emit_at {
+        ($level:expr) => {
+            tracing::event!(
+                target: CLOSED_TRACE_TARGET,
+                $level,
+                event = %Event::Lifecycle,
+                role = %role,
+                stage = %Stage::Tun,
+                source = %source,
+                result = %result,
+                cache_hit = cache_hit,
+            );
+        };
+    }
+
+    match result {
+        InterfaceResolutionResult::Success => {
+            emit_at!(Level::DEBUG);
+        }
+        InterfaceResolutionResult::Failure => {
+            emit_at!(Level::WARN);
+        }
+    }
 }
 
 fn emit_sniff(role: Role, transport: Transport, outcome: SniffOutcome, protocol: SniffProtocol) {
@@ -943,6 +1118,182 @@ impl TargetResolutionMode {
     }
 }
 
+/// Closed network-runtime lifecycle operations.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NetworkLifecycleOperation {
+    ResetNetwork,
+    FullRebuild,
+}
+
+impl NetworkLifecycleOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResetNetwork => "reset_network",
+            Self::FullRebuild => "full_rebuild",
+        }
+    }
+}
+
+/// Closed results for a lightweight reset or managed-plane rebuild attempt.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NetworkLifecycleResult {
+    Started,
+    Succeeded,
+    Failed,
+}
+
+impl NetworkLifecycleResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Closed reasons for replacing generation-bound runtime state while preserving the managed plane.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NetworkResetReason {
+    NetworkChange,
+    Retry,
+}
+
+impl NetworkResetReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NetworkChange => "network_change",
+            Self::Retry => "retry",
+        }
+    }
+}
+
+/// Closed reasons which permit rebuilding Ferrum2-owned managed network state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NetworkFullRebuildReason {
+    AdapterDamage,
+    SessionDamage,
+    AddressDamage,
+    RouteDamage,
+    DnsDamage,
+    StrictRouteDamage,
+    OwnershipLedgerDamage,
+}
+
+impl NetworkFullRebuildReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdapterDamage => "adapter_damage",
+            Self::SessionDamage => "session_damage",
+            Self::AddressDamage => "address_damage",
+            Self::RouteDamage => "route_damage",
+            Self::DnsDamage => "dns_damage",
+            Self::StrictRouteDamage => "strict_route_damage",
+            Self::OwnershipLedgerDamage => "ownership_ledger_damage",
+        }
+    }
+}
+
+/// Closed outcomes for installing the effective Windows strict-route filter set.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StrictRouteFilterInstallResult {
+    Success,
+    Failure,
+}
+
+impl StrictRouteFilterInstallResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// Closed startup/runtime strict-route states safe for diagnostic traces.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StrictRouteDiagnosticStatus {
+    NotRequested,
+    RequestedIneffective,
+    Installed,
+    InstallFailed,
+}
+
+impl StrictRouteDiagnosticStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::RequestedIneffective => "requested_ineffective",
+            Self::Installed => "installed",
+            Self::InstallFailed => "install_failed",
+        }
+    }
+
+    const fn requested(self) -> bool {
+        !matches!(self, Self::NotRequested)
+    }
+
+    const fn effective(self) -> bool {
+        matches!(self, Self::Installed | Self::InstallFailed)
+    }
+}
+
+/// Closed source selected by the shared outbound interface resolver.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InterfaceResolutionSource {
+    OutboundExplicit,
+    AutoDetected,
+    RouteDefault,
+    SystemBestRoute,
+}
+
+impl InterfaceResolutionSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::OutboundExplicit => "outbound_explicit",
+            Self::AutoDetected => "auto_detected",
+            Self::RouteDefault => "route_default",
+            Self::SystemBestRoute => "system_best_route",
+        }
+    }
+}
+
+/// Closed result of one shared outbound interface resolution.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InterfaceResolutionResult {
+    Success,
+    Failure,
+}
+
+impl InterfaceResolutionResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// Closed result of the single route evaluation for a TUN UDP association.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TunUdpAssociationRouteResult {
+    Success,
+    Rejected,
+    Failure,
+    StaleGeneration,
+}
+
+impl TunUdpAssociationRouteResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Rejected => "rejected",
+            Self::Failure => "failure",
+            Self::StaleGeneration => "stale_generation",
+        }
+    }
+}
+
 impl Direction {
     const fn as_str(self) -> &'static str {
         match self {
@@ -970,6 +1321,15 @@ impl_closed_display!(DnsQueryType);
 impl_closed_display!(TargetResolutionComponent);
 impl_closed_display!(TargetResolutionMode);
 impl_closed_display!(TunUdpResponseDropReason);
+impl_closed_display!(NetworkLifecycleOperation);
+impl_closed_display!(NetworkLifecycleResult);
+impl_closed_display!(NetworkResetReason);
+impl_closed_display!(NetworkFullRebuildReason);
+impl_closed_display!(StrictRouteFilterInstallResult);
+impl_closed_display!(StrictRouteDiagnosticStatus);
+impl_closed_display!(InterfaceResolutionSource);
+impl_closed_display!(InterfaceResolutionResult);
+impl_closed_display!(TunUdpAssociationRouteResult);
 
 macro_rules! impl_label_value {
     ($type:ty) => {
@@ -1005,6 +1365,14 @@ impl_label_value!(TargetResolutionComponent);
 impl_label_value!(TargetResolutionMode);
 impl_label_value!(TunPacketRejectReason);
 impl_label_value!(TunUdpResponseDropReason);
+impl_label_value!(NetworkLifecycleOperation);
+impl_label_value!(NetworkLifecycleResult);
+impl_label_value!(NetworkResetReason);
+impl_label_value!(NetworkFullRebuildReason);
+impl_label_value!(StrictRouteFilterInstallResult);
+impl_label_value!(InterfaceResolutionSource);
+impl_label_value!(InterfaceResolutionResult);
+impl_label_value!(TunUdpAssociationRouteResult);
 
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ConnectionLabels {
@@ -1129,6 +1497,40 @@ struct TunPacketRejectLabels {
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct TunUdpResponseDropLabels {
     reason: TunUdpResponseDropReason,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct NetworkResetLabels {
+    reason: NetworkResetReason,
+    result: NetworkLifecycleResult,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct NetworkFullRebuildLabels {
+    reason: NetworkFullRebuildReason,
+    result: NetworkLifecycleResult,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct NetworkAssociationsResetLabels {
+    operation: NetworkLifecycleOperation,
+    transport: Transport,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct StrictRouteFilterInstallLabels {
+    result: StrictRouteFilterInstallResult,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct InterfaceResolutionLabels {
+    source: InterfaceResolutionSource,
+    result: InterfaceResolutionResult,
+}
+
+#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
+struct TunUdpAssociationRouteLabels {
+    result: TunUdpAssociationRouteResult,
 }
 
 const ROLES: &[Role] = &[Role::Client, Role::Server];
@@ -1306,6 +1708,46 @@ const TUN_UDP_RESPONSE_DROP_REASONS: &[TunUdpResponseDropReason] = &[
     TunUdpResponseDropReason::Shutdown,
     TunUdpResponseDropReason::OwnerFatal,
 ];
+const NETWORK_LIFECYCLE_OPERATIONS: &[NetworkLifecycleOperation] = &[
+    NetworkLifecycleOperation::ResetNetwork,
+    NetworkLifecycleOperation::FullRebuild,
+];
+const NETWORK_LIFECYCLE_RESULTS: &[NetworkLifecycleResult] = &[
+    NetworkLifecycleResult::Started,
+    NetworkLifecycleResult::Succeeded,
+    NetworkLifecycleResult::Failed,
+];
+const NETWORK_RESET_REASONS: &[NetworkResetReason] =
+    &[NetworkResetReason::NetworkChange, NetworkResetReason::Retry];
+const NETWORK_FULL_REBUILD_REASONS: &[NetworkFullRebuildReason] = &[
+    NetworkFullRebuildReason::AdapterDamage,
+    NetworkFullRebuildReason::SessionDamage,
+    NetworkFullRebuildReason::AddressDamage,
+    NetworkFullRebuildReason::RouteDamage,
+    NetworkFullRebuildReason::DnsDamage,
+    NetworkFullRebuildReason::StrictRouteDamage,
+    NetworkFullRebuildReason::OwnershipLedgerDamage,
+];
+const STRICT_ROUTE_FILTER_INSTALL_RESULTS: &[StrictRouteFilterInstallResult] = &[
+    StrictRouteFilterInstallResult::Success,
+    StrictRouteFilterInstallResult::Failure,
+];
+const INTERFACE_RESOLUTION_SOURCES: &[InterfaceResolutionSource] = &[
+    InterfaceResolutionSource::OutboundExplicit,
+    InterfaceResolutionSource::AutoDetected,
+    InterfaceResolutionSource::RouteDefault,
+    InterfaceResolutionSource::SystemBestRoute,
+];
+const INTERFACE_RESOLUTION_RESULTS: &[InterfaceResolutionResult] = &[
+    InterfaceResolutionResult::Success,
+    InterfaceResolutionResult::Failure,
+];
+const TUN_UDP_ASSOCIATION_ROUTE_RESULTS: &[TunUdpAssociationRouteResult] = &[
+    TunUdpAssociationRouteResult::Success,
+    TunUdpAssociationRouteResult::Rejected,
+    TunUdpAssociationRouteResult::Failure,
+    TunUdpAssociationRouteResult::StaleGeneration,
+];
 const RULE_PROGRAM_CANDIDATE_BUCKETS: &[f64] = &[
     0.0, 1.0, 4.0, 16.0, 64.0, 256.0, 1_024.0, 4_096.0, 16_384.0, 65_536.0,
 ];
@@ -1348,6 +1790,15 @@ const TARGET_RESOLUTION_SERIES: usize =
     TARGET_RESOLUTION_COMPONENTS.len() * TARGET_RESOLUTION_MODES.len();
 const TUN_PACKET_REJECT_SERIES: usize = TUN_PACKET_REJECT_REASONS.len();
 const TUN_UDP_RESPONSE_DROP_SERIES: usize = TUN_UDP_RESPONSE_DROP_REASONS.len();
+const NETWORK_RESET_SERIES: usize = NETWORK_RESET_REASONS.len() * NETWORK_LIFECYCLE_RESULTS.len();
+const NETWORK_FULL_REBUILD_SERIES: usize =
+    NETWORK_FULL_REBUILD_REASONS.len() * NETWORK_LIFECYCLE_RESULTS.len();
+const NETWORK_ASSOCIATIONS_RESET_SERIES: usize =
+    NETWORK_LIFECYCLE_OPERATIONS.len() * TRANSPORTS.len();
+const STRICT_ROUTE_FILTER_INSTALL_SERIES: usize = STRICT_ROUTE_FILTER_INSTALL_RESULTS.len();
+const INTERFACE_RESOLUTION_SERIES: usize =
+    INTERFACE_RESOLUTION_SOURCES.len() * INTERFACE_RESOLUTION_RESULTS.len();
+const TUN_UDP_ASSOCIATION_ROUTE_SERIES: usize = TUN_UDP_ASSOCIATION_ROUTE_RESULTS.len();
 
 #[derive(Debug, Default)]
 struct CachedCounter {
@@ -1630,6 +2081,10 @@ fn usize_gauge(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
+fn usize_counter(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 type ConnectionFamily = SharedClosedFamily<ConnectionLabels, CachedCounter, CONNECTION_SERIES>;
 type ActiveFamily = SharedClosedFamily<ActiveLabels, CachedGauge, ACTIVE_SERIES>;
 type FailureFamily = SharedClosedFamily<FailureLabels, CachedCounter, FAILURE_SERIES>;
@@ -1665,6 +2120,27 @@ type TunPacketRejectFamily =
     SharedClosedFamily<TunPacketRejectLabels, CachedCounter, TUN_PACKET_REJECT_SERIES>;
 type TunUdpResponseDropFamily =
     SharedClosedFamily<TunUdpResponseDropLabels, CachedCounter, TUN_UDP_RESPONSE_DROP_SERIES>;
+type NetworkResetFamily =
+    SharedClosedFamily<NetworkResetLabels, CachedCounter, NETWORK_RESET_SERIES>;
+type NetworkFullRebuildFamily =
+    SharedClosedFamily<NetworkFullRebuildLabels, CachedCounter, NETWORK_FULL_REBUILD_SERIES>;
+type NetworkAssociationsResetFamily = SharedClosedFamily<
+    NetworkAssociationsResetLabels,
+    CachedCounter,
+    NETWORK_ASSOCIATIONS_RESET_SERIES,
+>;
+type StrictRouteFilterInstallFamily = SharedClosedFamily<
+    StrictRouteFilterInstallLabels,
+    CachedCounter,
+    STRICT_ROUTE_FILTER_INSTALL_SERIES,
+>;
+type InterfaceResolutionFamily =
+    SharedClosedFamily<InterfaceResolutionLabels, CachedCounter, INTERFACE_RESOLUTION_SERIES>;
+type TunUdpAssociationRouteFamily = SharedClosedFamily<
+    TunUdpAssociationRouteLabels,
+    CachedCounter,
+    TUN_UDP_ASSOCIATION_ROUTE_SERIES,
+>;
 fn record_rule_match(
     family: &RuleMatchFamily,
     source: RuleSource,
@@ -1751,6 +2227,16 @@ pub struct Metrics {
     tun_reassembly_dropped_malformed: Counter,
     tun_network_change: Counter,
     tun_underlay_bind_stale: Counter,
+    network_resets: NetworkResetFamily,
+    network_full_rebuilds: NetworkFullRebuildFamily,
+    network_generation: Gauge,
+    network_associations_reset: NetworkAssociationsResetFamily,
+    tun_strict_route_requested: Gauge,
+    tun_strict_route_effective: Gauge,
+    tun_strict_route_filter_installs: StrictRouteFilterInstallFamily,
+    outbound_interface_resolutions: InterfaceResolutionFamily,
+    outbound_interface_resolution_cache_hits: Counter,
+    tun_udp_association_routes: TunUdpAssociationRouteFamily,
     ruleset_loads: RuleSetResultFamily,
     ruleset_refreshes: RuleSetResultFamily,
     ruleset_generation: Gauge,
@@ -1902,6 +2388,41 @@ impl Metrics {
         let tun_reassembly_dropped_malformed = Counter::default();
         let tun_network_change = Counter::default();
         let tun_underlay_bind_stale = Counter::default();
+        let network_resets = NetworkResetFamily::new(pair_labels(
+            NETWORK_RESET_REASONS,
+            NETWORK_LIFECYCLE_RESULTS,
+            |reason, result| NetworkResetLabels { reason, result },
+        ));
+        let network_full_rebuilds = NetworkFullRebuildFamily::new(pair_labels(
+            NETWORK_FULL_REBUILD_REASONS,
+            NETWORK_LIFECYCLE_RESULTS,
+            |reason, result| NetworkFullRebuildLabels { reason, result },
+        ));
+        let network_generation = Gauge::default();
+        let network_associations_reset = NetworkAssociationsResetFamily::new(pair_labels(
+            NETWORK_LIFECYCLE_OPERATIONS,
+            TRANSPORTS,
+            |operation, transport| NetworkAssociationsResetLabels {
+                operation,
+                transport,
+            },
+        ));
+        let tun_strict_route_requested = Gauge::default();
+        let tun_strict_route_effective = Gauge::default();
+        let tun_strict_route_filter_installs = StrictRouteFilterInstallFamily::new(single_labels(
+            STRICT_ROUTE_FILTER_INSTALL_RESULTS,
+            |result| StrictRouteFilterInstallLabels { result },
+        ));
+        let outbound_interface_resolutions = InterfaceResolutionFamily::new(pair_labels(
+            INTERFACE_RESOLUTION_SOURCES,
+            INTERFACE_RESOLUTION_RESULTS,
+            |source, result| InterfaceResolutionLabels { source, result },
+        ));
+        let outbound_interface_resolution_cache_hits = Counter::default();
+        let tun_udp_association_routes = TunUdpAssociationRouteFamily::new(single_labels(
+            TUN_UDP_ASSOCIATION_ROUTE_RESULTS,
+            |result| TunUdpAssociationRouteLabels { result },
+        ));
         let ruleset_loads = RuleSetResultFamily::new(single_labels(RULESET_RESULTS, |result| {
             RuleSetResultLabels { result }
         }));
@@ -2231,6 +2752,56 @@ impl Metrics {
             tun_underlay_bind_stale.clone(),
         );
         registry.register(
+            "ferrum2_network_reset",
+            "Lightweight ResetNetwork attempts by closed initiating reason and result",
+            network_resets.clone(),
+        );
+        registry.register(
+            "ferrum2_network_full_rebuild",
+            "Managed network-plane full rebuild attempts by closed damage reason and result",
+            network_full_rebuilds.clone(),
+        );
+        registry.register(
+            "ferrum2_network_generation",
+            "Current fully published network runtime generation",
+            network_generation.clone(),
+        );
+        registry.register(
+            "ferrum2_network_associations_reset",
+            "TCP and UDP associations closed by a network lifecycle operation",
+            network_associations_reset.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_strict_route_requested",
+            "Whether strict route was requested by validated configuration",
+            tun_strict_route_requested.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_strict_route_effective",
+            "Whether strict route is effective under the auto-route gate",
+            tun_strict_route_effective.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_strict_route_filter_install",
+            "Windows strict-route filter installation outcomes",
+            tun_strict_route_filter_installs.clone(),
+        );
+        registry.register(
+            "ferrum2_outbound_interface_resolution",
+            "Outbound interface resolutions by closed selection source and result",
+            outbound_interface_resolutions.clone(),
+        );
+        registry.register(
+            "ferrum2_outbound_interface_resolution_cache_hit",
+            "Outbound interface resolver cache hits",
+            outbound_interface_resolution_cache_hits.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_udp_association_route",
+            "Single route evaluations for TUN UDP associations by closed result",
+            tun_udp_association_routes.clone(),
+        );
+        registry.register(
             "ferrum2_ruleset_load",
             "RuleSet initial load outcomes aggregated without RuleSet identity",
             ruleset_loads.clone(),
@@ -2374,6 +2945,16 @@ impl Metrics {
             tun_reassembly_dropped_malformed,
             tun_network_change,
             tun_underlay_bind_stale,
+            network_resets,
+            network_full_rebuilds,
+            network_generation,
+            network_associations_reset,
+            tun_strict_route_requested,
+            tun_strict_route_effective,
+            tun_strict_route_filter_installs,
+            outbound_interface_resolutions,
+            outbound_interface_resolution_cache_hits,
+            tun_udp_association_routes,
             ruleset_loads,
             ruleset_refreshes,
             ruleset_generation,
@@ -2807,6 +3388,97 @@ impl Metrics {
     /// Records one underlay bind rejected because its generation was stale.
     pub fn tun_underlay_bind_stale(&self) {
         self.tun_underlay_bind_stale.inc();
+    }
+
+    /// Records one lightweight ResetNetwork lifecycle transition.
+    pub fn network_reset(&self, reason: NetworkResetReason, result: NetworkLifecycleResult) {
+        self.network_resets
+            .metric(pair_index(
+                reason as usize,
+                result as usize,
+                NETWORK_LIFECYCLE_RESULTS.len(),
+            ))
+            .inc();
+    }
+
+    /// Records one managed-plane full-rebuild lifecycle transition.
+    pub fn network_full_rebuild(
+        &self,
+        reason: NetworkFullRebuildReason,
+        result: NetworkLifecycleResult,
+    ) {
+        self.network_full_rebuilds
+            .metric(pair_index(
+                reason as usize,
+                result as usize,
+                NETWORK_LIFECYCLE_RESULTS.len(),
+            ))
+            .inc();
+    }
+
+    /// Sets the current fully published network runtime generation.
+    pub fn set_network_generation(&self, generation: u64) {
+        self.network_generation.set(u64_gauge(generation));
+    }
+
+    /// Adds associations closed by one network lifecycle operation.
+    pub fn network_associations_reset(
+        &self,
+        operation: NetworkLifecycleOperation,
+        transport: Transport,
+        associations: usize,
+    ) {
+        self.network_associations_reset
+            .metric(pair_index(
+                operation as usize,
+                transport as usize,
+                TRANSPORTS.len(),
+            ))
+            .inc_by(usize_counter(associations));
+    }
+
+    /// Sets whether validated configuration requested Windows strict-route protection.
+    pub fn set_tun_strict_route_requested(&self, requested: bool) {
+        self.tun_strict_route_requested.set(i64::from(requested));
+    }
+
+    /// Sets whether strict route is effective under the auto-route gate.
+    pub fn set_tun_strict_route_effective(&self, effective: bool) {
+        self.tun_strict_route_effective.set(i64::from(effective));
+    }
+
+    /// Records one effective Windows strict-route filter installation outcome.
+    pub fn tun_strict_route_filter_install(&self, result: StrictRouteFilterInstallResult) {
+        self.tun_strict_route_filter_installs
+            .metric(result as usize)
+            .inc();
+    }
+
+    /// Records one shared outbound interface-resolution outcome.
+    pub fn outbound_interface_resolution(
+        &self,
+        source: InterfaceResolutionSource,
+        result: InterfaceResolutionResult,
+    ) {
+        self.outbound_interface_resolutions
+            .metric(pair_index(
+                source as usize,
+                result as usize,
+                INTERFACE_RESOLUTION_RESULTS.len(),
+            ))
+            .inc();
+    }
+
+    /// Records one outbound interface-resolution cache hit.
+    pub fn outbound_interface_resolution_cache_hit(&self) {
+        self.outbound_interface_resolution_cache_hits.inc();
+    }
+
+    /// Records the result of the one route evaluation for a TUN UDP association.
+    pub fn tun_udp_association_route(&self, result: TunUdpAssociationRouteResult) {
+        self.tun_udp_association_routes
+            .metric(result as usize)
+            .inc();
     }
 
     pub fn connection(&self, role: Role, inbound: Inbound, outcome: Outcome) {

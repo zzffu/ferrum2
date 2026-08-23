@@ -3,8 +3,12 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use ferrum2_observability::{
-    Event, LogLevel, Metrics, Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage,
-    TraceRecord, Transport, TunDiagnosticReason, TunIpFamily, emit_tun_diagnostic, json_subscriber,
+    Event, InterfaceResolutionResult, InterfaceResolutionSource, LogLevel, Metrics,
+    NetworkFullRebuildReason, NetworkLifecycleResult, NetworkResetReason, Outcome, Reason, Role,
+    SniffOutcome, SniffProtocol, Stage, StrictRouteDiagnosticStatus, TraceRecord, Transport,
+    TunDiagnosticReason, TunIpFamily, emit_interface_resolution_diagnostic,
+    emit_network_full_rebuild_diagnostic, emit_network_reset_diagnostic,
+    emit_strict_route_diagnostic, emit_tun_diagnostic, json_subscriber,
 };
 use serde_json::Value;
 use tracing::Dispatch;
@@ -297,4 +301,151 @@ fn tun_diagnostics_have_only_fixed_reason_and_family_fields() {
     for sentinel in ["192.0.2.99", "[2001:db8::99]:443", "TUN_ADAPTER_SENTINEL"] {
         assert!(!text.contains(sentinel));
     }
+}
+
+#[test]
+fn network_diagnostics_are_closed_numeric_and_identity_free() {
+    const INTERFACE: &str = "ETHERNET_TRACE_SENTINEL";
+    const DESTINATION: &str = "192.0.2.88:443";
+    const PREFIX: &str = "10.0.0.0/8";
+    const FILTER_ID: &str = "WFP_FILTER_TRACE_SENTINEL";
+    const ADAPTER: &str = "WINTUN_ADAPTER_TRACE_SENTINEL";
+
+    let capture = Captured::default();
+    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let dispatch = Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::event!(
+            target: "ferrum2_observability::closed",
+            tracing::Level::ERROR,
+            interface = INTERFACE,
+            destination = DESTINATION,
+            prefix = PREFIX,
+            filter_id = FILTER_ID,
+            adapter = ADAPTER,
+        );
+        emit_network_reset_diagnostic(
+            Role::Client,
+            NetworkResetReason::NetworkChange,
+            NetworkLifecycleResult::Failed,
+            9,
+            11,
+            13,
+        );
+        emit_network_full_rebuild_diagnostic(
+            Role::Client,
+            NetworkFullRebuildReason::StrictRouteDamage,
+            NetworkLifecycleResult::Started,
+            10,
+            0,
+            0,
+        );
+        emit_strict_route_diagnostic(
+            Role::Client,
+            StrictRouteDiagnosticStatus::RequestedIneffective,
+        );
+        emit_interface_resolution_diagnostic(
+            Role::Client,
+            InterfaceResolutionSource::SystemBestRoute,
+            InterfaceResolutionResult::Failure,
+            true,
+        );
+    });
+
+    let text = capture.text();
+    let values = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("network diagnostic JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 4);
+
+    for value in &values[..2] {
+        assert_eq!(
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "event",
+                "generation",
+                "level",
+                "operation",
+                "reason",
+                "result",
+                "role",
+                "stage",
+                "tcp_associations",
+                "timestamp",
+                "udp_associations",
+            ])
+        );
+    }
+    assert_eq!(values[0]["operation"], "reset_network");
+    assert_eq!(values[0]["reason"], "network_change");
+    assert_eq!(values[0]["result"], "failed");
+    assert_eq!(values[0]["generation"], 9);
+    assert_eq!(values[0]["tcp_associations"], 11);
+    assert_eq!(values[0]["udp_associations"], 13);
+    assert_eq!(values[1]["operation"], "full_rebuild");
+    assert_eq!(values[1]["reason"], "strict_route_damage");
+    assert_eq!(values[1]["result"], "started");
+
+    assert_eq!(
+        values[2]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "effective",
+            "event",
+            "level",
+            "requested",
+            "role",
+            "stage",
+            "status",
+            "timestamp",
+        ])
+    );
+    assert_eq!(values[2]["requested"], true);
+    assert_eq!(values[2]["effective"], false);
+    assert_eq!(values[2]["status"], "requested_ineffective");
+
+    assert_eq!(
+        values[3]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "cache_hit",
+            "event",
+            "level",
+            "result",
+            "role",
+            "source",
+            "stage",
+            "timestamp",
+        ])
+    );
+    assert_eq!(values[3]["source"], "system_best_route");
+    assert_eq!(values[3]["result"], "failure");
+    assert_eq!(values[3]["cache_hit"], true);
+
+    for sentinel in [INTERFACE, DESTINATION, PREFIX, FILTER_ID, ADAPTER] {
+        assert!(!text.contains(sentinel), "leaked sentinel {sentinel}");
+    }
+    for forbidden_field in ["interface", "destination", "prefix", "filter_id", "adapter"] {
+        assert!(
+            !values
+                .iter()
+                .any(|value| value.get(forbidden_field).is_some())
+        );
+    }
+    assert!(!text.contains("route_conflict"));
+    assert!(!text.contains("external_route"));
 }
