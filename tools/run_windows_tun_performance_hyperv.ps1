@@ -18,9 +18,10 @@ parameter and the credential must remain outside this repository.
 The portable guest controller defaults to the SHA-256-pinned PowerShell 7.4.19 win-x64 archive at
 %LOCALAPPDATA%\Ferrum2\PowerShell-7.4.19-win-x64.zip. The archive must remain outside the repository.
 
-Run mode requires an already provisioned TCP echo listener plus four contiguous UDP echo ports
-reachable from the guest. Its identity is recorded in each trial ledger. Ferrum2's candidate
-harness probes all four UDP ports from inside the guest before any TUN session starts.
+Run mode requires an already provisioned candidate qualification support listener reachable from
+the guest. It provides TCP echo, ordinary UDP echo, bounded fragment acknowledgements, and four
+contiguous UDP ports. Its identity is recorded in each trial ledger. Ferrum2's candidate harness
+probes all four UDP ports from inside the guest before any TUN session starts.
 
 PlanOnly validates repository lineage and emits the closed 90-trial plan without building, starting
 the VM, loading a credential, staging files, or executing traffic.
@@ -832,7 +833,7 @@ tag = "direct"
 type = "direct"
 [[outbounds]]
 tag = "proxy"
-server = "127.0.0.1:{{SERVER_PORT}}"
+server = "{{SERVER_ADDRESS}}:{{SERVER_PORT}}"
 [route]
 auto_detect_interface = true
 final = "proxy"
@@ -861,10 +862,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 schema_version = 2
 [[inbounds]]
 tag = "server-in"
-listen = "127.0.0.1:{{SERVER_PORT}}"
-outbound = "direct"
+listen = "{{SERVER_ADDRESS}}:{{SERVER_PORT}}"
 [[outbounds]]
 tag = "direct"
+[route]
+auto_detect_interface = true
+final = "direct"
 [udp]
 enabled = true
 max_sessions = 16384
@@ -1292,8 +1295,9 @@ public static class Ferrum2PerfProcessGroup {
             }
         }
 
-        function Get-FreeTcpPort {
-            $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+        function Get-FreeTcpPort([string]$LocalAddress = "127.0.0.1") {
+            $address = [Net.IPAddress]::Parse($LocalAddress)
+            $listener = New-Object Net.Sockets.TcpListener($address, 0)
             try {
                 $listener.Start()
                 return [int]$listener.LocalEndpoint.Port
@@ -1301,12 +1305,13 @@ public static class Ferrum2PerfProcessGroup {
                 $listener.Stop()
             }
         }
-        function Get-FreeDualPort {
+        function Get-FreeDualPort([string]$LocalAddress) {
+            $address = [Net.IPAddress]::Parse($LocalAddress)
             foreach ($attempt in 1..100) {
-                $port = Get-FreeTcpPort
+                $port = Get-FreeTcpPort -LocalAddress $LocalAddress
                 $udp = New-Object Net.Sockets.UdpClient
                 try {
-                    $udp.Client.Bind((New-Object Net.IPEndPoint([Net.IPAddress]::Loopback, $port)))
+                    $udp.Client.Bind((New-Object Net.IPEndPoint($address, $port)))
                     return $port
                 } catch {
                     if ($attempt -eq 100) { throw }
@@ -1316,8 +1321,48 @@ public static class Ferrum2PerfProcessGroup {
             }
             throw "unable to reserve a dual TCP/UDP port"
         }
+        function Get-GuestUnderlayAddress(
+            [string]$DestinationAddress,
+            [int]$DestinationPort
+        ) {
+            $destination = [Net.IPAddress]::Parse($DestinationAddress)
+            if ($destination.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+                throw "support listener address is not IPv4"
+            }
+            $socket = New-Object Net.Sockets.Socket(
+                [Net.Sockets.AddressFamily]::InterNetwork,
+                [Net.Sockets.SocketType]::Dgram,
+                [Net.Sockets.ProtocolType]::Udp
+            )
+            try {
+                $socket.Connect((New-Object Net.IPEndPoint($destination, $DestinationPort)))
+                $local = [Net.IPEndPoint]$socket.LocalEndPoint
+                $address = $local.Address
+            } finally {
+                $socket.Dispose()
+            }
+            if ($address.Equals([Net.IPAddress]::Any) -or
+                [Net.IPAddress]::IsLoopback($address)) {
+                throw "support route selected an invalid guest underlay address: $address"
+            }
+            $ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address.ToString() `
+                -ErrorAction SilentlyContinue)
+            if ($ipRows.Count -ne 1) {
+                throw "guest underlay address ownership is not unique: address=$address count=$($ipRows.Count)"
+            }
+            $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+                [int]$_.ifIndex -eq [int]$ipRows[0].InterfaceIndex
+            })
+            if ($adapters.Count -ne 1 -or
+                [string]$adapters[0].Status -cne "Up" -or
+                [string]$adapters[0].Name -ceq $AdapterName) {
+                throw "guest underlay adapter is not uniquely valid: address=$address count=$($adapters.Count)"
+            }
+            return $address.ToString()
+        }
         function Wait-ProcessListener(
             [int]$ProcessId,
+            [string]$LocalAddress,
             [int]$Port,
             [bool]$RequireUdp
         ) {
@@ -1328,16 +1373,181 @@ public static class Ferrum2PerfProcessGroup {
                 if ([Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 0)) {
                     throw "server exited before listener readiness"
                 }
-                $tcp = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
-                    Where-Object { [int]$_.OwningProcess -eq $ProcessId })
+                $tcp = @(Get-NetTCPConnection -State Listen -LocalPort $Port `
+                    -ErrorAction SilentlyContinue | Where-Object {
+                        [int]$_.OwningProcess -eq $ProcessId
+                    })
                 if ($RequireUdp) {
                     $udp = @(Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue |
-                        Where-Object { [int]$_.OwningProcess -eq $ProcessId })
+                        Where-Object {
+                            [int]$_.OwningProcess -eq $ProcessId
+                        })
                 }
-                if ($tcp.Count -eq 1 -and (-not $RequireUdp -or $udp.Count -eq 1)) { return }
+                $tcpExact = $tcp.Count -eq 1 -and
+                    [string]$tcp[0].LocalAddress -ceq $LocalAddress
+                $udpExact = -not $RequireUdp -or (
+                    $udp.Count -eq 1 -and
+                    [string]$udp[0].LocalAddress -ceq $LocalAddress
+                )
+                if ($tcpExact -and $udpExact) { return }
                 Start-Sleep -Milliseconds 100
             } while ([DateTime]::UtcNow -lt $deadline)
-            throw "server listener readiness timed out: port=$Port tcp=$($tcp.Count) udp=$($udp.Count) require_udp=$RequireUdp"
+            throw "server listener readiness timed out: address=$LocalAddress port=$Port tcp=$($tcp.Count) udp=$($udp.Count) require_udp=$RequireUdp"
+        }
+        function Get-PrometheusIntegerMetric(
+            [string]$Metrics,
+            [string]$Name
+        ) {
+            $pattern = "(?m)^$([regex]::Escape($Name))(?:_total)? (?<value>[0-9]+)$"
+            $selected = @([regex]::Matches($Metrics, $pattern))
+            if ($selected.Count -ne 1) {
+                throw "missing or ambiguous integer server metric: $Name"
+            }
+            return [uint64]::Parse(
+                $selected[0].Groups["value"].Value,
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        function Get-PrometheusLabeledIntegerMetric(
+            [string]$Metrics,
+            [string]$Name,
+            [hashtable]$Labels,
+            [bool]$AllowAbsent = $false
+        ) {
+            $pattern = "(?m)^$([regex]::Escape($Name))(?:_total)?\{(?<labels>[^}`r`n]*)\} (?<value>[0-9]+)$"
+            $selected = @([regex]::Matches($Metrics, $pattern) | Where-Object {
+                $encoded = $_.Groups["labels"].Value
+                @($encoded.Split(',')).Count -eq $Labels.Count -and
+                    @($Labels.GetEnumerator() | Where-Object {
+                        $encoded -cnotmatch "(?:^|,)$([regex]::Escape([string]$_.Key))=`"$([regex]::Escape([string]$_.Value))`"(?:,|$)"
+                    }).Count -eq 0
+            })
+            if ($selected.Count -eq 0 -and $AllowAbsent) { return [uint64]0 }
+            if ($selected.Count -ne 1) {
+                throw "missing or ambiguous labeled integer server metric: $Name"
+            }
+            return [uint64]::Parse(
+                $selected[0].Groups["value"].Value,
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        function Get-ServerNetworkState([int]$ProcessId, [int]$MetricsPort) {
+            if ([Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 0)) {
+                throw "server exited while waiting for network stability"
+            }
+            $metrics = (Invoke-WebRequest -UseBasicParsing `
+                -Uri "http://127.0.0.1:$MetricsPort/metrics" -TimeoutSec 2).Content
+            if ($metrics -cnotmatch '(?m)^# TYPE ferrum2_network_generation gauge$') {
+                throw "server network generation metric metadata is missing"
+            }
+            $resetFamilyPresent = $metrics -cmatch `
+                '(?m)^(?:# (?:HELP|TYPE) )?ferrum2_network_reset(?:_total)?(?:[ {])'
+            if ($resetFamilyPresent -and
+                $metrics -cnotmatch '(?m)^# TYPE ferrum2_network_reset counter$') {
+                throw "server network reset metric metadata is invalid"
+            }
+            $reset = @{}
+            foreach ($reason in @("network_change", "retry")) {
+                foreach ($result in @("started", "succeeded", "failed")) {
+                    $reset["$reason.$result"] = Get-PrometheusLabeledIntegerMetric `
+                        -Metrics $metrics -Name "ferrum2_network_reset" -Labels @{
+                            reason = $reason
+                            result = $result
+                        } -AllowAbsent $true
+                }
+            }
+            return [pscustomobject]@{
+                Generation = Get-PrometheusIntegerMetric `
+                    -Metrics $metrics -Name "ferrum2_network_generation"
+                NetworkChangeStarted = $reset["network_change.started"]
+                NetworkChangeSucceeded = $reset["network_change.succeeded"]
+                NetworkChangeFailed = $reset["network_change.failed"]
+                RetryStarted = $reset["retry.started"]
+                RetrySucceeded = $reset["retry.succeeded"]
+                RetryFailed = $reset["retry.failed"]
+            }
+        }
+        function Wait-ServerNetworkStable(
+            [int]$ProcessId,
+            [int]$MetricsPort,
+            [object]$Baseline,
+            [bool]$RequireAdvance
+        ) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $stableSince = $null
+            $lastSignature = $null
+            $observedSignature = $null
+            $state = $null
+            do {
+                $state = Get-ServerNetworkState `
+                    -ProcessId $ProcessId -MetricsPort $MetricsPort
+                $values = @(
+                    $state.Generation,
+                    $state.NetworkChangeStarted,
+                    $state.NetworkChangeSucceeded,
+                    $state.NetworkChangeFailed,
+                    $state.RetryStarted,
+                    $state.RetrySucceeded,
+                    $state.RetryFailed
+                )
+                $observedSignature = $values -join "|"
+                $totalStarted = $state.NetworkChangeStarted + $state.RetryStarted
+                $totalFinished = $state.NetworkChangeSucceeded +
+                    $state.NetworkChangeFailed + $state.RetrySucceeded + $state.RetryFailed
+                $eligible = $totalStarted -eq $totalFinished
+                if ($eligible -and $RequireAdvance) {
+                    $monotonic = $state.Generation -ge $Baseline.Generation -and
+                        $state.NetworkChangeStarted -ge $Baseline.NetworkChangeStarted -and
+                        $state.NetworkChangeSucceeded -ge $Baseline.NetworkChangeSucceeded -and
+                        $state.NetworkChangeFailed -ge $Baseline.NetworkChangeFailed -and
+                        $state.RetryStarted -ge $Baseline.RetryStarted -and
+                        $state.RetrySucceeded -ge $Baseline.RetrySucceeded -and
+                        $state.RetryFailed -ge $Baseline.RetryFailed
+                    if ($monotonic) {
+                        $generationDelta = $state.Generation - $Baseline.Generation
+                        $networkChangeStartedDelta = $state.NetworkChangeStarted -
+                            $Baseline.NetworkChangeStarted
+                        $startedDelta = $networkChangeStartedDelta +
+                            ($state.RetryStarted - $Baseline.RetryStarted)
+                        $succeededDelta = ($state.NetworkChangeSucceeded -
+                            $Baseline.NetworkChangeSucceeded) +
+                            ($state.RetrySucceeded - $Baseline.RetrySucceeded)
+                        $failedDelta = ($state.NetworkChangeFailed -
+                            $Baseline.NetworkChangeFailed) +
+                            ($state.RetryFailed - $Baseline.RetryFailed)
+                        $eligible = $networkChangeStartedDelta -ge 1 -and
+                            $generationDelta -gt 0 -and
+                            $startedDelta -eq $succeededDelta + $failedDelta -and
+                            $generationDelta -eq $succeededDelta
+                    } else {
+                        $eligible = $false
+                    }
+                }
+                if ($eligible) {
+                    if ($observedSignature -cne $lastSignature) {
+                        $lastSignature = $observedSignature
+                        $stableSince = [DateTime]::UtcNow
+                    } elseif (([DateTime]::UtcNow - $stableSince).TotalMilliseconds -ge 1500) {
+                        return $state
+                    }
+                } else {
+                    $stableSince = $null
+                    $lastSignature = $null
+                }
+                Start-Sleep -Milliseconds 100
+            } while ([DateTime]::UtcNow -lt $deadline)
+            $baselineSignature = if ($null -eq $Baseline) { "none" } else {
+                @(
+                    $Baseline.Generation,
+                    $Baseline.NetworkChangeStarted,
+                    $Baseline.NetworkChangeSucceeded,
+                    $Baseline.NetworkChangeFailed,
+                    $Baseline.RetryStarted,
+                    $Baseline.RetrySucceeded,
+                    $Baseline.RetryFailed
+                ) -join "|"
+            }
+            throw "server network stability timed out: baseline=$baselineSignature last=$observedSignature require_advance=$RequireAdvance"
         }
         function Wait-TunReady([int]$ProcessId, [int]$Port) {
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -1462,6 +1672,8 @@ public static class Ferrum2PerfProcessGroup {
             [string]$supportProbe[0] -cne "windows_tun_probe status=PASS protocols=tcp,udp") {
             throw "guest support listener preflight failed"
         }
+        $guestUnderlayAddress = Get-GuestUnderlayAddress `
+            -DestinationAddress $SupportAddress -DestinationPort $SupportUdp
 
         foreach ($trial in @($plan.trials | Sort-Object sequence)) {
             if (Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
@@ -1478,7 +1690,7 @@ public static class Ferrum2PerfProcessGroup {
             $metricsPort = Get-FreeTcpPort
             $serverPort = 0
             foreach ($attempt in 1..100) {
-                $candidatePort = Get-FreeDualPort
+                $candidatePort = Get-FreeDualPort -LocalAddress $guestUnderlayAddress
                 if ($candidatePort -ne $metricsPort) {
                     $serverPort = $candidatePort
                     break
@@ -1517,9 +1729,11 @@ public static class Ferrum2PerfProcessGroup {
             $clientText = $clientText.Replace("{{ADAPTER_NAME}}", $AdapterName).
                 Replace("{{SUPPORT_IPV4}}", $SupportAddress).
                 Replace("{{SUPPORT_UDP_PORT}}", [string]$SupportUdp).
+                Replace("{{SERVER_ADDRESS}}", $guestUnderlayAddress).
                 Replace("{{SERVER_PORT}}", [string]$serverPort).
                 Replace("{{METRICS_PORT}}", [string]$metricsPort)
             $serverText = (Get-Content -LiteralPath (Join-Path $InputRoot "server.toml.template") -Raw).
+                Replace("{{SERVER_ADDRESS}}", $guestUnderlayAddress).
                 Replace("{{SERVER_PORT}}", [string]$serverPort).
                 Replace("{{SERVER_METRICS_PORT}}", [string]$serverMetricsPort)
             if ($clientText.Contains("{{") -or $serverText.Contains("{{")) {
@@ -1556,12 +1770,25 @@ public static class Ferrum2PerfProcessGroup {
                     $server, "--config `"$serverConfig`"", $memberRoot,
                     $serverStdout, $serverStderr
                 )
-                Wait-ProcessListener $serverPid $serverPort $true
-                Wait-ProcessListener $serverPid $serverMetricsPort $false
+                Wait-ProcessListener -ProcessId $serverPid `
+                    -LocalAddress $guestUnderlayAddress -Port $serverPort -RequireUdp $true
+                Wait-ProcessListener -ProcessId $serverPid `
+                    -LocalAddress "127.0.0.1" -Port $serverMetricsPort -RequireUdp $false
+                $serverNetworkBaseline = Wait-ServerNetworkStable `
+                    -ProcessId $serverPid -MetricsPort $serverMetricsPort `
+                    -Baseline $null -RequireAdvance $false
                 $clientPid = [Ferrum2PerfProcessGroup]::Start(
                     $client, "--config `"$clientConfig`"", $memberRoot,
                     $clientStdout, $clientStderr
                 )
+                Wait-TunReady $clientPid $metricsPort
+                [void](Wait-ServerNetworkStable `
+                    -ProcessId $serverPid -MetricsPort $serverMetricsPort `
+                    -Baseline $serverNetworkBaseline -RequireAdvance $true)
+                Wait-ProcessListener -ProcessId $serverPid `
+                    -LocalAddress $guestUnderlayAddress -Port $serverPort -RequireUdp $true
+                Wait-ProcessListener -ProcessId $serverPid `
+                    -LocalAddress "127.0.0.1" -Port $serverMetricsPort -RequireUdp $false
                 Wait-TunReady $clientPid $metricsPort
                 $outputName = "{0:D3}-{1}-{2}-pair-{3}.json" -f @(
                     [int]$trial.sequence, [string]$trial.scenario, $member, [int]$trial.pair
