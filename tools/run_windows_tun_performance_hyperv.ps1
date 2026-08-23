@@ -978,6 +978,34 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     -cne $ExpectedPowerShellSha256) {
                 throw "guest network-path preflight executable identity mismatch"
             }
+            $vcRuntimeRoot = Join-Path $inputRoot "runtime\vc-runtime"
+            $vcRuntimeItems = @(Get-ChildItem -LiteralPath $vcRuntimeRoot -Force -ErrorAction Stop)
+            $vcRuntimeDlls = @($vcRuntimeItems | Where-Object { -not $_.PSIsContainer })
+            $allowedVcRuntimeNames = @(
+                "VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "MSVCP140.dll"
+            )
+            if ($vcRuntimeDlls.Count -le 0 -or $vcRuntimeDlls.Count -gt 3 -or
+                $vcRuntimeItems.Count -ne $vcRuntimeDlls.Count -or
+                @($vcRuntimeDlls | Where-Object {
+                    $_.Name -cnotin $allowedVcRuntimeNames -or
+                    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                    $_.Length -le 0 -or $_.Length -gt 16777216
+                }).Count -ne 0) {
+                throw "guest preflight Visual C++ runtime boundary is invalid"
+            }
+            $harnessRoot = Split-Path -Parent $harness
+            foreach ($runtimeDll in $vcRuntimeDlls) {
+                $runtimeDestination = Join-Path $harnessRoot $runtimeDll.Name
+                if (Test-Path -LiteralPath $runtimeDestination) {
+                    throw "guest preflight Visual C++ runtime baseline is not absent"
+                }
+                Copy-Item -LiteralPath $runtimeDll.FullName -Destination $runtimeDestination `
+                    -ErrorAction Stop
+                if ((Get-FileHash -LiteralPath $runtimeDestination -Algorithm SHA256).Hash `
+                        -cne (Get-FileHash -LiteralPath $runtimeDll.FullName -Algorithm SHA256).Hash) {
+                    throw "guest preflight Visual C++ runtime copy changed"
+                }
+            }
             $pathOutput = @(& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
                 -File $networkPathProbe -SupportIpv4 $SupportAddress `
                 -SupportPort $SupportUdp -ManagedAdapterName "Ferrum2Perf" -AsJson 2>&1)
@@ -987,10 +1015,20 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $path = [string]$pathOutput[0] | ConvertFrom-Json
             $probeOutput = @(& $harness windows-tun-probe `
                 --target-ip $SupportAddress --tcp-port $SupportTcp --udp-port $SupportUdp 2>&1)
-            if ($LASTEXITCODE -ne 0 -or $probeOutput.Count -ne 1 -or
+            $probeExitCode = $LASTEXITCODE
+            if ($probeExitCode -ne 0 -or $probeOutput.Count -ne 1 -or
                 [string]$probeOutput[0] -cne
                     "windows_tun_probe status=PASS protocols=tcp,udp") {
-                throw "guest support listener direct preflight failed"
+                $probeDiagnostic = @($probeOutput | Select-Object -First 4 | ForEach-Object {
+                    ([string]$_ -replace '[\r\n]+', ' ').Trim()
+                }) -join " | "
+                if ($probeDiagnostic.Length -gt 2048) {
+                    $probeDiagnostic = $probeDiagnostic.Substring(0, 2048)
+                }
+                if ([string]::IsNullOrWhiteSpace($probeDiagnostic)) {
+                    $probeDiagnostic = "<no output>"
+                }
+                throw "guest support listener direct preflight failed: exit=$probeExitCode output=$probeDiagnostic"
             }
             return ($path | ConvertTo-Json -Compress -Depth 5)
         })
@@ -1185,8 +1223,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             }
         }
         foreach ($runtimeDll in @(Get-ChildItem -LiteralPath (Join-Path $InputRoot "runtime\vc-runtime") -File)) {
-            Copy-Item -LiteralPath $runtimeDll.FullName `
-                -Destination (Join-Path $InputRoot "artifacts") -ErrorAction Stop
+            $harnessRuntimeDll = Join-Path (Join-Path $InputRoot "artifacts") $runtimeDll.Name
+            if (-not (Test-Path -LiteralPath $harnessRuntimeDll -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $harnessRuntimeDll -Algorithm SHA256).Hash -cne
+                    (Get-FileHash -LiteralPath $runtimeDll.FullName -Algorithm SHA256).Hash) {
+                throw "guest preflight Visual C++ runtime identity changed"
+            }
         }
 
         Add-Type -TypeDefinition @'
@@ -2088,7 +2130,9 @@ public static class Ferrum2PerfProcessGroup {
                     param([string]$Path, [string]$ProductRoot)
                     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
                         return [pscustomobject]@{
+                            Exists = $false
                             Safe = $false
+                            Reason = "missing"
                             OwnedProcesses = 0
                             Files = 0
                             ModelFiles = 0
@@ -2116,7 +2160,9 @@ public static class Ferrum2PerfProcessGroup {
                     $ownedProcessesBefore = Get-OwnedProductProcessCount
                     if ($ownedProcessesBefore -ne 0) {
                         return [pscustomobject]@{
+                            Exists = $true
                             Safe = $false
+                            Reason = "owned_process_before"
                             OwnedProcesses = $ownedProcessesBefore
                             Files = 0
                             ModelFiles = 0
@@ -2133,7 +2179,9 @@ public static class Ferrum2PerfProcessGroup {
                     }).Count -ne 0
                     if ($hasReparsePoint) {
                         return [pscustomobject]@{
+                            Exists = $true
                             Safe = $false
+                            Reason = "reparse_point"
                             OwnedProcesses = 0
                             Files = 0
                             ModelFiles = 0
@@ -2152,7 +2200,13 @@ public static class Ferrum2PerfProcessGroup {
                     })
                     $ownedProcessesAfter = Get-OwnedProductProcessCount
                     [pscustomobject]@{
+                        Exists = $true
                         Safe = $ownedProcessesAfter -eq 0
+                        Reason = if ($ownedProcessesAfter -eq 0) {
+                            "safe"
+                        } else {
+                            "owned_process_after"
+                        }
                         OwnedProcesses = $ownedProcessesAfter
                         Files = @(Get-ChildItem -LiteralPath $Path -File -Filter "*.json" `
                             -ErrorAction Stop).Count
@@ -2165,7 +2219,14 @@ public static class Ferrum2PerfProcessGroup {
                         LargestFileBytes = [long]($fileLengths | Measure-Object -Maximum).Maximum
                     }
                 })
-            if ($boundary.Count -eq 1 -and $boundary[0].Safe -eq $true -and
+            if ($boundary.Count -ne 1) {
+                throw "guest evidence export boundary result is not unique"
+            }
+            if ($boundary[0].Exists -ne $true) {
+                if ($null -eq $runFailure) {
+                    throw "guest evidence is absent without a prior run failure"
+                }
+            } elseif ($boundary[0].Safe -eq $true -and
                 [int]$boundary[0].OwnedProcesses -eq 0 -and
                 [int]$boundary[0].Files -le 90 -and
                 [int]$boundary[0].ModelFiles -le 20 -and
@@ -2181,7 +2242,18 @@ public static class Ferrum2PerfProcessGroup {
                 Copy-Item -FromSession $session -LiteralPath $guestEvidencePath `
                     -Destination $hostEvidenceRoot -Recurse -ErrorAction Stop
             } else {
-                throw "guest evidence export boundary rejected"
+                throw (
+                    "guest evidence export boundary rejected: reason={0} owned={1} " +
+                    "json={2} model={3} total_files={4} total_bytes={5} largest={6}"
+                ) -f @(
+                    [string]$boundary[0].Reason,
+                    [int]$boundary[0].OwnedProcesses,
+                    [int]$boundary[0].Files,
+                    [int]$boundary[0].ModelFiles,
+                    [int]$boundary[0].TotalFiles,
+                    [long]$boundary[0].TotalBytes,
+                    [long]$boundary[0].LargestFileBytes
+                )
             }
         } catch {
             $evidenceExportFailure = $_
