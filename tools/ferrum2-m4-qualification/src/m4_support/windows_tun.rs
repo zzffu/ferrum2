@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -32,6 +32,8 @@ const FRAGMENT_ACTIVE: Duration = Duration::from_secs(30);
 const FRAGMENT_PAYLOAD: usize = 1_440;
 const FRAGMENT_BATCH: usize = 8;
 const FRAGMENT_MINIMUM_DATAGRAMS: u64 = 4_096;
+const FRAGMENT_ACK_WINDOW: Duration = Duration::from_millis(500);
+const FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS: u64 = 1_000_000;
 const FRAGMENT_REQUEST_TAG: [u8; 8] = *b"F2FRQ001";
 const FRAGMENT_ACK_TAG: [u8; 8] = *b"F2FAK001";
 const FRAGMENT_ACK_LEN: usize = 24;
@@ -48,6 +50,196 @@ const ROUTE_DATAGRAMS_PER_TARGET: usize = 32;
 const ROUTE_PAYLOAD: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const SUPPORT_MAX_TCP_CONNECTIONS: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FragmentPhase {
+    Warmup,
+    Active,
+}
+
+#[derive(Debug)]
+struct FragmentAckBatch {
+    first_sequence: u64,
+    end_sequence: u64,
+    seen: Vec<bool>,
+}
+
+impl FragmentAckBatch {
+    fn new(first_sequence: u64, batch: usize) -> Result<Self, String> {
+        if batch == 0 {
+            return Err("fragment ACK batch cannot be empty".to_owned());
+        }
+        let end_sequence = first_sequence
+            .checked_add(batch as u64)
+            .ok_or_else(|| "fragment ACK batch sequence overflow".to_owned())?;
+        Ok(Self {
+            first_sequence,
+            end_sequence,
+            seen: vec![false; batch],
+        })
+    }
+
+    fn observe(
+        &mut self,
+        sequence: u64,
+        retried_sequences: &HashSet<u64>,
+        duplicate_sequences: &mut HashSet<u64>,
+    ) -> Result<bool, String> {
+        if sequence >= self.end_sequence {
+            return Err("fragment ACK sequence is in the future".to_owned());
+        }
+        if sequence < self.first_sequence {
+            if retried_sequences.contains(&sequence) && duplicate_sequences.insert(sequence) {
+                return Ok(false);
+            }
+            return Err("fragment ACK sequence is stale or duplicated without a retry".to_owned());
+        }
+        let offset = usize::try_from(sequence - self.first_sequence)
+            .map_err(|_| "fragment ACK sequence offset overflow".to_owned())?;
+        if !std::mem::replace(&mut self.seen[offset], true) {
+            return Ok(true);
+        }
+        if retried_sequences.contains(&sequence) && duplicate_sequences.insert(sequence) {
+            return Ok(false);
+        }
+        Err("fragment ACK sequence was duplicated more than allowed".to_owned())
+    }
+
+    fn complete(&self) -> bool {
+        self.seen.iter().all(|seen| *seen)
+    }
+
+    fn missing_sequences(&self) -> Vec<u64> {
+        self.seen
+            .iter()
+            .enumerate()
+            .filter(|(_, seen)| !**seen)
+            .map(|(offset, _)| self.first_sequence + offset as u64)
+            .collect()
+    }
+
+    fn sole_missing_sequence(&self) -> Result<u64, String> {
+        let missing = self.missing_sequences();
+        if missing.len() != 1 {
+            return Err("fragment ACK window must leave exactly one missing sequence".to_owned());
+        }
+        Ok(missing[0])
+    }
+
+    fn seen_bitmap(&self) -> String {
+        self.seen
+            .iter()
+            .map(|seen| if *seen { '1' } else { '0' })
+            .collect()
+    }
+}
+
+#[derive(Debug, Default)]
+struct FragmentWorkloadAccounting {
+    warmup_unique_datagrams: u64,
+    warmup_request_attempts: u64,
+    active_unique_datagrams: u64,
+    active_request_attempts: u64,
+    retransmissions: u64,
+    ack_window_expirations: u64,
+    duplicate_or_stale_acks: u64,
+    retried_sequences: HashSet<u64>,
+    duplicate_sequences: HashSet<u64>,
+}
+
+impl FragmentWorkloadAccounting {
+    fn total_unique_datagrams(&self) -> Result<u64, String> {
+        self.warmup_unique_datagrams
+            .checked_add(self.active_unique_datagrams)
+            .ok_or_else(|| "fragment total unique datagram count overflow".to_owned())
+    }
+
+    fn total_request_attempts(&self) -> Result<u64, String> {
+        self.warmup_request_attempts
+            .checked_add(self.active_request_attempts)
+            .ok_or_else(|| "fragment total request attempt count overflow".to_owned())
+    }
+
+    fn record_initial_attempts(
+        &mut self,
+        phase: FragmentPhase,
+        attempts: u64,
+    ) -> Result<(), String> {
+        let target = match phase {
+            FragmentPhase::Warmup => &mut self.warmup_request_attempts,
+            FragmentPhase::Active => &mut self.active_request_attempts,
+        };
+        *target = target
+            .checked_add(attempts)
+            .ok_or_else(|| "fragment phase request attempt count overflow".to_owned())?;
+        Ok(())
+    }
+
+    fn record_unique_datagrams(
+        &mut self,
+        phase: FragmentPhase,
+        datagrams: u64,
+    ) -> Result<(), String> {
+        let target = match phase {
+            FragmentPhase::Warmup => &mut self.warmup_unique_datagrams,
+            FragmentPhase::Active => &mut self.active_unique_datagrams,
+        };
+        *target = target
+            .checked_add(datagrams)
+            .ok_or_else(|| "fragment phase unique datagram count overflow".to_owned())?;
+        Ok(())
+    }
+
+    fn record_ack_window_expiration(&mut self) -> Result<(), String> {
+        self.ack_window_expirations = self
+            .ack_window_expirations
+            .checked_add(1)
+            .ok_or_else(|| "fragment ACK window expiration count overflow".to_owned())?;
+        Ok(())
+    }
+
+    fn record_retransmission(
+        &mut self,
+        phase: FragmentPhase,
+        sequence: u64,
+        retry_budget: u64,
+    ) -> Result<(), String> {
+        let retransmissions = self
+            .retransmissions
+            .checked_add(1)
+            .ok_or_else(|| "fragment retransmission count overflow".to_owned())?;
+        if retransmissions > retry_budget {
+            return Err("fragment retransmission budget exhausted".to_owned());
+        }
+        if self.retried_sequences.contains(&sequence) {
+            return Err("fragment sequence was already retransmitted".to_owned());
+        }
+        self.record_initial_attempts(phase, 1)?;
+        self.retried_sequences.insert(sequence);
+        self.retransmissions = retransmissions;
+        Ok(())
+    }
+
+    fn record_duplicate_or_stale_ack(&mut self) -> Result<(), String> {
+        self.duplicate_or_stale_acks = self
+            .duplicate_or_stale_acks
+            .checked_add(1)
+            .ok_or_else(|| "fragment duplicate/stale ACK count overflow".to_owned())?;
+        Ok(())
+    }
+
+    fn observe_ack(&mut self, batch: &mut FragmentAckBatch, sequence: u64) -> Result<(), String> {
+        let is_unique = batch.observe(
+            sequence,
+            &self.retried_sequences,
+            &mut self.duplicate_sequences,
+        )?;
+        if !is_unique {
+            self.record_duplicate_or_stale_ack()?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Scenario {
@@ -649,6 +841,141 @@ fn fragment_batch_round_trip(
     Ok(end_sequence)
 }
 
+fn fragment_retry_budget(unique_datagrams: u64) -> u64 {
+    unique_datagrams
+        .div_ceil(FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS)
+        .max(1)
+}
+
+fn fragment_batch_failure(error: &str, batch: &FragmentAckBatch, retry_budget: u64) -> String {
+    let missing_sequences = batch.missing_sequences();
+    format!(
+        "{error}; first={} end={} seen={} missing={} missing_sequences={missing_sequences:?} budget={retry_budget}",
+        batch.first_sequence,
+        batch.end_sequence,
+        batch.seen_bitmap(),
+        missing_sequences.len(),
+    )
+}
+
+fn send_fragment_request(socket: &UdpSocket, sequence: u64) -> Result<(), String> {
+    let payload = fragment_request(sequence);
+    if socket
+        .send(&payload)
+        .map_err(|error| format!("fragment request send failed: {error}"))?
+        != payload.len()
+    {
+        return Err("fragment request send was partial".to_owned());
+    }
+    Ok(())
+}
+
+fn receive_fragment_ack_window(
+    socket: &UdpSocket,
+    reply: &mut [u8],
+    batch: &mut FragmentAckBatch,
+    accounting: &mut FragmentWorkloadAccounting,
+    retry_budget: u64,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + FRAGMENT_ACK_WINDOW;
+    while !batch.complete() {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        socket
+            .set_read_timeout(Some(deadline.duration_since(now)))
+            .map_err(|error| {
+                fragment_batch_failure(
+                    &format!("set fragment ACK window failed: {error}"),
+                    batch,
+                    retry_budget,
+                )
+            })?;
+        let received = match socket.recv(reply) {
+            Ok(received) => received,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(fragment_batch_failure(
+                    &format!("fragment ACK receive failed: {error}"),
+                    batch,
+                    retry_budget,
+                ));
+            }
+        };
+        let sequence = fragment_ack_sequence(&reply[..received])
+            .map_err(|error| fragment_batch_failure(&error, batch, retry_budget))?;
+        accounting
+            .observe_ack(batch, sequence)
+            .map_err(|error| fragment_batch_failure(&error, batch, retry_budget))?;
+    }
+    Ok(true)
+}
+
+fn fragment_workload_batch_round_trip(
+    socket: &UdpSocket,
+    phase: FragmentPhase,
+    first_sequence: u64,
+    reply: &mut [u8],
+    accounting: &mut FragmentWorkloadAccounting,
+) -> Result<u64, String> {
+    if reply.len() < FRAGMENT_REPLY_BUFFER {
+        return Err(format!(
+            "fragment workload reply buffer is invalid; first={first_sequence} end={first_sequence} seen=<none> missing={FRAGMENT_BATCH} budget=1"
+        ));
+    }
+    let mut batch = FragmentAckBatch::new(first_sequence, FRAGMENT_BATCH).map_err(|error| {
+        format!(
+            "{error}; first={first_sequence} end=<overflow> seen=<none> missing={FRAGMENT_BATCH} budget=1"
+        )
+    })?;
+    let prospective_unique = accounting
+        .total_unique_datagrams()
+        .and_then(|value| {
+            value
+                .checked_add(FRAGMENT_BATCH as u64)
+                .ok_or_else(|| "fragment prospective unique count overflow".to_owned())
+        })
+        .map_err(|error| fragment_batch_failure(&error, &batch, 1))?;
+    let retry_budget = fragment_retry_budget(prospective_unique);
+    accounting
+        .record_initial_attempts(phase, FRAGMENT_BATCH as u64)
+        .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+    for sequence in batch.first_sequence..batch.end_sequence {
+        send_fragment_request(socket, sequence)
+            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+    }
+    if !receive_fragment_ack_window(socket, reply, &mut batch, accounting, retry_budget)? {
+        accounting
+            .record_ack_window_expiration()
+            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+        let missing_sequence = batch
+            .sole_missing_sequence()
+            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+        accounting
+            .record_retransmission(phase, missing_sequence, retry_budget)
+            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+        send_fragment_request(socket, missing_sequence)
+            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+        if !receive_fragment_ack_window(socket, reply, &mut batch, accounting, retry_budget)? {
+            accounting
+                .record_ack_window_expiration()
+                .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+            return Err(fragment_batch_failure(
+                "fragment ACK remained missing after its only retransmission",
+                &batch,
+                retry_budget,
+            ));
+        }
+    }
+    accounting
+        .record_unique_datagrams(phase, FRAGMENT_BATCH as u64)
+        .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
+    Ok(batch.end_sequence)
+}
+
 fn udp_packets(address: SocketAddr) -> Result<Value, String> {
     let socket = connected_udp(address)?;
     let mut reply = vec![0; UDP_PAYLOAD];
@@ -938,31 +1265,71 @@ fn fragments(address: SocketAddr) -> Result<Value, String> {
     let socket = connected_udp(address)?;
     let mut reply = [0_u8; FRAGMENT_REPLY_BUFFER];
     let mut sequence = 0_u64;
+    let mut accounting = FragmentWorkloadAccounting::default();
     let warmup_deadline = Instant::now() + FRAGMENT_WARMUP;
     while Instant::now() < warmup_deadline {
-        sequence = fragment_batch_round_trip(&socket, FRAGMENT_BATCH, sequence, &mut reply)?;
+        sequence = fragment_workload_batch_round_trip(
+            &socket,
+            FragmentPhase::Warmup,
+            sequence,
+            &mut reply,
+            &mut accounting,
+        )?;
     }
     let start = Instant::now();
     let deadline = start + FRAGMENT_ACTIVE;
-    let mut datagrams = 0_u64;
-    while Instant::now() < deadline || datagrams < FRAGMENT_MINIMUM_DATAGRAMS {
-        sequence = fragment_batch_round_trip(&socket, FRAGMENT_BATCH, sequence, &mut reply)?;
-        datagrams = datagrams
-            .checked_add(FRAGMENT_BATCH as u64)
-            .ok_or_else(|| "fragment datagram count overflow".to_owned())?;
+    while Instant::now() < deadline
+        || accounting.active_unique_datagrams < FRAGMENT_MINIMUM_DATAGRAMS
+    {
+        sequence = fragment_workload_batch_round_trip(
+            &socket,
+            FragmentPhase::Active,
+            sequence,
+            &mut reply,
+            &mut accounting,
+        )?;
     }
     let elapsed = start.elapsed();
-    let bytes = datagrams
+    let bytes = accounting
+        .active_unique_datagrams
         .checked_mul(FRAGMENT_PAYLOAD as u64)
         .ok_or_else(|| "fragment byte count overflow".to_owned())?;
+    let total_unique_datagrams = accounting.total_unique_datagrams()?;
+    let total_request_attempts = accounting.total_request_attempts()?;
+    let retry_budget = fragment_retry_budget(total_unique_datagrams);
+    let expected_request_attempts = total_unique_datagrams
+        .checked_add(accounting.retransmissions)
+        .ok_or_else(|| "fragment request accounting overflow".to_owned())?;
+    if sequence != total_unique_datagrams
+        || total_request_attempts != expected_request_attempts
+        || accounting.retransmissions > retry_budget
+        || accounting.ack_window_expirations != accounting.retransmissions
+        || accounting.duplicate_or_stale_acks > accounting.retransmissions
+    {
+        return Err("fragment workload accounting invariants failed".to_owned());
+    }
     Ok(json!({
         "measurements": {
             "reassembly_rate": elapsed_rate(bytes, elapsed, "fragment reassembly")?
         },
-        "checked_units": datagrams,
+        "checked_units": accounting.active_unique_datagrams,
+        "accounting": {
+            "warmup_unique_datagrams": accounting.warmup_unique_datagrams,
+            "warmup_request_attempts": accounting.warmup_request_attempts,
+            "active_unique_datagrams": accounting.active_unique_datagrams,
+            "active_request_attempts": accounting.active_request_attempts,
+            "total_unique_datagrams": total_unique_datagrams,
+            "total_request_attempts": total_request_attempts,
+            "retransmissions": accounting.retransmissions,
+            "ack_window_expirations": accounting.ack_window_expirations,
+            "duplicate_or_stale_acks": accounting.duplicate_or_stale_acks,
+            "retry_budget": retry_budget,
+        },
         "checks": {
             "payload_exact": true,
-            "no_gso": true
+            "no_gso": true,
+            "all_sequences_acknowledged": true,
+            "bounded_retransmissions": true,
         }
     }))
 }
@@ -1278,6 +1645,81 @@ pub(super) fn self_check() -> Result<(), String> {
     invalid_ack_request_len[16..24].copy_from_slice(&((FRAGMENT_PAYLOAD - 1) as u64).to_be_bytes());
     if fragment_ack_sequence(&invalid_ack_request_len).is_ok() {
         return Err("fragment ACK with an invalid request length was accepted".to_owned());
+    }
+    if FRAGMENT_BATCH != 8
+        || FRAGMENT_ACK_WINDOW != Duration::from_millis(500)
+        || fragment_retry_budget(0) != 1
+        || fragment_retry_budget(1) != 1
+        || fragment_retry_budget(FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS) != 1
+        || fragment_retry_budget(FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS + 1) != 2
+    {
+        return Err("Windows TUN fragment retry recipe is invalid".to_owned());
+    }
+    let mut ordered_batch = FragmentAckBatch::new(100, FRAGMENT_BATCH)?;
+    let mut ordered_accounting = FragmentWorkloadAccounting::default();
+    for sequence in [107, 100, 106, 101, 105, 102, 104, 103] {
+        ordered_accounting.observe_ack(&mut ordered_batch, sequence)?;
+    }
+    if !ordered_batch.complete()
+        || ordered_batch.sole_missing_sequence().is_ok()
+        || ordered_accounting.duplicate_or_stale_acks != 0
+    {
+        return Err("Windows TUN out-of-order fragment ACK accounting is invalid".to_owned());
+    }
+    let mut multiple_missing_batch = FragmentAckBatch::new(150, FRAGMENT_BATCH)?;
+    let mut multiple_missing_accounting = FragmentWorkloadAccounting::default();
+    for sequence in 150..156 {
+        multiple_missing_accounting.observe_ack(&mut multiple_missing_batch, sequence)?;
+    }
+    if multiple_missing_batch.sole_missing_sequence().is_ok() {
+        return Err("Windows TUN multiple missing fragment ACKs were recoverable".to_owned());
+    }
+    let mut retry_batch = FragmentAckBatch::new(200, FRAGMENT_BATCH)?;
+    let mut retry_accounting = FragmentWorkloadAccounting::default();
+    retry_accounting.record_initial_attempts(FragmentPhase::Warmup, FRAGMENT_BATCH as u64)?;
+    for sequence in 200..208 {
+        if sequence != 203 {
+            retry_accounting.observe_ack(&mut retry_batch, sequence)?;
+        }
+    }
+    let retry_diagnostic = fragment_batch_failure("self-check", &retry_batch, 1);
+    if retry_batch.complete()
+        || retry_batch.sole_missing_sequence()? != 203
+        || !retry_diagnostic.contains("first=200")
+        || !retry_diagnostic.contains("end=208")
+        || !retry_diagnostic.contains("seen=")
+        || !retry_diagnostic.contains("missing=1")
+        || !retry_diagnostic.contains("missing_sequences=[203]")
+        || !retry_diagnostic.contains("budget=1")
+        || retry_accounting.observe_ack(&mut retry_batch, 200).is_ok()
+        || retry_accounting.observe_ack(&mut retry_batch, 208).is_ok()
+    {
+        return Err("Windows TUN missing/future fragment ACK mutation was accepted".to_owned());
+    }
+    retry_accounting.record_ack_window_expiration()?;
+    retry_accounting.record_retransmission(FragmentPhase::Warmup, 203, 1)?;
+    retry_accounting.observe_ack(&mut retry_batch, 203)?;
+    retry_accounting.observe_ack(&mut retry_batch, 203)?;
+    if !retry_batch.complete()
+        || retry_accounting.observe_ack(&mut retry_batch, 203).is_ok()
+        || retry_accounting
+            .record_retransmission(FragmentPhase::Warmup, 204, 1)
+            .is_ok()
+        || retry_accounting.warmup_request_attempts != 9
+        || retry_accounting.retransmissions != 1
+        || retry_accounting.ack_window_expirations != 1
+        || retry_accounting.duplicate_or_stale_acks != 1
+    {
+        return Err("Windows TUN bounded fragment retransmission accounting is invalid".to_owned());
+    }
+    let mut stale_batch = FragmentAckBatch::new(300, FRAGMENT_BATCH)?;
+    let mut stale_accounting = FragmentWorkloadAccounting::default();
+    stale_accounting.record_retransmission(FragmentPhase::Warmup, 299, 1)?;
+    stale_accounting.observe_ack(&mut stale_batch, 299)?;
+    if stale_accounting.observe_ack(&mut stale_batch, 299).is_ok()
+        || stale_accounting.duplicate_or_stale_acks != 1
+    {
+        return Err("Windows TUN stale fragment ACK bound is invalid".to_owned());
     }
     let labels = [
         "tcp-single-flow",
