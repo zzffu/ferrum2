@@ -8,6 +8,8 @@ Privileged Windows acceptance is restricted to the approved Hyper-V guest and is
 
 A complete dual-stack direct-egress example is available at
 [`docs/examples/client-v2-tun.toml`](examples/client-v2-tun.toml).
+Deployments upgrading from the removed compatibility model should follow the
+[`network model v2 breaking migration`](network-model-v2-migration.md).
 
 ```toml
 schema_version = 2
@@ -48,8 +50,10 @@ Ferrum2 does not capture every port-53 destination and does not alter DoH or DoT
 ## UDP mapping and filtering
 
 TUN UDP mapping is always endpoint-independent: one local source IP and port owns one logical
-association even when it sends to several destinations. Each destination still receives its own
-route and outbound decision.
+association even when it sends to several destinations. The first ordinary datagram is routed
+exactly once; that route, terminal, outbound/chain, interface policy, and route generation remain
+frozen until the association expires or is reset. Later destinations reuse the same multi-target
+egress and never invoke the router again.
 
 `udp_filtering` accepts exactly two values:
 
@@ -116,12 +120,13 @@ exactly `auto_route && strict_route`. A configuration with `strict_route = true`
 `auto_route = false` remains valid so startup diagnostics can report the retained request and an
 effective value of `false`; it must not claim that strict routing is enabled.
 
-This change establishes only that configuration and diagnostic contract. The current runtime does
-not yet install WFP rules from the effective value, so setting `strict_route = true` is not yet a
-traffic-leak guarantee. The planned Windows enforcement is limited to unsupported-address-family
-unreachable handling and traditional TCP/UDP port-53 protection on non-TUN paths when managed DNS
-is enabled. It is not an external route-overlap detector, general physical-interface blocker, DoH
-or DoT detector, or complete kill switch.
+On Windows, an effective strict route owns one dynamic WFP session. A single-stack TUN installs an
+unsupported-address-family connect guard; a dual-stack TUN installs no family guard. When managed
+DNS is also enabled, the session blocks traditional TCP and UDP port 53 on non-TUN paths while
+allowing Ferrum2's own controlled traffic and the managed TUN path. Filter installation is
+fail-closed and ordinary `ResetNetwork` keeps the same WFP session and filters. This is not an
+external route-overlap detector, general physical-interface blocker, DoH or DoT detector, or
+complete kill switch.
 
 ### Route-level interface selection
 
@@ -134,9 +139,11 @@ default_interface = "Ethernet"
 ```
 
 `auto_detect_interface` defaults to `false`, while `default_interface` defaults to absent. Both may
-be configured together: a runtime consumer must prefer a usable family-aware automatically detected
-interface and use `default_interface` only as its route-level fallback. This change preserves those
-values through configuration preparation and finishing but does not connect them to socket creation.
+be configured together. Every physical TCP and UDP socket uses the same family-aware resolver, with
+the fixed order outbound `bind_interface`, automatically detected interface, route-level default,
+then the system best route for the actual destination. IPv4 and IPv6 are resolved independently;
+the managed TUN, loopback, unavailable interfaces, and interfaces without the requested family are
+not automatic candidates.
 
 `default_interface` is preserved exactly without trimming. It must contain 1 through 256 UTF-16
 code units and no control characters. Invalid names fail with the closed
@@ -159,17 +166,27 @@ inet6_bind_address = "2001:db8::20"
 `bind_interface` uses the same exact 1-through-256 UTF-16-unit name contract as
 `route.default_interface`. The two address fields are strict IPv4 and IPv6 literals respectively;
 putting an address in the wrong family is an error. Selectors and chains are composition nodes, not
-socket owners, and reject these fields. The values survive configuration preparation and finishing.
-Runtime socket binding and interface/address membership checks land with the unified interface
-resolver; until then these fields do not change socket creation.
+socket owners, and reject these fields. An explicit interface error is terminal for that dial and
+never falls through to a lower-priority source. A configured source address must still belong to the
+resolved interface. Sockets are bound against one network generation, discarded on a stale bind,
+and the complete resolve/create/bind/admit operation is retried at most once.
 
 ## Network changes
 
-A semantic route, interface, address, DNS-lease, or underlay change rebuilds the managed TUN session
-inside the same Ferrum2 process. Existing TCP flows are reset and UDP associations are closed; new
-traffic is admitted after cleanup, route verification, and reconstruction complete. Rebuilds retry
-with bounded backoff. A cleanup-integrity failure remains terminal because continuing could corrupt
-system network state.
+A route, interface, address, best-route, DHCP, VPN, or metric notification performs a lightweight
+`ResetNetwork`. Ferrum2 closes generation-bound TCP connections and UDP associations, clears the
+TUN stack's provisional UDP, pending response, and fragment state, captures a fresh dual-stack
+interface snapshot, runs the stack/router/outbound/inbound hooks, and resumes only after every hook
+accepts the same generation. Notification bursts are coalesced and resets are serialized.
+
+An ordinary reset preserves the Wintun adapter and device session, GUID/LUID/index, managed
+addresses, managed routes, managed DNS, strict-route WFP dynamic session and filters, and the
+transaction ownership ledger. A full rebuild is reserved for confirmed damage to one of those
+owned objects, an unrecoverable Wintun session failure, or an untrustworthy ownership ledger. It
+keeps admission closed, cancels the current generation, cleans up only ledger-owned state in reverse
+order, reconstructs the managed plane, performs readback, publishes exactly one new generation, and
+then reopens admission. Other VPN or LAN routes, default-route metric changes, link handovers, and
+temporary loss of an automatically detected interface are never full-rebuild reasons.
 
 ## Fragmentation, MTU, and ping
 
@@ -186,28 +203,29 @@ as a ring-full drop. It is not retried and does not restart the session.
 
 ## Operational metrics
 
-The managed path exports fixed-cardinality metrics for session starts/restarts and generation,
+The managed path exports fixed-cardinality metrics for network reset/full rebuild and generation,
 ingress/egress/reject outcomes, Wintun ring-full drops, active TCP flows, UDP candidates and
-associations, fragment reassembly, network changes, route detection, and stale underlay binds.
-Packet rejection and route-conflict labels use closed reason enums. IP addresses, ports, adapter
-names, and route prefixes are never metric labels.
+associations, fragment reassembly, strict-route installation, interface selection, and stale
+generation handling. IP addresses, ports, adapter names, and route prefixes are never metric labels.
 
-Wintun ring-full drops and route conflicts also emit closed structured diagnostics. Those records
-contain only the fixed reason and `ipv4`/`ipv6` family; they never contain packet endpoints,
-adapter names, or route prefixes.
+Wintun ring-full drops, managed-state damage, strict-route state, and interface resolution emit
+closed structured diagnostics. Those records contain only fixed reasons, results, selection source,
+and `ipv4`/`ipv6` family where applicable; they never contain packet endpoints, adapter names, or
+route prefixes.
 
-The principal counters and gauges are `ferrum2_tun_session_started_total`,
-`ferrum2_tun_session_restart_started_total`, `ferrum2_tun_session_restart_succeeded_total`,
-`ferrum2_tun_session_restart_failed_total`, `ferrum2_tun_session_generation`,
-`ferrum2_tun_session_active`, `ferrum2_tun_packets_ingress_total`,
+The principal counters and gauges are `ferrum2_network_reset_total{reason,result}`,
+`ferrum2_network_full_rebuild_total{reason,result}`, `ferrum2_network_generation`,
+`ferrum2_tun_session_generation`, `ferrum2_tun_session_active`,
+`ferrum2_tun_packets_ingress_total`,
 `ferrum2_tun_packets_egress_total`, `ferrum2_tun_packets_rejected_total`,
 `ferrum2_tun_internal_egress_backpressured_total`, `ferrum2_tun_pending_udp_responses`,
 `ferrum2_tun_udp_response_dropped_total{reason}`, `ferrum2_tun_wintun_ring_full_dropped_total`,
 `ferrum2_tun_tcp_flows_active`, `ferrum2_tun_udp_associations_active`,
 `ferrum2_tun_udp_candidates_active`, `ferrum2_tun_reassembly_entries_active`,
-`ferrum2_tun_network_change_total`, `ferrum2_tun_route_detect_total`,
-`ferrum2_tun_route_conflict_total`, and `ferrum2_tun_underlay_bind_stale_total`. There is no
-aggregate TUN memory budget gauge.
+`ferrum2_tun_strict_route_requested`, `ferrum2_tun_strict_route_effective`,
+`ferrum2_tun_strict_route_filter_install_total{result}`, and
+`ferrum2_outbound_interface_resolution_total{source,result}`. There are no route-detection,
+route-conflict, or aggregate TUN memory-budget metrics.
 
 Internal egress backpressure is lossless: the owner retains the pending response and retries it
 after the occupied output is flushed. Its dedicated counter records retry observations, not
@@ -221,16 +239,21 @@ Terminal UDP response removal increments both the general rejection counter and 
 `injection_rejected`, `session_reset`, `shutdown`, and `owner_fatal`; no endpoint, association,
 route, outbound, or adapter identity is exposed as a label.
 
-## Migration from earlier schema-v2 TUN configuration
+## Breaking migration
 
+- This release accepts `schema_version = 2` only. Version 1, a missing version, and future versions
+  fail before a partially validated configuration can be produced; there is no automatic migration.
+- Replace legacy composite matchers with the flat schema-v2 matcher fields documented in the
+  breaking migration guide.
+- Remove the deleted aggregate TUN UDP memory field. It has no replacement or deprecated no-op;
+  the breaking migration guide names the rejected legacy spelling explicitly.
 - Existing dual-stack address fields and IPv4 synthetic DNS remain valid.
 - `strict_route` is new and defaults to `false`. Its requested value is retained, but it is
   effective only with `auto_route = true`; requesting it without automatic routing requires a
-  fixed startup warning from the eventual runtime consumer. This configuration-only change does
-  not install WFP rules.
+  fixed startup warning and installs no WFP rules.
 - `[route].auto_detect_interface` and `[route].default_interface` are new and default to `false`
   and absent respectively. They may coexist; automatic detection has priority over the named
-  fallback. This configuration-only change does not yet alter runtime socket binding.
+  fallback.
 - `udp_filtering` now defaults to `endpoint_independent` when omitted. Set it to
   `address_dependent` explicitly to retain source-address filtering.
 - Ferrum2 no longer estimates or rejects aggregate TUN-owned memory. Flow, association, queue,
