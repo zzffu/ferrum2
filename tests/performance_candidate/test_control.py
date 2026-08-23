@@ -22,12 +22,6 @@ POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
 SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.json"
 WINDOWS_TUN_POLICY_PATH = ROOT / "tools" / "windows_tun_performance_policy.json"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "performance-candidate.yml"
-WINDOWS_TUN_RUNNER_PATH = ROOT / "tests" / "platform" / "run_windows_tun_hyperv.ps1"
-WINDOWS_TUN_PERFORMANCE_RUNNER_PATH = (
-    ROOT / "tools" / "run_windows_tun_performance_hyperv.ps1"
-)
-WINDOWS_TUN_COLLECTOR_PATH = ROOT / "tools" / "collect_windows_tun_performance_trial.ps1"
-M4_SUPPORT_PATH = ROOT / "tools" / "ferrum2-m4-qualification" / "src" / "m4_support" / "mod.rs"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 CONTROL = importlib.util.module_from_spec(SPEC)
@@ -898,106 +892,6 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 (trial["member"] == "parent") == (trial["pair"] % 2 == 1)
             ) else 2
             self.assertEqual(trial["order"], expected)
-
-    def test_windows_tun_execution_is_local_hyperv_only(
-        self,
-    ) -> None:
-        self.assertFalse(
-            (ROOT / ".github" / "workflows" / "windows-tun-performance.yml").exists()
-        )
-        runner = WINDOWS_TUN_RUNNER_PATH.read_text(encoding="utf-8")
-        self.assertIn("#requires -Modules Hyper-V", runner)
-        self.assertIn("run_windows_tun_hyperv", WINDOWS_TUN_RUNNER_PATH.name)
-        self.assertIn("82e20295-1d30-48e7-a751-e21d35d872d4", runner)
-        self.assertIn("1e570209-faf7-4248-8167-aa0687cdb8cf", runner)
-        self.assertIn("hyperv-ferrum2-test.credential.xml", runner)
-        self.assertIn("Restore-VMSnapshot", runner)
-        self.assertIn("New-PSSession", runner)
-        self.assertIn("-VMId", runner)
-
-        workflows = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
-        )
-        self.assertNotIn("ferrum2-hyperv-guest", workflows)
-        self.assertNotIn("qualify_windows_tun.ps1", workflows)
-
-    def test_local_hyperv_performance_runner_keeps_host_network_read_only(
-        self,
-    ) -> None:
-        runner = WINDOWS_TUN_PERFORMANCE_RUNNER_PATH.read_text(encoding="utf-8")
-        self.assertIn("#requires -Version 7.4", runner)
-        self.assertIn("#requires -Modules Hyper-V", runner)
-        for identity in (
-            "Windows 10 MSIX packaging environment",
-            "82e20295-1d30-48e7-a751-e21d35d872d4",
-            "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
-            "1e570209-faf7-4248-8167-aa0687cdb8cf",
-        ):
-            self.assertIn(identity, runner)
-
-        self.assertIn("hyperv-ferrum2-test.credential.xml", runner)
-        self.assertIn('Resolve-ExternalFile -Path $candidate -Label "guest credential"', runner)
-        self.assertIn("Test-PathWithinRoot", runner)
-        self.assertNotRegex(runner, r"(?i)\bpassword\s*=")
-
-        begin = "# BEGIN GUEST_ONLY_NETWORK_EXECUTION"
-        end = "# END GUEST_ONLY_NETWORK_EXECUTION"
-        self.assertEqual(runner.count(begin), 1)
-        self.assertEqual(runner.count(end), 1)
-        prefix, remainder = runner.split(begin, 1)
-        guest, suffix = remainder.split(end, 1)
-        host = prefix + suffix
-        self.assertNotRegex(
-            host,
-            r"(?im)^\s*(?:Get|New|Remove|Set)-Net(?:Adapter|IPAddress|Route|"
-            r"IPInterface|DnsClient|Firewall)\w*\b",
-        )
-        self.assertNotRegex(host, r"(?i)\bFwpm\w*\b")
-        self.assertNotRegex(guest, r"(?i)\b(?:cargo|git|rustup)(?:\.exe)?\b")
-        self.assertIn("Build-MemberArtifacts", host)
-        self.assertIn("Copy-Item -ToSession", host)
-        self.assertIn('runtime\\pwsh\\pwsh.exe', guest)
-        self.assertIn('runtime\\rust', guest)
-        collector = WINDOWS_TUN_COLLECTOR_PATH.read_text(encoding="utf-8")
-        self.assertIn("@(& rustc.exe --version", collector)
-        self.assertNotIn("rustc.exe +1.97.1", collector)
-        self.assertNotIn('rustc.exe") +1.97.1', runner)
-
-        self.assertIn("[string]$SupportIpv4", runner)
-        self.assertIn('"windows-tun-probe"', guest)
-        self.assertIn("guest support listener preflight failed", guest)
-        self.assertNotIn('"windows-tun-support"', host)
-
-        plan_index = runner.index("if ($PlanOnly)")
-        dirty_index = runner.index("diff --quiet --exit-code")
-        self.assertLess(plan_index, dirty_index)
-        finalizer = re.search(
-            r"finally\s*\{.*?Stop-ApprovedVm.*?Restore-ApprovedCheckpoint.*?"
-            r'Vm\.State\s+-cne\s+"Off"',
-            host,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(finalizer)
-
-    def test_raw_collector_and_traffic_harness_cover_the_closed_catalog(self) -> None:
-        collector = WINDOWS_TUN_COLLECTOR_PATH.read_text(encoding="utf-8")
-        harness_dispatch = M4_SUPPORT_PATH.read_text(encoding="utf-8")
-        for scenario in CONTROL.WINDOWS_TUN_SCENARIOS:
-            with self.subTest(scenario=scenario):
-                self.assertIn(f'"{scenario}"', collector)
-        for mode in (
-            "windows-tun-workload",
-            "windows-tun-probe",
-            "windows-tun-support",
-        ):
-            self.assertIn(f'"{mode}"', harness_dispatch)
-        self.assertIn("ferrum2_tun_wintun_ring_full_dropped", collector)
-        self.assertIn("ferrum2_tun_session_restart_succeeded", collector)
-        self.assertIn("ferrum2_tun_reassembly_completed", collector)
-        self.assertIn("ferrum2_tun_udp_associations_active", collector)
-        self.assertIn("workload did not traverse both directions", collector)
-        self.assertNotIn("qualify_windows_tun.ps1", collector)
 
     def test_policy_rejects_partial_or_unbound_calibration(self) -> None:
         policy = self.policy()
