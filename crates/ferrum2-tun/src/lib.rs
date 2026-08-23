@@ -171,6 +171,24 @@ pub enum TunEvent {
     NetworkResetStarted(TunNetworkResetReason),
     NetworkResetSucceeded(TunNetworkResetReason),
     NetworkResetFailed(TunNetworkResetReason),
+    NetworkFullRebuildStarted {
+        reason: TunNetworkFullRebuildReason,
+        generation: u64,
+        tcp_associations: usize,
+        udp_associations: usize,
+    },
+    NetworkFullRebuildSucceeded {
+        reason: TunNetworkFullRebuildReason,
+        generation: u64,
+        tcp_associations: usize,
+        udp_associations: usize,
+    },
+    NetworkFullRebuildFailed {
+        reason: TunNetworkFullRebuildReason,
+        generation: u64,
+        tcp_associations: usize,
+        udp_associations: usize,
+    },
     SessionRestartStarted,
     SessionRestartSucceeded,
     SessionRestartFailed,
@@ -219,7 +237,32 @@ pub enum TunNetworkResetReason {
     Retry,
 }
 
-/// Closed failure returned by the client reset coordinator bridge.
+/// Closed managed-plane damage reason that permits recreating the owned TUN plane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TunNetworkFullRebuildReason {
+    AdapterDamage,
+    SessionDamage,
+    AddressDamage,
+    RouteDamage,
+    DnsDamage,
+    StrictRouteDamage,
+    OwnershipLedgerDamage,
+}
+
+/// One generation-aware transition requested by the private TUN owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TunNetworkLifecycle {
+    /// Publishes the first real platform snapshot before the process root can activate.
+    Initialize,
+    /// Replaces only generation-bound runtime state while preserving the managed TUN plane.
+    ResetNetwork(TunNetworkResetReason),
+    /// Closes admission and records the managed-plane rebuild intent before teardown.
+    FullRebuildStarted(TunNetworkFullRebuildReason),
+    /// Publishes the rebuilt plane's read-back snapshot and reopens admission.
+    FullRebuildCompleted(TunNetworkFullRebuildReason),
+}
+
+/// Closed failure returned by the client network-lifecycle coordinator bridge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TunNetworkResetError;
 
@@ -376,13 +419,15 @@ impl UnderlayPublisher {
 ///
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
-/// The reset callback runs after a replacement stack exists but before underlay publication,
-/// success reporting, or packet admission. Returning an error keeps the managed adapter and
-/// retries the replaceable runtime.
+/// The lifecycle callback publishes the first real snapshot during preparation, coordinates a
+/// replacement stack before ordinary-reset admission, and brackets managed-plane rebuilds around
+/// teardown and readback. Returning an error keeps admission closed and retries only the affected
+/// lifecycle transition.
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[allow(clippy::too_many_arguments)]
 pub fn process_root<E, H, U, R, M>(
     config: Config,
+    initial_network_generation: u64,
     underlay: UnderlayPublisher,
     startup: E,
     runtime: E,
@@ -390,7 +435,7 @@ pub fn process_root<E, H, U, R, M>(
     registry: OwnerRegistry,
     handle_tcp: H,
     handle_udp: U,
-    handle_network_reset: R,
+    handle_network_lifecycle: R,
     events: M,
 ) -> ProcessRoot<E>
 where
@@ -405,7 +450,7 @@ where
         + 'static,
     R: Fn(
             Arc<NetworkSnapshot>,
-            TunNetworkResetReason,
+            TunNetworkLifecycle,
         ) -> ProcessFuture<Result<(), TunNetworkResetError>>
         + Send
         + Sync
@@ -420,6 +465,7 @@ where
         underlay.set_event_sink(events.clone());
         prepare(
             config,
+            initial_network_generation,
             underlay,
             RootErrors {
                 startup,
@@ -431,7 +477,7 @@ where
                 registry,
                 handle_tcp: Arc::new(handle_tcp),
                 handle_udp: Arc::new(handle_udp),
-                handle_network_reset: Arc::new(handle_network_reset),
+                handle_network_lifecycle: Arc::new(handle_network_lifecycle),
                 events,
             },
         )
@@ -444,6 +490,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn process_root<E, H, U, R, M>(
     _config: Config,
+    _initial_network_generation: u64,
     _underlay: UnderlayPublisher,
     startup: E,
     _runtime: E,
@@ -451,7 +498,7 @@ pub fn process_root<E, H, U, R, M>(
     _registry: OwnerRegistry,
     _handle_tcp: H,
     _handle_udp: U,
-    _handle_network_reset: R,
+    _handle_network_lifecycle: R,
     _events: M,
 ) -> ProcessRoot<E>
 where
@@ -466,7 +513,7 @@ where
         + 'static,
     R: Fn(
             Arc<NetworkSnapshot>,
-            TunNetworkResetReason,
+            TunNetworkLifecycle,
         ) -> ProcessFuture<Result<(), TunNetworkResetError>>
         + Send
         + Sync
@@ -510,7 +557,7 @@ struct RootServices {
     registry: OwnerRegistry,
     handle_tcp: TcpHandler,
     handle_udp: UdpHandler,
-    handle_network_reset: NetworkResetHandler,
+    handle_network_lifecycle: NetworkLifecycleHandler,
     events: TunEventSink,
 }
 
@@ -667,6 +714,7 @@ const fn map_packet_reject(reason: packet::PacketRejectReason) -> TunRejectReaso
 #[cfg(all(windows, target_arch = "x86_64"))]
 async fn prepare<E>(
     config: Config,
+    initial_network_generation: u64,
     underlay: UnderlayPublisher,
     errors: RootErrors<E>,
     mut cancellation: ProcessCancellation,
@@ -679,7 +727,7 @@ where
         registry,
         handle_tcp,
         handle_udp,
-        handle_network_reset,
+        handle_network_lifecycle,
         events,
     } = services;
     let timeout = config.ready_timeout;
@@ -701,6 +749,7 @@ where
             .spawn(move || {
                 let result = owner_main(
                     config,
+                    initial_network_generation,
                     owner_control,
                     deadline,
                     OwnerSessionServices {
@@ -710,7 +759,7 @@ where
                         underlay,
                         flow_output: flow_sender,
                         datagram_output: datagram_sender,
-                        network_reset_output: network_reset_sender,
+                        network_lifecycle_output: network_reset_sender,
                         max_udp_associations,
                     },
                 );
@@ -735,9 +784,35 @@ where
         }
         match ready_receiver.try_recv() {
             #[cfg(all(windows, target_arch = "x86_64"))]
-            Ok(OwnerReady::Ready { work }) => {
+            Ok(OwnerReady::Ready {
+                work,
+                snapshot,
+                initialization,
+            }) => {
                 if std::time::Instant::now() >= deadline {
+                    let _ = initialization.send(NetworkResetBridgeOutcome::Stopped);
                     return Err(prepare_failure(guard, errors.startup, errors.cleanup).await);
+                }
+                let mut initialization_cancellation = cancellation.clone();
+                let initialized = tokio::select! {
+                    biased;
+                    () = initialization_cancellation.cancelled() => {
+                        NetworkResetBridgeOutcome::Stopped
+                    }
+                    result = (handle_network_lifecycle)(snapshot, TunNetworkLifecycle::Initialize) => {
+                        match result {
+                            Ok(()) => NetworkResetBridgeOutcome::Completed,
+                            Err(TunNetworkResetError) => NetworkResetBridgeOutcome::Retry,
+                        }
+                    }
+                };
+                let _ = initialization.send(initialized);
+                if initialized != NetworkResetBridgeOutcome::Completed {
+                    return if cancellation.is_cancelled() {
+                        cancel_prepare(guard, errors.cleanup).await
+                    } else {
+                        Err(prepare_failure(guard, errors.startup, errors.cleanup).await)
+                    };
                 }
                 guard.work = work;
                 return Ok(Some(TunRoot {
@@ -753,7 +828,7 @@ where
                     registry,
                     handle_tcp,
                     handle_udp,
-                    handle_network_reset,
+                    handle_network_lifecycle,
                 }));
             }
             Ok(OwnerReady::Failed) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -806,7 +881,7 @@ enum OwnerExit {
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterErrorDisposition {
-    RestartSession,
+    FullRebuild(TunNetworkFullRebuildReason),
     RuntimeFailed,
     CleanupFailed,
 }
@@ -814,7 +889,9 @@ enum AdapterErrorDisposition {
 #[cfg(all(windows, target_arch = "x86_64"))]
 const fn classify_adapter_error(error: ferrum2_wintun::Error) -> AdapterErrorDisposition {
     match error.kind() {
-        ferrum2_wintun::ErrorKind::RecoverableSession => AdapterErrorDisposition::RestartSession,
+        ferrum2_wintun::ErrorKind::RecoverableSession => {
+            AdapterErrorDisposition::FullRebuild(TunNetworkFullRebuildReason::SessionDamage)
+        }
         ferrum2_wintun::ErrorKind::Cleanup => AdapterErrorDisposition::CleanupFailed,
         ferrum2_wintun::ErrorKind::InvalidInput
         | ferrum2_wintun::ErrorKind::UnrecoverableCorruption => {
@@ -825,7 +902,11 @@ const fn classify_adapter_error(error: ferrum2_wintun::Error) -> AdapterErrorDis
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 enum OwnerReady {
-    Ready { work: OwnerWake },
+    Ready {
+        work: OwnerWake,
+        snapshot: Arc<NetworkSnapshot>,
+        initialization: std::sync::mpsc::SyncSender<NetworkResetBridgeOutcome>,
+    },
     Failed,
 }
 
@@ -919,7 +1000,7 @@ struct TunRoot<E> {
     registry: OwnerRegistry,
     handle_tcp: TcpHandler,
     handle_udp: UdpHandler,
-    handle_network_reset: NetworkResetHandler,
+    handle_network_lifecycle: NetworkLifecycleHandler,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -945,10 +1026,10 @@ type UdpHandler = Arc<
 >;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-type NetworkResetHandler = Arc<
+type NetworkLifecycleHandler = Arc<
     dyn Fn(
             Arc<NetworkSnapshot>,
-            TunNetworkResetReason,
+            TunNetworkLifecycle,
         ) -> ProcessFuture<Result<(), TunNetworkResetError>>
         + Send
         + Sync
@@ -958,7 +1039,7 @@ type NetworkResetHandler = Arc<
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct NetworkResetRequest {
     snapshot: Arc<NetworkSnapshot>,
-    reason: TunNetworkResetReason,
+    lifecycle: TunNetworkLifecycle,
     completion: tokio::sync::oneshot::Sender<NetworkResetBridgeOutcome>,
 }
 
@@ -1058,13 +1139,13 @@ where
                         }
                     }
                     request = self.network_resets.recv(), if network_resets_open => {
-                        let Some(NetworkResetRequest { snapshot, reason, completion }) = request else {
+                        let Some(NetworkResetRequest { snapshot, lifecycle, completion }) = request else {
                             network_resets_open = false;
                             continue;
                         };
                         let mut reset_cancellation = cancellation.clone();
                         let mut reset_forced = forced.clone();
-                        let reset = (self.handle_network_reset)(snapshot, reason);
+                        let reset = (self.handle_network_lifecycle)(snapshot, lifecycle);
                         let outcome = tokio::select! {
                             biased;
                             () = reset_forced.forced() => NetworkResetBridgeOutcome::Stopped,
@@ -1164,7 +1245,7 @@ struct OwnerSessionServices {
     underlay: UnderlayPublisher,
     flow_output: tokio::sync::mpsc::Sender<SessionItem<TcpFlow>>,
     datagram_output: tokio::sync::mpsc::Sender<SessionItem<UdpCandidate>>,
-    network_reset_output: tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    network_lifecycle_output: tokio::sync::mpsc::Sender<NetworkResetRequest>,
     max_udp_associations: usize,
 }
 
@@ -1185,7 +1266,7 @@ const MANAGED_DNS_AUDIT_MILLIS: i64 = 5_000;
 enum NetworkChangeTransition {
     Unchanged,
     ResetNetwork,
-    FullRebuild,
+    FullRebuild(TunNetworkFullRebuildReason),
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -1193,7 +1274,7 @@ enum NetworkChangeTransition {
 enum NetworkResetHealthDisposition {
     Healthy,
     Retry,
-    FullRebuild,
+    FullRebuild(TunNetworkFullRebuildReason),
     RuntimeFailed,
     CleanupFailed,
 }
@@ -1204,8 +1285,8 @@ const fn classify_network_reset_health(
 ) -> NetworkResetHealthDisposition {
     match health {
         Ok(ferrum2_wintun::ManagedTunHealth::Healthy) => NetworkResetHealthDisposition::Healthy,
-        Ok(ferrum2_wintun::ManagedTunHealth::Damaged(_)) => {
-            NetworkResetHealthDisposition::FullRebuild
+        Ok(ferrum2_wintun::ManagedTunHealth::Damaged(damage)) => {
+            NetworkResetHealthDisposition::FullRebuild(map_managed_state_damage(damage))
         }
         Err(error) => match error.kind() {
             ferrum2_wintun::ErrorKind::RecoverableSession => NetworkResetHealthDisposition::Retry,
@@ -1239,8 +1320,24 @@ const fn classify_network_change(
     match outcome {
         ferrum2_wintun::NetworkChangeOutcome::Unchanged => NetworkChangeTransition::Unchanged,
         ferrum2_wintun::NetworkChangeOutcome::Changed => NetworkChangeTransition::ResetNetwork,
-        ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(_) => {
-            NetworkChangeTransition::FullRebuild
+        ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(damage) => {
+            NetworkChangeTransition::FullRebuild(map_managed_state_damage(damage))
+        }
+    }
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+const fn map_managed_state_damage(
+    damage: ferrum2_wintun::ManagedStateDamage,
+) -> TunNetworkFullRebuildReason {
+    match damage {
+        ferrum2_wintun::ManagedStateDamage::Adapter => TunNetworkFullRebuildReason::AdapterDamage,
+        ferrum2_wintun::ManagedStateDamage::Session => TunNetworkFullRebuildReason::SessionDamage,
+        ferrum2_wintun::ManagedStateDamage::Address => TunNetworkFullRebuildReason::AddressDamage,
+        ferrum2_wintun::ManagedStateDamage::Route => TunNetworkFullRebuildReason::RouteDamage,
+        ferrum2_wintun::ManagedStateDamage::Dns => TunNetworkFullRebuildReason::DnsDamage,
+        ferrum2_wintun::ManagedStateDamage::StrictRoute => {
+            TunNetworkFullRebuildReason::StrictRouteDamage
         }
     }
 }
@@ -1288,8 +1385,8 @@ fn semantic_network_change_transition(
         Err(error) => {
             events.emit(TunEvent::NetworkChange);
             match classify_adapter_error(error) {
-                AdapterErrorDisposition::RestartSession => {
-                    Ok(NetworkChangeTransition::ResetNetwork)
+                AdapterErrorDisposition::FullRebuild(damage) => {
+                    Ok(NetworkChangeTransition::FullRebuild(damage))
                 }
                 disposition => Err(disposition),
             }
@@ -1301,7 +1398,7 @@ fn semantic_network_change_transition(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NetworkResetRefreshOutcome {
     Refreshed(TunNetworkResetReason),
-    FullRebuild,
+    FullRebuild(TunNetworkFullRebuildReason),
     RuntimeFailed,
     CleanupFailed,
     Stopped,
@@ -1322,9 +1419,9 @@ fn refresh_network_runtime(
         }
         match classify_network_reset_health(adapter.managed_health()) {
             NetworkResetHealthDisposition::Healthy => {}
-            NetworkResetHealthDisposition::FullRebuild => {
+            NetworkResetHealthDisposition::FullRebuild(damage) => {
                 events.emit(TunEvent::NetworkResetFailed(reason));
-                return NetworkResetRefreshOutcome::FullRebuild;
+                return NetworkResetRefreshOutcome::FullRebuild(damage);
             }
             NetworkResetHealthDisposition::RuntimeFailed => {
                 events.emit(TunEvent::NetworkResetFailed(reason));
@@ -1364,7 +1461,7 @@ fn refresh_network_runtime(
                     events.emit(TunEvent::NetworkResetStarted(reason));
                 }
                 NetworkResetHealthDisposition::Healthy
-                | NetworkResetHealthDisposition::FullRebuild => {
+                | NetworkResetHealthDisposition::FullRebuild(_) => {
                     unreachable!("refresh errors have an exact retry or terminal disposition")
                 }
             },
@@ -1380,16 +1477,16 @@ fn adapter_underlay_is_current(adapter: &ferrum2_wintun::Adapter) -> bool {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-fn request_client_network_reset(
+fn request_client_network_lifecycle(
     output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
     snapshot: Arc<NetworkSnapshot>,
-    reason: TunNetworkResetReason,
+    lifecycle: TunNetworkLifecycle,
 ) -> NetworkResetBridgeOutcome {
     let (completion, completed) = tokio::sync::oneshot::channel();
     if output
         .blocking_send(NetworkResetRequest {
             snapshot,
-            reason,
+            lifecycle,
             completion,
         })
         .is_err()
@@ -1402,8 +1499,117 @@ fn request_client_network_reset(
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[derive(Clone, Copy)]
+struct PendingFullRebuild {
+    reason: TunNetworkFullRebuildReason,
+    generation: u64,
+    tcp_associations: usize,
+    udp_associations: usize,
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+impl PendingFullRebuild {
+    fn new(
+        reason: TunNetworkFullRebuildReason,
+        current_generation: u64,
+        tcp_associations: usize,
+        udp_associations: usize,
+    ) -> Option<Self> {
+        Some(Self {
+            reason,
+            generation: current_generation.checked_add(1)?,
+            tcp_associations,
+            udp_associations,
+        })
+    }
+
+    fn placeholder_snapshot(self) -> Arc<NetworkSnapshot> {
+        Arc::new(
+            NetworkSnapshot::new(self.generation, None, None)
+                .expect("an empty full-rebuild intent snapshot is valid"),
+        )
+    }
+
+    fn emit_started(self, events: &TunEventSink) {
+        events.emit(TunEvent::NetworkFullRebuildStarted {
+            reason: self.reason,
+            generation: self.generation,
+            tcp_associations: self.tcp_associations,
+            udp_associations: self.udp_associations,
+        });
+    }
+
+    fn emit_succeeded(self, events: &TunEventSink) {
+        events.emit(TunEvent::NetworkFullRebuildSucceeded {
+            reason: self.reason,
+            generation: self.generation,
+            tcp_associations: self.tcp_associations,
+            udp_associations: self.udp_associations,
+        });
+    }
+
+    fn emit_failed(self, events: &TunEventSink) {
+        events.emit(TunEvent::NetworkFullRebuildFailed {
+            reason: self.reason,
+            generation: self.generation,
+            tcp_associations: self.tcp_associations,
+            udp_associations: self.udp_associations,
+        });
+    }
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn request_full_rebuild_transition(
+    output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    snapshot: Arc<NetworkSnapshot>,
+    lifecycle: TunNetworkLifecycle,
+    control: &OwnerControl,
+    backoff: &mut RestartBackoff,
+) -> NetworkResetBridgeOutcome {
+    loop {
+        let outcome = request_client_network_lifecycle(output, Arc::clone(&snapshot), lifecycle);
+        if outcome != NetworkResetBridgeOutcome::Retry {
+            return outcome;
+        }
+        if !wait_owner_delay(control, backoff.next_delay()) {
+            return NetworkResetBridgeOutcome::Stopped;
+        }
+    }
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn start_full_rebuild(
+    rebuild: Result<PendingFullRebuild, OwnerExit>,
+    output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    control: &OwnerControl,
+    backoff: &mut RestartBackoff,
+    events: &TunEventSink,
+) -> Result<PendingFullRebuild, OwnerExit> {
+    let rebuild = rebuild?;
+    rebuild.emit_started(events);
+    let outcome = request_full_rebuild_transition(
+        output,
+        rebuild.placeholder_snapshot(),
+        TunNetworkLifecycle::FullRebuildStarted(rebuild.reason),
+        control,
+        backoff,
+    );
+    if outcome == NetworkResetBridgeOutcome::Completed {
+        Ok(rebuild)
+    } else {
+        rebuild.emit_failed(events);
+        Err(if outcome == NetworkResetBridgeOutcome::Stopped {
+            OwnerExit::Stopped
+        } else {
+            OwnerExit::RuntimeFailed
+        })
+    }
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn owner_main(
     config: Config,
+    initial_network_generation: u64,
     control: OwnerControl,
     initial_deadline: std::time::Instant,
     services: OwnerSessionServices,
@@ -1415,7 +1621,7 @@ fn owner_main(
         underlay,
         flow_output,
         datagram_output,
-        network_reset_output,
+        network_lifecycle_output,
         max_udp_associations,
     } = services;
     let adapter_config = match build_adapter_config(&config) {
@@ -1437,18 +1643,25 @@ fn owner_main(
         owner_thread.unpark();
     });
     let mut ready = Some(ready);
-    let mut generation = 0_u64;
+    let mut generation = initial_network_generation;
     let mut backoff = RestartBackoff::default();
     let supervisor_origin = std::time::Instant::now();
     let mut debounce = NetworkDebounce::default();
     let mut retry_delay = None;
     let mut retained_adapter: Option<(ferrum2_wintun::Adapter, TunNetworkResetReason, bool)> = None;
+    let mut retained_full_rebuild_adapter = None::<ferrum2_wintun::Adapter>;
+    let mut pending_full_rebuild = None::<PendingFullRebuild>;
 
     'owner: loop {
         if control.stop.load(Ordering::Acquire) || control.shutdown.load(Ordering::Acquire) {
             let _ = underlay.invalidate();
-            let cleanup_failed =
-                retained_adapter
+            if let Some(rebuild) = pending_full_rebuild.take() {
+                rebuild.emit_failed(&events);
+            }
+            let cleanup_failed = retained_full_rebuild_adapter
+                .take()
+                .is_some_and(|adapter| adapter.cleanup().is_err())
+                || retained_adapter
                     .take()
                     .is_some_and(|(adapter, reason, start_pending)| {
                         if !start_pending {
@@ -1466,8 +1679,13 @@ fn owner_main(
             && !wait_owner_delay(&control, delay)
         {
             let _ = underlay.invalidate();
-            let cleanup_failed =
-                retained_adapter
+            if let Some(rebuild) = pending_full_rebuild.take() {
+                rebuild.emit_failed(&events);
+            }
+            let cleanup_failed = retained_full_rebuild_adapter
+                .take()
+                .is_some_and(|adapter| adapter.cleanup().is_err())
+                || retained_adapter
                     .take()
                     .is_some_and(|(adapter, reason, start_pending)| {
                         if !start_pending {
@@ -1483,14 +1701,12 @@ fn owner_main(
         }
         let first_session = ready.is_some();
         let retained = retained_adapter.take();
+        let retained_rebuild = retained_full_rebuild_adapter.take();
         let reset_reason = retained.as_ref().map(|(_, reason, _)| *reason);
-        let reset_runtime = retained.is_some();
         if let Some((_, reason, true)) = retained.as_ref() {
             events.emit(TunEvent::NetworkResetStarted(*reason));
         }
-        if !first_session && !reset_runtime {
-            events.emit(TunEvent::SessionRestartStarted);
-        }
+        let rebuilding = pending_full_rebuild.is_some();
         let deadline = if first_session {
             initial_deadline
         } else {
@@ -1499,6 +1715,8 @@ fn owner_main(
                 .unwrap_or_else(std::time::Instant::now)
         };
         let mut adapter = if let Some((adapter, _, _)) = retained {
+            adapter
+        } else if let Some(adapter) = retained_rebuild {
             adapter
         } else {
             match ferrum2_wintun::Adapter::create(adapter_config.clone(), deadline, &control.stop) {
@@ -1516,11 +1734,14 @@ fn owner_main(
                         || control.shutdown.load(Ordering::Acquire)
                     {
                         let _ = underlay.invalidate();
+                        if let Some(rebuild) = pending_full_rebuild.take() {
+                            rebuild.emit_failed(&events);
+                        }
                         return OwnerExit::Stopped;
                     }
                     if error.is_cleanup_failure() {
-                        if !first_session {
-                            events.emit(TunEvent::SessionRestartFailed);
+                        if let Some(rebuild) = pending_full_rebuild.take() {
+                            rebuild.emit_failed(&events);
                         }
                         if let Some(ready) = ready.take() {
                             let _ = ready.send(OwnerReady::Failed);
@@ -1542,7 +1763,6 @@ fn owner_main(
                         let _ = ready.send(OwnerReady::Failed);
                         return OwnerExit::RuntimeFailed;
                     }
-                    events.emit(TunEvent::SessionRestartFailed);
                     retry_delay = Some(backoff.next_delay());
                     continue;
                 }
@@ -1560,6 +1780,51 @@ fn owner_main(
             };
         }
 
+        while rebuilding && !adapter_underlay_is_current(&adapter) {
+            match adapter.refresh_underlay() {
+                Ok(_) => {}
+                Err(error) => match classify_network_reset_refresh_error(error) {
+                    NetworkResetHealthDisposition::Retry => {
+                        if !wait_owner_delay(&control, backoff.next_delay()) {
+                            if let Some(rebuild) = pending_full_rebuild.take() {
+                                rebuild.emit_failed(&events);
+                            }
+                            if let Ok(mut work) = current_work.lock() {
+                                *work = None;
+                            }
+                            return match adapter.cleanup() {
+                                Ok(()) => OwnerExit::Stopped,
+                                Err(_) => OwnerExit::CleanupFailed,
+                            };
+                        }
+                    }
+                    NetworkResetHealthDisposition::RuntimeFailed
+                    | NetworkResetHealthDisposition::CleanupFailed => {
+                        if let Some(rebuild) = pending_full_rebuild.take() {
+                            rebuild.emit_failed(&events);
+                        }
+                        if let Ok(mut work) = current_work.lock() {
+                            *work = None;
+                        }
+                        let cleanup = adapter.cleanup();
+                        return if cleanup.is_err()
+                            || matches!(
+                                classify_network_reset_refresh_error(error),
+                                NetworkResetHealthDisposition::CleanupFailed
+                            ) {
+                            OwnerExit::CleanupFailed
+                        } else {
+                            OwnerExit::RuntimeFailed
+                        };
+                    }
+                    NetworkResetHealthDisposition::Healthy
+                    | NetworkResetHealthDisposition::FullRebuild(_) => {
+                        unreachable!("refresh errors have an exact retry or terminal disposition")
+                    }
+                },
+            }
+        }
+
         if let Some(reason) = reset_reason
             && !adapter_underlay_is_current(&adapter)
         {
@@ -1568,14 +1833,39 @@ fn owner_main(
                     retained_adapter = Some((adapter, reason, false));
                     continue;
                 }
-                NetworkResetRefreshOutcome::FullRebuild => {
+                NetworkResetRefreshOutcome::FullRebuild(damage) => {
+                    let rebuild = match start_full_rebuild(
+                        PendingFullRebuild::new(
+                            damage,
+                            generation,
+                            control.flow_count.load(Ordering::Acquire),
+                            control.association_count.load(Ordering::Acquire),
+                        )
+                        .ok_or(OwnerExit::RuntimeFailed),
+                        &network_lifecycle_output,
+                        &control,
+                        &mut backoff,
+                        &events,
+                    ) {
+                        Ok(rebuild) => rebuild,
+                        Err(exit) => {
+                            if let Ok(mut work) = current_work.lock() {
+                                *work = None;
+                            }
+                            return match adapter.cleanup() {
+                                Ok(()) => exit,
+                                Err(_) => OwnerExit::CleanupFailed,
+                            };
+                        }
+                    };
                     if let Ok(mut work) = current_work.lock() {
                         *work = None;
                     }
                     if adapter.cleanup().is_err() {
+                        rebuild.emit_failed(&events);
                         return OwnerExit::CleanupFailed;
                     }
-                    retry_delay = Some(backoff.next_delay());
+                    pending_full_rebuild = Some(rebuild);
                     continue;
                 }
                 NetworkResetRefreshOutcome::RuntimeFailed => {
@@ -1606,10 +1896,24 @@ fn owner_main(
             }
         }
 
-        generation = generation.wrapping_add(1).max(1);
+        let candidate_generation = pending_full_rebuild
+            .map(|rebuild| rebuild.generation)
+            .or_else(|| generation.checked_add(1));
+        let Some(candidate_generation) = candidate_generation else {
+            if let Some(rebuild) = pending_full_rebuild.take() {
+                rebuild.emit_failed(&events);
+            }
+            if let Ok(mut work) = current_work.lock() {
+                *work = None;
+            }
+            return match adapter.cleanup() {
+                Ok(()) => OwnerExit::RuntimeFailed,
+                Err(_) => OwnerExit::CleanupFailed,
+            };
+        };
         let (session_cancel_handle, session_cancel) =
-            session_cancellation(generation, owner_wake.clone());
-        debug_assert_eq!(session_cancel_handle.generation(), generation);
+            session_cancellation(candidate_generation, owner_wake.clone());
+        debug_assert_eq!(session_cancel_handle.generation(), candidate_generation);
         let stack = Stack::new_with_udp(
             (config.ipv4, config.ipv6),
             usize::from(config.mtu),
@@ -1621,7 +1925,7 @@ fn owner_main(
             max_udp_associations,
             config.udp_timeout,
             config.udp_filtering,
-            generation,
+            candidate_generation,
             owner_wake.clone(),
         );
         let (mut stack, mut flows, mut datagrams) = match stack {
@@ -1631,6 +1935,19 @@ fn owner_main(
                 if let Some(reason) = reset_reason {
                     events.emit(TunEvent::NetworkResetFailed(reason));
                     retained_adapter = Some((adapter, TunNetworkResetReason::Retry, true));
+                    retry_delay = Some(backoff.next_delay());
+                    continue;
+                }
+                if rebuilding {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    if adapter.cleanup().is_err() {
+                        if let Some(rebuild) = pending_full_rebuild.take() {
+                            rebuild.emit_failed(&events);
+                        }
+                        return OwnerExit::CleanupFailed;
+                    }
                     retry_delay = Some(backoff.next_delay());
                     continue;
                 }
@@ -1648,7 +1965,6 @@ fn owner_main(
                     let _ = ready.send(OwnerReady::Failed);
                     return OwnerExit::RuntimeFailed;
                 }
-                events.emit(TunEvent::SessionRestartFailed);
                 retry_delay = Some(backoff.next_delay());
                 continue;
             }
@@ -1657,7 +1973,7 @@ fn owner_main(
         if first_session && std::time::Instant::now() >= initial_deadline {
             session_cancel_handle.cancel();
             stack.quiesce(
-                generation.wrapping_add(1).max(1),
+                candidate_generation.saturating_add(1),
                 UdpResponseDropReason::OwnerFatal,
             );
             if let Ok(mut work) = current_work.lock() {
@@ -1673,67 +1989,121 @@ fn owner_main(
                 OwnerExit::RuntimeFailed
             };
         }
-        let managed_health = classify_network_reset_health(adapter.managed_health());
-        if managed_health != NetworkResetHealthDisposition::Healthy {
-            session_cancel_handle.cancel();
-            stack.quiesce(
-                generation.wrapping_add(1).max(1),
-                UdpResponseDropReason::SessionReset,
-            );
-            if let Some(reason) = reset_reason {
-                events.emit(TunEvent::NetworkResetFailed(reason));
-                if managed_health == NetworkResetHealthDisposition::Retry {
+        match classify_network_reset_health(adapter.managed_health()) {
+            NetworkResetHealthDisposition::Healthy => {}
+            disposition => {
+                session_cancel_handle.cancel();
+                stack.quiesce(
+                    candidate_generation.saturating_add(1),
+                    UdpResponseDropReason::SessionReset,
+                );
+                drop(flows);
+                drop(datagrams);
+                drop(stack);
+                if let Some(reason) = reset_reason {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                }
+                if disposition == NetworkResetHealthDisposition::Retry && reset_reason.is_some() {
                     retained_adapter = Some((adapter, TunNetworkResetReason::Retry, true));
                     retry_delay = Some(backoff.next_delay());
                     continue;
                 }
-                if managed_health == NetworkResetHealthDisposition::RuntimeFailed {
+                if let NetworkResetHealthDisposition::FullRebuild(damage) = disposition
+                    && !first_session
+                    && !rebuilding
+                {
+                    let rebuild = match start_full_rebuild(
+                        PendingFullRebuild::new(
+                            damage,
+                            generation,
+                            control.flow_count.load(Ordering::Acquire),
+                            control.association_count.load(Ordering::Acquire),
+                        )
+                        .ok_or(OwnerExit::RuntimeFailed),
+                        &network_lifecycle_output,
+                        &control,
+                        &mut backoff,
+                        &events,
+                    ) {
+                        Ok(rebuild) => rebuild,
+                        Err(exit) => {
+                            if let Ok(mut work) = current_work.lock() {
+                                *work = None;
+                            }
+                            return match adapter.cleanup() {
+                                Ok(()) => exit,
+                                Err(_) => OwnerExit::CleanupFailed,
+                            };
+                        }
+                    };
                     if let Ok(mut work) = current_work.lock() {
                         *work = None;
                     }
-                    return match adapter.cleanup() {
-                        Ok(()) => OwnerExit::RuntimeFailed,
-                        Err(_) => OwnerExit::CleanupFailed,
-                    };
-                }
-            }
-            if let Ok(mut work) = current_work.lock() {
-                *work = None;
-            }
-            let cleanup = adapter.cleanup();
-            if cleanup.is_err() {
-                if let Some(ready) = ready.take() {
-                    let _ = ready.send(OwnerReady::Failed);
-                }
-                return OwnerExit::CleanupFailed;
-            }
-            if ready.is_some() {
-                let now = std::time::Instant::now();
-                if now < initial_deadline {
-                    retry_delay = Some(
-                        backoff
-                            .next_delay()
-                            .min(initial_deadline.saturating_duration_since(now)),
-                    );
+                    if adapter.cleanup().is_err() {
+                        rebuild.emit_failed(&events);
+                        return OwnerExit::CleanupFailed;
+                    }
+                    pending_full_rebuild = Some(rebuild);
                     continue;
                 }
+                if matches!(
+                    disposition,
+                    NetworkResetHealthDisposition::RuntimeFailed
+                        | NetworkResetHealthDisposition::CleanupFailed
+                ) {
+                    if let Some(rebuild) = pending_full_rebuild.take() {
+                        rebuild.emit_failed(&events);
+                    }
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    let cleanup = adapter.cleanup();
+                    return if disposition == NetworkResetHealthDisposition::CleanupFailed
+                        || cleanup.is_err()
+                    {
+                        OwnerExit::CleanupFailed
+                    } else {
+                        OwnerExit::RuntimeFailed
+                    };
+                }
+                if let Ok(mut work) = current_work.lock() {
+                    *work = None;
+                }
+                let cleanup = adapter.cleanup();
+                if cleanup.is_err() {
+                    if let Some(rebuild) = pending_full_rebuild.take() {
+                        rebuild.emit_failed(&events);
+                    }
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(OwnerReady::Failed);
+                    }
+                    return OwnerExit::CleanupFailed;
+                }
+                if first_session {
+                    let now = std::time::Instant::now();
+                    if now < initial_deadline {
+                        retry_delay = Some(
+                            backoff
+                                .next_delay()
+                                .min(initial_deadline.saturating_duration_since(now)),
+                        );
+                        continue;
+                    }
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(OwnerReady::Failed);
+                    }
+                    return OwnerExit::RuntimeFailed;
+                }
+                retry_delay = Some(backoff.next_delay());
+                continue;
             }
-            if let Some(ready) = ready.take() {
-                let _ = ready.send(OwnerReady::Failed);
-                return OwnerExit::RuntimeFailed;
-            }
-            if reset_reason.is_none() {
-                events.emit(TunEvent::SessionRestartFailed);
-            }
-            retry_delay = Some(backoff.next_delay());
-            continue;
         }
         if let Some(reason) = reset_reason
             && !adapter_underlay_is_current(&adapter)
         {
             session_cancel_handle.cancel();
             stack.quiesce(
-                generation.wrapping_add(1).max(1),
+                candidate_generation.saturating_add(1),
                 UdpResponseDropReason::SessionReset,
             );
             drop(flows);
@@ -1742,20 +2112,68 @@ fn owner_main(
             retained_adapter = Some((adapter, reason, false));
             continue;
         }
-        if let Some(reason) = reset_reason {
-            let snapshot =
-                NetworkSnapshot::capture(generation, &adapter.network_interface_catalog())
-                    .map(Arc::new);
-            let outcome = match snapshot {
-                Ok(snapshot) => {
-                    request_client_network_reset(&network_reset_output, snapshot, reason)
+        let snapshot =
+            NetworkSnapshot::capture(candidate_generation, &adapter.network_interface_catalog())
+                .map(Arc::new);
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                session_cancel_handle.cancel();
+                stack.quiesce(
+                    candidate_generation.saturating_add(1),
+                    UdpResponseDropReason::SessionReset,
+                );
+                drop(flows);
+                drop(datagrams);
+                drop(stack);
+                if let Some(reason) = reset_reason {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    retained_adapter = Some((adapter, TunNetworkResetReason::Retry, true));
+                    retry_delay = Some(backoff.next_delay());
+                    continue;
                 }
-                Err(_) => NetworkResetBridgeOutcome::Retry,
-            };
+                if let Ok(mut work) = current_work.lock() {
+                    *work = None;
+                }
+                let cleanup = adapter.cleanup();
+                if cleanup.is_err() {
+                    if let Some(rebuild) = pending_full_rebuild.take() {
+                        rebuild.emit_failed(&events);
+                    }
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(OwnerReady::Failed);
+                    }
+                    return OwnerExit::CleanupFailed;
+                }
+                if first_session {
+                    let now = std::time::Instant::now();
+                    if now < initial_deadline {
+                        retry_delay = Some(
+                            backoff
+                                .next_delay()
+                                .min(initial_deadline.saturating_duration_since(now)),
+                        );
+                        continue;
+                    }
+                    if let Some(ready) = ready.take() {
+                        let _ = ready.send(OwnerReady::Failed);
+                    }
+                    return OwnerExit::RuntimeFailed;
+                }
+                retry_delay = Some(backoff.next_delay());
+                continue;
+            }
+        };
+        if let Some(reason) = reset_reason {
+            let outcome = request_client_network_lifecycle(
+                &network_lifecycle_output,
+                Arc::clone(&snapshot),
+                TunNetworkLifecycle::ResetNetwork(reason),
+            );
             if outcome != NetworkResetBridgeOutcome::Completed {
                 session_cancel_handle.cancel();
                 stack.quiesce(
-                    generation.wrapping_add(1).max(1),
+                    candidate_generation.saturating_add(1),
                     UdpResponseDropReason::SessionReset,
                 );
                 drop(flows);
@@ -1770,11 +2188,14 @@ fn owner_main(
         if underlay.publish(adapter.underlay_policy()).is_err() {
             session_cancel_handle.cancel();
             stack.quiesce(
-                generation.wrapping_add(1).max(1),
+                candidate_generation.saturating_add(1),
                 UdpResponseDropReason::OwnerFatal,
             );
             if let Some(reason) = reset_reason {
                 events.emit(TunEvent::NetworkResetFailed(reason));
+            }
+            if let Some(rebuild) = pending_full_rebuild.take() {
+                rebuild.emit_failed(&events);
             }
             if let Ok(mut work) = current_work.lock() {
                 *work = None;
@@ -1795,7 +2216,7 @@ fn owner_main(
             let underlay_failed = underlay.invalidate().is_err();
             session_cancel_handle.cancel();
             stack.quiesce(
-                generation.wrapping_add(1).max(1),
+                candidate_generation.saturating_add(1),
                 UdpResponseDropReason::SessionReset,
             );
             drop(flows);
@@ -1814,23 +2235,100 @@ fn owner_main(
             retained_adapter = Some((adapter, reason, false));
             continue;
         }
+        if rebuilding && !adapter_underlay_is_current(&adapter) {
+            let underlay_failed = underlay.invalidate().is_err();
+            session_cancel_handle.cancel();
+            stack.quiesce(
+                candidate_generation.saturating_add(1),
+                UdpResponseDropReason::SessionReset,
+            );
+            drop(flows);
+            drop(datagrams);
+            drop(stack);
+            if underlay_failed {
+                if let Some(rebuild) = pending_full_rebuild.take() {
+                    rebuild.emit_failed(&events);
+                }
+                if let Ok(mut work) = current_work.lock() {
+                    *work = None;
+                }
+                return match adapter.cleanup() {
+                    Ok(()) => OwnerExit::RuntimeFailed,
+                    Err(_) => OwnerExit::CleanupFailed,
+                };
+            }
+            retained_full_rebuild_adapter = Some(adapter);
+            continue;
+        }
+        if let Some(rebuild) = pending_full_rebuild {
+            let outcome = request_full_rebuild_transition(
+                &network_lifecycle_output,
+                Arc::clone(&snapshot),
+                TunNetworkLifecycle::FullRebuildCompleted(rebuild.reason),
+                &control,
+                &mut backoff,
+            );
+            if outcome != NetworkResetBridgeOutcome::Completed {
+                session_cancel_handle.cancel();
+                stack.quiesce(
+                    candidate_generation.saturating_add(1),
+                    UdpResponseDropReason::OwnerFatal,
+                );
+                let _ = underlay.invalidate();
+                if let Ok(mut work) = current_work.lock() {
+                    *work = None;
+                }
+                rebuild.emit_failed(&events);
+                return match adapter.cleanup() {
+                    Ok(()) => OwnerExit::Stopped,
+                    Err(_) => OwnerExit::CleanupFailed,
+                };
+            }
+        }
+        if first_session {
+            let (initialization, initialized) = std::sync::mpsc::sync_channel(1);
+            let sender = ready
+                .take()
+                .expect("first TUN runtime retains its ready sender");
+            if sender
+                .send(OwnerReady::Ready {
+                    work: owner_wake.clone(),
+                    snapshot: Arc::clone(&snapshot),
+                    initialization,
+                })
+                .is_err()
+            {
+                control.stop.store(true, Ordering::Release);
+            }
+            let outcome = initialized
+                .recv()
+                .unwrap_or(NetworkResetBridgeOutcome::Stopped);
+            if outcome != NetworkResetBridgeOutcome::Completed {
+                session_cancel_handle.cancel();
+                stack.quiesce(
+                    candidate_generation.saturating_add(1),
+                    UdpResponseDropReason::OwnerFatal,
+                );
+                let _ = underlay.invalidate();
+                if let Ok(mut work) = current_work.lock() {
+                    *work = None;
+                }
+                return match adapter.cleanup() {
+                    Ok(()) if outcome == NetworkResetBridgeOutcome::Stopped => OwnerExit::Stopped,
+                    Ok(()) => OwnerExit::RuntimeFailed,
+                    Err(_) => OwnerExit::CleanupFailed,
+                };
+            }
+        }
+        generation = candidate_generation;
         events.emit(TunEvent::SessionGeneration(generation));
         events.emit(TunEvent::SessionActive(true));
         if first_session {
             events.emit(TunEvent::SessionStarted);
         } else if let Some(reason) = reset_reason {
             events.emit(TunEvent::NetworkResetSucceeded(reason));
-        } else {
-            events.emit(TunEvent::SessionRestartSucceeded);
-        }
-        if let Some(sender) = ready.take()
-            && sender
-                .send(OwnerReady::Ready {
-                    work: owner_wake.clone(),
-                })
-                .is_err()
-        {
-            control.stop.store(true, Ordering::Release);
+        } else if let Some(rebuild) = pending_full_rebuild.take() {
+            rebuild.emit_succeeded(&events);
         }
         control.admitting.store(
             control.active.load(Ordering::Acquire)
@@ -1853,7 +2351,7 @@ fn owner_main(
         let mut raw_notification_generation = 0_u64;
         debounce.clear();
         let mut reset_network = false;
-        let mut restart = false;
+        let mut full_rebuild = None;
         let mut terminal_exit = None;
         'session: while !control.stop.load(Ordering::Acquire) {
             let supervisor_now =
@@ -1870,16 +2368,16 @@ fn owner_main(
                 }
                 match semantic_network_change_transition(&mut adapter, &events) {
                     Ok(NetworkChangeTransition::Unchanged) => {}
-                    Ok(NetworkChangeTransition::ResetNetwork)
-                    | Err(AdapterErrorDisposition::RestartSession) => {
+                    Ok(NetworkChangeTransition::ResetNetwork) => {
                         events.emit(TunEvent::NetworkResetStarted(
                             TunNetworkResetReason::NetworkChange,
                         ));
                         reset_network = true;
                         break;
                     }
-                    Ok(NetworkChangeTransition::FullRebuild) => {
-                        restart = true;
+                    Ok(NetworkChangeTransition::FullRebuild(damage))
+                    | Err(AdapterErrorDisposition::FullRebuild(damage)) => {
+                        full_rebuild = Some(damage);
                         break;
                     }
                     Err(AdapterErrorDisposition::RuntimeFailed) => {
@@ -1917,7 +2415,9 @@ fn owner_main(
                     }
                     Err(error) => {
                         match classify_adapter_error(error) {
-                            AdapterErrorDisposition::RestartSession => restart = true,
+                            AdapterErrorDisposition::FullRebuild(damage) => {
+                                full_rebuild = Some(damage);
+                            }
                             AdapterErrorDisposition::RuntimeFailed => {
                                 terminal_exit = Some(OwnerExit::RuntimeFailed);
                             }
@@ -2019,7 +2519,9 @@ fn owner_main(
             });
             if budget.fatal {
                 match adapter_failure.unwrap_or(AdapterErrorDisposition::RuntimeFailed) {
-                    AdapterErrorDisposition::RestartSession => restart = true,
+                    AdapterErrorDisposition::FullRebuild(damage) => {
+                        full_rebuild = Some(damage);
+                    }
                     AdapterErrorDisposition::RuntimeFailed => {
                         terminal_exit = Some(OwnerExit::RuntimeFailed);
                     }
@@ -2059,7 +2561,9 @@ fn owner_main(
                 }
                 Err(error) => {
                     match classify_adapter_error(error) {
-                        AdapterErrorDisposition::RestartSession => restart = true,
+                        AdapterErrorDisposition::FullRebuild(damage) => {
+                            full_rebuild = Some(damage);
+                        }
                         AdapterErrorDisposition::RuntimeFailed => {
                             terminal_exit = Some(OwnerExit::RuntimeFailed);
                         }
@@ -2074,16 +2578,18 @@ fn owner_main(
 
         control.admitting.store(false, Ordering::Release);
         events.emit(TunEvent::SessionActive(false));
+        let rebuild_tcp_associations = control.flow_count.load(Ordering::Acquire);
+        let rebuild_udp_associations = stack.live_udp_associations();
         let underlay_failed = underlay.invalidate().is_err();
         session_cancel_handle.cancel();
         let response_drop_reason = if terminal_exit.is_some() || underlay_failed {
             UdpResponseDropReason::OwnerFatal
-        } else if restart || reset_network {
+        } else if full_rebuild.is_some() || reset_network {
             UdpResponseDropReason::SessionReset
         } else {
             UdpResponseDropReason::Shutdown
         };
-        stack.quiesce(generation.wrapping_add(1).max(1), response_drop_reason);
+        stack.quiesce(generation.saturating_add(1), response_drop_reason);
         control.association_count.store(0, Ordering::Release);
         drop(pending_flow);
         drop(pending_datagram);
@@ -2115,7 +2621,7 @@ fn owner_main(
         }
         if control.stop.load(Ordering::Acquire)
             || control.shutdown.load(Ordering::Acquire)
-            || (!restart && !reset_network)
+            || (full_rebuild.is_none() && !reset_network)
         {
             if reset_network {
                 events.emit(TunEvent::NetworkResetFailed(
@@ -2146,7 +2652,9 @@ fn owner_main(
                     retained_adapter = Some((adapter, reason, false));
                     continue 'owner;
                 }
-                NetworkResetRefreshOutcome::FullRebuild => {}
+                NetworkResetRefreshOutcome::FullRebuild(damage) => {
+                    full_rebuild = Some(damage);
+                }
                 NetworkResetRefreshOutcome::RuntimeFailed => {
                     if let Ok(mut work) = current_work.lock() {
                         *work = None;
@@ -2174,6 +2682,45 @@ fn owner_main(
                 }
             }
         }
+        if let Some(damage) = full_rebuild {
+            let rebuild = match start_full_rebuild(
+                PendingFullRebuild::new(
+                    damage,
+                    generation,
+                    rebuild_tcp_associations,
+                    rebuild_udp_associations,
+                )
+                .ok_or(OwnerExit::RuntimeFailed),
+                &network_lifecycle_output,
+                &control,
+                &mut backoff,
+                &events,
+            ) {
+                Ok(rebuild) => rebuild,
+                Err(exit) => {
+                    if let Ok(mut work) = current_work.lock() {
+                        *work = None;
+                    }
+                    return match adapter.cleanup() {
+                        Ok(()) => exit,
+                        Err(_) => OwnerExit::CleanupFailed,
+                    };
+                }
+            };
+            if let Ok(mut work) = current_work.lock() {
+                *work = None;
+            }
+            if adapter.cleanup().is_err() {
+                rebuild.emit_failed(&events);
+                return OwnerExit::CleanupFailed;
+            }
+            if session_started.elapsed() >= Duration::from_secs(5) {
+                backoff.reset();
+            }
+            debounce.clear();
+            pending_full_rebuild = Some(rebuild);
+            continue 'owner;
+        }
         if let Ok(mut work) = current_work.lock() {
             *work = None;
         }
@@ -2183,9 +2730,8 @@ fn owner_main(
         if session_started.elapsed() >= Duration::from_secs(5) {
             backoff.reset();
         }
-        let delay = backoff.next_delay();
         debounce.clear();
-        retry_delay = Some(delay);
+        return OwnerExit::RuntimeFailed;
     }
 }
 
@@ -3696,7 +4242,7 @@ mod tests {
         TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering,
         UdpPeerAuthorization, UdpResponseDropReason, UdpTuple, classify_network_change,
         classify_network_reset_health, classify_network_reset_refresh_error, finish_stack_setup,
-        map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
+        map_managed_state_damage, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -6103,7 +6649,7 @@ mod tests {
                 classify_network_change(ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(
                     damage
                 )),
-                NetworkChangeTransition::FullRebuild,
+                NetworkChangeTransition::FullRebuild(map_managed_state_damage(damage)),
                 "managed damage {damage:?}"
             );
         }
@@ -6127,7 +6673,7 @@ mod tests {
                 classify_network_reset_health(Ok(ferrum2_wintun::ManagedTunHealth::Damaged(
                     damage
                 ))),
-                NetworkResetHealthDisposition::FullRebuild
+                NetworkResetHealthDisposition::FullRebuild(map_managed_state_damage(damage))
             );
         }
         let recoverable = ferrum2_wintun::Error::new(ferrum2_wintun::ErrorKind::RecoverableSession);
@@ -6172,7 +6718,9 @@ mod tests {
         for (kind, expected) in [
             (
                 ferrum2_wintun::ErrorKind::RecoverableSession,
-                AdapterErrorDisposition::RestartSession,
+                AdapterErrorDisposition::FullRebuild(
+                    super::TunNetworkFullRebuildReason::SessionDamage,
+                ),
             ),
             (
                 ferrum2_wintun::ErrorKind::InvalidInput,
@@ -6330,7 +6878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_reset_bridge_reports_retry_before_completion() {
+    async fn network_lifecycle_bridge_reports_retry_before_completion() {
         use ferrum2_runtime::{NetworkSnapshot, ProcessCause, ProcessRoot, ProcessSupervisor};
 
         let (_flow_sender, flows) = tokio::sync::mpsc::channel(1);
@@ -6370,7 +6918,7 @@ mod tests {
                 registry: root_registry,
                 handle_tcp: Arc::new(|_, _, _| Box::pin(async {})),
                 handle_udp: Arc::new(|_, _, _| Box::pin(async {})),
-                handle_network_reset: Arc::new(move |_, _| {
+                handle_network_lifecycle: Arc::new(move |_, _| {
                     let call = handler_calls.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async move {
                         if call == 0 {
@@ -6400,7 +6948,9 @@ mod tests {
             network_reset_sender
                 .send(NetworkResetRequest {
                     snapshot: Arc::new(NetworkSnapshot::new(generation, None, None).unwrap()),
-                    reason: TunNetworkResetReason::NetworkChange,
+                    lifecycle: super::TunNetworkLifecycle::ResetNetwork(
+                        TunNetworkResetReason::NetworkChange,
+                    ),
                     completion,
                 })
                 .await
@@ -6466,7 +7016,7 @@ mod tests {
                     })
                 }),
                 handle_udp: Arc::new(|_: crate::UdpCandidate, _, _| Box::pin(async {})),
-                handle_network_reset: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+                handle_network_lifecycle: Arc::new(|_, _| Box::pin(async { Ok(()) })),
             })
         });
         let supervisor =
@@ -6646,7 +7196,7 @@ mod tests {
                         })
                     }),
                     handle_udp: Arc::new(|_: crate::UdpCandidate, _, _| Box::pin(async {})),
-                    handle_network_reset: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+                    handle_network_lifecycle: Arc::new(|_, _| Box::pin(async { Ok(()) })),
                 })
             });
             let supervisor =
