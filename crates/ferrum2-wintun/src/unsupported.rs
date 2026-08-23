@@ -31,6 +31,9 @@ impl Adapter {
     pub fn underlay_policy(&self) -> Option<UnderlayPolicy> {
         None
     }
+    pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
+        Err(UNSUPPORTED)
+    }
     pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
         Err(UNSUPPORTED)
     }

@@ -1658,6 +1658,35 @@ impl Adapter {
         self.managed.as_ref().map(|state| state.policy.clone())
     }
 
+    /// Replaces only the generation-bound underlay snapshot.
+    ///
+    /// The adapter, Wintun session, managed addresses and routes, DNS leases, notification
+    /// subscriptions, and strict-route WFP session remain owned by this adapter.
+    pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
+        if self.managed_device_health() != ManagedTunHealth::Healthy {
+            return Err(Error::recoverable_session());
+        }
+        let Some(config) = self.config.managed_network().cloned() else {
+            return Ok(None);
+        };
+        let owned = InterfaceIdentity {
+            luid: unsafe { self.luid.Value },
+            index: self.interface_index,
+        };
+        let state = self.managed.as_mut().ok_or(Error)?;
+        let generation = state.notifications.generation_counter();
+        let next = refresh_underlay_with(
+            &config,
+            &state.policy,
+            owned,
+            &mut state.validated_generation,
+            generation,
+            &mut PlatformUnderlay,
+        )?;
+        state.policy = next.clone();
+        Ok(Some(next))
+    }
+
     /// Reads back only Ferrum2-owned adapter, address, route, DNS, and strict-route state.
     pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
         let device_health = self.managed_device_health();
@@ -2589,6 +2618,41 @@ fn snapshot_underlay_at(
         owned_luid: Arc::new(AtomicU64::new(0)),
         owned_index: Arc::new(AtomicU32::new(0)),
     })
+}
+
+fn refresh_underlay_with(
+    config: &crate::ManagedNetworkConfig,
+    current: &UnderlayPolicy,
+    owned: InterfaceIdentity,
+    validated_generation: &mut u64,
+    generation: Arc<AtomicU64>,
+    operations: &mut impl UnderlayOperations,
+) -> Result<UnderlayPolicy, Error> {
+    for attempt in 0..2 {
+        let before = generation.load(Ordering::Acquire);
+        let next = match snapshot_underlay_at(config, Arc::clone(&generation), before, operations) {
+            Ok(next) => next,
+            Err(_) if attempt == 0 && generation.load(Ordering::Acquire) != before => continue,
+            Err(error) => return Err(error),
+        };
+        next.set_owned_identity(owned)?;
+        if !underlay_matches_with(&next, owned, operations)? {
+            next.invalidate();
+            return Err(Error);
+        }
+        let after = generation.load(Ordering::Acquire);
+        if after != before {
+            next.invalidate();
+            if attempt == 0 {
+                continue;
+            }
+            return Err(Error);
+        }
+        *validated_generation = after;
+        current.invalidate();
+        return Ok(next);
+    }
+    unreachable!("underlay refresh has exactly two attempts")
 }
 
 fn underlay_matches_with(
@@ -3914,9 +3978,9 @@ mod tests {
         ipv6_dns_settings_input, ipv6_interface_index_option_value, ipv6_sockaddr,
         leak_notification_owners, load_transaction, managed_address_matches, managed_device_health,
         managed_dns_matches, managed_notification_family, managed_state_health,
-        normalize_dns_settings, prepare_managed_intent, require_exports, restore_managed_dns,
-        revalidate_managed_network, route_changed, route_matches, setup_transaction,
-        snapshot_underlay_at, snapshot_underlay_with, strict_route_rules,
+        normalize_dns_settings, prepare_managed_intent, refresh_underlay_with, require_exports,
+        restore_managed_dns, revalidate_managed_network, route_changed, route_matches,
+        setup_transaction, snapshot_underlay_at, snapshot_underlay_with, strict_route_rules,
         strict_route_state_matches, subscribe_notification_sequence, take_last_owned_route,
         underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
@@ -5854,6 +5918,86 @@ mod tests {
         let mut snapshot_race = make_operations();
         snapshot_race.change_generation = Some(generation.clone());
         assert!(snapshot_underlay_at(&fixed, generation, 10, &mut snapshot_race).is_err());
+    }
+
+    #[test]
+    fn underlay_refresh_replaces_only_the_frozen_policy_after_complete_capture() {
+        let physical_a = InterfaceIdentity { luid: 7, index: 17 };
+        let physical_b = InterfaceIdentity { luid: 8, index: 18 };
+        let wintun = InterfaceIdentity { luid: 9, index: 19 };
+        let endpoint: std::net::SocketAddr = "198.51.100.8:443".parse().unwrap();
+        let config =
+            crate::ManagedNetworkConfig::new(Vec::new(), vec![endpoint], false, None, None)
+                .unwrap();
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let mut initial_operations = InjectedUnderlay {
+            interfaces: vec![physical_a, wintun],
+            routes: vec![(
+                endpoint.ip(),
+                injected_fingerprint(physical_a, endpoint.ip()),
+            )],
+            interface_metrics: Vec::new(),
+            best_calls: 0,
+            fail_at: None,
+            change_generation: None,
+        };
+        let current = snapshot_underlay_at(
+            &config,
+            std::sync::Arc::clone(&generation),
+            1,
+            &mut initial_operations,
+        )
+        .unwrap();
+        current.set_owned_identity(wintun).unwrap();
+
+        generation.store(2, std::sync::atomic::Ordering::Release);
+        let mut refreshed_operations = InjectedUnderlay {
+            interfaces: vec![physical_b, wintun],
+            routes: vec![(
+                endpoint.ip(),
+                injected_fingerprint(physical_b, endpoint.ip()),
+            )],
+            interface_metrics: Vec::new(),
+            best_calls: 0,
+            fail_at: None,
+            change_generation: None,
+        };
+        let mut validated_generation = 1;
+        let refreshed = refresh_underlay_with(
+            &config,
+            &current,
+            wintun,
+            &mut validated_generation,
+            std::sync::Arc::clone(&generation),
+            &mut refreshed_operations,
+        )
+        .unwrap();
+
+        assert_eq!(validated_generation, 2);
+        assert!(!current.valid.load(std::sync::atomic::Ordering::Acquire));
+        assert!(refreshed.generation_is_current());
+        let mut binder = InjectedBinder::default();
+        bind_fixed_with(&refreshed, endpoint, &mut binder).unwrap();
+        assert_eq!(binder.calls, [(endpoint.ip(), physical_b.index)]);
+
+        generation.store(3, std::sync::atomic::Ordering::Release);
+        let mut failed_operations = InjectedUnderlay {
+            fail_at: Some("route"),
+            ..refreshed_operations
+        };
+        assert!(
+            refresh_underlay_with(
+                &config,
+                &refreshed,
+                wintun,
+                &mut validated_generation,
+                generation,
+                &mut failed_operations,
+            )
+            .is_err()
+        );
+        assert!(refreshed.valid.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(validated_generation, 2);
     }
 
     #[test]
