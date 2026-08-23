@@ -927,9 +927,13 @@ mod tests {
             runtime.push_str(&format!("idle_timeout_ms = {value}\n"));
         }
         let source = format!(
-            "schema_version = 1\n\
-             [server]\n\
+            "schema_version = 2\n\
+             [[inbounds]]\n\
+             tag = \"proxy\"\n\
              listen = \"127.0.0.1:42001\"\n\
+             outbound = \"direct\"\n\
+             [[outbounds]]\n\
+             tag = \"direct\"\n\
              [shadowsocks]\n\
              method = \"2022-blake3-aes-128-gcm\"\n\
              psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\

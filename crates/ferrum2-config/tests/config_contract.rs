@@ -30,12 +30,12 @@ fn selected(route: &RouteTable, inbound: usize) -> usize {
     )
 }
 
-const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const CLIENT_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
-const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const SERVER_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:8388\"\noutbound = \"direct\"\n[[outbounds]]\ntag = \"direct\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 fn tagged_client(inbound_count: usize, outbound_count: usize) -> String {
-    let mut source = "schema_version = 1\n".to_owned();
+    let mut source = "schema_version = 2\n".to_owned();
     for index in 0..inbound_count {
         source.push_str(&format!(
             "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"127.0.0.1:{}\"\noutbound = \"o{}\"\n",
@@ -188,22 +188,6 @@ struct CohortCase {
     metrics_port: Option<u16>,
 }
 
-struct SchemaV1CompatibilityPolicy {
-    all_v0_releases: bool,
-    successor_minimum_months: u8,
-    successor_minimum_stable_minors: u8,
-    prior_stable_release_notice: bool,
-    elapsed_time_proven_at_m3_close: bool,
-}
-
-const SCHEMA_V1_COMPATIBILITY_POLICY: SchemaV1CompatibilityPolicy = SchemaV1CompatibilityPolicy {
-    all_v0_releases: true,
-    successor_minimum_months: 12,
-    successor_minimum_stable_minors: 2,
-    prior_stable_release_notice: true,
-    elapsed_time_proven_at_m3_close: false,
-};
-
 fn assert_runtime(actual: RuntimeConfig, expected: [u64; 6], name: &str) {
     let actual = (
         u64::from(actual.max_connections.get()),
@@ -225,7 +209,7 @@ fn assert_runtime(actual: RuntimeConfig, expected: [u64; 6], name: &str) {
 }
 
 #[test]
-fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
+fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
     let cases = [
         CohortCase {
             name: "client defaults",
@@ -366,16 +350,6 @@ fn preserved_schema_v1_cohort_normalizes_defaults_boundaries_and_choices() {
         );
     }
 
-    let policy = SCHEMA_V1_COMPATIBILITY_POLICY;
-    let policy = (
-        policy.all_v0_releases,
-        policy.successor_minimum_months,
-        policy.successor_minimum_stable_minors,
-        policy.prior_stable_release_notice,
-        policy.elapsed_time_proven_at_m3_close,
-    );
-    assert_eq!(policy, (true, 12, 2, true, false));
-
     let mut exact_limit = format!("{CLIENT_BASE}\n#").into_bytes();
     exact_limit.resize(MAX_CONFIG_BYTES - 1, b'a');
     exact_limit.push(b'\n');
@@ -469,8 +443,19 @@ fn chain_bounds_and_static_rule_final_selector_actions_are_complete() {
     let routed =
         load_client(TempConfig::text(&routed_source).path()).expect("rule and final plans");
     let target = TargetAddr::domain("chain-actions.test", 443).expect("target");
+    let program = routed.route_program.as_ref().expect("route program");
+    let select_hops = |network| match program
+        .evaluate(0, network, &target)
+        .next(RouteMetadata::new(None, None))
+    {
+        Some(RouteProgramAction::Terminal(RouteAction::Route(handle)))
+        | Some(RouteProgramAction::Final(RouteAction::Route(handle))) => {
+            handle.snapshot().hops().to_vec()
+        }
+        other => panic!("unexpected chain route action: {other:?}"),
+    };
     #[rustfmt::skip]
-    assert_eq!((routed.route.select_plan(0, Network::Tcp, &target).hops(), routed.route.select_plan(0, Network::Udp, &target).hops()), (&[0, 1][..], &[1, 2][..]));
+    assert_eq!((select_hops(Network::Tcp), select_hops(Network::Udp)), (vec![0, 1], vec![1, 2]));
 
     let hops = (0..8)
         .map(|index| format!("\"o{index}\""))
@@ -624,15 +609,14 @@ fn selector_graph_rejects_bounds_members_defaults_cycles_and_inert_nodes_redacte
         .collect::<Vec<_>>()
         .join(", ");
     let empty = base().replacen(
-        "schema_version = 1",
-        "schema_version = 1\nselectors = []",
+        "schema_version = 2",
+        "schema_version = 2\nselectors = []",
         1,
     );
-    let partial = "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"manual\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\"]\ndefault = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned();
+    let partial = "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"manual\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\"]\ndefault = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned();
     #[rustfmt::skip]
     let cases = [
-        ("legacy mixing", with_selectors(CLIENT_BASE.to_owned(), valid), ConfigField::Selectors, ConfigRole::Client),
-        ("partial tagged selector", partial, ConfigField::Selectors, ConfigRole::Client),
+        ("partial tagged selector", partial, ConfigField::Outbounds, ConfigRole::Client),
         ("empty selectors", empty, ConfigField::Selectors, ConfigRole::Client),
         ("65 selectors", graph(&selector_65).replacen("outbound = \"manual\"", "outbound = \"s0\"", 1), ConfigField::Selectors, ConfigRole::Client),
         ("empty members", graph("[[selectors]]\ntag = \"manual\"\noutbounds = []\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
@@ -732,9 +716,9 @@ fn chains_reject_all_bounds_namespaces_references_and_inert_nodes_redacted() {
     );
     #[rustfmt::skip]
     let cases = [
-        ("empty collection", tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 1\nchains = []", 1), ConfigField::Chains, ConfigRole::Client),
-        ("chains missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[[outbounds]]\ntag = \"o1\"\nserver = \"127.0.0.1:20001\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Chains, ConfigRole::Client),
-        ("chains missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"c\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Chains, ConfigRole::Client),
+        ("empty collection", tagged_client(1, 1).replacen("schema_version = 2", "schema_version = 2\nchains = []", 1), ConfigField::Chains, ConfigRole::Client),
+        ("chains missing inbounds", "schema_version = 2\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[[outbounds]]\ntag = \"o1\"\nserver = \"127.0.0.1:20001\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Client),
+        ("chains missing outbounds", "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"c\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Client),
         ("65 chains", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c0\"", 1).replacen("[shadowsocks]", &format!("{many}[shadowsocks]"), 1), ConfigField::Chains, ConfigRole::Client),
         ("missing tag", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
         ("missing hops", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
@@ -754,7 +738,6 @@ fn chains_reject_all_bounds_namespaces_references_and_inert_nodes_redacted() {
         ("selector collision", chain("manual", "\"o0\", \"o1\"").replacen("[shadowsocks]", "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n[shadowsocks]", 1), ConfigField::ChainsTag, ConfigRole::Client),
         ("unreachable chain", tagged_client(1, 2).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::ChainsTag, ConfigRole::Client),
         ("unreachable concrete", tagged_client(1, 3).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::OutboundsTag, ConfigRole::Client),
-        ("legacy chain", CLIENT_BASE.replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Client),
         ("server chain", tagged_server(1, 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Server),
     ];
     for (index, (name, source, field, role)) in cases.into_iter().enumerate() {
@@ -783,16 +766,38 @@ fn routed_graph_compiles_resolved_first_match_tables_for_both_roles() {
     let domain = TargetAddr::domain("EXAMPLE.TEST", 443).expect("domain");
     let ipv4 = TargetAddr::ip("192.0.2.1:53".parse().expect("IPv4")).expect("target");
     let other_port = TargetAddr::domain("example.test", 80).expect("other port");
+    let client_program = client.route_program.as_ref().expect("client route program");
+    let select_client = |inbound, network, target: &TargetAddr| match client_program
+        .evaluate(inbound, network, target)
+        .next(RouteMetadata::new(None, None))
+    {
+        Some(RouteProgramAction::Terminal(RouteAction::Route(handle)))
+        | Some(RouteProgramAction::Final(RouteAction::Route(handle))) => {
+            handle.snapshot().hops()[0]
+        }
+        other => panic!("unexpected client route action: {other:?}"),
+    };
     #[rustfmt::skip]
-    let client_actual = (client.route.is_routed(), client.route.select(0, Network::Tcp, &domain), client.route.select(1, Network::Tcp, &domain), client.route.select(0, Network::Udp, &ipv4), client.route.select(0, Network::Tcp, &other_port));
+    let client_actual = (client.route.is_routed(), select_client(0, Network::Tcp, &domain), select_client(1, Network::Tcp, &domain), select_client(0, Network::Udp, &ipv4), select_client(0, Network::Tcp, &other_port));
     assert_eq!(client_actual, (true, 1, 0, 2, 0));
     let server = load_server(fixture("server-route-valid.toml")).expect("routed server");
     let ipv6 = TargetAddr::ip("[2001:db8::1]:53".parse().expect("IPv6")).expect("target");
+    let server_program = server.route_program.as_ref().expect("server route program");
+    let select_server = |inbound, network, target: &TargetAddr| match server_program
+        .evaluate(inbound, network, target)
+        .next(RouteMetadata::new(None, None))
+    {
+        Some(RouteProgramAction::Terminal(RouteAction::Route(handle)))
+        | Some(RouteProgramAction::Final(RouteAction::Route(handle))) => {
+            handle.snapshot().hops()[0]
+        }
+        other => panic!("unexpected server route action: {other:?}"),
+    };
     assert_eq!(
         (
             server.route.is_routed(),
-            server.route.select(1, Network::Tcp, &domain),
-            server.route.select(0, Network::Udp, &ipv6)
+            select_server(1, Network::Tcp, &domain),
+            select_server(0, Network::Udp, &ipv6)
         ),
         (true, 1, 2)
     );
@@ -810,7 +815,7 @@ fn routed_graph_compiles_resolved_first_match_tables_for_both_roles() {
 fn schema_v2_compiles_ordered_route_actions_on_the_shared_selector_graph() {
     let source = with_selectors(
         routed(
-            tagged_client(1, 2).replacen("schema_version = 1", "schema_version = 2", 1),
+            tagged_client(1, 2),
             "[route]\nfinal = \"o0\"\n[route.sniff]\ntimeout_ms = 300\nmax_bytes = 8192\n[[route.rules]]\ninbound = [\"i0\"]\nnetwork = [\"udp\"]\naction = \"sniff\"\nsniffers = \"dns\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"udp\"\nprotocol = \"dns\"\naction = \"route\"\noutbound = \"manual\"",
         ),
         "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"",
@@ -892,10 +897,7 @@ action = "reject""#;
         .replace("port_range = \"50:60\"", "port_range = [\"50:60\"]");
 
     for route in [scalar_route.to_owned(), list_route] {
-        let source = routed(
-            tagged_server(1, 2).replacen("schema_version = 1", "schema_version = 2", 1),
-            &route,
-        );
+        let source = routed(tagged_server(1, 2), &route);
         let config = load_server(TempConfig::text(&source).path()).expect("schema v2 matcher set");
         let program = config.route_program.as_ref().expect("compiled program");
 
@@ -940,7 +942,7 @@ action = "reject""#;
     }
 
     let defaults = routed(
-        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        tagged_server(1, 1),
         "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\naction = \"sniff\"",
     ) + "[runtime]\nmax_connections = 2\n";
     let defaults = load_server(TempConfig::text(&defaults).path()).expect("sniff defaults");
@@ -965,7 +967,7 @@ action = "reject""#;
 
     let bounded_rules = "[[route.rules]]\nnetwork = \"tcp\"\naction = \"reject\"\n".repeat(65);
     let bounded = routed(
-        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        tagged_server(1, 1),
         &format!("[route]\nfinal = \"o0\"\n{bounded_rules}"),
     );
     load_server(TempConfig::text(&bounded).path()).expect("more than 64 schema v2 rules");
@@ -974,7 +976,7 @@ action = "reject""#;
         .collect::<Vec<_>>()
         .join(", ");
     let bounded_values = routed(
-        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        tagged_server(1, 1),
         &format!(
             "[route]\nfinal = \"o0\"\n[[route.rules]]\ndomain = [{values}]\naction = \"reject\""
         ),
@@ -986,24 +988,18 @@ action = "reject""#;
 fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
     let client = |rules: &str| {
         routed(
-            tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            tagged_client(1, 1),
             &format!("[route]\nfinal = \"o0\"\n{rules}"),
         )
     };
     let server = |rules: &str| {
         routed(
-            tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            tagged_server(1, 1),
             &format!("[route]\nfinal = \"o0\"\n{rules}"),
         )
     };
-    let migration = routed(
-        tagged_client(1, 1),
-        "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"udp\"\naction = \"reject\"",
-    ) + "[udp]\nenabled = true\n";
     #[rustfmt::skip]
     let cases = vec![
-        ("v1 routed UDP migration wins over M14 field", ConfigRole::Client, migration, ConfigField::SchemaVersion),
-        ("v1 rejects M14 protocol", ConfigRole::Client, routed(tagged_client(1, 1), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\noutbound = \"o0\""), ConfigField::RouteRulesProtocol),
         ("v2 dangling final", ConfigRole::Client, client("").replacen("final = \"o0\"", "final = \"missing\"", 1), ConfigField::RouteFinal),
         ("v2 dangling rule action", ConfigRole::Client, client("[[route.rules]]\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"missing\""), ConfigField::RouteRulesOutbound),
         ("empty matcher list", ConfigRole::Server, server("[[route.rules]]\nip = []\naction = \"reject\""), ConfigField::RouteRulesIp),
@@ -1036,7 +1032,7 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
         ("port-narrow sniff cannot cover", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\nport = 443\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
         ("IP-narrow sniff cannot cover", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\nip = \"192.0.2.1\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
         ("domain-gated sniff cannot prove metadata", ConfigRole::Server, server("[[route.rules]]\nnetwork = \"tcp\"\ndomain = \"example.test\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\ndomain = \"example.test\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
-        ("inbound-narrow sniff cannot cover", ConfigRole::Server, routed(tagged_server(2, 1).replacen("schema_version = 1", "schema_version = 2", 1), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
+        ("inbound-narrow sniff cannot cover", ConfigRole::Server, routed(tagged_server(2, 1), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\naction = \"sniff\"\nsniffers = \"tls\"\n[[route.rules]]\nnetwork = \"tcp\"\nprotocol = \"tls\"\naction = \"reject\""), ConfigField::RouteRulesProtocol),
     ];
     for (index, (name, role, source, field)) in cases.into_iter().enumerate() {
         assert_tagged_error(
@@ -1053,7 +1049,7 @@ fn schema_v2_route_rejections_cover_versions_shapes_bounds_and_capabilities() {
 fn schema_v2_protocol_coverage_uses_the_first_overlapping_sniff() {
     let server = |rules: &str| {
         routed(
-            tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            tagged_server(1, 1),
             &format!("[route]\nfinal = \"o0\"\n{rules}"),
         )
     };
@@ -1178,12 +1174,16 @@ server = "tls""#;
             false,
         )
     );
+    let dns_policy = config.dns_route.as_ref().expect("client DNS policy");
     let select_dns = |name: &str, network| {
-        dns.route.select(
-            0,
-            network,
-            &TargetAddr::domain(name, 53).expect("DNS target"),
-        )
+        dns_policy
+            .select(
+                DnsIngressId::Listener(0),
+                network,
+                &TargetAddr::domain(name, 53).expect("DNS target"),
+                None,
+            )
+            .expect("client DNS selection")
     };
     assert_eq!(
         (
@@ -1231,14 +1231,15 @@ network = "tcp"
 server = "detoured""#;
     let server = load_server(TempConfig::text(&with_dns(tagged_server(1, 2), server_dns)).path())
         .expect("server DNS graph");
-    let dns = server.dns.expect("server DNS");
+    let dns_policy = server.dns_route.as_ref().expect("server DNS policy");
+    let dns = server.dns.as_ref().expect("server DNS");
     assert_eq!(dns.servers[0].path.as_deref(), Some("/dns-query"));
     assert_eq!(
         dns.servers[1].detour.as_ref().unwrap().snapshot().hops(),
         &[1]
     );
     assert_eq!(
-        dns.route.select(
+        dns_policy.select(
             0,
             Network::Tcp,
             &TargetAddr::domain("application.example", 443).unwrap()
@@ -1277,7 +1278,7 @@ qtype = "A"
 server = "default""#;
     let source = with_dns(
         routed(
-            tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            tagged_client(1, 1),
             "[route]\nfinal = \"o0\"\n[[route.rules]]\nport = 9\naction = \"reject\"\n[[route.rules]]\nport = 53\naction = \"hijack-dns\"",
         ),
         client_dns,
@@ -1369,10 +1370,7 @@ network = ["tcp", "udp"]
 domain_suffix = "example.com"
 port_range = ["443:8443"]
 server = "special""#;
-    let source = with_dns(
-        tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
-        server_dns,
-    );
+    let source = with_dns(tagged_server(1, 1), server_dns);
     let server = load_server(TempConfig::text(&source).path()).expect("server DNS program");
     let policy = server.dns_route.as_ref().expect("server DNS policy");
     let target = TargetAddr::domain("API.EXAMPLE.COM.", 443).expect("application target");
@@ -1399,7 +1397,7 @@ server = "special""#;
         .collect::<Vec<_>>()
         .join(", ");
     let bounded = with_dns(
-        tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+        tagged_client(1, 1),
         &format!(
             "[dns]\n[[dns.inbounds]]\ntag = \"d0\"\nlisten = \"127.0.0.1:5353\"\n[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"\n[[dns.route.rules]]\nqname = [{values}]\nserver = \"s0\""
         ),
@@ -1430,10 +1428,7 @@ server = "special"
 [[dns.route.rules]]
 qname = "untyped.example"
 server = "special""#;
-    let source = with_dns(
-        tagged_client(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
-        dns,
-    );
+    let source = with_dns(tagged_client(1, 1), dns);
     let client = load_client(TempConfig::text(&source).path()).expect("client DNS program");
     let policy = client.dns_route.as_ref().expect("client DNS policy");
     let target = |name| TargetAddr::domain(name, 53).expect("query target");
@@ -1474,7 +1469,7 @@ fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
     let client = |rule: &str, version: u32| {
         with_dns(
             tagged_client(1, 1).replacen(
-                "schema_version = 1",
+                "schema_version = 2",
                 &format!("schema_version = {version}"),
                 1,
             ),
@@ -1485,7 +1480,7 @@ fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
     };
     let server = |rule: &str| {
         with_dns(
-            tagged_server(1, 1).replacen("schema_version = 1", "schema_version = 2", 1),
+            tagged_server(1, 1),
             &format!(
                 "[dns]\n[[dns.servers]]\ntag = \"s0\"\ntransport = \"udp\"\naddress = \"192.0.2.53:53\"\n[dns.route]\nfinal = \"s0\"\n{rule}"
             ),
@@ -1505,7 +1500,6 @@ fn schema_v2_dns_rejects_role_mixing_closed_values_and_bounds() {
     .expect("more than 64 DNS matcher values");
     #[rustfmt::skip]
     let cases = vec![
-        ("v1 rejects client qname", ConfigRole::Client, client("[[dns.route.rules]]\nqname = \"example.test\"\nserver = \"s0\"", 1), ConfigField::DnsRouteRulesQname),
         ("client rejects server domain", ConfigRole::Client, client("[[dns.route.rules]]\ndomain = \"example.test\"\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesDomain),
         ("client rejects server port", ConfigRole::Client, client("[[dns.route.rules]]\nport = 53\nserver = \"s0\"", 2), ConfigField::DnsRouteRulesPort),
         ("server rejects client qname", ConfigRole::Server, server("[[dns.route.rules]]\nqname = \"example.test\"\nserver = \"s0\""), ConfigField::DnsRouteRulesQname),
@@ -1757,7 +1751,6 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
     #[rustfmt::skip]
     let cases = [
         ("static mixing", format!("{}[route]\nfinal = \"o0\"\n", base), ConfigField::Route),
-        ("legacy mixing", format!("{CLIENT_BASE}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
         ("partial static binding", base.replacen("outbound = \"o0\"\n", "", 1), ConfigField::InboundsOutbound),
         ("missing final", routed(base.clone(), "[route]"), ConfigField::RouteFinal),
         ("dangling final", routed(base.clone(), "[route]\nfinal = \"missing\""), ConfigField::RouteFinal),
@@ -1767,7 +1760,7 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
         ("dangling inbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"missing\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
         ("wrong inbound namespace", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"o0\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
         ("dangling outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"missing\""), ConfigField::RouteRulesOutbound),
-        ("missing outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\""), ConfigField::RouteRulesOutbound),
+        ("missing outbound", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\""), ConfigField::RouteRulesAction),
         ("wrong outbound namespace", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
         ("unreferenced outbound", routed(base.clone(), "[route]\nfinal = \"o0\""), ConfigField::RouteRulesOutbound),
         ("ordinary target subtable", routed(base.clone(), "[route]\nfinal = \"o0\"\n[[route.rules]]\noutbound = \"o1\"\n[route.rules.target]\nhost = \"example.test\"\nport = 53"), ConfigField::RouteRulesTarget),
@@ -1803,7 +1796,6 @@ fn routed_graph_rejects_mixing_bounds_matchers_and_references_redacted() {
     #[rustfmt::skip]
     let server_cases = [
         ("server static mixing", format!("{server_base}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
-        ("server legacy mixing", format!("{SERVER_BASE}[route]\nfinal = \"o0\"\n"), ConfigField::Route),
         ("server partial static binding", server_base.replacen("outbound = \"o0\"\n", "", 1), ConfigField::InboundsOutbound),
         ("server wrong inbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"o0\"\noutbound = \"o1\""), ConfigField::RouteRulesInbound),
         ("server wrong outbound namespace", server_routed("[route]\nfinal = \"o0\"\n[[route.rules]]\nnetwork = \"tcp\"\noutbound = \"i0\""), ConfigField::RouteRulesOutbound),
@@ -1856,7 +1848,7 @@ fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted()
     let valid = tagged_client(2, 2);
     let server = tagged_server(2, 2);
     let server_three = tagged_server(3, 3);
-    let mut cases = vec![
+    let cases = vec![
         ("empty inbounds", tagged_client(0, 1), ConfigField::Inbounds, ConfigRole::Client),
         ("empty outbounds", tagged_client(1, 0), ConfigField::Outbounds, ConfigRole::Client),
         ("65 inbounds", tagged_client(65, 1), ConfigField::Inbounds, ConfigRole::Client),
@@ -1897,24 +1889,11 @@ fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted()
         ("server metrics first", format!("{server_three}[metrics]\nlisten = \"127.0.0.1:10000\"\n"), ConfigField::MetricsListen, ConfigRole::Server),
         ("server metrics last", format!("{server_three}[metrics]\nlisten = \"127.0.0.1:10002\"\n"), ConfigField::MetricsListen, ConfigRole::Server),
         ("client server last collision", tagged_client(3, 3).replacen("127.0.0.1:20000", "127.0.0.1:10002", 1), ConfigField::OutboundsServer, ConfigRole::Client),
-        ("missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Client),
-        ("missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Client),
-        ("server missing inbounds", "schema_version = 1\n[[outbounds]]\ntag = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Server),
-        ("server missing outbounds", "schema_version = 1\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Server),
+        ("missing inbounds", "schema_version = 2\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Client),
+        ("missing outbounds", "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Client),
+        ("server missing inbounds", "schema_version = 2\n[[outbounds]]\ntag = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Inbounds, ConfigRole::Server),
+        ("server missing outbounds", "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".to_owned(), ConfigField::Outbounds, ConfigRole::Server),
     ];
-    cases.push((
-        "legacy tagged mixing",
-        format!("{CLIENT_BASE}[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[[outbounds]]\ntag = \"o0\"\nserver = \"127.0.0.1:20000\"\n"),
-        ConfigField::Inbounds,
-        ConfigRole::Client,
-    ));
-    cases.push((
-        "server legacy tagged mixing",
-        format!("{SERVER_BASE}[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"o0\"\n[[outbounds]]\ntag = \"o0\"\n"),
-        ConfigField::Inbounds,
-        ConfigRole::Server,
-    ));
-
     for (index, (name, source, field, role)) in cases.into_iter().enumerate() {
         assert_tagged_error(
             name,
@@ -1924,6 +1903,23 @@ fn tagged_graph_rejects_invalid_counts_tags_references_and_collisions_redacted()
             index,
         );
     }
+
+    assert_tagged_error(
+        "client legacy root rejected",
+        ConfigRole::Client,
+        format!(
+            "{CLIENT_BASE}[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n"
+        ),
+        (ConfigErrorKind::Syntax, ConfigField::Config),
+        48,
+    );
+    assert_tagged_error(
+        "server legacy root rejected",
+        ConfigRole::Server,
+        format!("{SERVER_BASE}[server]\nlisten = \"127.0.0.1:8388\"\n"),
+        (ConfigErrorKind::Syntax, ConfigField::Config),
+        49,
+    );
 
     let client_unknown = valid.replacen(
         "server = \"127.0.0.1:20000\"",
@@ -2035,7 +2031,7 @@ fn endpoint_method_key_and_cross_field_rules_are_enforced() {
         (
             "client endpoints equal",
             CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1),
-            ConfigField::ClientServer,
+            ConfigField::OutboundsServer,
         ),
         (
             "unknown method",
@@ -2124,12 +2120,12 @@ fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
             ConfigRole::Client,
             CLIENT_BASE
                 .replace(
-                    "[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n",
+                    "[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy-out\"\n",
                     "",
                 )
                 .into_bytes(),
-            ConfigErrorKind::Syntax,
-            ConfigField::Config,
+            ConfigErrorKind::Semantic,
+            ConfigField::Inbounds,
         ),
         (
             "current reader rejects a later optional field",
@@ -2156,7 +2152,7 @@ fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
             "wrong declared version",
             ConfigRole::Client,
             CLIENT_BASE
-                .replacen("schema_version = 1", "schema_version = 3", 1)
+                .replacen("schema_version = 2", "schema_version = 3", 1)
                 .into_bytes(),
             ConfigErrorKind::Semantic,
             ConfigField::SchemaVersion,
@@ -2168,7 +2164,7 @@ fn invalid_cohort_rows_keep_stable_redacted_categories_and_fields() {
                 .replacen("127.0.0.1:1080", "127.0.0.1:0", 1)
                 .into_bytes(),
             ConfigErrorKind::Semantic,
-            ConfigField::ClientListen,
+            ConfigField::InboundsListen,
         ),
         (
             "invalid range",
@@ -2620,7 +2616,7 @@ fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
     }
 
     let server = TempConfig::text(&format!(
-        "schema_version = 2\n{base}\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+        "schema_version = 2\n{base}\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:8388\"\noutbound = \"direct\"\n[[outbounds]]\ntag = \"direct\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
     ));
     assert_eq!(
         load_server(server.path())
@@ -2629,11 +2625,14 @@ fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
             .field(),
         ConfigField::Tun
     );
-    let v1 =
+    let unsupported =
         TempConfig::text(&tun_client(base).replacen("schema_version = 2", "schema_version = 1", 1));
     assert_eq!(
-        load_client(v1.path()).err().expect("v1 TUN").field(),
-        ConfigField::Tun
+        load_client(unsupported.path())
+            .err()
+            .expect("unsupported schema")
+            .field(),
+        ConfigField::SchemaVersion
     );
 }
 
@@ -2971,24 +2970,15 @@ fn m16_client_outbound_shape_and_direct_plan_roots_are_closed() {
         (ConfigErrorKind::Syntax, ConfigField::Config)
     );
 
-    for schema in [1, 2] {
-        for hops in [["exit", "proxy"], ["proxy", "exit"]] {
-            let source = format!(
-                "schema_version = {schema}\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"chain\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"127.0.0.1:8388\"\n[[chains]]\ntag = \"chain\"\nhops = [\"{}\", \"{}\"]\n{credentials}",
-                hops[0], hops[1]
-            );
-            let error = load_client(TempConfig::text(&source).path())
-                .err()
-                .expect("direct chain hop");
-            assert_eq!(
-                error.field(),
-                if schema == 1 {
-                    ConfigField::OutboundsType
-                } else {
-                    ConfigField::ChainsHops
-                }
-            );
-        }
+    for hops in [["exit", "proxy"], ["proxy", "exit"]] {
+        let source = format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"socks\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"chain\"\n[[outbounds]]\ntag = \"exit\"\ntype = \"direct\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"127.0.0.1:8388\"\n[[chains]]\ntag = \"chain\"\nhops = [\"{}\", \"{}\"]\n{credentials}",
+            hops[0], hops[1]
+        );
+        let error = load_client(TempConfig::text(&source).path())
+            .err()
+            .expect("direct chain hop");
+        assert_eq!(error.field(), ConfigField::ChainsHops);
     }
 
     #[rustfmt::skip]

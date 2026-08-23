@@ -1,8 +1,13 @@
-schema_version = 1
+schema_version = 2
 unexpected = true
 
-[client]
+[[inbounds]]
+tag = "proxy"
 listen = "127.0.0.1:1080"
+outbound = "proxy-out"
+
+[[outbounds]]
+tag = "proxy-out"
 server = "127.0.0.1:8388"
 
 [shadowsocks]

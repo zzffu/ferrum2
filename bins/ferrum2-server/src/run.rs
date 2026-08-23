@@ -148,21 +148,6 @@ const fn run_error_for_dns_policy_compile(error: ferrum2_dns::DnsPolicyCompileEr
     }
 }
 
-pub(crate) fn run(config: ValidatedServerConfig) -> Result<(), RunError> {
-    let dns_specs = config
-        .dns
-        .as_ref()
-        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
-    let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
-    tracing::subscriber::set_global_default(subscriber)
-        .map_err(|_| RunError::StartupObservability)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(run_async(config, dns_specs))
-}
-
 /// Fully materializes schema-v2 fixed endpoints and the initial RuleSet
 /// snapshot before any listener root is allowed to prepare.
 pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
@@ -229,7 +214,8 @@ struct ServerRunResources {
 }
 
 impl ServerRunResources {
-    const fn legacy(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
+    #[cfg(test)]
+    const fn test_unmaterialized(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
         Self {
             materialization_root: None,
             materialized_cache: None,
@@ -237,20 +223,6 @@ impl ServerRunResources {
             materialized: false,
         }
     }
-}
-
-async fn run_async(
-    config: ValidatedServerConfig,
-    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
-) -> Result<(), RunError> {
-    run_with_registry_prepared(
-        config,
-        OwnerRegistry::new(),
-        shutdown_signal(),
-        Arc::new(Metrics::new()),
-        ServerRunResources::legacy(dns_specs),
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -271,7 +243,7 @@ where
         registry,
         shutdown,
         Arc::new(Metrics::new()),
-        ServerRunResources::legacy(dns_specs),
+        ServerRunResources::test_unmaterialized(dns_specs),
     )
     .await
 }

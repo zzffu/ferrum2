@@ -14,9 +14,7 @@ use crate::model::{
     ClientDnsRoute, CompiledRoute, DnsQueryType, RouteAction, RouteProtocol, RouteSniffConfig,
     SchemaVersion, ServerDnsRoute, Sniffers,
 };
-use crate::raw::{
-    RawClientOutbound, RawDns, RawDnsRouteRule, RawRoute, RawRouteRule, ScalarOrList,
-};
+use crate::raw::{RawDns, RawDnsRouteRule, RawRoute, RawRouteRule, ScalarOrList};
 
 #[derive(Clone, Copy)]
 pub(super) enum Role {
@@ -26,126 +24,9 @@ pub(super) enum Role {
 
 pub(crate) fn validate_version(version: u32) -> Result<SchemaVersion, ConfigError> {
     match version {
-        1 => Ok(SchemaVersion::V1),
         2 => Ok(SchemaVersion::V2),
         _ => Err(ConfigError::semantic(ConfigField::SchemaVersion)),
     }
-}
-
-pub(super) fn reject_v1_fields(
-    route: Option<&RawRoute>,
-    dns: Option<&RawDns>,
-    has_rule_set_loader: bool,
-    outbounds: Option<&[RawClientOutbound]>,
-) -> Result<(), ConfigError> {
-    if has_rule_set_loader {
-        return Err(ConfigError::semantic(ConfigField::RuleSetLoader));
-    }
-    if let Some(outbounds) = outbounds {
-        for outbound in outbounds {
-            if outbound.domain_resolver.is_some() {
-                return Err(ConfigError::semantic(ConfigField::OutboundsDomainResolver));
-            }
-            if outbound.domain_strategy.is_some() {
-                return Err(ConfigError::semantic(ConfigField::OutboundsDomainStrategy));
-            }
-        }
-    }
-    if let Some(route) = route {
-        if !route.rule_set.is_empty() {
-            return Err(ConfigError::semantic(ConfigField::RouteRuleSet));
-        }
-        if route.sniff.is_some() {
-            return Err(ConfigError::semantic(ConfigField::RouteSniff));
-        }
-        for rule in &route.rules {
-            let field = if rule.inbound.as_ref().is_some_and(ScalarOrList::is_list) {
-                Some(ConfigField::RouteRulesInbound)
-            } else if rule.network.as_ref().is_some_and(ScalarOrList::is_list) {
-                Some(ConfigField::RouteRulesNetwork)
-            } else if rule.protocol.is_some() {
-                Some(ConfigField::RouteRulesProtocol)
-            } else if rule.domain.is_some() {
-                Some(ConfigField::RouteRulesDomain)
-            } else if rule.domain_suffix.is_some() {
-                Some(ConfigField::RouteRulesDomainSuffix)
-            } else if rule.domain_keyword.is_some() {
-                Some(ConfigField::RouteRulesDomainKeyword)
-            } else if rule.rule_set.is_some() {
-                Some(ConfigField::RouteRulesRuleSet)
-            } else if rule.ip.is_some() {
-                Some(ConfigField::RouteRulesIp)
-            } else if rule.ip_cidr.is_some() {
-                Some(ConfigField::RouteRulesIpCidr)
-            } else if rule.port.is_some() {
-                Some(ConfigField::RouteRulesPort)
-            } else if rule.port_range.is_some() {
-                Some(ConfigField::RouteRulesPortRange)
-            } else if rule.action.is_some() {
-                Some(ConfigField::RouteRulesAction)
-            } else if rule.sniffers.is_some() {
-                Some(ConfigField::RouteRulesSniffers)
-            } else {
-                None
-            };
-            if let Some(field) = field {
-                return Err(ConfigError::semantic(field));
-            }
-        }
-    }
-    if let Some(dns) = dns {
-        if dns.strategy.is_some() {
-            return Err(ConfigError::semantic(ConfigField::DnsStrategy));
-        }
-        if dns.cache.is_some() {
-            return Err(ConfigError::semantic(ConfigField::DnsCache));
-        }
-        for server in dns.servers.as_deref().unwrap_or(&[]) {
-            if server.domain_resolver.is_some() {
-                return Err(ConfigError::semantic(ConfigField::DnsServersDomainResolver));
-            }
-            if server.domain_strategy.is_some() {
-                return Err(ConfigError::semantic(ConfigField::DnsServersDomainStrategy));
-            }
-        }
-    }
-    if let Some(route) = dns.and_then(|dns| dns.route.as_ref()) {
-        for rule in &route.rules {
-            let field = if rule.inbound.as_ref().is_some_and(ScalarOrList::is_list) {
-                Some(ConfigField::DnsRouteRulesInbound)
-            } else if rule.network.as_ref().is_some_and(ScalarOrList::is_list) {
-                Some(ConfigField::DnsRouteRulesNetwork)
-            } else if rule.qname.is_some() {
-                Some(ConfigField::DnsRouteRulesQname)
-            } else if rule.qname_suffix.is_some() {
-                Some(ConfigField::DnsRouteRulesQnameSuffix)
-            } else if rule.qtype.is_some() {
-                Some(ConfigField::DnsRouteRulesQtype)
-            } else if rule.domain.is_some() {
-                Some(ConfigField::DnsRouteRulesDomain)
-            } else if rule.domain_suffix.is_some() {
-                Some(ConfigField::DnsRouteRulesDomainSuffix)
-            } else if rule.domain_keyword.is_some() {
-                Some(ConfigField::DnsRouteRulesDomainKeyword)
-            } else if rule.rule_set.is_some() {
-                Some(ConfigField::DnsRouteRulesRuleSet)
-            } else if rule.port.is_some() {
-                Some(ConfigField::DnsRouteRulesPort)
-            } else if rule.port_range.is_some() {
-                Some(ConfigField::DnsRouteRulesPortRange)
-            } else if rule.action.is_some() {
-                Some(ConfigField::DnsRouteRulesAction)
-            } else if rule.strategy.is_some() {
-                Some(ConfigField::DnsRouteRulesStrategy)
-            } else {
-                None
-            };
-            if let Some(field) = field {
-                return Err(ConfigError::semantic(field));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(super) struct RouteDraft {

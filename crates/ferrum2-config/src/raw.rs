@@ -19,7 +19,6 @@ use crate::{
 #[serde(deny_unknown_fields)]
 pub(super) struct RawClientRoot {
     pub(super) schema_version: u32,
-    pub(super) client: Option<RawClient>,
     pub(super) inbounds: Option<Vec<RawClientInbound>>,
     pub(super) outbounds: Option<Vec<RawClientOutbound>>,
     pub(super) chains: Option<Vec<RawChain>>,
@@ -41,7 +40,6 @@ pub(super) struct RawClientRoot {
 #[serde(deny_unknown_fields)]
 pub(super) struct RawServerRoot {
     pub(super) schema_version: u32,
-    pub(super) server: Option<RawServer>,
     pub(super) inbounds: Option<Vec<RawServerInbound>>,
     pub(super) outbounds: Option<Vec<RawServerOutbound>>,
     pub(super) chains: Option<Vec<RawChain>>,
@@ -118,19 +116,6 @@ impl Default for RawUdp {
             idle_timeout_ms: default_udp_idle_timeout_ms(),
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawClient {
-    pub(super) listen: String,
-    pub(super) server: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawServer {
-    pub(super) listen: String,
 }
 
 #[derive(Deserialize)]
@@ -337,10 +322,6 @@ pub enum ScalarOrList<T> {
 }
 
 impl<T> ScalarOrList<T> {
-    pub fn is_list(&self) -> bool {
-        matches!(self, Self::List(_))
-    }
-
     pub fn len(&self) -> usize {
         match self {
             Self::Scalar(_) => 1,

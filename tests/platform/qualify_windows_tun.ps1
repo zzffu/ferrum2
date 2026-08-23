@@ -6115,9 +6115,13 @@ function Start-M17Server {
     $serverConfig = Join-Path $script:work "m17-server.toml"
     $script:m17ServerPort = Get-UniqueTcpPort
     @"
-schema_version = 1
-[server]
+schema_version = 2
+[[inbounds]]
+tag = "server-in"
 listen = "127.0.0.1:$script:m17ServerPort"
+outbound = "direct"
+[[outbounds]]
+tag = "direct"
 [runtime]
 shutdown_grace_ms = 1000
 [udp]
@@ -9300,9 +9304,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $serverBConfig = Join-Path $work "server-b.toml"
         foreach ($serverCase in @(@($serverAConfig, $serverPortA), @($serverBConfig, $serverPortB))) {
             @"
-schema_version = 1
-[server]
+schema_version = 2
+[[inbounds]]
+tag = "server-in"
 listen = "127.0.0.1:$($serverCase[1])"
+outbound = "direct"
+[[outbounds]]
+tag = "direct"
 [runtime]
 shutdown_grace_ms = 1000
 [udp]

@@ -2820,7 +2820,8 @@ fn run_m14_udp_measurement(
 
 fn m14_udp_server_config(listen: SocketAddrV4, max_buffered_bytes: usize) -> String {
     format!(
-        "schema_version = 1\n[server]\nlisten = \"{listen}\"\n\
+        "schema_version = 2\n[[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\
+         [[outbounds]]\ntag = \"direct\"\n\
          [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
          [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
@@ -2850,7 +2851,8 @@ fn m14_udp_client_config(
 ) -> String {
     if !association_route_once {
         return format!(
-            "schema_version = 1\n[client]\nlisten = \"{listen}\"\nserver = \"{server}\"\n\
+            "schema_version = 2\n[[inbounds]]\ntag = \"client-in\"\nlisten = \"{listen}\"\noutbound = \"proxy\"\n\
+             [[outbounds]]\ntag = \"proxy\"\nserver = \"{server}\"\n\
              [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
              [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
              [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
@@ -4619,7 +4621,8 @@ fn ferrum_client_config(
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
     format!(
-        "schema_version = 1\n\n[client]\nlisten = \"{listen}\"\nserver = \"{server}\"\n\n\
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"client-in\"\nlisten = \"{listen}\"\noutbound = \"proxy\"\n\n\
+         [[outbounds]]\ntag = \"proxy\"\nserver = \"{server}\"\n\n\
          [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\n\
          [runtime]\nmax_connections = 12000\nlisten_backlog = 65535\n\
          idle_timeout_ms = 3600000\n\n[logging]\nlevel = \"error\"\n{metrics}"
@@ -4631,7 +4634,8 @@ fn ferrum_server_config(listen: SocketAddrV4, metrics: Option<SocketAddrV4>) -> 
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
     format!(
-        "schema_version = 1\n\n[server]\nlisten = \"{listen}\"\n\n\
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\n\
+         [[outbounds]]\ntag = \"direct\"\n\n\
          [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\n\
          [runtime]\nmax_connections = 12000\nlisten_backlog = 65535\n\
          idle_timeout_ms = 3600000\n\n[udp]\nenabled = false\n\n\
@@ -4650,7 +4654,7 @@ fn ferrum_dns_resource_client_config(
     metrics: SocketAddrV4,
 ) -> String {
     format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          [[inbounds]]\ntag = \"socks\"\nlisten = \"{proxy}\"\n\
          [[outbounds]]\ntag = \"dns-hop\"\nserver = \"{server}\"\n\
          [route]\nfinal = \"dns-hop\"\n\
@@ -4675,7 +4679,7 @@ fn ferrum_dns_resource_server_config(
     metrics: SocketAddrV4,
 ) -> String {
     format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          [[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\n\
          [[outbounds]]\ntag = \"app-direct\"\n\
          [[outbounds]]\ntag = \"dns-direct\"\n\

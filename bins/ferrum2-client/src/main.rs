@@ -6,7 +6,7 @@ mod run;
 use std::process::ExitCode;
 
 use clap::Parser as _;
-use ferrum2_config::{PreparedClientConfig, prepare_client};
+use ferrum2_config::prepare_client;
 
 use crate::cli::Cli;
 
@@ -26,23 +26,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let has_tun = match &prepared {
-        PreparedClientConfig::V1(config) => config.tun.is_some(),
-        PreparedClientConfig::V2(prepared) => prepared.has_tun(),
-    };
-    if has_tun && !cli::tun_target_supported() {
+    if prepared.has_tun() && !cli::tun_target_supported() {
         eprintln!("error[config.semantic] tun: configuration value is invalid");
         return ExitCode::from(2);
     }
     if cli.check_config {
         if cli.materialize {
-            let result = match prepared {
-                PreparedClientConfig::V1(_) => Ok(()),
-                PreparedClientConfig::V2(prepared) => {
-                    run::validate_prepared_materialization(*prepared)
-                }
-            };
-            if let Err(error) = result {
+            if let Err(error) = run::validate_prepared_materialization(prepared) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
@@ -51,10 +41,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let result = match prepared {
-        PreparedClientConfig::V1(config) => run::run(*config),
-        PreparedClientConfig::V2(prepared) => run::run_prepared(*prepared),
-    };
+    let result = run::run_prepared(prepared);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

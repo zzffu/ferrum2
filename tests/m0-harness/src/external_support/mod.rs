@@ -654,7 +654,8 @@ fn run_external_dns_case(case: DnsCaseSpec) {
     let mut server_process = None;
     if case.path == DnsPath::Detoured {
         let server_config = format!(
-            "schema_version = 1\n[server]\nlisten = \"{shadowsocks_address}\"\n\
+            "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{shadowsocks_address}\"\noutbound = \"direct\"\n\
+             [[outbounds]]\ntag = \"direct\"\n\
              [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n[udp]\n",
             Method::Aes128Gcm.canonical_name(),
             Method::Aes128Gcm.synthetic_psk(),
@@ -1267,13 +1268,13 @@ fn run_tcp_processes(
     let config_path = write_config(directory, "reference-tcp.json", &config);
     let ferrum_config = match case.direction {
         Direction::FerrumClient => format!(
-            "schema_version = 1\n\n[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\
+            "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{proxy}\"\noutbound = \"proxy-out\"\n\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"{shadowsocks}\"\n\n\
              [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
             case.method.canonical_name(),
             case.method.synthetic_psk()
         ),
         Direction::ReferenceClient => format!(
-            "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
+            "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{shadowsocks}\"\noutbound = \"direct\"\n\n[[outbounds]]\ntag = \"direct\"\n\n\
              [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
             case.method.canonical_name(),
             case.method.synthetic_psk()
@@ -1604,7 +1605,7 @@ fn run_udp_ferrum_client_case(
     wait_for_stable_child(&mut reference, deadline, "reference Shadowsocks UDP server");
 
     let ferrum_config = format!(
-        "schema_version = 1\n\n[client]\nlisten = \"{proxy}\"\nserver = \"{shadowsocks}\"\n\n\
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{proxy}\"\noutbound = \"proxy-out\"\n\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"{shadowsocks}\"\n\n\
          [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\n\
          [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = 1048576\n\
          idle_timeout_ms = 60000\n",
@@ -1639,7 +1640,7 @@ fn run_udp_reference_client_case(
     deadline: CaseDeadline,
 ) -> (String, String) {
     let ferrum_config = format!(
-        "schema_version = 1\n\n[server]\nlisten = \"{shadowsocks}\"\n\n\
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{shadowsocks}\"\noutbound = \"direct\"\n\n[[outbounds]]\ntag = \"direct\"\n\n\
          [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\n\
          [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = 1048576\n\
          idle_timeout_ms = 60000\n",

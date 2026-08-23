@@ -101,9 +101,13 @@ pub(in crate::run) fn server_test_config_for_method(
     psk: &str,
 ) -> (PathBuf, ValidatedServerConfig) {
     let source = format!(
-        "schema_version = 1\n\
-             [server]\n\
+        "schema_version = 2\n\
+             [[inbounds]]\n\
+             tag = \"proxy\"\n\
              listen = \"{listen}\"\n\
+             outbound = \"direct\"\n\
+             [[outbounds]]\n\
+             tag = \"direct\"\n\
              [shadowsocks]\n\
              method = \"{method}\"\n\
              psk = \"{psk}\"\n\

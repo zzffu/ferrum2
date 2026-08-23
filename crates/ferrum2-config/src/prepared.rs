@@ -19,21 +19,20 @@ use ferrum2_rule::{
 
 use crate::dependency::{DependencyGraph, DependencyGraphError, DependencyNode, DependencySource};
 use crate::error::{ConfigError, ConfigField};
-use crate::load::{parse_toml, read_bounded_utf8};
+use crate::load::{parse_v2_toml, read_bounded_utf8};
 use crate::model::{
     ClientOutboundConfig, DirectDomainResolver, DnsCacheConfig, DnsEndpointMode, DnsQueryType,
-    DnsRuntimeConfig, DnsStrategy, DnsTransport, ResolverRef, RuntimeConfig, SchemaVersion,
-    UdpConfig, ValidatedClientConfig, ValidatedServerConfig,
+    DnsRuntimeConfig, DnsStrategy, DnsTransport, ResolverRef, RuntimeConfig, UdpConfig,
+    ValidatedClientConfig, ValidatedServerConfig,
 };
 use crate::raw::{
     RawChain, RawClientOutbound, RawClientRoot, RawDns, RawDnsRouteRule, RawRoute, RawRuleSet,
     RawRuleSetLoader, RawSelector, RawServerRoot, ScalarOrList,
 };
-use crate::validation::v2::validate_version;
 use crate::validation::{
-    finish_client_tun_targets, validate_client, validate_client_prepared,
-    validate_direct_domain_resolver, validate_finished_client_endpoints, validate_route_target,
-    validate_server, validate_server_prepared, validate_tag,
+    finish_client_tun_targets, validate_client_prepared, validate_direct_domain_resolver,
+    validate_finished_client_endpoints, validate_route_target, validate_server_prepared,
+    validate_tag,
 };
 
 const DEFAULT_RULE_SET_CACHE_DIR: &str = "./rule-set-cache";
@@ -612,54 +611,6 @@ impl ServerV2Resources {
     }
 }
 
-/// Version-dispatched client preparation result.
-pub enum PreparedClientConfig {
-    V1(Box<ValidatedClientConfig>),
-    V2(Box<PreparedClientV2>),
-}
-
-impl PreparedClientConfig {
-    pub const fn schema_version(&self) -> SchemaVersion {
-        match self {
-            Self::V1(_) => SchemaVersion::V1,
-            Self::V2(_) => SchemaVersion::V2,
-        }
-    }
-}
-
-impl std::fmt::Debug for PreparedClientConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::V1(_) => "PreparedClientConfig::V1([redacted])",
-            Self::V2(_) => "PreparedClientConfig::V2([redacted])",
-        })
-    }
-}
-
-/// Version-dispatched server preparation result.
-pub enum PreparedServerConfig {
-    V1(Box<ValidatedServerConfig>),
-    V2(Box<PreparedServerV2>),
-}
-
-impl PreparedServerConfig {
-    pub const fn schema_version(&self) -> SchemaVersion {
-        match self {
-            Self::V1(_) => SchemaVersion::V1,
-            Self::V2(_) => SchemaVersion::V2,
-        }
-    }
-}
-
-impl std::fmt::Debug for PreparedServerConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::V1(_) => "PreparedServerConfig::V1([redacted])",
-            Self::V2(_) => "PreparedServerConfig::V2([redacted])",
-        })
-    }
-}
-
 /// Closed future returned by a client V2 resource materializer.
 pub type ClientV2MaterializeFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ClientV2Resources, ConfigError>> + Send + 'a>>;
@@ -959,58 +910,30 @@ impl PreparedServerV2 {
     }
 }
 
-/// Reads a client configuration once and dispatches by its closed schema version.
-///
-/// V1 returns the established fully validated model. V2 returns a side-effect-free
-/// preparation that still requires explicit resource materialization.
-pub fn prepare_client(path: impl AsRef<Path>) -> Result<PreparedClientConfig, ConfigError> {
+/// Reads and prepares a client schema-v2 config without external I/O.
+pub fn prepare_client(path: impl AsRef<Path>) -> Result<PreparedClientV2, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawClientRoot = parse_toml(&source)?;
-    if raw.schema_version == 2 {
-        let compatibility: RawClientRoot = parse_toml(&source)?;
-        prepare_client_inner(raw, compatibility, &source)
-            .map(Box::new)
-            .map(PreparedClientConfig::V2)
-    } else {
-        validate_client(raw, &source)
-            .map(Box::new)
-            .map(PreparedClientConfig::V1)
-    }
+    let raw: RawClientRoot = parse_v2_toml(&source)?;
+    let validation_raw: RawClientRoot = parse_v2_toml(&source)?;
+    prepare_client_inner(raw, validation_raw, &source)
 }
 
-/// Reads a server configuration once and dispatches by its closed schema version.
-///
-/// V1 returns the established fully validated model. V2 returns a side-effect-free
-/// preparation that still requires explicit resource materialization.
-pub fn prepare_server(path: impl AsRef<Path>) -> Result<PreparedServerConfig, ConfigError> {
+/// Reads and prepares a server schema-v2 config without external I/O.
+pub fn prepare_server(path: impl AsRef<Path>) -> Result<PreparedServerV2, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawServerRoot = parse_toml(&source)?;
-    if raw.schema_version == 2 {
-        let compatibility: RawServerRoot = parse_toml(&source)?;
-        prepare_server_inner(raw, compatibility, &source)
-            .map(Box::new)
-            .map(PreparedServerConfig::V2)
-    } else {
-        validate_server(raw, &source)
-            .map(Box::new)
-            .map(PreparedServerConfig::V1)
-    }
+    let raw: RawServerRoot = parse_v2_toml(&source)?;
+    let validation_raw: RawServerRoot = parse_v2_toml(&source)?;
+    prepare_server_inner(raw, validation_raw, &source)
 }
 
 /// Reads and prepares a client V2 config without DNS, download, socket, or listener I/O.
 pub fn prepare_client_v2(path: impl AsRef<Path>) -> Result<PreparedClientV2, ConfigError> {
-    let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawClientRoot = parse_toml(&source)?;
-    let compatibility: RawClientRoot = parse_toml(&source)?;
-    prepare_client_inner(raw, compatibility, &source)
+    prepare_client(path)
 }
 
 /// Reads and prepares a server V2 config without DNS, download, socket, or listener I/O.
 pub fn prepare_server_v2(path: impl AsRef<Path>) -> Result<PreparedServerV2, ConfigError> {
-    let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawServerRoot = parse_toml(&source)?;
-    let compatibility: RawServerRoot = parse_toml(&source)?;
-    prepare_server_inner(raw, compatibility, &source)
+    prepare_server(path)
 }
 
 /// Materializes client V2 resources through an injected context, then finishes synchronously.
@@ -1552,19 +1475,15 @@ fn prepared_dependency_dns_servers(
 
 fn prepare_client_inner(
     raw: RawClientRoot,
-    mut compatibility: RawClientRoot,
+    mut validation_raw: RawClientRoot,
     source: &str,
 ) -> Result<PreparedClientV2, ConfigError> {
-    require_v2(raw.schema_version)?;
     let dns = prepare_dns(raw.dns.as_ref())?;
-    let outbound_endpoints = match raw.outbounds.as_deref() {
-        Some(outbounds) => prepare_client_outbounds(outbounds, raw.dns.as_ref(), dns.strategy)?,
-        None => prepare_compatibility_client_outbound(
-            raw.client.as_ref(),
-            raw.dns.as_ref(),
-            dns.strategy,
-        )?,
-    };
+    let outbound_endpoints = prepare_client_outbounds(
+        raw.outbounds.as_deref().unwrap_or(&[]),
+        raw.dns.as_ref(),
+        dns.strategy,
+    )?;
     let outbound_tags = raw
         .outbounds
         .as_deref()
@@ -1620,9 +1539,9 @@ fn prepare_client_inner(
         &direct_domain_resolvers,
         &common.rule_sets,
     )?;
-    sanitize_client(&mut compatibility);
+    sanitize_client(&mut validation_raw);
     let validation = validate_client_prepared(
-        compatibility,
+        validation_raw,
         source,
         &rule_set_tags,
         &dependency_egress.tags,
@@ -1656,10 +1575,9 @@ fn prepare_client_inner(
 
 fn prepare_server_inner(
     raw: RawServerRoot,
-    mut compatibility: RawServerRoot,
+    mut validation_raw: RawServerRoot,
     source: &str,
 ) -> Result<PreparedServerV2, ConfigError> {
-    require_v2(raw.schema_version)?;
     let dns = prepare_dns(raw.dns.as_ref())?;
     let outbound_tags = raw
         .outbounds
@@ -1713,9 +1631,9 @@ fn prepare_server_inner(
         &direct_domain_resolvers,
         &common.rule_sets,
     )?;
-    sanitize_server(&mut compatibility);
+    sanitize_server(&mut validation_raw);
     let validation = validate_server_prepared(
-        compatibility,
+        validation_raw,
         source,
         &rule_set_tags,
         &dependency_egress.tags,
@@ -1742,13 +1660,6 @@ fn prepare_server_inner(
         egress_domain_capabilities,
         dependency_order: common.dependency_order,
     })
-}
-
-fn require_v2(version: u32) -> Result<(), ConfigError> {
-    match validate_version(version)? {
-        SchemaVersion::V2 => Ok(()),
-        SchemaVersion::V1 => Err(ConfigError::semantic(ConfigField::SchemaVersion)),
-    }
 }
 
 struct PreparedDnsDraft {
@@ -1893,32 +1804,6 @@ fn prepare_server_direct_domain_resolvers(
             .map(Some)
         })
         .collect()
-}
-
-fn prepare_compatibility_client_outbound(
-    client: Option<&crate::raw::RawClient>,
-    dns: Option<&RawDns>,
-    default_strategy: Option<DnsStrategy>,
-) -> Result<Vec<Option<DialEndpoint>>, ConfigError> {
-    let Some(client) = client else {
-        return Ok(Vec::new());
-    };
-    let servers = dns.and_then(|dns| dns.servers.as_deref()).unwrap_or(&[]);
-    let mut endpoints = Vec::new();
-    endpoints
-        .try_reserve_exact(1)
-        .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-    endpoints.push(Some(parse_endpoint(
-        &client.server,
-        None,
-        None,
-        default_strategy.unwrap_or(DnsStrategy::PreferIpv4),
-        servers,
-        ConfigField::ClientServer,
-        ConfigField::OutboundsDomainResolver,
-        ConfigField::OutboundsDomainStrategy,
-    )?));
-    Ok(endpoints)
 }
 
 fn parse_dns_endpoint(

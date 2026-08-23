@@ -45,11 +45,11 @@ pub use model::{
 };
 pub use prepared::{
     ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,
-    CompiledRuleSetResource, DialEndpoint, PreparedClientConfig, PreparedClientOutboundDescriptor,
+    CompiledRuleSetResource, DialEndpoint, PreparedClientOutboundDescriptor,
     PreparedClientOutboundKind, PreparedClientV2, PreparedDependencyNode, PreparedDnsAction,
     PreparedDnsEndpoint, PreparedDnsEndpointMode, PreparedDnsRule, PreparedDnsServerDescriptor,
     PreparedEgressRef, PreparedFixedEndpointDescriptor, PreparedFixedEndpointTarget,
-    PreparedRouteRuleSets, PreparedRuleSet, PreparedRuleSetDownloadMode, PreparedServerConfig,
+    PreparedRouteRuleSets, PreparedRuleSet, PreparedRuleSetDownloadMode,
     PreparedServerOutboundDescriptor, PreparedServerV2, ResolvedDnsEndpoint,
     ResolvedOutboundEndpoint, RuleSetLoaderConfig, ServerV2MaterializeContext,
     ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2,

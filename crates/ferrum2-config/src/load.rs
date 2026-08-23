@@ -9,19 +9,24 @@ use crate::MAX_CONFIG_BYTES;
 use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
 use crate::model::{ValidatedClientConfig, ValidatedServerConfig};
 use crate::raw::{RawClientRoot, RawServerRoot};
-use crate::validation::{validate_client, validate_server};
+use crate::validation::{validate_client, validate_server, validate_version};
+
+#[derive(Deserialize)]
+struct RawSchemaRoot {
+    schema_version: Option<u32>,
+}
 
 /// Reads and fully validates a client configuration without creating runtime resources.
 pub fn load_client(path: impl AsRef<Path>) -> Result<ValidatedClientConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawClientRoot = parse_toml(&source)?;
+    let raw: RawClientRoot = parse_v2_toml(&source)?;
     validate_client(raw, &source)
 }
 
 /// Reads and fully validates a server configuration without creating runtime resources.
 pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawServerRoot = parse_toml(&source)?;
+    let raw: RawServerRoot = parse_v2_toml(&source)?;
     validate_server(raw, &source)
 }
 
@@ -57,4 +62,13 @@ pub(super) fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, Config
 pub(super) fn parse_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError> {
     toml::from_str(source)
         .map_err(|_| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))
+}
+
+pub(super) fn parse_v2_toml<'a, T: Deserialize<'a>>(source: &'a str) -> Result<T, ConfigError> {
+    let root: RawSchemaRoot = parse_toml(source)?;
+    let version = root
+        .schema_version
+        .ok_or_else(|| ConfigError::semantic(ConfigField::SchemaVersion))?;
+    validate_version(version)?;
+    parse_toml(source)
 }

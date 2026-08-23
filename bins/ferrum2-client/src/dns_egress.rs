@@ -2214,7 +2214,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             Arc::new(Metrics::new()),
             None,
             Some(observed),
-            ClientRunResources::legacy(dns_specs),
+            ClientRunResources::test_unmaterialized(dns_specs),
         ));
         let (context, resolver) = resolver.await.expect("observed DNS resolver");
         let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))

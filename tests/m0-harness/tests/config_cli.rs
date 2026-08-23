@@ -10,9 +10,9 @@ use local_support::{
     unused_loopback, write_client_config, write_server_config, write_udp_client_config,
 };
 
-const CLIENT_BASE: &str = "schema_version = 1\n[client]\nlisten = \"127.0.0.1:1080\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const CLIENT_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
-const SERVER_BASE: &str = "schema_version = 1\n[server]\nlisten = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const SERVER_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:8388\"\noutbound = \"direct\"\n[[outbounds]]\ntag = \"direct\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 const PAIRED_PORT_ATTEMPTS: usize = 256;
 const STARTUP_BIND_DIAGNOSTIC: &str =
@@ -342,7 +342,7 @@ fn assert_tun_check_is_offline_valid(label: &str, source: &str) {
 }
 
 fn tagged_client(inbounds: &[SocketAddrV4], servers: &[SocketAddrV4]) -> String {
-    let mut source = "schema_version = 1\n".to_owned();
+    let mut source = "schema_version = 2\n".to_owned();
     for (index, listen) in inbounds.iter().enumerate() {
         source.push_str(&format!(
             "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"{listen}\"\noutbound = \"o{index}\"\n"
@@ -627,7 +627,7 @@ fn direct_check_config_is_offline_and_runtime_reaches_bind() {
             std::fs::read_to_string(&direct)
                 .unwrap()
                 .replacen("schema_version = 2", "schema_version = 1", 1),
-            b"error[config.semantic] outbounds.type: configuration value is invalid\n".as_slice(),
+            b"error[config.semantic] schema_version: configuration value is invalid\n".as_slice(),
         ),
         (
             "server-direct",
@@ -738,20 +738,20 @@ max_redirects = 0
     assert_eq!(successful.stdout, b"configuration valid\n");
     assert!(successful.stderr.is_empty());
 
-    let v1 = write_client_config(directory.path(), listen, unused_loopback(), None)
-        .expect("V1 materialized-check config");
-    let v1_successful = run_binary(
+    let baseline = write_client_config(directory.path(), listen, unused_loopback(), None)
+        .expect("materialized-check config");
+    let baseline_successful = run_binary(
         "ferrum2-client",
         &[
             "--config",
-            v1.to_str().expect("UTF-8 V1 path"),
+            baseline.to_str().expect("UTF-8 config path"),
             "--check-config",
             "--materialize",
         ],
     );
-    assert_eq!(v1_successful.status.code(), Some(0));
-    assert_eq!(v1_successful.stdout, b"configuration valid\n");
-    assert!(v1_successful.stderr.is_empty());
+    assert_eq!(baseline_successful.status.code(), Some(0));
+    assert_eq!(baseline_successful.stdout, b"configuration valid\n");
+    assert!(baseline_successful.stderr.is_empty());
 }
 
 #[test]
@@ -830,15 +830,12 @@ fn schema_v2_check_succeeds_and_occupied_runtime_endpoints_fail_closed() {
         (
             "ferrum2-client",
             CLIENT_BASE
-                .replacen("schema_version = 1", "schema_version = 2", 1)
                 .replace("127.0.0.1:1080", &client_address.to_string())
                 .replace("127.0.0.1:8388", &server_address.to_string()),
         ),
         (
             "ferrum2-server",
-            SERVER_BASE
-                .replacen("schema_version = 1", "schema_version = 2", 1)
-                .replace("127.0.0.1:8388", &server_address.to_string()),
+            SERVER_BASE.replace("127.0.0.1:8388", &server_address.to_string()),
         ),
     ];
     for (binary, source) in cases {
@@ -858,29 +855,6 @@ fn schema_v2_check_succeeds_and_occupied_runtime_endpoints_fail_closed() {
 
         let run = run_binary(binary, &["--config", path.to_str().expect("UTF-8 path")]);
         let _ = assert_startup_bind_failure(&run, binary, &path, binary);
-    }
-
-    let migration_path = directory.path().join("client-v1-routed-udp.toml");
-    let migration = routed_tagged(tagged_client(
-        &[client_address],
-        &[server_address, unused_loopback()],
-    )) + "[udp]\nenabled = true\n";
-    std::fs::write(&migration_path, migration).expect("migration config");
-    for arguments in [
-        vec![
-            "--config",
-            migration_path.to_str().expect("UTF-8 path"),
-            "--check-config",
-        ],
-        vec!["--config", migration_path.to_str().expect("UTF-8 path")],
-    ] {
-        let output = run_binary("ferrum2-client", &arguments);
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        assert_eq!(
-            output.stderr,
-            b"error[config.semantic] schema_version: configuration value is invalid\n"
-        );
     }
 
     for listener in [client_listener, server_listener] {
@@ -904,8 +878,8 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
         (
             "client missing schema",
             "ferrum2-client",
-            CLIENT_BASE.replacen("schema_version = 1\n", "", 1),
-            None,
+            CLIENT_BASE.replacen("schema_version = 2\n", "", 1),
+            Some("schema_version"),
         ),
         (
             "client unknown field",
@@ -927,7 +901,7 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
             "client endpoint collision",
             "ferrum2-client",
             CLIENT_BASE.replacen("127.0.0.1:1080", "127.0.0.1:8388", 1),
-            Some("client.server"),
+            Some("outbounds.server"),
         ),
         (
             "client unknown method",
@@ -970,7 +944,11 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
         (
             "server wrong role",
             "ferrum2-server",
-            SERVER_BASE.replacen("[server]", "[client]", 1),
+            SERVER_BASE.replacen(
+                "[[inbounds]]",
+                "[server]\nlisten = \"127.0.0.1:8388\"\n[[inbounds]]",
+                1,
+            ),
             None,
         ),
         (
@@ -1224,7 +1202,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     assert_invalid(
         "ferrum2-client",
         &invalid,
-        "error[config.semantic] selectors.outbounds: configuration value is invalid\n",
+        "error[config.dependency_cycle] config.dependency_cycle: the configuration dependency graph contains a cycle: selector[0] -> selector[0]\n",
         cycle_sentinel,
     );
     for (name, source, field) in [

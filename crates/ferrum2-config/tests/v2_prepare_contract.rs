@@ -11,13 +11,12 @@ use ferrum2_config::{
     ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,
     CompiledRuleSetResource, ConfigError, ConfigErrorKind, ConfigField, DialEndpoint,
     DirectDomainResolver, DnsEndpointMode, DnsIngressId, DnsQueryType, DnsStrategy,
-    PreparedClientConfig, PreparedClientOutboundKind, PreparedDependencyNode, PreparedDnsAction,
-    PreparedDnsEndpointMode, PreparedEgressRef, PreparedFixedEndpointTarget,
-    PreparedRuleSetDownloadMode, PreparedServerConfig, ResolvedDnsEndpoint,
-    ResolvedOutboundEndpoint, ResolverRef, RouteAction, SchemaVersion, ServerV2MaterializeContext,
-    ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2, load_client,
-    materialize_client_v2, materialize_server_v2, prepare_client, prepare_client_v2,
-    prepare_server, prepare_server_v2,
+    PreparedClientOutboundKind, PreparedDependencyNode, PreparedDnsAction, PreparedDnsEndpointMode,
+    PreparedEgressRef, PreparedFixedEndpointTarget, PreparedRuleSetDownloadMode,
+    ResolvedDnsEndpoint, ResolvedOutboundEndpoint, ResolverRef, RouteAction, SchemaVersion,
+    ServerV2MaterializeContext, ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2,
+    finish_server_v2, load_client, materialize_client_v2, materialize_server_v2, prepare_client,
+    prepare_client_v2, prepare_server, prepare_server_v2,
 };
 use ferrum2_core::{CanonicalDomain, DomainName, TargetAddr};
 use ferrum2_rule::{
@@ -253,29 +252,6 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
 
-const CLIENT_V1: &str = r#"
-schema_version = 1
-
-[client]
-listen = "127.0.0.1:1080"
-server = "127.0.0.1:8388"
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
-"#;
-
-const SERVER_V1: &str = r#"
-schema_version = 1
-
-[server]
-listen = "127.0.0.1:8388"
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
-"#;
-
 const CLIENT_V2_MINIMAL: &str = r#"
 schema_version = 2
 
@@ -332,36 +308,59 @@ fn valid_client_resources() -> ClientV2Resources {
 }
 
 #[test]
-fn unified_prepare_dispatches_v1_and_v2_without_binary_version_guessing() {
-    let client_v1 = TempConfig::new(CLIENT_V1);
-    let client = prepare_client(&client_v1.0).expect("dispatch client V1");
-    assert_eq!(client.schema_version(), SchemaVersion::V1);
-    assert!(matches!(client, PreparedClientConfig::V1(_)));
-
+fn unified_prepare_returns_schema_v2_prepared_types() {
     let client_v2 = TempConfig::new(CLIENT_V2_MINIMAL);
-    let client = prepare_client(&client_v2.0).expect("dispatch client V2");
-    assert_eq!(client.schema_version(), SchemaVersion::V2);
-    assert!(matches!(client, PreparedClientConfig::V2(_)));
-
-    let server_v1 = TempConfig::new(SERVER_V1);
-    let server = prepare_server(&server_v1.0).expect("dispatch server V1");
-    assert_eq!(server.schema_version(), SchemaVersion::V1);
-    assert!(matches!(server, PreparedServerConfig::V1(_)));
+    let client = prepare_client(&client_v2.0).expect("prepare client V2");
+    assert!(!client.has_tun());
 
     let server_v2 = TempConfig::new(SERVER_V2);
-    let server = prepare_server(&server_v2.0).expect("dispatch server V2");
-    assert_eq!(server.schema_version(), SchemaVersion::V2);
-    assert!(matches!(server, PreparedServerConfig::V2(_)));
+    let server = prepare_server(&server_v2.0).expect("prepare server V2");
+    assert_eq!(server.outbound_count(), 1);
+}
 
-    let invalid_source = CLIENT_V1.replace("127.0.0.1:1080", "private.invalid");
-    let invalid = TempConfig::new(&invalid_source);
-    let established = match load_client(&invalid.0) {
-        Ok(_) => panic!("invalid V1 client was accepted"),
+fn assert_schema_version_error<T>(result: Result<T, ConfigError>) {
+    let error = match result {
+        Ok(_) => panic!("unsupported schema produced a configuration"),
         Err(error) => error,
     };
-    let dispatched = prepare_client(&invalid.0).unwrap_err();
-    assert_eq!(dispatched, established);
-    assert!(!format!("{dispatched:?} {dispatched}").contains("private.invalid"));
+    assert_eq!(error.kind(), ConfigErrorKind::Semantic);
+    assert_eq!(error.field(), ConfigField::SchemaVersion);
+}
+
+fn assert_config_syntax_error<T>(result: Result<T, ConfigError>) {
+    let error = match result {
+        Ok(_) => panic!("legacy root shape produced a configuration"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ConfigErrorKind::Syntax);
+    assert_eq!(error.field(), ConfigField::Config);
+}
+
+#[test]
+fn load_and_prepare_reject_missing_and_unsupported_schema_versions() {
+    let client_sources = [
+        CLIENT_V2_MINIMAL.replacen("schema_version = 2", "schema_version = 1", 1),
+        CLIENT_V2_MINIMAL.replacen("schema_version = 2", "schema_version = 0", 1),
+        CLIENT_V2_MINIMAL.replacen("schema_version = 2", "schema_version = 3", 1),
+        CLIENT_V2_MINIMAL.replacen("schema_version = 2", "", 1),
+    ];
+    for source in client_sources {
+        let file = TempConfig::new(&source);
+        assert_schema_version_error(load_client(&file.0));
+        assert_schema_version_error(prepare_client(&file.0));
+    }
+
+    let server_sources = [
+        SERVER_V2.replacen("schema_version = 2", "schema_version = 1", 1),
+        SERVER_V2.replacen("schema_version = 2", "schema_version = 0", 1),
+        SERVER_V2.replacen("schema_version = 2", "schema_version = 3", 1),
+        SERVER_V2.replacen("schema_version = 2", "", 1),
+    ];
+    for source in server_sources {
+        let file = TempConfig::new(&source);
+        assert_schema_version_error(ferrum2_config::load_server(&file.0));
+        assert_schema_version_error(prepare_server(&file.0));
+    }
 }
 
 #[test]
@@ -539,10 +538,7 @@ server = "s{server}"
 #[test]
 fn async_materialize_facade_calls_context_once_and_short_circuits_failure() {
     let client_file = TempConfig::new(CLIENT_V2_MINIMAL);
-    let prepared = match prepare_client(&client_file.0).expect("prepare client facade") {
-        PreparedClientConfig::V2(prepared) => *prepared,
-        PreparedClientConfig::V1(_) => panic!("client V2 dispatched as V1"),
-    };
+    let prepared = prepare_client(&client_file.0).expect("prepare client");
     let success = CountingMaterializer::new(false);
     assert_eq!(
         success.calls(),
@@ -554,10 +550,7 @@ fn async_materialize_facade_calls_context_once_and_short_circuits_failure() {
     assert_eq!(config.schema_version, SchemaVersion::V2);
 
     let server_file = TempConfig::new(SERVER_V2);
-    let prepared = match prepare_server(&server_file.0).expect("prepare server facade") {
-        PreparedServerConfig::V2(prepared) => *prepared,
-        PreparedServerConfig::V1(_) => panic!("server V2 dispatched as V1"),
-    };
+    let prepared = prepare_server(&server_file.0).expect("prepare server");
     let failure = CountingMaterializer::new(true);
     assert_eq!(
         failure.calls(),
@@ -1192,7 +1185,7 @@ fn system_is_reserved_and_dependency_cycles_fail_before_materialization() {
 }
 
 #[test]
-fn schema_v1_rejects_new_fields_without_changing_the_v1_facade() {
+fn schema_v1_is_rejected_before_legacy_root_fields_are_parsed() {
     let source = r#"
 schema_version = 1
 [client]
@@ -1206,11 +1199,41 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let file = TempConfig::new(source);
     let error = match ferrum2_config::load_client(&file.0) {
-        Ok(_) => panic!("V1 accepted a V2-only field"),
+        Ok(_) => panic!("schema V1 produced a configuration"),
         Err(error) => error,
     };
     assert_eq!(error.kind(), ConfigErrorKind::Semantic);
-    assert_eq!(error.field(), ConfigField::RuleSetLoader);
+    assert_eq!(error.field(), ConfigField::SchemaVersion);
+}
+
+#[test]
+fn schema_v2_rejects_legacy_client_and_server_root_shapes() {
+    let client = TempConfig::new(
+        r#"
+schema_version = 2
+[client]
+listen = "127.0.0.1:1080"
+server = "127.0.0.1:8388"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#,
+    );
+    assert_config_syntax_error(load_client(&client.0));
+    assert_config_syntax_error(prepare_client(&client.0));
+
+    let server = TempConfig::new(
+        r#"
+schema_version = 2
+[server]
+listen = "127.0.0.1:8388"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#,
+    );
+    assert_config_syntax_error(ferrum2_config::load_server(&server.0));
+    assert_config_syntax_error(prepare_server(&server.0));
 }
 
 #[test]
@@ -1887,13 +1910,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     let file = TempConfig::new(&cycle_source);
     let materializer = CountingMaterializer::new(false);
     let error = match prepare_client(&file.0) {
-        Ok(PreparedClientConfig::V2(prepared)) => {
-            match block_on(materialize_client_v2(*prepared, &materializer)) {
-                Ok(_) => panic!("dependency cycle reached materialization"),
-                Err(error) => error,
-            }
-        }
-        Ok(PreparedClientConfig::V1(_)) => panic!("schema V2 dispatched as V1"),
+        Ok(prepared) => match block_on(materialize_client_v2(prepared, &materializer)) {
+            Ok(_) => panic!("dependency cycle reached materialization"),
+            Err(error) => error,
+        },
         Err(error) => error,
     };
     assert_eq!(error.field(), ConfigField::DnsDependencyCycle);

@@ -523,7 +523,7 @@ def write_tagged_config(
     listens: tuple[int, int],
     servers: tuple[int, int] | None,
     routed: bool = False,
-    schema_version: int = 1,
+    schema_version: int = 2,
 ) -> None:
     require((spec.role == "client") == (servers is not None), "tagged-config-role")
     inbounds = "\n\n".join(
@@ -637,12 +637,12 @@ def reserve_ports(count: int) -> tuple[int, ...]:
 
 def write_runtime_config(path: Path, spec: BinarySpec, listen: int, metrics: int, grace: int) -> None:
     role = (
-        f'[client]\nlisten = "127.0.0.1:{listen}"\nserver = "127.0.0.1:1"'
+        f'[[inbounds]]\ntag = "proxy"\nlisten = "127.0.0.1:{listen}"\noutbound = "proxy-out"\n\n[[outbounds]]\ntag = "proxy-out"\nserver = "127.0.0.1:1"'
         if spec.role == "client"
-        else f'[server]\nlisten = "127.0.0.1:{listen}"'
+        else f'[[inbounds]]\ntag = "proxy"\nlisten = "127.0.0.1:{listen}"\noutbound = "direct"\n\n[[outbounds]]\ntag = "direct"'
     )
     path.write_text(
-        f"""schema_version = 1
+        f"""schema_version = 2
 
 {role}
 

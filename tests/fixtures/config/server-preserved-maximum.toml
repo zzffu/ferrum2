@@ -1,7 +1,12 @@
-schema_version = 1
+schema_version = 2
 
-[server]
+[[inbounds]]
+tag = "proxy"
 listen = "127.0.0.1:8388"
+outbound = "direct"
+
+[[outbounds]]
+tag = "direct"
 
 [shadowsocks]
 method = "2022-blake3-chacha20-poly1305"

@@ -468,7 +468,7 @@ pub(in crate::run) fn client_test_config(
         CONFIG_ID.fetch_add(1, Ordering::SeqCst)
     ));
     let source = format!(
-        "schema_version = 1\n[client]\nlisten = \"{listen}\"\nserver = \"{server}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n"
+        "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{listen}\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"{server}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n"
     );
     std::fs::write(&path, source).expect("client test config");
     let config = ferrum2_config::load_client(&path).expect("validated client test config");
@@ -609,7 +609,7 @@ pub(in crate::run) fn spawn_test_client_with_random(
         Arc::new(Metrics::new()),
         Some(random),
         None,
-        ClientRunResources::legacy(dns_specs),
+        ClientRunResources::test_unmaterialized(dns_specs),
     ));
     (stop, task)
 }

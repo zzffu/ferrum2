@@ -1940,45 +1940,6 @@ final = "direct"
     }
 
     #[tokio::test]
-    async fn compatibility_proxy_v2_materializes_without_network_or_background_owner() {
-        let listen = reserve_address();
-        let server = reserve_address();
-        let file = TestConfig::new(|_| {
-            format!(
-                r#"schema_version = 2
-
-[client]
-listen = "{listen}"
-server = "{server}"
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
-"#
-            )
-        });
-        let prepared =
-            ferrum2_config::prepare_client_v2(&file.path).expect("prepare compatibility proxy V2");
-        let downloader = Arc::new(RecordingDownloader::failure());
-        let context = ClientV2MaterializeContext::with_downloader(
-            Arc::new(Metrics::new()),
-            downloader.clone(),
-        );
-
-        let materialized = materialize_prepared(prepared, &context)
-            .await
-            .expect("materialize compatibility proxy V2");
-        assert!(materialized.pending.is_none());
-        let config = materialized
-            .validate_only_shutdown()
-            .await
-            .expect("finish compatibility proxy V2");
-        assert!(downloader.seen().is_empty());
-        assert_eq!(config.outbounds.len(), 1);
-        assert!(context.take_pending().is_none());
-    }
-
-    #[tokio::test]
     async fn numeric_bootstrap_materializes_domain_dns_upstream_in_dependency_order() {
         let listen = reserve_address();
         let dns_listen = reserve_address();

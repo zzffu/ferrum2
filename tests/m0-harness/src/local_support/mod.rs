@@ -1091,7 +1091,7 @@ pub fn write_two_hop_client_config(
         .map(|address| format!("[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
     let config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          [[inbounds]]\ntag = \"socks\"\nlisten = \"{listen}\"\n{inbound_outbound}\
          [[outbounds]]\ntag = \"hop-a\"\nserver = \"{}\"\n\
          [[outbounds]]\ntag = \"hop-b\"\nserver = \"{}\"\nmethod = \"{}\"\npsk = \"{}\"\n\
@@ -1145,7 +1145,7 @@ pub fn write_tagged_client_config(
         String::new()
     };
     let config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          \n\
          [[inbounds]]\n\
          tag = \"in-a\"\n\
@@ -1195,7 +1195,7 @@ pub fn write_tagged_server_config(
         ""
     };
     let config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          \n\
          [[inbounds]]\n\
          tag = \"in-a\"\n\
@@ -1325,10 +1325,15 @@ pub fn write_client_config_with_psk(
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
     let config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          \n\
-         [client]\n\
+         [[inbounds]]\n\
+         tag = \"proxy\"\n\
          listen = \"{listen}\"\n\
+         outbound = \"proxy-out\"\n\
+         \n\
+         [[outbounds]]\n\
+         tag = \"proxy-out\"\n\
          server = \"{server}\"\n\
          \n\
          [shadowsocks]\n\
@@ -1392,10 +1397,15 @@ fn write_server_config_variant(
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
     let config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          \n\
-         [server]\n\
+         [[inbounds]]\n\
+         tag = \"proxy\"\n\
          listen = \"{listen}\"\n\
+         outbound = \"direct\"\n\
+         \n\
+         [[outbounds]]\n\
+         tag = \"direct\"\n\
          \n\
          [shadowsocks]\n\
          method = \"2022-blake3-aes-128-gcm\"\n\

@@ -168,15 +168,7 @@ pub enum DirectDomainResolver {
 /// Explicit supported configuration versions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
-    V1,
     V2,
-}
-
-impl SchemaVersion {
-    /// Returns whether this model requires the M14 composition path.
-    pub const fn is_v2(self) -> bool {
-        matches!(self, Self::V2)
-    }
 }
 
 /// Closed protocols recognized by ordinary route sniffing.

@@ -803,21 +803,6 @@ fn write_cleanup_diagnostic(
     formatter.write_str("}")
 }
 
-pub(crate) fn run(config: ValidatedClientConfig) -> Result<(), RunError> {
-    let dns_specs = config
-        .dns
-        .as_ref()
-        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
-    let subscriber = json_subscriber(std::io::stderr, log_level(config.logging.level));
-    tracing::subscriber::set_global_default(subscriber)
-        .map_err(|_| RunError::StartupObservability)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(run_async(config, dns_specs))
-}
-
 /// Fully materializes a prepared schema-v2 client before any listener or TUN
 /// root is allowed to prepare. The returned process owns the bootstrap DNS,
 /// RuleSet refresh, and egress bridge lifecycle for its entire run.
@@ -892,7 +877,8 @@ struct ClientRunResources {
 }
 
 impl ClientRunResources {
-    const fn legacy(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
+    #[cfg(test)]
+    const fn test_unmaterialized(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
         Self {
             materialization_root: None,
             materialized_cache: None,
@@ -900,23 +886,6 @@ impl ClientRunResources {
             dns_specs,
         }
     }
-}
-
-async fn run_async(
-    config: ValidatedClientConfig,
-    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
-) -> Result<(), RunError> {
-    run_with_registry_and_metrics_inner(
-        config,
-        OwnerRegistry::new(),
-        shutdown_signal(),
-        Arc::new(Metrics::new()),
-        None,
-        #[cfg(test)]
-        None,
-        ClientRunResources::legacy(dns_specs),
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -953,7 +922,7 @@ where
         None,
         #[cfg(test)]
         None,
-        ClientRunResources::legacy(dns_specs),
+        ClientRunResources::test_unmaterialized(dns_specs),
     )
     .await
 }

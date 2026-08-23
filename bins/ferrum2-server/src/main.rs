@@ -6,7 +6,7 @@ mod run;
 use std::process::ExitCode;
 
 use clap::Parser as _;
-use ferrum2_config::{PreparedServerConfig, prepare_server};
+use ferrum2_config::prepare_server;
 
 use crate::cli::Cli;
 
@@ -27,21 +27,17 @@ fn main() -> ExitCode {
         }
     };
     if cli.check_config {
-        if cli.materialize
-            && let PreparedServerConfig::V2(prepared) = prepared
-            && let Err(error) = run::materialize_only(*prepared)
-        {
-            eprintln!("{error}");
-            return ExitCode::from(2);
+        if cli.materialize {
+            if let Err(error) = run::materialize_only(prepared) {
+                eprintln!("{error}");
+                return ExitCode::from(2);
+            }
         }
         println!("configuration valid");
         return ExitCode::SUCCESS;
     }
 
-    let result = match prepared {
-        PreparedServerConfig::V1(config) => run::run(*config),
-        PreparedServerConfig::V2(prepared) => run::run_prepared(*prepared),
-    };
+    let result = run::run_prepared(prepared);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
