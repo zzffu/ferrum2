@@ -1,8 +1,10 @@
 param(
     [Parameter(Mandatory = $true)]
     # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
-    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
     [string]$Mode,
+    [ValidateSet(10, 100, 1000)]
+    [int]$NetworkResetCycles = 10,
     [ValidateSet(10, 100, 1000)]
     [int]$RestartCycles = 10,
     [string]$WintunZip,
@@ -24,7 +26,8 @@ $tcp08ClockOriginUtc = [DateTime]::UtcNow.ToString("o")
 $tcp08ClockOriginTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
 $controllerStartedUtc = $tcp08ClockOriginUtc
 $m17Modes = @(
-    "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
+    "network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy",
+    "scheduler-ring-full"
 )
 $expectedHyperVVmName = "Windows 10 MSIX packaging environment"
 $expectedHyperVVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
@@ -35,6 +38,9 @@ if ($Mode -in $m17Modes -and [string]::IsNullOrWhiteSpace($CandidateTestDirector
     throw "M17 qualification requires host-built CandidateTestDirectory artifacts"
 }
 
+if ($Mode -ne "network-reset" -and $PSBoundParameters.ContainsKey("NetworkResetCycles")) {
+    throw "NetworkResetCycles is valid only with network-reset mode"
+}
 if ($Mode -ne "restart-stress" -and $PSBoundParameters.ContainsKey("RestartCycles")) {
     throw "RestartCycles is valid only with restart-stress mode"
 }
@@ -168,6 +174,8 @@ $failureConfig = Join-Path $work "client-failure.toml"
 $addressJournal = Join-Path $work "owned-target-addresses.txt"
 $dllJournal = Join-Path $work "owned-wintun-dll.txt"
 $m17NetworkMutationJournal = Join-Path $work "m17-network-mutations"
+$m17NetworkResetProbeAddress = "203.0.113.254"
+$m17NetworkResetProbePrefix = "$m17NetworkResetProbeAddress/32"
 $m17UdpFirewallRuleName = "Ferrum2-M17-UDP-$runIdentity"
 $controllerProgram = [IO.Path]::GetFullPath((Get-Process -Id $PID -ErrorAction Stop).Path)
 $runIdentityJournalRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "Ferrum2\ControllerRunIdentities"
@@ -299,7 +307,7 @@ function Write-RunIdentityJournal {
     $siblingPath = [IO.Path]::GetFullPath($script:siblingDll).TrimEnd('\', '/')
     $controllerPath = (Resolve-Path -LiteralPath $PSCommandPath).Path
     $serverRequired = $script:Mode -in @(
-        "tcp", "tcp08", "udp", "full", "performance", "restart-stress",
+        "tcp", "tcp08", "udp", "full", "performance", "network-reset", "restart-stress",
         "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )
     $document = [ordered]@{
@@ -350,7 +358,7 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
         $document.run_token -ceq $script:runIdentity) "run identity journal schema/token mismatch"
     Assert-True ($document.mode -in @(
         "lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance",
-        "network-feasibility", "managed-product", "hard-kill",
+        "network-feasibility", "managed-product", "hard-kill", "network-reset",
         "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )) "run identity journal mode is invalid"
     if ($document.mode -in $script:m17Modes) {
@@ -378,7 +386,7 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     Assert-True ($document.client_binary_explicit -is [bool] -and
         $document.server_binary_explicit -is [bool] -and $document.server_required -is [bool]) "run identity journal boolean field is invalid"
     $expectedServerRequired = $document.mode -in @(
-        "tcp", "tcp08", "udp", "full", "performance", "restart-stress",
+        "tcp", "tcp08", "udp", "full", "performance", "network-reset", "restart-stress",
         "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )
     Assert-True ($document.server_required -eq $expectedServerRequired) "run identity journal server requirement is inconsistent with mode"
@@ -479,6 +487,12 @@ function Get-ExactRunProcesses([string]$WorkPath, [string[]]$Executables = @($sc
     })
 }
 
+function Get-M17NetworkResetRouteIntentPath(
+    [string]$JournalPath = $script:m17NetworkMutationJournal
+) {
+    return Join-Path $JournalPath "network-reset-route.json"
+}
+
 function Write-M17DurableMutationIntent([string]$Path, [System.Collections.IDictionary]$Document) {
     if (-not (Test-Path -LiteralPath $script:m17NetworkMutationJournal -PathType Container)) {
         New-Item -ItemType Directory -Path $script:m17NetworkMutationJournal -ErrorAction Stop | Out-Null
@@ -502,7 +516,7 @@ function Read-M17MutationIntent(
     [string]$Schema,
     [string[]]$Properties,
     [string]$ExpectedWorkPath = $script:work,
-    [string[]]$ExpectedSourceMode = @()
+    [string[]]$ExpectedSourceMode = @("network-reset")
 ) {
     Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "M17 mutation intent is missing"
     Assert-NotReparsePoint $Path "M17 mutation intent"
@@ -548,6 +562,30 @@ function Read-M17UdpFirewallMutationIntent(
             $script:controllerProgram,
             [StringComparison]::OrdinalIgnoreCase
         )) "M17 UDP firewall mutation intent values are invalid"
+    return $document
+}
+
+function Read-M17NetworkResetRouteMutationIntent(
+    [string]$Path,
+    [string]$ExpectedWorkPath = $script:work,
+    [string]$JournalPath = $script:m17NetworkMutationJournal
+) {
+    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-network-reset-route-intent.v1" @(
+        "schema", "run_token", "source_mode", "work_path", "interface_index",
+        "destination_prefix", "next_hop", "route_metrics"
+    ) $ExpectedWorkPath @("network-reset")
+    $expectedPath = Get-M17NetworkResetRouteIntentPath $JournalPath
+    Assert-True ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($expectedPath), [StringComparison]::OrdinalIgnoreCase) -and
+        $document.interface_index -is [long] -and $document.interface_index -ge 1 -and
+        $document.interface_index -le [uint32]::MaxValue -and
+        $document.destination_prefix -ceq "203.0.113.254/32" -and
+        @($document.route_metrics).Count -eq 2 -and
+        @($document.route_metrics | Where-Object { $_ -isnot [long] -or $_ -notin @(4094, 4095) }).Count -eq 0 -and
+        @($document.route_metrics | Sort-Object -Unique).Count -eq 2) "M17 network-reset route mutation intent values are invalid"
+    $nextHop = $null
+    Assert-True ([Net.IPAddress]::TryParse([string]$document.next_hop, [ref]$nextHop) -and
+        $nextHop.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
+        -not $nextHop.Equals([Net.IPAddress]::Any)) "M17 network-reset route next hop is invalid"
     return $document
 }
 
@@ -629,7 +667,7 @@ function Restore-M17NetworkMutationJournal([string]$WorkPath, [string]$JournalPa
     if (-not (Test-Path -LiteralPath $canonicalJournal)) { return }
     Assert-NotReparsePoint $canonicalWork "M17 recovery work directory"
     Assert-NotReparsePoint $canonicalJournal "M17 network mutation journal directory"
-    $intentNames = @("udp-firewall.json")
+    $intentNames = @("network-reset-route.json", "udp-firewall.json")
     $allowedNames = @($intentNames + @($intentNames | ForEach-Object { "$_.pending" }))
     $entries = @(Get-ChildItem -LiteralPath $canonicalJournal -Force -ErrorAction Stop)
     Assert-True (@($entries | Where-Object { $_.PSIsContainer -or $allowedNames -notcontains $_.Name }).Count -eq 0) "M17 network mutation journal contains an unknown entry"
@@ -649,6 +687,19 @@ function Restore-M17NetworkMutationJournal([string]$WorkPath, [string]$JournalPa
         if ($owned.Count -eq 1) { $owned[0] | Remove-NetFirewallRule -ErrorAction Stop }
         Assert-True (@(Get-NetFirewallRule -Name ([string]$intent.rule_name) -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 journaled UDP firewall rule remained"
         Complete-M17MutationIntent $firewallPath
+    }
+    $routePath = Get-M17NetworkResetRouteIntentPath $canonicalJournal
+    if (Test-Path -LiteralPath $routePath) {
+        $intent = Read-M17NetworkResetRouteMutationIntent $routePath $canonicalWork $canonicalJournal
+        $owned = @(Get-NetRoute -InterfaceIndex ([int]$intent.interface_index) `
+            -DestinationPrefix ([string]$intent.destination_prefix) -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -ceq [string]$intent.next_hop -and [uint32]$_.RouteMetric -in @($intent.route_metrics) })
+        Assert-True ($owned.Count -le 1) "M17 journaled network-reset route ownership is ambiguous"
+        if ($owned.Count -eq 1) { Remove-NetRoute -InputObject $owned[0] -Confirm:$false -ErrorAction Stop }
+        Assert-True (@(Get-NetRoute -InterfaceIndex ([int]$intent.interface_index) `
+            -DestinationPrefix ([string]$intent.destination_prefix) -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -ceq [string]$intent.next_hop }).Count -eq 0) "M17 journaled network-reset route remained"
+        Complete-M17MutationIntent $routePath
     }
     Assert-True (@(Get-ChildItem -LiteralPath $canonicalJournal -Force -ErrorAction Stop).Count -eq 0) "M17 network mutation journal was not drained"
     Remove-Item -LiteralPath $canonicalJournal -Force -ErrorAction Stop
@@ -796,7 +847,7 @@ if ($Mode -eq "cleanup") {
     ) "M17 result artifact"
     $artifactResult = $artifactResultRaw | ConvertFrom-Json -Depth 12 -ErrorAction Stop
     Assert-ClosedJsonProperties $artifactResult @(
-        "schema", "status", "mode", "run_token", "restart_cycles", "approved_vm_name",
+        "schema", "status", "mode", "run_token", "network_reset_cycles", "restart_cycles", "approved_vm_name",
         "approved_vm_id", "approved_checkpoint_name", "approved_checkpoint_id", "guest_build",
         "identity_sha256", "candidate_sha", "client_sha256", "server_sha256", "controller_sha256",
         "wintun_zip_sha256", "wintun_dll_sha256", "test_binaries", "started_utc", "finished_utc",
@@ -5437,6 +5488,52 @@ $Additional
 
 function Get-M17ModeContract {
     switch ($script:Mode) {
+        "network-reset" {
+            return [ordered]@{
+                fixtures = @(
+                    New-M17TunFixture "network-reset-dual-strict" @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+strict_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+max_udp_mappings = 32
+udp_filtering = "address_dependent"
+"@ $true
+                )
+                witnesses = @(
+                    "ordinary_route_notifications_reset_network_runtime",
+                    "same_process_and_managed_adapter_identity",
+                    "managed_addresses_routes_and_dns_are_unchanged",
+                    "network_generation_and_reset_metrics_advance",
+                    "session_restart_and_full_rebuild_metrics_are_unchanged",
+                    "fixed_and_direct_dual_stack_underlay_binding",
+                    "multihoming_prefix_and_metric_selection",
+                    "route_interface_and_address_notifications",
+                    "foreign_route_state_survives_cleanup",
+                    "foreign_address_state_survives_cleanup",
+                    "dad_failure_rolls_back_in_reverse",
+                    "owned_state_damage_is_the_only_full_rebuild_trigger",
+                    "reset_retries_without_managed_teardown",
+                    "network_reset_hooks_accept_each_generation_once"
+                )
+                counters = @(
+                    "ferrum2_network_reset_total",
+                    "ferrum2_network_full_rebuild_total",
+                    "ferrum2_network_generation",
+                    "ferrum2_tun_session_restart_started_total",
+                    "ferrum2_tun_session_restart_succeeded_total",
+                    "ferrum2_tun_session_restart_failed_total",
+                    "ferrum2_tun_session_generation",
+                    "ferrum2_tun_strict_route_requested",
+                    "ferrum2_tun_strict_route_effective",
+                    "ferrum2_tun_strict_route_filter_install_total"
+                )
+                network_reset_cycles = $script:NetworkResetCycles
+            }
+        }
         "restart-stress" {
             return [ordered]@{
                 fixtures = @(
@@ -5638,7 +5735,7 @@ function Invoke-M17ContractPreflight {
     Assert-NotReparsePoint $artifactRoot "M17 artifact directory"
     foreach ($name in @(
         "identity-ledger.json", "m17-contract.json", "m17-result.json",
-        "external-cleanup.json", "external-cleanup.json.pending"
+        "external-cleanup.json", "external-cleanup.json.pending", "network-reset-cycles.jsonl"
     )) {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $artifactRoot $name))) "M17 artifact baseline is not absent: $name"
     }
@@ -5675,6 +5772,7 @@ function Invoke-M17ContractPreflight {
         schema = "ferrum2.windows-tun.m17-contract.v1"
         status = "preflight_pass"
         mode = $script:Mode
+        network_reset_cycles = if ($script:Mode -eq "network-reset") { $script:NetworkResetCycles } else { $null }
         restart_cycles = if ($script:Mode -eq "restart-stress") { $script:RestartCycles } else { $null }
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId
@@ -6075,6 +6173,58 @@ function Stop-M17Candidate([System.Diagnostics.Process]$Process, [string]$Label)
     Add-M17LiveRow "client-$Label-graceful-stop" ([ordered]@{ exit_code = 0; adapter = "absent" })
 }
 
+function Start-M17NetworkResetRouteMutation {
+    Assert-True ($script:Mode -ceq "network-reset") "M17 network-reset route mutation is mode restricted"
+    $underlay = Get-Ipv4DefaultUnderlay
+    $prefix = $script:m17NetworkResetProbePrefix
+    Assert-True (@(Get-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 network-reset notification route baseline is not absent"
+    $intentPath = Get-M17NetworkResetRouteIntentPath
+    Write-M17DurableMutationIntent $intentPath ([ordered]@{
+        schema = "ferrum2.windows-tun.m17-network-reset-route-intent.v1"
+        run_token = $script:runIdentity
+        source_mode = "network-reset"
+        work_path = [IO.Path]::GetFullPath($script:work)
+        interface_index = [uint32]$underlay.InterfaceIndex
+        destination_prefix = $prefix
+        next_hop = [string]$underlay.Row.Route.NextHop
+        route_metrics = @([uint32]4094, [uint32]4095)
+    })
+    [void](New-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $prefix `
+        -NextHop $underlay.Row.Route.NextHop -RouteMetric 4094 -PolicyStore ActiveStore -ErrorAction Stop)
+    $readback = @(Get-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $prefix `
+        -PolicyStore ActiveStore -ErrorAction Stop | Where-Object {
+            $_.NextHop -ceq [string]$underlay.Row.Route.NextHop -and [uint32]$_.RouteMetric -eq 4094
+        })
+    Assert-True ($readback.Count -eq 1) "M17 network-reset notification route create readback failed"
+    return [pscustomobject]@{
+        IntentPath = $intentPath
+        InterfaceIndex = [uint32]$underlay.InterfaceIndex
+        DestinationPrefix = $prefix
+        NextHop = [string]$underlay.Row.Route.NextHop
+        RouteMetric = [uint32]4094
+    }
+}
+
+function Set-M17NetworkResetRouteMetric([object]$Mutation, [uint32]$Metric) {
+    Assert-True ($script:Mode -ceq "network-reset" -and $Metric -in @(4094, 4095)) "M17 network-reset route metric is outside the closed mutation set"
+    $intent = Read-M17NetworkResetRouteMutationIntent ([string]$Mutation.IntentPath)
+    Assert-True ([uint32]$intent.interface_index -eq [uint32]$Mutation.InterfaceIndex -and
+        [string]$intent.destination_prefix -ceq [string]$Mutation.DestinationPrefix -and
+        [string]$intent.next_hop -ceq [string]$Mutation.NextHop -and
+        @($intent.route_metrics) -contains [long]$Metric) "M17 network-reset route no longer matches its durable intent"
+    $routes = @(Get-NetRoute -InterfaceIndex ([int]$Mutation.InterfaceIndex) `
+        -DestinationPrefix ([string]$Mutation.DestinationPrefix) -PolicyStore ActiveStore -ErrorAction Stop |
+        Where-Object { $_.NextHop -ceq [string]$Mutation.NextHop })
+    Assert-True ($routes.Count -eq 1 -and [uint32]$routes[0].RouteMetric -in @($intent.route_metrics) -and
+        [uint32]$routes[0].RouteMetric -ne $Metric) "M17 network-reset route mutation ownership changed"
+    Set-NetRoute -InputObject $routes[0] -RouteMetric $Metric -ErrorAction Stop | Out-Null
+    $readback = @(Get-NetRoute -InterfaceIndex ([int]$Mutation.InterfaceIndex) `
+        -DestinationPrefix ([string]$Mutation.DestinationPrefix) -PolicyStore ActiveStore -ErrorAction Stop |
+        Where-Object { $_.NextHop -ceq [string]$Mutation.NextHop -and [uint32]$_.RouteMetric -eq $Metric })
+    Assert-True ($readback.Count -eq 1) "M17 network-reset route metric readback failed"
+    $Mutation.RouteMetric = $Metric
+}
+
 function Get-M17ExactManagedRoute([int]$InterfaceIndex, [string]$Prefix) {
     $routes = @(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $Prefix `
         -PolicyStore ActiveStore -ErrorAction Stop)
@@ -6140,6 +6290,23 @@ function Invoke-M17CandidateTests {
     })
 
     $specs = switch ($script:Mode) {
+        "network-reset" { @(
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dual_stack_target_binding_selects_actual_target_and_rejects_tun"; Witnesses = @("fixed_and_direct_dual_stack_underlay_binding") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::target_binding_excludes_tun_and_orders_prefix_then_effective_metric"; Witnesses = @("multihoming_prefix_and_metric_selection") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::network_change_notifications_cover_each_callback_and_runtime_owned_events"; Witnesses = @("route_interface_and_address_notifications") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_route_cleanup_preserves_replacements_and_audits_every_delete"; Witnesses = @("foreign_route_state_survives_cleanup") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_address_readback_and_cleanup_are_exact_and_foreign_safe"; Witnesses = @("foreign_address_state_survives_cleanup") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dad_failure_rolls_back_in_reverse_and_cleanup_conflicts_do_not_short_circuit"; Witnesses = @("dad_failure_rolls_back_in_reverse") },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_state_health_reports_owned_route_dns_and_strict_route_damage"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::network_change_revalidates_underlay_and_owned_routes_before_shutdown"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::windows_catalog_is_family_aware_and_marks_the_exact_managed_tun"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::resolved_socket_binding_applies_interface_then_family_source"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::only_managed_damage_escalates_a_network_change_to_full_rebuild"; Witnesses = @("owned_state_damage_is_the_only_full_rebuild_trigger") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::reset_retries_transient_readback_errors_without_tearing_down_managed_state"; Witnesses = @("reset_retries_without_managed_teardown") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::network_reset_bridge_reports_retry_before_completion"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @() },
+            @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::client_network_hook_retries_failure_and_accepts_each_generation_once"; Witnesses = @("network_reset_hooks_accept_each_generation_once") }
+        ) }
         "restart-stress" { @(
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @("admission_quiesces_during_rebuild", "stale_flows_and_fragments_are_cleared") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @() },
@@ -6213,6 +6380,424 @@ function Invoke-M17CandidateTests {
             Add-M17Witness $witness "deterministic-candidate-test" "$($spec.Package):$($spec.Test)"
         }
     }
+}
+
+function Get-M17TextSha256([string]$Value) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $algorithm.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($Value))
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally { $algorithm.Dispose() }
+}
+
+function Get-M17ManagedPlaneIdentity([string]$Name) {
+    $adapters = @(Get-NetAdapter -Name $Name -IncludeHidden -ErrorAction Stop)
+    Assert-True ($adapters.Count -eq 1) "M17 managed adapter identity is not exact"
+    $adapter = $adapters[0]
+    $interfaceIndex = [uint32]$adapter.ifIndex
+    $interfaceLuid = [uint64]$adapter.NetLuid
+    $interfaceGuid = ([Guid]$adapter.InterfaceGuid).ToString("D").ToLowerInvariant()
+    Assert-True ($interfaceIndex -ne 0 -and $interfaceLuid -ne 0 -and
+        [string]$adapter.Status -ceq "Up") "M17 managed adapter is not active"
+    $addresses = @(
+        Get-NetIPAddress -InterfaceIndex $interfaceIndex -PolicyStore ActiveStore -ErrorAction Stop |
+            Sort-Object AddressFamily, IPAddress, PrefixLength |
+            ForEach-Object {
+                "$($_.AddressFamily)|$($_.IPAddress)|$($_.PrefixLength)|$($_.AddressState)|$($_.PrefixOrigin)|$($_.SuffixOrigin)|$([bool]$_.SkipAsSource)"
+            }
+    )
+    $routes = @(
+        Get-NetRoute -InterfaceIndex $interfaceIndex -PolicyStore ActiveStore -ErrorAction Stop |
+            Sort-Object AddressFamily, DestinationPrefix, NextHop, RouteMetric, Protocol |
+            ForEach-Object {
+                "$($_.AddressFamily)|$($_.DestinationPrefix)|$($_.NextHop)|$([uint32]$_.RouteMetric)|$($_.Protocol)|$([bool]$_.Publish)"
+            }
+    )
+    $dns = @(
+        Get-DnsClientServerAddress -InterfaceIndex $interfaceIndex -ErrorAction Stop |
+            Sort-Object AddressFamily |
+            ForEach-Object { "$($_.AddressFamily)|$(@($_.ServerAddresses) -join ',')" }
+    )
+    $interfaces = @(
+        Get-NetIPInterface -InterfaceIndex $interfaceIndex -PolicyStore ActiveStore -ErrorAction Stop |
+            Sort-Object AddressFamily |
+            ForEach-Object {
+                "$($_.AddressFamily)|$([uint32]$_.NlMtu)|$($_.ConnectionState)|$($_.Dhcp)|$($_.AutomaticMetric)|$([uint32]$_.InterfaceMetric)"
+            }
+    )
+    $document = [ordered]@{
+        adapter_name = [string]$adapter.Name
+        interface_guid = $interfaceGuid
+        interface_luid = $interfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)
+        interface_index = $interfaceIndex
+        interface_description = [string]$adapter.InterfaceDescription
+        addresses = $addresses
+        routes = $routes
+        dns = $dns
+        interfaces = $interfaces
+    }
+    $canonical = $document | ConvertTo-Json -Compress -Depth 6
+    return [pscustomobject]@{
+        Document = $document
+        Canonical = $canonical
+        Sha256 = Get-M17TextSha256 $canonical
+        InterfaceGuid = $interfaceGuid
+        InterfaceLuid = $interfaceLuid
+        InterfaceIndex = $interfaceIndex
+    }
+}
+
+function Get-M17MetricLabelSetValue(
+    [string]$Metrics,
+    [string]$Name,
+    [System.Collections.IDictionary]$Labels,
+    [bool]$AllowAbsent = $false
+) {
+    $lookaheads = @($Labels.GetEnumerator() | ForEach-Object {
+        "(?=[^}`r`n]*$([regex]::Escape([string]$_.Key))=`"$([regex]::Escape([string]$_.Value))`"(?:,|}))"
+    }) -join ""
+    $pattern = "(?m)^$([regex]::Escape($Name))(?:_total)?\{$lookaheads[^}`r`n]*\} ([0-9]+(?:\.[0-9]+)?)$"
+    $matches = [regex]::Matches($Metrics, $pattern)
+    if ($matches.Count -eq 0 -and $AllowAbsent) { return 0.0 }
+    Assert-True ($matches.Count -eq 1) "missing or ambiguous M17 metric label set: $Name"
+    return [double]::Parse($matches[0].Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-M17NetworkResetMetricState([string]$Metrics) {
+    $reset = {
+        param([string]$Reason, [string]$Result)
+        Get-M17MetricLabelSetValue $Metrics "ferrum2_network_reset" ([ordered]@{
+            reason = $Reason
+            result = $Result
+        }) $true
+    }
+    return [pscustomobject]@{
+        ResetStarted = & $reset "network_change" "started"
+        ResetSucceeded = & $reset "network_change" "succeeded"
+        ResetFailed = & $reset "network_change" "failed"
+        RetryStarted = & $reset "retry" "started"
+        RetrySucceeded = & $reset "retry" "succeeded"
+        RetryFailed = & $reset "retry" "failed"
+        FullRebuild = Get-M17MetricValue $Metrics "ferrum2_network_full_rebuild" $true
+        NetworkGeneration = Get-M17MetricValue $Metrics "ferrum2_network_generation"
+        SessionGeneration = Get-M17MetricValue $Metrics "ferrum2_tun_session_generation"
+        SessionActive = Get-M17MetricValue $Metrics "ferrum2_tun_session_active"
+        SessionRestartStarted = Get-M17MetricValue $Metrics "ferrum2_tun_session_restart_started"
+        SessionRestartSucceeded = Get-M17MetricValue $Metrics "ferrum2_tun_session_restart_succeeded"
+        SessionRestartFailed = Get-M17MetricValue $Metrics "ferrum2_tun_session_restart_failed"
+        StrictRequested = Get-M17MetricValue $Metrics "ferrum2_tun_strict_route_requested"
+        StrictEffective = Get-M17MetricValue $Metrics "ferrum2_tun_strict_route_effective"
+        StrictInstallSucceeded = Get-M17LabeledMetricValue $Metrics "ferrum2_tun_strict_route_filter_install" "result" "success" $true
+        StrictInstallFailed = Get-M17LabeledMetricValue $Metrics "ferrum2_tun_strict_route_filter_install" "result" "failure" $true
+    }
+}
+
+function Wait-M17NetworkResetCycle(
+    [int]$MetricsPort,
+    [object]$Baseline,
+    [int]$Cycle,
+    [double]$ExpectedSessionGeneration,
+    [int]$TimeoutSeconds = 60
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $state = $null
+    do {
+        $metrics = Get-Metrics $MetricsPort 2
+        $state = Get-M17NetworkResetMetricState $metrics
+        if ($state.ResetStarted -eq $Baseline.ResetStarted + $Cycle -and
+            $state.ResetSucceeded -eq $Baseline.ResetSucceeded + $Cycle -and
+            $state.ResetFailed -eq $Baseline.ResetFailed -and
+            $state.RetryStarted -eq $Baseline.RetryStarted -and
+            $state.RetrySucceeded -eq $Baseline.RetrySucceeded -and
+            $state.RetryFailed -eq $Baseline.RetryFailed -and
+            $state.FullRebuild -eq $Baseline.FullRebuild -and
+            $state.NetworkGeneration -eq $ExpectedSessionGeneration -and
+            $state.SessionGeneration -eq $ExpectedSessionGeneration -and
+            $state.SessionActive -eq 1 -and
+            $state.SessionRestartStarted -eq $Baseline.SessionRestartStarted -and
+            $state.SessionRestartSucceeded -eq $Baseline.SessionRestartSucceeded -and
+            $state.SessionRestartFailed -eq $Baseline.SessionRestartFailed -and
+            $state.StrictRequested -eq 1 -and $state.StrictEffective -eq 1 -and
+            $state.StrictInstallSucceeded -eq $Baseline.StrictInstallSucceeded -and
+            $state.StrictInstallFailed -eq $Baseline.StrictInstallFailed) {
+            # Hold beyond the runtime's 350 ms notification debounce before accepting one cycle.
+            Start-Sleep -Milliseconds 500
+            $stableMetrics = Get-Metrics $MetricsPort 2
+            $stable = Get-M17NetworkResetMetricState $stableMetrics
+            Assert-True ($stable.ResetStarted -eq $state.ResetStarted -and
+                $stable.ResetSucceeded -eq $state.ResetSucceeded -and
+                $stable.ResetFailed -eq $state.ResetFailed -and
+                $stable.RetryStarted -eq $state.RetryStarted -and
+                $stable.RetrySucceeded -eq $state.RetrySucceeded -and
+                $stable.RetryFailed -eq $state.RetryFailed -and
+                $stable.NetworkGeneration -eq $state.NetworkGeneration -and
+                $stable.SessionGeneration -eq $state.SessionGeneration -and
+                $stable.FullRebuild -eq $state.FullRebuild -and
+                $stable.SessionRestartStarted -eq $state.SessionRestartStarted -and
+                $stable.SessionRestartSucceeded -eq $state.SessionRestartSucceeded -and
+                $stable.SessionRestartFailed -eq $state.SessionRestartFailed -and
+                $stable.StrictRequested -eq $state.StrictRequested -and
+                $stable.StrictEffective -eq $state.StrictEffective -and
+                $stable.StrictInstallSucceeded -eq $state.StrictInstallSucceeded -and
+                $stable.StrictInstallFailed -eq $state.StrictInstallFailed) "M17 network-reset cycle did not stabilize"
+            return [pscustomobject]@{ Metrics = $stableMetrics; State = $stable }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "M17 network-reset cycle timeout: cycle=$Cycle expected_generation=$ExpectedSessionGeneration state=$($state | ConvertTo-Json -Compress)"
+}
+
+function Invoke-M17NetworkReset {
+    $udpAssociationLimit = 32
+    $script:m17MetricsPort = Get-UniqueTcpPort
+    $path = Join-Path $script:work "m17-network-reset.toml"
+    $physical = Get-Ipv4DefaultUnderlay
+    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverPort = Get-UniqueTcpPort
+    $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
+    $script:tcpResources.Add($dnsResponder)
+    $supportAddress = $script:capabilityIdentity.SupportAddress
+    Write-M17ClientConfig $path @"
+ipv4_address = "198.18.0.2/30"
+ipv6_address = "fd00::2/126"
+auto_route = true
+route_address = ["$supportAddress/32"]
+strict_route = true
+auto_dns = true
+ipv4_dns_address = "198.18.0.1"
+ipv6_dns_address = "fd00::1"
+max_udp_mappings = $udpAssociationLimit
+udp_filtering = "address_dependent"
+ready_timeout_ms = 15000
+"@ "direct" $script:m17MetricsPort @"
+[[outbounds]]
+tag = "network-probe"
+server = "$($script:m17NetworkResetProbeAddress):8388"
+[[selectors]]
+tag = "network-egress"
+outbounds = ["direct", "network-probe"]
+default = "direct"
+[route]
+final = "network-egress"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[dns]
+timeout_ms = 1000
+max_inflight = 8
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "127.0.0.1:$(Get-UniqueTcpPort)"
+[[dns.servers]]
+tag = "resolver"
+transport = "udp"
+address = "${resolverAddress}:$resolverPort"
+detour = "direct"
+[dns.route]
+final = "resolver"
+"@
+    Assert-M17Config $path "network-reset"
+    $script:activeProcess = Start-M17Candidate $path "network-reset"
+    $candidatePid = [uint32]$script:activeProcess.Id
+    $adapter = Wait-M17AdapterReady $script:adapterName $true $true @("198.18.0.1") @("fd00::1")
+    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
+    $initial = Wait-M17Session $script:m17MetricsPort 1 1
+    $managedBaseline = Get-M17ManagedPlaneIdentity $script:adapterName
+    Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-network-reset-before"))
+    Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-network-reset-before"))
+    Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false 0x1710
+    $initialDrain = Wait-M17FlowDrain $script:m17MetricsPort $initial.Generation $udpAssociationLimit
+    $baseline = Get-M17NetworkResetMetricState $initialDrain.Metrics
+    Assert-True ($baseline.StrictRequested -eq 1 -and $baseline.StrictEffective -eq 1 -and
+        $baseline.StrictInstallSucceeded -ge 1 -and $baseline.StrictInstallFailed -eq 0 -and
+        $baseline.SessionGeneration -eq $initial.Generation -and
+        $baseline.ResetStarted -eq $baseline.ResetSucceeded -and $baseline.ResetFailed -eq 0 -and
+        $baseline.RetryStarted -eq 0 -and $baseline.RetrySucceeded -eq 0 -and $baseline.RetryFailed -eq 0 -and
+        $baseline.FullRebuild -eq 0 -and $baseline.SessionRestartStarted -eq 0 -and
+        $baseline.SessionRestartSucceeded -eq 0 -and $baseline.SessionRestartFailed -eq 0) "M17 network-reset strict-route or lifecycle metric baseline is invalid"
+    $script:m17CounterBefore = Get-M17CounterSnapshot $initialDrain.Metrics
+    Add-M17LiveRow "network-reset-baseline" ([ordered]@{
+        process_id = $candidatePid
+        interface_guid = $managedBaseline.InterfaceGuid
+        interface_luid = $managedBaseline.InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)
+        interface_index = $managedBaseline.InterfaceIndex
+        managed_plane_sha256 = $managedBaseline.Sha256
+        managed_plane = $managedBaseline.Document
+        session_generation = $baseline.SessionGeneration
+        network_generation = $baseline.NetworkGeneration
+    })
+
+    $evidencePath = Join-Path $script:m17ArtifactRoot "network-reset-cycles.jsonl"
+    Assert-True (-not (Test-Path -LiteralPath $evidencePath)) "M17 network-reset cycle evidence baseline is not absent"
+    $stream = [IO.FileStream]::new($evidencePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+    $writer.NewLine = "`n"
+    $writer.AutoFlush = $true
+    $evidenceBytes = 0
+    $sampleStride = [Math]::Max(1, [int][Math]::Ceiling($script:NetworkResetCycles / 10.0))
+    $mutation = $null
+    $final = $null
+    try {
+        foreach ($cycle in 1..$script:NetworkResetCycles) {
+            if ($cycle -eq 1) {
+                $mutation = Start-M17NetworkResetRouteMutation
+                $mutationKind = "create"
+            } else {
+                $metric = if (($cycle % 2) -eq 0) { [uint32]4095 } else { [uint32]4094 }
+                Set-M17NetworkResetRouteMetric $mutation $metric
+                $mutationKind = "metric_toggle"
+            }
+            $expectedGeneration = $initial.Generation + $cycle
+            $final = Wait-M17NetworkResetCycle $script:m17MetricsPort $baseline $cycle $expectedGeneration
+            $script:activeProcess.Refresh()
+            Assert-True (-not $script:activeProcess.HasExited -and [uint32]$script:activeProcess.Id -eq $candidatePid) "M17 ordinary network reset replaced the client process"
+            $managed = Get-M17ManagedPlaneIdentity $script:adapterName
+            Assert-True ($managed.Canonical -ceq $managedBaseline.Canonical) "M17 ordinary network reset changed managed adapter/address/route/DNS state"
+            $healthSample = $cycle -eq 1 -or $cycle -eq $script:NetworkResetCycles -or ($cycle % $sampleStride) -eq 0
+            $payload = [Text.Encoding]::ASCII.GetBytes(("m17-network-reset-{0:D4}" -f $cycle))
+            Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex $payload
+            Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex $payload
+            if ($healthSample) { Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false ([uint16](0x1800 + ($cycle % 2048))) }
+            $drained = Wait-M17FlowDrain $script:m17MetricsPort $expectedGeneration $udpAssociationLimit
+            $state = Get-M17NetworkResetMetricState $drained.Metrics
+            Assert-True ($state.ResetStarted -eq $final.State.ResetStarted -and
+                $state.ResetSucceeded -eq $final.State.ResetSucceeded -and
+                $state.ResetFailed -eq $baseline.ResetFailed -and
+                $state.RetryStarted -eq $baseline.RetryStarted -and
+                $state.RetrySucceeded -eq $baseline.RetrySucceeded -and
+                $state.RetryFailed -eq $baseline.RetryFailed -and
+                $state.SessionGeneration -eq $expectedGeneration -and
+                $state.NetworkGeneration -eq $expectedGeneration -and
+                $state.FullRebuild -eq $baseline.FullRebuild -and
+                $state.SessionRestartStarted -eq $baseline.SessionRestartStarted -and
+                $state.SessionRestartSucceeded -eq $baseline.SessionRestartSucceeded -and
+                $state.SessionRestartFailed -eq $baseline.SessionRestartFailed -and
+                $state.StrictRequested -eq 1 -and $state.StrictEffective -eq 1 -and
+                $state.StrictInstallSucceeded -eq $baseline.StrictInstallSucceeded -and
+                $state.StrictInstallFailed -eq $baseline.StrictInstallFailed) "M17 post-reset health changed lifecycle state"
+            $row = [ordered]@{
+                cycle = $cycle
+                mutation = $mutationKind
+                route_metric = [uint32]$mutation.RouteMetric
+                process_id = $candidatePid
+                interface_guid = $managed.InterfaceGuid
+                interface_luid = $managed.InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)
+                interface_index = $managed.InterfaceIndex
+                managed_plane_sha256 = $managed.Sha256
+                session_generation = $state.SessionGeneration
+                network_generation = $state.NetworkGeneration
+                reset_started = $state.ResetStarted
+                reset_succeeded = $state.ResetSucceeded
+                reset_failed = $state.ResetFailed
+                session_restart_started = $state.SessionRestartStarted
+                full_rebuild = $state.FullRebuild
+                strict_route_effective = $state.StrictEffective
+            }
+            $line = $row | ConvertTo-Json -Compress -Depth 4
+            $lineBytes = [Text.UTF8Encoding]::new($false).GetByteCount($line) + 1
+            $evidenceBytes += $lineBytes
+            Assert-True ($evidenceBytes -le 1048576) "M17 network-reset cycle evidence exceeded its 1 MiB boundary"
+            $writer.WriteLine($line)
+        }
+    } finally { $writer.Dispose() }
+
+    $finalMetrics = Get-Metrics $script:m17MetricsPort 2
+    $finalState = Get-M17NetworkResetMetricState $finalMetrics
+    Assert-True ($finalState.ResetStarted -eq $baseline.ResetStarted + $script:NetworkResetCycles -and
+        $finalState.ResetSucceeded -eq $baseline.ResetSucceeded + $script:NetworkResetCycles -and
+        $finalState.ResetFailed -eq $baseline.ResetFailed -and
+        $finalState.RetryStarted -eq $baseline.RetryStarted -and
+        $finalState.RetrySucceeded -eq $baseline.RetrySucceeded -and
+        $finalState.RetryFailed -eq $baseline.RetryFailed -and
+        $finalState.SessionGeneration -eq $initial.Generation + $script:NetworkResetCycles -and
+        $finalState.NetworkGeneration -eq $finalState.SessionGeneration -and
+        $finalState.NetworkGeneration -gt $baseline.NetworkGeneration -and
+        $finalState.FullRebuild -eq $baseline.FullRebuild -and
+        $finalState.SessionRestartStarted -eq $baseline.SessionRestartStarted -and
+        $finalState.SessionRestartSucceeded -eq $baseline.SessionRestartSucceeded -and
+        $finalState.SessionRestartFailed -eq $baseline.SessionRestartFailed -and
+        $finalState.StrictRequested -eq 1 -and $finalState.StrictEffective -eq 1 -and
+        $finalState.StrictInstallSucceeded -eq $baseline.StrictInstallSucceeded -and
+        $finalState.StrictInstallFailed -eq $baseline.StrictInstallFailed) "M17 network-reset final lifecycle contract changed"
+    $evidenceItem = Get-Item -LiteralPath $evidencePath -Force -ErrorAction Stop
+    $evidence = [IO.File]::ReadAllBytes($evidencePath)
+    Assert-True ($evidenceItem.Length -eq $evidenceBytes -and $evidenceItem.Length -le 1048576 -and
+        @($evidence | Where-Object { $_ -eq 10 }).Count -eq $script:NetworkResetCycles -and
+        @($evidence | Where-Object { $_ -eq 13 }).Count -eq 0) "M17 network-reset cycle evidence is not closed"
+    $evidenceText = [Text.UTF8Encoding]::new($false, $true).GetString($evidence)
+    $evidenceLines = $evidenceText.Split([char[]]@([char]10), [StringSplitOptions]::None)
+    Assert-True ($evidenceLines.Count -eq $script:NetworkResetCycles + 1 -and
+        $evidenceLines[-1].Length -eq 0) "M17 network-reset cycle evidence row count is invalid"
+    $cycleProperties = @(
+        "cycle", "mutation", "route_metric", "process_id", "interface_guid", "interface_luid",
+        "interface_index", "managed_plane_sha256",
+        "session_generation", "network_generation", "reset_started", "reset_succeeded",
+        "reset_failed", "session_restart_started", "full_rebuild", "strict_route_effective"
+    )
+    foreach ($offset in 0..($script:NetworkResetCycles - 1)) {
+        $cycle = $offset + 1
+        $row = $evidenceLines[$offset] | ConvertFrom-Json -Depth 4 -ErrorAction Stop
+        Assert-ClosedJsonProperties $row $cycleProperties "M17 network-reset cycle evidence row"
+        $expectedMetric = if ($cycle -eq 1 -or ($cycle % 2) -ne 0) { 4094 } else { 4095 }
+        $expectedMutation = if ($cycle -eq 1) { "create" } else { "metric_toggle" }
+        Assert-True ($row.cycle -is [long] -and [long]$row.cycle -eq $cycle -and
+            $row.mutation -is [string] -and $row.mutation -ceq $expectedMutation -and
+            $row.route_metric -is [long] -and [long]$row.route_metric -eq $expectedMetric -and
+            $row.process_id -is [long] -and [uint32]$row.process_id -eq $candidatePid -and
+            $row.interface_guid -is [string] -and $row.interface_guid -ceq $managedBaseline.InterfaceGuid -and
+            $row.interface_luid -is [string] -and $row.interface_luid -ceq $managedBaseline.InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture) -and
+            $row.interface_index -is [long] -and [uint32]$row.interface_index -eq $managedBaseline.InterfaceIndex -and
+            $row.managed_plane_sha256 -is [string] -and $row.managed_plane_sha256 -ceq $managedBaseline.Sha256 -and
+            $row.session_generation -is [double] -and $row.network_generation -is [double] -and
+            $row.reset_started -is [double] -and $row.reset_succeeded -is [double] -and
+            $row.reset_failed -is [double] -and $row.session_restart_started -is [double] -and
+            $row.full_rebuild -is [double] -and $row.strict_route_effective -is [double] -and
+            [double]$row.session_generation -eq $initial.Generation + $cycle -and
+            [double]$row.network_generation -eq $initial.Generation + $cycle -and
+            [double]$row.reset_started -eq $baseline.ResetStarted + $cycle -and
+            [double]$row.reset_succeeded -eq $baseline.ResetSucceeded + $cycle -and
+            [double]$row.reset_failed -eq $baseline.ResetFailed -and
+            [double]$row.session_restart_started -eq $baseline.SessionRestartStarted -and
+            [double]$row.full_rebuild -eq $baseline.FullRebuild -and
+            [double]$row.strict_route_effective -eq 1) "M17 network-reset cycle evidence row values are invalid: cycle=$cycle"
+    }
+    $routeIntent = Read-M17NetworkResetRouteMutationIntent ([string]$mutation.IntentPath)
+    $foreignRoute = @(Get-NetRoute -InterfaceIndex ([int]$routeIntent.interface_index) `
+        -DestinationPrefix ([string]$routeIntent.destination_prefix) -PolicyStore ActiveStore -ErrorAction Stop |
+        Where-Object { $_.NextHop -ceq [string]$routeIntent.next_hop -and [uint32]$_.RouteMetric -in @($routeIntent.route_metrics) })
+    Assert-True ($foreignRoute.Count -eq 1) "M17 journaled notification route did not survive ordinary resets"
+    $script:m17CounterAfter = Get-M17CounterSnapshot $finalMetrics
+    Add-M17Witness "ordinary_route_notifications_reset_network_runtime" "live-product" "$script:NetworkResetCycles journaled underlay route mutations completed lightweight ResetNetwork"
+    Add-M17Witness "same_process_and_managed_adapter_identity" "live-product" "every reset retained one PID and the exact adapter GUID, LUID, and interface index"
+    Add-M17Witness "managed_addresses_routes_and_dns_are_unchanged" "live-product" "every reset reproduced the exact managed-plane address, route, DNS, MTU, and adapter snapshot hash"
+    Add-M17Witness "network_generation_and_reset_metrics_advance" "live-product" "network and TUN generations plus successful ResetNetwork counters advanced exactly once per mutation"
+    Add-M17Witness "session_restart_and_full_rebuild_metrics_are_unchanged" "live-product" "session restart, retry, reset failure, and full-rebuild counters remained at baseline"
+    Add-M17LiveRow "network-reset-summary" ([ordered]@{
+        cycles = $script:NetworkResetCycles
+        process_id = $candidatePid
+        initial_session_generation = $initial.Generation
+        final_session_generation = $finalState.SessionGeneration
+        final_network_generation = $finalState.NetworkGeneration
+        reset_started_delta = $finalState.ResetStarted - $baseline.ResetStarted
+        reset_succeeded_delta = $finalState.ResetSucceeded - $baseline.ResetSucceeded
+        reset_failed_delta = $finalState.ResetFailed - $baseline.ResetFailed
+        session_restart_delta = $finalState.SessionRestartStarted - $baseline.SessionRestartStarted
+        full_rebuild_delta = $finalState.FullRebuild - $baseline.FullRebuild
+        strict_route_filter_install_delta = $finalState.StrictInstallSucceeded - $baseline.StrictInstallSucceeded
+        managed_plane_sha256 = $managedBaseline.Sha256
+        cycle_evidence = [IO.Path]::GetFileName($evidencePath)
+        cycle_evidence_bytes = $evidenceItem.Length
+        cycle_evidence_sha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    })
+    Stop-M17Candidate $script:activeProcess "network-reset"
+    Restore-M17NetworkMutationJournal $script:work $script:m17NetworkMutationJournal
+    Assert-True (@(Get-NetRoute -DestinationPrefix $script:m17NetworkResetProbePrefix `
+        -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 network-reset notification route cleanup was not exact"
+    Add-M17LiveRow "network-reset-mutation-cleanup" ([ordered]@{
+        destination_prefix = $script:m17NetworkResetProbePrefix
+        active_store_routes = 0
+        mutation_journal = "absent"
+    })
 }
 
 function Invoke-M17RestartStress {
@@ -7486,6 +8071,7 @@ function Invoke-M17Qualification([string]$SourceDll) {
     Assert-True ((Get-FileHash -LiteralPath $script:siblingDll -Algorithm SHA256).Hash -eq $script:expectedDllHash) "M17 sibling DLL identity changed"
     Start-M17Server
     switch ($script:Mode) {
+        "network-reset" { Invoke-M17NetworkReset }
         "restart-stress" { Invoke-M17RestartStress }
         "fragments" { Invoke-M17Fragments }
         "dual-stack-dns" { Invoke-M17DualStackDns }
@@ -7530,6 +8116,7 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         status = if ($Succeeded) { "pass" } else { "fail" }
         mode = $script:Mode
         run_token = $script:runIdentity
+        network_reset_cycles = if ($script:Mode -eq "network-reset") { $script:NetworkResetCycles } else { $null }
         restart_cycles = if ($script:Mode -eq "restart-stress") { $script:RestartCycles } else { $null }
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId
