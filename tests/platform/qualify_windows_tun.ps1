@@ -1471,7 +1471,8 @@ function ConvertTo-Tcp08OwnerCounters([object]$Counters, [bool]$AllowNegative = 
         "process_root_rollbacks", "process_forced_roots", "active_tun_tcp_flows", "active_tun_handler_tasks",
         "active_supervisor_children", "connection_tasks", "owned_buffers", "owned_permits", "listeners",
         "forced_shutdowns", "udp_sessions", "udp_sockets", "udp_tasks", "udp_queued_datagrams",
-        "udp_buffered_bytes", "udp_scratch_buffers", "udp_forced_shutdowns", "sniff_buffered_bytes"
+        "udp_buffered_bytes", "udp_scratch_buffers", "udp_forced_shutdowns", "sniff_buffered_bytes",
+        "network_reset_hooks", "network_runtime_owners", "network_reset_drivers"
     )
     Assert-ClosedJsonProperties $Counters $names "process shutdown report owner counters"
     $sanitized = [ordered]@{}
@@ -1796,7 +1797,8 @@ function Get-Tcp08ForcedReportAssessment(
         "active_tun_tcp_flows", "active_tun_handler_tasks", "active_supervisor_children",
         "connection_tasks", "owned_buffers", "owned_permits", "listeners", "udp_sessions",
         "udp_sockets", "udp_tasks", "udp_queued_datagrams", "udp_buffered_bytes",
-        "udp_scratch_buffers", "sniff_buffered_bytes"
+        "udp_scratch_buffers", "sniff_buffered_bytes", "network_reset_hooks",
+        "network_runtime_owners", "network_reset_drivers"
     )
     foreach ($name in $activeOwnerNames) {
         if ($Report.owner_stopped.$name -ne $Report.owner_baseline.$name -or $Report.owner_delta.$name -ne 0) {
@@ -2859,6 +2861,12 @@ public static class Ferrum2ProcessGroup {
     private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
     private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
     private static readonly Dictionary<uint, ProcessEntry> Processes = new Dictionary<uint, ProcessEntry>();
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private delegate bool ConsoleCtrlHandler(uint controlType);
+    private static readonly ConsoleCtrlHandler IgnoreConsoleControl = IgnoreControl;
+
+    private static bool IgnoreControl(uint controlType) { return true; }
     private sealed class ProcessEntry {
         public IntPtr Handle;
         public bool SeparateConsole;
@@ -2907,7 +2915,7 @@ public static class Ferrum2ProcessGroup {
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(IntPtr handle, out uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr handle, uint exitCode);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler handler, bool add);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint GetConsoleProcessList([Out] uint[] processes, uint count);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AttachConsole(uint processId);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool FreeConsole();
@@ -2938,7 +2946,7 @@ public static class Ferrum2ProcessGroup {
         var startup = new STARTUPINFO(); startup.cb = Marshal.SizeOf(startup);
         if (separateConsole) startup.flags = STARTF_USESHOWWINDOW;
         var command = new StringBuilder("\"" + application + "\" " + arguments);
-        var flags = CREATE_NEW_PROCESS_GROUP | (separateConsole ? CREATE_NEW_CONSOLE : 0);
+        var flags = separateConsole ? CREATE_NEW_CONSOLE : CREATE_NEW_PROCESS_GROUP;
         var redirect = !String.IsNullOrWhiteSpace(stdoutPath) || !String.IsNullOrWhiteSpace(stderrPath);
         if (redirect && (String.IsNullOrWhiteSpace(stdoutPath) || String.IsNullOrWhiteSpace(stderrPath)))
             throw new ArgumentException("stdout and stderr redirection paths must be supplied together");
@@ -3038,12 +3046,15 @@ public static class Ferrum2ProcessGroup {
                 if (!result.AttachConsoleResult) return result;
                 attached = true;
             }
-            result.SetConsoleCtrlHandlerResult = SetConsoleCtrlHandler(IntPtr.Zero, true);
+            result.SetConsoleCtrlHandlerResult = SetConsoleCtrlHandler(IgnoreConsoleControl, true);
             result.SetConsoleCtrlHandlerWin32Error = result.SetConsoleCtrlHandlerResult ? 0 : Marshal.GetLastWin32Error();
             if (!result.SetConsoleCtrlHandlerResult) return result;
             try {
                 result.SendStartedTimestamp = Stopwatch.GetTimestamp();
-                result.GenerateConsoleCtrlEventResult = GenerateConsoleCtrlEvent(1, processGroup);
+                result.GenerateConsoleCtrlEventResult = GenerateConsoleCtrlEvent(
+                    1,
+                    process.SeparateConsole ? 0 : processGroup
+                );
                 result.GenerateConsoleCtrlEventWin32Error = result.GenerateConsoleCtrlEventResult ? 0 : Marshal.GetLastWin32Error();
                 result.SendReturnedTimestamp = Stopwatch.GetTimestamp();
                 result.SendDurationMilliseconds = (result.SendReturnedTimestamp - result.SendStartedTimestamp) * 1000.0 / Stopwatch.Frequency;
@@ -3056,7 +3067,7 @@ public static class Ferrum2ProcessGroup {
                 result.InternalWaitReturnedTimestamp = Stopwatch.GetTimestamp();
                 result.InternalWaitMilliseconds =
                     (result.InternalWaitReturnedTimestamp - result.InternalWaitStartedTimestamp) * 1000.0 / Stopwatch.Frequency;
-                result.ResetConsoleCtrlHandlerResult = SetConsoleCtrlHandler(IntPtr.Zero, false);
+                result.ResetConsoleCtrlHandlerResult = SetConsoleCtrlHandler(IgnoreConsoleControl, false);
                 result.ResetConsoleCtrlHandlerWin32Error = result.ResetConsoleCtrlHandlerResult ? 0 : Marshal.GetLastWin32Error();
             }
         }

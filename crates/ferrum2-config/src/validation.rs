@@ -806,6 +806,18 @@ fn validate_tun_targets(
             }
         }
     }
+    // Loopback first hops never cross the managed interface. Keeping them in the physical
+    // underlay plan would ask Windows to bind a software-loopback route as a hardware egress.
+    tun.physical_endpoints.retain(|endpoint| match endpoint {
+        SocketAddr::V4(endpoint) => !endpoint.ip().is_loopback(),
+        SocketAddr::V6(endpoint) => {
+            !endpoint.ip().is_loopback()
+                && !endpoint
+                    .ip()
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| address.is_loopback())
+        }
+    });
     tun.physical_endpoints.sort_unstable();
     tun.physical_endpoints.dedup();
     if tun.physical_endpoints.len() > 256 {

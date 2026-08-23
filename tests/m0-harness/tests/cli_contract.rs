@@ -27,7 +27,7 @@ const REPORT_FIELDS: [&str; 17] = [
     "shutdown_grace_ns",
     "termination_cause",
 ];
-const OWNER_COUNTER_FIELDS: [&str; 22] = [
+const OWNER_COUNTER_FIELDS: [&str; 25] = [
     "active_supervisor_children",
     "active_tun_handler_tasks",
     "active_tun_tcp_flows",
@@ -35,6 +35,9 @@ const OWNER_COUNTER_FIELDS: [&str; 22] = [
     "connection_tasks",
     "forced_shutdowns",
     "listeners",
+    "network_reset_drivers",
+    "network_reset_hooks",
+    "network_runtime_owners",
     "owned_buffers",
     "owned_permits",
     "prepared_process_roots",

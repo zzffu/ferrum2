@@ -390,6 +390,9 @@ macro_rules! owner_counters {
             udp_scratch_buffers,
             udp_forced_shutdowns,
             sniff_buffered_bytes,
+            network_reset_hooks,
+            network_runtime_owners,
+            network_reset_drivers,
         }
     };
 }

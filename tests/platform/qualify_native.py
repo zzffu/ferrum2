@@ -83,6 +83,9 @@ OWNER_COUNTER_FIELDS = frozenset(
         "udp_scratch_buffers",
         "udp_forced_shutdowns",
         "sniff_buffered_bytes",
+        "network_reset_hooks",
+        "network_runtime_owners",
+        "network_reset_drivers",
     }
 )
 ACTIVE_OWNER_COUNTER_FIELDS = frozenset(
@@ -104,6 +107,9 @@ ACTIVE_OWNER_COUNTER_FIELDS = frozenset(
         "udp_buffered_bytes",
         "udp_scratch_buffers",
         "sniff_buffered_bytes",
+        "network_reset_hooks",
+        "network_runtime_owners",
+        "network_reset_drivers",
     }
 )
 

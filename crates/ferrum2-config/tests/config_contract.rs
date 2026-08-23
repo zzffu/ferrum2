@@ -3484,6 +3484,32 @@ fn m16_managed_tun_compiles_bounded_canonical_capture_and_dns_plan() {
 }
 
 #[test]
+fn m16_managed_tun_omits_loopback_physical_first_hops() {
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nauto_route = true\noutbound = \"proxy\"";
+    for server in ["127.0.0.1:8388", "[::1]:8388", "[::ffff:127.0.0.1]:8388"] {
+        let source = tun_client(base).replace("192.0.2.10:8388", server);
+        let tun = load_client(TempConfig::text(&source).path())
+            .unwrap_or_else(|error| panic!("loopback first hop {server} failed: {error}"))
+            .tun
+            .expect("managed TUN");
+        assert!(
+            tun.physical_endpoints.is_empty(),
+            "loopback first hop {server} entered the physical underlay plan"
+        );
+    }
+    let mapped_non_loopback = "[::ffff:192.0.2.10]:8388";
+    let source = tun_client(base).replace("192.0.2.10:8388", mapped_non_loopback);
+    let tun = load_client(TempConfig::text(&source).path())
+        .expect("mapped non-loopback first hop")
+        .tun
+        .expect("managed TUN");
+    assert_eq!(
+        tun.physical_endpoints,
+        vec![mapped_non_loopback.parse().expect("mapped endpoint")]
+    );
+}
+
+#[test]
 fn m16_managed_tun_relations_bounds_and_physical_endpoints_fail_closed() {
     let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\noutbound = \"proxy\"";
     let managed =

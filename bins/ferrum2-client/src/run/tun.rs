@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ferrum2_config::TunConfig;
@@ -457,7 +457,7 @@ impl ResetNetwork for ClientNetworkResetHook {
 struct ClientNetworkResetRuntime {
     coordinator: NetworkResetCoordinator,
     hooks: [Arc<ClientNetworkResetHook>; 4],
-    _registrations: [NetworkResetHookRegistration; 4],
+    registrations: Mutex<Option<[NetworkResetHookRegistration; 4]>>,
     hook_udp_associations: Arc<AtomicUsize>,
     pending_full_rebuild_udp_associations: AtomicUsize,
     egress: Arc<super::egress::ClientEgressEngine>,
@@ -497,29 +497,41 @@ impl ClientNetworkResetRuntime {
             Arc::clone(&accept),
         ));
         let hooks = [stack, router, outbound, inbound_dns];
-        let registrations = [
-            coordinator
-                .register_reset_hook(NetworkResetHookStage::Stack, hooks[0].clone())
-                .expect("client reset coordinator accepts stack hook"),
-            coordinator
-                .register_reset_hook(NetworkResetHookStage::Router, hooks[1].clone())
-                .expect("client reset coordinator accepts router hook"),
-            coordinator
-                .register_reset_hook(NetworkResetHookStage::Outbound, hooks[2].clone())
-                .expect("client reset coordinator accepts outbound hook"),
-            coordinator
-                .register_reset_hook(NetworkResetHookStage::Inbound, hooks[3].clone())
-                .expect("client reset coordinator accepts inbound/DNS hook"),
-        ];
         Self {
             coordinator,
             hooks,
-            _registrations: registrations,
+            registrations: Mutex::new(None),
             hook_udp_associations,
             pending_full_rebuild_udp_associations: AtomicUsize::new(0),
             egress,
             metrics: Arc::clone(&context.metrics),
         }
+    }
+
+    fn register_hooks(&self) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        let mut registrations = self
+            .registrations
+            .lock()
+            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+        if registrations.is_some() {
+            return Ok(());
+        }
+        let registered = [
+            self.coordinator
+                .register_reset_hook(NetworkResetHookStage::Stack, self.hooks[0].clone())
+                .map_err(|_| ferrum2_tun::TunNetworkResetError)?,
+            self.coordinator
+                .register_reset_hook(NetworkResetHookStage::Router, self.hooks[1].clone())
+                .map_err(|_| ferrum2_tun::TunNetworkResetError)?,
+            self.coordinator
+                .register_reset_hook(NetworkResetHookStage::Outbound, self.hooks[2].clone())
+                .map_err(|_| ferrum2_tun::TunNetworkResetError)?,
+            self.coordinator
+                .register_reset_hook(NetworkResetHookStage::Inbound, self.hooks[3].clone())
+                .map_err(|_| ferrum2_tun::TunNetworkResetError)?,
+        ];
+        *registrations = Some(registered);
+        Ok(())
     }
 
     fn require_next_generation(
@@ -550,6 +562,7 @@ impl ClientNetworkResetRuntime {
         snapshot: Arc<NetworkSnapshot>,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
         self.require_next_generation(&snapshot)?;
+        self.register_hooks()?;
         let report = self
             .coordinator
             .reset_network(
@@ -572,6 +585,7 @@ impl ClientNetworkResetRuntime {
         reason: ferrum2_tun::TunNetworkResetReason,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
         self.require_next_generation(&snapshot)?;
+        self.register_hooks()?;
         let reason = match reason {
             ferrum2_tun::TunNetworkResetReason::NetworkChange => {
                 RuntimeNetworkResetReason::InterfaceChanged
@@ -603,6 +617,7 @@ impl ClientNetworkResetRuntime {
 
     #[cfg(all(windows, not(test)))]
     async fn retry(&self) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        self.register_hooks()?;
         let report = self
             .coordinator
             .retry_reset()
@@ -2072,9 +2087,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::{RunError, report_result};
     use super::{
-        ClientNetworkResetHook, SyntheticDns, TunUdpPlan, TunUdpRouteRequest,
-        authorize_dns_peer_after_answer, commit_peer_after_success, record_tun_event, run_tcp,
-        select_udp_target, select_udp_target_generation_stable, target_payload_within_bound,
+        ClientNetworkResetHook, ClientNetworkResetRuntime, SyntheticDns, TunUdpPlan,
+        TunUdpRouteRequest, authorize_dns_peer_after_answer, commit_peer_after_success,
+        network_reset_coordinator, record_tun_event, run_tcp, select_udp_target,
+        select_udp_target_generation_stable, target_payload_within_bound,
         udp_route_generation_is_current,
     };
 
@@ -2106,6 +2122,75 @@ mod tests {
         let stale = Arc::new(NetworkSnapshot::new(1, None, None).unwrap());
         assert!(hook.reset_network(stale).await.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn client_network_hooks_are_owned_only_during_tun_prepare_lifetime() {
+        use ferrum2_runtime::NetworkSnapshot;
+
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let (path, context) = udp_test_context_for_server(registry.clone(), reserve_address());
+        let initial = Arc::new(NetworkSnapshot::new(1, None, None).expect("initial snapshot"));
+        let coordinator = network_reset_coordinator(initial, registry.clone());
+        let runtime = ClientNetworkResetRuntime::new(&context, coordinator);
+
+        assert_eq!(
+            registry.snapshot().network_reset_hooks,
+            baseline.network_reset_hooks
+        );
+        runtime
+            .initialize(Arc::new(
+                NetworkSnapshot::new(2, None, None).expect("next snapshot"),
+            ))
+            .await
+            .expect("initialize reset hooks");
+        assert_eq!(registry.snapshot().network_reset_hooks, 4);
+
+        drop(runtime);
+        assert_eq!(
+            registry.snapshot().network_reset_hooks,
+            baseline.network_reset_hooks
+        );
+        std::fs::remove_file(path).expect("remove config");
+    }
+
+    #[tokio::test]
+    async fn non_tun_network_reset_registers_hooks_before_publishing_generation() {
+        use ferrum2_runtime::NetworkSnapshot;
+
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let (path, context) = udp_test_context_for_server(registry.clone(), reserve_address());
+        let initial = Arc::new(NetworkSnapshot::new(1, None, None).expect("initial snapshot"));
+        let coordinator = network_reset_coordinator(initial, registry.clone());
+        let runtime = ClientNetworkResetRuntime::new(&context, coordinator);
+
+        assert_eq!(
+            registry.snapshot().network_reset_hooks,
+            baseline.network_reset_hooks
+        );
+        runtime
+            .reset(
+                Arc::new(NetworkSnapshot::new(2, None, None).expect("next snapshot")),
+                ferrum2_tun::TunNetworkResetReason::NetworkChange,
+            )
+            .await
+            .expect("non-TUN reset");
+        assert_eq!(registry.snapshot().network_reset_hooks, 4);
+        assert!(
+            runtime
+                .hooks
+                .iter()
+                .all(|hook| { hook.accepted_generation.load(Ordering::Acquire) == 2 })
+        );
+
+        drop(runtime);
+        assert_eq!(
+            registry.snapshot().network_reset_hooks,
+            baseline.network_reset_hooks
+        );
+        std::fs::remove_file(path).expect("remove config");
     }
 
     #[test]
