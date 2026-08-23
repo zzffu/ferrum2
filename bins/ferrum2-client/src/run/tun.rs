@@ -10,7 +10,7 @@ use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Metrics, NetworkLifecycleOperation, NetworkLifecycleResult, NetworkResetReason,
     Outcome, Role, Transport, TunDiagnosticReason, TunIpFamily, TunPacketRejectReason,
-    TunUdpResponseDropReason, emit_tun_diagnostic,
+    TunUdpAssociationRouteResult, TunUdpResponseDropReason, emit_tun_diagnostic,
 };
 use ferrum2_runtime::{
     NetworkResetCoordinator, NetworkResetHookRegistration, NetworkResetHookStage,
@@ -518,6 +518,9 @@ async fn run_udp(
         return;
     }
     let Ok(mut route_scratch) = routing.route_scratch() else {
+        context
+            .metrics
+            .tun_udp_association_route(TunUdpAssociationRouteResult::Failure);
         return;
     };
     let first_request = TunUdpRouteRequest {
@@ -603,6 +606,9 @@ async fn run_udp_synthetic_candidate(
         }
 
         let Ok(mut route_scratch) = routing.route_scratch() else {
+            context
+                .metrics
+                .tun_udp_association_route(TunUdpAssociationRouteResult::Failure);
             return;
         };
         let Ok(target) = TargetAddr::ip(datagram.target()) else {
@@ -847,12 +853,34 @@ fn select_udp_target_generation_stable(
     scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
 ) -> Result<(RouteGeneration, TunUdpPlan), ferrum2_rule::RuleCompileError> {
     let before = request.routing.route_generation();
-    let plan = select_udp_target_with_scratch(request, scratch)?;
+    let plan = match select_udp_target_with_scratch(request, scratch) {
+        Ok(plan) => plan,
+        Err(error) => {
+            request
+                .metrics
+                .tun_udp_association_route(TunUdpAssociationRouteResult::Failure);
+            return Err(error);
+        }
+    };
     let after = request.routing.route_generation();
-    if before == after {
-        return Ok((after, plan));
+    if before != after {
+        request
+            .metrics
+            .tun_udp_association_route(TunUdpAssociationRouteResult::StaleGeneration);
+        return Err(ferrum2_rule::RuleCompileError::Internal);
     }
-    Err(ferrum2_rule::RuleCompileError::Internal)
+    match &plan {
+        TunUdpPlan::Route { .. } | TunUdpPlan::HijackDns => request
+            .metrics
+            .tun_udp_association_route(TunUdpAssociationRouteResult::Success),
+        TunUdpPlan::Reject => request
+            .metrics
+            .tun_udp_association_route(TunUdpAssociationRouteResult::Rejected),
+        // Synthetic DNS is preprocessing for the same source-keyed association. Its first
+        // ordinary datagram performs and records the association's sole route evaluation.
+        TunUdpPlan::SyntheticDns => {}
+    }
+    Ok((after, plan))
 }
 
 fn select_udp_target_with_scratch(
@@ -1845,6 +1873,10 @@ mod tests {
             None,
         )
         .expect("first stable generation");
+        let encoded = metrics.encode_text().expect("route result metrics");
+        assert!(encoded.lines().any(|line| {
+            line == "ferrum2_tun_udp_association_route_total{result=\"success\"} 1"
+        }));
         let TunUdpPlan::Route {
             snapshot: first_snapshot,
             ..
