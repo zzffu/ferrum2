@@ -9,7 +9,7 @@ use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_dns::{ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Metrics, Outcome, Role, TunDiagnosticReason, TunIpFamily, TunPacketRejectReason,
-    TunRouteConflictReason, TunUdpResponseDropReason, emit_tun_diagnostic,
+    TunUdpResponseDropReason, emit_tun_diagnostic,
 };
 use ferrum2_runtime::{ProcessCancellation, ProcessRoot, relay_lifecycle};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -178,7 +178,6 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
             }
             ferrum2_tun::TunRejectReason::StaleGeneration => TunPacketRejectReason::StaleGeneration,
             ferrum2_tun::TunRejectReason::WintunRingFull => TunPacketRejectReason::WintunRingFull,
-            ferrum2_tun::TunRejectReason::RouteConflict => TunPacketRejectReason::RouteConflict,
         }),
         TunEvent::InternalEgressBackpressured => metrics.tun_internal_egress_backpressured(),
         TunEvent::WintunRingFullDropped => metrics.tun_wintun_ring_full_dropped(),
@@ -232,27 +231,12 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
         TunEvent::ReassemblyDroppedLimit => metrics.tun_reassembly_dropped_limit(),
         TunEvent::ReassemblyDroppedMalformed => metrics.tun_reassembly_dropped_malformed(),
         TunEvent::NetworkChange => metrics.tun_network_change(),
-        TunEvent::RouteDetect => metrics.tun_route_detect(),
-        TunEvent::RouteConflict(reason) => metrics.tun_route_conflict(match reason {
-            ferrum2_tun::TunRouteConflictReason::MoreSpecificRoute => {
-                TunRouteConflictReason::MoreSpecificRoute
-            }
-            ferrum2_tun::TunRouteConflictReason::EqualPrefixPreferred => {
-                TunRouteConflictReason::EqualPrefixPreferred
-            }
-        }),
         TunEvent::UnderlayBindStale => metrics.tun_underlay_bind_stale(),
         TunEvent::Diagnostic { reason, family } => emit_tun_diagnostic(
             Role::Client,
             match reason {
                 ferrum2_tun::TunDiagnosticReason::WintunRingFull => {
                     TunDiagnosticReason::WintunRingFull
-                }
-                ferrum2_tun::TunDiagnosticReason::RouteMoreSpecific => {
-                    TunDiagnosticReason::MoreSpecificRoute
-                }
-                ferrum2_tun::TunDiagnosticReason::RouteEqualPrefixPreferred => {
-                    TunDiagnosticReason::EqualPrefixPreferred
                 }
             },
             match family {
@@ -1184,8 +1168,7 @@ mod tests {
     #[test]
     fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         use ferrum2_tun::{
-            TunDiagnosticReason, TunEvent, TunIpFamily, TunRejectReason, TunRouteConflictReason,
-            UdpResponseDropReason,
+            TunDiagnosticReason, TunEvent, TunIpFamily, TunRejectReason, UdpResponseDropReason,
         };
 
         let metrics = ferrum2_observability::Metrics::new();
@@ -1224,9 +1207,6 @@ mod tests {
             TunEvent::ReassemblyDroppedLimit,
             TunEvent::ReassemblyDroppedMalformed,
             TunEvent::NetworkChange,
-            TunEvent::RouteDetect,
-            TunEvent::RouteConflict(TunRouteConflictReason::MoreSpecificRoute),
-            TunEvent::RouteConflict(TunRouteConflictReason::EqualPrefixPreferred),
             TunEvent::UnderlayBindStale,
             TunEvent::Diagnostic {
                 reason: TunDiagnosticReason::WintunRingFull,
@@ -1261,7 +1241,6 @@ mod tests {
             TunRejectReason::UdpResponseClosed,
             TunRejectReason::StaleGeneration,
             TunRejectReason::WintunRingFull,
-            TunRejectReason::RouteConflict,
         ];
         for reason in reject_reasons {
             record_tun_event(&metrics, TunEvent::PacketRejected(reason));
@@ -1303,7 +1282,6 @@ mod tests {
             "ferrum2_tun_reassembly_dropped_limit_total 1",
             "ferrum2_tun_reassembly_dropped_malformed_total 1",
             "ferrum2_tun_network_change_total 1",
-            "ferrum2_tun_route_detect_total 1",
             "ferrum2_tun_underlay_bind_stale_total 1",
         ] {
             assert!(
@@ -1311,13 +1289,8 @@ mod tests {
                 "missing {sample}"
             );
         }
-        assert!(
-            output.contains("ferrum2_tun_route_conflict_total{reason=\"more_specific_route\"} 1")
-        );
-        assert!(
-            output
-                .contains("ferrum2_tun_route_conflict_total{reason=\"equal_prefix_preferred\"} 1")
-        );
+        assert!(!output.contains("ferrum2_tun_route_detect"));
+        assert!(!output.contains("ferrum2_tun_route_conflict"));
         assert_eq!(
             output
                 .lines()

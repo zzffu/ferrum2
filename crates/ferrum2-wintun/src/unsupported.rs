@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use crate::{
-    AdapterConfig, CreateError, Error, ErrorKind, NetworkChangeOutcome, RouteIntegrityResult,
+    AdapterConfig, CreateError, Error, ErrorKind, ManagedTunHealth, NetworkChangeOutcome,
     SendOutcome, WaitOutcome,
 };
 
@@ -31,8 +31,8 @@ impl Adapter {
     pub fn underlay_policy(&self) -> Option<UnderlayPolicy> {
         None
     }
-    pub fn route_integrity(&self) -> RouteIntegrityResult {
-        RouteIntegrityResult::PlatformError
+    pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
+        Err(UNSUPPORTED)
     }
     pub fn revalidate_network_change(&mut self) -> Result<NetworkChangeOutcome, Error> {
         Err(UNSUPPORTED)

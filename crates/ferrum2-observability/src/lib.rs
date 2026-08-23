@@ -263,23 +263,18 @@ impl TunIpFamily {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TunDiagnosticReason {
     WintunRingFull,
-    MoreSpecificRoute,
-    EqualPrefixPreferred,
 }
 
 impl TunDiagnosticReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::WintunRingFull => "wintun_ring_full",
-            Self::MoreSpecificRoute => "more_specific_route",
-            Self::EqualPrefixPreferred => "equal_prefix_preferred",
         }
     }
 
     const fn outcome(self) -> Outcome {
         match self {
             Self::WintunRingFull => Outcome::Dropped,
-            Self::MoreSpecificRoute | Self::EqualPrefixPreferred => Outcome::Rejected,
         }
     }
 }
@@ -419,7 +414,6 @@ pub enum TunPacketRejectReason {
     UdpResponseClosed,
     StaleGeneration,
     WintunRingFull,
-    RouteConflict,
 }
 
 impl TunPacketRejectReason {
@@ -449,7 +443,6 @@ impl TunPacketRejectReason {
             Self::UdpResponseClosed => "udp_response_closed",
             Self::StaleGeneration => "stale_generation",
             Self::WintunRingFull => "wintun_ring_full",
-            Self::RouteConflict => "route_conflict",
         }
     }
 }
@@ -484,22 +477,6 @@ impl TunUdpResponseDropReason {
     }
 }
 
-/// Closed reasons for an external route winning over a TUN capture route.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TunRouteConflictReason {
-    MoreSpecificRoute,
-    EqualPrefixPreferred,
-}
-
-impl TunRouteConflictReason {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::MoreSpecificRoute => "more_specific_route",
-            Self::EqualPrefixPreferred => "equal_prefix_preferred",
-        }
-    }
-}
-
 macro_rules! impl_closed_display {
     ($type:ty) => {
         impl fmt::Display for $type {
@@ -519,7 +496,6 @@ impl_closed_display!(Reason);
 impl_closed_display!(SniffOutcome);
 impl_closed_display!(SniffProtocol);
 impl_closed_display!(TunPacketRejectReason);
-impl_closed_display!(TunRouteConflictReason);
 impl_closed_display!(TunIpFamily);
 impl_closed_display!(TunDiagnosticReason);
 
@@ -1029,7 +1005,6 @@ impl_label_value!(TargetResolutionComponent);
 impl_label_value!(TargetResolutionMode);
 impl_label_value!(TunPacketRejectReason);
 impl_label_value!(TunUdpResponseDropReason);
-impl_label_value!(TunRouteConflictReason);
 
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct ConnectionLabels {
@@ -1154,11 +1129,6 @@ struct TunPacketRejectLabels {
 #[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
 struct TunUdpResponseDropLabels {
     reason: TunUdpResponseDropReason,
-}
-
-#[derive(Debug, prometheus_client::encoding::EncodeLabelSet)]
-struct TunRouteConflictLabels {
-    reason: TunRouteConflictReason,
 }
 
 const ROLES: &[Role] = &[Role::Client, Role::Server];
@@ -1324,7 +1294,6 @@ const TUN_PACKET_REJECT_REASONS: &[TunPacketRejectReason] = &[
     TunPacketRejectReason::UdpResponseClosed,
     TunPacketRejectReason::StaleGeneration,
     TunPacketRejectReason::WintunRingFull,
-    TunPacketRejectReason::RouteConflict,
 ];
 const TUN_UDP_RESPONSE_DROP_REASONS: &[TunUdpResponseDropReason] = &[
     TunUdpResponseDropReason::StaleGeneration,
@@ -1337,11 +1306,6 @@ const TUN_UDP_RESPONSE_DROP_REASONS: &[TunUdpResponseDropReason] = &[
     TunUdpResponseDropReason::Shutdown,
     TunUdpResponseDropReason::OwnerFatal,
 ];
-const TUN_ROUTE_CONFLICT_REASONS: &[TunRouteConflictReason] = &[
-    TunRouteConflictReason::MoreSpecificRoute,
-    TunRouteConflictReason::EqualPrefixPreferred,
-];
-
 const RULE_PROGRAM_CANDIDATE_BUCKETS: &[f64] = &[
     0.0, 1.0, 4.0, 16.0, 64.0, 256.0, 1_024.0, 4_096.0, 16_384.0, 65_536.0,
 ];
@@ -1384,7 +1348,6 @@ const TARGET_RESOLUTION_SERIES: usize =
     TARGET_RESOLUTION_COMPONENTS.len() * TARGET_RESOLUTION_MODES.len();
 const TUN_PACKET_REJECT_SERIES: usize = TUN_PACKET_REJECT_REASONS.len();
 const TUN_UDP_RESPONSE_DROP_SERIES: usize = TUN_UDP_RESPONSE_DROP_REASONS.len();
-const TUN_ROUTE_CONFLICT_SERIES: usize = TUN_ROUTE_CONFLICT_REASONS.len();
 
 #[derive(Debug, Default)]
 struct CachedCounter {
@@ -1702,9 +1665,6 @@ type TunPacketRejectFamily =
     SharedClosedFamily<TunPacketRejectLabels, CachedCounter, TUN_PACKET_REJECT_SERIES>;
 type TunUdpResponseDropFamily =
     SharedClosedFamily<TunUdpResponseDropLabels, CachedCounter, TUN_UDP_RESPONSE_DROP_SERIES>;
-type TunRouteConflictFamily =
-    SharedClosedFamily<TunRouteConflictLabels, CachedCounter, TUN_ROUTE_CONFLICT_SERIES>;
-
 fn record_rule_match(
     family: &RuleMatchFamily,
     source: RuleSource,
@@ -1790,8 +1750,6 @@ pub struct Metrics {
     tun_reassembly_dropped_limit: Counter,
     tun_reassembly_dropped_malformed: Counter,
     tun_network_change: Counter,
-    tun_route_detect: Counter,
-    tun_route_conflict: TunRouteConflictFamily,
     tun_underlay_bind_stale: Counter,
     ruleset_loads: RuleSetResultFamily,
     ruleset_refreshes: RuleSetResultFamily,
@@ -1943,11 +1901,6 @@ impl Metrics {
         let tun_reassembly_dropped_limit = Counter::default();
         let tun_reassembly_dropped_malformed = Counter::default();
         let tun_network_change = Counter::default();
-        let tun_route_detect = Counter::default();
-        let tun_route_conflict =
-            TunRouteConflictFamily::new(single_labels(TUN_ROUTE_CONFLICT_REASONS, |reason| {
-                TunRouteConflictLabels { reason }
-            }));
         let tun_underlay_bind_stale = Counter::default();
         let ruleset_loads = RuleSetResultFamily::new(single_labels(RULESET_RESULTS, |result| {
             RuleSetResultLabels { result }
@@ -2273,16 +2226,6 @@ impl Metrics {
             tun_network_change.clone(),
         );
         registry.register(
-            "ferrum2_tun_route_detect",
-            "TUN route integrity scans completed",
-            tun_route_detect.clone(),
-        );
-        registry.register(
-            "ferrum2_tun_route_conflict",
-            "TUN route conflicts by a closed low-cardinality reason",
-            tun_route_conflict.clone(),
-        );
-        registry.register(
             "ferrum2_tun_underlay_bind_stale",
             "TUN underlay binds rejected because their generation was stale",
             tun_underlay_bind_stale.clone(),
@@ -2430,8 +2373,6 @@ impl Metrics {
             tun_reassembly_dropped_limit,
             tun_reassembly_dropped_malformed,
             tun_network_change,
-            tun_route_detect,
-            tun_route_conflict,
             tun_underlay_bind_stale,
             ruleset_loads,
             ruleset_refreshes,
@@ -2861,16 +2802,6 @@ impl Metrics {
     /// Records one semantic network change delivered to the TUN session.
     pub fn tun_network_change(&self) {
         self.tun_network_change.inc();
-    }
-
-    /// Records one completed TUN route integrity scan.
-    pub fn tun_route_detect(&self) {
-        self.tun_route_detect.inc();
-    }
-
-    /// Records one TUN route conflict using only a closed reason code.
-    pub fn tun_route_conflict(&self, reason: TunRouteConflictReason) {
-        self.tun_route_conflict.metric(reason as usize).inc();
     }
 
     /// Records one underlay bind rejected because its generation was stale.

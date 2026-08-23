@@ -24,11 +24,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER,
     DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeInterfaceDnsSettings, FreeMibTable,
     GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetInterfaceDnsSettings, GetIpForwardEntry2,
-    GetIpForwardTable2, GetIpInterfaceEntry, GetIpInterfaceTable, GetUnicastIpAddressEntry,
-    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
-    MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
-    MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW, NotifyIpInterfaceChange, NotifyRouteChange2,
-    NotifyUnicastIpAddressChange, SetInterfaceDnsSettings, SetIpInterfaceEntry,
+    GetIpInterfaceEntry, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
+    MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, NotifyIpInterfaceChange,
+    NotifyRouteChange2, NotifyUnicastIpAddressChange, SetInterfaceDnsSettings, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
@@ -37,8 +36,8 @@ use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, IP_UNICAST_IF,
     IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IpDadStateDeprecated, IpDadStateDuplicate,
     IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, IpPrefixOriginManual,
-    IpSuffixOriginManual, MIB_IPPROTO_LOCAL, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, NlroManual,
-    SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, setsockopt,
+    IpSuffixOriginManual, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, NlroManual, SOCKADDR, SOCKADDR_IN,
+    SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, setsockopt,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -59,9 +58,8 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::core::GUID;
 
 use crate::{
-    ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, IpFamily, IpPrefix,
-    NetworkChangeOutcome, RouteConflict, RouteConflictReason, RouteIntegrityResult, SendOutcome,
-    WaitOutcome,
+    ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, IpPrefix,
+    ManagedStateDamage, ManagedTunHealth, NetworkChangeOutcome, SendOutcome, WaitOutcome,
 };
 
 type WintunAdapter = *mut c_void;
@@ -325,135 +323,6 @@ struct RouteFingerprint {
 struct InterfaceIdentity {
     luid: u64,
     index: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RouteFamily {
-    Ipv4,
-    Ipv6,
-}
-
-impl RouteFamily {
-    const fn public(self) -> IpFamily {
-        match self {
-            Self::Ipv4 => IpFamily::Ipv4,
-            Self::Ipv6 => IpFamily::Ipv6,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RoutePrefix {
-    address: std::net::IpAddr,
-    length: u8,
-}
-
-impl RoutePrefix {
-    fn new(address: std::net::IpAddr, length: u8) -> Option<Self> {
-        let bits = match address {
-            std::net::IpAddr::V4(_) => 32,
-            std::net::IpAddr::V6(_) => 128,
-        };
-        if length > bits {
-            return None;
-        }
-        let canonical = match address {
-            std::net::IpAddr::V4(address) => {
-                let mask = u32::MAX.checked_shl(u32::from(bits - length)).unwrap_or(0);
-                std::net::IpAddr::V4(std::net::Ipv4Addr::from(u32::from(address) & mask))
-            }
-            std::net::IpAddr::V6(address) => {
-                let mask = u128::MAX.checked_shl(u32::from(bits - length)).unwrap_or(0);
-                std::net::IpAddr::V6(std::net::Ipv6Addr::from(u128::from(address) & mask))
-            }
-        };
-        (canonical == address).then_some(Self {
-            address: canonical,
-            length,
-        })
-    }
-
-    fn from_capture(prefix: IpPrefix) -> Self {
-        match prefix {
-            IpPrefix::V4(prefix) => Self {
-                address: std::net::IpAddr::V4(prefix.address()),
-                length: prefix.length(),
-            },
-            IpPrefix::V6(prefix) => Self {
-                address: std::net::IpAddr::V6(prefix.address()),
-                length: prefix.length(),
-            },
-        }
-    }
-
-    const fn family(self) -> RouteFamily {
-        match self.address {
-            std::net::IpAddr::V4(_) => RouteFamily::Ipv4,
-            std::net::IpAddr::V6(_) => RouteFamily::Ipv6,
-        }
-    }
-
-    fn overlaps(self, other: Self) -> bool {
-        if self.family() != other.family() {
-            return false;
-        }
-        let shared = self.length.min(other.length);
-        match (self.address, other.address) {
-            (std::net::IpAddr::V4(left), std::net::IpAddr::V4(right)) => {
-                let mask = u32::MAX.checked_shl(u32::from(32 - shared)).unwrap_or(0);
-                u32::from(left) & mask == u32::from(right) & mask
-            }
-            (std::net::IpAddr::V6(left), std::net::IpAddr::V6(right)) => {
-                let mask = u128::MAX.checked_shl(u32::from(128 - shared)).unwrap_or(0);
-                u128::from(left) & mask == u128::from(right) & mask
-            }
-            _ => false,
-        }
-    }
-
-    fn is_within(self, parent: Self) -> bool {
-        self.family() == parent.family() && self.length >= parent.length && self.overlaps(parent)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RouteIntegrityRoute {
-    interface: InterfaceIdentity,
-    destination: RoutePrefix,
-    route_metric: u32,
-    valid: bool,
-    owned_shape: bool,
-    owned_local_shape: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct InterfaceFamilyState {
-    up: bool,
-    metric: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RouteIntegrityInterface {
-    identity: InterfaceIdentity,
-    software_loopback: bool,
-    up: bool,
-    ipv4: Option<InterfaceFamilyState>,
-    ipv6: Option<InterfaceFamilyState>,
-}
-
-impl RouteIntegrityInterface {
-    const fn family(self, family: RouteFamily) -> Option<InterfaceFamilyState> {
-        match family {
-            RouteFamily::Ipv4 => self.ipv4,
-            RouteFamily::Ipv6 => self.ipv6,
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct RouteIntegritySnapshot {
-    routes: Vec<RouteIntegrityRoute>,
-    interfaces: Vec<RouteIntegrityInterface>,
 }
 
 /// Immutable, redacted dual-stack socket-binding policy frozen before capture.
@@ -1085,45 +954,48 @@ impl Adapter {
         self.managed.as_ref().map(|state| state.policy.clone())
     }
 
-    /// Scans all current route and interface rows against the managed capture plan.
-    pub fn route_integrity(&self) -> RouteIntegrityResult {
-        let Some(state) = &self.managed else {
-            return RouteIntegrityResult::Clean;
+    /// Reads back only Ferrum2-owned managed routes and DNS leases.
+    pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
+        let Some(state) = self.managed.as_ref() else {
+            return Ok(ManagedTunHealth::Healthy);
         };
-        scan_route_integrity_with(
-            &state.capture_routes,
-            InterfaceIdentity {
-                luid: unsafe { self.luid.Value },
-                index: self.interface_index,
-            },
-            || state.notifications.generation(),
-            &mut PlatformRouteIntegrity,
-        )
+        let ManagedState {
+            routes,
+            dns_interface,
+            ipv4_dns,
+            ipv6_dns,
+            ..
+        } = state;
+        let dns_interface = *dns_interface;
+        managed_state_health(routes, &mut PlatformManagedRouteCleanup, || {
+            let Some(interface) = dns_interface else {
+                return Ok(ipv4_dns.is_none() && ipv6_dns.is_none());
+            };
+            if let Some(lease) = ipv4_dns
+                && !managed_dns_matches(&mut PlatformManagedIpv4Dns(interface), lease)?
+            {
+                return Ok(false);
+            }
+            if let Some(lease) = ipv6_dns
+                && !managed_dns_matches(&mut PlatformManagedIpv6Dns(interface), lease)?
+            {
+                return Ok(false);
+            }
+            Ok(true)
+        })
     }
 
     /// Revalidates one stable, debounced notification burst against managed state.
     pub fn revalidate_network_change(&mut self) -> Result<NetworkChangeOutcome, Error> {
-        let matches = match self.managed_network_matches(true) {
-            Ok(matches) => matches,
+        match self.revalidate_managed_network_state(true) {
+            Ok(ManagedNetworkValidationOutcome::Unchanged) => Ok(NetworkChangeOutcome::Unchanged),
+            Ok(ManagedNetworkValidationOutcome::UnderlayChanged) => {
+                Ok(NetworkChangeOutcome::Changed)
+            }
+            Ok(ManagedNetworkValidationOutcome::ManagedStateDamaged(reason)) => {
+                Ok(NetworkChangeOutcome::ManagedStateDamaged(reason))
+            }
             Err(_) => {
-                if let Some(state) = &self.managed {
-                    state.policy.invalidate();
-                }
-                return Err(Error::recoverable_session());
-            }
-        };
-        if !matches {
-            return Ok(NetworkChangeOutcome::Changed);
-        }
-        match self.route_integrity() {
-            RouteIntegrityResult::Clean => Ok(NetworkChangeOutcome::Unchanged),
-            RouteIntegrityResult::Conflict(reason) => {
-                if let Some(state) = &self.managed {
-                    state.policy.invalidate();
-                }
-                Ok(NetworkChangeOutcome::RouteConflict(reason))
-            }
-            RouteIntegrityResult::UnstableGeneration | RouteIntegrityResult::PlatformError => {
                 if let Some(state) = &self.managed {
                     state.policy.invalidate();
                 }
@@ -1398,7 +1270,7 @@ impl Adapter {
             .wait_until_quiescent(deadline, cancelled)?;
         state.notifications.monitor_runtime();
         let dns_interface = state.dns_interface;
-        if !revalidate_managed_network(
+        if revalidate_managed_network(
             ManagedNetworkValidation {
                 policy: &state.policy,
                 owned,
@@ -1425,15 +1297,19 @@ impl Adapter {
                 }
                 Ok(true)
             },
-        )? {
+        )? != ManagedNetworkValidationOutcome::Unchanged
+        {
             return Err(Error);
         }
         Ok(())
     }
 
-    fn managed_network_matches(&mut self, force: bool) -> Result<bool, Error> {
+    fn revalidate_managed_network_state(
+        &mut self,
+        force: bool,
+    ) -> Result<ManagedNetworkValidationOutcome, Error> {
         let Some(state) = self.managed.as_mut() else {
-            return Ok(true);
+            return Ok(ManagedNetworkValidationOutcome::Unchanged);
         };
         let owned = InterfaceIdentity {
             luid: unsafe { self.luid.Value },
@@ -2083,318 +1959,6 @@ impl Drop for MibTable {
 }
 
 const MANAGED_CAPTURE_ROUTE_METRIC: u32 = 1;
-const ROUTE_INTEGRITY_GENERATION_RETRIES: usize = 2;
-
-trait RouteIntegrityOperations {
-    fn snapshot(&mut self) -> Result<RouteIntegritySnapshot, Error>;
-}
-
-struct PlatformRouteIntegrity;
-
-impl RouteIntegrityOperations for PlatformRouteIntegrity {
-    fn snapshot(&mut self) -> Result<RouteIntegritySnapshot, Error> {
-        platform_route_integrity_snapshot()
-    }
-}
-
-fn scan_route_integrity_with(
-    capture_routes: &[IpPrefix],
-    owned: InterfaceIdentity,
-    mut generation: impl FnMut() -> u64,
-    operations: &mut impl RouteIntegrityOperations,
-) -> RouteIntegrityResult {
-    if capture_routes.is_empty() {
-        return RouteIntegrityResult::Clean;
-    }
-    for _ in 0..=ROUTE_INTEGRITY_GENERATION_RETRIES {
-        let before = generation();
-        let result = match operations.snapshot() {
-            Ok(snapshot) => evaluate_route_integrity(capture_routes, owned, &snapshot),
-            Err(_) => RouteIntegrityResult::PlatformError,
-        };
-        if generation() == before {
-            return result;
-        }
-    }
-    RouteIntegrityResult::UnstableGeneration
-}
-
-fn evaluate_route_integrity(
-    capture_routes: &[IpPrefix],
-    owned: InterfaceIdentity,
-    snapshot: &RouteIntegritySnapshot,
-) -> RouteIntegrityResult {
-    if owned.luid == 0 || owned.index == 0 {
-        return RouteIntegrityResult::PlatformError;
-    }
-    let captures = capture_routes
-        .iter()
-        .copied()
-        .map(RoutePrefix::from_capture)
-        .collect::<Vec<_>>();
-    let owned_ipv4 = captures
-        .iter()
-        .any(|prefix| prefix.family() == RouteFamily::Ipv4)
-        .then(|| owned_effective_metric(snapshot, owned, RouteFamily::Ipv4))
-        .transpose();
-    let owned_ipv6 = captures
-        .iter()
-        .any(|prefix| prefix.family() == RouteFamily::Ipv6)
-        .then(|| owned_effective_metric(snapshot, owned, RouteFamily::Ipv6))
-        .transpose();
-    let (owned_ipv4, owned_ipv6) = match (owned_ipv4, owned_ipv6) {
-        (Ok(ipv4), Ok(ipv6)) => (ipv4, ipv6),
-        _ => return RouteIntegrityResult::PlatformError,
-    };
-    let mut equal_prefix_conflict = None;
-    for route in &snapshot.routes {
-        if !route.valid
-            || is_control_prefix(route.destination)
-            || is_exact_owned_route(route, owned, &captures)
-        {
-            continue;
-        }
-        let interface = snapshot
-            .interfaces
-            .iter()
-            .find(|interface| interface.identity == route.interface);
-        if interface.is_some_and(|interface| {
-            interface.software_loopback
-                || !interface.up
-                || interface
-                    .family(route.destination.family())
-                    .is_some_and(|family| !family.up)
-        }) {
-            continue;
-        }
-        for capture in &captures {
-            if !route.destination.overlaps(*capture) || route.destination.length < capture.length {
-                continue;
-            }
-            if route.destination.length > capture.length {
-                return RouteIntegrityResult::Conflict(RouteConflict::new(
-                    RouteConflictReason::MoreSpecificRoute,
-                    capture.family().public(),
-                ));
-            }
-            let owned_metric = match capture.family() {
-                RouteFamily::Ipv4 => owned_ipv4,
-                RouteFamily::Ipv6 => owned_ipv6,
-            }
-            .expect("a used capture family has a validated owned metric");
-            let external_metric = interface
-                .and_then(|interface| interface.family(capture.family()))
-                .and_then(|family| route.route_metric.checked_add(family.metric));
-            if external_metric.is_none_or(|metric| metric <= owned_metric) {
-                equal_prefix_conflict.get_or_insert(capture.family().public());
-            }
-        }
-    }
-    if let Some(family) = equal_prefix_conflict {
-        RouteIntegrityResult::Conflict(RouteConflict::new(
-            RouteConflictReason::EqualPrefixPreferred,
-            family,
-        ))
-    } else {
-        RouteIntegrityResult::Clean
-    }
-}
-
-fn owned_effective_metric(
-    snapshot: &RouteIntegritySnapshot,
-    owned: InterfaceIdentity,
-    family: RouteFamily,
-) -> Result<u32, Error> {
-    let interface = snapshot
-        .interfaces
-        .iter()
-        .find(|interface| interface.identity == owned)
-        .ok_or(Error)?;
-    let family = interface.family(family).ok_or(Error)?;
-    if interface.software_loopback || !interface.up || !family.up {
-        return Err(Error);
-    }
-    MANAGED_CAPTURE_ROUTE_METRIC
-        .checked_add(family.metric)
-        .ok_or(Error)
-}
-
-fn is_exact_owned_route(
-    route: &RouteIntegrityRoute,
-    owned: InterfaceIdentity,
-    captures: &[RoutePrefix],
-) -> bool {
-    route.interface == owned
-        && ((route.owned_shape && captures.contains(&route.destination))
-            || (route.owned_local_shape
-                && captures
-                    .iter()
-                    .any(|capture| route.destination.is_within(*capture))))
-}
-
-fn is_control_prefix(prefix: RoutePrefix) -> bool {
-    match prefix.address {
-        std::net::IpAddr::V4(_) => [
-            route_prefix_v4([0, 0, 0, 0], 8),
-            route_prefix_v4([127, 0, 0, 0], 8),
-            route_prefix_v4([169, 254, 0, 0], 16),
-            route_prefix_v4([224, 0, 0, 0], 4),
-            route_prefix_v4([240, 0, 0, 0], 4),
-        ]
-        .into_iter()
-        .any(|control| prefix.is_within(control)),
-        std::net::IpAddr::V6(_) => [
-            route_prefix_v6([0; 16], 128),
-            route_prefix_v6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 128),
-            route_prefix_v6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10),
-            route_prefix_v6([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8),
-        ]
-        .into_iter()
-        .any(|control| prefix.is_within(control)),
-    }
-}
-
-fn route_prefix_v4(address: [u8; 4], length: u8) -> RoutePrefix {
-    RoutePrefix {
-        address: std::net::IpAddr::V4(std::net::Ipv4Addr::from(address)),
-        length,
-    }
-}
-
-fn route_prefix_v6(address: [u8; 16], length: u8) -> RoutePrefix {
-    RoutePrefix {
-        address: std::net::IpAddr::V6(std::net::Ipv6Addr::from(address)),
-        length,
-    }
-}
-
-fn platform_route_integrity_snapshot() -> Result<RouteIntegritySnapshot, Error> {
-    let mut route_table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
-    if unsafe { GetIpForwardTable2(AF_UNSPEC, &mut route_table) } != ERROR_SUCCESS
-        || route_table.is_null()
-    {
-        return Err(Error);
-    }
-    let route_owner = MibTable(route_table.cast());
-    let route_count = unsafe { (*route_table).NumEntries as usize };
-    let route_rows =
-        unsafe { std::slice::from_raw_parts((*route_table).Table.as_ptr(), route_count) };
-    let routes = route_rows
-        .iter()
-        .filter_map(normalize_route_integrity_row)
-        .collect::<Vec<_>>();
-    drop(route_owner);
-
-    let mut interface_table: *mut MIB_IF_TABLE2 = null_mut();
-    if unsafe { GetIfTable2(&mut interface_table) } != ERROR_SUCCESS || interface_table.is_null() {
-        return Err(Error);
-    }
-    let interface_owner = MibTable(interface_table.cast());
-    let interface_count = unsafe { (*interface_table).NumEntries as usize };
-    let interface_rows =
-        unsafe { std::slice::from_raw_parts((*interface_table).Table.as_ptr(), interface_count) };
-    let mut interfaces = interface_rows
-        .iter()
-        .filter_map(normalize_route_integrity_interface)
-        .collect::<Vec<_>>();
-    drop(interface_owner);
-
-    let mut ip_interface_table: *mut MIB_IPINTERFACE_TABLE = null_mut();
-    if unsafe { GetIpInterfaceTable(AF_UNSPEC, &mut ip_interface_table) } != ERROR_SUCCESS
-        || ip_interface_table.is_null()
-    {
-        return Err(Error);
-    }
-    let ip_interface_owner = MibTable(ip_interface_table.cast());
-    let ip_interface_count = unsafe { (*ip_interface_table).NumEntries as usize };
-    let ip_interface_rows = unsafe {
-        std::slice::from_raw_parts((*ip_interface_table).Table.as_ptr(), ip_interface_count)
-    };
-    for row in ip_interface_rows {
-        merge_ip_interface_row(&mut interfaces, row)?;
-    }
-    drop(ip_interface_owner);
-    Ok(RouteIntegritySnapshot { routes, interfaces })
-}
-
-fn normalize_route_integrity_row(row: &MIB_IPFORWARD_ROW2) -> Option<RouteIntegrityRoute> {
-    let interface = InterfaceIdentity {
-        luid: unsafe { row.InterfaceLuid.Value },
-        index: row.InterfaceIndex,
-    };
-    let destination_address = sockaddr_ip(&row.DestinationPrefix.Prefix).ok()?;
-    let destination = RoutePrefix::new(destination_address, row.DestinationPrefix.PrefixLength)?;
-    let next_hop = sockaddr_ip(&row.NextHop).ok()?;
-    let valid = interface.luid != 0
-        && interface.index != 0
-        && row.ValidLifetime != 0
-        && same_ip_family(destination_address, next_hop);
-    let owned_shape = valid
-        && next_hop.is_unspecified()
-        && row.SitePrefixLength == 0
-        && row.ValidLifetime == u32::MAX
-        && row.PreferredLifetime == u32::MAX
-        && row.Metric == MANAGED_CAPTURE_ROUTE_METRIC
-        && row.Protocol == MIB_IPPROTO_NETMGMT
-        && !row.Loopback
-        && !row.AutoconfigureAddress
-        && !row.Publish
-        && !row.Immortal
-        && row.Origin == NlroManual;
-    let owned_local_shape = valid && next_hop.is_unspecified() && row.Protocol == MIB_IPPROTO_LOCAL;
-    Some(RouteIntegrityRoute {
-        interface,
-        destination,
-        route_metric: row.Metric,
-        valid,
-        owned_shape,
-        owned_local_shape,
-    })
-}
-
-fn normalize_route_integrity_interface(row: &MIB_IF_ROW2) -> Option<RouteIntegrityInterface> {
-    let identity = InterfaceIdentity {
-        luid: unsafe { row.InterfaceLuid.Value },
-        index: row.InterfaceIndex,
-    };
-    (identity.luid != 0 && identity.index != 0).then_some(RouteIntegrityInterface {
-        identity,
-        software_loopback: row.Type
-            == windows_sys::Win32::NetworkManagement::IpHelper::IF_TYPE_SOFTWARE_LOOPBACK,
-        up: row.OperStatus == IfOperStatusUp
-            && row.AdminStatus == NET_IF_ADMIN_STATUS_UP
-            && row.MediaConnectState == MediaConnectStateConnected,
-        ipv4: None,
-        ipv6: None,
-    })
-}
-
-fn merge_ip_interface_row(
-    interfaces: &mut [RouteIntegrityInterface],
-    row: &MIB_IPINTERFACE_ROW,
-) -> Result<(), Error> {
-    let identity = InterfaceIdentity {
-        luid: unsafe { row.InterfaceLuid.Value },
-        index: row.InterfaceIndex,
-    };
-    let interface = interfaces
-        .iter_mut()
-        .find(|interface| interface.identity == identity)
-        .ok_or(Error)?;
-    let destination = match row.Family {
-        AF_INET => &mut interface.ipv4,
-        AF_INET6 => &mut interface.ipv6,
-        _ => return Err(Error),
-    };
-    if destination.is_some() {
-        return Err(Error);
-    }
-    *destination = Some(InterfaceFamilyState {
-        up: row.Connected,
-        metric: row.Metric,
-    });
-    Ok(())
-}
 
 fn constrained_route(
     destination: std::net::SocketAddr,
@@ -2772,11 +2336,32 @@ fn managed_routes_match<O: ManagedRouteCleanupOperations>(
     })
 }
 
+fn managed_state_health<O: ManagedRouteCleanupOperations>(
+    routes: &[O::Row],
+    route_operations: &mut O,
+    mut dns_matches: impl FnMut() -> Result<bool, Error>,
+) -> Result<ManagedTunHealth, Error> {
+    if !managed_routes_match(routes, route_operations) {
+        return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Route));
+    }
+    if !dns_matches()? {
+        return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Dns));
+    }
+    Ok(ManagedTunHealth::Healthy)
+}
+
 struct ManagedNetworkValidation<'a, R> {
     policy: &'a UnderlayPolicy,
     owned: InterfaceIdentity,
     routes: &'a [R],
     validated_generation: &'a mut u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedNetworkValidationOutcome {
+    Unchanged,
+    UnderlayChanged,
+    ManagedStateDamaged(ManagedStateDamage),
 }
 
 fn revalidate_managed_network<
@@ -2789,8 +2374,8 @@ fn revalidate_managed_network<
     mut generation: impl FnMut() -> u64,
     underlay: &mut U,
     route_operations: &mut O,
-    mut additional_matches: F,
-) -> Result<bool, Error> {
+    mut dns_matches: F,
+) -> Result<ManagedNetworkValidationOutcome, Error> {
     let ManagedNetworkValidation {
         policy,
         owned,
@@ -2799,7 +2384,7 @@ fn revalidate_managed_network<
     } = validation;
     let mut before = generation();
     if !force && before == *validated_generation {
-        return Ok(true);
+        return Ok(ManagedNetworkValidationOutcome::Unchanged);
     }
     for _ in 0..2 {
         let underlay_matches = match underlay_matches_with(policy, owned, underlay) {
@@ -2809,31 +2394,32 @@ fn revalidate_managed_network<
                 return Err(error);
             }
         };
-        if !underlay_matches || !managed_routes_match(routes, route_operations) {
-            policy.invalidate();
-            return Ok(false);
-        }
-        let additional_matches = match additional_matches() {
-            Ok(matches) => matches,
+        let health = match managed_state_health(routes, route_operations, &mut dns_matches) {
+            Ok(health) => health,
             Err(error) => {
                 policy.invalidate();
                 return Err(error);
             }
         };
-        if !additional_matches {
-            policy.invalidate();
-            return Ok(false);
-        }
         let after = generation();
-        if after == before {
-            *validated_generation = after;
-            policy.accept_generation(after);
-            return Ok(true);
+        if after != before {
+            before = after;
+            continue;
         }
-        before = after;
+        if let ManagedTunHealth::Damaged(reason) = health {
+            policy.invalidate();
+            return Ok(ManagedNetworkValidationOutcome::ManagedStateDamaged(reason));
+        }
+        if !underlay_matches {
+            policy.invalidate();
+            return Ok(ManagedNetworkValidationOutcome::UnderlayChanged);
+        }
+        *validated_generation = after;
+        policy.accept_generation(after);
+        return Ok(ManagedNetworkValidationOutcome::Unchanged);
     }
     policy.invalidate();
-    Ok(false)
+    Ok(ManagedNetworkValidationOutcome::UnderlayChanged)
 }
 
 struct PlatformManagedRouteCleanup;
@@ -3492,36 +3078,34 @@ mod tests {
         ABI_EXPORTS, AF_INET6, AF_UNSPEC, AdapterCreateFailure, CleanupOperations, DLL_BYTES,
         DLL_SHA256, DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER, DadProgress, DnsFamily,
         ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW, ERROR_HANDLE_EOF,
-        ERROR_NO_MORE_ITEMS, Error, InterfaceFamilyState, InterfaceIdentity, IpDadStateDeprecated,
-        IpDadStateDuplicate, IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative,
-        Ipv4DnsSettings, Ipv6DnsSettings, LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2,
-        MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, ManagedAddressCleanupOperations,
-        ManagedAddressRead, ManagedDnsLease, ManagedDnsOperations, ManagedNetworkValidation,
-        ManagedRouteCleanupOperations, ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH,
-        NotificationContext, NotificationOwners, OwnedHandle, RouteFingerprint,
-        RouteIntegrityInterface, RouteIntegrityOperations, RouteIntegrityRoute,
-        RouteIntegritySnapshot, RoutePrefix, SessionJournal, SetupOperations,
-        SocketBindingOperations, StopSignal, UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0,
-        WAIT_TIMEOUT, WaitForMultipleObjects, WorkSignal, address_changed, bind_fixed_with,
-        bind_target_with, cancel_notification_handles, capture_route_row,
-        classify_adapter_create_failure, classify_notification_luid, classify_receive_null,
-        classify_send_allocation_failure, classify_wait_result, cleanup_transaction,
-        copy_bounded_wide, create_event, dad_snapshot, delete_managed_address,
-        delete_managed_route, dns_settings_query_flags, eligible_interface_identity,
-        evaluate_route_integrity, finish_setup_transaction, initialize_managed_address,
+        ERROR_NO_MORE_ITEMS, Error, InterfaceIdentity, IpDadStateDeprecated, IpDadStateDuplicate,
+        IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, Ipv4DnsSettings,
+        Ipv6DnsSettings, LoaderOperations, MIB_IF_ROW2, MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
+        MIB_UNICASTIPADDRESS_ROW, ManagedAddressCleanupOperations, ManagedAddressRead,
+        ManagedDnsLease, ManagedDnsOperations, ManagedNetworkValidation,
+        ManagedNetworkValidationOutcome, ManagedRouteCleanupOperations, ManagedRouteOperations,
+        ManagedRouteRead, NET_LUID_LH, NotificationContext, NotificationOwners, OwnedHandle,
+        RouteFingerprint, SessionJournal, SetupOperations, SocketBindingOperations, StopSignal,
+        UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WaitForMultipleObjects,
+        WorkSignal, address_changed, bind_fixed_with, bind_target_with,
+        cancel_notification_handles, capture_route_row, classify_adapter_create_failure,
+        classify_notification_luid, classify_receive_null, classify_send_allocation_failure,
+        classify_wait_result, cleanup_transaction, copy_bounded_wide, create_event, dad_snapshot,
+        delete_managed_address, delete_managed_route, dns_settings_query_flags,
+        eligible_interface_identity, finish_setup_transaction, initialize_managed_address,
         install_managed_dns, install_managed_routes, interface_changed, interface_socket_option,
         ipv4_dns_settings_input, ipv4_interface_index_option_value, ipv4_sockaddr,
         ipv6_dns_settings_input, ipv6_interface_index_option_value, ipv6_sockaddr,
         leak_notification_owners, load_transaction, managed_address_matches, managed_dns_matches,
-        managed_notification_family, normalize_dns_settings, prepare_managed_intent,
-        require_exports, restore_managed_dns, revalidate_managed_network, route_changed,
-        route_matches, scan_route_integrity_with, setup_transaction, snapshot_underlay_at,
+        managed_notification_family, managed_state_health, normalize_dns_settings,
+        prepare_managed_intent, require_exports, restore_managed_dns, revalidate_managed_network,
+        route_changed, route_matches, setup_transaction, snapshot_underlay_at,
         snapshot_underlay_with, subscribe_notification_sequence, take_last_owned_route,
         underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
     use crate::{
-        ErrorKind, IpFamily, IpPrefix, Ipv4Prefix, Ipv6Prefix, RouteConflict, RouteConflictReason,
-        RouteIntegrityResult, SendOutcome, WaitOutcome,
+        ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix, ManagedStateDamage, ManagedTunHealth,
+        SendOutcome, WaitOutcome,
     };
 
     enum PublicationObservation<T> {
@@ -4400,6 +3984,45 @@ mod tests {
     }
 
     #[test]
+    fn managed_state_health_reports_owned_route_and_dns_damage_only() {
+        for readback in [
+            ManagedRouteRead::Absent,
+            ManagedRouteRead::Present(2),
+            ManagedRouteRead::Failed,
+        ] {
+            let mut routes = InjectedRouteCleanup {
+                reads: [readback].into(),
+                delete_error: false,
+                calls: Vec::new(),
+            };
+            assert_eq!(
+                managed_state_health(&[1], &mut routes, || Ok(true)).unwrap(),
+                ManagedTunHealth::Damaged(ManagedStateDamage::Route)
+            );
+        }
+
+        let mut healthy_route = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            managed_state_health(&[1], &mut healthy_route, || Ok(false)).unwrap(),
+            ManagedTunHealth::Damaged(ManagedStateDamage::Dns)
+        );
+
+        let mut healthy_route = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Present(1)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            managed_state_health(&[1], &mut healthy_route, || Ok(true)).unwrap(),
+            ManagedTunHealth::Healthy
+        );
+    }
+
+    #[test]
     fn network_change_revalidates_underlay_and_owned_routes_before_shutdown() {
         let physical = InterfaceIdentity { luid: 7, index: 17 };
         let wintun = InterfaceIdentity { luid: 9, index: 19 };
@@ -4432,7 +4055,7 @@ mod tests {
             delete_error: false,
             calls: Vec::new(),
         };
-        assert!(
+        assert_eq!(
             revalidate_managed_network(
                 ManagedNetworkValidation {
                     policy: &policy,
@@ -4446,15 +4069,31 @@ mod tests {
                 &mut owned_routes,
                 || Ok(true),
             )
-            .unwrap()
+            .unwrap(),
+            ManagedNetworkValidationOutcome::Unchanged
         );
         assert_eq!(validated_generation, 1);
         assert_eq!(owned_routes.calls, ["get"]);
 
-        for (name, changed_underlay, route_readback) in [
-            ("underlay", true, ManagedRouteRead::Present(1)),
-            ("owned route", false, ManagedRouteRead::Present(2)),
-            ("replacement query", false, ManagedRouteRead::Failed),
+        for (name, changed_underlay, route_readback, expected) in [
+            (
+                "underlay",
+                true,
+                ManagedRouteRead::Present(1),
+                ManagedNetworkValidationOutcome::UnderlayChanged,
+            ),
+            (
+                "owned route",
+                false,
+                ManagedRouteRead::Present(2),
+                ManagedNetworkValidationOutcome::ManagedStateDamaged(ManagedStateDamage::Route),
+            ),
+            (
+                "replacement query",
+                false,
+                ManagedRouteRead::Failed,
+                ManagedNetworkValidationOutcome::ManagedStateDamaged(ManagedStateDamage::Route),
+            ),
         ] {
             let mut changed = underlay.clone();
             if changed_underlay {
@@ -4467,8 +4106,8 @@ mod tests {
             };
             let mut observed = 1;
             let mut generation = [2, 2].into_iter();
-            assert!(
-                !revalidate_managed_network(
+            assert_eq!(
+                revalidate_managed_network(
                     ManagedNetworkValidation {
                         policy: &policy,
                         owned: wintun,
@@ -4482,6 +4121,7 @@ mod tests {
                     || Ok(true),
                 )
                 .unwrap(),
+                expected,
                 "{name}"
             );
             assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
@@ -4496,7 +4136,7 @@ mod tests {
             delete_error: false,
             calls: Vec::new(),
         };
-        assert!(
+        assert_eq!(
             revalidate_managed_network(
                 ManagedNetworkValidation {
                     policy: &policy,
@@ -4511,6 +4151,7 @@ mod tests {
                 || Ok(true),
             )
             .unwrap(),
+            ManagedNetworkValidationOutcome::Unchanged,
             "one repeated/coalesced signal gets one bounded retry"
         );
         assert_eq!(observed, 3);
@@ -4521,8 +4162,8 @@ mod tests {
             delete_error: false,
             calls: Vec::new(),
         };
-        assert!(
-            !revalidate_managed_network(
+        assert_eq!(
+            revalidate_managed_network(
                 ManagedNetworkValidation {
                     policy: &policy,
                     owned: wintun,
@@ -4536,6 +4177,7 @@ mod tests {
                 || Ok(true),
             )
             .unwrap(),
+            ManagedNetworkValidationOutcome::UnderlayChanged,
             "repeated changes exhaust the bounded retry"
         );
         assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
@@ -4549,8 +4191,8 @@ mod tests {
             calls: Vec::new(),
         };
         let mut additional_checks = 0;
-        assert!(
-            !revalidate_managed_network(
+        assert_eq!(
+            revalidate_managed_network(
                 ManagedNetworkValidation {
                     policy: &policy,
                     owned: wintun,
@@ -4567,6 +4209,7 @@ mod tests {
                 },
             )
             .unwrap(),
+            ManagedNetworkValidationOutcome::ManagedStateDamaged(ManagedStateDamage::Dns),
             "a forced runtime audit rejects a mutated DNS lease even without a generation bump"
         );
         assert_eq!(additional_checks, 1);
@@ -4895,7 +4538,7 @@ mod tests {
             delete_error: false,
             calls: Vec::new(),
         };
-        assert!(
+        assert_eq!(
             revalidate_managed_network(
                 ManagedNetworkValidation {
                     policy: &policy,
@@ -4909,7 +4552,8 @@ mod tests {
                 &mut no_routes,
                 || Ok(true),
             )
-            .unwrap()
+            .unwrap(),
+            ManagedNetworkValidationOutcome::Unchanged
         );
         assert_eq!(validated_generation, 10);
         bind_target_with(
@@ -6143,7 +5787,7 @@ mod tests {
         cleanup.dns.extend(["ipv4-dns", "ipv6-dns"]);
         assert!(
             cleanup_transaction(&mut cleanup),
-            "route conflict is surfaced"
+            "cleanup conflicts are surfaced"
         );
         assert_eq!(
             cleanup.cleanup_calls,
@@ -6160,418 +5804,12 @@ mod tests {
                 "end-session",
                 "adapter",
             ],
-            "route conflict cannot short-circuit reverse cleanup"
+            "managed cleanup cannot short-circuit reverse ownership order"
         );
         assert!(cleanup.resources.is_empty());
         assert_eq!(low.Metric, 1);
         assert_eq!(low.DestinationPrefix.PrefixLength, 1);
         assert_eq!(unsafe { low.NextHop.Ipv4.sin_addr.S_un.S_addr }, 0);
-    }
-
-    fn integrity_capture_v4(address: &str, length: u8) -> IpPrefix {
-        IpPrefix::V4(Ipv4Prefix::new(address.parse().unwrap(), length).unwrap())
-    }
-
-    fn integrity_capture_v6(address: &str, length: u8) -> IpPrefix {
-        IpPrefix::V6(Ipv6Prefix::new(address.parse().unwrap(), length).unwrap())
-    }
-
-    fn integrity_prefix(address: &str, length: u8) -> RoutePrefix {
-        RoutePrefix::new(address.parse().unwrap(), length).unwrap()
-    }
-
-    fn integrity_route(
-        interface: InterfaceIdentity,
-        address: &str,
-        length: u8,
-        route_metric: u32,
-    ) -> RouteIntegrityRoute {
-        RouteIntegrityRoute {
-            interface,
-            destination: integrity_prefix(address, length),
-            route_metric,
-            valid: true,
-            owned_shape: false,
-            owned_local_shape: false,
-        }
-    }
-
-    fn integrity_interface(
-        identity: InterfaceIdentity,
-        ipv4_metric: u32,
-        ipv6_metric: u32,
-    ) -> RouteIntegrityInterface {
-        RouteIntegrityInterface {
-            identity,
-            software_loopback: false,
-            up: true,
-            ipv4: Some(InterfaceFamilyState {
-                up: true,
-                metric: ipv4_metric,
-            }),
-            ipv6: Some(InterfaceFamilyState {
-                up: true,
-                metric: ipv6_metric,
-            }),
-        }
-    }
-
-    fn integrity_snapshot(
-        owned: InterfaceIdentity,
-        routes: Vec<RouteIntegrityRoute>,
-        mut interfaces: Vec<RouteIntegrityInterface>,
-    ) -> RouteIntegritySnapshot {
-        interfaces.insert(0, integrity_interface(owned, 10, 20));
-        RouteIntegritySnapshot { routes, interfaces }
-    }
-
-    #[derive(Default)]
-    struct InjectedRouteIntegrity {
-        snapshots: std::collections::VecDeque<Result<RouteIntegritySnapshot, Error>>,
-        calls: usize,
-    }
-
-    impl RouteIntegrityOperations for InjectedRouteIntegrity {
-        fn snapshot(&mut self) -> Result<RouteIntegritySnapshot, Error> {
-            self.calls += 1;
-            self.snapshots.pop_front().unwrap_or(Err(Error))
-        }
-    }
-
-    #[test]
-    fn route_integrity_detects_v4_and_v6_specificity_without_default_route_false_positives() {
-        let owned = InterfaceIdentity { luid: 90, index: 9 };
-        let external = InterfaceIdentity { luid: 70, index: 7 };
-        let external_interface = integrity_interface(external, 30, 30);
-
-        let ipv4 = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "10.20.30.0", 24, 50)],
-            vec![external_interface],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&[integrity_capture_v4("0.0.0.0", 1)], owned, &ipv4),
-            RouteIntegrityResult::Conflict(RouteConflict::new(
-                RouteConflictReason::MoreSpecificRoute,
-                IpFamily::Ipv4,
-            ))
-        );
-
-        let ipv6 = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "2001:db8:1::", 64, 50)],
-            vec![external_interface],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&[integrity_capture_v6("::", 1)], owned, &ipv6),
-            RouteIntegrityResult::Conflict(RouteConflict::new(
-                RouteConflictReason::MoreSpecificRoute,
-                IpFamily::Ipv6,
-            ))
-        );
-
-        let defaults = integrity_snapshot(
-            owned,
-            vec![
-                integrity_route(external, "0.0.0.0", 0, 0),
-                integrity_route(external, "::", 0, 0),
-            ],
-            vec![external_interface],
-        );
-        assert_eq!(
-            evaluate_route_integrity(
-                &[
-                    integrity_capture_v4("10.0.0.0", 8),
-                    integrity_capture_v6("2001:db8::", 32),
-                ],
-                owned,
-                &defaults,
-            ),
-            RouteIntegrityResult::Clean,
-            "external /0 routes are less specific than managed capture"
-        );
-
-        let disjoint = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "192.0.2.0", 24, 0)],
-            vec![external_interface],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&[integrity_capture_v4("10.0.0.0", 8)], owned, &disjoint),
-            RouteIntegrityResult::Clean,
-            "a route with no overlap is ignored"
-        );
-    }
-
-    #[test]
-    fn equal_prefix_metric_is_closed_for_lower_equal_overflow_and_unknown() {
-        let owned = InterfaceIdentity { luid: 90, index: 9 };
-        let external = InterfaceIdentity { luid: 70, index: 7 };
-        let capture = [integrity_capture_v4("10.0.0.0", 8)];
-        let cases = [
-            (1, Some(8), true, "lower total metric"),
-            (1, Some(10), true, "equal total metric"),
-            (1, Some(11), false, "higher total metric"),
-            (u32::MAX, Some(1), true, "overflowed total metric"),
-            (1, None, true, "unknown interface metric"),
-        ];
-        for (route_metric, interface_metric, conflicts, label) in cases {
-            let interfaces = interface_metric
-                .map(|metric| integrity_interface(external, metric, metric))
-                .into_iter()
-                .collect();
-            let snapshot = integrity_snapshot(
-                owned,
-                vec![integrity_route(external, "10.0.0.0", 8, route_metric)],
-                interfaces,
-            );
-            let expected = if conflicts {
-                RouteIntegrityResult::Conflict(RouteConflict::new(
-                    RouteConflictReason::EqualPrefixPreferred,
-                    IpFamily::Ipv4,
-                ))
-            } else {
-                RouteIntegrityResult::Clean
-            };
-            assert_eq!(
-                evaluate_route_integrity(&capture, owned, &snapshot),
-                expected,
-                "{label}"
-            );
-        }
-
-        let ipv6_equal = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "2001:db8::", 32, 1)],
-            vec![integrity_interface(external, 10, 20)],
-        );
-        assert_eq!(
-            evaluate_route_integrity(
-                &[integrity_capture_v6("2001:db8::", 32)],
-                owned,
-                &ipv6_equal,
-            ),
-            RouteIntegrityResult::Conflict(RouteConflict::new(
-                RouteConflictReason::EqualPrefixPreferred,
-                IpFamily::Ipv6,
-            ))
-        );
-    }
-
-    #[test]
-    fn route_integrity_uses_only_fixed_control_and_liveness_exemptions() {
-        let owned = InterfaceIdentity { luid: 90, index: 9 };
-        let external = InterfaceIdentity { luid: 70, index: 7 };
-        let captures = [
-            integrity_capture_v4("0.0.0.0", 1),
-            integrity_capture_v4("128.0.0.0", 1),
-            integrity_capture_v6("::", 1),
-            integrity_capture_v6("8000::", 1),
-        ];
-        let controls = integrity_snapshot(
-            owned,
-            vec![
-                integrity_route(external, "127.0.0.0", 8, 0),
-                integrity_route(external, "169.254.0.0", 16, 0),
-                integrity_route(external, "224.0.0.0", 4, 0),
-                integrity_route(external, "255.255.255.255", 32, 0),
-                integrity_route(external, "::1", 128, 0),
-                integrity_route(external, "fe80::", 10, 0),
-                integrity_route(external, "ff00::", 8, 0),
-            ],
-            vec![integrity_interface(external, 1, 1)],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&captures, owned, &controls),
-            RouteIntegrityResult::Clean
-        );
-
-        let mut loopback = integrity_interface(external, 1, 1);
-        loopback.software_loopback = true;
-        let snapshot = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "10.0.0.0", 8, 1)],
-            vec![loopback],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&captures, owned, &snapshot),
-            RouteIntegrityResult::Clean
-        );
-
-        let mut down = integrity_interface(external, 1, 1);
-        down.up = false;
-        let snapshot = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "10.0.0.0", 8, 1)],
-            vec![down],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&captures, owned, &snapshot),
-            RouteIntegrityResult::Clean
-        );
-
-        let mut family_down = integrity_interface(external, 1, 1);
-        family_down.ipv4.as_mut().unwrap().up = false;
-        let snapshot = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "10.0.0.0", 8, 1)],
-            vec![family_down],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&captures, owned, &snapshot),
-            RouteIntegrityResult::Clean
-        );
-
-        let mut invalid = integrity_route(external, "10.0.0.0", 8, 1);
-        invalid.valid = false;
-        let snapshot = integrity_snapshot(
-            owned,
-            vec![invalid],
-            vec![integrity_interface(external, 1, 1)],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&captures, owned, &snapshot),
-            RouteIntegrityResult::Clean
-        );
-
-        for (address, length, label) in [
-            ("10.0.0.0", 8, "RFC1918"),
-            ("172.17.0.0", 16, "Docker/Hyper-V-style private route"),
-            ("198.51.100.0", 24, "route containing a fixed endpoint"),
-            ("fc00::", 7, "ULA or another VPN route"),
-        ] {
-            let snapshot = integrity_snapshot(
-                owned,
-                vec![integrity_route(external, address, length, 100)],
-                vec![integrity_interface(external, 100, 100)],
-            );
-            assert_eq!(
-                evaluate_route_integrity(&captures, owned, &snapshot),
-                RouteIntegrityResult::Conflict(RouteConflict::new(
-                    RouteConflictReason::MoreSpecificRoute,
-                    if address.contains(':') {
-                        IpFamily::Ipv6
-                    } else {
-                        IpFamily::Ipv4
-                    },
-                )),
-                "{label} is not implicitly exempt"
-            );
-        }
-    }
-
-    #[test]
-    fn only_exact_managed_and_kernel_local_owned_rows_are_ignored() {
-        let owned = InterfaceIdentity { luid: 90, index: 9 };
-        let external = InterfaceIdentity { luid: 70, index: 7 };
-        let capture = [integrity_capture_v4("0.0.0.0", 1)];
-        let mut owned_route = integrity_route(owned, "0.0.0.0", 1, 1);
-        owned_route.owned_shape = true;
-        let exact = integrity_snapshot(owned, vec![owned_route], Vec::new());
-        assert_eq!(
-            evaluate_route_integrity(&capture, owned, &exact),
-            RouteIntegrityResult::Clean
-        );
-
-        owned_route.owned_shape = false;
-        let changed = integrity_snapshot(owned, vec![owned_route], Vec::new());
-        assert_eq!(
-            evaluate_route_integrity(&capture, owned, &changed),
-            RouteIntegrityResult::Conflict(RouteConflict::new(
-                RouteConflictReason::EqualPrefixPreferred,
-                IpFamily::Ipv4,
-            ))
-        );
-
-        let mut local = integrity_route(owned, "10.255.255.255", 32, 256);
-        local.owned_local_shape = true;
-        let owned_local = integrity_snapshot(owned, vec![local], Vec::new());
-        assert_eq!(
-            evaluate_route_integrity(&capture, owned, &owned_local),
-            RouteIntegrityResult::Clean,
-            "kernel-local routes on the owned adapter cannot bypass capture"
-        );
-
-        local.interface = external;
-        let external_local = integrity_snapshot(
-            owned,
-            vec![local],
-            vec![integrity_interface(external, 1, 1)],
-        );
-        assert_eq!(
-            evaluate_route_integrity(&capture, owned, &external_local),
-            RouteIntegrityResult::Conflict(RouteConflict::new(
-                RouteConflictReason::MoreSpecificRoute,
-                IpFamily::Ipv4,
-            )),
-            "the exemption is identity-bound to the owned adapter"
-        );
-    }
-
-    #[test]
-    fn route_integrity_retries_generation_twice_then_reports_unstable() {
-        let owned = InterfaceIdentity { luid: 90, index: 9 };
-        let capture = [integrity_capture_v4("0.0.0.0", 1)];
-        let clean = integrity_snapshot(owned, Vec::new(), Vec::new());
-        let external = InterfaceIdentity { luid: 70, index: 7 };
-        let conflict = integrity_snapshot(
-            owned,
-            vec![integrity_route(external, "10.0.0.0", 8, 1)],
-            vec![integrity_interface(external, 1, 1)],
-        );
-        let mut operations = InjectedRouteIntegrity {
-            snapshots: [Ok(conflict), Ok(clean.clone())].into(),
-            calls: 0,
-        };
-        let mut generations = [1, 2, 2, 2].into_iter();
-        assert_eq!(
-            scan_route_integrity_with(
-                &capture,
-                owned,
-                || generations.next().unwrap(),
-                &mut operations,
-            ),
-            RouteIntegrityResult::Clean,
-            "a raced conflict snapshot is never adopted"
-        );
-        assert_eq!(operations.calls, 2);
-
-        let mut operations = InjectedRouteIntegrity {
-            snapshots: [Ok(clean.clone()), Ok(clean.clone()), Ok(clean)].into(),
-            calls: 0,
-        };
-        let mut generations = [1, 2, 2, 3, 3, 4].into_iter();
-        assert_eq!(
-            scan_route_integrity_with(
-                &capture,
-                owned,
-                || generations.next().unwrap(),
-                &mut operations,
-            ),
-            RouteIntegrityResult::UnstableGeneration
-        );
-        assert_eq!(operations.calls, 3, "one attempt plus two retries");
-    }
-
-    #[test]
-    fn route_integrity_platform_failures_are_closed_and_generation_checked() {
-        let owned = InterfaceIdentity { luid: 90, index: 9 };
-        let capture = [integrity_capture_v4("0.0.0.0", 1)];
-        let mut operations = InjectedRouteIntegrity {
-            snapshots: [Err(Error)].into(),
-            calls: 0,
-        };
-        let mut generations = [7, 7].into_iter();
-        assert_eq!(
-            scan_route_integrity_with(
-                &capture,
-                owned,
-                || generations.next().unwrap(),
-                &mut operations,
-            ),
-            RouteIntegrityResult::PlatformError
-        );
-        assert_eq!(operations.calls, 1);
     }
 
     #[test]

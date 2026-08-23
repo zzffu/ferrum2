@@ -129,7 +129,6 @@ pub enum TunRejectReason {
     UdpResponseClosed,
     StaleGeneration,
     WintunRingFull,
-    RouteConflict,
 }
 
 /// Closed, identity-free reasons why one UDP response became terminal.
@@ -146,13 +145,6 @@ pub enum UdpResponseDropReason {
     OwnerFatal,
 }
 
-/// Closed reason for an external route winning over a managed capture route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TunRouteConflictReason {
-    MoreSpecificRoute,
-    EqualPrefixPreferred,
-}
-
 /// Closed address-family label for redacted TUN diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TunIpFamily {
@@ -164,8 +156,6 @@ pub enum TunIpFamily {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TunDiagnosticReason {
     WintunRingFull,
-    RouteMoreSpecific,
-    RouteEqualPrefixPreferred,
 }
 
 /// One redacted event emitted by the TUN owner or a generation-bound bridge.
@@ -206,8 +196,6 @@ pub enum TunEvent {
     ReassemblyDroppedLimit,
     ReassemblyDroppedMalformed,
     NetworkChange,
-    RouteDetect,
-    RouteConflict(TunRouteConflictReason),
     UnderlayBindStale,
     Diagnostic {
         reason: TunDiagnosticReason,
@@ -1086,30 +1074,6 @@ struct OwnerSessionServices {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-fn emit_route_conflict(events: &TunEventSink, conflict: ferrum2_wintun::RouteConflict) {
-    let (reason, diagnostic) = match conflict.reason() {
-        ferrum2_wintun::RouteConflictReason::MoreSpecificRoute => (
-            TunRouteConflictReason::MoreSpecificRoute,
-            TunDiagnosticReason::RouteMoreSpecific,
-        ),
-        ferrum2_wintun::RouteConflictReason::EqualPrefixPreferred => (
-            TunRouteConflictReason::EqualPrefixPreferred,
-            TunDiagnosticReason::RouteEqualPrefixPreferred,
-        ),
-    };
-    let family = match conflict.family() {
-        ferrum2_wintun::IpFamily::Ipv4 => TunIpFamily::Ipv4,
-        ferrum2_wintun::IpFamily::Ipv6 => TunIpFamily::Ipv6,
-    };
-    events.emit(TunEvent::RouteConflict(reason));
-    events.emit(TunEvent::PacketRejected(TunRejectReason::RouteConflict));
-    events.emit(TunEvent::Diagnostic {
-        reason: diagnostic,
-        family,
-    });
-}
-
-#[cfg(all(windows, target_arch = "x86_64"))]
 fn packet_ip_family(packet: &[u8]) -> Option<TunIpFamily> {
     match packet.first().map(|byte| byte >> 4) {
         Some(4) => Some(TunIpFamily::Ipv4),
@@ -1153,16 +1117,13 @@ fn semantic_network_change_requires_restart(
     adapter: &mut ferrum2_wintun::Adapter,
     events: &TunEventSink,
 ) -> Result<bool, AdapterErrorDisposition> {
-    events.emit(TunEvent::RouteDetect);
     match adapter.revalidate_network_change() {
         Ok(ferrum2_wintun::NetworkChangeOutcome::Unchanged) => Ok(false),
-        Ok(ferrum2_wintun::NetworkChangeOutcome::Changed) => {
+        Ok(
+            ferrum2_wintun::NetworkChangeOutcome::Changed
+            | ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(_),
+        ) => {
             events.emit(TunEvent::NetworkChange);
-            Ok(true)
-        }
-        Ok(ferrum2_wintun::NetworkChangeOutcome::RouteConflict(reason)) => {
-            events.emit(TunEvent::NetworkChange);
-            emit_route_conflict(events, reason);
             Ok(true)
         }
         Err(error) => {
@@ -1349,12 +1310,7 @@ fn owner_main(
                 OwnerExit::RuntimeFailed
             };
         }
-        events.emit(TunEvent::RouteDetect);
-        let route_integrity = adapter.route_integrity();
-        if route_integrity != ferrum2_wintun::RouteIntegrityResult::Clean {
-            if let ferrum2_wintun::RouteIntegrityResult::Conflict(reason) = route_integrity {
-                emit_route_conflict(&events, reason);
-            }
+        if adapter.managed_health() != Ok(ferrum2_wintun::ManagedTunHealth::Healthy) {
             session_cancel_handle.cancel();
             stack.quiesce(
                 generation.wrapping_add(1).max(1),
@@ -1495,13 +1451,6 @@ fn owner_main(
                         let observed_at = i64::try_from(supervisor_origin.elapsed().as_millis())
                             .unwrap_or(i64::MAX);
                         debounce.observe(raw_notification_generation, observed_at);
-                    }
-                    Ok(ferrum2_wintun::WaitOutcome::RouteConflict(reason)) => {
-                        events.emit(TunEvent::NetworkChange);
-                        events.emit(TunEvent::RouteDetect);
-                        emit_route_conflict(&events, reason);
-                        restart = true;
-                        break;
                     }
                     Err(error) => {
                         match classify_adapter_error(error) {
@@ -1644,13 +1593,6 @@ fn owner_main(
                     let observed_at =
                         i64::try_from(supervisor_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
                     debounce.observe(raw_notification_generation, observed_at);
-                }
-                Ok(ferrum2_wintun::WaitOutcome::RouteConflict(reason)) => {
-                    events.emit(TunEvent::NetworkChange);
-                    events.emit(TunEvent::RouteDetect);
-                    emit_route_conflict(&events, reason);
-                    restart = true;
-                    break;
                 }
                 Err(error) => {
                     match classify_adapter_error(error) {

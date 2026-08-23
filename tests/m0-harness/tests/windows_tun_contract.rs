@@ -4,7 +4,6 @@ const APPROVED_HYPER_V_GUEST: &str = "Windows 10 MSIX packaging environment";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Feature {
-    RouteDetect,
     InProcessRestart,
     FragmentReassembly,
     DualStackDns,
@@ -51,31 +50,6 @@ const UDP_INTEROPERABILITY_WITNESSES: &[&str] = &[
 ];
 
 const MODES: &[ModeSpec] = &[
-    ModeSpec {
-        id: "route-detect",
-        feature: Feature::RouteDetect,
-        restart_cycles: None,
-        workflow_only: true,
-        approved_guest: APPROVED_HYPER_V_GUEST,
-        witnesses: &[
-            "clean_route_scan",
-            "lan_exclude_remains_active",
-            "more_specific_external_conflict",
-            "equal_prefix_winning_metric_conflict",
-            "owned_route_exemption",
-            "admission_quiesced_before_conflicting_session",
-            "fixed_and_direct_dual_stack_underlay_binding",
-            "multihoming_prefix_and_metric_selection",
-            "route_interface_and_address_notifications",
-            "foreign_route_state_survives_cleanup",
-            "foreign_address_state_survives_cleanup",
-            "dad_failure_rolls_back_in_reverse",
-        ],
-        counters: &[
-            "ferrum2_tun_route_detect_total",
-            "ferrum2_tun_route_conflict_total",
-        ],
-    },
     ModeSpec {
         id: "restart-stress-10",
         feature: Feature::InProcessRestart,
@@ -208,7 +182,6 @@ fn privileged_mode_contract_is_closed_guest_only_and_feature_complete() {
         .map(|mode| mode.feature)
         .collect::<BTreeSet<_>>();
     let expected_features = BTreeSet::from([
-        Feature::RouteDetect,
         Feature::InProcessRestart,
         Feature::FragmentReassembly,
         Feature::DualStackDns,

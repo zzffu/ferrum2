@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 
-use ferrum2_observability::{
-    Metrics, TunPacketRejectReason, TunRouteConflictReason, TunUdpResponseDropReason,
-};
+use ferrum2_observability::{Metrics, TunPacketRejectReason, TunUdpResponseDropReason};
 
 const PACKET_REJECT_REASONS: &[(TunPacketRejectReason, &str)] = &[
     (
@@ -68,7 +66,6 @@ const PACKET_REJECT_REASONS: &[(TunPacketRejectReason, &str)] = &[
     ),
     (TunPacketRejectReason::StaleGeneration, "stale_generation"),
     (TunPacketRejectReason::WintunRingFull, "wintun_ring_full"),
-    (TunPacketRejectReason::RouteConflict, "route_conflict"),
 ];
 
 const UDP_RESPONSE_DROP_REASONS: &[(TunUdpResponseDropReason, &str)] = &[
@@ -93,17 +90,6 @@ const UDP_RESPONSE_DROP_REASONS: &[(TunUdpResponseDropReason, &str)] = &[
     (TunUdpResponseDropReason::SessionReset, "session_reset"),
     (TunUdpResponseDropReason::Shutdown, "shutdown"),
     (TunUdpResponseDropReason::OwnerFatal, "owner_fatal"),
-];
-
-const ROUTE_CONFLICT_REASONS: &[(TunRouteConflictReason, &str)] = &[
-    (
-        TunRouteConflictReason::MoreSpecificRoute,
-        "more_specific_route",
-    ),
-    (
-        TunRouteConflictReason::EqualPrefixPreferred,
-        "equal_prefix_preferred",
-    ),
 ];
 
 fn series(output: &str) -> BTreeSet<String> {
@@ -172,10 +158,6 @@ fn record_one_of_every_tun_event(metrics: &Metrics) {
     metrics.tun_reassembly_dropped_malformed();
 
     metrics.tun_network_change();
-    metrics.tun_route_detect();
-    for (reason, _) in ROUTE_CONFLICT_REASONS {
-        metrics.tun_route_conflict(*reason);
-    }
     metrics.tun_underlay_bind_stale();
 }
 
@@ -211,8 +193,6 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_reassembly_dropped_timeout TUN fragment reassemblies dropped after timeout.",
             "ferrum2_tun_reassembly_entries_active Active bounded TUN fragment reassembly entries.",
             "ferrum2_tun_reassembly_started TUN fragment reassemblies started.",
-            "ferrum2_tun_route_conflict TUN route conflicts by a closed low-cardinality reason.",
-            "ferrum2_tun_route_detect TUN route integrity scans completed.",
             "ferrum2_tun_session_active Whether a TUN session is active.",
             "ferrum2_tun_session_generation Current TUN session generation.",
             "ferrum2_tun_session_restart_failed TUN session restart attempts that failed.",
@@ -259,8 +239,6 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_reassembly_dropped_timeout counter",
             "ferrum2_tun_reassembly_entries_active gauge",
             "ferrum2_tun_reassembly_started counter",
-            "ferrum2_tun_route_conflict counter",
-            "ferrum2_tun_route_detect counter",
             "ferrum2_tun_session_active gauge",
             "ferrum2_tun_session_generation gauge",
             "ferrum2_tun_session_restart_failed counter",
@@ -330,18 +308,6 @@ fn tun_reason_series_are_closed_and_identity_free() {
         )));
     }
 
-    let conflicts = samples
-        .iter()
-        .filter(|sample| sample.starts_with("ferrum2_tun_route_conflict_total{"))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(conflicts.len(), ROUTE_CONFLICT_REASONS.len());
-    for (reason, encoded) in ROUTE_CONFLICT_REASONS {
-        assert_eq!(reason.to_string(), *encoded);
-        assert!(conflicts.contains(&format!(
-            "ferrum2_tun_route_conflict_total{{reason=\"{encoded}\"}}"
-        )));
-    }
-
     for sample in samples
         .iter()
         .filter(|sample| sample.starts_with("ferrum2_tun_") && sample.contains('{'))
@@ -365,4 +331,6 @@ fn tun_reason_series_are_closed_and_identity_free() {
     assert!(output.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 4096"));
     assert!(!output.contains("ferrum2_tun_buffered_bytes"));
     assert!(!output.contains("ferrum2_tun_owned_bytes"));
+    assert!(!output.contains("ferrum2_tun_route_detect"));
+    assert!(!output.contains("ferrum2_tun_route_conflict"));
 }

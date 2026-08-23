@@ -45,10 +45,8 @@ pub enum WaitOutcome {
     Stop,
     /// Wintun has at least one packet ready to receive.
     Readable,
-    /// A network notification was observed and the current managed state still revalidated.
+    /// A route, interface, or address notification was observed.
     NetworkChanged,
-    /// A network notification exposed an external route that can supersede capture.
-    RouteConflict(RouteConflict),
     /// The bounded wait elapsed without a signalled handle.
     Timeout,
     /// Adapter-owner work was explicitly signalled.
@@ -62,61 +60,26 @@ pub enum WaitOutcome {
 pub enum NetworkChangeOutcome {
     /// Only irrelevant or Ferrum2-owned state changed; the current session remains valid.
     Unchanged,
-    /// The frozen underlay, a managed row, or a managed DNS lease no longer matches.
+    /// The frozen underlay no longer matches the current network.
     Changed,
-    /// An external route can supersede one managed capture route.
-    RouteConflict(RouteConflict),
+    /// A Ferrum2-owned managed object no longer matches its transaction journal.
+    ManagedStateDamaged(ManagedStateDamage),
 }
 
-/// Closed address-family label for route-conflict diagnostics.
+/// Health of the Ferrum2-owned network objects in one managed TUN transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IpFamily {
-    Ipv4,
-    Ipv6,
+pub enum ManagedTunHealth {
+    Healthy,
+    Damaged(ManagedStateDamage),
 }
 
-/// Fixed, redacted reason that a route-integrity scan rejected admission.
+/// Closed reason that Ferrum2-owned managed state no longer matches exact readback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RouteConflictReason {
-    /// An external route overlaps a managed capture prefix and is more specific.
-    MoreSpecificRoute,
-    /// An equal-prefix external route can win or cannot be proven to lose by metric.
-    EqualPrefixPreferred,
-}
-
-/// Redacted route-conflict detail with only bounded reason and family fields.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RouteConflict {
-    reason: RouteConflictReason,
-    family: IpFamily,
-}
-
-impl RouteConflict {
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    pub(crate) const fn new(reason: RouteConflictReason, family: IpFamily) -> Self {
-        Self { reason, family }
-    }
-
-    pub const fn reason(self) -> RouteConflictReason {
-        self.reason
-    }
-
-    pub const fn family(self) -> IpFamily {
-        self.family
-    }
-}
-
-/// Closed result of one generation-stable route-integrity scan.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RouteIntegrityResult {
-    /// No external route can supersede a managed capture route.
-    Clean,
-    /// A stable snapshot contains a route that can supersede managed capture.
-    Conflict(RouteConflict),
-    /// Every bounded scan attempt raced a network-generation change.
-    UnstableGeneration,
-    /// The platform route or interface tables could not be acquired or validated.
-    PlatformError,
+pub enum ManagedStateDamage {
+    /// One or more owned capture-route rows are absent or no longer exact.
+    Route,
+    /// One or more managed DNS leases are absent or no longer exact.
+    Dns,
 }
 
 /// Complete validated setup input for one newly-created Wintun adapter.

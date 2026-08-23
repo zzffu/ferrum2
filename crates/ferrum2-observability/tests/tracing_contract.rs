@@ -258,11 +258,6 @@ fn tun_diagnostics_have_only_fixed_reason_and_family_fields() {
             TunDiagnosticReason::WintunRingFull,
             TunIpFamily::Ipv4,
         );
-        emit_tun_diagnostic(
-            Role::Client,
-            TunDiagnosticReason::EqualPrefixPreferred,
-            TunIpFamily::Ipv6,
-        );
     });
 
     let text = capture.text();
@@ -270,7 +265,7 @@ fn tun_diagnostics_have_only_fixed_reason_and_family_fields() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("TUN diagnostic JSON"))
         .collect::<Vec<_>>();
-    assert_eq!(values.len(), 2);
+    assert_eq!(values.len(), 1);
     for value in &values {
         assert_eq!(
             value
@@ -297,9 +292,8 @@ fn tun_diagnostics_have_only_fixed_reason_and_family_fields() {
     assert_eq!(values[0]["outcome"], "dropped");
     assert_eq!(values[0]["reason"], "wintun_ring_full");
     assert_eq!(values[0]["family"], "ipv4");
-    assert_eq!(values[1]["outcome"], "rejected");
-    assert_eq!(values[1]["reason"], "equal_prefix_preferred");
-    assert_eq!(values[1]["family"], "ipv6");
+    assert!(!text.contains("more_specific_route"));
+    assert!(!text.contains("equal_prefix_preferred"));
     for sentinel in ["192.0.2.99", "[2001:db8::99]:443", "TUN_ADAPTER_SENTINEL"] {
         assert!(!text.contains(sentinel));
     }
