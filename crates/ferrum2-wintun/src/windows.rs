@@ -1805,14 +1805,16 @@ impl Adapter {
             managed: None,
             _not_send: PhantomData,
         };
+        let mut strict_route_install_failed = false;
         let setup = setup_transaction(&mut PlatformSetup {
             owner: &mut owner,
             deadline,
             cancelled,
         })
         .and_then(|()| owner.prepare_managed())
-        .and_then(|()| owner.finish_managed(deadline, cancelled));
-        match finish_setup_transaction(setup, || owner.cleanup_inner()) {
+        .and_then(|()| owner.finish_managed(deadline, cancelled, &mut strict_route_install_failed));
+        match finish_setup_transaction(setup, strict_route_install_failed, || owner.cleanup_inner())
+        {
             Ok(()) => Ok(owner),
             Err(error) => Err(error),
         }
@@ -2177,7 +2179,12 @@ impl Adapter {
         Ok(())
     }
 
-    fn finish_managed(&mut self, deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
+    fn finish_managed(
+        &mut self,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+        strict_route_install_failed: &mut bool,
+    ) -> Result<(), Error> {
         let has_ipv4 = self.config.ipv4.is_some();
         let has_ipv6 = self.config.ipv6.is_some();
         let Some(state) = self.managed.as_mut() else {
@@ -2223,13 +2230,19 @@ impl Adapter {
             )?;
         }
         if state.strict_route_intent {
-            state.strict_route = Some(StrictRouteSession::open(PlatformStrictRouteOperations)?);
-            state.strict_route.as_mut().ok_or(Error)?.install(
-                has_ipv4,
-                has_ipv6,
-                state.ipv4_dns.is_some() || state.ipv6_dns.is_some(),
-                owned.luid,
-            )?;
+            let install = (|| -> Result<(), Error> {
+                state.strict_route = Some(StrictRouteSession::open(PlatformStrictRouteOperations)?);
+                state.strict_route.as_mut().ok_or(Error)?.install(
+                    has_ipv4,
+                    has_ipv6,
+                    state.ipv4_dns.is_some() || state.ipv6_dns.is_some(),
+                    owned.luid,
+                )
+            })();
+            if install.is_err() {
+                *strict_route_install_failed = true;
+            }
+            install?;
         }
         state
             .notifications
@@ -3954,12 +3967,16 @@ fn take_last_owned_route<R>(pending: &mut Option<R>, journal: &mut Vec<R>) -> Op
 
 fn finish_setup_transaction(
     setup: Result<(), Error>,
+    strict_route_install_failed: bool,
     cleanup: impl FnOnce() -> bool,
 ) -> Result<(), CreateError> {
     match setup {
         Ok(()) => Ok(()),
         Err(_) => {
-            if cleanup() {
+            let cleanup_failed = cleanup();
+            if strict_route_install_failed {
+                Err(CreateError::strict_route_install(cleanup_failed))
+            } else if cleanup_failed {
                 Err(CreateError::cleanup())
             } else {
                 Err(CreateError::operation())
@@ -7768,17 +7785,27 @@ mod tests {
         assert!(!cleanup_transaction(&mut overlap));
         assert_eq!(overlap.cleanup_calls, order);
 
-        let clean = finish_setup_transaction(Err(Error), || false).expect_err("DAD failure");
+        let clean = finish_setup_transaction(Err(Error), false, || false).expect_err("DAD failure");
         assert!(!clean.is_cleanup_failure());
-        let conflict = finish_setup_transaction(Err(Error), || true).expect_err("cleanup conflict");
+        let conflict =
+            finish_setup_transaction(Err(Error), false, || true).expect_err("cleanup conflict");
         assert!(conflict.is_cleanup_failure());
         let mut cleanup_called = false;
-        finish_setup_transaction(Ok(()), || {
+        finish_setup_transaction(Ok(()), false, || {
             cleanup_called = true;
             false
         })
         .expect("successful setup");
         assert!(!cleanup_called, "successful setup retains the journal");
+
+        let strict = finish_setup_transaction(Err(Error), true, || false)
+            .expect_err("strict-route install failure");
+        assert!(strict.is_strict_route_install_failure());
+        assert!(!strict.is_cleanup_failure());
+        let strict_cleanup = finish_setup_transaction(Err(Error), true, || true)
+            .expect_err("strict-route install cleanup conflict");
+        assert!(strict_cleanup.is_strict_route_install_failure());
+        assert!(strict_cleanup.is_cleanup_failure());
     }
 
     #[test]

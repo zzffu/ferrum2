@@ -386,12 +386,14 @@ pub(crate) const Error: Error = Error::unrecoverable_corruption();
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CreateError {
     cleanup_failed: bool,
+    strict_route_install_failed: bool,
 }
 
 impl CreateError {
     pub(crate) const fn operation() -> Self {
         Self {
             cleanup_failed: false,
+            strict_route_install_failed: false,
         }
     }
 
@@ -399,12 +401,26 @@ impl CreateError {
     pub(crate) const fn cleanup() -> Self {
         Self {
             cleanup_failed: true,
+            strict_route_install_failed: false,
+        }
+    }
+
+    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+    pub(crate) const fn strict_route_install(cleanup_failed: bool) -> Self {
+        Self {
+            cleanup_failed,
+            strict_route_install_failed: true,
         }
     }
 
     /// Reports only whether reverse cleanup failed, without exposing platform detail.
     pub const fn is_cleanup_failure(self) -> bool {
         self.cleanup_failed
+    }
+
+    /// Reports only whether the scoped strict-route WFP transaction failed.
+    pub const fn is_strict_route_install_failure(self) -> bool {
+        self.strict_route_install_failed
     }
 }
 
@@ -483,6 +499,10 @@ mod tests {
         );
         assert!(!CreateError::operation().is_cleanup_failure());
         assert!(CreateError::cleanup().is_cleanup_failure());
+        assert!(!CreateError::operation().is_strict_route_install_failure());
+        assert!(!CreateError::cleanup().is_strict_route_install_failure());
+        assert!(CreateError::strict_route_install(false).is_strict_route_install_failure());
+        assert!(CreateError::strict_route_install(true).is_cleanup_failure());
     }
 
     #[test]
