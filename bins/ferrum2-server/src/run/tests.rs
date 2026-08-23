@@ -1279,7 +1279,7 @@ async fn operational_dns_outlives_tcp_quiesce_drain() {
 }
 
 #[tokio::test]
-async fn operational_dns_outlives_udp_quiesce_drain() {
+async fn unresolved_udp_selection_is_cancelled_before_session_admission() {
     let listen = reserve_address();
     let target = udp_loopback().await;
     let target_address = TargetAddr::domain(
@@ -1312,37 +1312,26 @@ async fn operational_dns_outlives_udp_quiesce_drain() {
         .expect("observe UDP drain DNS query");
 
     shutdown_sender.send(()).expect("quiesce UDP drain server");
-    let quiesce_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    loop {
-        let snapshot = registry.snapshot();
-        if snapshot.listeners == baseline.listeners
-            && snapshot.udp_tasks == 1
-            && snapshot.active_process_roots == baseline.active_process_roots + 2
-        {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < quiesce_deadline,
-            "UDP root did not drain with DNS ownership and its session live: {snapshot:?}"
-        );
-        tokio::task::yield_now().await;
-    }
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
-    release_answer.send(()).expect("answer UDP drain DNS query");
-    let mut payload = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
-    let (length, _) = recv_udp(&target, &mut payload).await;
-    assert_eq!(&payload[..length], b"udp-drain");
-    dns_task.await.expect("UDP drain DNS task join");
-
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), run_task)
             .await
-            .expect("UDP drain server shutdown deadline")
-            .expect("UDP drain server task"),
+            .expect("UDP selection cancellation shutdown deadline")
+            .expect("UDP selection cancellation server task"),
         Ok(())
     );
+    assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions);
+    assert_eq!(registry.snapshot().udp_sockets, baseline.udp_sockets);
+    assert_eq!(registry.snapshot().udp_tasks, baseline.udp_tasks);
+
+    release_answer.send(()).expect("answer UDP drain DNS query");
+    let mut payload = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
+    assert_pending(
+        target.recv_from(&mut payload),
+        "unresolved UDP target received a datagram after pre-admission cancellation",
+    )
+    .await;
+    dns_task.await.expect("UDP drain DNS task join");
+
     assert_eq!(active(registry.snapshot()), active(baseline));
     std::fs::remove_file(config_path).expect("remove UDP drain server config");
 }

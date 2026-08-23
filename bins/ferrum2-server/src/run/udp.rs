@@ -6,20 +6,24 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use ferrum2_config::{RouteAction, UdpConfig};
-use ferrum2_core::TargetAddr;
 use ferrum2_core::route::Network;
+use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_crypto::{Clock as _, SystemClock, SystemRandom};
 use ferrum2_observability::{
-    Direction, Metrics, Outcome, Reason, Role, Stage, Transport as ObservationTransport,
+    Direction, InterfaceResolutionResult, Metrics, Outcome, Reason, Role, Stage,
+    Transport as ObservationTransport,
 };
 use ferrum2_rule::{RouteMetadata, RouteProgramAction, RuleCompileError, RuleEvaluationScratch};
 use ferrum2_runtime::{
-    AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSocketFactory,
+    AccountedDatagram, DialOptions, DirectUdpPacketHandler, DirectUdpRuntime,
+    DirectUdpSocketFactory, GenerationBoundUdpSocket, MAX_UDP_RESOLVED_CANDIDATES,
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
-    ProcessFuture, SniffPrefixOutcome, SystemDirectUdpSocketFactory, UdpBufferBudget,
-    UdpBufferReservation, UdpCommitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
+    ProcessFuture, RouteNetworkOptions, SniffPrefixOutcome, UdpBufferBudget, UdpBufferReservation,
+    UdpCommitError, UdpResolver, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
     UdpSessionManager,
 };
+#[cfg(test)]
+use ferrum2_runtime::{SystemDirectUdpSocket, SystemDirectUdpSocketFactory};
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
 use ferrum2_sniff::{Progress as SniffProgress, Transport as SniffTransport};
 use tokio::net::UdpSocket;
@@ -30,7 +34,8 @@ use super::observation::{
     record_udp_runtime_failure, update_udp_resource_metrics,
 };
 use super::tcp::{
-    RouteProgramObservation, ServerRouting, ServerTerminalRoute, route_metadata, sniff_order,
+    RouteProgramObservation, ServerNetworkSocketService, ServerRouting, ServerTerminalRoute,
+    interface_resolution_result, interface_resolution_source, route_metadata, sniff_order,
 };
 use super::{RunError, run_error_for_rule_compile};
 
@@ -466,10 +471,89 @@ where
 type ServerUdpRuntime<L, F> =
     DirectUdpRuntime<dns_egress::ServerDnsResolver, F, ServerUdpResponseHandler<L>>;
 
-pub(super) struct PreparedUdpServer<L, F = SystemDirectUdpSocketFactory>
+#[derive(Clone)]
+pub(super) struct ServerUdpNetworkPolicy {
+    outbound: DialOptions,
+    route: Arc<RouteNetworkOptions>,
+}
+
+#[derive(Clone)]
+pub(super) struct ServerNetworkUdpSocketFactory {
+    sockets: Arc<ServerNetworkSocketService>,
+    metrics: Arc<Metrics>,
+}
+
+impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
+    type Socket = GenerationBoundUdpSocket<UdpSocket>;
+    type OpenContext = Option<ServerUdpNetworkPolicy>;
+
+    async fn open(
+        &self,
+        policy: Self::OpenContext,
+        selection_destination: SocketAddr,
+    ) -> io::Result<Self::Socket> {
+        let policy = policy.ok_or_else(closed_udp_socket_error)?;
+        let result = self.sockets.open_udp(
+            &policy.outbound,
+            policy.route.as_ref(),
+            selection_destination,
+        );
+        match result {
+            Ok(socket) => {
+                self.metrics.outbound_interface_resolution(
+                    interface_resolution_source(socket.resolved_interface().selection_source()),
+                    InterfaceResolutionResult::Success,
+                );
+                Ok(socket)
+            }
+            Err(error) => {
+                self.metrics.outbound_interface_resolution(
+                    interface_resolution_source(error.attempted_source()),
+                    interface_resolution_result(&error),
+                );
+                Err(closed_udp_socket_error())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ServerSystemUdpSocketFactory;
+
+#[cfg(test)]
+impl DirectUdpSocketFactory for ServerSystemUdpSocketFactory {
+    type Socket = SystemDirectUdpSocket;
+    type OpenContext = Option<ServerUdpNetworkPolicy>;
+
+    async fn open(
+        &self,
+        policy: Self::OpenContext,
+        selection_destination: SocketAddr,
+    ) -> io::Result<Self::Socket> {
+        if policy.is_some() {
+            return Err(closed_udp_socket_error());
+        }
+        SystemDirectUdpSocketFactory
+            .open((), selection_destination)
+            .await
+    }
+}
+
+fn closed_udp_socket_error() -> io::Error {
+    io::Error::other("generation-bound UDP socket unavailable")
+}
+
+#[derive(Clone)]
+struct ServerUdpNetworkPolicies {
+    outbound_dial_options: Arc<[DialOptions]>,
+    route_network: Arc<RouteNetworkOptions>,
+}
+
+pub(super) struct PreparedUdpServer<L, F>
 where
     L: ServerUdpListener,
-    F: DirectUdpSocketFactory,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
 {
     inbound: usize,
     routing: Arc<ServerRouting>,
@@ -480,6 +564,8 @@ where
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
     direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
+    connect_timeout: std::time::Duration,
+    network_policies: Option<ServerUdpNetworkPolicies>,
     runtime: ServerUdpRuntime<L, F>,
     mappings: Arc<UdpMappings>,
     admission: Arc<tokio::sync::Mutex<()>>,
@@ -506,17 +592,43 @@ pub(super) struct ServerUdpShared {
     pub(super) metrics: Arc<Metrics>,
 }
 
-pub(super) fn prepare_udp_server<L>(
+#[cfg(test)]
+fn prepare_udp_server<L>(
     inbound: usize,
     listener: Arc<L>,
     shared: ServerUdpShared,
-) -> Result<PreparedUdpServer<L>, RunError>
+) -> Result<PreparedUdpServer<L, ServerSystemUdpSocketFactory>, RunError>
 where
     L: ServerUdpListener,
 {
-    prepare_udp_server_with_socket_factory(inbound, listener, shared, SystemDirectUdpSocketFactory)
+    prepare_udp_server_with_socket_factory(inbound, listener, shared, ServerSystemUdpSocketFactory)
 }
 
+pub(super) fn prepare_udp_server_with_network<L>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+    sockets: Arc<ServerNetworkSocketService>,
+    outbound_dial_options: Arc<[DialOptions]>,
+    route_network: Arc<RouteNetworkOptions>,
+) -> Result<PreparedUdpServer<L, ServerNetworkUdpSocketFactory>, RunError>
+where
+    L: ServerUdpListener,
+{
+    let metrics = Arc::clone(&shared.metrics);
+    prepare_udp_server_with_socket_factory_and_policies(
+        inbound,
+        listener,
+        shared,
+        ServerNetworkUdpSocketFactory { sockets, metrics },
+        Some(ServerUdpNetworkPolicies {
+            outbound_dial_options,
+            route_network,
+        }),
+    )
+}
+
+#[cfg(test)]
 fn prepare_udp_server_with_socket_factory<L, F>(
     inbound: usize,
     listener: Arc<L>,
@@ -525,7 +637,27 @@ fn prepare_udp_server_with_socket_factory<L, F>(
 ) -> Result<PreparedUdpServer<L, F>, RunError>
 where
     L: ServerUdpListener,
-    F: DirectUdpSocketFactory,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
+{
+    prepare_udp_server_with_socket_factory_and_policies(
+        inbound,
+        listener,
+        shared,
+        socket_factory,
+        None,
+    )
+}
+
+fn prepare_udp_server_with_socket_factory_and_policies<L, F>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+    socket_factory: F,
+    network_policies: Option<ServerUdpNetworkPolicies>,
+) -> Result<PreparedUdpServer<L, F>, RunError>
+where
+    L: ServerUdpListener,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
 {
     let ServerUdpShared {
         routing,
@@ -588,6 +720,8 @@ where
         registry,
         metrics,
         direct_resolvers,
+        connect_timeout,
+        network_policies,
         runtime,
         mappings,
         admission,
@@ -603,7 +737,7 @@ where
 impl<L, SF> PreparedUdpServer<L, SF>
 where
     L: ServerUdpListener,
-    SF: DirectUdpSocketFactory,
+    SF: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
 {
     async fn run_with_cancellation(
         self,
@@ -637,6 +771,8 @@ where
             registry,
             metrics,
             direct_resolvers,
+            connect_timeout,
+            network_policies,
             mut runtime,
             mappings,
             admission,
@@ -870,7 +1006,11 @@ where
             let ServerTerminalRoute::Direct(outbound) = terminal else {
                 unreachable!("rejected UDP route returned before direct session admission")
             };
-            let Some(session_resolver) = direct_resolvers.get(outbound).cloned() else {
+            let Some(session_resolver) = direct_resolvers
+                .get(outbound)
+                .cloned()
+                .map(|resolver| resolver.for_inbound(inbound))
+            else {
                 record_udp_failure(
                     &metrics,
                     Stage::Config,
@@ -879,12 +1019,49 @@ where
                 );
                 continue;
             };
+            let selection_target = pending.datagram().target().clone();
+            let selection_destination = tokio::select! {
+                biased;
+                _ = &mut shutdown => break Ok(()),
+                selection = resolve_udp_selection_destination(
+                    &session_resolver,
+                    &selection_target,
+                    connect_timeout,
+                ) => selection,
+            };
+            let selection_destination = match selection_destination {
+                Ok(destination) => destination,
+                Err(error) => {
+                    record_udp_runtime_failure(&metrics, error);
+                    continue;
+                }
+            };
+            let open_context = if let Some(policies) = network_policies.as_ref() {
+                let Some(outbound_policy) = policies.outbound_dial_options.get(outbound).cloned()
+                else {
+                    record_udp_failure(
+                        &metrics,
+                        Stage::Config,
+                        Reason::ConfigSemantic,
+                        Outcome::Failed,
+                    );
+                    continue;
+                };
+                Some(ServerUdpNetworkPolicy {
+                    outbound: outbound_policy,
+                    route: Arc::clone(&policies.route_network),
+                })
+            } else {
+                None
+            };
             let provisional = tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
                 provisional = runtime.reserve_session(
                     tokio::time::Instant::now(),
                     pending.datagram().allocated_capacity(),
+                    open_context,
+                    selection_destination,
                 ) => provisional,
             };
             let provisional = match provisional {
@@ -1014,7 +1191,7 @@ where
                 provisional,
                 datagram,
                 tokio::time::Instant::now(),
-                session_resolver.for_inbound(inbound),
+                session_resolver,
                 || {
                     // QA-M2-T02-N01: new protocol state is created only inside
                     // T03's reserved session/bytes/queue commit transition.
@@ -1065,9 +1242,10 @@ where
     }
 }
 
-impl<L> PreparedProcessRoot<RunError> for PreparedUdpServer<L>
+impl<L, F> PreparedProcessRoot<RunError> for PreparedUdpServer<L, F>
 where
     L: ServerUdpListener,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
 {
     fn activate(&mut self) -> Result<(), RunError> {
         Ok(())
@@ -1093,6 +1271,32 @@ where
     H: DirectUdpPacketHandler,
 {
     mappings.reconcile_runtime(runtime.sessions());
+}
+
+async fn resolve_udp_selection_destination<R>(
+    resolver: &R,
+    target: &TargetAddr,
+    timeout: std::time::Duration,
+) -> Result<SocketAddr, UdpRuntimeError>
+where
+    R: UdpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
+{
+    if let Some(destination) = target.as_socket_addr() {
+        return Ok(destination);
+    }
+    let TargetHostRef::Domain(host) = target.host() else {
+        return Err(UdpRuntimeError::Resolve);
+    };
+    let candidates = tokio::time::timeout(timeout, resolver.resolve(host, target.port().get()))
+        .await
+        .map_err(|_| UdpRuntimeError::Resolve)?
+        .map_err(|_| UdpRuntimeError::Resolve)?;
+    candidates
+        .into_iter()
+        .take(MAX_UDP_RESOLVED_CANDIDATES)
+        .next()
+        .ok_or(UdpRuntimeError::Resolve)
 }
 
 fn select_udp_route(
@@ -1292,8 +1496,13 @@ mod tests {
 
     impl DirectUdpSocketFactory for GatedSocketFactory {
         type Socket = UdpSocket;
+        type OpenContext = Option<ServerUdpNetworkPolicy>;
 
-        async fn open(&self) -> io::Result<Self::Socket> {
+        async fn open(
+            &self,
+            _policy: Self::OpenContext,
+            _selection_destination: SocketAddr,
+        ) -> io::Result<Self::Socket> {
             self.entered.fetch_add(1, Ordering::SeqCst);
             self.entry_changed.notify_waiters();
             let permit = self

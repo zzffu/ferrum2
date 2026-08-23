@@ -31,7 +31,7 @@ use tcp::{
     prepare_server_network_socket_service,
 };
 use tokio_io::{bind_listener, shutdown_signal};
-use udp::{ServerUdpShared, UdpMappings, prepare_udp_server, udp_runtime_limits};
+use udp::{ServerUdpShared, UdpMappings, prepare_udp_server_with_network, udp_runtime_limits};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -475,14 +475,24 @@ where
                 let listen = inbound.listen;
                 let shared = shared.clone();
                 let udp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
+                let udp_network_sockets = Arc::clone(&network_sockets);
+                let udp_outbound_dial_options = Arc::clone(&outbound_dial_options);
+                let udp_route_network = Arc::clone(&route_network);
                 roots.push(ProcessRoot::new(move || async move {
                     let listener = Arc::new(
                         UdpSocket::bind(SocketAddr::V4(listen))
                             .await
                             .map_err(|_| RunError::StartupBind)?,
                     );
-                    prepare_udp_server(inbound_id, listener, shared)
-                        .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
+                    prepare_udp_server_with_network(
+                        inbound_id,
+                        listener,
+                        shared,
+                        udp_network_sockets,
+                        udp_outbound_dial_options,
+                        udp_route_network,
+                    )
+                    .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
                 }));
             }
         }
