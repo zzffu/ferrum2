@@ -524,7 +524,7 @@ async fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     let before_failure = registry.snapshot();
     assert_eq!(
         second
-            .reserve_session(Instant::now(), 465, selection_destination())
+            .reserve_session(Instant::now(), 465, (), selection_destination())
             .await
             .unwrap_err(),
         UdpRuntimeError::BufferLimit
@@ -537,7 +537,7 @@ async fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     assert_eq!(budget.reserved_bytes(), 982_605);
     drop(
         second
-            .reserve_session(Instant::now(), 465, selection_destination())
+            .reserve_session(Instant::now(), 465, (), selection_destination())
             .await
             .expect("shared bytes returned"),
     );
@@ -719,14 +719,35 @@ struct ScriptedFactory {
 
 impl DirectUdpSocketFactory for ScriptedFactory {
     type Socket = ScriptedSocket;
+    type OpenContext = ();
 
-    async fn open(&self, selection_destination: SocketAddr) -> io::Result<Self::Socket> {
+    async fn open(&self, (): (), selection_destination: SocketAddr) -> io::Result<Self::Socket> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         self.selections
             .lock()
             .expect("selection destinations")
             .push(selection_destination);
         Ok(self.socket.clone())
+    }
+}
+
+#[derive(Clone)]
+struct ContextRecordingFactory {
+    inner: ScriptedFactory,
+    contexts: Arc<Mutex<Vec<u64>>>,
+}
+
+impl DirectUdpSocketFactory for ContextRecordingFactory {
+    type Socket = ScriptedSocket;
+    type OpenContext = u64;
+
+    async fn open(
+        &self,
+        context: Self::OpenContext,
+        selection_destination: SocketAddr,
+    ) -> io::Result<Self::Socket> {
+        self.contexts.lock().expect("open contexts").push(context);
+        self.inner.open((), selection_destination).await
     }
 }
 
@@ -878,11 +899,16 @@ fn shared_runtime(
 }
 
 #[tokio::test]
-async fn direct_socket_factory_receives_the_first_concrete_selection_destination() {
+async fn direct_socket_factory_receives_explicit_context_and_first_concrete_destination() {
     let registry = OwnerRegistry::new();
     let (socket, _) = socket_fixture(Duration::ZERO, []);
-    let factory = scripted_factory(socket);
-    let selections = Arc::clone(&factory.selections);
+    let inner = scripted_factory(socket);
+    let selections = Arc::clone(&inner.selections);
+    let contexts = Arc::new(Mutex::new(Vec::new()));
+    let factory = ContextRecordingFactory {
+        inner,
+        contexts: Arc::clone(&contexts),
+    };
     let mut runtime = DirectUdpRuntime::with_adapters(
         limits(1),
         Duration::from_secs(1),
@@ -894,7 +920,7 @@ async fn direct_socket_factory_receives_the_first_concrete_selection_destination
     let selected = SocketAddr::from(([198, 51, 100, 44], 53));
 
     let admission = runtime
-        .reserve_session(Instant::now(), 7, selected)
+        .reserve_session(Instant::now(), 7, 41, selected)
         .await
         .expect("target-aware socket admission");
 
@@ -905,6 +931,7 @@ async fn direct_socket_factory_receives_the_first_concrete_selection_destination
             .as_slice(),
         &[selected]
     );
+    assert_eq!(contexts.lock().expect("open contexts").as_slice(), &[41]);
     drop(admission);
     runtime.shutdown(Duration::ZERO).await;
     wait_for_zero_udp_owners(&registry).await;
@@ -923,7 +950,7 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     let empty = shared_runtime(manager, &registry, empty_socket);
 
     let admission = first
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("first shared admission");
     let handle = first
@@ -935,7 +962,7 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     assert!(first.remove_session(handle));
     assert_eq!(
         second
-            .reserve_session(Instant::now(), 7, selection_destination())
+            .reserve_session(Instant::now(), 7, (), selection_destination())
             .await
             .unwrap_err(),
         UdpRuntimeError::SessionLimit,
@@ -944,7 +971,7 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     wait_for_zero_udp_owners(&registry).await;
     drop(
         second
-            .reserve_session(Instant::now(), 7, selection_destination())
+            .reserve_session(Instant::now(), 7, (), selection_destination())
             .await
             .expect("shared owner slot returned"),
     );
@@ -986,7 +1013,7 @@ async fn domain_resolution_and_candidate_sends_share_one_absolute_deadline() {
     let (mut runtime, _) =
         recording_runtime(&registry, resolver, socket, Duration::from_secs(7), false);
     let rejected = runtime
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("reserve before protocol commit");
     assert!(matches!(
@@ -1000,7 +1027,7 @@ async fn domain_resolution_and_candidate_sends_share_one_absolute_deadline() {
     assert_eq!(registry.snapshot().udp_tasks, 0);
 
     let admission = runtime
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime
@@ -1042,7 +1069,7 @@ async fn association_resolves_every_datagram_reuses_hint_and_never_falls_back() 
     );
     let now = Instant::now();
     let admission = runtime
-        .reserve_session(now, 7, selection_destination())
+        .reserve_session(now, 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     let handle = runtime
@@ -1108,7 +1135,7 @@ async fn resolver_consumes_zero_one_sixteen_and_at_most_sixteen_candidates() {
         let (mut runtime, _) =
             recording_runtime(&registry, resolver, socket, Duration::from_secs(10), false);
         let admission = runtime
-            .reserve_session(Instant::now(), 7, selection_destination())
+            .reserve_session(Instant::now(), 7, (), selection_destination())
             .await
             .expect("reserve direct session");
         runtime
@@ -1132,7 +1159,7 @@ async fn direct_session_idle_expiry_reaps_socket_task_queue_scratch_and_bytes() 
         false,
     );
     let admission = runtime
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime
@@ -1159,7 +1186,7 @@ async fn expired_replacement_churn_never_exceeds_the_direct_owner_limit() {
     );
     let mut activity = Instant::now();
     let initial = runtime
-        .reserve_session(activity, 7, selection_destination())
+        .reserve_session(activity, 7, (), selection_destination())
         .await
         .expect("initial direct owner");
     runtime
@@ -1171,7 +1198,7 @@ async fn expired_replacement_churn_never_exceeds_the_direct_owner_limit() {
         activity += MIN_UDP_IDLE_TIMEOUT;
         assert_eq!(
             runtime
-                .reserve_session(activity, 7, selection_destination())
+                .reserve_session(activity, 7, (), selection_destination())
                 .await
                 .unwrap_err(),
             UdpRuntimeError::SessionLimit
@@ -1182,7 +1209,7 @@ async fn expired_replacement_churn_never_exceeds_the_direct_owner_limit() {
         wait_for_zero_udp_owners(&registry).await;
 
         let replacement = runtime
-            .reserve_session(activity, 7, selection_destination())
+            .reserve_session(activity, 7, (), selection_destination())
             .await
             .expect("retired owner releases fixed slot");
         runtime
@@ -1216,7 +1243,7 @@ async fn direct_response_awaits_handler_without_creating_a_queue_owner() {
         true,
     );
     let admission = runtime
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime
@@ -1259,7 +1286,7 @@ async fn direct_response_preserves_to_client_queue_backpressure() {
     );
     let now = Instant::now();
     let admission = runtime
-        .reserve_session(now, 7, selection_destination())
+        .reserve_session(now, 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     let handle = runtime
@@ -1305,7 +1332,7 @@ async fn successful_direct_response_refreshes_activity_after_handler_completion(
     );
     let started = Instant::now();
     let admission = runtime
-        .reserve_session(started, 7, selection_destination())
+        .reserve_session(started, 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime
@@ -1354,7 +1381,7 @@ async fn handler_failure_does_not_refresh_activity_before_final_generation_reche
     );
     let started = Instant::now();
     let admission = runtime
-        .reserve_session(started, 7, selection_destination())
+        .reserve_session(started, 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime
@@ -1402,7 +1429,7 @@ async fn graceful_shutdown_drains_admitted_queue_before_reaping() {
         false,
     );
     let admission = runtime
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime
@@ -1433,7 +1460,7 @@ async fn process_deadline_forces_response_handler_and_reaps_every_udp_owner() {
         true,
     );
     let admission = runtime
-        .reserve_session(Instant::now(), 7, selection_destination())
+        .reserve_session(Instant::now(), 7, (), selection_destination())
         .await
         .expect("reserve direct session");
     runtime

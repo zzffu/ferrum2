@@ -990,10 +990,14 @@ fn normalize_direct_source(source: SocketAddr) -> SocketAddr {
 pub trait DirectUdpSocketFactory: Send + Sync + 'static {
     /// Owned direct socket.
     type Socket: DirectUdpSocket;
+    /// Caller-owned, per-admission policy passed explicitly to the socket opener.
+    type OpenContext: Send;
 
-    /// Opens one unconnected datagram socket selected for the first concrete destination.
+    /// Opens one unconnected datagram socket using the selected policy and first concrete
+    /// destination. The runtime never stores or reconstructs this context.
     fn open(
         &self,
+        context: Self::OpenContext,
         selection_destination: SocketAddr,
     ) -> impl Future<Output = io::Result<Self::Socket>> + Send;
 }
@@ -1003,7 +1007,10 @@ pub trait DirectUdpSocketFactory: Send + Sync + 'static {
 pub struct SystemDirectUdpSocketFactory;
 
 impl DirectUdpSocketFactory for SystemDirectUdpSocketFactory {
-    async fn open(&self, _selection_destination: SocketAddr) -> io::Result<Self::Socket> {
+    type Socket = SystemDirectUdpSocket;
+    type OpenContext = ();
+
+    async fn open(&self, (): (), _selection_destination: SocketAddr) -> io::Result<Self::Socket> {
         let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_only_v6(false)?;
         socket.set_nonblocking(true)?;
@@ -1013,8 +1020,6 @@ impl DirectUdpSocketFactory for SystemDirectUdpSocketFactory {
             socket: UdpSocket::from_std(socket)?,
         })
     }
-
-    type Socket = SystemDirectUdpSocket;
 }
 
 /// Protocol-neutral callback for one bounded target response.
@@ -1176,6 +1181,7 @@ where
         &mut self,
         now: Instant,
         first_allocated_capacity: usize,
+        open_context: F::OpenContext,
         selection_destination: SocketAddr,
     ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
         while self.tasks.try_join_next().is_some() {}
@@ -1187,7 +1193,7 @@ where
             session.reserve_datagram(UdpDirection::ToTarget, first_allocated_capacity)?;
         let socket = self
             .socket_factory
-            .open(selection_destination)
+            .open(open_context, selection_destination)
             .await
             .map_err(|_| UdpRuntimeError::Send)?;
         let socket_guard = self.registry.track_udp_socket();
