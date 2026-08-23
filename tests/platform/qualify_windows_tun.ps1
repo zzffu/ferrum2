@@ -5588,7 +5588,7 @@ udp_filtering = "address_dependent"
         "restart-stress" {
             return [ordered]@{
                 fixtures = @(
-                    New-M17TunFixture "restart-dual-legacy" @"
+                    New-M17TunFixture "restart-dual" @"
 ipv4_address = "198.18.0.2/30"
 ipv6_address = "fd00::2/126"
 auto_route = true
@@ -5597,14 +5597,12 @@ ipv4_dns_address = "198.18.0.1"
 ipv6_dns_address = "fd00::1"
 max_udp_mappings = 32
 udp_filtering = "address_dependent"
-max_udp_buffered_bytes = 0
 "@ $true
                 )
                 witnesses = @(
                     "same_process_for_every_restart", "generation_advances_once_per_restart",
                     "admission_quiesces_during_rebuild", "stale_flows_and_fragments_are_cleared",
-                    "adapter_route_dns_and_handler_baselines_restore",
-                    "one_fixed_deprecation_warning_on_normal_startup"
+                    "adapter_route_dns_and_handler_baselines_restore"
                 )
                 counters = @(
                     "ferrum2_tun_session_restart_started_total",
@@ -5613,8 +5611,6 @@ max_udp_buffered_bytes = 0
                     "ferrum2_tun_session_generation"
                 )
                 restart_cycles = $script:RestartCycles
-                deprecation_warning = "warning[config.deprecated] tun.max_udp_buffered_bytes: ignored and scheduled for removal"
-                deprecation_warning_count = 1
             }
         }
         "fragments" {
@@ -5797,8 +5793,6 @@ function Invoke-M17ContractPreflight {
     $script:m17ArtifactRoot = $artifactRoot
     $script:m17ArtifactInitialized = $true
     $script:m17Contract = $contract
-    $script:m17ExpectedWarning = if ($contract.Contains("deprecation_warning")) { [string]$contract.deprecation_warning } else { $null }
-    $script:m17ExpectedWarningCount = if ($contract.Contains("deprecation_warning_count")) { [int]$contract.deprecation_warning_count } else { $null }
     $script:m17StartedUtc = [DateTime]::UtcNow.ToString("o")
     $identityArtifact = Join-Path $artifactRoot "identity-ledger.json"
     [IO.File]::WriteAllBytes($identityArtifact, [IO.File]::ReadAllBytes($script:capabilityIdentity.Path))
@@ -5848,8 +5842,6 @@ function Invoke-M17ContractPreflight {
         fixtures = $fixtureRows
         witnesses = $contract.witnesses
         counters = $contract.counters
-        deprecation_warning = if ($contract.Contains("deprecation_warning")) { $contract.deprecation_warning } else { $null }
-        deprecation_warning_count = if ($contract.Contains("deprecation_warning_count")) { $contract.deprecation_warning_count } else { $null }
     }
     $artifact = Join-Path $artifactRoot "m17-contract.json"
     [IO.File]::WriteAllText(
@@ -6612,7 +6604,6 @@ ipv6_dns_address = "fd00::1"
 max_udp_mappings = $udpAssociationLimit
 udp_filtering = "address_dependent"
 ready_timeout_ms = 15000
-max_udp_buffered_bytes = 0
 "@ "direct" $script:m17MetricsPort @"
 [dns]
 timeout_ms = 1000
@@ -6742,10 +6733,6 @@ final = "resolver"
         udp_association_limit_rejections = Get-M17MetricValue $finalMetrics "ferrum2_tun_udp_association_rejected_limit" $true
     })
     Stop-M17Candidate $script:activeProcess "restart-stress"
-    $clientLog = @($script:m17ProcessRows | Where-Object { $_.role -ceq "client" -and $_.label -ceq "restart-stress" })[-1]
-    $stderr = Get-Content -LiteralPath (Join-Path $script:m17ArtifactRoot $clientLog.stderr) -Raw -Encoding utf8
-    Assert-True ([regex]::Matches($stderr, [regex]::Escape($script:m17ExpectedWarning)).Count -eq $script:m17ExpectedWarningCount) "M17 runtime deprecation warning count changed"
-    Add-M17Witness "one_fixed_deprecation_warning_on_normal_startup" "live-product" "captured one exact fixed warning on candidate stderr"
 }
 
 function New-M17PaddedDnsQuery([uint16]$Id, [int]$PaddingBytes = 2048) {
@@ -9354,7 +9341,6 @@ max_tcp_flows = 8
 tcp_buffer_bytes = 4096
 ring_capacity = 8388608
 max_udp_mappings = 4
-max_udp_buffered_bytes = 4194304
 [[outbounds]]
 tag = "one"
 server = "127.0.0.1:$gatePortA"

@@ -27,7 +27,6 @@ const RESTART_WITNESSES: &[&str] = &[
     "same_process_for_every_restart",
     "generation_advances_once_per_restart",
     "adapter_route_dns_and_handler_baselines_restore",
-    "one_fixed_deprecation_warning_on_normal_startup",
 ];
 
 const UDP_INTEROPERABILITY_WITNESSES: &[&str] = &[
@@ -229,7 +228,7 @@ fn privileged_mode_contract_is_closed_guest_only_and_feature_complete() {
 }
 
 #[test]
-fn fixed_counter_names_and_deprecation_warning_witness_are_low_cardinality() {
+fn fixed_counter_names_are_low_cardinality() {
     let counters = MODES
         .iter()
         .flat_map(|mode| mode.counters.iter().copied())
@@ -240,7 +239,6 @@ fn fixed_counter_names_and_deprecation_warning_witness_are_low_cardinality() {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     }));
-    assert!(RESTART_WITNESSES.contains(&"one_fixed_deprecation_warning_on_normal_startup"));
 }
 
 #[test]

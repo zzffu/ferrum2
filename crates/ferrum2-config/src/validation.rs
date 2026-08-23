@@ -532,7 +532,6 @@ fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             tcp_buffer_bytes: raw.tcp_buffer_bytes as usize,
             max_udp_mappings: raw.max_udp_mappings as usize,
             udp_filtering,
-            deprecated_max_udp_buffered_bytes_present: raw.max_udp_buffered_bytes.is_some(),
         },
     })
 }

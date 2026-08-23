@@ -90,8 +90,6 @@ pub(super) struct RawTun {
     pub(super) max_udp_mappings: u64,
     #[serde(default = "default_tun_udp_filtering")]
     pub(super) udp_filtering: String,
-    /// Compatibility-only marker. Validation intentionally ignores the value.
-    pub(super) max_udp_buffered_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]

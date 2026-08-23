@@ -534,15 +534,23 @@ fn tun_compiled_capture_plan_is_bounded_after_excludes() {
 }
 
 #[test]
-fn legacy_tun_udp_buffer_field_is_parse_only_and_not_range_checked() {
+fn removed_tun_udp_memory_field_fails_offline_cli_validation() {
+    let directory = tempfile::tempdir().expect("temporary removed TUN field directory");
     for (label, value) in [
-        ("legacy-zero", "0"),
-        ("legacy-former-minimum-minus-one", "65535"),
-        ("legacy-former-maximum-plus-one", "134217729"),
-        ("legacy-maximum-integer", "18446744073709551615"),
+        ("removed-zero", "0"),
+        ("removed-former-minimum", "65536"),
+        ("removed-former-maximum", "134217728"),
+        ("removed-maximum-integer", "18446744073709551615"),
     ] {
         let fields = format!("ipv4_address = \"198.18.0.2/30\"\nmax_udp_buffered_bytes = {value}");
-        assert_tun_check_is_offline_valid(label, &tun_client(&fields));
+        let path = directory.path().join(format!("{label}.toml"));
+        std::fs::write(&path, tun_client(&fields)).expect("removed TUN field fixture");
+        assert_invalid(
+            "ferrum2-client",
+            &path,
+            "error[config.syntax] config: configuration is not valid TOML\n",
+            value,
+        );
     }
 }
 

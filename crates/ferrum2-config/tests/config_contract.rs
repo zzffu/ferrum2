@@ -2302,7 +2302,6 @@ fn tun_only_static_config_appends_one_validated_ordinary_inbound() {
         "fd00::2/126"
     );
     assert_eq!(tun.udp_filtering, UdpFiltering::AddressDependent);
-    assert!(!tun.deprecated_max_udp_buffered_bytes_present);
 }
 
 #[test]
@@ -2683,9 +2682,29 @@ fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
 }
 
 #[test]
+fn removed_tun_udp_memory_field_is_always_unknown() {
+    let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\noutbound = \"proxy\"";
+    for value in ["0", "65536", "134217728", "18446744073709551615"] {
+        let source = base.replace(
+            "outbound =",
+            &format!("max_udp_buffered_bytes = {value}\noutbound ="),
+        );
+        let error = load_client(TempConfig::text(&tun_client(&source)).path())
+            .err()
+            .expect("removed TUN UDP memory field must fail");
+        assert_eq!(
+            (error.kind(), error.field()),
+            (ConfigErrorKind::Syntax, ConfigField::Config)
+        );
+        let rendered = format!("{error}\n{error:?}");
+        assert!(!rendered.contains(value));
+    }
+}
+
+#[test]
 fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
     let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
-    let minimums = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nmtu = 1280\nring_capacity = 131072\nready_timeout_ms = 1000\nmax_tcp_flows = 1\ntcp_buffer_bytes = 4096\nmax_udp_mappings = 1\nmax_udp_buffered_bytes = 65536\noutbound = \"proxy\"";
+    let minimums = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nmtu = 1280\nring_capacity = 131072\nready_timeout_ms = 1000\nmax_tcp_flows = 1\ntcp_buffer_bytes = 4096\nmax_udp_mappings = 1\noutbound = \"proxy\"";
     let accepted = [
         ("all minima", minimums.to_owned()),
         ("mtu maximum", minimums.replace("mtu = 1280", "mtu = 1500")),
@@ -2708,13 +2727,6 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
         (
             "mapping maximum",
             minimums.replace("max_udp_mappings = 1", "max_udp_mappings = 8192"),
-        ),
-        (
-            "legacy UDP bytes value is ignored",
-            minimums.replace(
-                "max_udp_buffered_bytes = 65536",
-                "max_udp_buffered_bytes = 0",
-            ),
         ),
     ];
     for (name, source) in accepted {
@@ -2794,24 +2806,6 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             field,
             "{name}"
         );
-    }
-
-    for (name, udp_bytes) in [
-        ("zero legacy value", 0_u64),
-        ("former minimum minus one", 65_535),
-        ("former maximum plus one", 134_217_729),
-        ("maximum integer", u64::MAX),
-    ] {
-        let source = base.replace(
-            "outbound =",
-            &format!("max_udp_buffered_bytes = {udp_bytes}\noutbound ="),
-        );
-        let file = TempConfig::text(&tun_client(&source));
-        let tun = load_client(file.path())
-            .unwrap_or_else(|error| panic!("{name}: {error}"))
-            .tun
-            .expect(name);
-        assert!(tun.deprecated_max_udp_buffered_bytes_present, "{name}");
     }
 
     load_client(
@@ -3457,5 +3451,69 @@ fn production_config_and_public_docs_cannot_reintroduce_composite_target() {
     assert!(
         violations.is_empty(),
         "removed composite target reappeared in production config or public docs: {violations:?}"
+    );
+}
+
+#[test]
+fn removed_tun_udp_memory_field_is_limited_to_negative_and_migration_material() {
+    fn scan(path: &Path, removed: &str, violations: &mut Vec<String>) {
+        if path.is_dir() {
+            let name = path.file_name().and_then(|value| value.to_str());
+            if matches!(
+                name,
+                Some(".git" | "target" | "profiles" | "vendor" | "__pycache__")
+            ) {
+                return;
+            }
+            for entry in fs::read_dir(path).expect("read removed-field scan directory") {
+                scan(
+                    &entry.expect("read removed-field scan entry").path(),
+                    removed,
+                    violations,
+                );
+            }
+            return;
+        }
+        let extension = path.extension().and_then(|value| value.to_str());
+        if !matches!(
+            extension,
+            Some("json" | "md" | "ps1" | "py" | "rs" | "toml" | "yaml" | "yml")
+        ) {
+            return;
+        }
+        let source = fs::read_to_string(path).expect("read removed-field scan source");
+        let occurrences = source.matches(removed).count();
+        if occurrences == 0 {
+            return;
+        }
+        let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
+        if normalized.ends_with("/crates/ferrum2-config/tests/config_contract.rs")
+            || normalized.ends_with("/tests/m0-harness/tests/config_cli.rs")
+        {
+            if occurrences != 1 {
+                violations.push(format!(
+                    "{}: expected one negative-contract occurrence, found {occurrences}",
+                    path.display()
+                ));
+            }
+            return;
+        }
+        let migration_document = extension == Some("md")
+            && (normalized.contains("migration")
+                || normalized.ends_with("/ferrum2-singbox-network-model-refactor-plan.md")
+                || normalized.ends_with("/ferrum2-tun-complete-implementation-plan.md"));
+        if !migration_document {
+            violations.push(format!("{}: {occurrences}", path.display()));
+        }
+    }
+
+    let removed = ["max_udp", "_buffered_bytes"].concat();
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut violations = Vec::new();
+    scan(&repository, &removed, &mut violations);
+    assert!(
+        violations.is_empty(),
+        "removed TUN UDP memory field reappeared outside negative contracts or migration docs: \
+         {violations:?}"
     );
 }

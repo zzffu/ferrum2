@@ -168,10 +168,6 @@ route, outbound, or adapter identity is exposed as a label.
 
 - Existing dual-stack address fields and IPv4 synthetic DNS remain valid.
 - `udp_filtering` defaults to `address_dependent` when omitted.
-- `max_udp_buffered_bytes` is accepted for one compatibility period but is ignored, is not range
-  checked, and does not contribute to any runtime or startup memory calculation. A normal startup
-  emits the fixed `warning[config.deprecated] tun.max_udp_buffered_bytes` warning once. Remove it
-  from new configurations.
 - Ferrum2 no longer estimates or rejects aggregate TUN-owned memory. Flow, association, queue,
   fragment, timeout, and protocol-length bounds still apply; extreme combinations can therefore be
   limited by the operating system's available memory. This does not remove the shared runtime UDP

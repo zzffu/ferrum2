@@ -49,8 +49,6 @@ pub struct TunConfig {
     pub tcp_buffer_bytes: usize,
     pub max_udp_mappings: usize,
     pub udp_filtering: UdpFiltering,
-    /// True when the ignored compatibility-only field appeared in source.
-    pub deprecated_max_udp_buffered_bytes_present: bool,
 }
 
 /// Source-address filtering applied to one endpoint-independent UDP association.
