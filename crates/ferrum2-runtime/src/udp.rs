@@ -687,6 +687,28 @@ impl UdpSessionManager {
         }
     }
 
+    /// Removes every session for a network-generation transition while keeping admission open.
+    ///
+    /// If permanent shutdown has already started, this operation does not reopen admission.
+    pub fn reset_all(&self) -> usize {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("UDP session state lock poisoned");
+        let slots: Vec<_> = state.entries.keys().copied().collect();
+        let removed: Vec<_> = slots
+            .into_iter()
+            .filter_map(|slot| remove_entry(&mut state, slot))
+            .collect();
+        drop(state);
+        let removed_count = removed.len();
+        for handle in removed {
+            publish_removal(&self.inner, handle);
+        }
+        removed_count
+    }
+
     /// Removes every session and wakes every owned worker.
     pub fn cancel_all(&self) {
         let mut state = self

@@ -185,6 +185,33 @@ async fn batch_liveness_filter_rejects_shutdown_without_side_effects() {
     assert_eq!(manager.buffer_budget().reserved_bytes(), 0);
 }
 
+#[tokio::test]
+async fn network_reset_cancels_existing_sessions_without_closing_admission() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let mut removals = manager.subscribe_removals();
+    let first = committed_session(&manager, Instant::now(), b"first");
+    let mut cancellation = manager.cancellation(first).expect("live cancellation");
+
+    assert_eq!(manager.reset_all(), 1);
+    cancellation.changed().await.expect("network reset signal");
+    assert!(*cancellation.borrow());
+    assert_eq!(removals.try_recv().expect("network reset removal"), first);
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+    assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+    assert_eq!(manager.buffer_budget().reserved_bytes(), 0);
+
+    let replacement = committed_session(&manager, Instant::now(), b"replacement");
+    assert_ne!(replacement, first);
+
+    manager.cancel_all();
+    assert_eq!(manager.reset_all(), 0, "reset must not reopen shutdown");
+    assert_eq!(
+        manager.reserve_session(Instant::now()).unwrap_err(),
+        UdpRuntimeError::Cancelled
+    );
+}
+
 #[test]
 fn removal_subscription_reports_each_exact_generation() {
     let registry = OwnerRegistry::new();
