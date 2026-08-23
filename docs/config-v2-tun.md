@@ -61,15 +61,17 @@ Capacity remains drop-new. A new source association is dropped when `max_udp_map
 Ferrum2 does not evict an active association.
 
 The shared `[udp].max_buffered_bytes` limit continues to meter ordinary SOCKS, DNS, and RuleSet UDP
-request/response buffers. Managed-TUN target children are intentionally outside that byte budget:
-both Direct and Shadowsocks TUN requests and responses use unmetered reservations, so an exhausted
-shared budget does not reject them with `buffer_limit` and does not change its `reserved_bytes`.
-This is not an unbounded queue contract. TUN association count, per-child packet queues, payload
-length, session capacity, timeouts, and session-generation checks still apply.
+request/response buffers. Managed-TUN association buffers are intentionally outside that byte
+budget: both Direct and Shadowsocks TUN requests and responses use fixed-capacity unmetered
+reservations, so an exhausted shared budget does not reject them with `buffer_limit` and does not
+change its `reserved_bytes`. This is not an unbounded queue contract. TUN association count,
+packet queues, payload length, session capacity, timeouts, and generation checks still apply.
 
-Ordinary route selection remains per destination even though association ownership is EIM. A
-single IPv4 source socket can therefore keep one association while one target uses Direct and a
-second target uses Shadowsocks:
+The first ordinary datagram from a local UDP source is routed exactly once. A successful terminal,
+outbound/chain, interface policy, and route generation are frozen for that source association. All
+later targets reuse the same multi-target Direct socket or proxy packet connection and never invoke
+the router again. For example, the rule below affects a socket only when `198.51.100.10:3478` is
+that socket's first ordinary target:
 
 ```toml
 [[outbounds]]
@@ -92,11 +94,17 @@ action = "route"
 outbound = "direct"
 ```
 
+Applications that need different target-level routing must use different local UDP sources or wait
+for association expiry/network reset. A rejected first terminal is frozen and drained under the
+same rule, rather than rerouting every later datagram. Synthetic DNS is handled before this ordinary
+association freeze, so an initial query to the configured synthetic address does not choose the
+Internet outbound. Address-dependent filtering authorizes a remote IP only after a successful send;
+endpoint-independent filtering accepts any otherwise-valid same-family response source.
+
 The privileged `udp-policy` qualification sends parsed DNS, fixed-structure 1,200-byte QUIC v1
 Initial, STUN multi-server, WebRTC ICE-candidate, and sequenced game-style datagrams through the
-live TUN. It also proves mixed Direct/Shadowsocks and IPv4/IPv6 target children, live capacity
-drop-new without eviction, and binds deterministic candidate tests to congested queues and stale
-restart generations.
+live TUN. It also proves one frozen Direct or Shadowsocks multi-target association, IPv4/IPv6
+coverage, live capacity drop-new without eviction, congested queues, and stale generations.
 
 ## Automatic and strict routing
 

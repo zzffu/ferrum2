@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,21 +5,23 @@ use std::time::Duration;
 use ferrum2_config::TunConfig;
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{EgressPlanSnapshot, Network};
-use ferrum2_dns::{ProxyIngress, ProxyTransport};
+use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Metrics, Outcome, Role, TunDiagnosticReason, TunIpFamily, TunPacketRejectReason,
     TunUdpResponseDropReason, emit_tun_diagnostic,
 };
 use ferrum2_runtime::{ProcessCancellation, ProcessRoot, relay_lifecycle};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use super::RunError;
 use super::context::{ClientContext, ClientRouting};
-use super::egress::{ClientRequestOrigin, UdpPlanResponseError, composed_udp_plan_limit};
-use super::routing::{ClientTerminalRoute, ReplayIo, RouteGeneration, relay_hijacked_tcp};
+use super::egress::{
+    ClientRequestOrigin, ClientUdpAssociation, UdpPlanResponseError, composed_udp_plan_limit,
+};
+use super::routing::{
+    ClientTerminalRoute, ReplayIo, RouteGeneration, RouteGenerationChange, relay_hijacked_tcp,
+};
 use super::tokio_io::TokioFramed;
 
 pub(super) fn process_root(
@@ -262,108 +263,15 @@ impl SyntheticDns {
     }
 }
 
-const TUN_UDP_TARGET_CAPACITY: usize = 256;
-const TUN_UDP_TARGET_QUEUE_DEPTH: usize = 16;
-
 #[derive(Clone)]
-enum TunUdpTargetPlan {
+enum TunUdpPlan {
     Route {
         snapshot: EgressPlanSnapshot,
-        payload_bound: usize,
+        request_payload_bound: usize,
     },
     SyntheticDns,
     HijackDns,
     Reject,
-}
-
-struct TunUdpTargetChild {
-    id: u64,
-    sender: mpsc::Sender<ferrum2_tun::UdpDatagram>,
-    abort: tokio::task::AbortHandle,
-}
-
-impl Drop for TunUdpTargetChild {
-    fn drop(&mut self) {
-        self.abort.abort();
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct TunUdpTargetKey {
-    target: SocketAddr,
-    route_generation: RouteGeneration,
-}
-
-struct TunUdpTargetTable<K, T> {
-    entries: HashMap<K, T>,
-    capacity: usize,
-}
-
-impl<K, T> TunUdpTargetTable<K, T>
-where
-    K: Copy + Eq + std::hash::Hash,
-{
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: HashMap::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    fn get(&self, key: K) -> Option<&T> {
-        self.entries.get(&key)
-    }
-
-    fn insert(&mut self, key: K, child: T) -> Result<(), T> {
-        if self.entries.len() >= self.capacity {
-            return Err(child);
-        }
-        match self.entries.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(child);
-                Ok(())
-            }
-            std::collections::hash_map::Entry::Occupied(_) => Err(child),
-        }
-    }
-
-    fn remove(&mut self, key: K) -> Option<T> {
-        self.entries.remove(&key)
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
-
-impl<K> TunUdpTargetTable<K, TunUdpTargetChild>
-where
-    K: Copy + Eq + std::hash::Hash,
-{
-    fn remove_closed(&mut self) {
-        self.entries.retain(|_, child| !child.sender.is_closed());
-    }
-}
-
-impl TunUdpTargetTable<TunUdpTargetKey, TunUdpTargetChild> {
-    fn remove_stale_generations(&mut self, generation: RouteGeneration) {
-        self.entries
-            .retain(|key, _| key.route_generation == generation);
-    }
-}
-
-async fn commit_udp_candidate_if_admitted<T, E, F, Fut>(
-    plan: &TunUdpTargetPlan,
-    commit: F,
-) -> Result<Option<T>, E>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-{
-    if matches!(plan, TunUdpTargetPlan::Reject) {
-        return Ok(None);
-    }
-    commit().await.map(Some)
 }
 
 const fn target_payload_within_bound(payload_len: usize, payload_bound: usize) -> bool {
@@ -379,11 +287,24 @@ async fn run_udp(
     synthetic_dns: SyntheticDns,
     session_cancellation: ferrum2_tun::SessionCancellation,
 ) {
-    let Ok(mut route_scratch) = routing.route_scratch() else {
-        return;
-    };
     let first_target = candidate.first_target();
     let Ok(first_application_target) = TargetAddr::ip(first_target) else {
+        return;
+    };
+    if synthetic_dns.matches(first_target) {
+        run_udp_synthetic_candidate(
+            candidate,
+            cancellation,
+            context,
+            routing,
+            inbound,
+            synthetic_dns,
+            session_cancellation,
+        )
+        .await;
+        return;
+    }
+    let Ok(mut route_scratch) = routing.route_scratch() else {
         return;
     };
     let first_request = TunUdpRouteRequest {
@@ -394,174 +315,308 @@ async fn run_udp(
         payload: candidate.first_payload(),
         metrics: &context.metrics,
     };
-    let Ok((first_route_generation, first_plan)) =
+    let Ok((route_generation, plan)) =
         select_udp_target_generation_stable(first_request, route_scratch.as_mut())
     else {
         return;
     };
-    let Ok(Some(mut association)) =
-        commit_udp_candidate_if_admitted(&first_plan, || candidate.commit_association()).await
+    let route_change = routing.watch_route_generation_from(route_generation);
+    run_udp_first_ordinary_candidate(
+        candidate,
+        route_generation,
+        route_change,
+        plan,
+        cancellation,
+        context,
+        routing,
+        inbound,
+        synthetic_dns,
+        session_cancellation,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_udp_synthetic_candidate(
+    candidate: ferrum2_tun::UdpCandidate,
+    cancellation: ProcessCancellation,
+    context: Arc<ClientContext>,
+    routing: Arc<ClientRouting>,
+    inbound: usize,
+    synthetic_dns: SyntheticDns,
+    session_cancellation: ferrum2_tun::SessionCancellation,
+) {
+    let Some(proxy) = tun_dns_proxy(&context) else {
+        return;
+    };
+    let packet_payload_bound = candidate.packet_payload_bound();
+    let Ok(mut association) = candidate
+        .commit_association_with_payload_bound(packet_payload_bound)
+        .await
     else {
         return;
     };
-    let response = association.response_sink();
+    let response_sink = association.response_sink();
     let peer_policy = association.peer_policy();
-    let mut first_plan = Some((
-        TunUdpTargetKey {
-            target: first_target,
-            route_generation: first_route_generation,
-        },
-        first_plan,
-    ));
-    let mut targets: TunUdpTargetTable<TunUdpTargetKey, TunUdpTargetChild> =
-        TunUdpTargetTable::new(TUN_UDP_TARGET_CAPACITY);
-    let mut children = JoinSet::new();
-    let mut next_child_id = 0_u64;
 
     loop {
         let mut forced = cancellation.clone();
-        tokio::select! {
-            () = forced.forced() => break,
-            () = session_cancellation.cancelled() => break,
-            completed = children.join_next(), if !children.is_empty() => {
-                if let Some(Ok((key, id))) = completed
-                    && targets.get(key).is_some_and(|child| child.id == id)
-                {
-                    targets.remove(key);
-                }
+        let datagram = tokio::select! {
+            () = forced.forced() => return,
+            () = session_cancellation.cancelled() => return,
+            datagram = association.receive() => datagram,
+        };
+        let Some(datagram) = datagram else {
+            return;
+        };
+        if synthetic_dns.matches(datagram.target()) {
+            if !answer_tun_udp_dns(
+                datagram,
+                &proxy,
+                inbound,
+                &cancellation,
+                &session_cancellation,
+                None,
+                None,
+                &routing,
+                &response_sink,
+                &peer_policy,
+            )
+            .await
+            {
+                return;
             }
-            datagram = association.receive() => {
-                let Some(datagram) = datagram else { break };
-                let target = datagram.target();
-                let route_generation = routing.route_generation();
-                targets.remove_stale_generations(route_generation);
-                let key = TunUdpTargetKey {
-                    target,
-                    route_generation,
-                };
-                let existing = targets
-                    .get(key)
-                    .map(|child| (child.id, child.sender.clone()));
-                let datagram = if let Some((id, sender)) = existing {
-                    match sender.try_send(datagram) {
-                        Ok(()) => continue,
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            context.metrics.tun_udp_datagram_queue_full();
-                            context
-                                .metrics
-                                .tun_packet_rejected(TunPacketRejectReason::UdpQueueFull);
-                            continue;
-                        }
-                        Err(mpsc::error::TrySendError::Closed(error)) => {
-                            if targets.get(key).is_some_and(|child| child.id == id) {
-                                targets.remove(key);
-                            }
-                            error
-                        }
-                    }
-                } else {
-                    datagram
-                };
-
-                targets.remove_closed();
-                if targets.len() >= TUN_UDP_TARGET_CAPACITY
-                    || children.len() >= TUN_UDP_TARGET_CAPACITY
-                {
-                    context.metrics.tun_udp_datagram_queue_full();
-                    context
-                        .metrics
-                        .tun_packet_rejected(TunPacketRejectReason::UdpQueueFull);
-                    continue;
-                }
-                let Ok(application_target) = TargetAddr::ip(target) else {
-                    continue;
-                };
-                let selected = match first_plan.take() {
-                    Some((first_key, plan)) if first_key == key => (key.route_generation, plan),
-                    Some(first) => {
-                        first_plan = Some(first);
-                        let request = TunUdpRouteRequest {
-                            routing: &routing,
-                            inbound,
-                            synthetic_dns,
-                            target: &application_target,
-                            payload: datagram.payload(),
-                            metrics: &context.metrics,
-                        };
-                        let Ok(selected) = select_udp_target_generation_stable(
-                            request,
-                            route_scratch.as_mut(),
-                        ) else {
-                            continue;
-                        };
-                        selected
-                    }
-                    None => {
-                        let request = TunUdpRouteRequest {
-                            routing: &routing,
-                            inbound,
-                            synthetic_dns,
-                            target: &application_target,
-                            payload: datagram.payload(),
-                            metrics: &context.metrics,
-                        };
-                        let Ok(selected) = select_udp_target_generation_stable(
-                            request,
-                            route_scratch.as_mut(),
-                        ) else {
-                            continue;
-                        };
-                        selected
-                    }
-                };
-                let (route_generation, plan) = selected;
-                let key = TunUdpTargetKey {
-                    target,
-                    route_generation,
-                };
-                targets.remove_stale_generations(route_generation);
-                let (sender, receiver) = mpsc::channel(TUN_UDP_TARGET_QUEUE_DEPTH);
-                if sender.try_send(datagram).is_err() {
-                    continue;
-                }
-                let id = next_child_id;
-                next_child_id = next_child_id.wrapping_add(1);
-                let child_context = Arc::clone(&context);
-                let child_routing = Arc::clone(&routing);
-                let child_cancellation = cancellation.clone();
-                let child_session_cancellation = session_cancellation.clone();
-                let child_response = response.clone();
-                let child_peer_policy = peer_policy.clone();
-                let abort = children.spawn(async move {
-                    run_udp_target_child(
-                        target,
-                        route_generation,
-                        plan,
-                        receiver,
-                        child_cancellation,
-                        child_session_cancellation,
-                        child_context,
-                        child_routing,
-                        inbound,
-                        child_response,
-                        child_peer_policy,
-                    )
-                    .await;
-                    (key, id)
-                });
-                if targets
-                    .insert(key, TunUdpTargetChild { id, sender, abort })
-                    .is_err()
-                {
-                    continue;
-                }
-            }
+            continue;
         }
-    }
 
-    drop(targets);
-    children.abort_all();
-    while children.join_next().await.is_some() {}
+        let Ok(mut route_scratch) = routing.route_scratch() else {
+            return;
+        };
+        let Ok(target) = TargetAddr::ip(datagram.target()) else {
+            return;
+        };
+        let request = TunUdpRouteRequest {
+            routing: &routing,
+            inbound,
+            synthetic_dns,
+            target: &target,
+            payload: datagram.payload(),
+            metrics: &context.metrics,
+        };
+        let Ok((route_generation, plan)) =
+            select_udp_target_generation_stable(request, route_scratch.as_mut())
+        else {
+            return;
+        };
+        let route_change = routing.watch_route_generation_from(route_generation);
+        run_udp_committed_plan(
+            association,
+            datagram,
+            route_generation,
+            route_change,
+            plan,
+            cancellation,
+            context,
+            routing,
+            inbound,
+            synthetic_dns,
+            session_cancellation,
+            proxy,
+        )
+        .await;
+        return;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_udp_first_ordinary_candidate(
+    candidate: ferrum2_tun::UdpCandidate,
+    route_generation: RouteGeneration,
+    mut route_change: RouteGenerationChange,
+    plan: TunUdpPlan,
+    cancellation: ProcessCancellation,
+    context: Arc<ClientContext>,
+    routing: Arc<ClientRouting>,
+    inbound: usize,
+    synthetic_dns: SyntheticDns,
+    session_cancellation: ferrum2_tun::SessionCancellation,
+) {
+    match plan {
+        TunUdpPlan::Route {
+            snapshot,
+            request_payload_bound,
+        } => {
+            if !target_payload_within_bound(candidate.first_payload().len(), request_payload_bound)
+            {
+                return;
+            }
+            let Some(mut egress) = prepare_tun_udp_egress(
+                &cancellation,
+                &session_cancellation,
+                &context,
+                &routing,
+                inbound,
+                candidate.first_target(),
+                route_generation,
+                &mut route_change,
+                snapshot,
+            )
+            .await
+            else {
+                return;
+            };
+            // The sink retains the TUN packet ceiling because later synthetic DNS answers share
+            // this source association. Proxy decoding enforces its own per-packet response bound.
+            let Ok(association) = candidate.commit_association().await else {
+                return;
+            };
+            if !udp_route_generation_is_current(&routing, route_generation) {
+                return;
+            }
+            run_udp_route_association(
+                association,
+                None,
+                route_generation,
+                route_change,
+                request_payload_bound,
+                cancellation,
+                session_cancellation,
+                context,
+                routing,
+                inbound,
+                synthetic_dns,
+                &mut egress,
+            )
+            .await;
+        }
+        TunUdpPlan::HijackDns => {
+            let Some(proxy) = tun_dns_proxy(&context) else {
+                return;
+            };
+            if !udp_route_generation_is_current(&routing, route_generation) {
+                return;
+            }
+            let Ok(association) = candidate.commit_association().await else {
+                return;
+            };
+            run_udp_dns_association(
+                association,
+                None,
+                route_generation,
+                route_change,
+                cancellation,
+                session_cancellation,
+                routing,
+                inbound,
+                proxy,
+            )
+            .await;
+        }
+        TunUdpPlan::Reject => {
+            if !udp_route_generation_is_current(&routing, route_generation) {
+                return;
+            }
+            let Ok(association) = candidate.commit_association().await else {
+                return;
+            };
+            run_udp_reject_association(
+                association,
+                route_generation,
+                route_change,
+                cancellation,
+                session_cancellation,
+                routing,
+                &context.metrics,
+            )
+            .await;
+        }
+        TunUdpPlan::SyntheticDns => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_udp_committed_plan(
+    association: ferrum2_tun::UdpAssociation,
+    first_datagram: ferrum2_tun::UdpDatagram,
+    route_generation: RouteGeneration,
+    mut route_change: RouteGenerationChange,
+    plan: TunUdpPlan,
+    cancellation: ProcessCancellation,
+    context: Arc<ClientContext>,
+    routing: Arc<ClientRouting>,
+    inbound: usize,
+    synthetic_dns: SyntheticDns,
+    session_cancellation: ferrum2_tun::SessionCancellation,
+    proxy: Arc<DnsProxy>,
+) {
+    match plan {
+        TunUdpPlan::Route {
+            snapshot,
+            request_payload_bound,
+            ..
+        } => {
+            if !target_payload_within_bound(first_datagram.payload().len(), request_payload_bound) {
+                return;
+            }
+            let Some(mut egress) = prepare_tun_udp_egress(
+                &cancellation,
+                &session_cancellation,
+                &context,
+                &routing,
+                inbound,
+                first_datagram.target(),
+                route_generation,
+                &mut route_change,
+                snapshot,
+            )
+            .await
+            else {
+                return;
+            };
+            run_udp_route_association(
+                association,
+                Some(first_datagram),
+                route_generation,
+                route_change,
+                request_payload_bound,
+                cancellation,
+                session_cancellation,
+                context,
+                routing,
+                inbound,
+                synthetic_dns,
+                &mut egress,
+            )
+            .await;
+        }
+        TunUdpPlan::HijackDns => {
+            run_udp_dns_association(
+                association,
+                Some(first_datagram),
+                route_generation,
+                route_change,
+                cancellation,
+                session_cancellation,
+                routing,
+                inbound,
+                proxy,
+            )
+            .await;
+        }
+        TunUdpPlan::Reject => {
+            run_udp_reject_association(
+                association,
+                route_generation,
+                route_change,
+                cancellation,
+                session_cancellation,
+                routing,
+                &context.metrics,
+            )
+            .await;
+        }
+        TunUdpPlan::SyntheticDns => {}
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -576,15 +631,13 @@ struct TunUdpRouteRequest<'a> {
 
 fn select_udp_target_generation_stable(
     request: TunUdpRouteRequest<'_>,
-    mut scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
-) -> Result<(RouteGeneration, TunUdpTargetPlan), ferrum2_rule::RuleCompileError> {
-    for _ in 0..3 {
-        let before = request.routing.route_generation();
-        let plan = select_udp_target_with_scratch(request, scratch.as_deref_mut())?;
-        let after = request.routing.route_generation();
-        if before == after {
-            return Ok((after, plan));
-        }
+    scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
+) -> Result<(RouteGeneration, TunUdpPlan), ferrum2_rule::RuleCompileError> {
+    let before = request.routing.route_generation();
+    let plan = select_udp_target_with_scratch(request, scratch)?;
+    let after = request.routing.route_generation();
+    if before == after {
+        return Ok((after, plan));
     }
     Err(ferrum2_rule::RuleCompileError::Internal)
 }
@@ -592,9 +645,9 @@ fn select_udp_target_generation_stable(
 fn select_udp_target_with_scratch(
     request: TunUdpRouteRequest<'_>,
     scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
-) -> Result<TunUdpTargetPlan, ferrum2_rule::RuleCompileError> {
+) -> Result<TunUdpPlan, ferrum2_rule::RuleCompileError> {
     if is_synthetic_dns_target(request.target, request.synthetic_dns) {
-        return Ok(TunUdpTargetPlan::SyntheticDns);
+        return Ok(TunUdpPlan::SyntheticDns);
     }
     let terminal = request.routing.select_terminal_with_scratch(
         request.inbound,
@@ -607,25 +660,25 @@ fn select_udp_target_with_scratch(
     let selected = match terminal {
         ClientTerminalRoute::Route(plan) => {
             let Some(target) = request.target.as_socket_addr() else {
-                return Ok(TunUdpTargetPlan::Reject);
+                return Ok(TunUdpPlan::Reject);
             };
             let encoded_target_len = match target {
                 SocketAddr::V4(_) => 7,
                 SocketAddr::V6(_) => 19,
             };
-            let payload_bound = composed_udp_plan_limit(
+            let request_payload_bound = composed_udp_plan_limit(
                 &request.routing.outbounds,
                 plan.hops(),
                 false,
                 encoded_target_len,
             );
-            TunUdpTargetPlan::Route {
+            TunUdpPlan::Route {
                 snapshot: plan,
-                payload_bound,
+                request_payload_bound,
             }
         }
-        ClientTerminalRoute::HijackDns => TunUdpTargetPlan::HijackDns,
-        ClientTerminalRoute::Reject => TunUdpTargetPlan::Reject,
+        ClientTerminalRoute::HijackDns => TunUdpPlan::HijackDns,
+        ClientTerminalRoute::Reject => TunUdpPlan::Reject,
     };
     Ok(selected)
 }
@@ -641,7 +694,7 @@ fn select_udp_target(
     payload: &[u8],
     _response_payload_bound: usize,
     metrics: &ferrum2_observability::Metrics,
-) -> Option<TunUdpTargetPlan> {
+) -> Option<TunUdpPlan> {
     let mut scratch = routing.route_scratch().ok().flatten();
     select_udp_target_with_scratch(
         TunUdpRouteRequest {
@@ -660,60 +713,96 @@ fn select_udp_target(
     .ok()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_udp_target_child(
-    target: SocketAddr,
+fn tun_dns_proxy(context: &ClientContext) -> Option<Arc<DnsProxy>> {
+    context
+        .dns
+        .as_ref()
+        .and_then(|proxy| proxy.get())
+        .map(Arc::clone)
+}
+
+fn udp_route_generation_is_current(routing: &ClientRouting, generation: RouteGeneration) -> bool {
+    routing.route_generation() == generation
+}
+
+async fn wait_for_optional_udp_route_generation_change(
+    route_change: Option<&mut RouteGenerationChange>,
+) {
+    match route_change {
+        Some(route_change) => route_change.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn run_udp_reject_association(
+    mut association: ferrum2_tun::UdpAssociation,
     route_generation: RouteGeneration,
-    plan: TunUdpTargetPlan,
-    receiver: mpsc::Receiver<ferrum2_tun::UdpDatagram>,
+    mut route_change: RouteGenerationChange,
     cancellation: ProcessCancellation,
     session_cancellation: ferrum2_tun::SessionCancellation,
-    context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
-    inbound: usize,
-    response: ferrum2_tun::UdpResponseSink,
-    peer_policy: ferrum2_tun::UdpPeerPolicyHandle,
+    metrics: &Metrics,
 ) {
-    match plan {
-        TunUdpTargetPlan::Route {
-            snapshot,
-            payload_bound,
-        } => {
-            run_udp_route_child(
-                target,
-                route_generation,
-                payload_bound,
-                receiver,
-                cancellation,
-                session_cancellation,
-                context,
-                routing,
-                inbound,
-                response,
-                peer_policy,
-                snapshot,
-            )
-            .await;
+    loop {
+        if !udp_route_generation_is_current(&routing, route_generation) {
+            return;
         }
-        TunUdpTargetPlan::SyntheticDns | TunUdpTargetPlan::HijackDns => {
-            run_udp_dns_child(
-                target,
-                route_generation,
-                receiver,
-                cancellation,
-                session_cancellation,
-                context,
-                routing,
-                inbound,
-                response,
-                peer_policy,
-            )
-            .await;
-        }
-        TunUdpTargetPlan::Reject => {
-            run_udp_reject_child(receiver, cancellation, session_cancellation).await;
+        let mut forced = cancellation.clone();
+        tokio::select! {
+            biased;
+            () = forced.forced() => return,
+            () = session_cancellation.cancelled() => return,
+            () = &mut route_change => return,
+            datagram = association.receive() => {
+                if datagram.is_none() {
+                    return;
+                }
+                metrics.udp_datagram(
+                    Role::Client,
+                    Direction::ClientToTarget,
+                    Outcome::Rejected,
+                );
+            }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_tun_udp_egress(
+    cancellation: &ProcessCancellation,
+    session_cancellation: &ferrum2_tun::SessionCancellation,
+    context: &ClientContext,
+    routing: &ClientRouting,
+    inbound: usize,
+    first_target: SocketAddr,
+    route_generation: RouteGeneration,
+    route_change: &mut RouteGenerationChange,
+    snapshot: EgressPlanSnapshot,
+) -> Option<ClientUdpAssociation> {
+    if !udp_route_generation_is_current(routing, route_generation) {
+        return None;
+    }
+    let Ok(first_target) = TargetAddr::ip(first_target) else {
+        return None;
+    };
+    let mut forced = cancellation.clone();
+    let prepared = tokio::select! {
+        () = forced.forced() => return None,
+        () = session_cancellation.cancelled() => return None,
+        () = route_change => return None,
+        prepared = context.egress.prepare_udp_for_ingress(
+            ClientRequestOrigin::Tun,
+            inbound,
+            Some(snapshot),
+            Some(&first_target),
+        ) => prepared.ok()?,
+    };
+    if !udp_route_generation_is_current(routing, route_generation) {
+        return None;
+    }
+    let mut prepared = prepared;
+    prepared.activate(&context.egress).ok()?;
+    udp_route_generation_is_current(routing, route_generation).then_some(prepared)
 }
 
 enum TunUdpPeerReservation {
@@ -775,129 +864,140 @@ fn record_tun_udp_response_outcome(outcome: ferrum2_tun::UdpResponseSendOutcome)
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_udp_route_child(
-    target: SocketAddr,
+async fn run_udp_route_association(
+    mut association: ferrum2_tun::UdpAssociation,
+    mut pending_datagram: Option<ferrum2_tun::UdpDatagram>,
     route_generation: RouteGeneration,
-    payload_bound: usize,
-    mut receiver: mpsc::Receiver<ferrum2_tun::UdpDatagram>,
+    mut route_change: RouteGenerationChange,
+    request_payload_bound: usize,
     cancellation: ProcessCancellation,
     session_cancellation: ferrum2_tun::SessionCancellation,
     context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
-    response_sink: ferrum2_tun::UdpResponseSink,
-    peer_policy: ferrum2_tun::UdpPeerPolicyHandle,
-    plan: EgressPlanSnapshot,
+    synthetic_dns: SyntheticDns,
+    egress: &mut ClientUdpAssociation,
 ) {
-    if routing.route_generation() != route_generation {
+    if !udp_route_generation_is_current(&routing, route_generation) {
         return;
     }
-    let mut force = cancellation.clone();
-    let Ok(original_target) = TargetAddr::ip(target) else {
-        return;
-    };
-    let prepared = tokio::select! {
-        () = force.forced() => return,
-        () = session_cancellation.cancelled() => return,
-        prepared = context.egress.prepare_udp_for_ingress(
-            ClientRequestOrigin::Tun,
-            inbound,
-            Some(plan),
-            Some(&original_target),
-        ) => prepared,
-    };
-    let Ok(mut association) = prepared else {
-        return;
-    };
-    if association.activate(&context.egress).is_err() {
-        return;
-    }
-    let Ok(mut session_cancelled) = association.cancellation() else {
+    let response_sink = association.response_sink();
+    let peer_policy = association.peer_policy();
+    let Ok(mut egress_cancelled) = egress.cancellation() else {
         return;
     };
     loop {
-        if routing.route_generation() != route_generation {
+        if !udp_route_generation_is_current(&routing, route_generation) {
             return;
         }
-        let Ok(idle_deadline) = association.idle_deadline() else {
+        if let Some(datagram) = pending_datagram.take() {
+            if synthetic_dns.matches(datagram.target()) {
+                let Some(proxy) = tun_dns_proxy(&context) else {
+                    continue;
+                };
+                if !answer_tun_udp_dns(
+                    datagram,
+                    &proxy,
+                    inbound,
+                    &cancellation,
+                    &session_cancellation,
+                    Some(route_generation),
+                    Some(&mut route_change),
+                    &routing,
+                    &response_sink,
+                    &peer_policy,
+                )
+                .await
+                {
+                    return;
+                }
+                continue;
+            }
+            let target = datagram.target();
+            let Ok(application_target) = TargetAddr::ip(target) else {
+                continue;
+            };
+            if !target_payload_within_bound(datagram.payload().len(), request_payload_bound) {
+                continue;
+            }
+            let Some(peer_reservation) = reserve_tun_udp_peer(&peer_policy, target.ip()) else {
+                continue;
+            };
+            let payload_len = datagram.payload().len();
+            let wire_len = match egress.prepare_application_request(
+                &context.egress,
+                &routing.outbounds,
+                application_target,
+                datagram.payload(),
+                Instant::now(),
+            ) {
+                Ok(length) => length,
+                Err(UdpPlanResponseError::Packet(_) | UdpPlanResponseError::Runtime(_)) => continue,
+            };
+            drop(datagram);
+            let mut send_forced = cancellation.clone();
+            let sent = tokio::select! {
+                biased;
+                () = send_forced.forced() => return,
+                () = session_cancellation.cancelled() => return,
+                () = &mut route_change => return,
+                changed = egress_cancelled.changed() => {
+                    let _ = changed;
+                    return;
+                }
+                result = egress.send_encoded_request(wire_len) => result,
+            };
+            if session_cancellation.is_cancelled()
+                || !udp_route_generation_is_current(&routing, route_generation)
+            {
+                return;
+            }
+            if !commit_peer_after_success(sent, wire_len, || peer_reservation.commit()) {
+                return;
+            }
+            context.metrics.udp_datagram(
+                Role::Client,
+                Direction::ClientToTarget,
+                Outcome::Accepted,
+            );
+            context.metrics.add_udp_bytes(
+                Role::Client,
+                Direction::ClientToTarget,
+                payload_len as u64,
+            );
+            continue;
+        }
+
+        let Ok(idle_deadline) = egress.idle_deadline() else {
             return;
         };
         let mut forced = cancellation.clone();
         tokio::select! {
+            biased;
             () = forced.forced() => return,
             () = session_cancellation.cancelled() => return,
-            changed = session_cancelled.changed() => {
+            () = &mut route_change => return,
+            changed = egress_cancelled.changed() => {
                 let _ = changed;
                 return;
             }
             () = tokio::time::sleep_until(idle_deadline) => {
-                if association.idle_expired(idle_deadline) {
+                if egress.idle_expired(idle_deadline) {
                     return;
                 }
             }
-            datagram = receiver.recv() => {
+            datagram = association.receive() => {
                 let Some(datagram) = datagram else { return };
-                if routing.route_generation() != route_generation {
-                    return;
-                }
-                if datagram.target() != target
-                    || !target_payload_within_bound(datagram.payload().len(), payload_bound)
-                {
-                    continue;
-                }
-                let Some(peer_reservation) = reserve_tun_udp_peer(&peer_policy, target.ip()) else {
-                    return;
-                };
-                let payload_len = datagram.payload().len();
-                let wire_len = match association.prepare_application_request(
-                    &context.egress,
-                    &routing.outbounds,
-                    original_target.clone(),
-                    datagram.payload(),
-                    Instant::now(),
-                ) {
-                    Ok(length) => length,
-                    Err(UdpPlanResponseError::Packet(_)
-                        | UdpPlanResponseError::Runtime(_)) => continue,
-                };
-                drop(datagram);
-                let mut send_forced = cancellation.clone();
-                let sent = tokio::select! {
-                    () = send_forced.forced() => return,
-                    () = session_cancellation.cancelled() => return,
-                    changed = session_cancelled.changed() => {
-                        let _ = changed;
-                        return;
-                    }
-                    result = association.send_encoded_request(wire_len) => result,
-                };
-                if session_cancellation.is_cancelled()
-                    || routing.route_generation() != route_generation
-                {
-                    return;
-                }
-                if !commit_peer_after_success(sent, wire_len, || peer_reservation.commit()) {
-                    return;
-                }
-                context.metrics.udp_datagram(
-                    Role::Client,
-                    Direction::ClientToTarget,
-                    Outcome::Accepted,
-                );
-                context.metrics.add_udp_bytes(
-                    Role::Client,
-                    Direction::ClientToTarget,
-                    payload_len as u64,
-                );
+                pending_datagram = Some(datagram);
             }
-            received = association.receive_response_wire() => {
+            received = egress.receive_response_wire() => {
                 let Ok(wire_len) = received else { return };
                 if session_cancellation.is_cancelled()
-                    || routing.route_generation() != route_generation
+                    || !udp_route_generation_is_current(&routing, route_generation)
                 {
                     return;
                 }
-                let Ok(response) = association.prepare_application_response(
+                let Ok(response) = egress.prepare_application_response(
                     &context.egress,
                     &routing.outbounds,
                     wire_len,
@@ -906,7 +1006,14 @@ async fn run_udp_route_child(
                 };
                 let Some(source) = response.datagram().target().as_socket_addr() else { continue };
                 let payload = response.datagram().payload();
-                if record_tun_udp_response_outcome(response_sink.send(source, payload)) {
+                if !udp_route_generation_is_current(&routing, route_generation) {
+                    return;
+                }
+                let response_outcome = response_sink.send(source, payload);
+                if !udp_route_generation_is_current(&routing, route_generation) {
+                    return;
+                }
+                if record_tun_udp_response_outcome(response_outcome) {
                     context.metrics.udp_datagram(
                         Role::Client,
                         Direction::TargetToClient,
@@ -918,91 +1025,122 @@ async fn run_udp_route_child(
                         payload.len() as u64,
                     );
                 }
-                association.recycle_application_response(response);
+                egress.recycle_application_response(response);
             }
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_udp_dns_child(
-    target: SocketAddr,
+async fn run_udp_dns_association(
+    mut association: ferrum2_tun::UdpAssociation,
+    mut pending_datagram: Option<ferrum2_tun::UdpDatagram>,
     route_generation: RouteGeneration,
-    mut receiver: mpsc::Receiver<ferrum2_tun::UdpDatagram>,
+    mut route_change: RouteGenerationChange,
     cancellation: ProcessCancellation,
     session_cancellation: ferrum2_tun::SessionCancellation,
-    context: Arc<ClientContext>,
     routing: Arc<ClientRouting>,
     inbound: usize,
-    response_sink: ferrum2_tun::UdpResponseSink,
-    peer_policy: ferrum2_tun::UdpPeerPolicyHandle,
+    proxy: Arc<DnsProxy>,
 ) {
-    if routing.route_generation() != route_generation {
+    if !udp_route_generation_is_current(&routing, route_generation) {
         return;
     }
-    let Some(proxy) = context
-        .dns
-        .as_ref()
-        .and_then(|proxy| proxy.get())
-        .map(Arc::clone)
-    else {
-        return;
-    };
+    let response_sink = association.response_sink();
+    let peer_policy = association.peer_policy();
     loop {
-        let mut forced = cancellation.clone();
-        let datagram = tokio::select! {
-            () = forced.forced() => return,
-            () = session_cancellation.cancelled() => return,
-            datagram = receiver.recv() => datagram,
-        };
-        let Some(datagram) = datagram else { return };
-        if routing.route_generation() != route_generation {
+        if !udp_route_generation_is_current(&routing, route_generation) {
             return;
         }
-        if datagram.target() != target {
+        if let Some(datagram) = pending_datagram.take() {
+            if !answer_tun_udp_dns(
+                datagram,
+                &proxy,
+                inbound,
+                &cancellation,
+                &session_cancellation,
+                Some(route_generation),
+                Some(&mut route_change),
+                &routing,
+                &response_sink,
+                &peer_policy,
+            )
+            .await
+            {
+                return;
+            }
             continue;
         }
-        let mut answer_forced = cancellation.clone();
-        let response = tokio::select! {
-            () = answer_forced.forced() => return,
+        let mut forced = cancellation.clone();
+        let datagram = tokio::select! {
+            biased;
+            () = forced.forced() => return,
             () = session_cancellation.cancelled() => return,
-            response = proxy.answer(
-                    ProxyIngress::Ordinary(inbound),
-                    ProxyTransport::Udp,
-                    datagram.payload(),
-                ) => response,
+            () = &mut route_change => return,
+            datagram = association.receive() => datagram,
         };
-        if session_cancellation.is_cancelled() || routing.route_generation() != route_generation {
-            return;
-        }
-        if let Some(response) = authorize_dns_peer_after_answer(response, target, |peer| {
-            reserve_tun_udp_peer(&peer_policy, peer).is_some_and(TunUdpPeerReservation::commit)
-        }) {
-            // Both synthetic and ordinary hijack-DNS replies originate from the
-            // exact endpoint selected for this target. ADF authorization is
-            // published only after a successful local answer exists.
-            record_tun_udp_response_outcome(response_sink.send(target, &response));
-        }
+        let Some(datagram) = datagram else { return };
+        pending_datagram = Some(datagram);
     }
 }
 
-async fn run_udp_reject_child(
-    mut receiver: mpsc::Receiver<ferrum2_tun::UdpDatagram>,
-    cancellation: ProcessCancellation,
-    session_cancellation: ferrum2_tun::SessionCancellation,
-) {
-    loop {
-        let mut forced = cancellation.clone();
-        if tokio::select! {
-            () = forced.forced() => None,
-            () = session_cancellation.cancelled() => None,
-            datagram = receiver.recv() => datagram,
-        }
-        .is_none()
-        {
-            return;
-        }
+#[allow(clippy::too_many_arguments)]
+async fn answer_tun_udp_dns(
+    datagram: ferrum2_tun::UdpDatagram,
+    proxy: &DnsProxy,
+    inbound: usize,
+    cancellation: &ProcessCancellation,
+    session_cancellation: &ferrum2_tun::SessionCancellation,
+    route_generation: Option<RouteGeneration>,
+    route_change: Option<&mut RouteGenerationChange>,
+    routing: &ClientRouting,
+    response_sink: &ferrum2_tun::UdpResponseSink,
+    peer_policy: &ferrum2_tun::UdpPeerPolicyHandle,
+) -> bool {
+    if route_generation
+        .is_some_and(|generation| !udp_route_generation_is_current(routing, generation))
+    {
+        return false;
     }
+    let target = datagram.target();
+    let mut answer_forced = cancellation.clone();
+    let response = tokio::select! {
+        biased;
+        () = answer_forced.forced() => return false,
+        () = session_cancellation.cancelled() => return false,
+        () = wait_for_optional_udp_route_generation_change(route_change) => {
+            return false;
+        }
+        response = proxy.answer(
+            ProxyIngress::Ordinary(inbound),
+            ProxyTransport::Udp,
+            datagram.payload(),
+        ) => response,
+    };
+    if session_cancellation.is_cancelled()
+        || route_generation
+            .is_some_and(|generation| !udp_route_generation_is_current(routing, generation))
+    {
+        return false;
+    }
+    if let Some(response) = authorize_dns_peer_after_answer(response, target, |peer| {
+        reserve_tun_udp_peer(peer_policy, peer).is_some_and(TunUdpPeerReservation::commit)
+    }) {
+        if route_generation
+            .is_some_and(|generation| !udp_route_generation_is_current(routing, generation))
+        {
+            return false;
+        }
+        // Local DNS replies retain the per-datagram synthetic or hijacked endpoint.
+        let outcome = response_sink.send(target, &response);
+        if route_generation
+            .is_some_and(|generation| !udp_route_generation_is_current(routing, generation))
+        {
+            return false;
+        }
+        record_tun_udp_response_outcome(outcome);
+    }
+    true
 }
 
 async fn wait_for_session_cancellation(
@@ -1159,10 +1297,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::{RunError, report_result};
     use super::{
-        SyntheticDns, TUN_UDP_TARGET_CAPACITY, TunUdpRouteRequest, TunUdpTargetChild,
-        TunUdpTargetKey, TunUdpTargetPlan, TunUdpTargetTable, authorize_dns_peer_after_answer,
-        commit_peer_after_success, commit_udp_candidate_if_admitted, record_tun_event, run_tcp,
-        select_udp_target, select_udp_target_generation_stable, target_payload_within_bound,
+        SyntheticDns, TunUdpPlan, TunUdpRouteRequest, authorize_dns_peer_after_answer,
+        commit_peer_after_success, record_tun_event, run_tcp, select_udp_target,
+        select_udp_target_generation_stable, target_payload_within_bound,
+        udp_route_generation_is_current,
     };
 
     #[test]
@@ -1325,7 +1463,6 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("ferrum2_tun_packets_rejected_total{"))
             .collect::<Vec<_>>();
-        assert!(!rejected.is_empty(), "closed reject series are prebound");
         assert!(
             rejected.iter().all(|line| line.ends_with(" 0")),
             "a delayed response that is later injected is not rejected: {rejected:?}"
@@ -1421,41 +1558,8 @@ mod tests {
         assert!(!SyntheticDns::default().matches("[fd00::1]:53".parse().unwrap()));
     }
 
-    #[test]
-    fn tun_udp_target_table_is_drop_new_without_lru_eviction() {
-        let first: SocketAddr = "192.0.2.1:1".parse().unwrap();
-        let mut targets = TunUdpTargetTable::new(TUN_UDP_TARGET_CAPACITY);
-        for port in 1..=u16::try_from(TUN_UDP_TARGET_CAPACITY).unwrap() {
-            targets
-                .insert(SocketAddr::new(first.ip(), port), port)
-                .expect("target below fixed capacity");
-        }
-        let newcomer: SocketAddr = "192.0.2.1:257".parse().unwrap();
-        assert_eq!(targets.insert(newcomer, 257), Err(257));
-        assert_eq!(targets.len(), TUN_UDP_TARGET_CAPACITY);
-        assert_eq!(targets.get(first), Some(&1), "oldest live target remains");
-        assert!(targets.get(newcomer).is_none(), "new target is dropped");
-    }
-
     #[tokio::test]
-    async fn tun_udp_target_children_have_isolated_bounded_queues() {
-        let first: SocketAddr = "192.0.2.1:53".parse().unwrap();
-        let second: SocketAddr = "198.51.100.1:53".parse().unwrap();
-        let (first_sender, mut first_receiver) = tokio::sync::mpsc::channel(1);
-        let (second_sender, mut second_receiver) = tokio::sync::mpsc::channel(1);
-        let mut targets = TunUdpTargetTable::new(2);
-        targets.insert(first, first_sender).unwrap();
-        targets.insert(second, second_sender).unwrap();
-
-        targets.get(first).unwrap().try_send(b'a').unwrap();
-        targets.get(second).unwrap().try_send(b'b').unwrap();
-        assert!(targets.get(first).unwrap().try_send(b'x').is_err());
-        assert_eq!(first_receiver.recv().await, Some(b'a'));
-        assert_eq!(second_receiver.recv().await, Some(b'b'));
-    }
-
-    #[tokio::test]
-    async fn selector_switch_rekeys_and_retires_tun_udp_target_child() {
+    async fn selector_switch_invalidates_the_frozen_tun_udp_association() {
         let (outbounds, route, selector) = chain_test_setup(
             [
                 ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022,
@@ -1472,7 +1576,6 @@ mod tests {
             selector: selector.clone(),
         };
         let target = TargetAddr::ip("192.0.2.8:53".parse().unwrap()).unwrap();
-        let target_socket = target.as_socket_addr().unwrap();
         let metrics = ferrum2_observability::Metrics::new();
         let (first_generation, first_plan) = select_udp_target_generation_stable(
             TunUdpRouteRequest {
@@ -1486,103 +1589,34 @@ mod tests {
             None,
         )
         .expect("first stable generation");
-        let TunUdpTargetPlan::Route {
+        let TunUdpPlan::Route {
             snapshot: first_snapshot,
             ..
         } = first_plan
         else {
             panic!("first route target");
         };
+        let mut route_change = routing.watch_route_generation_from(first_generation);
         assert_eq!(first_snapshot.hops(), &[0, 1]);
-
-        let first_key = TunUdpTargetKey {
-            target: target_socket,
-            route_generation: first_generation,
-        };
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        let mut tasks = tokio::task::JoinSet::new();
-        let abort = tasks.spawn(std::future::pending::<()>());
-        let mut targets = TunUdpTargetTable::new(1);
-        assert!(
-            targets
-                .insert(
-                    first_key,
-                    TunUdpTargetChild {
-                        id: 0,
-                        sender,
-                        abort,
-                    },
-                )
-                .is_ok(),
-            "first child"
-        );
+        assert!(udp_route_generation_is_current(&routing, first_generation));
 
         selector.switch("manual", "a-b").expect("no-op switch");
         assert!(selector.switch("manual", "missing").is_err());
-        assert_eq!(routing.route_generation(), first_generation);
-        targets.remove_stale_generations(first_generation);
-        assert!(targets.get(first_key).is_some(), "no-op retired child");
+        assert!(udp_route_generation_is_current(&routing, first_generation));
 
         selector.switch("manual", "c-d").expect("effective switch");
-        let (second_generation, second_plan) = select_udp_target_generation_stable(
-            TunUdpRouteRequest {
-                routing: &routing,
-                inbound: 0,
-                synthetic_dns: SyntheticDns::default(),
-                target: &target,
-                payload: b"second",
-                metrics: &metrics,
-            },
-            None,
-        )
-        .expect("second stable generation");
-        let TunUdpTargetPlan::Route {
-            snapshot: second_snapshot,
-            ..
-        } = second_plan
-        else {
-            panic!("second route target");
-        };
-        assert_ne!(second_generation, first_generation);
-        assert_eq!(second_snapshot.hops(), &[2, 3]);
-
-        targets.remove_stale_generations(second_generation);
-        assert!(targets.get(first_key).is_none());
-        assert!(receiver.recv().await.is_none(), "stale sender stayed alive");
-        let cancelled = tasks
-            .join_next()
-            .await
-            .expect("stale task")
-            .expect_err("stale task was not aborted");
-        assert!(cancelled.is_cancelled());
-
-        let second_key = TunUdpTargetKey {
-            target: target_socket,
-            route_generation: second_generation,
-        };
-        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        let abort = tasks.spawn(std::future::pending::<()>());
         assert!(
-            targets
-                .insert(
-                    second_key,
-                    TunUdpTargetChild {
-                        id: 1,
-                        sender,
-                        abort,
-                    },
-                )
-                .is_ok(),
-            "new-generation child"
+            !udp_route_generation_is_current(&routing, first_generation),
+            "the active association must terminate instead of selecting another route"
         );
-        assert!(targets.get(second_key).is_some());
-        drop(targets);
-        let cancelled = tasks
-            .join_next()
+        tokio::time::timeout(Duration::from_millis(50), &mut route_change)
             .await
-            .expect("new task")
-            .expect_err("table drop did not abort child");
-        assert!(cancelled.is_cancelled());
+            .expect("generation watcher must wake a blocked association");
+        assert_eq!(
+            first_snapshot.hops(),
+            &[0, 1],
+            "the frozen snapshot is never rewritten in place"
+        );
     }
 
     #[test]
@@ -1655,7 +1689,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         };
 
         let (first_generation, first_plan) = select(b"first", &mut scratch);
-        let TunUdpTargetPlan::Route {
+        let TunUdpPlan::Route {
             snapshot: first_snapshot,
             ..
         } = first_plan
@@ -1666,7 +1700,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
         selector.switch("manual", "proxy").expect("selector switch");
         let (second_generation, second_plan) = select(b"second", &mut scratch);
-        let TunUdpTargetPlan::Route {
+        let TunUdpPlan::Route {
             snapshot: second_snapshot,
             ..
         } = second_plan
@@ -1744,30 +1778,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
 
     #[tokio::test]
-    async fn rejected_first_udp_target_never_commits_association() {
-        let committed = std::cell::Cell::new(false);
-        let result = commit_udp_candidate_if_admitted(&TunUdpTargetPlan::Reject, || async {
-            committed.set(true);
-            Ok::<_, ()>(())
-        })
-        .await;
-        assert_eq!(result, Ok(None));
-        assert!(!committed.get(), "Reject invoked the association commit");
-
-        let result = commit_udp_candidate_if_admitted(&TunUdpTargetPlan::SyntheticDns, || async {
-            committed.set(true);
-            Ok::<_, ()>(7_u8)
-        })
-        .await;
-        assert_eq!(result, Ok(Some(7)));
-        assert!(
-            committed.get(),
-            "admitted target skipped association commit"
-        );
-    }
-
-    #[tokio::test]
-    async fn tun_udp_target_plan_is_bounded_and_immutable_after_selection() {
+    async fn tun_udp_route_snapshot_is_bounded_and_immutable_after_selection() {
         let (outbounds, route, selector) = chain_test_setup(
             [
                 ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022,
@@ -1787,9 +1798,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let metrics = ferrum2_observability::Metrics::new();
         let first = select_udp_target(&routing, 0, None, None, &target, b"first", 1_392, &metrics)
             .expect("first selector snapshot");
-        let TunUdpTargetPlan::Route {
+        let TunUdpPlan::Route {
             snapshot: first_snapshot,
-            payload_bound: bound,
+            request_payload_bound: bound,
+            ..
         } = first
         else {
             panic!("route target plan");
@@ -1811,9 +1823,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             &metrics,
         )
         .expect("oversized datagram still snapshots its target plan");
-        let TunUdpTargetPlan::Route {
+        let TunUdpPlan::Route {
             snapshot: oversized_snapshot,
-            payload_bound: oversized_bound,
+            request_payload_bound: oversized_bound,
+            ..
         } = oversized
         else {
             panic!("route target plan");
@@ -1826,8 +1839,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .expect("switch after rejected candidate");
         let selected =
             select_udp_target(&routing, 0, None, None, &target, b"valid", 1_392, &metrics)
-                .expect("current per-target selector");
-        let TunUdpTargetPlan::Route { snapshot, .. } = selected else {
+                .expect("current association selector");
+        let TunUdpPlan::Route { snapshot, .. } = selected else {
             panic!("route target plan");
         };
         assert_eq!(snapshot.hops(), &[2, 3]);
@@ -1837,7 +1850,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         assert_eq!(
             snapshot.hops(),
             &[2, 3],
-            "target child owns an immutable plan snapshot"
+            "the selected association owns an immutable plan snapshot"
         );
 
         let registry = OwnerRegistry::new();
@@ -1873,10 +1886,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             outbounds: Arc::clone(&outbounds),
             selector: direct_selector.clone(),
         };
-        let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        let first_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .expect("direct TUN UDP target");
-        let target = TargetAddr::ip(echo.local_addr().unwrap()).unwrap();
+            .expect("first direct TUN UDP target");
+        let second_echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("second direct TUN UDP target");
+        let target = TargetAddr::ip(first_echo.local_addr().unwrap()).unwrap();
+        let second_target = TargetAddr::ip(second_echo.local_addr().unwrap()).unwrap();
         let selected = select_udp_target(
             &routing,
             0,
@@ -1888,9 +1905,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             &Metrics::new(),
         )
         .expect("direct TUN UDP selection");
-        let TunUdpTargetPlan::Route {
+        let TunUdpPlan::Route {
             snapshot: direct,
-            payload_bound: bound,
+            request_payload_bound: bound,
+            ..
         } = selected
         else {
             panic!("direct route target plan");
@@ -1901,10 +1919,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         );
         assert!(target_payload_within_bound(1_393, bound));
         assert_eq!(direct.hops(), &[0]);
-        direct_selector
-            .switch("manual", "proxy")
-            .expect("switch after direct snapshot");
-        assert_eq!(direct.hops(), &[0], "Direct TUN target child is immutable");
         let engine = ClientEgressEngine::new(
             outbounds,
             TokioConnector::new(TcpConnector::new(Duration::from_secs(1))),
@@ -1942,9 +1956,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .await
             .expect("direct TUN send");
         let mut raw = [0_u8; 32];
-        let (length, peer) = echo.recv_from(&mut raw).await.expect("direct TUN receive");
+        let (length, peer) = first_echo
+            .recv_from(&mut raw)
+            .await
+            .expect("first direct TUN receive");
         assert_eq!(&raw[..length], b"tun-direct");
-        echo.send_to(b"tun-reply", peer).await.unwrap();
+        first_echo.send_to(b"tun-reply", peer).await.unwrap();
         let length = association.receive_response_wire().await.unwrap();
         let response = association
             .prepare_application_response(&engine, &routing.outbounds, length)
@@ -1952,11 +1969,42 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         assert_eq!(response.datagram().target(), &target);
         assert_eq!(response.datagram().payload(), b"tun-reply");
         association.recycle_application_response(response);
+
+        let length = association
+            .prepare_application_request(
+                &engine,
+                &routing.outbounds,
+                second_target.clone(),
+                b"second-target",
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("second direct TUN request"));
+        association
+            .send_encoded_request(length)
+            .await
+            .expect("second direct TUN send");
+        let (length, second_peer) = second_echo
+            .recv_from(&mut raw)
+            .await
+            .expect("second direct TUN receive");
+        assert_eq!(&raw[..length], b"second-target");
+        assert_eq!(second_peer, peer, "one direct socket serves every target");
+        second_echo
+            .send_to(b"second-reply", second_peer)
+            .await
+            .unwrap();
+        let length = association.receive_response_wire().await.unwrap();
+        let response = association
+            .prepare_application_response(&engine, &routing.outbounds, length)
+            .unwrap_or_else(|_| panic!("second direct TUN response"));
+        assert_eq!(response.datagram().target(), &second_target);
+        assert_eq!(response.datagram().payload(), b"second-reply");
+        association.recycle_application_response(response);
         assert!(live_ids.lock().expect("live SIP022 IDs").is_empty());
     }
 
     #[test]
-    fn tun_udp_targets_independently_select_direct_proxy_dns_and_reject() {
+    fn synthetic_dns_precedes_one_frozen_ordinary_udp_route() {
         let (path, _) = client_test_config(reserve_address(), reserve_address());
         std::fs::write(
             &path,
@@ -2020,135 +2068,82 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             selector,
         };
         let metrics = ferrum2_observability::Metrics::new();
-        for (address, expected) in [("192.0.2.53:53", "dns"), ("192.0.2.54:53", "reject")] {
-            let target = TargetAddr::ip(address.parse().expect("target")).expect("target");
-            let plan = select_udp_target(
-                &routing, inbound, None, None, &target, b"query", 1_392, &metrics,
-            )
-            .expect("terminal mode");
-            assert!(
-                matches!(
-                    (plan, expected),
-                    (TunUdpTargetPlan::HijackDns, "dns") | (TunUdpTargetPlan::Reject, "reject")
-                ),
-                "ordinary route fallback did not replace the terminal mode"
-            );
-        }
+        let synthetic_v4 = Ipv4Addr::new(198, 18, 0, 1);
+        let synthetic_target =
+            TargetAddr::ip("198.18.0.1:53".parse().expect("synthetic DNS target"))
+                .expect("synthetic DNS target");
+        let synthetic = select_udp_target(
+            &routing,
+            inbound,
+            Some(synthetic_v4),
+            None,
+            &synthetic_target,
+            b"query",
+            1_392,
+            &metrics,
+        )
+        .expect("synthetic DNS plan");
+        assert!(matches!(synthetic, TunUdpPlan::SyntheticDns));
 
         let direct_target = TargetAddr::ip("192.0.2.60:443".parse().unwrap()).unwrap();
         let proxy_target = TargetAddr::ip("192.0.2.61:443".parse().unwrap()).unwrap();
-        let direct = select_udp_target(
+        let first = select_udp_target(
             &routing,
             inbound,
-            None,
+            Some(synthetic_v4),
             None,
             &direct_target,
             b"direct-a",
             1_392,
             &metrics,
         )
-        .expect("target A plan");
-        let proxy = select_udp_target(
+        .expect("first ordinary plan");
+        let TunUdpPlan::Route {
+            snapshot: frozen,
+            request_payload_bound: frozen_bound,
+            ..
+        } = first
+        else {
+            panic!("first ordinary target must select Direct");
+        };
+        assert_eq!(frozen.hops(), &[1]);
+
+        let encoded = metrics.encode_text().expect("route-once metrics");
+        assert!(
+            encoded.lines().any(|line| {
+                line.starts_with("ferrum2_rule_program_candidate_count_count{program=\"route\"}")
+                    && line.ends_with(" 1")
+            }),
+            "synthetic DNS plus the first ordinary target must invoke the router once\n{encoded}"
+        );
+
+        let verification_metrics = ferrum2_observability::Metrics::new();
+        let independently_selected_second = select_udp_target(
             &routing,
             inbound,
-            None,
+            Some(synthetic_v4),
             None,
             &proxy_target,
             b"proxy-b",
             1_392,
-            &metrics,
+            &verification_metrics,
         )
-        .expect("target B plan");
-        let TunUdpTargetPlan::Route {
-            snapshot: direct,
-            payload_bound: direct_bound,
-        } = direct
-        else {
-            panic!("target A direct route");
-        };
-        let TunUdpTargetPlan::Route {
-            snapshot: proxy,
-            payload_bound: proxy_bound,
-        } = proxy
+        .expect("independent target-B policy witness");
+        let TunUdpPlan::Route {
+            snapshot: independently_selected_second,
+            request_payload_bound: proxy_bound,
+            ..
+        } = independently_selected_second
         else {
             panic!("target B proxy route");
         };
-        assert_eq!(direct.hops(), &[1], "target A independently selects Direct");
-        assert_eq!(proxy.hops(), &[0], "target B independently selects proxy");
+        assert_eq!(independently_selected_second.hops(), &[0]);
+        assert_eq!(frozen.hops(), &[1]);
         assert!(
-            direct_bound > proxy_bound,
+            frozen_bound > proxy_bound,
             "Direct and proxy should retain distinct plan limits"
         );
-        let between_limits = proxy_bound + 1;
-        assert!(target_payload_within_bound(between_limits, direct_bound));
-        assert!(!target_payload_within_bound(between_limits, proxy_bound));
-
-        let synthetic_v4 = Ipv4Addr::new(198, 18, 0, 1);
-        let synthetic_v6 = "fd00::1".parse().unwrap();
-        for (target, configured_v4, configured_v6, hijacked) in [
-            ("198.18.0.1:53", Some(synthetic_v4), None, true),
-            ("[fd00::1]:53", None, Some(synthetic_v6), true),
-            ("198.18.0.1:54", Some(synthetic_v4), None, false),
-            ("[fd00::1]:54", None, Some(synthetic_v6), false),
-            ("198.18.0.2:53", Some(synthetic_v4), None, false),
-            ("[fd00::2]:53", None, Some(synthetic_v6), false),
-            ("198.18.0.1:53", None, Some(synthetic_v6), false),
-            ("[fd00::1]:53", Some(synthetic_v4), None, false),
-        ] {
-            let target = TargetAddr::ip(target.parse().unwrap()).unwrap();
-            let plan = select_udp_target(
-                &routing,
-                inbound,
-                configured_v4,
-                configured_v6,
-                &target,
-                b"query",
-                1_392,
-                &metrics,
-            )
-            .expect("bounded synthetic candidate");
-            assert_eq!(
-                matches!(plan, TunUdpTargetPlan::SyntheticDns),
-                hijacked,
-                "synthetic target {target:?}"
-            );
-        }
-
-        let synthetic_target: SocketAddr = "198.18.0.1:53".parse().unwrap();
-        let synthetic = select_udp_target(
-            &routing,
-            inbound,
-            Some(synthetic_v4),
-            None,
-            &TargetAddr::ip(synthetic_target).unwrap(),
-            b"query",
-            1_392,
-            &metrics,
-        )
-        .unwrap();
-        let ordinary_target = direct_target.as_socket_addr().unwrap();
-        let ordinary = select_udp_target(
-            &routing,
-            inbound,
-            Some(synthetic_v4),
-            None,
-            &direct_target,
-            b"ordinary",
-            1_392,
-            &metrics,
-        )
-        .unwrap();
-        let mut coexist = TunUdpTargetTable::new(2);
-        assert!(coexist.insert(synthetic_target, synthetic).is_ok());
-        assert!(coexist.insert(ordinary_target, ordinary).is_ok());
-        assert!(matches!(
-            coexist.get(synthetic_target),
-            Some(TunUdpTargetPlan::SyntheticDns)
-        ));
-        assert!(matches!(
-            coexist.get(ordinary_target),
-            Some(TunUdpTargetPlan::Route { .. })
-        ));
+        assert!(target_payload_within_bound(proxy_bound + 1, frozen_bound));
     }
 
     #[tokio::test]

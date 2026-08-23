@@ -51,6 +51,30 @@ pub(super) struct RouteGeneration {
     selector: u64,
 }
 
+pub(super) struct RouteGenerationChange {
+    rule_engine: Option<ferrum2_rule::GenerationChange>,
+    selector: ferrum2_rule::GenerationChange,
+}
+
+impl Future for RouteGenerationChange {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if Pin::new(&mut this.selector).poll(context).is_ready() {
+            return Poll::Ready(());
+        }
+        if this
+            .rule_engine
+            .as_mut()
+            .is_some_and(|change| Pin::new(change).poll(context).is_ready())
+        {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    }
+}
+
 impl ClientRouting {
     pub(super) fn route_generation(&self) -> RouteGeneration {
         RouteGeneration {
@@ -59,6 +83,20 @@ impl ClientRouting {
                 .as_ref()
                 .map_or(0, ferrum2_config::CompiledRoute::rule_engine_generation),
             selector: self.selector.generation(),
+        }
+    }
+
+    pub(super) fn watch_route_generation_from(
+        &self,
+        generation: RouteGeneration,
+    ) -> RouteGenerationChange {
+        RouteGenerationChange {
+            rule_engine: self
+                .program
+                .as_ref()
+                .and_then(ferrum2_config::CompiledRoute::rule_registry)
+                .map(|registry| registry.watch_generation_from(generation.rule_engine)),
+            selector: self.selector.watch_generation_from(generation.selector),
         }
     }
 
