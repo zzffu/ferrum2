@@ -525,9 +525,6 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
             tcp_associations,
             udp_associations,
         ),
-        TunEvent::SessionRestartStarted => metrics.tun_session_restart_started(),
-        TunEvent::SessionRestartSucceeded => metrics.tun_session_restart_succeeded(),
-        TunEvent::SessionRestartFailed => metrics.tun_session_restart_failed(),
         TunEvent::SessionGeneration(generation) => {
             metrics.set_tun_session_generation(generation);
         }
@@ -1900,9 +1897,6 @@ mod tests {
                 tcp_associations: 5,
                 udp_associations: 6,
             },
-            TunEvent::SessionRestartStarted,
-            TunEvent::SessionRestartSucceeded,
-            TunEvent::SessionRestartFailed,
             TunEvent::SessionGeneration(7),
             TunEvent::SessionActive(true),
             TunEvent::PacketIngress,
@@ -1986,9 +1980,6 @@ mod tests {
             "ferrum2_network_full_rebuild_total{reason=\"route_damage\",result=\"failed\"} 1",
             "ferrum2_network_associations_reset_total{operation=\"full_rebuild\",transport=\"tcp\"} 5",
             "ferrum2_network_associations_reset_total{operation=\"full_rebuild\",transport=\"udp\"} 6",
-            "ferrum2_tun_session_restart_started_total 1",
-            "ferrum2_tun_session_restart_succeeded_total 1",
-            "ferrum2_tun_session_restart_failed_total 1",
             "ferrum2_tun_session_generation 7",
             "ferrum2_tun_session_active 1",
             "ferrum2_tun_packets_ingress_total 1",
