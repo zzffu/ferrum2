@@ -3857,6 +3857,8 @@ fn removed_tun_udp_memory_field_is_limited_to_negative_and_migration_material() 
         let normalized = path.to_string_lossy().replace('\\', "/").to_lowercase();
         if normalized.ends_with("/crates/ferrum2-config/tests/config_contract.rs")
             || normalized.ends_with("/tests/m0-harness/tests/config_cli.rs")
+            || normalized.ends_with("/crates/ferrum2-tun/fuzz/src/config_legacy.rs")
+            || normalized.ends_with("/crates/ferrum2-tun/fuzz/corpus/provenance.toml")
         {
             if occurrences != 1 {
                 violations.push(format!(

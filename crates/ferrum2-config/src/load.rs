@@ -19,15 +19,50 @@ struct RawSchemaRoot {
 /// Reads and fully validates a client configuration without creating runtime resources.
 pub fn load_client(path: impl AsRef<Path>) -> Result<ValidatedClientConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawClientRoot = parse_v2_toml(&source)?;
-    validate_client(raw)
+    parse_client_source(&source)
 }
 
 /// Reads and fully validates a server configuration without creating runtime resources.
 pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawServerRoot = parse_v2_toml(&source)?;
+    parse_server_source(&source)
+}
+
+fn parse_client_source(source: &str) -> Result<ValidatedClientConfig, ConfigError> {
+    let raw: RawClientRoot = parse_v2_toml(source)?;
+    validate_client(raw)
+}
+
+fn parse_server_source(source: &str) -> Result<ValidatedServerConfig, ConfigError> {
+    let raw: RawServerRoot = parse_v2_toml(source)?;
     validate_server(raw)
+}
+
+#[cfg(feature = "fuzzing")]
+fn fuzz_source(input: &[u8]) -> Result<Zeroizing<String>, ConfigError> {
+    if input.len() > MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(
+            ConfigErrorKind::TooLarge,
+            ConfigField::Config,
+        ));
+    }
+    let source = std::str::from_utf8(input)
+        .map_err(|_| ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config))?;
+    Ok(Zeroizing::new(source.to_owned()))
+}
+
+/// Runs the production client parser and validator over one bounded in-memory fuzz input.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_client(input: &[u8]) -> Result<(), ConfigError> {
+    let source = fuzz_source(input)?;
+    parse_client_source(&source).map(drop)
+}
+
+/// Runs the production server parser and validator over one bounded in-memory fuzz input.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_server(input: &[u8]) -> Result<(), ConfigError> {
+    let source = fuzz_source(input)?;
+    parse_server_source(&source).map(drop)
 }
 
 pub(super) fn read_bounded_utf8(path: &Path) -> Result<Zeroizing<String>, ConfigError> {

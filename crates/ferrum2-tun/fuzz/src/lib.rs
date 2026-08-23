@@ -15,14 +15,18 @@ mod udp;
 #[path = "../../src/wake.rs"]
 mod wake;
 
+mod config_legacy;
+mod strict_route;
 mod udp_reset;
 
 use std::sync::Arc;
 
+pub use config_legacy::{MAX_CONFIG_LEGACY_FUZZ_INPUT_BYTES, fuzz_config_legacy_fields};
 use packet::{Families, PacketParser, ParsedPacket};
 use reassembly::{
     MAX_REASSEMBLY_ENTRIES, REASSEMBLY_TIMEOUT_MILLIS, ReassemblyOutcome, ReassemblyTable,
 };
+pub use strict_route::{MAX_STRICT_ROUTE_FUZZ_INPUT_BYTES, fuzz_strict_route_rule_builder};
 pub use udp_reset::{MAX_UDP_RESET_FUZZ_INPUT_BYTES, fuzz_udp_reset_races};
 pub(crate) use wake::OwnerWake;
 

@@ -20,6 +20,8 @@ default = []
 libfuzzer = ["dep:libfuzzer-sys"]
 
 [dependencies]
+ferrum2-config = { path = "../../ferrum2-config", features = ["fuzzing"] }
+ferrum2-wintun = { path = "../../ferrum2-wintun", features = ["fuzzing"] }
 libfuzzer-sys = { version = "=0.4.12", optional = true }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt", "sync"] }
 
@@ -40,6 +42,22 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "config_legacy_fields"
+path = "fuzz_targets/config_legacy_fields.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "strict_route_rules"
+path = "fuzz_targets/strict_route_rules.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "smoke"
 path = "src/bin/smoke.rs"
 test = false
@@ -48,3 +66,6 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[patch.crates-io]
+shadowsocks-crypto = { path = "../../../vendor/shadowsocks-crypto" }

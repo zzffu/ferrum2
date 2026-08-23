@@ -33,6 +33,8 @@ mod raw;
 mod validation;
 
 pub use error::{ConfigError, ConfigErrorKind, ConfigField};
+#[cfg(feature = "fuzzing")]
+pub use load::{fuzz_parse_client, fuzz_parse_server};
 pub use load::{load_client, load_server};
 pub use model::{
     ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DirectDomainResolver,

@@ -1,0 +1,105 @@
+schema_version = 1
+fixture_class = "reviewed repository-owned synthetic fuzz seeds; not packet captures or external conformance vectors"
+created = "2026-08-24"
+encoding = "canonical-LF UTF-8 text; the exact seed bytes include the final LF"
+source = "independently selected bounded state selectors and descriptive ASCII payload bytes"
+source_license = "GPL-3.0-only"
+external_bytes = "none"
+consumer = "crates/ferrum2-tun/fuzz/src/bin/smoke.rs and matching libFuzzer targets"
+execution_boundary = "deterministic smoke executes only in the approved Hyper-V guest; hosted CI compiles without execution"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/client-route-target.seed"
+bytes = 21
+sha256 = "d618c61d1623839d2282a0b8cba47f66078563304631f2695c2f64c1f413a5fc"
+coverage = "production client parser rejects removed ordinary-route composite target"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/server-route-target.seed"
+bytes = 21
+sha256 = "c1875608d90d840681f8a818c4ce240003b0b0679191ffcc1c15c0d3c61d3d95"
+coverage = "production server parser rejects removed ordinary-route target subtable"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/client-dns-target.seed"
+bytes = 19
+sha256 = "ea523655b10738765811fa310ae0c6170cc8f96b1216e026374a61134bbaee7e"
+coverage = "production client parser rejects removed DNS-route composite target"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/server-dns-target.seed"
+bytes = 19
+sha256 = "8dd91c1522a108595786b2204340c6faf244bd5d7673da9b17bd0dc4b611ba43"
+coverage = "production server parser rejects removed DNS-route composite target"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/tun-memory-field.seed"
+bytes = 28
+sha256 = "59eaf3136283b66f05b2a91bef4943639f544bae59e1949dfe0f3e33df16ab00"
+coverage = "production client parser rejects removed tun.max_udp_buffered_bytes"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/schema-v1.seed"
+bytes = 23
+sha256 = "8d7c2a914dfd80900517ce7d9e4876ebbf86bb97e9b0a724d02d1967d6efb07f"
+coverage = "production client parser rejects schema version 1 before inspecting legacy root fields"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/missing-schema.seed"
+bytes = 28
+sha256 = "2d650d7d6ea4494488a8abbd01e82125036a4fe741e0bf887569a9aba3afc10f"
+coverage = "production client parser rejects a missing schema version as schema_version semantic failure"
+
+[[seeds]]
+path = "corpus/config_legacy_fields/future-schema.seed"
+bytes = 27
+sha256 = "e6cedec5adef32e75eecae1cc855412ff69bfa445241e2707343eccdf252ebc9"
+coverage = "production client parser rejects a future schema version before inspecting legacy root fields"
+
+[[seeds]]
+path = "corpus/strict_route_rules/empty-app-id.seed"
+bytes = 15
+sha256 = "94f41b9038a804b762b1bc3e0e345d73b7a7fd68f14cfa1cbe93a1e96caff953"
+coverage = "empty WFP application identity is rejected"
+
+[[seeds]]
+path = "corpus/strict_route_rules/one-byte-app-id.seed"
+bytes = 15
+sha256 = "d5a0a3f6ba4e95bb58719d669745d752b410778f006bdee8373403d65f183c2b"
+coverage = "minimum non-empty WFP application identity is accepted"
+
+[[seeds]]
+path = "corpus/strict_route_rules/max-minus-one-app-id.seed"
+bytes = 15
+sha256 = "c0447e195d9b19719b0dda2118448b46777eaacc612b6e372843248ece76aa47"
+coverage = "application identity immediately below the production maximum is accepted"
+
+[[seeds]]
+path = "corpus/strict_route_rules/max-app-id.seed"
+bytes = 15
+sha256 = "a231d17ebe93fa615624001dc862bc2c95dc0c02f0992986acfa9c0fe36b6303"
+coverage = "application identity at the production maximum is accepted"
+
+[[seeds]]
+path = "corpus/strict_route_rules/max-plus-one-app-id.seed"
+bytes = 15
+sha256 = "fdbb71b50297e8ff2b4de58c7a2a30a3163f98ed346997f4805b77a8234dc44a"
+coverage = "application identity immediately above the production maximum is rejected"
+
+[[seeds]]
+path = "corpus/strict_route_rules/no-family.seed"
+bytes = 15
+sha256 = "81a410b482351f8a7b24bbd2af068e60057217b0af3f6b939da396791ec206ba"
+coverage = "a rule plan without an enabled address family is rejected"
+
+[[seeds]]
+path = "corpus/strict_route_rules/zero-luid.seed"
+bytes = 12
+sha256 = "59b595e1796cc3ad2737cc93474c2dc6833d96dc6eb67f4d9c58e0fa642f3548"
+coverage = "zero managed-interface LUID is rejected"
+
+[[seeds]]
+path = "corpus/strict_route_rules/managed-dns.seed"
+bytes = 12
+sha256 = "385b2303fb7379fbeacbff7605d84cbc45b215486d3e3d72746aba93df1f8b46"
+coverage = "dual-family managed DNS adds bounded TCP and UDP port-53 blocks"
