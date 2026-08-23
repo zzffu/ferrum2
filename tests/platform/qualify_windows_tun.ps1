@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
-    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "route-detect", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
+    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
     [string]$Mode,
     [ValidateSet(10, 100, 1000)]
     [int]$RestartCycles = 10,
@@ -31,9 +31,6 @@ $expectedHyperVVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
 $expectedHyperVCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
 $expectedHyperVCheckpointId = "1e570209-faf7-4248-8167-aa0687cdb8cf"
 
-if ($Mode -ceq "route-detect") {
-    throw "route-detect qualification is unsupported after removal of external route-conflict detection"
-}
 if ($Mode -in $m17Modes -and [string]::IsNullOrWhiteSpace($CandidateTestDirectory)) {
     throw "M17 qualification requires host-built CandidateTestDirectory artifacts"
 }
@@ -302,7 +299,7 @@ function Write-RunIdentityJournal {
     $siblingPath = [IO.Path]::GetFullPath($script:siblingDll).TrimEnd('\', '/')
     $controllerPath = (Resolve-Path -LiteralPath $PSCommandPath).Path
     $serverRequired = $script:Mode -in @(
-        "tcp", "tcp08", "udp", "full", "performance", "route-detect", "restart-stress",
+        "tcp", "tcp08", "udp", "full", "performance", "restart-stress",
         "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )
     $document = [ordered]@{
@@ -353,7 +350,7 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
         $document.run_token -ceq $script:runIdentity) "run identity journal schema/token mismatch"
     Assert-True ($document.mode -in @(
         "lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance",
-        "network-feasibility", "managed-product", "hard-kill", "route-detect",
+        "network-feasibility", "managed-product", "hard-kill",
         "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )) "run identity journal mode is invalid"
     if ($document.mode -in $script:m17Modes) {
@@ -381,7 +378,7 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     Assert-True ($document.client_binary_explicit -is [bool] -and
         $document.server_binary_explicit -is [bool] -and $document.server_required -is [bool]) "run identity journal boolean field is invalid"
     $expectedServerRequired = $document.mode -in @(
-        "tcp", "tcp08", "udp", "full", "performance", "route-detect", "restart-stress",
+        "tcp", "tcp08", "udp", "full", "performance", "restart-stress",
         "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )
     Assert-True ($document.server_required -eq $expectedServerRequired) "run identity journal server requirement is inconsistent with mode"
@@ -482,18 +479,6 @@ function Get-ExactRunProcesses([string]$WorkPath, [string[]]$Executables = @($sc
     })
 }
 
-function Get-M17RouteMutationIntentPath(
-    [string]$Prefix,
-    [string]$JournalPath = $script:m17NetworkMutationJournal
-) {
-    $name = switch ($Prefix) {
-        "203.0.113.128/25" { "route-more-specific.json" }
-        "203.0.113.0/24" { "route-equal-prefix.json" }
-        default { throw "M17 external route is outside the durable journal whitelist: $Prefix" }
-    }
-    return Join-Path $JournalPath $name
-}
-
 function Write-M17DurableMutationIntent([string]$Path, [System.Collections.IDictionary]$Document) {
     if (-not (Test-Path -LiteralPath $script:m17NetworkMutationJournal -PathType Container)) {
         New-Item -ItemType Directory -Path $script:m17NetworkMutationJournal -ErrorAction Stop | Out-Null
@@ -517,7 +502,7 @@ function Read-M17MutationIntent(
     [string]$Schema,
     [string[]]$Properties,
     [string]$ExpectedWorkPath = $script:work,
-    [string[]]$ExpectedSourceMode = @("route-detect")
+    [string[]]$ExpectedSourceMode = @()
 ) {
     Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "M17 mutation intent is missing"
     Assert-NotReparsePoint $Path "M17 mutation intent"
@@ -563,49 +548,6 @@ function Read-M17UdpFirewallMutationIntent(
             $script:controllerProgram,
             [StringComparison]::OrdinalIgnoreCase
         )) "M17 UDP firewall mutation intent values are invalid"
-    return $document
-}
-
-function Read-M17RouteMutationIntent(
-    [string]$Path,
-    [string]$ExpectedWorkPath = $script:work,
-    [string]$JournalPath = $script:m17NetworkMutationJournal
-) {
-    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-route-intent.v1" @(
-        "schema", "run_token", "source_mode", "work_path", "interface_index",
-        "destination_prefix", "next_hop", "route_metric"
-    ) $ExpectedWorkPath
-    $expectedPath = Get-M17RouteMutationIntentPath ([string]$document.destination_prefix) $JournalPath
-    Assert-True ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($expectedPath), [StringComparison]::OrdinalIgnoreCase) -and
-        $document.interface_index -is [long] -and $document.interface_index -ge 1 -and
-        $document.interface_index -le [uint32]::MaxValue -and $document.route_metric -is [long] -and
-        $document.route_metric -ge 0 -and $document.route_metric -le [uint32]::MaxValue) "M17 route mutation intent values are invalid"
-    $nextHop = $null
-    Assert-True ([Net.IPAddress]::TryParse([string]$document.next_hop, [ref]$nextHop) -and
-        $nextHop.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) "M17 route mutation next hop is invalid"
-    return $document
-}
-
-function Read-M17MetricMutationIntent(
-    [string]$Path,
-    [string]$ExpectedWorkPath = $script:work,
-    [string]$JournalPath = $script:m17NetworkMutationJournal
-) {
-    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-metric-intent.v1" @(
-        "schema", "run_token", "source_mode", "work_path", "interface_index", "interface_guid",
-        "original_automatic_metric", "original_interface_metric", "applied_automatic_metric", "applied_interface_metric"
-    ) $ExpectedWorkPath
-    $expectedPath = Join-Path $JournalPath "physical-ipv4-metric.json"
-    $guid = [Guid]::Empty
-    Assert-True ([IO.Path]::GetFullPath($Path).Equals([IO.Path]::GetFullPath($expectedPath), [StringComparison]::OrdinalIgnoreCase) -and
-        $document.interface_index -is [long] -and $document.interface_index -ge 1 -and
-        $document.interface_index -le [uint32]::MaxValue -and
-        [Guid]::TryParseExact([string]$document.interface_guid, "D", [ref]$guid) -and $guid -ne [Guid]::Empty -and
-        $document.original_automatic_metric -in @("Enabled", "Disabled") -and
-        $document.original_interface_metric -is [long] -and $document.original_interface_metric -ge 0 -and
-        $document.original_interface_metric -le [uint32]::MaxValue -and
-        $document.applied_automatic_metric -ceq "Disabled" -and
-        $document.applied_interface_metric -is [long] -and $document.applied_interface_metric -eq 1) "M17 metric mutation intent values are invalid"
     return $document
 }
 
@@ -687,10 +629,7 @@ function Restore-M17NetworkMutationJournal([string]$WorkPath, [string]$JournalPa
     if (-not (Test-Path -LiteralPath $canonicalJournal)) { return }
     Assert-NotReparsePoint $canonicalWork "M17 recovery work directory"
     Assert-NotReparsePoint $canonicalJournal "M17 network mutation journal directory"
-    $intentNames = @(
-        "route-more-specific.json", "route-equal-prefix.json", "physical-ipv4-metric.json",
-        "udp-firewall.json"
-    )
+    $intentNames = @("udp-firewall.json")
     $allowedNames = @($intentNames + @($intentNames | ForEach-Object { "$_.pending" }))
     $entries = @(Get-ChildItem -LiteralPath $canonicalJournal -Force -ErrorAction Stop)
     Assert-True (@($entries | Where-Object { $_.PSIsContainer -or $allowedNames -notcontains $_.Name }).Count -eq 0) "M17 network mutation journal contains an unknown entry"
@@ -710,52 +649,6 @@ function Restore-M17NetworkMutationJournal([string]$WorkPath, [string]$JournalPa
         if ($owned.Count -eq 1) { $owned[0] | Remove-NetFirewallRule -ErrorAction Stop }
         Assert-True (@(Get-NetFirewallRule -Name ([string]$intent.rule_name) -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 journaled UDP firewall rule remained"
         Complete-M17MutationIntent $firewallPath
-    }
-    foreach ($name in @("route-more-specific.json", "route-equal-prefix.json")) {
-        $path = Join-Path $canonicalJournal $name
-        if (-not (Test-Path -LiteralPath $path)) { continue }
-        $intent = Read-M17RouteMutationIntent $path $canonicalWork $canonicalJournal
-        $owned = @(Get-NetRoute -InterfaceIndex ([int]$intent.interface_index) `
-            -DestinationPrefix ([string]$intent.destination_prefix) -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
-            Where-Object { $_.NextHop -ceq [string]$intent.next_hop -and [uint32]$_.RouteMetric -eq [uint32]$intent.route_metric })
-        Assert-True ($owned.Count -le 1) "M17 journaled external route ownership is ambiguous"
-        if ($owned.Count -eq 1) { Remove-NetRoute -InputObject $owned[0] -Confirm:$false -ErrorAction Stop }
-        Assert-True (@(Get-NetRoute -InterfaceIndex ([int]$intent.interface_index) `
-            -DestinationPrefix ([string]$intent.destination_prefix) -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
-            Where-Object { $_.NextHop -ceq [string]$intent.next_hop -and [uint32]$_.RouteMetric -eq [uint32]$intent.route_metric }).Count -eq 0) "M17 journaled external route remained"
-        Complete-M17MutationIntent $path
-    }
-    $metricPath = Join-Path $canonicalJournal "physical-ipv4-metric.json"
-    if (Test-Path -LiteralPath $metricPath) {
-        $intent = Read-M17MetricMutationIntent $metricPath $canonicalWork $canonicalJournal
-        $adapters = @(Get-NetAdapter -InterfaceIndex ([int]$intent.interface_index) -IncludeHidden -ErrorAction Stop)
-        Assert-True ($adapters.Count -eq 1 -and
-            ([Guid]$adapters[0].InterfaceGuid).ToString("D").ToLowerInvariant() -ceq [string]$intent.interface_guid) "M17 journaled physical interface identity changed"
-        $current = Get-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-        $isOriginal = if ($intent.original_automatic_metric -ceq "Enabled") {
-            [string]$current.AutomaticMetric -ceq "Enabled"
-        } else {
-            [string]$current.AutomaticMetric -ceq "Disabled" -and
-                [uint32]$current.InterfaceMetric -eq [uint32]$intent.original_interface_metric
-        }
-        $isApplied = [string]$current.AutomaticMetric -ceq "Disabled" -and
-            [uint32]$current.InterfaceMetric -eq [uint32]$intent.applied_interface_metric
-        Assert-True ($isOriginal -or $isApplied) "M17 journaled physical interface metric ownership changed"
-        if ($isApplied) {
-            if ($intent.original_automatic_metric -ceq "Enabled") {
-                Set-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 `
-                    -AutomaticMetric Enabled -PolicyStore ActiveStore -ErrorAction Stop
-            } else {
-                Set-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 `
-                    -AutomaticMetric Disabled -InterfaceMetric ([uint32]$intent.original_interface_metric) `
-                    -PolicyStore ActiveStore -ErrorAction Stop
-            }
-        }
-        $restored = Get-NetIPInterface -InterfaceIndex ([int]$intent.interface_index) -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-        $restoredMetric = ($intent.original_automatic_metric -ceq "Enabled") -or
-            ([uint32]$restored.InterfaceMetric -eq [uint32]$intent.original_interface_metric)
-        Assert-True ([string]$restored.AutomaticMetric -ceq [string]$intent.original_automatic_metric -and $restoredMetric) "M17 journaled physical interface metric restore failed"
-        Complete-M17MutationIntent $metricPath
     }
     Assert-True (@(Get-ChildItem -LiteralPath $canonicalJournal -Force -ErrorAction Stop).Count -eq 0) "M17 network mutation journal was not drained"
     Remove-Item -LiteralPath $canonicalJournal -Force -ErrorAction Stop
@@ -4375,26 +4268,6 @@ function Get-Ipv4DefaultUnderlay {
     return [pscustomobject]@{ InterfaceIndex = $indices[0]; Row = $best[0]; Sources = $sources }
 }
 
-function Get-Ipv4ConnectedPrefix([object]$AddressRow) {
-    $prefixLength = [int]$AddressRow.PrefixLength
-    Assert-True ($prefixLength -ge 0 -and $prefixLength -le 32) "IPv4 connected prefix length is invalid"
-    $bytes = [Net.IPAddress]::Parse([string]$AddressRow.IPAddress).GetAddressBytes()
-    for ($index = 0; $index -lt 4; $index++) {
-        $remaining = $prefixLength - ($index * 8)
-        $mask = if ($remaining -ge 8) { 255 } elseif ($remaining -le 0) { 0 } else { (255 -shl (8 - $remaining)) -band 255 }
-        $bytes[$index] = [byte]([int]$bytes[$index] -band $mask)
-    }
-    return "$([Net.IPAddress]::new($bytes))/$prefixLength"
-}
-
-function Get-Ipv4PrivateSupernet([string]$Address) {
-    $bytes = [Net.IPAddress]::Parse($Address).GetAddressBytes()
-    if ($bytes[0] -eq 10) { return "10.0.0.0/8" }
-    if ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) { return "172.16.0.0/12" }
-    if ($bytes[0] -eq 192 -and $bytes[1] -eq 168) { return "192.168.0.0/16" }
-    throw "approved guest underlay is not RFC1918"
-}
-
 function Get-PhysicalDnsSnapshot([int]$TunInterfaceIndex) {
     return @(
         Get-DnsClientServerAddress -ErrorAction Stop |
@@ -5564,33 +5437,6 @@ $Additional
 
 function Get-M17ModeContract {
     switch ($script:Mode) {
-        "route-detect" {
-            return [ordered]@{
-                fixtures = @(
-                    New-M17TunFixture "route-detect-dual" @"
-ipv4_address = "198.18.0.2/30"
-ipv6_address = "fd00::2/126"
-auto_route = true
-route_address = ["10.0.0.1/8", "2001:db8:1::1/48"]
-route_exclude_address = ["10.128.0.1/9", "2001:db8:1:8000::1/49"]
-udp_filtering = "address_dependent"
-"@ $false
-                )
-                witnesses = @(
-                    "clean_route_scan", "more_specific_external_conflict",
-                    "equal_prefix_winning_metric_conflict", "owned_route_exemption",
-                    "admission_quiesced_before_conflicting_session",
-                    "lan_exclude_remains_active",
-                    "fixed_and_direct_dual_stack_underlay_binding",
-                    "multihoming_prefix_and_metric_selection",
-                    "route_interface_and_address_notifications",
-                    "foreign_route_state_survives_cleanup",
-                    "foreign_address_state_survives_cleanup",
-                    "dad_failure_rolls_back_in_reverse"
-                )
-                counters = @("ferrum2_tun_route_detect_total", "ferrum2_tun_route_conflict_total")
-            }
-        }
         "restart-stress" {
             return [ordered]@{
                 fixtures = @(
@@ -6229,43 +6075,6 @@ function Stop-M17Candidate([System.Diagnostics.Process]$Process, [string]$Label)
     Add-M17LiveRow "client-$Label-graceful-stop" ([ordered]@{ exit_code = 0; adapter = "absent" })
 }
 
-function Add-M17ExternalRoute([string]$Prefix, [uint32]$Metric) {
-    $underlay = Get-Ipv4DefaultUnderlay
-    Assert-True (@(Get-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $Prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 external route baseline is not absent: $Prefix"
-    $intentPath = Get-M17RouteMutationIntentPath $Prefix
-    Write-M17DurableMutationIntent $intentPath ([ordered]@{
-        schema = "ferrum2.windows-tun.m17-route-intent.v1"
-        run_token = $script:runIdentity
-        source_mode = "route-detect"
-        work_path = [IO.Path]::GetFullPath($script:work)
-        interface_index = [uint32]$underlay.InterfaceIndex
-        destination_prefix = $Prefix
-        next_hop = [string]$underlay.Row.Route.NextHop
-        route_metric = $Metric
-    })
-    $route = New-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $Prefix `
-        -NextHop $underlay.Row.Route.NextHop -RouteMetric $Metric -PolicyStore ActiveStore -ErrorAction Stop
-    $script:ownedRoutes.Add($route)
-    $readback = @(Get-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $Prefix -PolicyStore ActiveStore -ErrorAction Stop |
-        Where-Object { $_.NextHop -ceq $underlay.Row.Route.NextHop -and [uint32]$_.RouteMetric -eq $Metric })
-    Assert-True ($readback.Count -eq 1) "M17 external route readback failed: $Prefix"
-    return $route
-}
-
-function Remove-M17ExternalRoute([object]$Route) {
-    $interfaceIndex = [int]$Route.InterfaceIndex
-    $prefix = [string]$Route.DestinationPrefix
-    $intentPath = Get-M17RouteMutationIntentPath $prefix
-    $intent = Read-M17RouteMutationIntent $intentPath
-    Assert-True ([int]$intent.interface_index -eq $interfaceIndex -and
-        [string]$intent.next_hop -ceq [string]$Route.NextHop -and
-        [uint32]$intent.route_metric -eq [uint32]$Route.RouteMetric) "M17 external route no longer matches its durable intent"
-    Remove-NetRoute -InputObject $Route -Confirm:$false -ErrorAction Stop
-    Assert-True (@(Get-NetRoute -InterfaceIndex $interfaceIndex -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 external route cleanup failed: $prefix"
-    [void]$script:ownedRoutes.Remove($Route)
-    Complete-M17MutationIntent $intentPath
-}
-
 function Get-M17ExactManagedRoute([int]$InterfaceIndex, [string]$Prefix) {
     $routes = @(Get-NetRoute -InterfaceIndex $InterfaceIndex -DestinationPrefix $Prefix `
         -PolicyStore ActiveStore -ErrorAction Stop)
@@ -6331,18 +6140,6 @@ function Invoke-M17CandidateTests {
     })
 
     $specs = switch ($script:Mode) {
-        "route-detect" { @(
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::route_integrity_detects_v4_and_v6_specificity_without_default_route_false_positives"; Witnesses = @() },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::equal_prefix_metric_is_closed_for_lower_equal_overflow_and_unknown"; Witnesses = @() },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::only_exact_managed_and_kernel_local_owned_rows_are_ignored"; Witnesses = @() },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dual_stack_target_binding_selects_actual_target_and_rejects_tun"; Witnesses = @("fixed_and_direct_dual_stack_underlay_binding") },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::target_binding_excludes_tun_and_orders_prefix_then_effective_metric"; Witnesses = @("multihoming_prefix_and_metric_selection") },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::network_change_notifications_cover_each_callback_and_runtime_owned_events"; Witnesses = @("route_interface_and_address_notifications") },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_route_cleanup_preserves_replacements_and_audits_every_delete"; Witnesses = @("foreign_route_state_survives_cleanup") },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_address_readback_and_cleanup_are_exact_and_foreign_safe"; Witnesses = @("foreign_address_state_survives_cleanup") },
-            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dad_failure_rolls_back_in_reverse_and_cleanup_conflicts_do_not_short_circuit"; Witnesses = @("dad_failure_rolls_back_in_reverse") },
-            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @() }
-        ) }
         "restart-stress" { @(
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @("admission_quiesces_during_rebuild", "stale_flows_and_fragments_are_cleared") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @() },
@@ -6416,150 +6213,6 @@ function Invoke-M17CandidateTests {
             Add-M17Witness $witness "deterministic-candidate-test" "$($spec.Package):$($spec.Test)"
         }
     }
-}
-
-function Wait-M17RouteConflict(
-    [int]$MetricsPort,
-    [string]$Reason,
-    [double]$Before,
-    [int]$TimeoutSeconds = 30
-) {
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    do {
-        $metrics = Get-Metrics $MetricsPort 2
-        $current = Get-M17LabeledMetricValue $metrics "ferrum2_tun_route_conflict" "reason" $Reason $true
-        $active = Get-M17MetricValue $metrics "ferrum2_tun_session_active"
-        if ($current -gt $Before -and $active -eq 0) {
-            return [pscustomobject]@{ Metrics = $metrics; Count = $current }
-        }
-        Start-Sleep -Milliseconds 50
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw "M17 route conflict witness timeout: $Reason"
-}
-
-function Invoke-M17RouteDetect {
-    $script:m17MetricsPort = Get-UniqueTcpPort
-    $path = Join-Path $script:work "m17-route-detect.toml"
-    $physical = Get-Ipv4DefaultUnderlay
-    $lanSource = @($physical.Sources | Sort-Object IPAddress)[0]
-    $lanPrefix = Get-Ipv4ConnectedPrefix $lanSource
-    $lanSupernet = Get-Ipv4PrivateSupernet ([string]$lanSource.IPAddress)
-    Write-M17ClientConfig $path @"
-ipv4_address = "198.18.0.2/30"
-ipv6_address = "fd00::2/126"
-auto_route = true
-route_address = ["203.0.113.0/24", "2001:db8:17::/48", "$lanSupernet"]
-route_exclude_address = ["2001:db8:17:8000::/49", "$lanPrefix"]
-udp_filtering = "address_dependent"
-ready_timeout_ms = 15000
-"@ "direct" $script:m17MetricsPort
-    Assert-M17Config $path "route-detect"
-    $script:activeProcess = Start-M17Candidate $path "route-detect"
-    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
-    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
-    $initial = Wait-M17Session $script:m17MetricsPort 1 1
-    $script:m17CounterBefore = Get-M17CounterSnapshot $initial.Metrics
-    Assert-True ((Get-M17MetricValue $initial.Metrics "ferrum2_tun_route_detect") -ge 1) "M17 clean route scan was not observed"
-    $lanDecision = @(Find-NetRoute -RemoteIPAddress ([string]$physical.Row.Route.NextHop) -ErrorAction Stop |
-        Where-Object { $_.PSObject.Properties.Name -contains "DestinationPrefix" })[0]
-    Assert-True ($lanDecision -and [int]$lanDecision.InterfaceIndex -eq [int]$physical.InterfaceIndex -and
-        [int]$lanDecision.InterfaceIndex -ne $script:ownedInterfaceIndex) "M17 LAN exclude did not retain the physical route"
-    Add-M17Witness "clean_route_scan" "live-product" "active generation completed a route integrity scan"
-    Add-M17Witness "owned_route_exemption" "live-product" "managed capture rows remained Active after route detect"
-    Add-M17Witness "lan_exclude_remains_active" "live-product" "RFC1918 capture excluded the connected LAN and retained Active"
-    Add-M17LiveRow "lan-exclude" ([ordered]@{
-        status = "active"
-        route_conflicts = Get-M17MetricValue $initial.Metrics "ferrum2_tun_route_conflict" $true
-        physical_interface = [int]$physical.InterfaceIndex
-        tun_interface = $script:ownedInterfaceIndex
-    })
-
-    $moreBefore = Get-M17LabeledMetricValue $initial.Metrics "ferrum2_tun_route_conflict" "reason" "more_specific_route" $true
-    $moreSpecific = Add-M17ExternalRoute "203.0.113.128/25" 0
-    $conflict = Wait-M17RouteConflict $script:m17MetricsPort "more_specific_route" $moreBefore
-    Add-M17Witness "more_specific_external_conflict" "live-product" "external /25 quiesced a managed /24 session"
-    Add-M17Witness "admission_quiesced_before_conflicting_session" "live-product" "session_active reached zero before conflict recovery"
-    Remove-M17ExternalRoute $moreSpecific
-    $recovered = Wait-M17Session $script:m17MetricsPort ($initial.Generation + 1) 1 180
-    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
-    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
-
-    $physical = Get-Ipv4DefaultUnderlay
-    $physicalInterface = Get-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-    $originalAutomaticMetric = [string]$physicalInterface.AutomaticMetric
-    $originalInterfaceMetric = [uint32]$physicalInterface.InterfaceMetric
-    $tunInterface = Get-NetIPInterface -InterfaceIndex $script:ownedInterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-    $tunRoutes = @(Get-NetRoute -InterfaceIndex $script:ownedInterfaceIndex -DestinationPrefix "203.0.113.0/24" -PolicyStore ActiveStore -ErrorAction Stop)
-    Assert-True ($tunRoutes.Count -eq 1) "M17 managed equal-prefix route readback is not exact"
-    $tunRoute = $tunRoutes[0]
-    $metricChanged = ([uint64]$originalInterfaceMetric -ge ([uint64]$tunInterface.InterfaceMetric + [uint64]$tunRoute.RouteMetric))
-    $equalPrefix = $null
-    $metricIntentPath = $null
-    try {
-        if ($metricChanged) {
-            $physicalAdapter = Get-NetAdapter -InterfaceIndex $physical.InterfaceIndex -IncludeHidden -ErrorAction Stop
-            $metricIntentPath = Join-Path $script:m17NetworkMutationJournal "physical-ipv4-metric.json"
-            Write-M17DurableMutationIntent $metricIntentPath ([ordered]@{
-                schema = "ferrum2.windows-tun.m17-metric-intent.v1"
-                run_token = $script:runIdentity
-                source_mode = "route-detect"
-                work_path = [IO.Path]::GetFullPath($script:work)
-                interface_index = [uint32]$physical.InterfaceIndex
-                interface_guid = ([Guid]$physicalAdapter.InterfaceGuid).ToString("D").ToLowerInvariant()
-                original_automatic_metric = $originalAutomaticMetric
-                original_interface_metric = $originalInterfaceMetric
-                applied_automatic_metric = "Disabled"
-                applied_interface_metric = 1
-            })
-            Set-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 `
-                -AutomaticMetric Disabled -InterfaceMetric 1 -PolicyStore ActiveStore -ErrorAction Stop
-            $minimumGeneration = $recovered.Generation
-            Start-Sleep -Milliseconds 500
-            $recovered = Wait-M17Session $script:m17MetricsPort $minimumGeneration 1 180
-            $adapter = Wait-M17AdapterReady $script:adapterName $true $true
-            $script:ownedInterfaceIndex = [int]$adapter.ifIndex
-        }
-        $equalBefore = Get-M17LabeledMetricValue $recovered.Metrics "ferrum2_tun_route_conflict" "reason" "equal_prefix_preferred" $true
-        $equalPrefix = Add-M17ExternalRoute "203.0.113.0/24" 0
-        [void](Wait-M17RouteConflict $script:m17MetricsPort "equal_prefix_preferred" $equalBefore)
-        Add-M17Witness "equal_prefix_winning_metric_conflict" "live-product" "lower-effective-metric external /24 quiesced the session"
-        Remove-M17ExternalRoute $equalPrefix
-        $equalPrefix = $null
-        $recovered = Wait-M17Session $script:m17MetricsPort ($recovered.Generation + 1) 1 180
-    } finally {
-        if ($equalPrefix) { Remove-M17ExternalRoute $equalPrefix }
-        if ($metricChanged) {
-            if ($originalAutomaticMetric -ceq "Enabled") {
-                Set-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 `
-                    -AutomaticMetric Enabled -PolicyStore ActiveStore -ErrorAction Stop
-            } else {
-                Set-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 `
-                    -AutomaticMetric Disabled -InterfaceMetric $originalInterfaceMetric `
-                    -PolicyStore ActiveStore -ErrorAction Stop
-            }
-            $restoredInterface = Get-NetIPInterface -InterfaceIndex $physical.InterfaceIndex -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-            $metricMatches = ($originalAutomaticMetric -ceq "Enabled") -or
-                ([uint32]$restoredInterface.InterfaceMetric -eq $originalInterfaceMetric)
-            Assert-True ([string]$restoredInterface.AutomaticMetric -ceq $originalAutomaticMetric -and
-                $metricMatches) "M17 physical interface metric restore failed"
-            Complete-M17MutationIntent $metricIntentPath
-        }
-    }
-    if ($metricChanged) {
-        $minimumGeneration = $recovered.Generation
-        Start-Sleep -Milliseconds 500
-        $recovered = Wait-M17Session $script:m17MetricsPort $minimumGeneration 1 180
-    }
-    $adapter = Wait-M17AdapterReady $script:adapterName $true $true
-    $script:ownedInterfaceIndex = [int]$adapter.ifIndex
-    $script:m17CounterAfter = Get-M17CounterSnapshot $recovered.Metrics
-    Add-M17LiveRow "route-conflict-recovery" ([ordered]@{
-        process_id = [uint32]$script:activeProcess.Id
-        final_generation = $recovered.Generation
-        more_specific_conflicts = Get-M17LabeledMetricValue $recovered.Metrics "ferrum2_tun_route_conflict" "reason" "more_specific_route"
-        equal_prefix_conflicts = Get-M17LabeledMetricValue $recovered.Metrics "ferrum2_tun_route_conflict" "reason" "equal_prefix_preferred"
-    })
-    Stop-M17Candidate $script:activeProcess "route-detect"
 }
 
 function Invoke-M17RestartStress {
@@ -7833,7 +7486,6 @@ function Invoke-M17Qualification([string]$SourceDll) {
     Assert-True ((Get-FileHash -LiteralPath $script:siblingDll -Algorithm SHA256).Hash -eq $script:expectedDllHash) "M17 sibling DLL identity changed"
     Start-M17Server
     switch ($script:Mode) {
-        "route-detect" { Invoke-M17RouteDetect }
         "restart-stress" { Invoke-M17RestartStress }
         "fragments" { Invoke-M17Fragments }
         "dual-stack-dns" { Invoke-M17DualStackDns }
