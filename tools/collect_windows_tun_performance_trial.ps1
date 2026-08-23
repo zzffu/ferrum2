@@ -464,7 +464,6 @@ function Get-ProductDropCounter([string]$Metrics) {
     foreach ($name in @(
         "ferrum2_tun_internal_egress_backpressured",
         "ferrum2_tun_packets_foundation_dropped",
-        "ferrum2_tun_packets_rejected",
         "ferrum2_tun_reassembly_dropped_limit",
         "ferrum2_tun_reassembly_dropped_malformed",
         "ferrum2_tun_reassembly_dropped_overlap",
@@ -485,6 +484,23 @@ function Get-ProductDropCounter([string]$Metrics) {
             -Metrics $Metrics -Name $name -AllowAbsent $true
         )
     }
+    # Windows emits unrelated IPv6 and non-test-destination background traffic
+    # into the managed adapter. Subtract only those two closed reasons; any
+    # current or future rejection reason remains in the fail-closed anomaly sum.
+    [uint64]$packetRejected = Get-Metric `
+        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" -AllowAbsent $true
+    [uint64]$familyDisabled = Get-LabeledMetric `
+        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" `
+        -Labels @{ reason = "family_disabled" } -AllowAbsent $true
+    [uint64]$invalidDestination = Get-LabeledMetric `
+        -Metrics $Metrics -Name "ferrum2_tun_packets_rejected" `
+        -Labels @{ reason = "invalid_destination" } -AllowAbsent $true
+    [decimal]$backgroundRejected = [decimal]$familyDisabled + $invalidDestination
+    Assert-Condition ([decimal]$packetRejected -ge $backgroundRejected) `
+        "packet rejection reason accounting is inconsistent"
+    $counters["ferrum2_tun_packets_rejected_unexpected"] = [uint64](
+        [decimal]$packetRejected - $backgroundRejected
+    )
     return $counters
 }
 
