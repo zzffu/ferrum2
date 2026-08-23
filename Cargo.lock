@@ -705,6 +705,7 @@ name = "ferrum2-wintun"
 version = "0.1.0"
 dependencies = [
  "ferrum2-runtime",
+ "socket2",
  "windows-sys 0.61.2",
 ]
 

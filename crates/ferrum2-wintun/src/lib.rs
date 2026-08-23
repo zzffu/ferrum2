@@ -446,14 +446,15 @@ mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub use windows::{
     Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog,
-    WorkSignal, bind_resolved_socket,
+    WindowsResolvedSocketBinder, WorkSignal, bind_resolved_socket,
 };
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 mod unsupported;
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 pub use unsupported::{
-    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog, WorkSignal,
+    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog,
+    WindowsResolvedSocketBinder, WorkSignal,
 };
 
 #[cfg(test)]
@@ -519,6 +520,13 @@ mod tests {
             assert!(!format!("{error:?}").is_empty());
         }
         assert_eq!(Error::cleanup().kind(), ErrorKind::Cleanup);
+    }
+
+    #[test]
+    fn runtime_socket_binder_contract_is_available_on_every_target() {
+        fn assert_binder<T: ferrum2_runtime::ResolvedSocketBinder<Error = Error>>() {}
+
+        assert_binder::<super::WindowsResolvedSocketBinder>();
     }
 
     #[test]

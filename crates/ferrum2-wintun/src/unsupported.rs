@@ -2,8 +2,9 @@ use std::ops::Deref;
 
 use ferrum2_runtime::{
     NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceObservation,
-    SystemBestRoute,
+    ResolvedInterface, ResolvedSocketBinder, SystemBestRoute,
 };
+use socket2::Socket;
 
 use crate::{
     AdapterConfig, CreateError, Error, ErrorKind, ManagedTunHealth, NetworkChangeOutcome,
@@ -18,6 +19,23 @@ pub struct WorkSignal;
 pub struct ReceivedPacket<'a>(&'a [u8]);
 #[derive(Clone)]
 pub struct UnderlayPolicy;
+
+/// Fail-closed placeholder for the Windows socket binding boundary.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowsResolvedSocketBinder;
+
+impl ResolvedSocketBinder for WindowsResolvedSocketBinder {
+    type Error = Error;
+
+    fn bind_resolved_socket(
+        &self,
+        _: &Socket,
+        _: std::net::SocketAddr,
+        _: &ResolvedInterface,
+    ) -> Result<(), Self::Error> {
+        Err(UNSUPPORTED)
+    }
+}
 
 /// Fail-closed placeholder for the Windows read-only network catalog.
 #[derive(Clone, Copy, Default)]

@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 use ferrum2_runtime::{
     InterfaceBinding, NetworkFamily, NetworkInterfaceCatalog as RuntimeNetworkInterfaceCatalog,
     NetworkInterfaceCatalogError, NetworkInterfaceKind, NetworkInterfaceObservation,
-    ResolvedInterface, SystemBestRoute,
+    ResolvedInterface, ResolvedSocketBinder, SystemBestRoute,
 };
+use socket2::Socket;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW,
     ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_NOT_FOUND, ERROR_SUCCESS, FWP_E_FILTER_NOT_FOUND,
@@ -599,6 +600,23 @@ pub fn bind_resolved_socket<T: AsRawSocket>(
         resolved,
         &mut PlatformResolvedSocketBinder(socket),
     )
+}
+
+/// Production adapter from the shared runtime socket service to the reviewed Windows boundary.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowsResolvedSocketBinder;
+
+impl ResolvedSocketBinder for WindowsResolvedSocketBinder {
+    type Error = Error;
+
+    fn bind_resolved_socket(
+        &self,
+        socket: &Socket,
+        destination: std::net::SocketAddr,
+        resolved: &ResolvedInterface,
+    ) -> Result<(), Self::Error> {
+        bind_resolved_socket(socket, destination, resolved)
+    }
 }
 
 trait ResolvedSocketBindingOperations {
