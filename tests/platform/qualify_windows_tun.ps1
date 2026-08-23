@@ -5507,6 +5507,7 @@ udp_filtering = "address_dependent"
                     "ordinary_route_notifications_reset_network_runtime",
                     "same_process_and_managed_adapter_identity",
                     "managed_addresses_routes_and_dns_are_unchanged",
+                    "strict_route_is_effective_and_filter_identity_is_unchanged",
                     "network_generation_and_reset_metrics_advance",
                     "session_restart_and_full_rebuild_metrics_are_unchanged",
                     "fixed_and_direct_dual_stack_underlay_binding",
@@ -6298,6 +6299,7 @@ function Invoke-M17CandidateTests {
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_address_readback_and_cleanup_are_exact_and_foreign_safe"; Witnesses = @("foreign_address_state_survives_cleanup") },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::dad_failure_rolls_back_in_reverse_and_cleanup_conflicts_do_not_short_circuit"; Witnesses = @("dad_failure_rolls_back_in_reverse") },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::managed_state_health_reports_owned_route_dns_and_strict_route_damage"; Witnesses = @() },
+            @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::strict_route_health_reads_every_exact_filter_id_and_rejects_damage"; Witnesses = @() },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::network_change_revalidates_underlay_and_owned_routes_before_shutdown"; Witnesses = @() },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::windows_catalog_is_family_aware_and_marks_the_exact_managed_tun"; Witnesses = @() },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::resolved_socket_binding_applies_interface_then_family_source"; Witnesses = @() },
@@ -6444,6 +6446,107 @@ function Get-M17ManagedPlaneIdentity([string]$Name) {
         InterfaceGuid = $interfaceGuid
         InterfaceLuid = $interfaceLuid
         InterfaceIndex = $interfaceIndex
+    }
+}
+
+function Get-M17StrictRouteWfpIdentity(
+    [string]$Label,
+    [uint64]$InterfaceLuid,
+    [uint32]$ProcessId
+) {
+    Assert-True ($Label -cmatch '^[a-z0-9][a-z0-9-]{0,63}$' -and
+        $InterfaceLuid -ne 0 -and $ProcessId -ne 0) "M17 strict-route WFP snapshot identity is invalid"
+    $path = Join-Path $script:work "m17-wfp-$Label.xml"
+    Assert-True (-not (Test-Path -LiteralPath $path)) "M17 strict-route WFP snapshot baseline is not absent"
+    $netsh = Join-Path ([Environment]::SystemDirectory) "netsh.exe"
+    try {
+        $result = Invoke-M17BoundedCommand "wfp-$Label" $netsh @("wfp", "show", "state", "file=$path") $script:work 60
+        Assert-True ($result.ExitCode -eq 0 -and (Test-Path -LiteralPath $path -PathType Leaf)) "M17 strict-route WFP state capture failed"
+        Assert-NotReparsePoint $path "M17 strict-route WFP snapshot"
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        Assert-True ($item.Length -gt 0 -and $item.Length -le 67108864) "M17 strict-route WFP snapshot exceeded its 64 MiB boundary"
+        [xml]$document = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $sublayer = "{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}"
+        $expected = @(
+            [pscustomobject]@{ Name = "Ferrum2 app permit IPv4"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701001}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_PERMIT"; Condition = "app"; Protocol = 0 },
+            [pscustomobject]@{ Name = "Ferrum2 app permit IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701002}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_PERMIT"; Condition = "app"; Protocol = 0 },
+            [pscustomobject]@{ Name = "Ferrum2 TUN permit IPv4"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701003}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_PERMIT"; Condition = "tun"; Protocol = 0 },
+            [pscustomobject]@{ Name = "Ferrum2 TUN permit IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701004}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_PERMIT"; Condition = "tun"; Protocol = 0 },
+            [pscustomobject]@{ Name = "Ferrum2 DNS TCP block IPv4"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701007}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_BLOCK"; Condition = "dns"; Protocol = 6 },
+            [pscustomobject]@{ Name = "Ferrum2 DNS UDP block IPv4"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701008}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_BLOCK"; Condition = "dns"; Protocol = 17 },
+            [pscustomobject]@{ Name = "Ferrum2 DNS TCP block IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701009}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_BLOCK"; Condition = "dns"; Protocol = 6 },
+            [pscustomobject]@{ Name = "Ferrum2 DNS UDP block IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e870100a}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_BLOCK"; Condition = "dns"; Protocol = 17 }
+        )
+        $filters = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
+            $subLayerNode = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
+            $filterIdNode = $_.SelectSingleNode("./*[local-name()='filterId']")
+            $null -ne $subLayerNode -and $null -ne $filterIdNode -and
+                $subLayerNode.InnerText.ToLowerInvariant() -ceq $sublayer
+        })
+        Assert-True ($filters.Count -eq $expected.Count) "M17 strict-route WFP filter count is not exact"
+        $rows = [System.Collections.Generic.List[string]]::new()
+        foreach ($spec in $expected) {
+            $matches = @($filters | Where-Object {
+                $nameNode = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
+                $null -ne $nameNode -and $nameNode.InnerText -ceq $spec.Name
+            })
+            Assert-True ($matches.Count -eq 1) "M17 strict-route WFP named filter is not exact: $($spec.Name)"
+            $filter = $matches[0]
+            $keyNode = $filter.SelectSingleNode("./*[local-name()='filterKey']")
+            $layerNode = $filter.SelectSingleNode("./*[local-name()='layerKey']")
+            $actionNode = $filter.SelectSingleNode("./*[local-name()='action']/*[local-name()='type']")
+            $filterIdNode = $filter.SelectSingleNode("./*[local-name()='filterId']")
+            [uint64]$filterId = 0
+            Assert-True ($null -ne $keyNode -and $keyNode.InnerText.ToLowerInvariant() -ceq $spec.Key -and
+                $null -ne $layerNode -and $layerNode.InnerText -ceq $spec.Layer -and
+                $null -ne $actionNode -and $actionNode.InnerText -ceq $spec.Action -and
+                $null -ne $filterIdNode -and [uint64]::TryParse($filterIdNode.InnerText, [ref]$filterId) -and
+                $filterId -ne 0) "M17 strict-route WFP filter identity changed: $($spec.Name)"
+            $fieldKeys = @($filter.SelectNodes(".//*[local-name()='fieldKey']") | ForEach-Object { $_.InnerText } | Sort-Object)
+            if ($spec.Condition -ceq "app") {
+                Assert-True (($fieldKeys -join "|") -ceq "FWPM_CONDITION_ALE_APP_ID") "M17 strict-route app permit condition changed"
+            } elseif ($spec.Condition -ceq "tun") {
+                $luidValues = @($filter.SelectNodes(".//*[local-name()='uint64']") | ForEach-Object { $_.InnerText })
+                Assert-True (($fieldKeys -join "|") -ceq "FWPM_CONDITION_IP_LOCAL_INTERFACE" -and
+                    $luidValues -contains $InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)) "M17 strict-route TUN LUID condition changed"
+            } else {
+                $protocolValues = @($filter.SelectNodes(".//*[local-name()='uint8']") | ForEach-Object { $_.InnerText })
+                $portValues = @($filter.SelectNodes(".//*[local-name()='uint16']") | ForEach-Object { $_.InnerText })
+                Assert-True (($fieldKeys -join "|") -ceq "FWPM_CONDITION_IP_PROTOCOL|FWPM_CONDITION_IP_REMOTE_PORT" -and
+                    $protocolValues -contains ([string]$spec.Protocol) -and $portValues -contains "53") "M17 strict-route DNS condition changed"
+            }
+            $rows.Add("$($spec.Name)|$($spec.Key)|$filterId|$($spec.Layer)|$($spec.Action)|$sublayer")
+        }
+        $sessionKey = "{8ea35b4e-6629-4e26-9776-95c5bf9c6b01}"
+        $sessionName = "Ferrum2 strict route dynamic session"
+        $sessions = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
+            $keyNode = $_.SelectSingleNode("./*[local-name()='sessionKey']")
+            $nameNode = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
+            $null -ne $keyNode -and $keyNode.InnerText.ToLowerInvariant() -ceq $sessionKey -and
+                $null -ne $nameNode -and $nameNode.InnerText -ceq $sessionName
+        })
+        Assert-True ($sessions.Count -eq 1) "M17 strict-route dynamic WFP session identity is not exact"
+        $processNode = $sessions[0].SelectSingleNode("./*[local-name()='processId']")
+        [uint32]$sessionProcessId = 0
+        Assert-True ($null -ne $processNode -and
+            [uint32]::TryParse($processNode.InnerText, [ref]$sessionProcessId) -and
+            $sessionProcessId -eq $ProcessId) "M17 strict-route dynamic WFP session process identity changed"
+        $sessionCanonical = "session|$sessionKey|$sessionName|$sessionProcessId"
+        $canonical = (@($sessionCanonical) + @($rows | Sort-Object)) -join "`n"
+        return [pscustomobject]@{
+            Canonical = $canonical
+            Sha256 = Get-M17TextSha256 $canonical
+            FilterIds = @($rows | Sort-Object | ForEach-Object { ($_ -split '\|')[2] })
+            FilterCount = $rows.Count
+            ProcessId = $sessionProcessId
+            SessionKey = "8ea35b4e-6629-4e26-9776-95c5bf9c6b01"
+            SublayerKey = "ddbc2fa2-d52f-4a79-8a63-8446c308cf02"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $path) {
+            Assert-NotReparsePoint $path "M17 strict-route WFP snapshot cleanup"
+            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        }
     }
 }
 
@@ -6603,6 +6706,7 @@ final = "resolver"
     $script:ownedInterfaceIndex = [int]$adapter.ifIndex
     $initial = Wait-M17Session $script:m17MetricsPort 1 1
     $managedBaseline = Get-M17ManagedPlaneIdentity $script:adapterName
+    $wfpBaseline = Get-M17StrictRouteWfpIdentity "network-reset-0000" $managedBaseline.InterfaceLuid $candidatePid
     Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-network-reset-before"))
     Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-network-reset-before"))
     Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false 0x1710
@@ -6623,6 +6727,11 @@ final = "resolver"
         interface_index = $managedBaseline.InterfaceIndex
         managed_plane_sha256 = $managedBaseline.Sha256
         managed_plane = $managedBaseline.Document
+        strict_route_wfp_sha256 = $wfpBaseline.Sha256
+        strict_route_filters = $wfpBaseline.FilterCount
+        strict_route_filter_ids = @($wfpBaseline.FilterIds)
+        strict_route_session_key = $wfpBaseline.SessionKey
+        strict_route_sublayer_key = $wfpBaseline.SublayerKey
         session_generation = $baseline.SessionGeneration
         network_generation = $baseline.NetworkGeneration
     })
@@ -6634,6 +6743,7 @@ final = "resolver"
     $writer.NewLine = "`n"
     $writer.AutoFlush = $true
     $evidenceBytes = 0
+    $wfpSamples = 1
     $sampleStride = [Math]::Max(1, [int][Math]::Ceiling($script:NetworkResetCycles / 10.0))
     $mutation = $null
     $final = $null
@@ -6653,11 +6763,16 @@ final = "resolver"
             Assert-True (-not $script:activeProcess.HasExited -and [uint32]$script:activeProcess.Id -eq $candidatePid) "M17 ordinary network reset replaced the client process"
             $managed = Get-M17ManagedPlaneIdentity $script:adapterName
             Assert-True ($managed.Canonical -ceq $managedBaseline.Canonical) "M17 ordinary network reset changed managed adapter/address/route/DNS state"
-            $healthSample = $cycle -eq 1 -or $cycle -eq $script:NetworkResetCycles -or ($cycle % $sampleStride) -eq 0
+            $sampleWfp = $cycle -eq 1 -or $cycle -eq $script:NetworkResetCycles -or ($cycle % $sampleStride) -eq 0
+            if ($sampleWfp) {
+                $wfp = Get-M17StrictRouteWfpIdentity ("network-reset-{0:D4}" -f $cycle) $managed.InterfaceLuid $candidatePid
+                Assert-True ($wfp.Canonical -ceq $wfpBaseline.Canonical) "M17 ordinary network reset replaced the strict-route WFP session or filters"
+                $wfpSamples++
+            }
             $payload = [Text.Encoding]::ASCII.GetBytes(("m17-network-reset-{0:D4}" -f $cycle))
             Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex $payload
             Invoke-TunProductUdp $supportAddress $script:capabilityIdentity.UdpPort $script:ownedInterfaceIndex $payload
-            if ($healthSample) { Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false ([uint16](0x1800 + ($cycle % 2048))) }
+            if ($sampleWfp) { Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false ([uint16](0x1800 + ($cycle % 2048))) }
             $drained = Wait-M17FlowDrain $script:m17MetricsPort $expectedGeneration $udpAssociationLimit
             $state = Get-M17NetworkResetMetricState $drained.Metrics
             Assert-True ($state.ResetStarted -eq $final.State.ResetStarted -and
@@ -6684,6 +6799,8 @@ final = "resolver"
                 interface_luid = $managed.InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)
                 interface_index = $managed.InterfaceIndex
                 managed_plane_sha256 = $managed.Sha256
+                strict_route_wfp_sha256 = $wfpBaseline.Sha256
+                wfp_sampled = $sampleWfp
                 session_generation = $state.SessionGeneration
                 network_generation = $state.NetworkGeneration
                 reset_started = $state.ResetStarted
@@ -6730,7 +6847,7 @@ final = "resolver"
         $evidenceLines[-1].Length -eq 0) "M17 network-reset cycle evidence row count is invalid"
     $cycleProperties = @(
         "cycle", "mutation", "route_metric", "process_id", "interface_guid", "interface_luid",
-        "interface_index", "managed_plane_sha256",
+        "interface_index", "managed_plane_sha256", "strict_route_wfp_sha256", "wfp_sampled",
         "session_generation", "network_generation", "reset_started", "reset_succeeded",
         "reset_failed", "session_restart_started", "full_rebuild", "strict_route_effective"
     )
@@ -6740,6 +6857,8 @@ final = "resolver"
         Assert-ClosedJsonProperties $row $cycleProperties "M17 network-reset cycle evidence row"
         $expectedMetric = if ($cycle -eq 1 -or ($cycle % 2) -ne 0) { 4094 } else { 4095 }
         $expectedMutation = if ($cycle -eq 1) { "create" } else { "metric_toggle" }
+        $expectedWfpSample = $cycle -eq 1 -or $cycle -eq $script:NetworkResetCycles -or
+            ($cycle % $sampleStride) -eq 0
         Assert-True ($row.cycle -is [long] -and [long]$row.cycle -eq $cycle -and
             $row.mutation -is [string] -and $row.mutation -ceq $expectedMutation -and
             $row.route_metric -is [long] -and [long]$row.route_metric -eq $expectedMetric -and
@@ -6748,6 +6867,8 @@ final = "resolver"
             $row.interface_luid -is [string] -and $row.interface_luid -ceq $managedBaseline.InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture) -and
             $row.interface_index -is [long] -and [uint32]$row.interface_index -eq $managedBaseline.InterfaceIndex -and
             $row.managed_plane_sha256 -is [string] -and $row.managed_plane_sha256 -ceq $managedBaseline.Sha256 -and
+            $row.strict_route_wfp_sha256 -is [string] -and $row.strict_route_wfp_sha256 -ceq $wfpBaseline.Sha256 -and
+            $row.wfp_sampled -is [bool] -and $row.wfp_sampled -eq $expectedWfpSample -and
             $row.session_generation -is [double] -and $row.network_generation -is [double] -and
             $row.reset_started -is [double] -and $row.reset_succeeded -is [double] -and
             $row.reset_failed -is [double] -and $row.session_restart_started -is [double] -and
@@ -6770,6 +6891,7 @@ final = "resolver"
     Add-M17Witness "ordinary_route_notifications_reset_network_runtime" "live-product" "$script:NetworkResetCycles journaled underlay route mutations completed lightweight ResetNetwork"
     Add-M17Witness "same_process_and_managed_adapter_identity" "live-product" "every reset retained one PID and the exact adapter GUID, LUID, and interface index"
     Add-M17Witness "managed_addresses_routes_and_dns_are_unchanged" "live-product" "every reset reproduced the exact managed-plane address, route, DNS, MTU, and adapter snapshot hash"
+    Add-M17Witness "strict_route_is_effective_and_filter_identity_is_unchanged" "live-product" "every notification passed exact strict-route health revalidation, and $wfpSamples bounded WFP snapshots retained the same process-owned dynamic session and eight dual-stack DNS guard filter IDs"
     Add-M17Witness "network_generation_and_reset_metrics_advance" "live-product" "network and TUN generations plus successful ResetNetwork counters advanced exactly once per mutation"
     Add-M17Witness "session_restart_and_full_rebuild_metrics_are_unchanged" "live-product" "session restart, retry, reset failure, and full-rebuild counters remained at baseline"
     Add-M17LiveRow "network-reset-summary" ([ordered]@{
@@ -6785,6 +6907,10 @@ final = "resolver"
         full_rebuild_delta = $finalState.FullRebuild - $baseline.FullRebuild
         strict_route_filter_install_delta = $finalState.StrictInstallSucceeded - $baseline.StrictInstallSucceeded
         managed_plane_sha256 = $managedBaseline.Sha256
+        strict_route_wfp_sha256 = $wfpBaseline.Sha256
+        strict_route_filter_ids = @($wfpBaseline.FilterIds)
+        strict_route_health_revalidations = $script:NetworkResetCycles
+        strict_route_wfp_samples = $wfpSamples
         cycle_evidence = [IO.Path]::GetFileName($evidencePath)
         cycle_evidence_bytes = $evidenceItem.Length
         cycle_evidence_sha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
