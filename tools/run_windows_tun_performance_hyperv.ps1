@@ -967,6 +967,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $InputRoot = Join-Path $Root "input"
         $EvidenceRoot = Join-Path $Root "raw-evidence"
         $NetworkModelEvidenceRoot = Join-Path $EvidenceRoot "network-model"
+        $ProcessLogRoot = Join-Path $EvidenceRoot "process-logs"
         $AdapterName = "Ferrum2Perf"
         if (-not $Root.StartsWith("C:\Windows\Temp\ferrum2-tun-performance-", [StringComparison]::OrdinalIgnoreCase) -or
             -not (Test-Path -LiteralPath $InputRoot -PathType Container) -or
@@ -994,6 +995,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }
         New-Item -ItemType Directory -Path $EvidenceRoot | Out-Null
         New-Item -ItemType Directory -Path $NetworkModelEvidenceRoot | Out-Null
+        New-Item -ItemType Directory -Path $ProcessLogRoot | Out-Null
 
         $RustRoot = Join-Path $InputRoot "runtime\rust"
         $PowerShell = Join-Path $InputRoot "runtime\pwsh\pwsh.exe"
@@ -1069,10 +1071,31 @@ using System.Threading;
 
 public static class Ferrum2PerfProcessGroup {
     private const uint CreateNewConsole = 0x00000010;
-    private const uint CreateNewProcessGroup = 0x00000200;
+    private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const int StartfUseShowWindow = 0x00000001;
+    private const int StartfUseStdHandles = 0x00000100;
+    private const uint FileAppendData = 0x00000004;
+    private const uint GenericRead = 0x80000000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint CreateNew = 1;
+    private const uint FileAttributeNormal = 0x00000080;
+    private static readonly IntPtr ProcThreadAttributeHandleList = new IntPtr(0x00020002);
+    private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
     private static readonly Dictionary<uint, IntPtr> Handles = new Dictionary<uint, IntPtr>();
     private static readonly object Sync = new object();
+    private static readonly ManualResetEvent ConsoleControlReceived = new ManualResetEvent(false);
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private delegate bool ConsoleCtrlHandler(uint controlType);
+    private static readonly ConsoleCtrlHandler IgnoreConsoleControl = IgnoreControl;
+
+    private static bool IgnoreControl(uint controlType) {
+        if (controlType == 1) ConsoleControlReceived.Set();
+        return true;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct StartupInfo {
@@ -1083,14 +1106,37 @@ public static class Ferrum2PerfProcessGroup {
         public IntPtr stdout; public IntPtr stderr;
     }
     [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfoEx {
+        public StartupInfo startup;
+        public IntPtr attributeList;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes {
+        public int length;
+        public IntPtr securityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool inheritHandle;
+    }
+    [StructLayout(LayoutKind.Sequential)]
     private struct ProcessInformation {
         public IntPtr process; public IntPtr thread; public uint processId; public uint threadId;
     }
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool CreateProcessW(string application, StringBuilder command,
+    [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessExtended(string application, StringBuilder command,
         IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags,
-        IntPtr environment, string directory, ref StartupInfo startup,
+        IntPtr environment, string directory, ref StartupInfoEx startup,
         out ProcessInformation process);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string fileName, uint desiredAccess, uint shareMode,
+        ref SecurityAttributes securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool InitializeProcThreadAttributeList(IntPtr attributeList,
+        int attributeCount, uint flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool UpdateProcThreadAttribute(IntPtr attributeList, uint flags,
+        IntPtr attribute, IntPtr value, IntPtr size, IntPtr previousValue, IntPtr returnSize);
+    [DllImport("kernel32.dll")]
+    private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -1104,21 +1150,86 @@ public static class Ferrum2PerfProcessGroup {
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool FreeConsole();
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+    private static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler handler, bool add);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GenerateConsoleCtrlEvent(uint control, uint group);
 
-    public static int Start(string application, string arguments, string directory) {
-        var startup = new StartupInfo();
-        startup.cb = Marshal.SizeOf(startup);
-        startup.flags = StartfUseShowWindow;
-        startup.show = 0;
+    private static IntPtr OpenInheritable(string path, uint access, uint disposition) {
+        var security = new SecurityAttributes {
+            length = Marshal.SizeOf(typeof(SecurityAttributes)),
+            securityDescriptor = IntPtr.Zero,
+            inheritHandle = true
+        };
+        var handle = CreateFileW(path, access,
+            FileShareRead | FileShareWrite | FileShareDelete,
+            ref security, disposition, FileAttributeNormal, IntPtr.Zero);
+        if (handle == InvalidHandleValue)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFileW redirected stream");
+        return handle;
+    }
+
+    public static int Start(string application, string arguments, string directory,
+        string stdoutPath, string stderrPath) {
+        if (String.IsNullOrWhiteSpace(stdoutPath) || String.IsNullOrWhiteSpace(stderrPath))
+            throw new ArgumentException("stdout and stderr redirection paths are required");
         var command = new StringBuilder("\"" + application + "\" " + arguments);
         ProcessInformation process;
-        if (!CreateProcessW(application, command, IntPtr.Zero, IntPtr.Zero, false,
-            CreateNewConsole | CreateNewProcessGroup, IntPtr.Zero, directory,
-            ref startup, out process)) {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW");
+        IntPtr stdoutHandle = IntPtr.Zero;
+        IntPtr stderrHandle = IntPtr.Zero;
+        IntPtr stdinHandle = IntPtr.Zero;
+        IntPtr attributeList = IntPtr.Zero;
+        IntPtr handleList = IntPtr.Zero;
+        var attributeListInitialized = false;
+        try {
+            stdoutHandle = OpenInheritable(stdoutPath, FileAppendData, CreateNew);
+            stderrHandle = OpenInheritable(stderrPath, FileAppendData, CreateNew);
+            stdinHandle = OpenInheritable("NUL", GenericRead, OpenExisting);
+            var startup = new StartupInfoEx();
+            startup.startup.cb = Marshal.SizeOf(typeof(StartupInfoEx));
+            startup.startup.flags = StartfUseShowWindow | StartfUseStdHandles;
+            startup.startup.show = 0;
+            startup.startup.stdin = stdinHandle;
+            startup.startup.stdout = stdoutHandle;
+            startup.startup.stderr = stderrHandle;
+            IntPtr attributeBytes = IntPtr.Zero;
+            var sizeProbe = InitializeProcThreadAttributeList(
+                IntPtr.Zero, 1, 0, ref attributeBytes);
+            var sizeProbeError = Marshal.GetLastWin32Error();
+            if (sizeProbe || attributeBytes == IntPtr.Zero || sizeProbeError != 122)
+                throw new Win32Exception(sizeProbeError,
+                    "InitializeProcThreadAttributeList size");
+            attributeList = Marshal.AllocHGlobal(attributeBytes);
+            if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeBytes))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "InitializeProcThreadAttributeList");
+            attributeListInitialized = true;
+            startup.attributeList = attributeList;
+            handleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
+            Marshal.WriteIntPtr(handleList, 0 * IntPtr.Size, stdinHandle);
+            Marshal.WriteIntPtr(handleList, 1 * IntPtr.Size, stdoutHandle);
+            Marshal.WriteIntPtr(handleList, 2 * IntPtr.Size, stderrHandle);
+            if (!UpdateProcThreadAttribute(attributeList, 0,
+                ProcThreadAttributeHandleList, handleList, new IntPtr(IntPtr.Size * 3),
+                IntPtr.Zero, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "UpdateProcThreadAttribute handle list");
+            if (!CreateProcessExtended(application, command, IntPtr.Zero, IntPtr.Zero, true,
+                CreateNewConsole | ExtendedStartupInfoPresent, IntPtr.Zero, directory,
+                ref startup, out process))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "CreateProcessW redirected");
+        } finally {
+            if (attributeList != IntPtr.Zero) {
+                if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
+                Marshal.FreeHGlobal(attributeList);
+            }
+            if (handleList != IntPtr.Zero) Marshal.FreeHGlobal(handleList);
+            if (stdinHandle != IntPtr.Zero && stdinHandle != InvalidHandleValue)
+                CloseHandle(stdinHandle);
+            if (stdoutHandle != IntPtr.Zero && stdoutHandle != InvalidHandleValue)
+                CloseHandle(stdoutHandle);
+            if (stderrHandle != IntPtr.Zero && stderrHandle != InvalidHandleValue)
+                CloseHandle(stderrHandle);
         }
         CloseHandle(process.thread);
         lock (Sync) Handles.Add(process.processId, process.process);
@@ -1138,13 +1249,15 @@ public static class Ferrum2PerfProcessGroup {
         FreeConsole();
         if (!AttachConsole(processId)) return false;
         try {
-            if (!SetConsoleCtrlHandler(IntPtr.Zero, true)) return false;
+            if (!SetConsoleCtrlHandler(IgnoreConsoleControl, true)) return false;
             try {
-                var sent = GenerateConsoleCtrlEvent(1, processId);
+                ConsoleControlReceived.Reset();
+                var sent = GenerateConsoleCtrlEvent(1, 0);
+                var senderObserved = sent && ConsoleControlReceived.WaitOne(5000);
                 Thread.Sleep(250);
-                return sent;
+                return sent && senderObserved;
             } finally {
-                SetConsoleCtrlHandler(IntPtr.Zero, false);
+                SetConsoleCtrlHandler(IgnoreConsoleControl, false);
             }
         } finally {
             FreeConsole();
@@ -1161,6 +1274,23 @@ public static class Ferrum2PerfProcessGroup {
     }
 }
 '@
+
+        function Invoke-NativeCapture([string]$Executable, [string[]]$Arguments) {
+            $previousErrorActionPreference = $ErrorActionPreference
+            $output = @()
+            $exitCode = $null
+            try {
+                $ErrorActionPreference = "Continue"
+                $output = @(& $Executable @Arguments 2>&1)
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            return [pscustomobject]@{
+                ExitCode = if ($null -eq $exitCode) { -1 } else { [int]$exitCode }
+                Output = @($output)
+            }
+        }
 
         function Get-FreeTcpPort {
             $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
@@ -1227,17 +1357,40 @@ public static class Ferrum2PerfProcessGroup {
             throw "client TUN readiness timed out"
         }
         function Stop-OwnedProcess([int]$ProcessId, [string]$Label) {
-            if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 0)) {
-                if (-not [Ferrum2PerfProcessGroup]::Break([uint32]$ProcessId) -or
-                    -not [Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 60000)) {
-                    [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$ProcessId)
-                    [void][Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 10000)
+            $confirmedExit = [Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 0)
+            try {
+                $forced = $false
+                if (-not $confirmedExit) {
+                    $breakSent = [Ferrum2PerfProcessGroup]::Break([uint32]$ProcessId)
+                    $confirmedExit = if ($breakSent) {
+                        [Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 60000)
+                    } else {
+                        [Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 0)
+                    }
+                }
+                if (-not $confirmedExit) {
+                    $terminateRequested = [Ferrum2PerfProcessGroup]::Terminate(
+                        [uint32]$ProcessId
+                    )
+                    $confirmedExit = [Ferrum2PerfProcessGroup]::Wait(
+                        [uint32]$ProcessId,
+                        10000
+                    )
+                    if (-not $confirmedExit) {
+                        throw "$Label fallback termination was not confirmed"
+                    }
+                    $forced = $terminateRequested
+                }
+                if ($forced) {
                     throw "$Label did not stop gracefully"
                 }
+                $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$ProcessId)
+                if ($exit -ne 0) { throw "$Label stopped with exit code $exit" }
+            } finally {
+                if ($confirmedExit) {
+                    [Ferrum2PerfProcessGroup]::Close([uint32]$ProcessId)
+                }
             }
-            $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$ProcessId)
-            if ($exit -ne 0) { throw "$Label stopped with exit code $exit" }
-            [Ferrum2PerfProcessGroup]::Close([uint32]$ProcessId)
         }
         function Wait-AdapterAbsent {
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -1300,9 +1453,15 @@ public static class Ferrum2PerfProcessGroup {
                 -cne $NetworkModelPlanSha256) {
             throw "guest trial plan changed during staging"
         }
-        & $harness "windows-tun-probe" "--target-ip" $SupportAddress `
-            "--tcp-port" ([string]$SupportTcp) "--udp-port" ([string]$SupportUdp)
-        if ($LASTEXITCODE -ne 0) { throw "guest support listener preflight failed" }
+        $supportProbeResult = Invoke-NativeCapture $harness @(
+            "windows-tun-probe", "--target-ip", $SupportAddress,
+            "--tcp-port", [string]$SupportTcp, "--udp-port", [string]$SupportUdp
+        )
+        $supportProbe = @($supportProbeResult.Output)
+        if ($supportProbeResult.ExitCode -ne 0 -or $supportProbe.Count -ne 1 -or
+            [string]$supportProbe[0] -cne "windows_tun_probe status=PASS protocols=tcp,udp") {
+            throw "guest support listener preflight failed"
+        }
 
         foreach ($trial in @($plan.trials | Sort-Object sequence)) {
             if (Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
@@ -1340,6 +1499,20 @@ public static class Ferrum2PerfProcessGroup {
             $clientConfig = Join-Path $trialRoot "client.toml"
             $serverConfig = Join-Path $trialRoot "server.toml"
             $ledger = Join-Path $trialRoot "identity-ledger.json"
+            $logPrefix = "{0:D3}-{1}-{2}" -f @(
+                [int]$trial.sequence,
+                [string]$trial.scenario,
+                $member
+            )
+            $clientStdout = Join-Path $ProcessLogRoot "$logPrefix-client.stdout.log"
+            $clientStderr = Join-Path $ProcessLogRoot "$logPrefix-client.stderr.log"
+            $serverStdout = Join-Path $ProcessLogRoot "$logPrefix-server.stdout.log"
+            $serverStderr = Join-Path $ProcessLogRoot "$logPrefix-server.stderr.log"
+            foreach ($logPath in @($clientStdout, $clientStderr, $serverStdout, $serverStderr)) {
+                if (Test-Path -LiteralPath $logPath) {
+                    throw "performance process log baseline is not absent"
+                }
+            }
             $clientText = Get-Content -LiteralPath (Join-Path $InputRoot "client.toml.template") -Raw
             $clientText = $clientText.Replace("{{ADAPTER_NAME}}", $AdapterName).
                 Replace("{{SUPPORT_IPV4}}", $SupportAddress).
@@ -1358,22 +1531,36 @@ public static class Ferrum2PerfProcessGroup {
             $serverHash = (Get-FileHash -LiteralPath $server -Algorithm SHA256).Hash.ToLowerInvariant()
             Write-CanonicalLedger $ledger $memberCommit $clientHash $serverHash $collectorHash
 
-            & $client "--config" $clientConfig "--check-config"
-            if ($LASTEXITCODE -ne 0) { throw "client performance configuration is invalid" }
-            & $server "--config" $serverConfig "--check-config"
-            if ($LASTEXITCODE -ne 0) { throw "server performance configuration is invalid" }
+            $clientCheckResult = Invoke-NativeCapture $client @(
+                "--config", $clientConfig, "--check-config"
+            )
+            $clientCheck = @($clientCheckResult.Output)
+            if ($clientCheckResult.ExitCode -ne 0 -or $clientCheck.Count -ne 1 -or
+                [string]$clientCheck[0] -cne "configuration valid") {
+                throw "client performance configuration is invalid"
+            }
+            $serverCheckResult = Invoke-NativeCapture $server @(
+                "--config", $serverConfig, "--check-config"
+            )
+            $serverCheck = @($serverCheckResult.Output)
+            if ($serverCheckResult.ExitCode -ne 0 -or $serverCheck.Count -ne 1 -or
+                [string]$serverCheck[0] -cne "configuration valid") {
+                throw "server performance configuration is invalid"
+            }
 
             $serverPid = 0
             $clientPid = 0
             $trialFailure = $null
             try {
                 $serverPid = [Ferrum2PerfProcessGroup]::Start(
-                    $server, "--config `"$serverConfig`"", $memberRoot
+                    $server, "--config `"$serverConfig`"", $memberRoot,
+                    $serverStdout, $serverStderr
                 )
                 Wait-ProcessListener $serverPid $serverPort $true
                 Wait-ProcessListener $serverPid $serverMetricsPort $false
                 $clientPid = [Ferrum2PerfProcessGroup]::Start(
-                    $client, "--config `"$clientConfig`"", $memberRoot
+                    $client, "--config `"$clientConfig`"", $memberRoot,
+                    $clientStdout, $clientStderr
                 )
                 Wait-TunReady $clientPid $metricsPort
                 $outputName = "{0:D3}-{1}-{2}-pair-{3}.json" -f @(
@@ -1412,26 +1599,84 @@ public static class Ferrum2PerfProcessGroup {
                     )
                     $collectorArguments += @("-NetworkModelOutput", $networkModelOutput)
                 }
-                & $PowerShell @collectorArguments
-                if ($LASTEXITCODE -ne 0 -or
+                $collectorResult = Invoke-NativeCapture $PowerShell $collectorArguments
+                $collectorOutput = @($collectorResult.Output)
+                $collectorExit = $collectorResult.ExitCode
+                $collectorLines = @($collectorOutput | ForEach-Object {
+                    if ($_ -is [Management.Automation.ErrorRecord]) {
+                        [string]$_.Exception.Message
+                    } else {
+                        [string]$_
+                    }
+                })
+                $expectedCollectorOutput = "windows_tun_trial status=PASS " +
+                    "scenario=$($trial.scenario) member=$member pair=$($trial.pair) " +
+                    "order=$($trial.order) output=$output"
+                if ($collectorExit -ne 0 -or $collectorLines.Count -ne 1 -or
+                    [string]$collectorLines[0] -cne $expectedCollectorOutput -or
                     -not (Test-Path -LiteralPath $output -PathType Leaf) -or
                     (Get-Item -LiteralPath $output).Length -gt 1048576) {
-                    throw "Windows TUN collector trial failed: sequence=$($trial.sequence)"
+                    $snapshotFailures = New-Object Collections.Generic.List[string]
+                    foreach ($snapshot in @(
+                        [pscustomobject]@{ Name = "client"; Port = $metricsPort },
+                        [pscustomobject]@{ Name = "server"; Port = $serverMetricsPort }
+                    )) {
+                        try {
+                            $metricsText = [string](Invoke-WebRequest -UseBasicParsing `
+                                -Uri "http://127.0.0.1:$($snapshot.Port)/metrics" `
+                                -TimeoutSec 5 -ErrorAction Stop).Content
+                            if ($Utf8NoBom.GetByteCount($metricsText) -gt 1048576) {
+                                throw "$($snapshot.Name) failure metrics exceeded 1 MiB"
+                            }
+                            [IO.File]::WriteAllText(
+                                (Join-Path $ProcessLogRoot `
+                                    "$logPrefix-$($snapshot.Name).failure.metrics.txt"),
+                                $metricsText,
+                                $Utf8NoBom
+                            )
+                        } catch {
+                            [void]$snapshotFailures.Add(
+                                "$($snapshot.Name) metrics snapshot failed: $($_.Exception.Message)"
+                            )
+                        }
+                    }
+                    $failureText = (@($collectorLines) + @($snapshotFailures)) -join "`n"
+                    if ($failureText.Length -gt 16384) {
+                        $failureText = $failureText.Substring(0, 16384)
+                    }
+                    $failurePath = Join-Path $ProcessLogRoot `
+                        "$logPrefix-collector.failure.txt"
+                    [IO.File]::WriteAllText($failurePath, $failureText, $Utf8NoBom)
+                    $failureDetail = if ($failureText.Length -gt 2048) {
+                        $failureText.Substring(0, 2048)
+                    } else {
+                        $failureText
+                    }
+                    throw "Windows TUN collector trial failed: sequence=$($trial.sequence) detail=$failureDetail"
                 }
             } catch {
                 $trialFailure = $_
             } finally {
                 $stopFailures = New-Object Collections.Generic.List[string]
                 if ($clientPid -gt 0) {
-                    try { Stop-OwnedProcess $clientPid "client" } catch { $stopFailures.Add($_.Exception.Message) }
+                    try { Stop-OwnedProcess $clientPid "client" }
+                    catch { [void]$stopFailures.Add($_.Exception.Message) }
                 }
-                try { Wait-AdapterAbsent } catch { $stopFailures.Add($_.Exception.Message) }
+                try { Wait-AdapterAbsent }
+                catch { [void]$stopFailures.Add($_.Exception.Message) }
                 if ($serverPid -gt 0) {
-                    try { Stop-OwnedProcess $serverPid "server" } catch { $stopFailures.Add($_.Exception.Message) }
+                    try { Stop-OwnedProcess $serverPid "server" }
+                    catch { [void]$stopFailures.Add($_.Exception.Message) }
                 }
-                if ($stopFailures.Count -ne 0 -and $null -eq $trialFailure) {
+                if ($stopFailures.Count -ne 0) {
+                    $cleanupFailure = $stopFailures -join "; "
+                    $failureMessage = if ($null -eq $trialFailure) {
+                        $cleanupFailure
+                    } else {
+                        "$($trialFailure.Exception.Message); cleanup: $cleanupFailure"
+                    }
                     $trialFailure = [Management.Automation.ErrorRecord]::new(
-                        [InvalidOperationException]::new(($stopFailures -join "; ")),
+                        [InvalidOperationException]::new($failureMessage),
                         "Ferrum2PerformanceCleanup",
                         [Management.Automation.ErrorCategory]::OperationStopped,
                         $trialRoot
@@ -1445,13 +1690,16 @@ public static class Ferrum2PerfProcessGroup {
             Get-ChildItem -LiteralPath $NetworkModelEvidenceRoot -File `
                 -Filter "*.network-model.json"
         )
-        if ($files.Count -ne 90 -or $networkModelFiles.Count -ne 20) {
+        $processLogFiles = @(Get-ChildItem -LiteralPath $ProcessLogRoot -File -Filter "*.log")
+        if ($files.Count -ne 90 -or $networkModelFiles.Count -ne 20 -or
+            $processLogFiles.Count -ne 360) {
             throw "guest evidence set is incomplete"
         }
         [pscustomobject]@{
             status = "PASS"
             trials = $files.Count
             network_model_observations = $networkModelFiles.Count
+            process_logs = $processLogFiles.Count
             evidence_path = $EvidenceRoot
             guest_build = "$($version.CurrentBuildNumber).$($version.UBR)"
             powershell_version = [string]$pwshVersion[0]
@@ -1462,6 +1710,7 @@ public static class Ferrum2PerfProcessGroup {
     if (@($guestResult).Count -ne 1 -or $guestResult.status -cne "PASS" -or
         [int]$guestResult.trials -ne 90 -or
         [int]$guestResult.network_model_observations -ne 20 -or
+        [int]$guestResult.process_logs -ne 360 -or
         [string]$guestResult.powershell_version -cne $portableRuntime.PowerShellVersion -or
         [string]$guestResult.powershell_executable_sha256 -cne
             $portableRuntime.PowerShellExecutableSha256) {
@@ -1472,36 +1721,129 @@ public static class Ferrum2PerfProcessGroup {
     $runFailure = $_
 } finally {
     if ($null -ne $session) {
+        $evidenceExportFailure = $null
         try {
             $guestEvidencePath = Join-Path $guestRoot "raw-evidence"
-            $boundary = @(Invoke-Command -Session $session -ArgumentList $guestEvidencePath `
+            $guestProductRoot = Join-Path $guestRoot "input\artifacts"
+            $boundary = @(Invoke-Command -Session $session `
+                -ArgumentList $guestEvidencePath, $guestProductRoot `
                 -ErrorAction Stop -ScriptBlock {
-                    param([string]$Path)
+                    param([string]$Path, [string]$ProductRoot)
                     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-                        return [pscustomobject]@{ Safe = $false; Files = 0; ModelFiles = 0 }
+                        return [pscustomobject]@{
+                            Safe = $false
+                            OwnedProcesses = 0
+                            Files = 0
+                            ModelFiles = 0
+                            TotalFiles = 0
+                            TotalBytes = 0
+                            LargestFileBytes = 0
+                        }
                     }
-                    $items = @(Get-Item -LiteralPath $Path -Force) + @(
-                        Get-ChildItem -LiteralPath $Path -Force -Recurse
+                    $productPrefix = [IO.Path]::GetFullPath($ProductRoot).
+                        TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+                    function Get-OwnedProductProcessCount {
+                        return @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+                            Where-Object {
+                                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
+                                ([string]$_.ExecutablePath).StartsWith(
+                                    $productPrefix,
+                                    [StringComparison]::OrdinalIgnoreCase
+                                ) -and
+                                [IO.Path]::GetFileName([string]$_.ExecutablePath) -in @(
+                                    "ferrum2-client.exe",
+                                    "ferrum2-server.exe"
+                                )
+                            }).Count
+                    }
+                    $ownedProcessesBefore = Get-OwnedProductProcessCount
+                    if ($ownedProcessesBefore -ne 0) {
+                        return [pscustomobject]@{
+                            Safe = $false
+                            OwnedProcesses = $ownedProcessesBefore
+                            Files = 0
+                            ModelFiles = 0
+                            TotalFiles = 0
+                            TotalBytes = 0
+                            LargestFileBytes = 0
+                        }
+                    }
+                    $items = @(Get-Item -LiteralPath $Path -Force -ErrorAction Stop) + @(
+                        Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop
                     )
+                    $hasReparsePoint = @($items | Where-Object {
+                        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+                    }).Count -ne 0
+                    if ($hasReparsePoint) {
+                        return [pscustomobject]@{
+                            Safe = $false
+                            OwnedProcesses = 0
+                            Files = 0
+                            ModelFiles = 0
+                            TotalFiles = 0
+                            TotalBytes = 0
+                            LargestFileBytes = 0
+                        }
+                    }
+                    $artifactPaths = @([IO.Directory]::EnumerateFiles(
+                        $Path,
+                        "*",
+                        [IO.SearchOption]::AllDirectories
+                    ))
+                    $fileLengths = @($artifactPaths | ForEach-Object {
+                        [IO.FileInfo]::new([string]$_).Length
+                    })
+                    $ownedProcessesAfter = Get-OwnedProductProcessCount
                     [pscustomobject]@{
-                        Safe = @($items | Where-Object {
-                            $_.Attributes -band [IO.FileAttributes]::ReparsePoint
-                        }).Count -eq 0
-                        Files = @(Get-ChildItem -LiteralPath $Path -File -Filter "*.json").Count
+                        Safe = $ownedProcessesAfter -eq 0
+                        OwnedProcesses = $ownedProcessesAfter
+                        Files = @(Get-ChildItem -LiteralPath $Path -File -Filter "*.json" `
+                            -ErrorAction Stop).Count
                         ModelFiles = @(
                             Get-ChildItem -LiteralPath (Join-Path $Path "network-model") `
-                                -File -Filter "*.network-model.json" -ErrorAction SilentlyContinue
+                                -File -Filter "*.network-model.json" -ErrorAction Stop
                         ).Count
+                        TotalFiles = $artifactPaths.Count
+                        TotalBytes = [long]($fileLengths | Measure-Object -Sum).Sum
+                        LargestFileBytes = [long]($fileLengths | Measure-Object -Maximum).Maximum
                     }
                 })
             if ($boundary.Count -eq 1 -and $boundary[0].Safe -eq $true -and
-                [int]$boundary[0].Files -eq 90 -and
-                [int]$boundary[0].ModelFiles -eq 20) {
+                [int]$boundary[0].OwnedProcesses -eq 0 -and
+                [int]$boundary[0].Files -le 90 -and
+                [int]$boundary[0].ModelFiles -le 20 -and
+                [int]$boundary[0].TotalFiles -le 512 -and
+                [long]$boundary[0].TotalBytes -le 536870912 -and
+                [long]$boundary[0].LargestFileBytes -le 8388608) {
+                # WinPS 5.1's Copy-Item remoting helper reads Length from the source
+                # DirectoryInfo. The guest controller leaves this persistent runspace in
+                # strict mode, which turns that helper implementation detail into an error.
+                Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    Set-StrictMode -Off
+                }
                 Copy-Item -FromSession $session -LiteralPath $guestEvidencePath `
                     -Destination $hostEvidenceRoot -Recurse -ErrorAction Stop
+            } else {
+                throw "guest evidence export boundary rejected"
             }
         } catch {
-            if ($null -eq $runFailure) { $runFailure = $_ }
+            $evidenceExportFailure = $_
+        }
+        if ($null -ne $evidenceExportFailure) {
+            if ($null -eq $runFailure) {
+                $runFailure = $evidenceExportFailure
+            } else {
+                $runFailure = [Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new(
+                        "$($runFailure.Exception.Message); evidence export: " +
+                        "$($evidenceExportFailure.Exception.Message) " +
+                        "at $($evidenceExportFailure.ScriptStackTrace)"
+                    ),
+                    "Ferrum2PerformanceEvidenceExport",
+                    [Management.Automation.ErrorCategory]::OperationStopped,
+                    $hostEvidenceRoot
+                )
+            }
         }
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         $session = $null
@@ -1531,11 +1873,14 @@ if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complet
 
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
 $rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"
+$rawProcessLogs = Join-Path $rawEvidence "process-logs"
 if (-not (Test-Path -LiteralPath $rawEvidence -PathType Container) -or
     @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 90 -or
     -not (Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container) -or
     @(Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
-        -Filter "*.network-model.json").Count -ne 20) {
+        -Filter "*.network-model.json").Count -ne 20 -or
+    -not (Test-Path -LiteralPath $rawProcessLogs -PathType Container) -or
+    @(Get-ChildItem -LiteralPath $rawProcessLogs -File -Filter "*.log").Count -ne 360) {
     throw "exported raw evidence is incomplete"
 }
 $summaryArguments = @(
@@ -1567,6 +1912,7 @@ $summary = Get-Content -LiteralPath $hostSummaryPath -Raw -Encoding utf8 | Conve
         Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
             -Filter "*.network-model.json"
     ).Count
+    process_logs = @(Get-ChildItem -LiteralPath $rawProcessLogs -File -Filter "*.log").Count
     final_vm_state = [string](Get-ApprovedVmContext).Vm.State
     checkpoint_restored = $true
     host_network_mutations = 0

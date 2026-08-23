@@ -304,13 +304,19 @@ function Invoke-BoundedHarness(
     $stderr = $stderrTask.GetAwaiter().GetResult()
     [IO.File]::WriteAllText($stdoutPath, $stdout, $script:Utf8NoBom)
     [IO.File]::WriteAllText($stderrPath, $stderr, $script:Utf8NoBom)
-    Assert-Condition (-not $timedOut) "traffic harness timed out"
-    Assert-Condition ($process.ExitCode -eq 0) "traffic harness failed; see $stderrPath"
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    $failureDetail = "exit_code=$exitCode stderr=$($stderr.Trim()) stdout=$($stdout.Trim())".
+        Replace("`r", " ").Replace("`n", " ")
+    if ($failureDetail.Length -gt 4096) {
+        $failureDetail = $failureDetail.Substring(0, 4096)
+    }
+    Assert-Condition (-not $timedOut) "traffic harness timed out: $failureDetail"
+    Assert-Condition ($exitCode -eq 0) "traffic harness failed: $failureDetail"
     Assert-Condition (
         $script:Utf8NoBom.GetByteCount($stdout) -le 65536 -and
         $script:Utf8NoBom.GetByteCount($stderr) -le 65536
     ) "traffic harness output exceeded 64 KiB"
-    $process.Dispose()
     if (-not [string]::IsNullOrWhiteSpace($PeakMetricName)) {
         Assert-Condition $sampledMetric "traffic harness metric sampler collected no observations"
         return $peakMetric
