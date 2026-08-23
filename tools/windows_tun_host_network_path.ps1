@@ -168,7 +168,7 @@ function Get-ApprovedVmNetworkContext {
         throw "approved switch management adapter GUID is invalid"
     }
     $hostAdapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
-        $_.InterfaceGuid -eq $managementGuid
+        ([Guid][string]$_.InterfaceGuid) -eq $managementGuid
     })
     if ($hostAdapters.Count -ne 1 -or
         [string]$hostAdapters[0].Status -cne "Up" -or
@@ -179,11 +179,11 @@ function Get-ApprovedVmNetworkContext {
     return [pscustomobject][ordered]@{
         vm_mac_address = ConvertTo-CanonicalMacAddress `
             -Value ([string]$vmAdapters[0].MacAddress) -Label "approved VM"
-        switch_id = $switches[0].Id.ToString("D")
+        switch_id = ([Guid][string]$switches[0].Id).ToString("D")
         switch_name = [string]$switches[0].Name
         host_interface_index = [int]$hostAdapters[0].ifIndex
         host_interface_alias = [string]$hostAdapters[0].Name
-        host_interface_guid = $hostAdapters[0].InterfaceGuid.ToString("D")
+        host_interface_guid = ([Guid][string]$hostAdapters[0].InterfaceGuid).ToString("D")
     }
 }
 

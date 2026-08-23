@@ -22,7 +22,9 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[^\r\n]{1,128}$')]
-    [string]$ManagedAdapterName
+    [string]$ManagedAdapterName,
+
+    [switch]$AsJson
 )
 
 Set-StrictMode -Version Latest
@@ -150,7 +152,7 @@ if ($socketSource -cne $guestAddress) {
     throw "socket source selection disagrees with Find-NetRoute"
 }
 
-[pscustomobject][ordered]@{
+$result = [pscustomobject][ordered]@{
     schema = 1
     support_ipv4 = $supportAddress
     guest_ipv4 = $guestAddress
@@ -161,4 +163,9 @@ if ($socketSource -cne $guestAddress) {
     guest_route_prefix = [string]$route.DestinationPrefix
     guest_route_next_hop = $nextHop
     guest_dns_ipv4 = @($dnsServers)
+}
+if ($AsJson) {
+    $result | ConvertTo-Json -Compress -Depth 4
+} else {
+    $result
 }

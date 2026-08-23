@@ -20,13 +20,20 @@ The portable guest controller defaults to the SHA-256-pinned PowerShell 7.4.19 w
 
 Run mode requires an already provisioned candidate qualification support listener reachable from
 the guest. It provides TCP echo, ordinary UDP echo, bounded fragment acknowledgements, and four
-contiguous UDP ports. Its identity is recorded in each trial ledger. Ferrum2's candidate harness
-probes all four UDP ports from inside the guest before any TUN session starts.
+contiguous UDP ports. The listener must bind an existing, active physical host IPv4 address rather
+than a host TUN or Hyper-V switch address. Before any TUN session starts, the runner proves that the
+guest forward path uses its approved Default Switch underlay and that the host return path is the
+same switch's direct local route. The path and listener identities are retained as evidence.
 
 PlanOnly validates repository lineage and emits the closed 90-trial plan without building, starting
 the VM, loading a credential, staging files, or executing traffic.
 #>
 
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    "PSUseUsingScopeModifierInNewRunspaces",
+    "",
+    Justification = "All remoting values are bound through explicit ArgumentList and param blocks."
+)]
 [CmdletBinding(DefaultParameterSetName = "Run")]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
@@ -103,6 +110,7 @@ $approvedVmName = "Windows 10 MSIX packaging environment"
 $approvedVmId = [Guid]"82e20295-1d30-48e7-a751-e21d35d872d4"
 $approvedCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
 $approvedCheckpointId = [Guid]"1e570209-faf7-4248-8167-aa0687cdb8cf"
+$approvedVmSwitchName = "Default Switch"
 $expectedWintunZipSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
 $expectedPowerShellVersion = "7.4.19"
@@ -111,6 +119,10 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -Err
 $policyPath = Join-Path $PSScriptRoot "windows_tun_performance_policy.json"
 $controlPath = Join-Path $PSScriptRoot "performance_candidate.py"
 $collectorPath = Join-Path $PSScriptRoot "collect_windows_tun_performance_trial.ps1"
+$guestNetworkPathProbePath = Join-Path $PSScriptRoot `
+    "get_windows_tun_guest_network_path.ps1"
+$hostNetworkPathHelperPath = Join-Path $PSScriptRoot `
+    "windows_tun_host_network_path.ps1"
 $networkModelControllerPath = Join-Path $repositoryRoot `
     "tests\performance_candidate\windows_tun_network_model.py"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
@@ -646,12 +658,16 @@ function Stage-PortableRuntime {
 $git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0].Source
 $python = @(Get-Command python -CommandType Application -ErrorAction Stop)[0].Source
 foreach ($required in @(
-    $policyPath, $controlPath, $collectorPath, $networkModelControllerPath
+    $policyPath, $controlPath, $collectorPath, $guestNetworkPathProbePath,
+    $hostNetworkPathHelperPath, $networkModelControllerPath
 )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "required performance controller file is missing: $required"
     }
 }
+. $hostNetworkPathHelperPath
+$hostNetworkPathHelperSha256 = (Get-FileHash -LiteralPath $hostNetworkPathHelperPath `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
 $head = [string](& $git -C $repositoryRoot rev-parse HEAD 2>$null)
 if ($LASTEXITCODE -ne 0 -or $head -cnotmatch '^[0-9a-f]{40}$') {
     throw "repository HEAD identity is invalid"
@@ -696,9 +712,14 @@ if ($PlanOnly) {
             vm_id = $approvedVmId.ToString("D")
             checkpoint_name = $approvedCheckpointName
             checkpoint_id = $approvedCheckpointId.ToString("D")
-            host_actions = @("archive exact commits", "build profiling binaries", "stage files", "reduce evidence")
+            host_actions = @(
+                "validate physical support binding", "archive exact commits",
+                "build profiling binaries", "stage files",
+                "validate direct Default Switch return path", "reduce evidence"
+            )
             guest_actions = @(
-                "probe support", "run 90 collector trials",
+                "reject gateway and DNS support collisions", "probe support",
+                "validate Default Switch underlay", "run 90 collector trials",
                 "collect 10 raw route-once and 10 raw lifecycle sidecars",
                 "clean each TUN session"
             )
@@ -718,6 +739,10 @@ if ($CandidateSha -cne $head) { throw "run mode requires candidate SHA to equal 
 if ($LASTEXITCODE -ne 0) { throw "run mode requires no unstaged tracked changes" }
 & $git -C $repositoryRoot diff --cached --quiet --exit-code
 if ($LASTEXITCODE -ne 0) { throw "run mode requires no staged changes" }
+$supportHostBaseline = Get-HostSupportContext `
+    -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
+    -ProcessId $SupportPid -ProcessOwner $SupportOwner
+$vmNetworkBaseline = Get-ApprovedVmNetworkContext
 
 if ([string]::IsNullOrWhiteSpace($PowerShellZip)) {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -751,6 +776,7 @@ $artifactRoot = Join-Path $temporaryRoot "input\artifacts"
 $runtimeRoot = Join-Path $temporaryRoot "input\runtime"
 $hostPlanPath = Join-Path $hostEvidenceRoot "plan.json"
 $hostNetworkModelPlanPath = Join-Path $hostEvidenceRoot "network-model-plan.json"
+$hostNetworkPathPath = Join-Path $hostEvidenceRoot "host-network-path.json"
 $hostSchedulePath = Join-Path $hostEvidenceRoot "trial-schedule.tsv"
 $hostSummaryPath = Join-Path $hostEvidenceRoot "summary.json"
 $hostMarkdownPath = Join-Path $hostEvidenceRoot "summary.md"
@@ -799,6 +825,10 @@ try {
 
     Copy-Item -LiteralPath $collectorPath -Destination (Join-Path $temporaryRoot "input") `
         -ErrorAction Stop
+    Copy-Item -LiteralPath $guestNetworkPathProbePath `
+        -Destination (Join-Path $temporaryRoot "input") -ErrorAction Stop
+    $guestNetworkPathProbeSha256 = (Get-FileHash -LiteralPath $guestNetworkPathProbePath `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
     Copy-Item -LiteralPath $networkModelControllerPath `
         -Destination (Join-Path $temporaryRoot "input\windows_tun_network_model.py") `
         -ErrorAction Stop
@@ -886,6 +916,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Write-Utf8FileNew -Path (Join-Path $temporaryRoot "input\server.toml.template") `
         -Text ($serverTemplate.TrimStart([char[]]"`r`n") + "`n")
 
+    $supportHostReadback = Get-HostSupportContext `
+        -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
+        -ProcessId $SupportPid -ProcessOwner $SupportOwner
+    Assert-HostSupportContextUnchanged `
+        -Expected $supportHostBaseline -Actual $supportHostReadback
+    $vmNetworkReadback = Get-ApprovedVmNetworkContext
+    Assert-ApprovedVmNetworkContextUnchanged `
+        -Expected $vmNetworkBaseline -Actual $vmNetworkReadback
     $context = Get-ApprovedVmContext
     if ([string]$context.Vm.State -cne "Off") {
         throw "approved VM must be Off at the performance-window baseline"
@@ -910,6 +948,83 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Copy-Item -ToSession $session -LiteralPath (Join-Path $temporaryRoot "input") `
         -Destination $guestRoot -Recurse -ErrorAction Stop
 
+    $guestNetworkPathJsonRows = @(Invoke-Command -Session $session -ErrorAction Stop `
+        -ArgumentList @(
+            $guestRoot, $SupportIpv4, $SupportTcpPort, $SupportUdpPort,
+            $guestNetworkPathProbeSha256, $candidateBuild.HarnessSha256,
+            $portableRuntime.PowerShellExecutableSha256
+        ) -ScriptBlock {
+            param(
+                [string]$Root,
+                [string]$SupportAddress,
+                [int]$SupportTcp,
+                [int]$SupportUdp,
+                [string]$ExpectedNetworkPathProbeSha256,
+                [string]$ExpectedHarnessSha256,
+                [string]$ExpectedPowerShellSha256
+            )
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = "Stop"
+            $inputRoot = Join-Path $Root "input"
+            $networkPathProbe = Join-Path $inputRoot `
+                "get_windows_tun_guest_network_path.ps1"
+            $harness = Join-Path $inputRoot "artifacts\m4-qualification.exe"
+            $powerShell = Join-Path $inputRoot "runtime\pwsh\pwsh.exe"
+            if ((Get-FileHash -LiteralPath $networkPathProbe -Algorithm SHA256).Hash.ToLowerInvariant() `
+                    -cne $ExpectedNetworkPathProbeSha256 -or
+                (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash.ToLowerInvariant() `
+                    -cne $ExpectedHarnessSha256 -or
+                (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash.ToLowerInvariant() `
+                    -cne $ExpectedPowerShellSha256) {
+                throw "guest network-path preflight executable identity mismatch"
+            }
+            $pathOutput = @(& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                -File $networkPathProbe -SupportIpv4 $SupportAddress `
+                -SupportPort $SupportUdp -ManagedAdapterName "Ferrum2Perf" -AsJson 2>&1)
+            if ($LASTEXITCODE -ne 0 -or $pathOutput.Count -ne 1) {
+                throw "guest network-path preflight returned an invalid result count"
+            }
+            $path = [string]$pathOutput[0] | ConvertFrom-Json
+            $probeOutput = @(& $harness windows-tun-probe `
+                --target-ip $SupportAddress --tcp-port $SupportTcp --udp-port $SupportUdp 2>&1)
+            if ($LASTEXITCODE -ne 0 -or $probeOutput.Count -ne 1 -or
+                [string]$probeOutput[0] -cne
+                    "windows_tun_probe status=PASS protocols=tcp,udp") {
+                throw "guest support listener direct preflight failed"
+            }
+            return ($path | ConvertTo-Json -Compress -Depth 5)
+        })
+    if ($guestNetworkPathJsonRows.Count -ne 1) {
+        throw "guest network-path preflight result is not unique"
+    }
+    $guestNetworkPathJson = [string]$guestNetworkPathJsonRows[0]
+    $guestNetworkPath = $guestNetworkPathJson | ConvertFrom-Json -Depth 5
+    $supportHostAfterProbe = Get-HostSupportContext `
+        -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
+        -ProcessId $SupportPid -ProcessOwner $SupportOwner
+    Assert-HostSupportContextUnchanged `
+        -Expected $supportHostBaseline -Actual $supportHostAfterProbe
+    $vmNetworkAfterProbe = Get-ApprovedVmNetworkContext
+    Assert-ApprovedVmNetworkContextUnchanged `
+        -Expected $vmNetworkBaseline -Actual $vmNetworkAfterProbe
+    $hostReturnPath = Get-HostGuestReturnPath `
+        -GuestPath $guestNetworkPath -VmNetworkContext $vmNetworkAfterProbe `
+        -ExpectedSupportIpv4 $SupportIpv4
+    $networkPathEvidence = [ordered]@{
+        schema = 1
+        kind = "windows_tun_host_network_path"
+        support_listener = $supportHostAfterProbe
+        approved_vm_network = $vmNetworkAfterProbe
+        guest_forward_path = $guestNetworkPath
+        host_return_path = $hostReturnPath
+        guest_probe_sha256 = $guestNetworkPathProbeSha256
+        host_helper_sha256 = $hostNetworkPathHelperSha256
+        host_tun_bypassed = $true
+        host_network_mutations = 0
+    }
+    Write-Utf8FileNew -Path $hostNetworkPathPath `
+        -Text (($networkPathEvidence | ConvertTo-Json -Depth 6) + "`n")
+
     # BEGIN GUEST_ONLY_NETWORK_EXECUTION
     $guestResult = Invoke-Command -Session $session -ErrorAction Stop -ArgumentList @(
         $guestRoot,
@@ -931,6 +1046,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         [string]$plan.recipe_sha256,
         [string]$plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256,
         [string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256,
+        $guestNetworkPathProbeSha256,
+        $guestNetworkPathJson,
         $SupportIpv4,
         $SupportTcpPort,
         $SupportUdpPort,
@@ -957,6 +1074,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [string]$RecipeSha256,
             [string]$NetworkModelControllerSha256,
             [string]$NetworkModelPlanSha256,
+            [string]$GuestNetworkPathProbeSha256,
+            [string]$ExpectedGuestNetworkPathJson,
             [string]$SupportAddress,
             [int]$SupportTcp,
             [int]$SupportUdp,
@@ -972,6 +1091,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $NetworkModelEvidenceRoot = Join-Path $EvidenceRoot "network-model"
         $ProcessLogRoot = Join-Path $EvidenceRoot "process-logs"
         $AdapterName = "Ferrum2Perf"
+        if ($GuestNetworkPathProbeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]::IsNullOrWhiteSpace($ExpectedGuestNetworkPathJson) -or
+            $ExpectedGuestNetworkPathJson.Length -gt 8192 -or
+            $ExpectedGuestNetworkPathJson -cmatch '[\r\n]') {
+            throw "expected guest network-path identity is invalid"
+        }
+        $ExpectedGuestNetworkPath = $ExpectedGuestNetworkPathJson | ConvertFrom-Json
         if (-not $Root.StartsWith("C:\Windows\Temp\ferrum2-tun-performance-", [StringComparison]::OrdinalIgnoreCase) -or
             -not (Test-Path -LiteralPath $InputRoot -PathType Container) -or
             (Test-Path -LiteralPath $EvidenceRoot)) {
@@ -1321,44 +1447,47 @@ public static class Ferrum2PerfProcessGroup {
             }
             throw "unable to reserve a dual TCP/UDP port"
         }
-        function Get-GuestUnderlayAddress(
-            [string]$DestinationAddress,
-            [int]$DestinationPort
-        ) {
-            $destination = [Net.IPAddress]::Parse($DestinationAddress)
-            if ($destination.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
-                throw "support listener address is not IPv4"
+        function Get-GuestNetworkPath {
+            $probe = Join-Path $InputRoot "get_windows_tun_guest_network_path.ps1"
+            if ((Get-FileHash -LiteralPath $probe -Algorithm SHA256).Hash.ToLowerInvariant() `
+                    -cne $GuestNetworkPathProbeSha256) {
+                throw "guest network-path probe identity changed"
             }
-            $socket = New-Object Net.Sockets.Socket(
-                [Net.Sockets.AddressFamily]::InterNetwork,
-                [Net.Sockets.SocketType]::Dgram,
-                [Net.Sockets.ProtocolType]::Udp
+            $probeResult = Invoke-NativeCapture $PowerShell @(
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", $probe, "-SupportIpv4", $SupportAddress,
+                "-SupportPort", [string]$SupportUdp,
+                "-ManagedAdapterName", $AdapterName, "-AsJson"
             )
-            try {
-                $socket.Connect((New-Object Net.IPEndPoint($destination, $DestinationPort)))
-                $local = [Net.IPEndPoint]$socket.LocalEndPoint
-                $address = $local.Address
-            } finally {
-                $socket.Dispose()
+            if ($probeResult.ExitCode -ne 0 -or @($probeResult.Output).Count -ne 1) {
+                throw "guest network-path probe result is not unique"
             }
-            if ($address.Equals([Net.IPAddress]::Any) -or
-                [Net.IPAddress]::IsLoopback($address)) {
-                throw "support route selected an invalid guest underlay address: $address"
+            $actual = [string]$probeResult.Output[0] | ConvertFrom-Json
+            $fields = @(
+                "schema", "support_ipv4", "guest_ipv4", "guest_prefix_length",
+                "guest_interface_index", "guest_interface_alias", "guest_mac_address",
+                "guest_route_prefix", "guest_route_next_hop", "guest_dns_ipv4"
+            )
+            if ((@($actual.PSObject.Properties.Name) -join "|") -cne ($fields -join "|") -or
+                (@($ExpectedGuestNetworkPath.PSObject.Properties.Name) -join "|") -cne
+                    ($fields -join "|") -or
+                [int]$actual.schema -ne 1 -or [int]$ExpectedGuestNetworkPath.schema -ne 1) {
+                throw "guest network-path evidence shape is invalid"
             }
-            $ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address.ToString() `
-                -ErrorAction SilentlyContinue)
-            if ($ipRows.Count -ne 1) {
-                throw "guest underlay address ownership is not unique: address=$address count=$($ipRows.Count)"
+            foreach ($field in @(
+                "support_ipv4", "guest_ipv4", "guest_prefix_length", "guest_interface_index",
+                "guest_interface_alias", "guest_mac_address", "guest_route_prefix",
+                "guest_route_next_hop"
+            )) {
+                if ([string]$actual.$field -cne [string]$ExpectedGuestNetworkPath.$field) {
+                    throw "guest network path changed: field=$field"
+                }
             }
-            $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
-                [int]$_.ifIndex -eq [int]$ipRows[0].InterfaceIndex
-            })
-            if ($adapters.Count -ne 1 -or
-                [string]$adapters[0].Status -cne "Up" -or
-                [string]$adapters[0].Name -ceq $AdapterName) {
-                throw "guest underlay adapter is not uniquely valid: address=$address count=$($adapters.Count)"
+            if ((@($actual.guest_dns_ipv4) -join "|") -cne
+                (@($ExpectedGuestNetworkPath.guest_dns_ipv4) -join "|")) {
+                throw "guest network path changed: field=guest_dns_ipv4"
             }
-            return $address.ToString()
+            return $actual
         }
         function Wait-ProcessListener(
             [int]$ProcessId,
@@ -1663,6 +1792,8 @@ public static class Ferrum2PerfProcessGroup {
                 -cne $NetworkModelPlanSha256) {
             throw "guest trial plan changed during staging"
         }
+        $guestNetworkPath = Get-GuestNetworkPath
+        $guestUnderlayAddress = [string]$guestNetworkPath.guest_ipv4
         $supportProbeResult = Invoke-NativeCapture $harness @(
             "windows-tun-probe", "--target-ip", $SupportAddress,
             "--tcp-port", [string]$SupportTcp, "--udp-port", [string]$SupportUdp
@@ -1672,13 +1803,12 @@ public static class Ferrum2PerfProcessGroup {
             [string]$supportProbe[0] -cne "windows_tun_probe status=PASS protocols=tcp,udp") {
             throw "guest support listener preflight failed"
         }
-        $guestUnderlayAddress = Get-GuestUnderlayAddress `
-            -DestinationAddress $SupportAddress -DestinationPort $SupportUdp
 
         foreach ($trial in @($plan.trials | Sort-Object sequence)) {
             if (Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
                 throw "managed performance adapter baseline is not absent"
             }
+            [void](Get-GuestNetworkPath)
             $member = [string]$trial.member
             $memberRoot = Join-Path $InputRoot "artifacts\$member"
             $client = Join-Path $memberRoot "ferrum2-client.exe"
@@ -2101,7 +2231,8 @@ if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complet
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
 $rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"
 $rawProcessLogs = Join-Path $rawEvidence "process-logs"
-if (-not (Test-Path -LiteralPath $rawEvidence -PathType Container) -or
+if (-not (Test-Path -LiteralPath $hostNetworkPathPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $rawEvidence -PathType Container) -or
     @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 90 -or
     -not (Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container) -or
     @(Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
@@ -2140,8 +2271,12 @@ $summary = Get-Content -LiteralPath $hostSummaryPath -Raw -Encoding utf8 | Conve
             -Filter "*.network-model.json"
     ).Count
     process_logs = @(Get-ChildItem -LiteralPath $rawProcessLogs -File -Filter "*.log").Count
+    host_network_path = $hostNetworkPathPath
+    host_network_path_sha256 = (Get-FileHash -LiteralPath $hostNetworkPathPath `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
     final_vm_state = [string](Get-ApprovedVmContext).Vm.State
     checkpoint_restored = $true
+    host_tun_bypassed = $true
     host_network_mutations = 0
 } | ConvertTo-Json -Depth 4
 exit $summaryExit
