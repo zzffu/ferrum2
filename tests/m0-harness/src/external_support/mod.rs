@@ -922,9 +922,9 @@ fn start_server_resolution_witness(
         Arc::clone(&trace),
     );
     let config = format!(
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          [[inbounds]]\ntag = \"server-in\"\nlisten = \"{shadowsocks}\"\n\
-         [[outbounds]]\ntag = \"server-app-direct\"\n\
+         [[outbounds]]\ntag = \"server-app-direct\"\ndomain_resolver = \"core\"\ndomain_strategy = \"ipv4_only\"\n\
          [[outbounds]]\ntag = \"server-dns-direct\"\n\
          [route]\nfinal = \"server-app-direct\"\n\
          [dns]\ntimeout_ms = 5000\nmax_inflight = 4\n\
