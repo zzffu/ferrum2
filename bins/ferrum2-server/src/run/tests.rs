@@ -55,6 +55,85 @@ fn rule_and_dns_scratch_failures_keep_closed_runtime_categories() {
     );
 }
 
+#[test]
+fn validated_server_network_policies_reach_the_shared_runtime_resolver() {
+    struct NoRouteCatalog;
+
+    impl ferrum2_runtime::NetworkInterfaceCatalog for NoRouteCatalog {
+        fn read_interfaces(
+            &self,
+        ) -> Result<
+            Vec<ferrum2_runtime::NetworkInterfaceObservation>,
+            ferrum2_runtime::NetworkInterfaceCatalogError,
+        > {
+            Err(ferrum2_runtime::NetworkInterfaceCatalogError)
+        }
+
+        fn system_best_route(
+            &self,
+            _: SocketAddr,
+        ) -> Result<ferrum2_runtime::SystemBestRoute, ferrum2_runtime::NetworkInterfaceCatalogError>
+        {
+            Err(ferrum2_runtime::NetworkInterfaceCatalogError)
+        }
+    }
+
+    let listen = reserve_address();
+    let source = format!(
+        r#"schema_version = 2
+[[inbounds]]
+tag = "server"
+listen = "{listen}"
+
+[[outbounds]]
+tag = "direct"
+bind_interface = "Server Ethernet"
+inet4_bind_address = "198.51.100.10"
+inet6_bind_address = "2001:db8::20"
+
+[route]
+auto_detect_interface = true
+default_interface = "Fallback Ethernet"
+final = "direct"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+"#
+    );
+    let (path, config) = server_test_config_source("network-policy-retention", &source);
+    let route = runtime_route_network(&config.route_network);
+    let dial = runtime_dial_options(config.outbounds[0].dial_options());
+    assert!(route.auto_detect_interface());
+    assert_eq!(route.default_interface(), Some("Fallback Ethernet"));
+    assert_eq!(dial.bind_interface(), Some("Server Ethernet"));
+
+    let binding = ferrum2_runtime::InterfaceBinding::new(
+        "Server Ethernet",
+        17,
+        23,
+        [
+            "198.51.100.10".parse().unwrap(),
+            "2001:db8::20".parse().unwrap(),
+        ],
+    )
+    .unwrap();
+    let snapshot =
+        ferrum2_runtime::NetworkSnapshot::new(1, Some(binding.clone()), Some(binding)).unwrap();
+    let resolved = ferrum2_runtime::NetworkInterfaceResolver::new(NoRouteCatalog)
+        .resolve(&dial, &route, "203.0.113.9:443".parse().unwrap(), &snapshot)
+        .unwrap();
+    assert_eq!(
+        resolved.selection_source(),
+        ferrum2_runtime::InterfaceSelectionSource::OutboundExplicit
+    );
+    assert_eq!(
+        resolved.source_address(),
+        Some("198.51.100.10".parse().unwrap())
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     let listen = reserve_address();

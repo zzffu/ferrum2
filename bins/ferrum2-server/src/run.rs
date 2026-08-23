@@ -8,8 +8,8 @@ use ferrum2_dns::{DnsCache, TaggedResolver};
 use ferrum2_observability::{Metrics, RuleProgram, RuleProgramMode, json_subscriber};
 use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
-    BoundedSupervisor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit,
-    ProcessSupervisor, UdpSessionManager,
+    BoundedSupervisor, DialOptions, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
+    ProcessRootExit, ProcessSupervisor, RouteNetworkOptions, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
 use tokio::net::UdpSocket;
@@ -146,6 +146,18 @@ const fn run_error_for_dns_policy_compile(error: ferrum2_dns::DnsPolicyCompileEr
         | ferrum2_dns::DnsPolicyCompileError::ResponseDependentReject
         | ferrum2_dns::DnsPolicyCompileError::Internal => RunError::RuleCompile,
     }
+}
+
+fn runtime_route_network(config: &ferrum2_config::RouteNetworkConfig) -> RouteNetworkOptions {
+    RouteNetworkOptions::new(config.auto_detect_interface, config.default_interface())
+}
+
+fn runtime_dial_options(config: &ferrum2_config::OutboundDialOptions) -> DialOptions {
+    DialOptions::new(
+        config.bind_interface(),
+        config.inet4_bind_address(),
+        config.inet6_bind_address(),
+    )
 }
 
 /// Fully materializes schema-v2 fixed endpoints and the initial RuleSet
