@@ -33,6 +33,7 @@ pub(super) fn process_root(
     underlay: ferrum2_tun::UnderlayPublisher,
     direct_binder: bool,
 ) -> ProcessRoot<RunError> {
+    let strict_route = config.strict_route_effective();
     let synthetic_dns = SyntheticDns {
         ipv4: config.ipv4_dns_address,
         ipv6: config.ipv6_dns_address,
@@ -75,6 +76,7 @@ pub(super) fn process_root(
             default_binder: direct_binder,
             ipv4_dns_address: synthetic_dns.ipv4,
             ipv6_dns_address: synthetic_dns.ipv6,
+            strict_route,
         },
         underlay,
         RunError::StartupProtocol,

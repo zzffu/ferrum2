@@ -100,6 +100,7 @@ pub struct Config {
     pub default_binder: bool,
     pub ipv4_dns_address: Option<Ipv4Addr>,
     pub ipv6_dns_address: Option<Ipv6Addr>,
+    pub strict_route: bool,
 }
 
 /// Closed, low-cardinality reasons for rejecting work at the TUN boundary.
@@ -1680,6 +1681,7 @@ fn build_adapter_config(
         && !config.default_binder
         && config.ipv4_dns_address.is_none()
         && config.ipv6_dns_address.is_none()
+        && !config.strict_route
     {
         return Ok(adapter);
     }
@@ -1700,7 +1702,8 @@ fn build_adapter_config(
         config.default_binder,
         config.ipv4_dns_address,
         config.ipv6_dns_address,
-    )?;
+    )?
+    .with_strict_route(config.strict_route);
     adapter.with_managed_network(managed)
 }
 
