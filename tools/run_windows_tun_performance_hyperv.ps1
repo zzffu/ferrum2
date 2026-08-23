@@ -15,11 +15,14 @@ The default credential is the current-user DPAPI-protected PSCredential at
 %LOCALAPPDATA%\Ferrum2\hyperv-ferrum2-test.credential.xml. The password is never accepted as a
 parameter and the credential must remain outside this repository.
 
-Run mode requires an already provisioned TCP/UDP echo listener reachable from the guest. Its
-identity is recorded in each trial ledger. Ferrum2's candidate harness probes it from inside the
-guest before any TUN session starts.
+The portable guest controller defaults to the SHA-256-pinned PowerShell 7.4.19 win-x64 archive at
+%LOCALAPPDATA%\Ferrum2\PowerShell-7.4.19-win-x64.zip. The archive must remain outside the repository.
 
-PlanOnly validates repository lineage and emits the closed 80-trial plan without building, starting
+Run mode requires an already provisioned TCP echo listener plus four contiguous UDP echo ports
+reachable from the guest. Its identity is recorded in each trial ledger. Ferrum2's candidate
+harness probes all four UDP ports from inside the guest before any TUN session starts.
+
+PlanOnly validates repository lineage and emits the closed 90-trial plan without building, starting
 the VM, loading a credential, staging files, or executing traffic.
 #>
 
@@ -49,6 +52,9 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [string]$WintunZip,
 
+    [Parameter(ParameterSetName = "Run")]
+    [string]$PowerShellZip,
+
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [ValidateScript({
         $parsed = $null
@@ -65,7 +71,7 @@ param(
     [int]$SupportTcpPort,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
-    [ValidateRange(1, 65535)]
+    [ValidateRange(1, 65532)]
     [int]$SupportUdpPort,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
@@ -98,6 +104,8 @@ $approvedCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045F
 $approvedCheckpointId = [Guid]"1e570209-faf7-4248-8167-aa0687cdb8cf"
 $expectedWintunZipSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+$expectedPowerShellVersion = "7.4.19"
+$expectedPowerShellZipSha256 = "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9"
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -ErrorAction Stop).Path
 $policyPath = Join-Path $PSScriptRoot "windows_tun_performance_policy.json"
 $controlPath = Join-Path $PSScriptRoot "performance_candidate.py"
@@ -260,6 +268,46 @@ function Restore-ApprovedCheckpoint {
     }
 }
 
+function Restore-ApprovedVmFinalState {
+    param([int]$TimeoutSeconds)
+
+    $stopFailures = [Collections.Generic.List[string]]::new()
+    $offConfirmed = $false
+    foreach ($attempt in 1..2) {
+        try {
+            Stop-ApprovedVm -TimeoutSeconds $TimeoutSeconds
+        } catch {
+            $stopFailures.Add("stop attempt ${attempt}: $($_.Exception.Message)")
+        }
+        try {
+            if ([string](Get-ApprovedVmContext).Vm.State -ceq "Off") {
+                $offConfirmed = $true
+                break
+            }
+            $stopFailures.Add("Off readback attempt ${attempt}: state was not Off")
+        } catch {
+            $stopFailures.Add("Off readback attempt ${attempt}: $($_.Exception.Message)")
+        }
+    }
+    if (-not $offConfirmed) {
+        throw "approved VM Off state was not confirmed after two attempts: $($stopFailures -join ' | ')"
+    }
+
+    $restoreFailures = [Collections.Generic.List[string]]::new()
+    foreach ($attempt in 1..2) {
+        try {
+            Restore-ApprovedCheckpoint
+            if ([string](Get-ApprovedVmContext).Vm.State -cne "Off") {
+                throw "approved VM final state is not Off"
+            }
+            return
+        } catch {
+            $restoreFailures.Add("restore attempt ${attempt}: $($_.Exception.Message)")
+        }
+    }
+    throw "approved checkpoint restore failed after two attempts: $($restoreFailures -join ' | ')"
+}
+
 function Connect-ApprovedGuest {
     param(
         [Parameter(Mandatory = $true)][Management.Automation.PSCredential]$Credential,
@@ -272,9 +320,12 @@ function Connect-ApprovedGuest {
             if ([string](Get-ApprovedVmContext).Vm.State -cne "Running") {
                 throw "approved VM left Running state before PowerShell Direct readiness"
             }
-            $option = New-PSSessionOption -OperationTimeout 43200000
             $session = New-PSSession -VMId $script:approvedVmId -Credential $Credential `
-                -SessionOption $option -ErrorAction Stop
+                -ErrorAction Stop
+            $session.Runspace.ConnectionInfo.OperationTimeout = 43200000
+            if ($session.Runspace.ConnectionInfo.OperationTimeout -ne 43200000) {
+                throw "PowerShell Direct operation timeout was not retained"
+            }
             $probe = @(Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
                 $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
                 $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
@@ -368,7 +419,8 @@ function New-CanonicalPlan {
     if ($plan.schema_version -ne 2 -or
         $plan.kind -cne "windows_tun_performance_plan" -or
         $plan.run_kind -cne $RunKindValue -or
-        @($plan.trials).Count -ne 80 -or
+        @($plan.trials).Count -ne 90 -or
+        $null -eq $plan.scenarios."udp-route-once" -or
         $null -eq $plan.scenarios."network-lifecycle") {
         throw "canonical Windows TUN plan shape is invalid"
     }
@@ -387,10 +439,13 @@ function New-NetworkModelPlan {
     }
     $model = Get-Content -LiteralPath $Output -Raw -Encoding utf8 |
         ConvertFrom-Json -Depth 12
-    if ($model.schema_version -ne 2 -or
+    if ($model.schema_version -ne 3 -or
         $model.execution -cne "local_hyperv_guest" -or
         $model.host_network_mutation -cne "forbidden" -or
-        [int]$model.workloads."network-lifecycle".reset_network_cycles -ne 1000) {
+        [int]$model.workloads."network-lifecycle".reset_network_cycles -ne 1000 -or
+        [int]$model.workloads."udp-route-once".generations -ne 2 -or
+        [int]$model.workloads."udp-route-once".source_slots -ne 64 -or
+        [int]$model.workloads."udp-route-once".target_slots -ne 4) {
         throw "Windows TUN network-model plan shape is invalid"
     }
     return $model
@@ -489,7 +544,11 @@ function Write-Utf8FileNew {
 }
 
 function Stage-PortableRuntime {
-    param([string]$Rustup, [string]$Destination)
+    param(
+        [Parameter(Mandatory = $true)][string]$Rustup,
+        [Parameter(Mandatory = $true)][string]$PowerShellZip,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
     $rustc = [string](& $Rustup which --toolchain 1.97.1 rustc 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $rustc -PathType Leaf)) {
         throw "host Rust 1.97.1 compiler is unavailable"
@@ -516,27 +575,52 @@ function Stage-PortableRuntime {
         Copy-Item -LiteralPath $file.FullName -Destination $rustDestination -ErrorAction Stop
     }
 
-    $pwsh = (Get-Process -Id $PID -ErrorAction Stop).Path
-    if ([IO.Path]::GetFileName($pwsh) -cne "pwsh.exe") {
-        throw "the host runner must be PowerShell 7"
+    $powerShellArchive = Resolve-ExternalFile `
+        -Path $PowerShellZip `
+        -Label "portable PowerShell ZIP" `
+        -MaximumBytes 536870912
+    if ((Get-FileHash -LiteralPath $powerShellArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $script:expectedPowerShellZipSha256) {
+        throw "portable PowerShell ZIP hash mismatch"
     }
-    $pwshRoot = Split-Path -Parent $pwsh
-    Assert-NoReparsePointInExistingPath -Path $pwshRoot -Label "portable PowerShell runtime"
+    $stagedPowerShellArchive = Join-Path $Destination "portable-pwsh.zip"
+    if (Test-Path -LiteralPath $stagedPowerShellArchive) {
+        throw "portable PowerShell archive staging baseline is not absent"
+    }
+    Copy-Item -LiteralPath $powerShellArchive -Destination $stagedPowerShellArchive -ErrorAction Stop
+    $stagedPowerShellHash = (Get-FileHash `
+        -LiteralPath $stagedPowerShellArchive `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($stagedPowerShellHash -cne $script:expectedPowerShellZipSha256) {
+        throw "copied portable PowerShell ZIP hash mismatch"
+    }
+    $pwshRoot = Join-Path $Destination "pwsh"
+    if (Test-Path -LiteralPath $pwshRoot) {
+        throw "portable PowerShell expansion baseline is not absent"
+    }
+    Expand-Archive -LiteralPath $stagedPowerShellArchive -DestinationPath $pwshRoot -ErrorAction Stop
     $pwshItems = @(Get-Item -LiteralPath $pwshRoot -Force) + @(
-        Get-ChildItem -LiteralPath $pwshRoot -Recurse -Force
+        Get-ChildItem -LiteralPath $pwshRoot -Force -Recurse
     )
     if (@($pwshItems | Where-Object {
         $_.Attributes -band [IO.FileAttributes]::ReparsePoint
     }).Count -ne 0) {
         throw "portable PowerShell runtime cannot contain a reparse point"
     }
-    $pwshBytes = ($pwshItems | Where-Object { -not $_.PSIsContainer } |
-        Measure-Object Length -Sum).Sum
-    if ($pwshBytes -le 0 -or $pwshBytes -gt 1073741824) {
+    $pwshFiles = @($pwshItems | Where-Object { -not $_.PSIsContainer })
+    $pwshBytes = [long]($pwshFiles | Measure-Object Length -Sum).Sum
+    if ($pwshFiles.Count -le 0 -or $pwshFiles.Count -gt 4096 -or
+        $pwshBytes -le 0 -or $pwshBytes -gt 1073741824) {
         throw "portable PowerShell runtime exceeds its staging boundary"
     }
-    Copy-Item -LiteralPath $pwshRoot -Destination (Join-Path $Destination "pwsh") `
-        -Recurse -ErrorAction Stop
+    $pwsh = Join-Path $pwshRoot "pwsh.exe"
+    $pwshVersion = @(& $pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $pwshVersion.Count -ne 1 -or
+        [string]$pwshVersion[0] -cne $script:expectedPowerShellVersion) {
+        throw "portable PowerShell version is not the pinned compatible release"
+    }
+    $pwshExecutableSha256 = (Get-FileHash -LiteralPath $pwsh -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::Delete($stagedPowerShellArchive)
 
     $system = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
     $vcDestination = Join-Path $Destination "vc-runtime"
@@ -550,6 +634,12 @@ function Stage-PortableRuntime {
         }
     }
     if ($copied -eq 0) { throw "host Visual C++ runtime dependencies are unavailable" }
+    return [pscustomobject]@{
+        PowerShellVersion = [string]$pwshVersion[0]
+        PowerShellExecutableSha256 = $pwshExecutableSha256
+        PowerShellFileCount = [long]$pwshFiles.Count
+        PowerShellExpandedBytes = $pwshBytes
+    }
 }
 
 $git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0].Source
@@ -607,8 +697,9 @@ if ($PlanOnly) {
             checkpoint_id = $approvedCheckpointId.ToString("D")
             host_actions = @("archive exact commits", "build profiling binaries", "stage files", "reduce evidence")
             guest_actions = @(
-                "probe support", "run 80 collector trials",
-                "collect 10 raw lifecycle sidecars", "clean each TUN session"
+                "probe support", "run 90 collector trials",
+                "collect 10 raw route-once and 10 raw lifecycle sidecars",
+                "clean each TUN session"
             )
             host_network_mutations = 0
         } | ConvertTo-Json -Depth 6
@@ -627,6 +718,21 @@ if ($LASTEXITCODE -ne 0) { throw "run mode requires no unstaged tracked changes"
 & $git -C $repositoryRoot diff --cached --quiet --exit-code
 if ($LASTEXITCODE -ne 0) { throw "run mode requires no staged changes" }
 
+if ([string]::IsNullOrWhiteSpace($PowerShellZip)) {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw "LOCALAPPDATA is required for the default portable PowerShell ZIP"
+    }
+    $PowerShellZip = Join-Path $env:LOCALAPPDATA `
+        "Ferrum2\PowerShell-$expectedPowerShellVersion-win-x64.zip"
+}
+$resolvedPowerShellZip = Resolve-ExternalFile `
+    -Path $PowerShellZip `
+    -Label "portable PowerShell ZIP" `
+    -MaximumBytes 536870912
+if ((Get-FileHash -LiteralPath $resolvedPowerShellZip -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+    $expectedPowerShellZipSha256) {
+    throw "portable PowerShell ZIP hash mismatch"
+}
 $resolvedWintunZip = Resolve-ExternalFile -Path $WintunZip -Label "Wintun ZIP"
 if ((Get-FileHash -LiteralPath $resolvedWintunZip -Algorithm SHA256).Hash.ToLowerInvariant() -cne
     $expectedWintunZipSha256) {
@@ -702,7 +808,10 @@ try {
     Copy-Item -LiteralPath $hostNetworkModelPlanPath `
         -Destination (Join-Path $temporaryRoot "input\network-model-plan.json") `
         -ErrorAction Stop
-    Stage-PortableRuntime -Rustup $rustup -Destination $runtimeRoot
+    $portableRuntime = Stage-PortableRuntime `
+        -Rustup $rustup `
+        -PowerShellZip $resolvedPowerShellZip `
+        -Destination $runtimeRoot
 
     $clientTemplate = @'
 schema_version = 2
@@ -718,13 +827,22 @@ max_tcp_flows = 4096
 tcp_buffer_bytes = 262144
 max_udp_mappings = 8192
 udp_filtering = "endpoint_independent"
-outbound = "direct"
 [[outbounds]]
 tag = "direct"
 type = "direct"
+[[outbounds]]
+tag = "proxy"
+server = "127.0.0.1:{{SERVER_PORT}}"
 [route]
 auto_detect_interface = true
-final = "direct"
+final = "proxy"
+[[route.rules]]
+inbound = "tun-in"
+network = "udp"
+ip = "{{SUPPORT_IPV4}}"
+port = {{SUPPORT_UDP_PORT}}
+action = "route"
+outbound = "direct"
 [udp]
 enabled = true
 max_sessions = 16384
@@ -735,6 +853,9 @@ shutdown_grace_ms = 30000
 idle_timeout_ms = 2000
 [metrics]
 listen = "127.0.0.1:{{METRICS_PORT}}"
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 '@
     $serverTemplate = @'
 schema_version = 2
@@ -744,7 +865,6 @@ listen = "127.0.0.1:{{SERVER_PORT}}"
 outbound = "direct"
 [[outbounds]]
 tag = "direct"
-type = "direct"
 [udp]
 enabled = true
 max_sessions = 16384
@@ -752,6 +872,8 @@ max_buffered_bytes = 268435456
 idle_timeout_ms = 60000
 [runtime]
 shutdown_grace_ms = 30000
+[metrics]
+listen = "127.0.0.1:{{SERVER_METRICS_PORT}}"
 [shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
@@ -794,6 +916,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $approvedCheckpointId.ToString("D"),
         $expectedWintunZipSha256,
         $expectedWintunDllSha256,
+        $portableRuntime.PowerShellVersion,
+        $portableRuntime.PowerShellExecutableSha256,
+        $portableRuntime.PowerShellFileCount,
+        $portableRuntime.PowerShellExpandedBytes,
         $RunKind,
         $ParentSha,
         $CandidateSha,
@@ -816,6 +942,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [string]$CheckpointId,
             [string]$WintunZipSha256,
             [string]$WintunDllSha256,
+            [string]$PowerShellVersion,
+            [string]$PowerShellExecutableSha256,
+            [long]$PowerShellFileCount,
+            [long]$PowerShellExpandedBytes,
             [string]$RunKindValue,
             [string]$ParentCommit,
             [string]$CandidateCommit,
@@ -872,9 +1002,24 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         if ($LASTEXITCODE -ne 0 -or ($rustVersion -join "`n") -cnotmatch '^rustc 1\.97\.1 \(') {
             throw "staged Rust 1.97.1 runtime verification failed"
         }
+        $pwshItems = @(Get-Item -LiteralPath (Split-Path -Parent $PowerShell) -Force) + @(
+            Get-ChildItem -LiteralPath (Split-Path -Parent $PowerShell) -Force -Recurse
+        )
+        $pwshFiles = @($pwshItems | Where-Object { -not $_.PSIsContainer })
+        $pwshBytes = [long]($pwshFiles | Measure-Object Length -Sum).Sum
+        if (@($pwshItems | Where-Object {
+                $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+            }).Count -ne 0 -or
+            $pwshFiles.Count -ne $PowerShellFileCount -or
+            $pwshBytes -ne $PowerShellExpandedBytes) {
+            throw "staged PowerShell runtime boundary changed"
+        }
         $pwshVersion = @(& $PowerShell -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
-        if ($LASTEXITCODE -ne 0 -or [Version]$pwshVersion[0] -lt [Version]"7.4") {
-            throw "staged PowerShell 7 runtime verification failed"
+        if ($LASTEXITCODE -ne 0 -or $pwshVersion.Count -ne 1 -or
+            [string]$pwshVersion[0] -cne $PowerShellVersion -or
+            (Get-FileHash -LiteralPath $PowerShell -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                $PowerShellExecutableSha256) {
+            throw "staged PowerShell runtime identity verification failed"
         }
         $networkModelController = Join-Path $InputRoot "windows_tun_network_model.py"
         $networkModelPlan = Join-Path $InputRoot "network-model-plan.json"
@@ -1041,20 +1186,28 @@ public static class Ferrum2PerfProcessGroup {
             }
             throw "unable to reserve a dual TCP/UDP port"
         }
-        function Wait-ProcessListener([int]$ProcessId, [int]$Port) {
+        function Wait-ProcessListener(
+            [int]$ProcessId,
+            [int]$Port,
+            [bool]$RequireUdp
+        ) {
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $tcp = @()
+            $udp = @()
             do {
                 if ([Ferrum2PerfProcessGroup]::Wait([uint32]$ProcessId, 0)) {
                     throw "server exited before listener readiness"
                 }
                 $tcp = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
                     Where-Object { [int]$_.OwningProcess -eq $ProcessId })
-                $udp = @(Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue |
-                    Where-Object { [int]$_.OwningProcess -eq $ProcessId })
-                if ($tcp.Count -eq 1 -and $udp.Count -eq 1) { return }
+                if ($RequireUdp) {
+                    $udp = @(Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue |
+                        Where-Object { [int]$_.OwningProcess -eq $ProcessId })
+                }
+                if ($tcp.Count -eq 1 -and (-not $RequireUdp -or $udp.Count -eq 1)) { return }
                 Start-Sleep -Milliseconds 100
             } while ([DateTime]::UtcNow -lt $deadline)
-            throw "server listener readiness timed out"
+            throw "server listener readiness timed out: port=$Port tcp=$($tcp.Count) udp=$($udp.Count) require_udp=$RequireUdp"
         }
         function Wait-TunReady([int]$ProcessId, [int]$Port) {
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -1139,7 +1292,7 @@ public static class Ferrum2PerfProcessGroup {
         $plan = Get-Content -LiteralPath (Join-Path $InputRoot "plan.json") -Raw -Encoding utf8 |
             ConvertFrom-Json
         if ($plan.schema_version -ne 2 -or
-            @($plan.trials).Count -ne 80 -or
+            @($plan.trials).Count -ne 90 -or
             $plan.recipe_sha256 -cne $RecipeSha256 -or
             $plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256 `
                 -cne $NetworkModelControllerSha256 -or
@@ -1164,16 +1317,38 @@ public static class Ferrum2PerfProcessGroup {
             $trialRoot = Join-Path $Root ("trial-{0:D3}" -f [int]$trial.sequence)
             New-Item -ItemType Directory -Path $trialRoot | Out-Null
             $metricsPort = Get-FreeTcpPort
-            $serverPort = Get-FreeDualPort
+            $serverPort = 0
+            foreach ($attempt in 1..100) {
+                $candidatePort = Get-FreeDualPort
+                if ($candidatePort -ne $metricsPort) {
+                    $serverPort = $candidatePort
+                    break
+                }
+            }
+            if ($serverPort -eq 0) { throw "unable to reserve a distinct server port" }
+            $serverMetricsPort = 0
+            foreach ($attempt in 1..100) {
+                $candidatePort = Get-FreeTcpPort
+                if ($candidatePort -ne $metricsPort -and $candidatePort -ne $serverPort) {
+                    $serverMetricsPort = $candidatePort
+                    break
+                }
+            }
+            if ($serverMetricsPort -eq 0) {
+                throw "unable to reserve a distinct server metrics port"
+            }
             $clientConfig = Join-Path $trialRoot "client.toml"
             $serverConfig = Join-Path $trialRoot "server.toml"
             $ledger = Join-Path $trialRoot "identity-ledger.json"
             $clientText = Get-Content -LiteralPath (Join-Path $InputRoot "client.toml.template") -Raw
             $clientText = $clientText.Replace("{{ADAPTER_NAME}}", $AdapterName).
                 Replace("{{SUPPORT_IPV4}}", $SupportAddress).
+                Replace("{{SUPPORT_UDP_PORT}}", [string]$SupportUdp).
+                Replace("{{SERVER_PORT}}", [string]$serverPort).
                 Replace("{{METRICS_PORT}}", [string]$metricsPort)
             $serverText = (Get-Content -LiteralPath (Join-Path $InputRoot "server.toml.template") -Raw).
-                Replace("{{SERVER_PORT}}", [string]$serverPort)
+                Replace("{{SERVER_PORT}}", [string]$serverPort).
+                Replace("{{SERVER_METRICS_PORT}}", [string]$serverMetricsPort)
             if ($clientText.Contains("{{") -or $serverText.Contains("{{")) {
                 throw "configuration template substitution is incomplete"
             }
@@ -1195,7 +1370,8 @@ public static class Ferrum2PerfProcessGroup {
                 $serverPid = [Ferrum2PerfProcessGroup]::Start(
                     $server, "--config `"$serverConfig`"", $memberRoot
                 )
-                Wait-ProcessListener $serverPid $serverPort
+                Wait-ProcessListener $serverPid $serverPort $true
+                Wait-ProcessListener $serverPid $serverMetricsPort $false
                 $clientPid = [Ferrum2PerfProcessGroup]::Start(
                     $client, "--config `"$clientConfig`"", $memberRoot
                 )
@@ -1225,12 +1401,14 @@ public static class Ferrum2PerfProcessGroup {
                     "-ClientPid", [string]$clientPid,
                     "-ServerPid", [string]$serverPid,
                     "-MetricsPort", [string]$metricsPort,
+                    "-ServerMetricsPort", [string]$serverMetricsPort,
                     "-Output", $output
                 )
-                if ([string]$trial.scenario -ceq "network-lifecycle") {
+                if ([string]$trial.scenario -in @("udp-route-once", "network-lifecycle")) {
                     $networkModelOutput = Join-Path $NetworkModelEvidenceRoot (
-                        "{0:D3}-network-lifecycle-{1}-pair-{2}.network-model.json" -f `
-                            [int]$trial.sequence, $member, [int]$trial.pair
+                        "{0:D3}-{1}-{2}-pair-{3}.network-model.json" -f `
+                            [int]$trial.sequence, [string]$trial.scenario,
+                            $member, [int]$trial.pair
                     )
                     $collectorArguments += @("-NetworkModelOutput", $networkModelOutput)
                 }
@@ -1267,7 +1445,7 @@ public static class Ferrum2PerfProcessGroup {
             Get-ChildItem -LiteralPath $NetworkModelEvidenceRoot -File `
                 -Filter "*.network-model.json"
         )
-        if ($files.Count -ne 80 -or $networkModelFiles.Count -ne 10) {
+        if ($files.Count -ne 90 -or $networkModelFiles.Count -ne 20) {
             throw "guest evidence set is incomplete"
         }
         [pscustomobject]@{
@@ -1276,12 +1454,17 @@ public static class Ferrum2PerfProcessGroup {
             network_model_observations = $networkModelFiles.Count
             evidence_path = $EvidenceRoot
             guest_build = "$($version.CurrentBuildNumber).$($version.UBR)"
+            powershell_version = [string]$pwshVersion[0]
+            powershell_executable_sha256 = $PowerShellExecutableSha256
         }
     }
     # END GUEST_ONLY_NETWORK_EXECUTION
     if (@($guestResult).Count -ne 1 -or $guestResult.status -cne "PASS" -or
-        [int]$guestResult.trials -ne 80 -or
-        [int]$guestResult.network_model_observations -ne 10) {
+        [int]$guestResult.trials -ne 90 -or
+        [int]$guestResult.network_model_observations -ne 20 -or
+        [string]$guestResult.powershell_version -cne $portableRuntime.PowerShellVersion -or
+        [string]$guestResult.powershell_executable_sha256 -cne
+            $portableRuntime.PowerShellExecutableSha256) {
         throw "guest performance controller did not return a complete result"
     }
     $guestEvidenceAvailable = $true
@@ -1312,8 +1495,8 @@ public static class Ferrum2PerfProcessGroup {
                     }
                 })
             if ($boundary.Count -eq 1 -and $boundary[0].Safe -eq $true -and
-                [int]$boundary[0].Files -eq 80 -and
-                [int]$boundary[0].ModelFiles -eq 10) {
+                [int]$boundary[0].Files -eq 90 -and
+                [int]$boundary[0].ModelFiles -eq 20) {
                 Copy-Item -FromSession $session -LiteralPath $guestEvidencePath `
                     -Destination $hostEvidenceRoot -Recurse -ErrorAction Stop
             }
@@ -1325,11 +1508,7 @@ public static class Ferrum2PerfProcessGroup {
     }
     if ($vmWindowStarted) {
         try {
-            Stop-ApprovedVm -TimeoutSeconds $ShutdownTimeoutSeconds
-            Restore-ApprovedCheckpoint
-            if ([string](Get-ApprovedVmContext).Vm.State -cne "Off") {
-                throw "approved VM final state is not Off"
-            }
+            Restore-ApprovedVmFinalState -TimeoutSeconds $ShutdownTimeoutSeconds
         } catch {
             $restoreFailure = $_
         }
@@ -1353,10 +1532,10 @@ if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complet
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
 $rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"
 if (-not (Test-Path -LiteralPath $rawEvidence -PathType Container) -or
-    @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 80 -or
+    @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 90 -or
     -not (Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container) -or
     @(Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
-        -Filter "*.network-model.json").Count -ne 10) {
+        -Filter "*.network-model.json").Count -ne 20) {
     throw "exported raw evidence is incomplete"
 }
 $summaryArguments = @(

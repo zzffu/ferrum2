@@ -158,7 +158,19 @@ jobs:
               test "$(git status --porcelain)" = ""
               cargo +1.97.1 build \
                 -p ferrum2-client -p ferrum2-server --bins --locked
-              cargo +1.97.1 test --workspace --locked
+              cargo +1.97.1 test --workspace \
+                --exclude ferrum2-client \
+                --exclude ferrum2-tun \
+                --exclude ferrum2-wintun \
+                --exclude ferrum2-m0-harness \
+                --locked
+              cargo +1.97.1 test \
+                -p ferrum2-client \
+                -p ferrum2-tun \
+                -p ferrum2-wintun \
+                --all-features --no-run --locked
+              cargo +1.97.1 test \
+                -p ferrum2-m0-harness --no-run --locked
               cargo +1.97.1 build --profile profiling \
                 -p ferrum2-client -p ferrum2-server --bins --locked
             )

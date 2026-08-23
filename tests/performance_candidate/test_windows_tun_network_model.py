@@ -17,29 +17,76 @@ MODEL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODEL)
 
 
+def observation_identity(*, trial_sequence: int = 90) -> dict[str, object]:
+    return {
+        "run_kind": "comparison",
+        "member": "candidate",
+        "pair": 1,
+        "trial_sequence": trial_sequence,
+        "client_pid": 1234,
+        "server_pid": 1235,
+        "vm_name": "Windows 10 MSIX packaging environment",
+        "vm_id": "82e20295-1d30-48e7-a751-e21d35d872d4",
+        "checkpoint_name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
+        "checkpoint_id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
+        "sha": "1" * 40,
+        "tree": "2" * 40,
+        "client_sha256": "3" * 64,
+        "server_sha256": "4" * 64,
+        "harness_sha256": "5" * 64,
+        "collector_sha256": "6" * 64,
+        "recipe_sha256": "7" * 64,
+        "model_controller_sha256": "8" * 64,
+        "model_plan_sha256": "9" * 64,
+    }
+
+
 def route_once_observation(*, elapsed_nanoseconds: int = 1_000_000_000) -> dict[str, object]:
-    associations = []
+    generations = []
     for generation in range(1, MODEL.ROUTE_GENERATIONS + 1):
+        associations = []
         for source_slot in range(MODEL.ROUTE_SOURCE_SLOTS):
             associations.append(
                 {
-                    "generation": generation,
                     "source_slot": source_slot,
                     "target_slots": list(range(MODEL.ROUTE_TARGET_SLOTS)),
+                    "first_target_slot": 0 if source_slot % 2 == 0 else 1,
                     "datagrams_sent": (
                         MODEL.ROUTE_TARGET_SLOTS * MODEL.ROUTE_DATAGRAMS_PER_TARGET
                     ),
-                    "router_invocations": 1,
-                    "association_commits": 1,
-                    "egress_instances": 1,
-                    "frozen_outbound": "direct" if source_slot % 2 == 0 else "proxy",
+                    "replies_received": (
+                        MODEL.ROUTE_TARGET_SLOTS * MODEL.ROUTE_DATAGRAMS_PER_TARGET
+                    ),
                 }
             )
+        path_datagrams = (
+            MODEL.ROUTE_SOURCE_SLOTS
+            // 2
+            * MODEL.ROUTE_TARGET_SLOTS
+            * MODEL.ROUTE_DATAGRAMS_PER_TARGET
+        )
+        generations.append(
+            {
+                "ordinal": generation,
+                "network_generation": 10 + generation,
+                "session_generation": 10 + generation,
+                "direct_datagrams_observed": path_datagrams,
+                "direct_replies_observed": path_datagrams,
+                "proxy_datagrams_observed": path_datagrams,
+                "proxy_replies_observed": path_datagrams,
+                "associations": associations,
+            }
+        )
+    expected_associations = MODEL.ROUTE_GENERATIONS * MODEL.ROUTE_SOURCE_SLOTS
     return {
         "schema_version": MODEL.SCHEMA_VERSION,
         "workload": MODEL.ROUTE_ONCE_WORKLOAD,
+        "identity": observation_identity(),
         "elapsed_nanoseconds": elapsed_nanoseconds,
-        "associations": associations,
+        "association_creation_elapsed_nanoseconds": elapsed_nanoseconds // 2,
+        "association_creations_observed": expected_associations,
+        "router_invocations_observed": expected_associations,
+        "generations": generations,
     }
 
 
@@ -125,27 +172,7 @@ def lifecycle_observation() -> dict[str, object]:
     return {
         "schema_version": MODEL.SCHEMA_VERSION,
         "workload": MODEL.LIFECYCLE_WORKLOAD,
-        "identity": {
-            "run_kind": "comparison",
-            "member": "candidate",
-            "pair": 1,
-            "trial_sequence": 72,
-            "client_pid": 1234,
-            "server_pid": 1235,
-            "vm_name": "Windows 10 MSIX packaging environment",
-            "vm_id": "82e20295-1d30-48e7-a751-e21d35d872d4",
-            "checkpoint_name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
-            "checkpoint_id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
-            "sha": "1" * 40,
-            "tree": "2" * 40,
-            "client_sha256": "3" * 64,
-            "server_sha256": "4" * 64,
-            "harness_sha256": "5" * 64,
-            "collector_sha256": "6" * 64,
-            "recipe_sha256": "7" * 64,
-            "model_controller_sha256": "8" * 64,
-            "model_plan_sha256": "9" * 64,
-        },
+        "identity": observation_identity(trial_sequence=80),
         "baseline_resources": dict(resources),
         "cycles": cycles,
         "interface_resolver": {
@@ -159,7 +186,7 @@ def lifecycle_observation() -> dict[str, object]:
 class LocalHypervPerformancePlanTests(unittest.TestCase):
     def test_plan_is_closed_bounded_and_guest_only(self) -> None:
         plan = MODEL.create_local_hyperv_plan()
-        self.assertEqual(plan["schema_version"], 2)
+        self.assertEqual(plan["schema_version"], 3)
         self.assertEqual(plan["execution"], "local_hyperv_guest")
         self.assertEqual(plan["host_network_mutation"], "forbidden")
         self.assertEqual(
@@ -199,9 +226,17 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "plan.json"
             status = MODEL.main(["plan", "--output", str(output)])
-            plan = json.loads(output.read_text(encoding="utf-8"))
+            encoded = output.read_bytes()
+            plan = json.loads(encoded.decode("utf-8"))
         self.assertEqual(status, 0)
         self.assertEqual(plan, MODEL.create_local_hyperv_plan())
+        self.assertEqual(
+            encoded,
+            (
+                json.dumps(MODEL.create_local_hyperv_plan(), indent=2, sort_keys=True)
+                + "\n"
+            ).encode("utf-8"),
+        )
 
 
 class RouteOnceWorkloadTests(unittest.TestCase):
@@ -216,8 +251,9 @@ class RouteOnceWorkloadTests(unittest.TestCase):
         self.assertEqual(summary["associations_created"], expected_associations)
         self.assertEqual(summary["datagrams_sent"], expected_datagrams)
         self.assertEqual(summary["packets_per_second"], expected_datagrams)
+        self.assertEqual(summary["associations_per_second"], expected_associations * 2)
         self.assertEqual(summary["router_invocations"], expected_associations)
-        self.assertEqual(summary["egress_instances"], expected_associations)
+        self.assertTrue(summary["direct_and_proxy_verified"])
         self.assertEqual(
             summary["router_invocations_avoided"],
             expected_associations * (MODEL.ROUTE_TARGET_SLOTS - 1),
@@ -228,22 +264,23 @@ class RouteOnceWorkloadTests(unittest.TestCase):
     def test_route_once_contract_rejects_per_target_or_child_egress_behavior(self) -> None:
         cases = []
         routed_per_target = route_once_observation()
-        routed_per_target["associations"][0]["router_invocations"] = (
-            MODEL.ROUTE_TARGET_SLOTS
-        )
+        routed_per_target["router_invocations_observed"] += 1
         cases.append((routed_per_target, "router exactly once"))
-        child_egress = route_once_observation()
-        child_egress["associations"][0]["egress_instances"] = 2
-        cases.append((child_egress, "one multi-target egress"))
         duplicate = route_once_observation()
-        duplicate["associations"][-1] = copy.deepcopy(duplicate["associations"][0])
+        duplicate["generations"][0]["associations"][-1] = copy.deepcopy(
+            duplicate["generations"][0]["associations"][0]
+        )
         cases.append((duplicate, "duplicated"))
         changed_route = route_once_observation()
-        changed_route["associations"][1]["frozen_outbound"] = "direct"
-        cases.append((changed_route, "first-route decision"))
+        changed_route["generations"][0]["proxy_datagrams_observed"] -= 1
+        cases.append((changed_route, "proxy traffic split"))
         missing_target = route_once_observation()
-        missing_target["associations"][0]["target_slots"] = [0, 1, 2]
+        missing_target["generations"][0]["associations"][0]["target_slots"] = [0, 1, 2]
         cases.append((missing_target, "deterministic target set"))
+        stale_generation = route_once_observation()
+        stale_generation["generations"][1]["network_generation"] += 1
+        stale_generation["generations"][1]["session_generation"] += 1
+        cases.append((stale_generation, "advance the generation exactly once"))
         for observation, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(MODEL.NetworkModelError, message):

@@ -892,6 +892,69 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             },
         }
 
+    def route_once_observation(self, *, row: dict[str, object]) -> dict[str, object]:
+        model = CONTROL.WINDOWS_TUN_NETWORK_MODEL
+        reference = row["network_model_evidence"]
+        environment = row["environment"]
+        generations = []
+        for ordinal in range(1, model.ROUTE_GENERATIONS + 1):
+            associations = []
+            for source_slot in range(model.ROUTE_SOURCE_SLOTS):
+                datagrams = model.ROUTE_TARGET_SLOTS * model.ROUTE_DATAGRAMS_PER_TARGET
+                associations.append(
+                    {
+                        "source_slot": source_slot,
+                        "target_slots": list(range(model.ROUTE_TARGET_SLOTS)),
+                        "first_target_slot": 0 if source_slot % 2 == 0 else 1,
+                        "datagrams_sent": datagrams,
+                        "replies_received": datagrams,
+                    }
+                )
+            path_datagrams = model.ROUTE_SOURCE_SLOTS // 2 * datagrams
+            generations.append(
+                {
+                    "ordinal": ordinal,
+                    "network_generation": 10 + ordinal,
+                    "session_generation": 10 + ordinal,
+                    "direct_datagrams_observed": path_datagrams,
+                    "direct_replies_observed": path_datagrams,
+                    "proxy_datagrams_observed": path_datagrams,
+                    "proxy_replies_observed": path_datagrams,
+                    "associations": associations,
+                }
+            )
+        associations_created = model.ROUTE_GENERATIONS * model.ROUTE_SOURCE_SLOTS
+        return {
+            "schema_version": model.SCHEMA_VERSION,
+            "workload": model.ROUTE_ONCE_WORKLOAD,
+            "identity": {
+                "run_kind": row["run_kind"],
+                "member": row["member"],
+                "pair": row["pair"],
+                "trial_sequence": row["sequence"],
+                "client_pid": 1234,
+                "server_pid": 1235,
+                "vm_name": environment["vm_name"],
+                "vm_id": environment["vm_id"],
+                "checkpoint_name": environment["checkpoint_name"],
+                "checkpoint_id": environment["checkpoint_id"],
+                "sha": row["sha"],
+                "tree": row["tree"],
+                "client_sha256": row["client_sha256"],
+                "server_sha256": row["server_sha256"],
+                "harness_sha256": row["harness_sha256"],
+                "collector_sha256": reference["collector_sha256"],
+                "recipe_sha256": row["recipe_sha256"],
+                "model_controller_sha256": reference["controller_sha256"],
+                "model_plan_sha256": reference["plan_sha256"],
+            },
+            "elapsed_nanoseconds": 1_000_000_000,
+            "association_creation_elapsed_nanoseconds": 500_000_000,
+            "association_creations_observed": associations_created,
+            "router_invocations_observed": associations_created,
+            "generations": generations,
+        }
+
     def row(
         self,
         *,
@@ -966,36 +1029,55 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "network_model_evidence": None,
             "status": "PASS",
         }
-        if scenario == "network-lifecycle":
+        if scenario in {"udp-route-once", "network-lifecycle"}:
             row["network_model_evidence"] = {
                 "schema_version": 1,
                 "controller_sha256": CONTROL.WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
                 "collector_sha256": "8" * 64,
                 "plan_sha256": CONTROL.WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
                 "observation_file": (
-                    f"{sequence:03d}-network-lifecycle-{member}-pair-{pair}.network-model.json"
+                    f"{sequence:03d}-{scenario}-{member}-pair-{pair}.network-model.json"
                 ),
                 "observation_sha256": "9" * 64,
             }
-            summary = CONTROL.WINDOWS_TUN_NETWORK_MODEL.summarize_lifecycle_observation(
-                self.network_model_observation(row=row)
-            )
-            values = CONTROL._network_model_trial_values(summary)
+            if scenario == "udp-route-once":
+                summary = CONTROL.WINDOWS_TUN_NETWORK_MODEL.summarize_route_once_observation(
+                    self.route_once_observation(row=row)
+                )
+                values = CONTROL._route_once_trial_values(summary)
+                row["correctness"]["checked_units"] = summary["datagrams_sent"]
+                row["correctness"]["checks"] = {
+                    "every_reply_accounted": True,
+                    "payload_exact": True,
+                    "direct_and_proxy_sources": True,
+                    "association_creation_counter_exact": True,
+                    "router_invocation_counter_exact": True,
+                    "post_reset_reroute_verified": True,
+                    "network_model_evidence_bound": True,
+                    "tun_path_observed": True,
+                    "clean_drain": True,
+                }
+            else:
+                summary = CONTROL.WINDOWS_TUN_NETWORK_MODEL.summarize_lifecycle_observation(
+                    self.network_model_observation(row=row)
+                )
+                values = CONTROL._network_model_trial_values(summary)
             for metric, value in values.items():
                 row["measurements"][metric]["value"] = value
-            row["correctness"]["checks"] = {
-                "same_process_all_cycles": True,
-                "generation_advanced_once_per_cycle": True,
-                "managed_identity_preserved_across_resets": True,
-                "damage_only_full_rebuild": True,
-                "reset_and_full_rebuild_metrics_are_exact": True,
-                "resource_growth_zero_after_1000_resets": True,
-                "tcp_and_udp_recovered_after_interface_switch": True,
-                "interface_resolver_cache_hit_observed": True,
-                "network_model_evidence_bound": True,
-                "tun_path_observed": True,
-                "clean_drain": True,
-            }
+            if scenario == "network-lifecycle":
+                row["correctness"]["checks"] = {
+                    "same_process_all_cycles": True,
+                    "generation_advanced_once_per_cycle": True,
+                    "managed_identity_preserved_across_resets": True,
+                    "damage_only_full_rebuild": True,
+                    "reset_and_full_rebuild_metrics_are_exact": True,
+                    "resource_growth_zero_after_1000_resets": True,
+                    "tcp_and_udp_recovered_after_interface_switch": True,
+                    "interface_resolver_cache_hit_observed": True,
+                    "network_model_evidence_bound": True,
+                    "tun_path_observed": True,
+                    "clean_drain": True,
+                }
         return row
 
     def evidence(
@@ -1019,8 +1101,12 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 candidate_sha=candidate_sha,
                 regression=regression,
             )
-            if row["scenario"] == "network-lifecycle":
-                observation = self.network_model_observation(row=row)
+            if row["scenario"] in {"udp-route-once", "network-lifecycle"}:
+                observation = (
+                    self.route_once_observation(row=row)
+                    if row["scenario"] == "udp-route-once"
+                    else self.network_model_observation(row=row)
+                )
                 encoded = json.dumps(observation, sort_keys=True).encode("utf-8")
                 reference = row["network_model_evidence"]
                 reference["observation_sha256"] = hashlib.sha256(encoded).hexdigest()
@@ -1037,14 +1123,37 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             run_kind="comparison", decision_policy=policy
         )
         self.assertEqual(set(plan["scenarios"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
-        self.assertEqual(len(plan["scenarios"]), 8)
+        self.assertEqual(len(plan["scenarios"]), 9)
         self.assertEqual(
             sum(len(contract["metrics"]) for contract in plan["scenarios"].values()),
-            18,
+            22,
         )
-        self.assertEqual(len(plan["trials"]), 80)
+        self.assertEqual(len(plan["trials"]), 90)
         self.assertFalse(plan["calibration_complete"])
         self.assertFalse(plan["adoption_eligible"])
+        route_once = plan["scenarios"]["udp-route-once"]
+        self.assertEqual(
+            set(route_once["metrics"]),
+            {
+                "multi_target_packet_rate",
+                "association_creation_rate",
+                "router_invocations_avoided",
+            },
+        )
+        self.assertEqual(
+            (
+                route_once["recipe"]["generations"],
+                route_once["recipe"]["source_slots"],
+                route_once["recipe"]["target_slots"],
+                route_once["recipe"]["datagrams_per_target"],
+            ),
+            (2, 64, 4, 32),
+        )
+        self.assertEqual(
+            plan["scenarios"]["wintun-ring-full-drop-rate"]["metrics"]
+            ["pending_response_peak"],
+            {"unit": "pending_udp_responses", "direction": "lower_is_better"},
+        )
         for scenario, contract in plan["scenarios"].items():
             with self.subTest(scenario=scenario):
                 for field, value in CONTROL.WINDOWS_TUN_RUNTIME_RECIPE.items():
@@ -1105,10 +1214,10 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self.assertFalse(artifact["thresholds_reviewed"])
         self.assertRegex(artifact["content_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(set(artifact["observations"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
-        self.assertEqual(len(artifact["evidence_files"]), 90)
+        self.assertEqual(len(artifact["evidence_files"]), 110)
         self.assertEqual(
             artifact["network_model"]["raw_observations"],
-            CONTROL.WINDOWS_TUN_PAIR_COUNT * 2,
+            CONTROL.WINDOWS_TUN_PAIR_COUNT * 2 * 2,
         )
 
     def test_uncalibrated_comparison_is_fail_closed(self) -> None:
@@ -1231,6 +1340,43 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             trial_path.write_text(json.dumps(row), encoding="utf-8")
             with self.assertRaisesRegex(
                 CONTROL.CandidateControlError, "not recomputed from raw evidence"
+            ):
+                CONTROL.summarize_windows_tun_evidence(
+                    plan=plan,
+                    evidence_root=root,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                )
+
+    def test_route_once_sidecar_is_hash_bound_and_reduced_from_raw_counters(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.evidence(
+                root,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+            trial_path = root / "udp-route-once-1-parent.json"
+            row = json.loads(trial_path.read_text(encoding="utf-8"))
+            observation_path = (
+                root
+                / "network-model"
+                / row["network_model_evidence"]["observation_file"]
+            )
+            observation = json.loads(observation_path.read_text(encoding="utf-8"))
+            observation["elapsed_nanoseconds"] += 1
+            encoded = json.dumps(observation, sort_keys=True).encode("utf-8")
+            observation_path.write_bytes(encoded)
+            row["network_model_evidence"]["observation_sha256"] = hashlib.sha256(
+                encoded
+            ).hexdigest()
+            trial_path.write_text(json.dumps(row), encoding="utf-8")
+            with self.assertRaisesRegex(
+                CONTROL.CandidateControlError, "route-once measurements were not recomputed"
             ):
                 CONTROL.summarize_windows_tun_evidence(
                     plan=plan,

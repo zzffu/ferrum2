@@ -46,6 +46,20 @@ WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256 = hashlib.sha256(
         json.dumps(WINDOWS_TUN_NETWORK_MODEL_PLAN, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
 ).hexdigest()
+WINDOWS_TUN_REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent.parent
+WINDOWS_TUN_COLLECTOR_SOURCE_SHA256 = hashlib.sha256(
+    (WINDOWS_TUN_REPOSITORY_ROOT / "tools" / "collect_windows_tun_performance_trial.ps1").read_bytes()
+).hexdigest()
+WINDOWS_TUN_HARNESS_SOURCE_SHA256 = hashlib.sha256(
+    (
+        WINDOWS_TUN_REPOSITORY_ROOT
+        / "tools"
+        / "ferrum2-m4-qualification"
+        / "src"
+        / "m4_support"
+        / "windows_tun.rs"
+    ).read_bytes()
+).hexdigest()
 
 WARMUP_SECONDS = frozenset({1, 3, 5, 10})
 ACTIVE_SECONDS = frozenset({15, 30, 60})
@@ -190,7 +204,7 @@ WINDOWS_TUN_PLAN_SCHEMA_VERSION = 2
 WINDOWS_TUN_TRIAL_SCHEMA_VERSION = 2
 WINDOWS_TUN_SUMMARY_SCHEMA_VERSION = 2
 WINDOWS_TUN_CALIBRATION_SCHEMA_VERSION = 2
-WINDOWS_TUN_POLICY_SCHEMA_VERSION = 1
+WINDOWS_TUN_POLICY_SCHEMA_VERSION = 2
 WINDOWS_TUN_TRIAL_MAX_BYTES = 64 * 1024
 WINDOWS_TUN_PAIR_SCHEDULE = "alternating-parent-candidate"
 WINDOWS_TUN_GUEST = {
@@ -207,6 +221,8 @@ WINDOWS_TUN_GUEST = {
 }
 WINDOWS_TUN_RUNTIME_RECIPE = {
     "topology": "tun-shadowsocks-external-echo",
+    "collector_source_sha256": WINDOWS_TUN_COLLECTOR_SOURCE_SHA256,
+    "harness_source_sha256": WINDOWS_TUN_HARNESS_SOURCE_SHA256,
     "tun_mtu_bytes": 1_420,
     "tun_ring_capacity_bytes": 131_072,
     "tun_max_tcp_flows": 4_096,
@@ -394,6 +410,10 @@ WINDOWS_TUN_SCENARIOS = {
                 "unit": "dropped_packets_per_million_responses",
                 "direction": "lower_is_better",
             },
+            "pending_response_peak": {
+                "unit": "pending_udp_responses",
+                "direction": "lower_is_better",
+            },
         },
         "checked_unit": "ring_full_events",
         "minimum_checked_units": 1,
@@ -401,8 +421,56 @@ WINDOWS_TUN_SCENARIOS = {
             "ring_full_counter_increased",
             "drop_rate_denominator_bound",
             "no_ring_full_retry",
+            "pending_response_peak_observed",
+            "pending_response_baseline_and_drain",
             "no_network_reset_or_full_rebuild",
             "tun_path_observed",
+        ),
+    },
+    "udp-route-once": {
+        "recipe": {
+            **WINDOWS_TUN_RUNTIME_RECIPE,
+            "network_model_schema_version": WINDOWS_TUN_NETWORK_MODEL.SCHEMA_VERSION,
+            "network_model_controller_sha256": WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
+            "network_model_plan_sha256": WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
+            "generations": WINDOWS_TUN_NETWORK_MODEL.ROUTE_GENERATIONS,
+            "source_slots": WINDOWS_TUN_NETWORK_MODEL.ROUTE_SOURCE_SLOTS,
+            "target_slots": WINDOWS_TUN_NETWORK_MODEL.ROUTE_TARGET_SLOTS,
+            "datagrams_per_target": WINDOWS_TUN_NETWORK_MODEL.ROUTE_DATAGRAMS_PER_TARGET,
+            "required_outbounds": ["direct", "proxy"],
+            "generation_transition": "guest_route_metric_reset_network",
+        },
+        "metrics": {
+            "multi_target_packet_rate": {
+                "unit": "multi_target_datagrams_per_second",
+                "direction": "higher_is_better",
+            },
+            "association_creation_rate": {
+                "unit": "associations_per_second",
+                "direction": "higher_is_better",
+            },
+            "router_invocations_avoided": {
+                "unit": "avoided_router_invocations",
+                "direction": "higher_is_better",
+            },
+        },
+        "checked_unit": "echoed_multi_target_datagrams",
+        "minimum_checked_units": (
+            WINDOWS_TUN_NETWORK_MODEL.ROUTE_GENERATIONS
+            * WINDOWS_TUN_NETWORK_MODEL.ROUTE_SOURCE_SLOTS
+            * WINDOWS_TUN_NETWORK_MODEL.ROUTE_TARGET_SLOTS
+            * WINDOWS_TUN_NETWORK_MODEL.ROUTE_DATAGRAMS_PER_TARGET
+        ),
+        "correctness_checks": (
+            "every_reply_accounted",
+            "payload_exact",
+            "direct_and_proxy_sources",
+            "association_creation_counter_exact",
+            "router_invocation_counter_exact",
+            "post_reset_reroute_verified",
+            "network_model_evidence_bound",
+            "tun_path_observed",
+            "clean_drain",
         ),
     },
     "network-lifecycle": {
@@ -3275,7 +3343,7 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 
 def windows_tun_scenario_contracts() -> dict[str, object]:
-    """Return the JSON-canonical eight-scenario recipe."""
+    """Return the JSON-canonical nine-scenario recipe."""
 
     return json.loads(_canonical_json_bytes(WINDOWS_TUN_SCENARIOS).decode("ascii"))
 
@@ -3324,7 +3392,7 @@ def validate_windows_tun_policy(policy: dict[str, object]) -> None:
     scenarios = policy["scenarios"]
     if type(scenarios) is not dict or set(scenarios) != set(WINDOWS_TUN_SCENARIOS):
         raise CandidateControlError(
-            "Windows TUN policy scenarios must exactly match the eight-scenario catalog"
+            "Windows TUN policy scenarios must exactly match the nine-scenario catalog"
         )
     calibration_states: list[bool] = []
     calibration_identities: list[tuple[object, object, object]] = []
@@ -3604,15 +3672,16 @@ def _windows_tun_utc(value: object, field: str) -> datetime:
 def _validate_windows_tun_network_model_reference(
     value: object, *, scenario: str, sequence: int, member: str, pair: int
 ) -> None:
-    if scenario != "network-lifecycle":
+    model_scenarios = {"udp-route-once", "network-lifecycle"}
+    if scenario not in model_scenarios:
         if value is not None:
             raise CandidateControlError(
-                "non-lifecycle Windows TUN trial cannot reference network-model evidence"
+                "non-model Windows TUN trial cannot reference network-model evidence"
             )
         return
     if type(value) is not dict:
         raise CandidateControlError(
-            "network-lifecycle trial must reference network-model evidence"
+            f"{scenario} trial must reference network-model evidence"
         )
     _exact_fields(
         value,
@@ -3628,9 +3697,7 @@ def _validate_windows_tun_network_model_reference(
         raise CandidateControlError("Windows TUN network-model collector SHA-256 is invalid")
     if value["plan_sha256"] != WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256:
         raise CandidateControlError("Windows TUN network-model plan identity mismatch")
-    expected_file = (
-        f"{sequence:03d}-network-lifecycle-{member}-pair-{pair}.network-model.json"
-    )
+    expected_file = f"{sequence:03d}-{scenario}-{member}-pair-{pair}.network-model.json"
     if value["observation_file"] != expected_file:
         raise CandidateControlError("Windows TUN network-model observation name mismatch")
     digest = value["observation_sha256"]
@@ -3783,16 +3850,24 @@ def _network_model_trial_values(summary: dict[str, object]) -> dict[str, int]:
     }
 
 
+def _route_once_trial_values(summary: dict[str, object]) -> dict[str, int]:
+    return {
+        "multi_target_packet_rate": summary["packets_per_second"],
+        "association_creation_rate": summary["associations_per_second"],
+        "router_invocations_avoided": summary["router_invocations_avoided"],
+    }
+
+
 def _validate_windows_tun_network_model_sidecars(
     *, evidence_root: pathlib.Path, rows: dict[tuple[str, int, str], dict[str, object]]
 ) -> list[dict[str, object]]:
     model_root = evidence_root / "network-model"
     if not model_root.is_dir() or model_root.is_symlink():
         raise CandidateControlError("Windows TUN network-model evidence directory is missing")
+    model_scenarios = ("udp-route-once", "network-lifecycle")
     expected_files = {
-        rows[("network-lifecycle", pair, member)]["network_model_evidence"][
-            "observation_file"
-        ]
+        rows[(scenario, pair, member)]["network_model_evidence"]["observation_file"]
+        for scenario in model_scenarios
         for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1)
         for member in ("parent", "candidate")
     }
@@ -3810,97 +3885,117 @@ def _validate_windows_tun_network_model_sidecars(
             "Windows TUN network-model evidence set is incomplete or contains extras"
         )
     evidence_files: list[dict[str, object]] = []
-    for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1):
-        for member in ("parent", "candidate"):
-            row = rows[("network-lifecycle", pair, member)]
-            reference = row["network_model_evidence"]
-            path = model_root / reference["observation_file"]
-            try:
-                raw = path.read_bytes()
-            except OSError as error:
-                raise CandidateControlError(
-                    "unable to read Windows TUN network-model observation"
-                ) from error
-            if hashlib.sha256(raw).hexdigest() != reference["observation_sha256"]:
-                raise CandidateControlError(
-                    "Windows TUN network-model observation identity mismatch"
+    for scenario in model_scenarios:
+        for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1):
+            for member in ("parent", "candidate"):
+                row = rows[(scenario, pair, member)]
+                reference = row["network_model_evidence"]
+                path = model_root / reference["observation_file"]
+                try:
+                    raw = path.read_bytes()
+                except OSError as error:
+                    raise CandidateControlError(
+                        "unable to read Windows TUN network-model observation"
+                    ) from error
+                if hashlib.sha256(raw).hexdigest() != reference["observation_sha256"]:
+                    raise CandidateControlError(
+                        "Windows TUN network-model observation identity mismatch"
+                    )
+                evidence_files.append(
+                    {
+                        "sequence": row["sequence"],
+                        "file": f"network-model/{path.name}",
+                        "sha256": reference["observation_sha256"],
+                    }
                 )
-            evidence_files.append(
-                {
-                    "sequence": row["sequence"],
-                    "file": f"network-model/{path.name}",
-                    "sha256": reference["observation_sha256"],
+                try:
+                    observation = WINDOWS_TUN_NETWORK_MODEL.load_observation(path)
+                    summary = WINDOWS_TUN_NETWORK_MODEL.summarize_observation(observation)
+                except WINDOWS_TUN_NETWORK_MODEL.NetworkModelError as error:
+                    raise CandidateControlError(
+                        f"invalid Windows TUN network-model observation: {error}"
+                    ) from error
+                identity = summary["identity"]
+                expected_identity = {
+                    "run_kind": row["run_kind"],
+                    "member": row["member"],
+                    "pair": row["pair"],
+                    "trial_sequence": row["sequence"],
+                    "vm_name": row["environment"]["vm_name"],
+                    "vm_id": row["environment"]["vm_id"],
+                    "checkpoint_name": row["environment"]["checkpoint_name"],
+                    "checkpoint_id": row["environment"]["checkpoint_id"],
+                    "sha": row["sha"],
+                    "tree": row["tree"],
+                    "client_sha256": row["client_sha256"],
+                    "server_sha256": row["server_sha256"],
+                    "harness_sha256": row["harness_sha256"],
+                    "collector_sha256": reference["collector_sha256"],
+                    "recipe_sha256": row["recipe_sha256"],
+                    "model_controller_sha256": reference["controller_sha256"],
+                    "model_plan_sha256": reference["plan_sha256"],
                 }
-            )
-            try:
-                observation = WINDOWS_TUN_NETWORK_MODEL.load_observation(path)
-                summary = WINDOWS_TUN_NETWORK_MODEL.summarize_lifecycle_observation(
-                    observation
-                )
-            except WINDOWS_TUN_NETWORK_MODEL.NetworkModelError as error:
-                raise CandidateControlError(
-                    f"invalid Windows TUN network-model observation: {error}"
-                ) from error
-            identity = summary["identity"]
-            expected_identity = {
-                "run_kind": row["run_kind"],
-                "member": row["member"],
-                "pair": row["pair"],
-                "trial_sequence": row["sequence"],
-                "vm_name": row["environment"]["vm_name"],
-                "vm_id": row["environment"]["vm_id"],
-                "checkpoint_name": row["environment"]["checkpoint_name"],
-                "checkpoint_id": row["environment"]["checkpoint_id"],
-                "sha": row["sha"],
-                "tree": row["tree"],
-                "client_sha256": row["client_sha256"],
-                "server_sha256": row["server_sha256"],
-                "harness_sha256": row["harness_sha256"],
-                "collector_sha256": reference["collector_sha256"],
-                "recipe_sha256": row["recipe_sha256"],
-                "model_controller_sha256": reference["controller_sha256"],
-                "model_plan_sha256": reference["plan_sha256"],
-            }
-            if any(identity[field] != value for field, value in expected_identity.items()):
-                raise CandidateControlError(
-                    "Windows TUN network-model observation is not bound to its trial"
-                )
-            measured = {
-                metric: entry["value"] for metric, entry in row["measurements"].items()
-            }
-            if measured != _network_model_trial_values(summary):
-                raise CandidateControlError(
-                    "Windows TUN lifecycle measurements were not recomputed from raw evidence"
-                )
-            reset_growth = summary["resources"]["reset_network"]["growth"]
-            expected_checks = {
-                "same_process_all_cycles": True,
-                "generation_advanced_once_per_cycle": True,
-                "managed_identity_preserved_across_resets": summary[
-                    "managed_identity_preserved_across_resets"
-                ],
-                "damage_only_full_rebuild": summary["damage_only_full_rebuild"],
-                "reset_and_full_rebuild_metrics_are_exact": summary[
-                    "reset_and_full_rebuild_metrics_are_exact"
-                ],
-                "resource_growth_zero_after_1000_resets": all(
-                    value <= 0 for value in reset_growth.values()
-                ),
-                "tcp_and_udp_recovered_after_interface_switch": summary[
-                    "tcp_and_udp_recovered_each_cycle"
-                ],
-                "interface_resolver_cache_hit_observed": summary[
-                    "interface_resolver"
-                ]["cache_hits"]
-                > 0,
-                "network_model_evidence_bound": True,
-                "tun_path_observed": True,
-                "clean_drain": True,
-            }
-            if row["correctness"]["checks"] != expected_checks:
-                raise CandidateControlError(
-                    "Windows TUN lifecycle correctness was not derived from raw evidence"
-                )
+                if any(identity[field] != value for field, value in expected_identity.items()):
+                    raise CandidateControlError(
+                        "Windows TUN network-model observation is not bound to its trial"
+                    )
+                measured = {
+                    metric: entry["value"] for metric, entry in row["measurements"].items()
+                }
+                if scenario == "udp-route-once":
+                    if measured != _route_once_trial_values(summary):
+                        raise CandidateControlError(
+                            "Windows TUN route-once measurements were not recomputed from raw evidence"
+                        )
+                    expected_checks = {
+                        "every_reply_accounted": True,
+                        "payload_exact": True,
+                        "direct_and_proxy_sources": summary["direct_and_proxy_verified"],
+                        "association_creation_counter_exact": True,
+                        "router_invocation_counter_exact": summary["route_once_verified"],
+                        "post_reset_reroute_verified": summary["post_reset_reroute_verified"],
+                        "network_model_evidence_bound": True,
+                        "tun_path_observed": True,
+                        "clean_drain": True,
+                    }
+                    if row["correctness"]["checked_units"] != summary["datagrams_sent"]:
+                        raise CandidateControlError(
+                            "Windows TUN route-once checked units were not derived from raw evidence"
+                        )
+                else:
+                    if measured != _network_model_trial_values(summary):
+                        raise CandidateControlError(
+                            "Windows TUN lifecycle measurements were not recomputed from raw evidence"
+                        )
+                    reset_growth = summary["resources"]["reset_network"]["growth"]
+                    expected_checks = {
+                        "same_process_all_cycles": True,
+                        "generation_advanced_once_per_cycle": True,
+                        "managed_identity_preserved_across_resets": summary[
+                            "managed_identity_preserved_across_resets"
+                        ],
+                        "damage_only_full_rebuild": summary["damage_only_full_rebuild"],
+                        "reset_and_full_rebuild_metrics_are_exact": summary[
+                            "reset_and_full_rebuild_metrics_are_exact"
+                        ],
+                        "resource_growth_zero_after_1000_resets": all(
+                            value <= 0 for value in reset_growth.values()
+                        ),
+                        "tcp_and_udp_recovered_after_interface_switch": summary[
+                            "tcp_and_udp_recovered_each_cycle"
+                        ],
+                        "interface_resolver_cache_hit_observed": summary[
+                            "interface_resolver"
+                        ]["cache_hits"]
+                        > 0,
+                        "network_model_evidence_bound": True,
+                        "tun_path_observed": True,
+                        "clean_drain": True,
+                    }
+                if row["correctness"]["checks"] != expected_checks:
+                    raise CandidateControlError(
+                        f"Windows TUN {scenario} correctness was not derived from raw evidence"
+                    )
     return evidence_files
 
 
@@ -4252,7 +4347,7 @@ def summarize_windows_tun_evidence(
             "schema_version": WINDOWS_TUN_NETWORK_MODEL.SCHEMA_VERSION,
             "controller_sha256": WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
             "plan_sha256": WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
-            "raw_observations": WINDOWS_TUN_PAIR_COUNT * 2,
+            "raw_observations": WINDOWS_TUN_PAIR_COUNT * 2 * 2,
         },
         "decision_policy": plan["decision_policy"],
         "calibration_complete": plan["calibration_complete"],
@@ -4515,7 +4610,7 @@ def _parser() -> argparse.ArgumentParser:
     source_lineage.add_argument("--candidate-sha", required=True)
     windows_tun_plan = commands.add_parser(
         "windows-tun-plan",
-        help="write the fixed eight-scenario Windows TUN paired plan",
+        help="write the fixed nine-scenario Windows TUN paired plan",
     )
     windows_tun_plan.add_argument(
         "--run-kind", required=True, choices=sorted(WINDOWS_TUN_RUN_KINDS)

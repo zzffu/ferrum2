@@ -1,5 +1,5 @@
 {
-  "policy_id": "windows-tun-network-model-calibration-required-v2",
+  "policy_id": "windows-tun-network-model-calibration-required-v3",
   "scenarios": {
     "fragment-reassembly-throughput": {
       "metrics": {
@@ -156,6 +156,49 @@
         }
       }
     },
+    "udp-route-once": {
+      "metrics": {
+        "association_creation_rate": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "associations_per_second"
+        },
+        "multi_target_packet_rate": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "multi_target_datagrams_per_second"
+        },
+        "router_invocations_avoided": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "avoided_router_invocations"
+        }
+      }
+    },
     "tcp-256-flow-fairness": {
       "metrics": {
         "fairness": {
@@ -264,10 +307,23 @@
           "noise_band_percent": null,
           "regression_threshold_percent": null,
           "unit": "dropped_packets_per_million_responses"
+        },
+        "pending_response_peak": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "pending_udp_responses"
         }
       }
     }
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "selection": "windows-tun-m17"
 }

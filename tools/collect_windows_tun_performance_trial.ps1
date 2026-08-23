@@ -8,6 +8,7 @@ param(
         "fragment-reassembly-throughput",
         "idle-cpu-wakeup",
         "wintun-ring-full-drop-rate",
+        "udp-route-once",
         "network-lifecycle"
     )]
     [string]$Scenario,
@@ -43,11 +44,16 @@ param(
     [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ClientPid,
     [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ServerPid,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$MetricsPort,
+    [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ServerMetricsPort,
     [Parameter(Mandatory = $true)][string]$Output
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($MetricsPort -eq $ServerMetricsPort) {
+    throw "client and server metrics ports must be distinct"
+}
 
 $ExpectedVmName = "Windows 10 MSIX packaging environment"
 $ExpectedVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
@@ -258,7 +264,11 @@ function Get-ContextSwitches([int]$ProcessId) {
     return [uint64]$rows[0].ContextSwitchesPersec
 }
 
-function Invoke-BoundedHarness([string[]]$Arguments, [int]$TimeoutSeconds) {
+function Invoke-BoundedHarness(
+    [string[]]$Arguments,
+    [int]$TimeoutSeconds,
+    [string]$PeakMetricName = ""
+) {
     $stdoutPath = Join-Path $script:WorkRoot "harness-$([guid]::NewGuid().ToString('N')).stdout"
     $stderrPath = "$stdoutPath.stderr"
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -274,7 +284,18 @@ function Invoke-BoundedHarness([string[]]$Arguments, [int]$TimeoutSeconds) {
     Assert-Condition $process.Start() "traffic harness failed to start"
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+    [uint64]$peakMetric = 0
+    $sampledMetric = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (-not [string]::IsNullOrWhiteSpace($PeakMetricName)) {
+            $sample = [uint64](Get-Metric (Get-Metrics $script:MetricsPort 2) $PeakMetricName)
+            if (-not $sampledMetric -or $sample -gt $peakMetric) { $peakMetric = $sample }
+            $sampledMetric = $true
+        }
+        if ($process.WaitForExit(10)) { break }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $timedOut = -not $process.HasExited
     if ($timedOut) {
         try { $process.Kill($true) } catch { try { $process.Kill() } catch { } }
         Assert-Condition ($process.WaitForExit(10000)) "timed-out traffic harness could not be reaped"
@@ -290,19 +311,33 @@ function Invoke-BoundedHarness([string[]]$Arguments, [int]$TimeoutSeconds) {
         $script:Utf8NoBom.GetByteCount($stderr) -le 65536
     ) "traffic harness output exceeded 64 KiB"
     $process.Dispose()
+    if (-not [string]::IsNullOrWhiteSpace($PeakMetricName)) {
+        Assert-Condition $sampledMetric "traffic harness metric sampler collected no observations"
+        return $peakMetric
+    }
 }
 
-function Invoke-Workload([string]$SelectedScenario, [int]$TimeoutSeconds) {
-    $path = Join-Path $script:WorkRoot "workload.json"
+function Invoke-Workload(
+    [string]$SelectedScenario,
+    [int]$TimeoutSeconds,
+    [string]$PeakMetricName = ""
+) {
+    $path = Join-Path $script:WorkRoot ("workload-{0}.json" -f [guid]::NewGuid().ToString("N"))
     Assert-Condition (-not (Test-Path -LiteralPath $path)) "workload output baseline is not absent"
-    Invoke-BoundedHarness @(
-        "windows-tun-workload",
-        "--scenario", $SelectedScenario,
-        "--target-ip", $script:TargetAddress,
-        "--tcp-port", [string]$script:TargetTcpPort,
-        "--udp-port", [string]$script:TargetUdpPort,
-        "--output", $path
-    ) $TimeoutSeconds
+    $arguments = @(
+            "windows-tun-workload",
+            "--scenario", $SelectedScenario,
+            "--target-ip", $script:TargetAddress,
+            "--tcp-port", [string]$script:TargetTcpPort,
+            "--udp-port", [string]$script:TargetUdpPort,
+            "--output", $path
+        )
+    $peakMetric = if ([string]::IsNullOrWhiteSpace($PeakMetricName)) {
+        [void](Invoke-BoundedHarness $arguments $TimeoutSeconds)
+        $null
+    } else {
+        [uint64](Invoke-BoundedHarness $arguments $TimeoutSeconds $PeakMetricName)
+    }
     $raw = Get-Content -LiteralPath $path -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8
     Assert-ExactProperties $raw @("schema_version", "kind", "scenario", "observation", "status") "workload"
     Assert-Condition (
@@ -311,16 +346,20 @@ function Invoke-Workload([string]$SelectedScenario, [int]$TimeoutSeconds) {
         $raw.scenario -ceq $SelectedScenario -and
         $raw.status -ceq "PASS"
     ) "workload identity/status mismatch"
-    return $raw.observation
+    if ([string]::IsNullOrWhiteSpace($PeakMetricName)) { return $raw.observation }
+    return [pscustomobject]@{
+        Observation = $raw.observation
+        PeakMetric = $peakMetric
+    }
 }
 
 function Invoke-Probe {
-    Invoke-BoundedHarness @(
+    [void](Invoke-BoundedHarness @(
         "windows-tun-probe",
         "--target-ip", $script:TargetAddress,
         "--tcp-port", [string]$script:TargetTcpPort,
         "--udp-port", [string]$script:TargetUdpPort
-    ) 30
+    ) 30)
 }
 
 function Wait-Metric(
@@ -508,6 +547,7 @@ $scenarioOrder = @(
     "fragment-reassembly-throughput",
     "idle-cpu-wakeup",
     "wintun-ring-full-drop-rate",
+    "udp-route-once",
     "network-lifecycle"
 )
 $scenarioIndex = [Array]::IndexOf($scenarioOrder, $Scenario)
@@ -532,16 +572,17 @@ $modelPlan = Get-Content -LiteralPath $modelPlanPath -Raw -Encoding utf8 |
     ConvertFrom-Json -Depth 12
 Assert-ExactProperties $modelPlan @(
     "schema_version", "execution", "host_network_mutation", "workloads",
-    "lifecycle_observation_identity_fields"
+    "observation_identity_fields"
 ) "network-model plan"
 Assert-Condition (
-    $modelPlan.schema_version -eq 2 -and
+    $modelPlan.schema_version -eq 3 -and
     $modelPlan.execution -ceq "local_hyperv_guest" -and
     $modelPlan.host_network_mutation -ceq "forbidden"
 ) "network-model plan execution boundary changed"
 Assert-ExactProperties $modelPlan.workloads @("network-lifecycle", "udp-route-once") `
     "network-model workloads"
 $lifecyclePlan = $modelPlan.workloads."network-lifecycle"
+$routeOncePlan = $modelPlan.workloads."udp-route-once"
 Assert-Condition (
     [int]$lifecyclePlan.reset_network_cycles -eq 1000 -and
     [int]$lifecyclePlan.full_rebuild_cycles -eq 10 -and
@@ -550,6 +591,13 @@ Assert-Condition (
     [int]$lifecyclePlan.interface_switch_sequence -eq 500 -and
     [int]$lifecyclePlan.interface_resolver_probes -eq 32
 ) "network-model lifecycle recipe changed"
+Assert-Condition (
+    [int]$routeOncePlan.generations -eq 2 -and
+    [int]$routeOncePlan.source_slots -eq 64 -and
+    [int]$routeOncePlan.target_slots -eq 4 -and
+    [int]$routeOncePlan.datagrams_per_target -eq 32 -and
+    (@($routeOncePlan.required_outbounds) -join "|") -ceq "direct|proxy"
+) "network-model route-once recipe changed"
 $outputPath = [IO.Path]::GetFullPath($Output)
 $outputParent = Split-Path -Parent $outputPath
 Assert-Condition (-not (Test-Path -LiteralPath $outputPath)) "trial output baseline is not absent"
@@ -557,9 +605,9 @@ Assert-Condition (Test-Path -LiteralPath $outputParent -PathType Container) "tri
 $outputParentItem = Get-Item -LiteralPath $outputParent -Force
 Assert-Condition (-not ($outputParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) "trial output parent cannot be a reparse point"
 $modelOutputPath = $null
-if ($Scenario -ceq "network-lifecycle") {
+if ($Scenario -in @("udp-route-once", "network-lifecycle")) {
     Assert-Condition (-not [string]::IsNullOrWhiteSpace($NetworkModelOutput)) `
-        "network-lifecycle requires raw network-model output"
+        "$Scenario requires raw network-model output"
     $modelOutputPath = [IO.Path]::GetFullPath($NetworkModelOutput)
     $modelOutputParent = Split-Path -Parent $modelOutputPath
     Assert-Condition (
@@ -568,13 +616,13 @@ if ($Scenario -ceq "network-lifecycle") {
         -not ((Get-Item -LiteralPath $modelOutputParent -Force).Attributes -band
             [IO.FileAttributes]::ReparsePoint) -and
         [IO.Path]::GetFileName($modelOutputPath) -ceq (
-            "{0:D3}-network-lifecycle-{1}-pair-{2}.network-model.json" -f `
-                $sequence, $Member, $Pair
+            "{0:D3}-{1}-{2}-pair-{3}.network-model.json" -f `
+                $sequence, $Scenario, $Member, $Pair
         )
     ) "network-model output boundary or identity is invalid"
 } else {
     Assert-Condition ([string]::IsNullOrWhiteSpace($NetworkModelOutput)) `
-        "non-lifecycle trial cannot write network-model evidence"
+        "non-model trial cannot write network-model evidence"
 }
 
 $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 6
@@ -620,7 +668,7 @@ $script:TargetTcpPort = [int]$ledger.support_listener.tcp_port
 $script:TargetUdpPort = [int]$ledger.support_listener.udp_port
 Assert-Condition (
     $script:TargetTcpPort -ge 1 -and $script:TargetTcpPort -le 65535 -and
-    $script:TargetUdpPort -ge 1 -and $script:TargetUdpPort -le 65535
+    $script:TargetUdpPort -ge 1 -and $script:TargetUdpPort -le 65532
 ) "support listener ports are invalid"
 
 $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
@@ -822,15 +870,26 @@ try {
             $before = Get-Metrics $MetricsPort 5
             $ringBefore = Get-Metric $before "ferrum2_tun_wintun_ring_full_dropped" $true
             $egressBefore = Get-Metric $before "ferrum2_tun_packets_egress" $true
+            $pendingBefore = Get-Metric $before "ferrum2_tun_pending_udp_responses"
+            Assert-Condition ($pendingBefore -eq 0) `
+                "ring-full pending UDP response baseline is not zero"
             $lifecycleBefore = Get-NetworkLifecycleMetrics $before
-            $observation = Invoke-Workload $Scenario 600
+            $sampledWorkload = Invoke-Workload $Scenario 600 `
+                "ferrum2_tun_pending_udp_responses"
+            $observation = $sampledWorkload.Observation
+            [uint64]$pendingResponsePeak = $sampledWorkload.PeakMetric
             Start-Sleep -Seconds 5
             $after = Get-Metrics $MetricsPort 5
             [uint64]$attempts = $observation.measurements.attempted_datagrams
             [uint64]$drops = (Get-Metric $after "ferrum2_tun_wintun_ring_full_dropped" $true) - $ringBefore
             [uint64]$egress = (Get-Metric $after "ferrum2_tun_packets_egress" $true) - $egressBefore
+            [uint64]$pendingAfter = Get-Metric $after "ferrum2_tun_pending_udp_responses"
             [uint64]$responseAttempts = $drops + $egress
             Assert-Condition ($drops -gt 0) "real workload did not trigger Wintun ring-full"
+            Assert-Condition ($pendingResponsePeak -eq 1) `
+                "ring-full workload did not observe the bounded pending UDP response depth"
+            Assert-Condition ($pendingAfter -eq 0) `
+                "ring-full pending UDP response did not drain"
             Assert-Condition ($responseAttempts -gt 0 -and $responseAttempts -le $attempts) "ring-full response accounting exceeds the request denominator"
             $lifecycleAfter = Get-NetworkLifecycleMetrics $after
             Assert-NetworkLifecycleMetricsEqual $lifecycleBefore $lifecycleAfter `
@@ -840,10 +899,273 @@ try {
                 unit = "dropped_packets_per_million_responses"
                 value = [uint64][Math]::Ceiling(([decimal]$drops * 1000000) / [decimal]$responseAttempts)
             }
+            $measurements.pending_response_peak = [ordered]@{
+                unit = "pending_udp_responses"
+                value = $pendingResponsePeak
+            }
             $checks.ring_full_counter_increased = $true
             $checks.drop_rate_denominator_bound = $true
             $checks.no_ring_full_retry = $true
+            $checks.pending_response_peak_observed = $true
+            $checks.pending_response_baseline_and_drain = $true
             $checks.no_network_reset_or_full_rebuild = $true
+        }
+        "udp-route-once" {
+            Start-Sleep -Seconds 5
+            $physical = Get-PhysicalDefaultRoute
+            $physicalRoute = $physical.Route
+            $physicalRouteIdentity = [ordered]@{
+                interface_index = [uint32]$physicalRoute.InterfaceIndex
+                interface_guid = ([Guid]$physical.Adapter.InterfaceGuid).ToString("D").ToLowerInvariant()
+                interface_name = [string]$physical.Adapter.Name
+                destination_prefix = [string]$physicalRoute.DestinationPrefix
+                next_hop = [string]$physicalRoute.NextHop
+                route_metric = [uint32]$physicalRoute.RouteMetric
+            }
+            $physicalJournal = Join-Path $script:WorkRoot "physical-route-journal.json"
+            [IO.File]::WriteAllText(
+                $physicalJournal,
+                (($physicalRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                $script:Utf8NoBom
+            )
+            [uint64]$mutatedRouteMetric = if ($physicalRouteIdentity.route_metric -lt 4294967295) {
+                [uint64]$physicalRouteIdentity.route_metric + 1
+            } else {
+                [uint64]$physicalRouteIdentity.route_metric - 1
+            }
+            $rawGenerations = [Collections.Generic.List[object]]::new()
+            [uint64]$totalElapsedNanoseconds = 0
+            [uint64]$totalAssociationCreationNanoseconds = 0
+            [uint64]$totalAssociationCreations = 0
+            [uint64]$totalRouterInvocations = 0
+            [uint64]$totalDatagrams = 0
+            foreach ($generationOrdinal in 1..2) {
+                $before = Get-Metrics $MetricsPort 5
+                $lifecycleBefore = Get-NetworkLifecycleMetrics $before
+                [uint64]$createdBefore = Get-Metric $before `
+                    "ferrum2_tun_udp_association_created" $true
+                [uint64]$routeBefore = Get-Metric $before `
+                    "ferrum2_tun_udp_association_route" $true
+                [uint64]$successfulRouteBefore = Get-LabeledMetric $before `
+                    "ferrum2_tun_udp_association_route" @{ result = "success" } $true
+                $serverBefore = Get-Metrics $ServerMetricsPort 5
+                [uint64]$proxyDatagramsBefore = Get-LabeledMetric $serverBefore `
+                    "ferrum2_udp_datagrams" @{
+                        role = "server"; direction = "client_to_target"; outcome = "accepted"
+                    } $true
+                [uint64]$proxyRepliesBefore = Get-LabeledMetric $serverBefore `
+                    "ferrum2_udp_datagrams" @{
+                        role = "server"; direction = "target_to_client"; outcome = "completed"
+                    } $true
+                $observation = Invoke-Workload $Scenario 120
+                Assert-ExactProperties $observation @(
+                    "measurements", "checked_units", "associations", "checks"
+                ) "route-once guest workload"
+                Assert-ExactProperties $observation.measurements @(
+                    "elapsed_nanoseconds", "association_creation_elapsed_nanoseconds",
+                    "packet_rate"
+                ) "route-once guest measurements"
+                Assert-ExactProperties $observation.checks @(
+                    "every_reply_accounted", "payload_exact", "multi_target_sources", "no_gso"
+                ) "route-once guest checks"
+                Assert-Condition (
+                    $observation.checks.every_reply_accounted -eq $true -and
+                    $observation.checks.payload_exact -eq $true -and
+                    $observation.checks.multi_target_sources -eq $true -and
+                    $observation.checks.no_gso -eq $true -and
+                    [uint64]$observation.checked_units -eq 8192 -and
+                    [uint64]$observation.measurements.elapsed_nanoseconds -gt 0 -and
+                    [uint64]$observation.measurements.association_creation_elapsed_nanoseconds `
+                        -gt 0 -and
+                    [uint64]$observation.measurements.association_creation_elapsed_nanoseconds `
+                        -le [uint64]$observation.measurements.elapsed_nanoseconds -and
+                    @($observation.associations).Count -eq 64
+                ) "route-once guest workload contract changed"
+                $after = Get-Metrics $MetricsPort 5
+                $lifecycleAfter = Get-NetworkLifecycleMetrics $after
+                Assert-NetworkLifecycleMetricsEqual $lifecycleBefore $lifecycleAfter `
+                    "route-once workload triggered an unplanned lifecycle transition"
+                [uint64]$createdDelta = (Get-Metric $after `
+                    "ferrum2_tun_udp_association_created") - $createdBefore
+                [uint64]$routeDelta = (Get-Metric $after `
+                    "ferrum2_tun_udp_association_route") - $routeBefore
+                [uint64]$successfulRouteDelta = (Get-LabeledMetric $after `
+                    "ferrum2_tun_udp_association_route" @{ result = "success" }) - `
+                    $successfulRouteBefore
+                $serverAfter = Get-Metrics $ServerMetricsPort 5
+                [uint64]$proxyDatagramsDelta = (Get-LabeledMetric $serverAfter `
+                    "ferrum2_udp_datagrams" @{
+                        role = "server"; direction = "client_to_target"; outcome = "accepted"
+                    }) - $proxyDatagramsBefore
+                [uint64]$proxyRepliesDelta = (Get-LabeledMetric $serverAfter `
+                    "ferrum2_udp_datagrams" @{
+                        role = "server"; direction = "target_to_client"; outcome = "completed"
+                    }) - $proxyRepliesBefore
+                [uint64]$expectedPathDatagrams = 32 * 4 * 32
+                Assert-Condition (
+                    $createdDelta -eq 64 -and
+                    $routeDelta -eq 64 -and
+                    $successfulRouteDelta -eq 64 -and
+                    $proxyDatagramsDelta -eq $expectedPathDatagrams -and
+                    $proxyRepliesDelta -eq $expectedPathDatagrams -and
+                    (Get-Metric $after "ferrum2_tun_udp_associations_active") -eq 64
+                ) "route-once product association/router/proxy counters are not exact"
+                $rawAssociations = [Collections.Generic.List[object]]::new()
+                $seenSources = [Collections.Generic.HashSet[uint64]]::new()
+                foreach ($association in @($observation.associations)) {
+                    Assert-ExactProperties $association @(
+                        "source_slot", "target_slots", "first_target_slot",
+                        "datagrams_sent", "replies_received"
+                    ) "route-once guest association"
+                    [uint64]$sourceSlot = $association.source_slot
+                    Assert-Condition (
+                        $sourceSlot -lt 64 -and $seenSources.Add($sourceSlot) -and
+                        (@($association.target_slots) -join "|") -ceq "0|1|2|3" -and
+                        [uint64]$association.first_target_slot -eq (
+                            if (($sourceSlot % 2) -eq 0) { 0 } else { 1 }
+                        ) -and
+                        [uint64]$association.datagrams_sent -eq 128 -and
+                        [uint64]$association.replies_received -eq 128
+                    ) "route-once guest association coverage is invalid"
+                    $rawAssociations.Add([ordered]@{
+                        source_slot = $sourceSlot
+                        target_slots = @(0, 1, 2, 3)
+                        first_target_slot = [uint64]$association.first_target_slot
+                        datagrams_sent = [uint64]$association.datagrams_sent
+                        replies_received = [uint64]$association.replies_received
+                    })
+                }
+                Assert-Condition ($seenSources.Count -eq 64) `
+                    "route-once guest workload did not cover every source slot"
+                $rawGenerations.Add([ordered]@{
+                    ordinal = [uint64]$generationOrdinal
+                    network_generation = [uint64]$lifecycleBefore.network_generation
+                    session_generation = [uint64]$lifecycleBefore.session_generation
+                    direct_datagrams_observed = `
+                        [uint64]$observation.checked_units - $proxyDatagramsDelta
+                    direct_replies_observed = `
+                        [uint64]$observation.checked_units - $proxyRepliesDelta
+                    proxy_datagrams_observed = $proxyDatagramsDelta
+                    proxy_replies_observed = $proxyRepliesDelta
+                    associations = $rawAssociations.ToArray()
+                })
+                $totalElapsedNanoseconds += [uint64]$observation.measurements.elapsed_nanoseconds
+                $totalAssociationCreationNanoseconds += `
+                    [uint64]$observation.measurements.association_creation_elapsed_nanoseconds
+                $totalAssociationCreations += $createdDelta
+                $totalRouterInvocations += $successfulRouteDelta
+                $totalDatagrams += [uint64]$observation.checked_units
+
+                $currentRoutes = @(
+                    Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
+                        -DestinationPrefix $physicalRouteIdentity.destination_prefix `
+                        -PolicyStore ActiveStore -ErrorAction Stop |
+                        Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
+                )
+                Assert-Condition ($currentRoutes.Count -eq 1) `
+                    "route-once physical route mutation target is not exact"
+                [uint64]$nextMetric = if ($generationOrdinal -eq 1) {
+                    $mutatedRouteMetric
+                } else {
+                    [uint64]$physicalRouteIdentity.route_metric
+                }
+                Set-NetRoute -InputObject $currentRoutes[0] -RouteMetric $nextMetric -ErrorAction Stop
+                $transition = Wait-LifecycleTransition "reset_network" $lifecycleAfter 30
+                Assert-Condition (
+                    (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
+                ) "route-once ResetNetwork retained an old association"
+            }
+            $physicalReadback = @(
+                Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
+                    -DestinationPrefix $physicalRouteIdentity.destination_prefix `
+                    -PolicyStore ActiveStore -ErrorAction Stop |
+                    Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
+            )
+            Assert-Condition (
+                $physicalReadback.Count -eq 1 -and
+                [uint32]$physicalReadback[0].RouteMetric -eq [uint32]$physicalRouteIdentity.route_metric
+            ) "route-once physical route metric baseline was not restored"
+            Remove-Item -LiteralPath $physicalJournal -Force
+            [void](Wait-CleanDrain $true)
+
+            $rawIdentity = [ordered]@{
+                run_kind = $RunKind
+                member = $Member
+                pair = [uint64]$Pair
+                trial_sequence = [uint64]$sequence
+                client_pid = [uint64]$ClientPid
+                server_pid = [uint64]$ServerPid
+                vm_name = $ExpectedVmName
+                vm_id = $ExpectedVmId
+                checkpoint_name = $ExpectedCheckpointName
+                checkpoint_id = $ExpectedCheckpointId
+                sha = $memberSha
+                tree = $Tree
+                client_sha256 = $clientHash
+                server_sha256 = $serverHash
+                harness_sha256 = $harnessHash
+                collector_sha256 = $collectorHash
+                recipe_sha256 = $RecipeSha256
+                model_controller_sha256 = $modelControllerHash
+                model_plan_sha256 = $modelPlanHash
+            }
+            $rawObservation = [ordered]@{
+                schema_version = 3
+                workload = "udp-route-once"
+                identity = $rawIdentity
+                elapsed_nanoseconds = $totalElapsedNanoseconds
+                association_creation_elapsed_nanoseconds = `
+                    $totalAssociationCreationNanoseconds
+                association_creations_observed = $totalAssociationCreations
+                router_invocations_observed = $totalRouterInvocations
+                generations = $rawGenerations.ToArray()
+            }
+            $modelPending = "$modelOutputPath.pending"
+            Assert-Condition (-not (Test-Path -LiteralPath $modelPending)) `
+                "network-model pending output baseline is not absent"
+            [IO.File]::WriteAllText(
+                $modelPending,
+                (($rawObservation | ConvertTo-Json -Depth 12) + "`n"),
+                $script:Utf8NoBom
+            )
+            Assert-Condition ((Get-Item -LiteralPath $modelPending).Length -le 2097152) `
+                "network-model observation exceeds 2 MiB"
+            Move-Item -LiteralPath $modelPending -Destination $modelOutputPath -ErrorAction Stop
+            $modelEvidenceReference = [ordered]@{
+                schema_version = 1
+                controller_sha256 = $modelControllerHash
+                collector_sha256 = $collectorHash
+                plan_sha256 = $modelPlanHash
+                observation_file = [IO.Path]::GetFileName($modelOutputPath)
+                observation_sha256 = Get-LowerSha256 $modelOutputPath
+            }
+            $checkedUnits = $totalDatagrams
+            $measurements.multi_target_packet_rate = [ordered]@{
+                unit = "multi_target_datagrams_per_second"
+                value = [uint64][Math]::Floor(
+                    ([decimal]$totalDatagrams * [decimal]1000000000) /
+                    [decimal]$totalElapsedNanoseconds
+                )
+            }
+            $measurements.association_creation_rate = [ordered]@{
+                unit = "associations_per_second"
+                value = [uint64][Math]::Floor(
+                    ([decimal]$totalAssociationCreations * [decimal]1000000000) /
+                    [decimal]$totalAssociationCreationNanoseconds
+                )
+            }
+            $measurements.router_invocations_avoided = [ordered]@{
+                unit = "avoided_router_invocations"
+                value = [uint64](2 * 64 * 4 - $totalRouterInvocations)
+            }
+            $checks.every_reply_accounted = $true
+            $checks.payload_exact = $true
+            $checks.direct_and_proxy_sources = $true
+            $checks.association_creation_counter_exact = $true
+            $checks.router_invocation_counter_exact = $true
+            $checks.post_reset_reroute_verified = $true
+            $checks.network_model_evidence_bound = $true
+            $checks.clean_drain = $true
         }
         "network-lifecycle" {
             Start-Sleep -Seconds 5
@@ -1120,7 +1442,7 @@ try {
                 model_plan_sha256 = $modelPlanHash
             }
             $rawObservation = [ordered]@{
-                schema_version = 2
+                schema_version = 3
                 workload = "network-lifecycle"
                 identity = $rawIdentity
                 baseline_resources = $baselineResources
@@ -1265,6 +1587,7 @@ try {
                 "fragment-reassembly-throughput" { "reassembled_datagrams" }
                 "idle-cpu-wakeup" { "idle_samples" }
                 "wintun-ring-full-drop-rate" { "ring_full_events" }
+                "udp-route-once" { "echoed_multi_target_datagrams" }
                 "network-lifecycle" { "successful_reset_network_cycles" }
             }
             checked_units = $checkedUnits

@@ -8,8 +8,9 @@ authoritative controller is
 only approved M17 and fuzz-smoke entry point is the local
 [`run_windows_tun_hyperv.ps1`](../tests/platform/run_windows_tun_hyperv.ps1) orchestrator. This
 runbook governs its host build, bounded staging, identity evidence, artifact readback, cleanup, and
-final checkpoint restoration around those repository contracts and the
-[managed-TUN Definition of Done](../ferrum2-tun-complete-implementation-plan.md#21-definition-of-done).
+final checkpoint restoration around the tracked
+[TUN configuration contract](config-v2-tun.md) and
+[network-model v2 migration contract](network-model-v2-migration.md).
 
 ## Safety boundary
 
@@ -53,7 +54,7 @@ Before staging every supported M17 or fuzz-smoke profile, require the VM to be `
 exact checkpoint, verify it is still `Off`, and then start that exact VM object. Run the ten M17
 invocations and the separate fuzz-smoke invocation serially. Each invocation must complete its
 closed evidence export, turn the VM off, restore the same checkpoint again, and verify `Off` before
-the next invocation. The hard-kill profile uses its separate orchestrator under the same isolation
+the next invocation. The hard-kill gate uses its separate orchestrator under the same isolation
 boundary. Do not retry or
 continue after any identity, execution, cleanup, export, restore, or final-state failure.
 
@@ -154,7 +155,7 @@ twelve local release-evidence invocations in total.
 | M17 | `dual-stack-dns` | `-Mode dual-stack-dns` | IPv4-only, IPv6-only, and dual TCP/UDP synthetic DNS plus readback/restore | 7 | 2 |
 | M17 | `udp-policy` | `-Mode udp-policy` | Source-keyed EIM and route-once association policy; ADF/EIF; parsed DNS, QUIC Initial, STUN/WebRTC, and game-style payloads; multi-target and v4/v6 source coverage; capacity, queue-pressure, and restart-stale-state contracts; directed-broadcast isolation; journaled firewall masking control | 18 | 9 |
 | M17 | `scheduler-ring-full` | `-Mode scheduler-ring-full` | Exact TCP 8/16/64 capacity-aware rotation, live UDP sequences totaling 8/16/64 in bounded eight-packet batches, a 256-packet 1,200-byte live egress pressure stage with closed sent/drop accounting, fair work rotation, lossless response backpressure, explicit nonfatal ring-full drop, and closed Wintun owner error dispositions | 8 | 8 |
-| TUN fuzz smoke | `fuzz-smoke` | guest executes staged `ferrum2-tun-fuzz-smoke.exe` | Four reviewed packet-reassembly seeds, three UDP-reset race seeds, bounded empty/malformed/oversized inputs, exact terminal/hash evidence | 7 | 0 |
+| TUN fuzz smoke | `fuzz-smoke` | guest executes staged `ferrum2-tun-fuzz-smoke.exe` | Four packet-reassembly, three UDP-reset race, eight removed-config, and eight strict-route rule-plan seeds plus bounded empty/malformed/oversized inputs and exact terminal/hash evidence | 23 | 0 |
 | M16 hard-kill | `hard-kill` | `-Mode hard-kill` | Managed auto-route, auto-DNS, and mixed live-traffic processes are forcibly terminated, followed by exact process, adapter, address, route, and DNS absence readback | 3 | 0 |
 
 Each network-reset profile creates one journaled guest-underlay `/32` notification route and then
@@ -171,7 +172,7 @@ The `fuzz-smoke` row is a separate in-memory deterministic gate. Hosted CI may c
 but does not execute them. The local host builds `smoke.exe` for
 `x86_64-pc-windows-msvc`, stages it under the same candidate/manifest/hash trust chain as the M17
 artifacts, and never executes it. Only the exact approved guest runs it. Acceptance requires exit
-zero, empty stderr, the exact `TUN state smoke corpora: 4 packet and 3 UDP reset seeds passed`
+zero, empty stderr, the exact `TUN state smoke corpora: 4 packet, 3 UDP reset, 8 config legacy, and 8 strict-route seeds passed`
 terminal, and a closed result
 binding the executable SHA-256/size, candidate SHA, identity SHA, staging-manifest SHA, seed counts,
 and log hashes.
@@ -183,7 +184,7 @@ hop, and route metric before termination. This is owned-route evidence, not exte
 or kill-switch evidence.
 
 All three network-reset counts, all three restart counts, fuzz smoke, and the separate hard-kill
-profile are required. A lower cycle count does not stand in for a higher count. Run all profiles
+gate are required. A lower cycle count does not stand in for a higher count. Run all profiles
 serially against this single approved guest; do not run concurrent jobs. Neither fuzz smoke nor
 hard-kill may be reported as an M17 witness or used to replace any of the ten M17 invocations.
 
@@ -194,7 +195,22 @@ been accepted. Performance calibration is a separate gate and remains `CALIBRATI
 correctness evidence cannot be used as performance acceptance. Its distinct entry point is
 [`run_windows_tun_performance_hyperv.ps1`](../tools/run_windows_tun_performance_hyperv.ps1), governed by
 [`windows_tun_performance_policy.json`](../tools/windows_tun_performance_policy.json); the current
-policy's calibration and threshold fields are all `null`.
+policy's calibration and threshold fields are all `null`. The closed plan has nine scenarios and
+90 alternating trials. Ten `udp-route-once` raw sidecars bind the real two-generation, 64-source,
+four-target guest traffic and product association/router counter deltas; ten lifecycle sidecars
+remain separate. The ring-full trial samples `ferrum2_tun_pending_udp_responses` while the guest
+workload is running and records the observed peak, not a configured or fabricated constant.
+The performance runner uses the same `-PowerShellZip` parameter, external default path, exact
+PowerShell version, and SHA-256 boundary documented under Local Hyper-V execution below.
+
+Establish calibration from a qualification-baseline commit that already contains the complete
+network-model implementation, route/cache metrics, collector, reducer, and schema. Run the first
+`calibration-aa` with that same commit as both `ParentSha` and `CandidateSha`; this measures noise
+only and cannot support an improvement claim. For a later comparison, keep that qualification
+baseline as `ParentSha` and use a descendant optimization commit as `CandidateSha`. Do not use an
+earlier commit that lacks the required route or cache metrics: the current collector deliberately
+fails closed on those missing series, so such a run is neither a valid calibration nor a valid
+performance comparison.
 
 The approved checkpoint exposes one Hyper-V network adapter, so it cannot honestly demonstrate a
 physical Wi-Fi-to-Ethernet handover. Interface resolver and notification unit tests may provide
@@ -261,7 +277,12 @@ Run each of the ten supported M17 profiles and the separate `fuzz-smoke` profile
 orchestrator. The credential argument
 may be omitted when a `PSCredential` exported by the current host user with `Export-Clixml` exists at
 `%LOCALAPPDATA%\Ferrum2\hyperv-ferrum2-test.credential.xml`. Keep that DPAPI-protected file outside
-the repository and evidence directories:
+the repository and evidence directories. All three Hyper-V entry points also default to the official
+PowerShell 7.4.19 win-x64 archive at
+`%LOCALAPPDATA%\Ferrum2\PowerShell-7.4.19-win-x64.zip`. The archive must remain outside the repository
+and its SHA-256 must be
+`cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9`; use `-PowerShellZip` only to
+select another absolute location containing those exact bytes:
 
 ```powershell
 pwsh -NoProfile -File tests/platform/run_windows_tun_hyperv.ps1 `
@@ -269,13 +290,34 @@ pwsh -NoProfile -File tests/platform/run_windows_tun_hyperv.ps1 `
     -RunToken '<unique-token>' `
     -IdentityLedger '<absolute-host-ledger-path>' `
     -WintunZip '<absolute-wintun-0.14.1-zip-path>' `
+    -PowerShellZip '<absolute-PowerShell-7.4.19-win-x64-zip-path>' `
     -EvidenceDirectory '<absent-absolute-host-evidence-path>'
+```
+
+Run M16 hard-kill only through its independent host orchestrator. It has no `Profile` parameter and
+must not be added to the M17 runner's profile set:
+
+```powershell
+pwsh -NoProfile -File tests/platform/run_windows_tun_hard_kill_hyperv.ps1 `
+    -RunToken '<unique-token>' `
+    -IdentityLedger '<absolute-host-ledger-path>' `
+    -WintunZip '<absolute-wintun-0.14.1-zip-path>' `
+    -PowerShellZip '<absolute-PowerShell-7.4.19-win-x64-zip-path>' `
+    -EvidenceDirectory '<absent-absolute-host-evidence-path>'
+```
+
+The non-mutating parameter/schema contract can be inspected without resolving a credential,
+building artifacts, inspecting a VM, or starting guest execution:
+
+```powershell
+pwsh -NoProfile -File tests/platform/run_windows_tun_hard_kill_hyperv.ps1 -DescribeContract
 ```
 
 Before any VM mutation, the orchestrator verifies the exact candidate commit, repeats the locked
 host builds, compares the client/server/test hashes with the ledger, compiles but does not execute the
-Windows fuzz-smoke binary, packages the current PowerShell 7 runtime, and stages bounded Visual C++
-runtime libraries. It then restores the exact approved checkpoint, starts the exact VM, and copies
+Windows fuzz-smoke binary, verifies and stages the pinned PowerShell 7.4.19 archive, and stages
+bounded Visual C++ runtime libraries. It then restores the exact approved checkpoint, starts the
+exact VM, and copies
 only the controller, identity ledger, Wintun archive, precompiled executables, portable PowerShell
 archive, runtime libraries, and a hash-bound staging manifest. For M17, the guest expands portable
 PowerShell and invokes the controller with explicit
@@ -289,8 +331,8 @@ more than 512 MiB in total. The host exports evidence before it turns off the VM
 checkpoint again, verifies the final state is `Off`, and only then publishes the host orchestration
 manifest.
 
-The adjacent `hard-kill` profile retains its separately versioned artifact and cleanup contract; do
-not adapt the M17 host-runner command by changing only `Profile` to `hard-kill`.
+The adjacent `hard-kill` gate retains its separately versioned artifact and cleanup contract; do not
+adapt the M17 host-runner command by changing only `Profile` to `hard-kill`.
 
 For M17, the main controller also performs bounded cleanup in its own `finally`; the outer cleanup is an
 additional idempotent, ownership-checked reap. `%ProgramData%\Ferrum2\ControllerRunIdentities\<token>.json`
@@ -370,14 +412,20 @@ The separate `fuzz-smoke` run must preserve `fuzz-smoke.stdout.log`, `fuzz-smoke
 `fuzz-smoke-result.json`, `guest-run.json`, `staged-input.json`, and `host-orchestration.json`. It must
 not fabricate M17 contract/result/cleanup artifacts. Accept it only when the staged smoke executable
 hash and size match all three wrapper layers, the candidate and staging-manifest hashes match, exit
-is zero, stderr is empty, packet/UDP seed counts are exactly 4/3, and stdout has exactly one line:
-`TUN state smoke corpora: 4 packet and 3 UDP reset seeds passed`.
+is zero, stderr is empty, packet/UDP-reset/config-legacy/strict-route seed counts are exactly
+4/3/8/8, and stdout has exactly one line:
+`TUN state smoke corpora: 4 packet, 3 UDP reset, 8 config legacy, and 8 strict-route seeds passed`.
 
 The separate hard-kill run must preserve `identity-ledger.json`, `controller.stdout.log`,
 `controller.stderr.log`, `hard-kill-evidence.jsonl`, `hard-kill-result.json`, `cleanup.stdout.log`,
 `cleanup.stderr.log`, and `hard-kill-cleanup.json`. It does not require and must not fabricate
 `m17-contract.json`, `m17-result.json`, or `external-cleanup.json`. Accept hard-kill only when all of
 the following are true:
+
+The eight guest files are exported under `<EvidenceDirectory>\guest\export`. The host evidence root
+also contains the byte-identical input ledger, the staged-input manifest, and
+`host-orchestration.json`; the latter is published only after the exact checkpoint is restored and
+the approved VM is confirmed `Off`.
 
 1. Controller exit is zero and stdout contains exactly one full
    `m16_windows_hard_kill status=PASS cases=3/3 ... cleanup=PASS ...` terminal line. Its guest build,
@@ -418,8 +466,8 @@ restore the approved checkpoint. A cleanup failure can never be waived into a pa
 
 ## Mandatory final checkpoint restore
 
-This sequence is mandatory after every local M17 or fuzz-smoke invocation and after every failed or
-abandoned run:
+This sequence is mandatory after every local M17, fuzz-smoke, or hard-kill invocation and after every
+failed or abandoned run:
 
 1. Export all guest artifacts and the identity ledger to the evidence store; compute and record
    their hashes outside the guest.

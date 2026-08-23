@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -32,6 +33,10 @@ const FRAGMENT_PAYLOAD: usize = 4_096;
 const FRAGMENT_BATCH: usize = 16;
 const FRAGMENT_MINIMUM_DATAGRAMS: u64 = 4_096;
 const RING_BURST_ATTEMPTS: u64 = 1_000_000;
+const ROUTE_SOURCE_SLOTS: usize = 64;
+const ROUTE_TARGET_SLOTS: usize = 4;
+const ROUTE_DATAGRAMS_PER_TARGET: usize = 32;
+const ROUTE_PAYLOAD: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const SUPPORT_MAX_TCP_CONNECTIONS: usize = 1_024;
 
@@ -41,6 +46,7 @@ enum Scenario {
     TcpFairness,
     UdpPackets,
     UdpAssociations,
+    UdpRouteOnce,
     Fragments,
     RingFull,
 }
@@ -52,6 +58,7 @@ impl Scenario {
             "tcp-256-flow-fairness" => Ok(Self::TcpFairness),
             "udp-packets-per-second" => Ok(Self::UdpPackets),
             "udp-8192-association-lookup-expiry" => Ok(Self::UdpAssociations),
+            "udp-route-once" => Ok(Self::UdpRouteOnce),
             "fragment-reassembly-throughput" => Ok(Self::Fragments),
             "wintun-ring-full-drop-rate" => Ok(Self::RingFull),
             _ => Err("unsupported Windows TUN workload scenario".to_owned()),
@@ -64,6 +71,7 @@ impl Scenario {
             Self::TcpFairness => "tcp-256-flow-fairness",
             Self::UdpPackets => "udp-packets-per-second",
             Self::UdpAssociations => "udp-8192-association-lookup-expiry",
+            Self::UdpRouteOnce => "udp-route-once",
             Self::Fragments => "fragment-reassembly-throughput",
             Self::RingFull => "wintun-ring-full-drop-rate",
         }
@@ -438,6 +446,24 @@ fn connected_udp(address: SocketAddr) -> Result<UdpSocket, String> {
     Ok(socket)
 }
 
+fn unconnected_udp(address: IpAddr) -> Result<UdpSocket, String> {
+    let bind = match address {
+        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        IpAddr::V6(_) => "[::]:0"
+            .parse::<SocketAddr>()
+            .map_err(|_| "internal IPv6 wildcard is invalid".to_owned())?,
+    };
+    let socket = UdpSocket::bind(bind)
+        .map_err(|error| format!("multi-target UDP workload bind failed: {error}"))?;
+    socket
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| format!("set multi-target UDP read timeout failed: {error}"))?;
+    socket
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| format!("set multi-target UDP write timeout failed: {error}"))?;
+    Ok(socket)
+}
+
 fn udp_round_trip(socket: &UdpSocket, payload: &[u8], reply: &mut [u8]) -> Result<(), String> {
     let sent = socket
         .send(payload)
@@ -625,6 +651,177 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     }))
 }
 
+fn route_target_addresses(target_ip: IpAddr, base_port: u16) -> Result<Vec<SocketAddr>, String> {
+    let last_port = base_port
+        .checked_add((ROUTE_TARGET_SLOTS - 1) as u16)
+        .ok_or_else(|| "UDP route-once target port range overflows".to_owned())?;
+    if last_port == 0 {
+        return Err("UDP route-once target port range is invalid".to_owned());
+    }
+    Ok((0..ROUTE_TARGET_SLOTS)
+        .map(|slot| SocketAddr::new(target_ip, base_port + slot as u16))
+        .collect())
+}
+
+const fn route_target_order(source_slot: usize) -> [usize; ROUTE_TARGET_SLOTS] {
+    if source_slot.is_multiple_of(2) {
+        [0, 1, 2, 3]
+    } else {
+        [1, 0, 2, 3]
+    }
+}
+
+fn send_route_targets(
+    socket: &UdpSocket,
+    source_slot: usize,
+    round: usize,
+    targets: &[SocketAddr],
+    target_slots: &[usize],
+) -> Result<(), String> {
+    for &target_slot in target_slots {
+        let sequence = ((source_slot as u64) << 32) | ((round as u64) << 16) | target_slot as u64;
+        let payload = sequenced_payload(ROUTE_PAYLOAD, sequence)?;
+        let sent = socket
+            .send_to(&payload, targets[target_slot])
+            .map_err(|error| format!("multi-target UDP send failed: {error}"))?;
+        if sent != payload.len() {
+            return Err("multi-target UDP sent a partial datagram".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn receive_route_targets(
+    socket: &UdpSocket,
+    source_slot: usize,
+    round: usize,
+    targets: &[SocketAddr],
+    expected_target_slots: &[usize],
+) -> Result<(), String> {
+    let mut seen = HashSet::with_capacity(expected_target_slots.len());
+    let mut reply = [0_u8; ROUTE_PAYLOAD];
+    for _ in expected_target_slots {
+        let (received, response_source) = socket
+            .recv_from(&mut reply)
+            .map_err(|error| format!("multi-target UDP receive failed: {error}"))?;
+        if received != ROUTE_PAYLOAD {
+            return Err("multi-target UDP payload length mismatch".to_owned());
+        }
+        let target_slot = targets
+            .iter()
+            .position(|target| *target == response_source)
+            .ok_or_else(|| {
+                "multi-target UDP response source is outside the target set".to_owned()
+            })?;
+        if !expected_target_slots.contains(&target_slot) || !seen.insert(target_slot) {
+            return Err(
+                "multi-target UDP received an unexpected or duplicate target response".to_owned(),
+            );
+        }
+        let sequence = ((source_slot as u64) << 32) | ((round as u64) << 16) | target_slot as u64;
+        if reply != sequenced_payload(ROUTE_PAYLOAD, sequence)?[..] {
+            return Err("multi-target UDP payload mismatch".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn udp_route_once(target_ip: IpAddr, base_port: u16) -> Result<Value, String> {
+    let targets = route_target_addresses(target_ip, base_port)?;
+    let sockets = (0..ROUTE_SOURCE_SLOTS)
+        .map(|_| unconnected_udp(target_ip))
+        .collect::<Result<Vec<_>, _>>()?;
+    let start = Instant::now();
+    for (source_slot, socket) in sockets.iter().enumerate() {
+        send_route_targets(
+            socket,
+            source_slot,
+            0,
+            &targets,
+            &route_target_order(source_slot)[..1],
+        )?;
+    }
+    for (source_slot, socket) in sockets.iter().enumerate() {
+        receive_route_targets(
+            socket,
+            source_slot,
+            0,
+            &targets,
+            &route_target_order(source_slot)[..1],
+        )?;
+    }
+    let association_creation_elapsed = start.elapsed();
+    for (source_slot, socket) in sockets.iter().enumerate() {
+        send_route_targets(
+            socket,
+            source_slot,
+            0,
+            &targets,
+            &route_target_order(source_slot)[1..],
+        )?;
+    }
+    for (source_slot, socket) in sockets.iter().enumerate() {
+        receive_route_targets(
+            socket,
+            source_slot,
+            0,
+            &targets,
+            &route_target_order(source_slot)[1..],
+        )?;
+    }
+    for round in 1..ROUTE_DATAGRAMS_PER_TARGET {
+        for (source_slot, socket) in sockets.iter().enumerate() {
+            send_route_targets(
+                socket,
+                source_slot,
+                round,
+                &targets,
+                &route_target_order(source_slot),
+            )?;
+        }
+        for (source_slot, socket) in sockets.iter().enumerate() {
+            receive_route_targets(
+                socket,
+                source_slot,
+                round,
+                &targets,
+                &route_target_order(source_slot),
+            )?;
+        }
+    }
+    let elapsed = start.elapsed();
+    let datagrams = (ROUTE_SOURCE_SLOTS * ROUTE_TARGET_SLOTS * ROUTE_DATAGRAMS_PER_TARGET) as u64;
+    let associations = (0..ROUTE_SOURCE_SLOTS)
+        .map(|source_slot| {
+            json!({
+                "source_slot": source_slot,
+                "target_slots": (0..ROUTE_TARGET_SLOTS).collect::<Vec<_>>(),
+                "first_target_slot": if source_slot % 2 == 0 { 0 } else { 1 },
+                "datagrams_sent": ROUTE_TARGET_SLOTS * ROUTE_DATAGRAMS_PER_TARGET,
+                "replies_received": ROUTE_TARGET_SLOTS * ROUTE_DATAGRAMS_PER_TARGET,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "measurements": {
+            "elapsed_nanoseconds": u64::try_from(elapsed.as_nanos())
+                .map_err(|_| "multi-target UDP elapsed time overflow".to_owned())?,
+            "association_creation_elapsed_nanoseconds": u64::try_from(
+                association_creation_elapsed.as_nanos()
+            ).map_err(|_| "multi-target UDP association time overflow".to_owned())?,
+            "packet_rate": elapsed_rate(datagrams, elapsed, "multi-target UDP packet rate")?,
+        },
+        "checked_units": datagrams,
+        "associations": associations,
+        "checks": {
+            "every_reply_accounted": true,
+            "payload_exact": true,
+            "multi_target_sources": true,
+            "no_gso": true,
+        }
+    }))
+}
+
 fn fragments(address: SocketAddr) -> Result<Value, String> {
     let socket = connected_udp(address)?;
     let mut reply = vec![0; FRAGMENT_PAYLOAD];
@@ -738,6 +935,7 @@ pub(super) fn run_workload(arguments: &[OsString]) -> Result<String, String> {
         Scenario::TcpFairness => tcp_fairness(address)?,
         Scenario::UdpPackets => udp_packets(address)?,
         Scenario::UdpAssociations => udp_associations(address)?,
+        Scenario::UdpRouteOnce => udp_route_once(arguments.target_ip, arguments.udp_port)?,
         Scenario::Fragments => fragments(address)?,
         Scenario::RingFull => ring_full(address)?,
     };
@@ -756,10 +954,12 @@ fn probe(arguments: &ProbeArgs) -> Result<(), String> {
     let payload = checked_payload(1_024, 5);
     let mut reply = vec![0; payload.len()];
     tcp_round_trip(&mut stream, &payload, &mut reply)?;
-    let udp_address = SocketAddr::new(arguments.target_ip, arguments.udp_port);
-    let socket = connected_udp(udp_address)?;
-    let mut udp_reply = vec![0; payload.len()];
-    udp_round_trip(&socket, &payload, &mut udp_reply)
+    for udp_address in route_target_addresses(arguments.target_ip, arguments.udp_port)? {
+        let socket = connected_udp(udp_address)?;
+        let mut udp_reply = vec![0; payload.len()];
+        udp_round_trip(&socket, &payload, &mut udp_reply)?;
+    }
+    Ok(())
 }
 
 pub(super) fn run_probe(arguments: &[OsString]) -> Result<String, String> {
@@ -787,34 +987,46 @@ fn serve_tcp(mut stream: TcpStream) -> Result<(), String> {
 pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
     let arguments = parse_support(arguments)?;
     let tcp_address = SocketAddr::new(arguments.listen_ip, arguments.tcp_port);
-    let udp_address = SocketAddr::new(arguments.listen_ip, arguments.udp_port);
+    let udp_addresses = route_target_addresses(arguments.listen_ip, arguments.udp_port)?;
     let tcp = TcpListener::bind(tcp_address)
         .map_err(|error| format!("bind Windows TUN support TCP failed: {error}"))?;
-    let udp = UdpSocket::bind(udp_address)
-        .map_err(|error| format!("bind Windows TUN support UDP failed: {error}"))?;
-    let active = Arc::new(AtomicUsize::new(0));
-    let udp_worker = thread::Builder::new()
-        .name("tun-support-udp".to_owned())
-        .spawn(move || -> Result<(), String> {
-            let mut buffer = vec![0_u8; 65_507];
-            loop {
-                let (read, peer) = udp
-                    .recv_from(&mut buffer)
-                    .map_err(|error| format!("support UDP receive failed: {error}"))?;
-                let sent = udp
-                    .send_to(&buffer[..read], peer)
-                    .map_err(|error| format!("support UDP send failed: {error}"))?;
-                if sent != read {
-                    return Err("support UDP sent a partial datagram".to_owned());
-                }
-            }
+    let udp_sockets = udp_addresses
+        .iter()
+        .map(|address| {
+            UdpSocket::bind(address)
+                .map_err(|error| format!("bind Windows TUN support UDP failed: {error}"))
         })
-        .map_err(|error| format!("spawn support UDP worker failed: {error}"))?;
+        .collect::<Result<Vec<_>, _>>()?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let udp_workers = udp_sockets
+        .into_iter()
+        .enumerate()
+        .map(|(slot, udp)| {
+            thread::Builder::new()
+                .name(format!("tun-support-udp-{slot}"))
+                .spawn(move || -> Result<(), String> {
+                    let mut buffer = vec![0_u8; 65_507];
+                    loop {
+                        let (read, peer) = udp
+                            .recv_from(&mut buffer)
+                            .map_err(|error| format!("support UDP receive failed: {error}"))?;
+                        let sent = udp
+                            .send_to(&buffer[..read], peer)
+                            .map_err(|error| format!("support UDP send failed: {error}"))?;
+                        if sent != read {
+                            return Err("support UDP sent a partial datagram".to_owned());
+                        }
+                    }
+                })
+                .map_err(|error| format!("spawn support UDP worker failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     println!(
-        "windows_tun_support status=READY tcp={} udp={}",
+        "windows_tun_support status=READY tcp={} udp={}..={}",
         tcp.local_addr()
             .map_err(|error| format!("read support TCP address failed: {error}"))?,
-        udp_address
+        udp_addresses[0],
+        udp_addresses[ROUTE_TARGET_SLOTS - 1],
     );
     std::io::stdout()
         .flush()
@@ -836,7 +1048,9 @@ pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
             })
             .map_err(|error| format!("spawn support TCP worker failed: {error}"))?;
     }
-    let _ = udp_worker.join();
+    for worker in udp_workers {
+        let _ = worker.join();
+    }
     Err("Windows TUN support listener stopped unexpectedly".to_owned())
 }
 
@@ -895,6 +1109,7 @@ pub(super) fn self_check() -> Result<(), String> {
         "tcp-256-flow-fairness",
         "udp-packets-per-second",
         "udp-8192-association-lookup-expiry",
+        "udp-route-once",
         "fragment-reassembly-throughput",
         "wintun-ring-full-drop-rate",
     ];

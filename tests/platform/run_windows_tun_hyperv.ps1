@@ -27,6 +27,9 @@ script or place one in the repository.
 
 [CmdletBinding(DefaultParameterSetName = "Run")]
 param(
+    [Parameter(Mandatory = $true, ParameterSetName = "Library", DontShow = $true)]
+    [switch]$LibraryOnly,
+
     [Parameter(Mandatory = $true, ParameterSetName = "Probe")]
     [switch]$ProbeOnly,
 
@@ -57,6 +60,9 @@ param(
     [string]$WintunZip,
 
     [Parameter(ParameterSetName = "Run")]
+    [string]$PowerShellZip,
+
+    [Parameter(ParameterSetName = "Run")]
     [string]$EvidenceDirectory,
 
     [string]$CredentialPath,
@@ -78,6 +84,8 @@ $approvedCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045F
 $approvedCheckpointId = [Guid]"1e570209-faf7-4248-8167-aa0687cdb8cf"
 $expectedWintunZipSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+$expectedPowerShellVersion = "7.4.19"
+$expectedPowerShellZipSha256 = "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9"
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..") -ErrorAction Stop).Path
 
 function Test-PathWithinRoot {
@@ -702,17 +710,54 @@ function Build-CandidateArtifacts {
 }
 
 function New-PortablePowerShellArchive {
-    param([Parameter(Mandatory = $true)][string]$Destination)
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceZip,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
 
-    $pwsh = (Get-Process -Id $PID -ErrorAction Stop).Path
-    if ([IO.Path]::GetFileName($pwsh) -cne "pwsh.exe" -or
-        $PSVersionTable.PSVersion -lt [Version]"7.4") {
-        throw "the host runner requires PowerShell 7.4 or newer"
+    if (-not [IO.Path]::IsPathFullyQualified($Destination)) {
+        throw "portable PowerShell archive destination must be absolute"
     }
-    $root = Split-Path -Parent $pwsh
-    Assert-NoReparsePointInExistingPath -Path $root -Label "portable PowerShell runtime"
-    $items = @(Get-Item -LiteralPath $root -Force) + @(
-        Get-ChildItem -LiteralPath $root -Force -Recurse
+    $destinationPath = [IO.Path]::GetFullPath($Destination)
+    $destinationParent = [IO.Path]::GetDirectoryName($destinationPath)
+    if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+        throw "portable PowerShell archive destination parent is absent"
+    }
+    Assert-NoReparsePointInExistingPath `
+        -Path $destinationParent `
+        -Label "portable PowerShell archive destination"
+    if (Test-PathWithinRoot -Path $destinationPath -Root $script:repositoryRoot) {
+        throw "portable PowerShell archive destination must remain outside the repository"
+    }
+    $source = Resolve-BoundedFile `
+        -Path $SourceZip `
+        -Label "portable PowerShell ZIP" `
+        -MaximumBytes 536870912 `
+        -RequireOutsideRepository
+    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $script:expectedPowerShellZipSha256) {
+        throw "portable PowerShell ZIP hash mismatch"
+    }
+    if (Test-Path -LiteralPath $destinationPath) {
+        throw "portable PowerShell archive destination baseline is not absent"
+    }
+    Copy-Item -LiteralPath $source -Destination $destinationPath -ErrorAction Stop
+    $archive = Resolve-BoundedFile `
+        -Path $destinationPath `
+        -Label "portable PowerShell archive" `
+        -MaximumBytes 536870912 `
+        -RequireOutsideRepository
+    if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $script:expectedPowerShellZipSha256) {
+        throw "copied portable PowerShell ZIP hash mismatch"
+    }
+    $inspectionRoot = Join-Path (Split-Path -Parent $archive) "portable-pwsh-inspection"
+    if (Test-Path -LiteralPath $inspectionRoot) {
+        throw "portable PowerShell inspection baseline is not absent"
+    }
+    Expand-Archive -LiteralPath $archive -DestinationPath $inspectionRoot -ErrorAction Stop
+    $items = @(Get-Item -LiteralPath $inspectionRoot -Force) + @(
+        Get-ChildItem -LiteralPath $inspectionRoot -Force -Recurse
     )
     if (@($items | Where-Object {
         $_.Attributes -band [IO.FileAttributes]::ReparsePoint
@@ -725,25 +770,19 @@ function New-PortablePowerShellArchive {
         $bytes -le 0 -or $bytes -gt 1073741824) {
         throw "portable PowerShell runtime exceeds its staging boundary"
     }
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [IO.Compression.ZipFile]::CreateFromDirectory(
-        $root,
-        $Destination,
-        [IO.Compression.CompressionLevel]::Optimal,
-        $false
-    )
-    $archive = Resolve-BoundedFile `
-        -Path $Destination `
-        -Label "portable PowerShell archive" `
-        -MaximumBytes 1073741824
+    $pwsh = Join-Path $inspectionRoot "pwsh.exe"
+    $version = @(& $pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $version.Count -ne 1 -or
+        [string]$version[0] -cne $script:expectedPowerShellVersion) {
+        throw "portable PowerShell version is not the pinned compatible release"
+    }
     return [pscustomobject]@{
         Path = $archive
         Name = [IO.Path]::GetFileName($archive)
         Bytes = [long](Get-Item -LiteralPath $archive -Force).Length
         Sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         ExecutableSha256 = (Get-FileHash -LiteralPath $pwsh -Algorithm SHA256).Hash.ToLowerInvariant()
-        Version = $PSVersionTable.PSVersion.ToString()
+        Version = [string]$version[0]
         FileCount = [long]$files.Count
         ExpandedBytes = $bytes
     }
@@ -908,6 +947,13 @@ function Get-EvidenceHashes {
     return @($rows)
 }
 
+# The independent hard-kill orchestrator imports the reviewed host-only safety primitives from this
+# script in an isolated dynamic-module scope. LibraryOnly must return before platform, credential,
+# VM, build, staging, or guest-execution work. It is intentionally not a qualification profile.
+if ($LibraryOnly) {
+    return
+}
+
 if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [Runtime.InteropServices.OSPlatform]::Windows
     ) -or
@@ -1013,6 +1059,13 @@ $wintunHash = (Get-FileHash -LiteralPath $wintunPath -Algorithm SHA256).Hash.ToL
 if ($wintunHash -cne $expectedWintunZipSha256) {
     throw "Wintun archive hash mismatch"
 }
+if ([string]::IsNullOrWhiteSpace($PowerShellZip)) {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw "LOCALAPPDATA is required for the default portable PowerShell ZIP"
+    }
+    $PowerShellZip = Join-Path $env:LOCALAPPDATA `
+        "Ferrum2\PowerShell-$expectedPowerShellVersion-win-x64.zip"
+}
 
 if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -1057,7 +1110,9 @@ try {
     $candidateArtifacts = Build-CandidateArtifacts `
         -Destination $hostArtifactRoot `
         -Ledger $ledgerIdentity.Ledger
-    $portablePowerShell = New-PortablePowerShellArchive -Destination $hostPowerShellArchive
+    $portablePowerShell = New-PortablePowerShellArchive `
+        -SourceZip $PowerShellZip `
+        -Destination $hostPowerShellArchive
     $runtimeLibraries = @(Stage-VisualCppRuntime -Destination $hostRuntimeLibraryRoot)
     $controllerEntry = New-StagedFileEntry `
         -Path $controllerPath `
@@ -1104,7 +1159,7 @@ try {
             powershell_archive = $(New-StagedFileEntry `
                 -Path $portablePowerShell.Path `
                 -Name "portable-pwsh.zip" `
-                -MaximumBytes 1073741824)
+                -MaximumBytes 536870912)
         }
         runtime = [ordered]@{
             rust_version = $candidateArtifacts.RustVersion
@@ -1213,6 +1268,8 @@ try {
             $ledgerIdentity.Sha256,
             $expectedWintunZipSha256,
             $expectedWintunDllSha256,
+            $expectedPowerShellZipSha256,
+            $expectedPowerShellVersion,
             $stagedInputSha256
         ) `
         -ErrorAction Stop `
@@ -1225,6 +1282,8 @@ try {
                 [string]$ExpectedLedgerHash,
                 [string]$ExpectedWintunHash,
                 [string]$ExpectedWintunDllHash,
+                [string]$ExpectedPowerShellZipHash,
+                [string]$ExpectedPowerShellVersion,
                 [string]$ExpectedInputManifestHash
             )
 
@@ -1584,6 +1643,7 @@ try {
                         (-not (Test-JsonInteger $manifest.restart_cycles) -or
                             [long]$manifest.restart_cycles -ne [long]$restartCycles)) -or
                     [string]$manifest.runtime.rust_version -cnotmatch '^rustc 1\.97\.1 \(' -or
+                    [string]$manifest.runtime.powershell_version -cne $ExpectedPowerShellVersion -or
                     [string]$manifest.runtime.powershell_executable_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
                     -not (Test-JsonInteger $manifest.runtime.powershell_file_count) -or
                     -not (Test-JsonInteger $manifest.runtime.powershell_expanded_bytes) -or
@@ -1603,14 +1663,16 @@ try {
                     @((Join-Path $candidateTestDirectory "ferrum2-tun-tests.exe"), $manifest.files.tun_tests, "ferrum2-tun-tests.exe", 4096, 536870912),
                     @((Join-Path $candidateTestDirectory "ferrum2-wintun-tests.exe"), $manifest.files.wintun_tests, "ferrum2-wintun-tests.exe", 4096, 536870912),
                     @($fuzzSmokeBinary, $manifest.files.fuzz_smoke, "ferrum2-tun-fuzz-smoke.exe", 4096, 536870912),
-                    @($powerShellArchive, $manifest.files.powershell_archive, "portable-pwsh.zip", 1, 1073741824)
+                    @($powerShellArchive, $manifest.files.powershell_archive, "portable-pwsh.zip", 1, 536870912)
                 )
                 foreach ($check in $fileChecks) {
                     Assert-StagedFileIdentity $check[0] $check[1] $check[2] $check[3] $check[4]
                 }
                 if ([string]$manifest.files.identity_ledger.sha256 -cne $ExpectedLedgerHash -or
-                    [string]$manifest.files.wintun_zip.sha256 -cne $ExpectedWintunHash) {
-                    throw "guest identity ledger or Wintun archive hash mismatch"
+                    [string]$manifest.files.wintun_zip.sha256 -cne $ExpectedWintunHash -or
+                    [string]$manifest.files.powershell_archive.sha256 -cne
+                        $ExpectedPowerShellZipHash) {
+                    throw "guest staged archive or identity hash mismatch"
                 }
                 $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding utf8 |
                     ConvertFrom-Json -ErrorAction Stop
@@ -1711,7 +1773,7 @@ try {
                 $pwshVersion = @(& $pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>> $setupStderr)
                 if ($LASTEXITCODE -ne 0 -or $pwshVersion.Count -ne 1 -or
                     [string]$pwshVersion[0] -cne [string]$manifest.runtime.powershell_version -or
-                    [Version]$pwshVersion[0] -lt [Version]"7.4") {
+                    [string]$pwshVersion[0] -cne $ExpectedPowerShellVersion) {
                     throw "staged PowerShell runtime verification failed"
                 }
                 [IO.File]::WriteAllText(
@@ -1732,14 +1794,14 @@ try {
                         -StderrPath $fuzzStderr
                     $fuzzStdoutLines = @(Get-Content -LiteralPath $fuzzStdout -ErrorAction Stop)
                     $fuzzStderrItem = Get-Item -LiteralPath $fuzzStderr -Force -ErrorAction Stop
-                    $expectedFuzzTerminal = "TUN state smoke corpora: 4 packet and 3 UDP reset seeds passed"
+                    $expectedFuzzTerminal = "TUN state smoke corpora: 4 packet, 3 UDP reset, 8 config legacy, and 8 strict-route seeds passed"
                     if ($qualificationExit -ne 0 -or $fuzzStdoutLines.Count -ne 1 -or
                         [string]$fuzzStdoutLines[0] -cne $expectedFuzzTerminal -or
                         $fuzzStderrItem.Length -ne 0) {
                         throw "guest Windows TUN fuzz smoke evidence is invalid"
                     }
                     $fuzzSmokeResult = [ordered]@{
-                        schema = "ferrum2.windows-tun.fuzz-smoke-result.v1"
+                        schema = "ferrum2.windows-tun.fuzz-smoke-result.v2"
                         status = "pass"
                         run_token = $Token
                         candidate_sha = $CandidateSha
@@ -1749,6 +1811,8 @@ try {
                         binary_bytes = [long]$manifest.files.fuzz_smoke.bytes
                         packet_seed_count = 4
                         udp_reset_seed_count = 3
+                        config_legacy_seed_count = 8
+                        strict_route_seed_count = 8
                         terminal = $expectedFuzzTerminal
                         stdout_sha256 = (Get-FileHash -LiteralPath $fuzzStdout -Algorithm SHA256).Hash.ToLowerInvariant()
                         stderr_sha256 = (Get-FileHash -LiteralPath $fuzzStderr -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -1760,9 +1824,10 @@ try {
                     Assert-ClosedProperties $fuzzSmokeResult @(
                         "schema", "status", "run_token", "candidate_sha", "identity_sha256", "staged_input_sha256",
                         "binary_sha256", "binary_bytes", "packet_seed_count", "udp_reset_seed_count",
+                        "config_legacy_seed_count", "strict_route_seed_count",
                         "terminal", "stdout_sha256", "stderr_sha256", "finished_utc"
                     ) "fuzz smoke result"
-                    if ($fuzzSmokeResult.schema -cne "ferrum2.windows-tun.fuzz-smoke-result.v1" -or
+                    if ($fuzzSmokeResult.schema -cne "ferrum2.windows-tun.fuzz-smoke-result.v2" -or
                         $fuzzSmokeResult.status -cne "pass" -or $fuzzSmokeResult.run_token -cne $Token -or
                         $fuzzSmokeResult.candidate_sha -cne $CandidateSha -or
                         $fuzzSmokeResult.identity_sha256 -cne $ExpectedLedgerHash -or
@@ -1774,6 +1839,10 @@ try {
                         [long]$fuzzSmokeResult.packet_seed_count -ne 4 -or
                         -not (Test-JsonInteger $fuzzSmokeResult.udp_reset_seed_count) -or
                         [long]$fuzzSmokeResult.udp_reset_seed_count -ne 3 -or
+                        -not (Test-JsonInteger $fuzzSmokeResult.config_legacy_seed_count) -or
+                        [long]$fuzzSmokeResult.config_legacy_seed_count -ne 8 -or
+                        -not (Test-JsonInteger $fuzzSmokeResult.strict_route_seed_count) -or
+                        [long]$fuzzSmokeResult.strict_route_seed_count -ne 8 -or
                         $fuzzSmokeResult.terminal -cne $expectedFuzzTerminal -or
                         $fuzzSmokeResult.stdout_sha256 -cne (Get-FileHash -LiteralPath $fuzzStdout -Algorithm SHA256).Hash.ToLowerInvariant() -or
                         $fuzzSmokeResult.stderr_sha256 -cne (Get-FileHash -LiteralPath $fuzzStderr -Algorithm SHA256).Hash.ToLowerInvariant()) {
@@ -2127,11 +2196,12 @@ try {
         $fuzzResultKeys = @(
             "schema", "status", "run_token", "candidate_sha", "identity_sha256", "staged_input_sha256",
             "binary_sha256", "binary_bytes", "packet_seed_count", "udp_reset_seed_count",
+            "config_legacy_seed_count", "strict_route_seed_count",
             "terminal", "stdout_sha256", "stderr_sha256", "finished_utc"
         )
         $null -ne $guestResult.fuzz_smoke -and
             (@($guestResult.fuzz_smoke.PSObject.Properties.Name) -join "|") -ceq ($fuzzResultKeys -join "|") -and
-            $guestResult.fuzz_smoke.schema -ceq "ferrum2.windows-tun.fuzz-smoke-result.v1" -and
+            $guestResult.fuzz_smoke.schema -ceq "ferrum2.windows-tun.fuzz-smoke-result.v2" -and
             $guestResult.fuzz_smoke.status -ceq "pass" -and
             $guestResult.fuzz_smoke.run_token -ceq $RunToken -and
             $guestResult.fuzz_smoke.candidate_sha -ceq $candidate.Sha -and
@@ -2141,7 +2211,9 @@ try {
             [long]$guestResult.fuzz_smoke.binary_bytes -eq [long]$candidateArtifacts.FuzzSmoke.Bytes -and
             [long]$guestResult.fuzz_smoke.packet_seed_count -eq 4 -and
             [long]$guestResult.fuzz_smoke.udp_reset_seed_count -eq 3 -and
-            $guestResult.fuzz_smoke.terminal -ceq "TUN state smoke corpora: 4 packet and 3 UDP reset seeds passed" -and
+            [long]$guestResult.fuzz_smoke.config_legacy_seed_count -eq 8 -and
+            [long]$guestResult.fuzz_smoke.strict_route_seed_count -eq 8 -and
+            $guestResult.fuzz_smoke.terminal -ceq "TUN state smoke corpora: 4 packet, 3 UDP reset, 8 config legacy, and 8 strict-route seeds passed" -and
             [string]$guestResult.fuzz_smoke.stdout_sha256 -cmatch '^[0-9a-f]{64}$' -and
             [string]$guestResult.fuzz_smoke.stderr_sha256 -cmatch '^[0-9a-f]{64}$'
     } else {
@@ -2192,11 +2264,48 @@ try {
     }
 
     if ($restoreRequired) {
-        try {
-            Stop-ApprovedVm -TimeoutSeconds $ShutdownTimeoutSeconds
-            Restore-ApprovedCheckpoint
-        } catch {
-            $finalizationFailures.Add("mandatory final checkpoint restore failed: $($_.Exception.Message)")
+        $vmConfirmedOff = $false
+        for ($attempt = 1; $attempt -le 2 -and -not $vmConfirmedOff; $attempt++) {
+            try {
+                Stop-ApprovedVm -TimeoutSeconds $ShutdownTimeoutSeconds
+            } catch {
+                $finalizationFailures.Add(
+                    "mandatory final VM stop attempt $attempt failed: $($_.Exception.Message)"
+                )
+            }
+            try {
+                $stoppedState = [string](Get-ApprovedVmContext).Vm.State
+                if ($stoppedState -ceq "Off") {
+                    $vmConfirmedOff = $true
+                } else {
+                    $finalizationFailures.Add(
+                        "mandatory final VM stop attempt $attempt left state $stoppedState"
+                    )
+                }
+            } catch {
+                $finalizationFailures.Add(
+                    "mandatory final VM stop attempt $attempt readback failed: " +
+                        $_.Exception.Message
+                )
+            }
+        }
+        if ($vmConfirmedOff) {
+            $checkpointRestored = $false
+            for ($attempt = 1; $attempt -le 2 -and -not $checkpointRestored; $attempt++) {
+                try {
+                    Restore-ApprovedCheckpoint
+                    $checkpointRestored = $true
+                } catch {
+                    $finalizationFailures.Add(
+                        "mandatory final checkpoint restore attempt $attempt failed: " +
+                            $_.Exception.Message
+                    )
+                }
+            }
+        } else {
+            $finalizationFailures.Add(
+                "mandatory final checkpoint restore could not start because Off was not proven"
+            )
         }
     }
 
