@@ -23,6 +23,9 @@ SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.
 WINDOWS_TUN_POLICY_PATH = ROOT / "tools" / "windows_tun_performance_policy.json"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "performance-candidate.yml"
 WINDOWS_TUN_RUNNER_PATH = ROOT / "tests" / "platform" / "run_windows_tun_hyperv.ps1"
+WINDOWS_TUN_PERFORMANCE_RUNNER_PATH = (
+    ROOT / "tools" / "run_windows_tun_performance_hyperv.ps1"
+)
 WINDOWS_TUN_COLLECTOR_PATH = ROOT / "tools" / "collect_windows_tun_performance_trial.ps1"
 M4_SUPPORT_PATH = ROOT / "tools" / "ferrum2-m4-qualification" / "src" / "m4_support" / "mod.rs"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
@@ -918,6 +921,64 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         )
         self.assertNotIn("ferrum2-hyperv-guest", workflows)
         self.assertNotIn("qualify_windows_tun.ps1", workflows)
+
+    def test_local_hyperv_performance_runner_keeps_host_network_read_only(
+        self,
+    ) -> None:
+        runner = WINDOWS_TUN_PERFORMANCE_RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("#requires -Version 7.4", runner)
+        self.assertIn("#requires -Modules Hyper-V", runner)
+        for identity in (
+            "Windows 10 MSIX packaging environment",
+            "82e20295-1d30-48e7-a751-e21d35d872d4",
+            "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
+            "1e570209-faf7-4248-8167-aa0687cdb8cf",
+        ):
+            self.assertIn(identity, runner)
+
+        self.assertIn("hyperv-ferrum2-test.credential.xml", runner)
+        self.assertIn('Resolve-ExternalFile -Path $candidate -Label "guest credential"', runner)
+        self.assertIn("Test-PathWithinRoot", runner)
+        self.assertNotRegex(runner, r"(?i)\bpassword\s*=")
+
+        begin = "# BEGIN GUEST_ONLY_NETWORK_EXECUTION"
+        end = "# END GUEST_ONLY_NETWORK_EXECUTION"
+        self.assertEqual(runner.count(begin), 1)
+        self.assertEqual(runner.count(end), 1)
+        prefix, remainder = runner.split(begin, 1)
+        guest, suffix = remainder.split(end, 1)
+        host = prefix + suffix
+        self.assertNotRegex(
+            host,
+            r"(?im)^\s*(?:Get|New|Remove|Set)-Net(?:Adapter|IPAddress|Route|"
+            r"IPInterface|DnsClient|Firewall)\w*\b",
+        )
+        self.assertNotRegex(host, r"(?i)\bFwpm\w*\b")
+        self.assertNotRegex(guest, r"(?i)\b(?:cargo|git|rustup)(?:\.exe)?\b")
+        self.assertIn("Build-MemberArtifacts", host)
+        self.assertIn("Copy-Item -ToSession", host)
+        self.assertIn('runtime\\pwsh\\pwsh.exe', guest)
+        self.assertIn('runtime\\rust', guest)
+        collector = WINDOWS_TUN_COLLECTOR_PATH.read_text(encoding="utf-8")
+        self.assertIn("@(& rustc.exe --version", collector)
+        self.assertNotIn("rustc.exe +1.97.1", collector)
+        self.assertNotIn('rustc.exe") +1.97.1', runner)
+
+        self.assertIn("[string]$SupportIpv4", runner)
+        self.assertIn('"windows-tun-probe"', guest)
+        self.assertIn("guest support listener preflight failed", guest)
+        self.assertNotIn('"windows-tun-support"', host)
+
+        plan_index = runner.index("if ($PlanOnly)")
+        dirty_index = runner.index("diff --quiet --exit-code")
+        self.assertLess(plan_index, dirty_index)
+        finalizer = re.search(
+            r"finally\s*\{.*?Stop-ApprovedVm.*?Restore-ApprovedCheckpoint.*?"
+            r'Vm\.State\s+-cne\s+"Off"',
+            host,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(finalizer)
 
     def test_raw_collector_and_traffic_harness_cover_the_closed_catalog(self) -> None:
         collector = WINDOWS_TUN_COLLECTOR_PATH.read_text(encoding="utf-8")

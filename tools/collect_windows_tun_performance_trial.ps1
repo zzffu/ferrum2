@@ -305,7 +305,7 @@ Assert-Condition (
     $computer.Manufacturer -ceq "Microsoft Corporation" -and
     $computer.Model -ceq "Virtual Machine"
 ) "collector is restricted to the approved Hyper-V guest"
-$rustcVersion = @(& rustc.exe +1.97.1 --version 2>&1)
+$rustcVersion = @(& rustc.exe --version 2>&1)
 Assert-Condition (
     $LASTEXITCODE -eq 0 -and ($rustcVersion -join "`n") -cmatch '^rustc 1\.97\.1 \('
 ) "the pinned Rust 1.97.1 toolchain is unavailable or changed"
