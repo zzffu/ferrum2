@@ -8,6 +8,7 @@ mod network;
 mod owner;
 mod process;
 mod relay;
+mod reset;
 mod ruleset;
 mod ruleset_https;
 mod sniff;
@@ -45,6 +46,15 @@ pub use process::{
 pub use relay::{
     RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
     relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
+};
+pub use reset::{
+    DEFAULT_NETWORK_RESET_HOOKS, DEFAULT_NETWORK_RUNTIME_OWNERS, MAX_NETWORK_RESET_HOOKS,
+    MAX_NETWORK_RUNTIME_OWNERS, ManagedNetworkDamage, NetworkResetCoordinator,
+    NetworkResetCoordinatorError, NetworkResetHookRegistration, NetworkResetHookRegistrationError,
+    NetworkResetHookStage, NetworkResetIntent, NetworkResetLimits, NetworkResetLimitsError,
+    NetworkResetOutcome, NetworkResetReason, NetworkResetReport, NetworkResetRequestDisposition,
+    NetworkResetSignal, NetworkResetState, NetworkResetStatus, NetworkRuntimeOwner,
+    NetworkRuntimeOwnerCancellation, NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
 };
 pub use ruleset::{
     BoxedRuleSetBody, LoadedRuleSet, PreparedRuleSetRefreshRoot, RuleSetBody, RuleSetCacheName,

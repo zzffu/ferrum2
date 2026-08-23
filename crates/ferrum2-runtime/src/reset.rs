@@ -1,0 +1,1066 @@
+use std::collections::BTreeMap;
+use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, Weak};
+
+use futures_util::FutureExt;
+use tokio::sync::{Mutex as AsyncMutex, watch};
+
+use crate::network::{
+    NetworkSnapshot, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,
+};
+use crate::owner::{OwnerGuard, OwnerRegistry};
+
+/// Default maximum number of registered reset hooks.
+pub const DEFAULT_NETWORK_RESET_HOOKS: usize = 16;
+/// Default maximum number of generation-bound runtime owners.
+pub const DEFAULT_NETWORK_RUNTIME_OWNERS: usize = 65_536;
+/// Hard upper bound for reset hooks accepted by one coordinator.
+pub const MAX_NETWORK_RESET_HOOKS: usize = 64;
+/// Hard upper bound for runtime owners accepted by one coordinator.
+pub const MAX_NETWORK_RUNTIME_OWNERS: usize = 1_048_576;
+
+/// Bounded registration limits for one network reset coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkResetLimits {
+    max_hooks: usize,
+    max_runtime_owners: usize,
+}
+
+impl NetworkResetLimits {
+    /// Validates explicit hook and runtime-owner capacities.
+    pub const fn new(
+        max_hooks: usize,
+        max_runtime_owners: usize,
+    ) -> Result<Self, NetworkResetLimitsError> {
+        if max_hooks == 0 {
+            return Err(NetworkResetLimitsError::ZeroHooks);
+        }
+        if max_hooks > MAX_NETWORK_RESET_HOOKS {
+            return Err(NetworkResetLimitsError::TooManyHooks);
+        }
+        if max_runtime_owners == 0 {
+            return Err(NetworkResetLimitsError::ZeroRuntimeOwners);
+        }
+        if max_runtime_owners > MAX_NETWORK_RUNTIME_OWNERS {
+            return Err(NetworkResetLimitsError::TooManyRuntimeOwners);
+        }
+        Ok(Self {
+            max_hooks,
+            max_runtime_owners,
+        })
+    }
+
+    /// Returns the reset-hook registration bound.
+    pub const fn max_hooks(self) -> usize {
+        self.max_hooks
+    }
+
+    /// Returns the generation-bound owner registration bound.
+    pub const fn max_runtime_owners(self) -> usize {
+        self.max_runtime_owners
+    }
+}
+
+impl Default for NetworkResetLimits {
+    fn default() -> Self {
+        Self {
+            max_hooks: DEFAULT_NETWORK_RESET_HOOKS,
+            max_runtime_owners: DEFAULT_NETWORK_RUNTIME_OWNERS,
+        }
+    }
+}
+
+/// Closed validation failure for coordinator capacities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetLimitsError {
+    ZeroHooks,
+    TooManyHooks,
+    ZeroRuntimeOwners,
+    TooManyRuntimeOwners,
+}
+
+/// Ordinary network-semantic event that requests a lightweight reset.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetReason {
+    RouteChanged,
+    InterfaceChanged,
+    UnicastAddressChanged,
+    DefaultInterfaceChanged,
+    SourceAddressInvalid,
+    ExplicitRequest,
+    GenerationChangedDuringBind,
+}
+
+/// Closed managed-plane damage classification that permits a full rebuild.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedNetworkDamage {
+    AdapterInvalid,
+    DeviceSessionFatal,
+    InterfaceIdentityMismatch,
+    ManagedAddressDamaged,
+    ManagedRouteDamaged,
+    ManagedDnsDamaged,
+    StrictRouteDamaged,
+    OwnershipLedgerUntrusted,
+    ManagedObjectMissing,
+}
+
+/// Whether one request is an ordinary runtime reset or an externally completed full rebuild.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetIntent {
+    Ordinary(NetworkResetReason),
+    FullRebuild(ManagedNetworkDamage),
+}
+
+impl NetworkResetIntent {
+    const fn full_rebuild_damage(self) -> Option<ManagedNetworkDamage> {
+        match self {
+            Self::Ordinary(_) => None,
+            Self::FullRebuild(damage) => Some(damage),
+        }
+    }
+}
+
+/// Fixed order for generation-bound task and connection cancellation.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NetworkRuntimeOwnerKind {
+    /// Background work that must stop before active connections are closed.
+    GenerationTask,
+    /// Active TCP connection or flow.
+    TcpConnection,
+    /// Active UDP association.
+    UdpAssociation,
+}
+
+const OWNER_RESET_ORDER: [NetworkRuntimeOwnerKind; 3] = [
+    NetworkRuntimeOwnerKind::GenerationTask,
+    NetworkRuntimeOwnerKind::TcpConnection,
+    NetworkRuntimeOwnerKind::UdpAssociation,
+];
+
+/// Fixed hook order around atomic snapshot publication.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NetworkResetHookStage {
+    /// Replace stack-owned packet state before publishing the new snapshot.
+    Stack,
+    /// Accept the published generation in the router.
+    Router,
+    /// Replace outbound binders, DNS sockets, and other generation-bound state.
+    Outbound,
+    /// Replace inbound generation-bound state last.
+    Inbound,
+}
+
+const POST_PUBLISH_HOOK_ORDER: [NetworkResetHookStage; 3] = [
+    NetworkResetHookStage::Router,
+    NetworkResetHookStage::Outbound,
+    NetworkResetHookStage::Inbound,
+];
+
+/// Public coordinator phase. The coordinator begins after managed-plane startup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetState {
+    Active,
+    ResetPending,
+    Resetting,
+    RetryReset,
+    ManagedDamaged,
+}
+
+/// Read-only, redacted state of one coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkResetStatus {
+    state: NetworkResetState,
+    admission_open: bool,
+    published_generation: u64,
+    active_generation: Option<u64>,
+    pending_generation: Option<u64>,
+    registered_hooks: usize,
+    registered_runtime_owners: usize,
+}
+
+impl NetworkResetStatus {
+    pub const fn state(self) -> NetworkResetState {
+        self.state
+    }
+
+    pub const fn admission_open(self) -> bool {
+        self.admission_open
+    }
+
+    pub const fn published_generation(self) -> u64 {
+        self.published_generation
+    }
+
+    pub const fn active_generation(self) -> Option<u64> {
+        self.active_generation
+    }
+
+    pub const fn pending_generation(self) -> Option<u64> {
+        self.pending_generation
+    }
+
+    pub const fn registered_hooks(self) -> usize {
+        self.registered_hooks
+    }
+
+    pub const fn registered_runtime_owners(self) -> usize {
+        self.registered_runtime_owners
+    }
+}
+
+/// Closed reset result classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetOutcome {
+    Noop,
+    ResetCompleted,
+    FullRebuildRequired(ManagedNetworkDamage),
+    FullRebuildAcknowledged,
+}
+
+/// Result of placing one notification into the coordinator's single pending slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetRequestDisposition {
+    /// The same snapshot is already active and no reset is required.
+    Noop,
+    /// The notification created the pending reset slot.
+    Queued,
+    /// The notification was absorbed by active, pending, or full-rebuild work.
+    Coalesced,
+}
+
+/// Bounded summary of work completed by one serialized driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkResetReport {
+    outcome: NetworkResetOutcome,
+    published_generation: u64,
+    completed_resets: usize,
+    cancelled_runtime_owners: usize,
+}
+
+impl NetworkResetReport {
+    pub const fn outcome(self) -> NetworkResetOutcome {
+        self.outcome
+    }
+
+    pub const fn published_generation(self) -> u64 {
+        self.published_generation
+    }
+
+    pub const fn completed_resets(self) -> usize {
+        self.completed_resets
+    }
+
+    pub const fn cancelled_runtime_owners(self) -> usize {
+        self.cancelled_runtime_owners
+    }
+}
+
+/// Closed reset coordination failure. No injected hook or platform error is retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetCoordinatorError {
+    StaleRequestGeneration,
+    ConflictingGenerationSnapshot,
+    HookFailed(NetworkResetHookStage),
+    HookPanicked(NetworkResetHookStage),
+    SnapshotPublicationStale,
+    SnapshotPublicationNonMonotonic,
+    FullRebuildNotPending,
+    FullRebuildGenerationTooOld,
+    FullRebuildOwnersRemain,
+}
+
+/// Closed reset-hook registration failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkResetHookRegistrationError {
+    AdmissionClosed,
+    CapacityExhausted,
+    IdentifierExhausted,
+}
+
+/// Closed generation-bound owner admission failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkRuntimeOwnerRegistrationError {
+    AdmissionClosed,
+    StaleGeneration,
+    CapacityExhausted,
+    IdentifierExhausted,
+}
+
+/// Cancellation delivered to one generation-bound owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkResetSignal {
+    target_generation: u64,
+    intent: NetworkResetIntent,
+}
+
+impl NetworkResetSignal {
+    pub const fn target_generation(self) -> u64 {
+        self.target_generation
+    }
+
+    pub const fn intent(self) -> NetworkResetIntent {
+        self.intent
+    }
+}
+
+/// Terminal result from waiting for a runtime-owner cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkRuntimeOwnerCancellation {
+    Reset(NetworkResetSignal),
+    CoordinatorDropped,
+}
+
+#[derive(Clone)]
+pub struct NetworkResetCoordinator {
+    inner: Arc<CoordinatorInner>,
+}
+
+impl fmt::Debug for NetworkResetCoordinator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkResetCoordinator")
+            .field("status", &self.status())
+            .finish()
+    }
+}
+
+impl NetworkResetCoordinator {
+    /// Creates an active coordinator around an already-published initial snapshot.
+    pub fn new(
+        snapshots: NetworkSnapshotPublisher,
+        limits: NetworkResetLimits,
+        owners: OwnerRegistry,
+    ) -> Self {
+        let (owner_changes, _receiver) = watch::channel(0_u64);
+        Self {
+            inner: Arc::new(CoordinatorInner {
+                snapshots,
+                limits,
+                owners,
+                state: Mutex::new(CoordinatorState::new()),
+                owner_changes,
+                driver: AsyncMutex::new(()),
+            }),
+        }
+    }
+
+    /// Returns the shared immutable snapshot publisher controlled by this coordinator.
+    pub fn snapshots(&self) -> NetworkSnapshotPublisher {
+        self.inner.snapshots.clone()
+    }
+
+    /// Returns current state without exposing registered hooks or owner values.
+    pub fn status(&self) -> NetworkResetStatus {
+        let state = lock_unpoisoned(&self.inner.state);
+        NetworkResetStatus {
+            state: state.phase,
+            admission_open: state.admission_open,
+            published_generation: self.inner.snapshots.generation(),
+            active_generation: state
+                .active
+                .as_ref()
+                .map(|active| active.snapshot.generation()),
+            pending_generation: state
+                .full_rebuild
+                .as_ref()
+                .or(state.pending.as_ref())
+                .map(|pending| pending.snapshot.generation()),
+            registered_hooks: state.hooks.len(),
+            registered_runtime_owners: state.runtime_owners.len(),
+        }
+    }
+
+    /// Registers one bounded hook. Hooks execute by stage and then registration order.
+    pub fn register_reset_hook(
+        &self,
+        stage: NetworkResetHookStage,
+        hook: Arc<dyn ResetNetwork>,
+    ) -> Result<NetworkResetHookRegistration, NetworkResetHookRegistrationError> {
+        let mut state = lock_unpoisoned(&self.inner.state);
+        if !state.admission_open {
+            return Err(NetworkResetHookRegistrationError::AdmissionClosed);
+        }
+        if state.hooks.len() >= self.inner.limits.max_hooks {
+            return Err(NetworkResetHookRegistrationError::CapacityExhausted);
+        }
+        let id = state.next_hook_id;
+        state.next_hook_id = state
+            .next_hook_id
+            .checked_add(1)
+            .ok_or(NetworkResetHookRegistrationError::IdentifierExhausted)?;
+        state.hooks.insert(id, HookEntry { stage, hook });
+        Ok(NetworkResetHookRegistration {
+            coordinator: Arc::downgrade(&self.inner),
+            id,
+            stage,
+            _owner: self.inner.owners.track_network_reset_hook(),
+        })
+    }
+
+    /// Admits one generation-bound task or connection under the current open generation.
+    ///
+    /// Dropping the returned owner is the acknowledgement observed by reset ordering.
+    pub fn register_runtime_owner(
+        &self,
+        generation: u64,
+        kind: NetworkRuntimeOwnerKind,
+    ) -> Result<NetworkRuntimeOwner, NetworkRuntimeOwnerRegistrationError> {
+        let mut state = lock_unpoisoned(&self.inner.state);
+        if !state.admission_open {
+            return Err(NetworkRuntimeOwnerRegistrationError::AdmissionClosed);
+        }
+        if generation != self.inner.snapshots.generation() {
+            return Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration);
+        }
+        if state.runtime_owners.len() >= self.inner.limits.max_runtime_owners {
+            return Err(NetworkRuntimeOwnerRegistrationError::CapacityExhausted);
+        }
+        let id = state.next_runtime_owner_id;
+        state.next_runtime_owner_id = state
+            .next_runtime_owner_id
+            .checked_add(1)
+            .ok_or(NetworkRuntimeOwnerRegistrationError::IdentifierExhausted)?;
+        let (cancellation, receiver) = watch::channel(None);
+        state.runtime_owners.insert(
+            id,
+            RuntimeOwnerEntry {
+                generation,
+                kind,
+                cancellation,
+            },
+        );
+        Ok(NetworkRuntimeOwner {
+            coordinator: Arc::downgrade(&self.inner),
+            id,
+            generation,
+            kind,
+            cancellation: receiver,
+            _owner: self.inner.owners.track_network_runtime_owner(),
+        })
+    }
+
+    /// Queues and serially drives one ordinary reset or full-rebuild intent.
+    ///
+    /// Newer queued generations replace older pending generations. A full-rebuild intent is never
+    /// downgraded by a later ordinary notification. Hook failure and future cancellation preserve
+    /// the pending request and keep admission closed for [`Self::retry_reset`].
+    pub async fn reset_network(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+        intent: NetworkResetIntent,
+    ) -> Result<NetworkResetReport, NetworkResetCoordinatorError> {
+        self.queue_reset(snapshot, intent)?;
+        self.drive_reset().await
+    }
+
+    /// Places a notification into one bounded pending slot without spawning a driver task.
+    ///
+    /// A notification source can keep calling this method while one dedicated task runs
+    /// [`Self::drive_reset`]. Only the newest pending generation is retained.
+    pub fn queue_reset(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+        intent: NetworkResetIntent,
+    ) -> Result<NetworkResetRequestDisposition, NetworkResetCoordinatorError> {
+        self.submit(snapshot, intent)
+    }
+
+    /// Serially drains all currently pending work, including work queued during a reset.
+    pub async fn drive_reset(&self) -> Result<NetworkResetReport, NetworkResetCoordinatorError> {
+        self.drive_pending().await
+    }
+
+    /// Retries preserved work after hook failure or cancellation.
+    pub async fn retry_reset(&self) -> Result<NetworkResetReport, NetworkResetCoordinatorError> {
+        self.drive_reset().await
+    }
+
+    /// Reopens admission after an external full rebuild and managed readback have completed.
+    ///
+    /// The external rebuild owns managed teardown/recreation and all component activation. This
+    /// acknowledgement only validates/publishes its final snapshot and clears the held intent.
+    pub async fn acknowledge_full_rebuild(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+    ) -> Result<NetworkResetReport, NetworkResetCoordinatorError> {
+        let _driver = self.inner.driver.lock().await;
+        let _driver_owner = self.inner.owners.track_network_reset_driver();
+        let mut state = lock_unpoisoned(&self.inner.state);
+        let requested = state
+            .full_rebuild
+            .as_ref()
+            .ok_or(NetworkResetCoordinatorError::FullRebuildNotPending)?;
+        if !state.runtime_owners.is_empty() {
+            return Err(NetworkResetCoordinatorError::FullRebuildOwnersRemain);
+        }
+        if snapshot.generation() < requested.snapshot.generation() {
+            return Err(NetworkResetCoordinatorError::FullRebuildGenerationTooOld);
+        }
+        publish_snapshot(&self.inner.snapshots, &snapshot)?;
+        state.full_rebuild = None;
+        state.pending = None;
+        state.active = None;
+        state.phase = NetworkResetState::Active;
+        state.admission_open = true;
+        Ok(NetworkResetReport {
+            outcome: NetworkResetOutcome::FullRebuildAcknowledged,
+            published_generation: snapshot.generation(),
+            completed_resets: 0,
+            cancelled_runtime_owners: 0,
+        })
+    }
+
+    fn submit(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+        intent: NetworkResetIntent,
+    ) -> Result<NetworkResetRequestDisposition, NetworkResetCoordinatorError> {
+        let mut state = lock_unpoisoned(&self.inner.state);
+        let current = self.inner.snapshots.snapshot();
+        if snapshot.generation() < current.generation() {
+            return Err(NetworkResetCoordinatorError::StaleRequestGeneration);
+        }
+        if snapshot.generation() == current.generation() && *snapshot != *current {
+            return Err(NetworkResetCoordinatorError::ConflictingGenerationSnapshot);
+        }
+        let incoming = PendingReset { snapshot, intent };
+
+        if let Some(rebuild) = state.full_rebuild.as_mut() {
+            merge_pending(rebuild, incoming)?;
+            rebuild.intent = NetworkResetIntent::FullRebuild(
+                rebuild
+                    .intent
+                    .full_rebuild_damage()
+                    .or(intent.full_rebuild_damage())
+                    .expect("a held full rebuild remains a full rebuild"),
+            );
+            return Ok(NetworkResetRequestDisposition::Coalesced);
+        }
+
+        if let Some(active) = state.active.clone() {
+            match incoming
+                .snapshot
+                .generation()
+                .cmp(&active.snapshot.generation())
+            {
+                std::cmp::Ordering::Less => {
+                    if let Some(damage) = incoming.intent.full_rebuild_damage() {
+                        return queue_pending(
+                            &mut state,
+                            PendingReset {
+                                snapshot: Arc::clone(&active.snapshot),
+                                intent: NetworkResetIntent::FullRebuild(damage),
+                            },
+                        );
+                    }
+                    return Ok(NetworkResetRequestDisposition::Coalesced);
+                }
+                std::cmp::Ordering::Equal => {
+                    if *incoming.snapshot != *active.snapshot {
+                        return Err(NetworkResetCoordinatorError::ConflictingGenerationSnapshot);
+                    }
+                    if let Some(damage) = incoming.intent.full_rebuild_damage() {
+                        return queue_pending(
+                            &mut state,
+                            PendingReset {
+                                snapshot: Arc::clone(&active.snapshot),
+                                intent: NetworkResetIntent::FullRebuild(damage),
+                            },
+                        );
+                    }
+                    return Ok(NetworkResetRequestDisposition::Coalesced);
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+
+        if state.active.is_none()
+            && state.pending.is_none()
+            && incoming.snapshot.generation() == current.generation()
+            && matches!(incoming.intent, NetworkResetIntent::Ordinary(_))
+        {
+            return Ok(NetworkResetRequestDisposition::Noop);
+        }
+
+        queue_pending(&mut state, incoming)
+    }
+
+    async fn drive_pending(&self) -> Result<NetworkResetReport, NetworkResetCoordinatorError> {
+        let _driver = self.inner.driver.lock().await;
+        let _driver_owner = self.inner.owners.track_network_reset_driver();
+        let mut completed_resets = 0_usize;
+        let mut cancelled_runtime_owners = 0_usize;
+
+        loop {
+            if let Some(damage) = self.pending_full_rebuild_damage() {
+                return Ok(NetworkResetReport {
+                    outcome: NetworkResetOutcome::FullRebuildRequired(damage),
+                    published_generation: self.inner.snapshots.generation(),
+                    completed_resets,
+                    cancelled_runtime_owners,
+                });
+            }
+
+            let Some(target) = self.take_pending() else {
+                let mut state = lock_unpoisoned(&self.inner.state);
+                if state.full_rebuild.is_some() {
+                    continue;
+                }
+                if state.pending.is_some() {
+                    continue;
+                }
+                state.phase = NetworkResetState::Active;
+                state.admission_open = true;
+                return Ok(NetworkResetReport {
+                    outcome: if completed_resets == 0 {
+                        NetworkResetOutcome::Noop
+                    } else {
+                        NetworkResetOutcome::ResetCompleted
+                    },
+                    published_generation: self.inner.snapshots.generation(),
+                    completed_resets,
+                    cancelled_runtime_owners,
+                });
+            };
+
+            let mut attempt = ResetAttemptGuard::new(Arc::clone(&self.inner), target);
+            let signal = NetworkResetSignal {
+                target_generation: attempt.target().snapshot.generation(),
+                intent: attempt.target().intent,
+            };
+            cancelled_runtime_owners += self.cancel_runtime_owners(signal).await;
+
+            if let Some(damage) = attempt.target().intent.full_rebuild_damage() {
+                let target = attempt.complete();
+                let mut state = lock_unpoisoned(&self.inner.state);
+                state.active = None;
+                let mut rebuild = target;
+                if let Some(pending) = state.pending.take() {
+                    merge_pending(&mut rebuild, pending)?;
+                }
+                rebuild.intent = NetworkResetIntent::FullRebuild(
+                    rebuild.intent.full_rebuild_damage().unwrap_or(damage),
+                );
+                state.full_rebuild = Some(rebuild);
+                state.phase = NetworkResetState::ManagedDamaged;
+                state.admission_open = false;
+                return Ok(NetworkResetReport {
+                    outcome: NetworkResetOutcome::FullRebuildRequired(damage),
+                    published_generation: self.inner.snapshots.generation(),
+                    completed_resets,
+                    cancelled_runtime_owners,
+                });
+            }
+
+            let hooks = self.snapshot_hooks();
+            self.run_hook_stage(
+                NetworkResetHookStage::Stack,
+                &hooks,
+                &attempt.target().snapshot,
+            )
+            .await?;
+            publish_snapshot(&self.inner.snapshots, &attempt.target().snapshot)?;
+            for stage in POST_PUBLISH_HOOK_ORDER {
+                self.run_hook_stage(stage, &hooks, &attempt.target().snapshot)
+                    .await?;
+            }
+
+            attempt.complete();
+            let mut state = lock_unpoisoned(&self.inner.state);
+            state.active = None;
+            completed_resets += 1;
+            if state.pending.is_some() {
+                state.phase = NetworkResetState::ResetPending;
+            } else {
+                state.phase = NetworkResetState::Active;
+                state.admission_open = true;
+            }
+        }
+    }
+
+    fn pending_full_rebuild_damage(&self) -> Option<ManagedNetworkDamage> {
+        lock_unpoisoned(&self.inner.state)
+            .full_rebuild
+            .as_ref()
+            .and_then(|pending| pending.intent.full_rebuild_damage())
+    }
+
+    fn take_pending(&self) -> Option<PendingReset> {
+        let mut state = lock_unpoisoned(&self.inner.state);
+        let pending = state.pending.take()?;
+        state.active = Some(ActiveReset {
+            snapshot: Arc::clone(&pending.snapshot),
+        });
+        state.phase = NetworkResetState::Resetting;
+        Some(pending)
+    }
+
+    fn snapshot_hooks(&self) -> Vec<(NetworkResetHookStage, u64, Arc<dyn ResetNetwork>)> {
+        let state = lock_unpoisoned(&self.inner.state);
+        let mut hooks = state
+            .hooks
+            .iter()
+            .map(|(id, entry)| (entry.stage, *id, Arc::clone(&entry.hook)))
+            .collect::<Vec<_>>();
+        hooks.sort_by_key(|(stage, id, _)| (*stage, *id));
+        hooks
+    }
+
+    async fn run_hook_stage(
+        &self,
+        stage: NetworkResetHookStage,
+        hooks: &[(NetworkResetHookStage, u64, Arc<dyn ResetNetwork>)],
+        snapshot: &Arc<NetworkSnapshot>,
+    ) -> Result<(), NetworkResetCoordinatorError> {
+        for (_, _, hook) in hooks
+            .iter()
+            .filter(|(hook_stage, _, _)| *hook_stage == stage)
+        {
+            let future = catch_unwind(AssertUnwindSafe(|| {
+                hook.reset_network(Arc::clone(snapshot))
+            }))
+            .map_err(|_| NetworkResetCoordinatorError::HookPanicked(stage))?;
+            match AssertUnwindSafe(future).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return Err(NetworkResetCoordinatorError::HookFailed(stage)),
+                Err(_) => return Err(NetworkResetCoordinatorError::HookPanicked(stage)),
+            }
+        }
+        Ok(())
+    }
+
+    async fn cancel_runtime_owners(&self, signal: NetworkResetSignal) -> usize {
+        let mut cancelled = 0_usize;
+        for kind in OWNER_RESET_ORDER {
+            let senders = {
+                let state = lock_unpoisoned(&self.inner.state);
+                state
+                    .runtime_owners
+                    .values()
+                    .filter(|owner| owner.kind == kind && owner_is_stale(owner, signal))
+                    .map(|owner| owner.cancellation.clone())
+                    .collect::<Vec<_>>()
+            };
+            cancelled += senders.len();
+            for sender in senders {
+                sender.send_replace(Some(signal));
+            }
+            self.wait_for_runtime_owner_kind(kind, signal).await;
+        }
+        cancelled
+    }
+
+    async fn wait_for_runtime_owner_kind(
+        &self,
+        kind: NetworkRuntimeOwnerKind,
+        signal: NetworkResetSignal,
+    ) {
+        let mut changes = self.inner.owner_changes.subscribe();
+        loop {
+            let remaining = lock_unpoisoned(&self.inner.state)
+                .runtime_owners
+                .values()
+                .any(|owner| owner.kind == kind && owner_is_stale(owner, signal));
+            if !remaining {
+                return;
+            }
+            if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+fn owner_is_stale(owner: &RuntimeOwnerEntry, signal: NetworkResetSignal) -> bool {
+    owner.generation < signal.target_generation
+        || (owner.generation == signal.target_generation
+            && matches!(signal.intent, NetworkResetIntent::FullRebuild(_)))
+}
+
+fn publish_snapshot(
+    publisher: &NetworkSnapshotPublisher,
+    snapshot: &Arc<NetworkSnapshot>,
+) -> Result<(), NetworkResetCoordinatorError> {
+    let current = publisher.snapshot();
+    match snapshot.generation().cmp(&current.generation()) {
+        std::cmp::Ordering::Less => Err(NetworkResetCoordinatorError::SnapshotPublicationStale),
+        std::cmp::Ordering::Equal => {
+            if **snapshot == *current {
+                Ok(())
+            } else {
+                Err(NetworkResetCoordinatorError::ConflictingGenerationSnapshot)
+            }
+        }
+        std::cmp::Ordering::Greater => publisher
+            .publish_if_current(current.generation(), Arc::clone(snapshot))
+            .map(|_| ())
+            .map_err(|error| match error {
+                NetworkSnapshotPublishError::StaleExpectedGeneration => {
+                    NetworkResetCoordinatorError::SnapshotPublicationStale
+                }
+                NetworkSnapshotPublishError::NonMonotonicGeneration => {
+                    NetworkResetCoordinatorError::SnapshotPublicationNonMonotonic
+                }
+            }),
+    }
+}
+
+fn queue_pending(
+    state: &mut CoordinatorState,
+    incoming: PendingReset,
+) -> Result<NetworkResetRequestDisposition, NetworkResetCoordinatorError> {
+    let disposition = if state.pending.is_some() {
+        NetworkResetRequestDisposition::Coalesced
+    } else {
+        NetworkResetRequestDisposition::Queued
+    };
+    if let Some(pending) = state.pending.as_mut() {
+        merge_pending(pending, incoming)?;
+    } else {
+        state.pending = Some(incoming);
+    }
+    state.admission_open = false;
+    state.phase = NetworkResetState::ResetPending;
+    Ok(disposition)
+}
+
+fn merge_pending(
+    pending: &mut PendingReset,
+    incoming: PendingReset,
+) -> Result<(), NetworkResetCoordinatorError> {
+    let existing_damage = pending.intent.full_rebuild_damage();
+    let incoming_damage = incoming.intent.full_rebuild_damage();
+    match incoming
+        .snapshot
+        .generation()
+        .cmp(&pending.snapshot.generation())
+    {
+        std::cmp::Ordering::Less => {}
+        std::cmp::Ordering::Equal => {
+            if *incoming.snapshot != *pending.snapshot {
+                return Err(NetworkResetCoordinatorError::ConflictingGenerationSnapshot);
+            }
+            if existing_damage.is_none() {
+                pending.intent = incoming.intent;
+            }
+        }
+        std::cmp::Ordering::Greater => {
+            pending.snapshot = incoming.snapshot;
+            pending.intent = incoming.intent;
+        }
+    }
+    if let Some(damage) = existing_damage.or(incoming_damage) {
+        pending.intent = NetworkResetIntent::FullRebuild(damage);
+    }
+    Ok(())
+}
+
+struct CoordinatorInner {
+    snapshots: NetworkSnapshotPublisher,
+    limits: NetworkResetLimits,
+    owners: OwnerRegistry,
+    state: Mutex<CoordinatorState>,
+    owner_changes: watch::Sender<u64>,
+    driver: AsyncMutex<()>,
+}
+
+struct CoordinatorState {
+    phase: NetworkResetState,
+    admission_open: bool,
+    hooks: BTreeMap<u64, HookEntry>,
+    runtime_owners: BTreeMap<u64, RuntimeOwnerEntry>,
+    next_hook_id: u64,
+    next_runtime_owner_id: u64,
+    pending: Option<PendingReset>,
+    active: Option<ActiveReset>,
+    full_rebuild: Option<PendingReset>,
+}
+
+impl CoordinatorState {
+    fn new() -> Self {
+        Self {
+            phase: NetworkResetState::Active,
+            admission_open: true,
+            hooks: BTreeMap::new(),
+            runtime_owners: BTreeMap::new(),
+            next_hook_id: 1,
+            next_runtime_owner_id: 1,
+            pending: None,
+            active: None,
+            full_rebuild: None,
+        }
+    }
+}
+
+struct HookEntry {
+    stage: NetworkResetHookStage,
+    hook: Arc<dyn ResetNetwork>,
+}
+
+struct RuntimeOwnerEntry {
+    generation: u64,
+    kind: NetworkRuntimeOwnerKind,
+    cancellation: watch::Sender<Option<NetworkResetSignal>>,
+}
+
+#[derive(Clone)]
+struct PendingReset {
+    snapshot: Arc<NetworkSnapshot>,
+    intent: NetworkResetIntent,
+}
+
+#[derive(Clone)]
+struct ActiveReset {
+    snapshot: Arc<NetworkSnapshot>,
+}
+
+struct ResetAttemptGuard {
+    coordinator: Arc<CoordinatorInner>,
+    target: Option<PendingReset>,
+}
+
+impl ResetAttemptGuard {
+    fn new(coordinator: Arc<CoordinatorInner>, target: PendingReset) -> Self {
+        Self {
+            coordinator,
+            target: Some(target),
+        }
+    }
+
+    fn target(&self) -> &PendingReset {
+        self.target.as_ref().expect("active reset target")
+    }
+
+    fn complete(&mut self) -> PendingReset {
+        self.target.take().expect("active reset target")
+    }
+}
+
+impl Drop for ResetAttemptGuard {
+    fn drop(&mut self) {
+        let Some(target) = self.target.take() else {
+            return;
+        };
+        let mut state = lock_unpoisoned(&self.coordinator.state);
+        state.active = None;
+        if let Some(pending) = state.pending.as_mut() {
+            if merge_pending(pending, target).is_err() {
+                debug_assert!(
+                    false,
+                    "validated reset targets cannot conflict during retry"
+                );
+            }
+        } else {
+            state.pending = Some(target);
+        }
+        state.phase = NetworkResetState::RetryReset;
+        state.admission_open = false;
+    }
+}
+
+/// RAII registration for one reset hook.
+#[must_use = "dropping the registration removes the reset hook"]
+pub struct NetworkResetHookRegistration {
+    coordinator: Weak<CoordinatorInner>,
+    id: u64,
+    stage: NetworkResetHookStage,
+    _owner: OwnerGuard,
+}
+
+impl NetworkResetHookRegistration {
+    pub const fn stage(&self) -> NetworkResetHookStage {
+        self.stage
+    }
+}
+
+impl fmt::Debug for NetworkResetHookRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkResetHookRegistration")
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for NetworkResetHookRegistration {
+    fn drop(&mut self) {
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return;
+        };
+        lock_unpoisoned(&coordinator.state).hooks.remove(&self.id);
+    }
+}
+
+/// Exclusive acknowledgement owner for one generation-bound task or connection.
+#[must_use = "dropping the owner acknowledges completion to the reset coordinator"]
+pub struct NetworkRuntimeOwner {
+    coordinator: Weak<CoordinatorInner>,
+    id: u64,
+    generation: u64,
+    kind: NetworkRuntimeOwnerKind,
+    cancellation: watch::Receiver<Option<NetworkResetSignal>>,
+    _owner: OwnerGuard,
+}
+
+impl NetworkRuntimeOwner {
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn kind(&self) -> NetworkRuntimeOwnerKind {
+        self.kind
+    }
+
+    /// Returns an already-delivered reset without registering an async waiter.
+    pub fn cancellation_now(&self) -> Option<NetworkResetSignal> {
+        *self.cancellation.borrow()
+    }
+
+    /// Waits for reset cancellation or coordinator destruction.
+    pub async fn cancelled(&mut self) -> NetworkRuntimeOwnerCancellation {
+        loop {
+            if let Some(signal) = *self.cancellation.borrow_and_update() {
+                return NetworkRuntimeOwnerCancellation::Reset(signal);
+            }
+            if self.cancellation.changed().await.is_err() {
+                return NetworkRuntimeOwnerCancellation::CoordinatorDropped;
+            }
+        }
+    }
+}
+
+impl fmt::Debug for NetworkRuntimeOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkRuntimeOwner")
+            .field("generation", &self.generation)
+            .field("kind", &self.kind)
+            .field("cancelled", &self.cancellation_now().is_some())
+            .finish()
+    }
+}
+
+impl Drop for NetworkRuntimeOwner {
+    fn drop(&mut self) {
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return;
+        };
+        let removed = lock_unpoisoned(&coordinator.state)
+            .runtime_owners
+            .remove(&self.id)
+            .is_some();
+        if removed {
+            coordinator
+                .owner_changes
+                .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        }
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
