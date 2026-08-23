@@ -5509,7 +5509,7 @@ udp_filtering = "address_dependent"
                     "managed_addresses_routes_and_dns_are_unchanged",
                     "strict_route_is_effective_and_filter_identity_is_unchanged",
                     "network_generation_and_reset_metrics_advance",
-                    "session_restart_and_full_rebuild_metrics_are_unchanged",
+                    "retry_reset_failure_and_full_rebuild_metrics_are_unchanged",
                     "fixed_and_direct_dual_stack_underlay_binding",
                     "multihoming_prefix_and_metric_selection",
                     "route_interface_and_address_notifications",
@@ -5524,9 +5524,6 @@ udp_filtering = "address_dependent"
                     "ferrum2_network_reset_total",
                     "ferrum2_network_full_rebuild_total",
                     "ferrum2_network_generation",
-                    "ferrum2_tun_session_restart_started_total",
-                    "ferrum2_tun_session_restart_succeeded_total",
-                    "ferrum2_tun_session_restart_failed_total",
                     "ferrum2_tun_session_generation",
                     "ferrum2_tun_strict_route_requested",
                     "ferrum2_tun_strict_route_effective",
@@ -5555,9 +5552,9 @@ udp_filtering = "address_dependent"
                     "adapter_route_dns_and_handler_baselines_restore"
                 )
                 counters = @(
-                    "ferrum2_tun_session_restart_started_total",
-                    "ferrum2_tun_session_restart_succeeded_total",
-                    "ferrum2_tun_session_restart_failed_total",
+                    "ferrum2_network_reset_total",
+                    "ferrum2_network_full_rebuild_total",
+                    "ferrum2_network_generation",
                     "ferrum2_tun_session_generation"
                 )
                 restart_cycles = $script:RestartCycles
@@ -5580,7 +5577,7 @@ udp_filtering = "address_dependent"
                     "ipv4_udp_out_of_order", "ipv4_tcp_out_of_order",
                     "ipv6_extension_and_fragment", "ipv6_atomic_fragment",
                     "fragmented_synthetic_dns", "overlap_drops_entry", "timeout_drops_entry",
-                    "disabled_family_rejects_fragment", "restart_rejects_stale_generation"
+                    "disabled_family_rejects_fragment", "network_reset_rejects_stale_generation"
                 )
                 counters = @(
                     "ferrum2_tun_reassembly_entries_active",
@@ -5678,7 +5675,7 @@ outbound = "direct"
                     "one_eim_association_reuses_first_outbound_for_all_targets",
                     "association_capacity_drops_new_without_evicting_live",
                     "udp_queue_pressure_is_bounded_and_control_remains_live",
-                    "restart_clears_udp_stale_generation_state"
+                    "reset_clears_udp_stale_generation_state"
                 )
                 counters = @(
                     "ferrum2_tun_udp_associations_active", "ferrum2_tun_udp_candidates_active",
@@ -5704,7 +5701,7 @@ udp_filtering = "address_dependent"
                 witnesses = @(
                     "rx_bursts_8_16_64_have_no_structural_drop", "work_stages_rotate_fairly",
                     "udp_response_backpressure_is_lossless", "ring_full_drops_one_complete_packet",
-                    "ring_full_is_not_retried", "ring_full_does_not_restart_session",
+                    "ring_full_is_not_retried", "ring_full_does_not_reset_or_rebuild_network",
                     "wintun_error_kinds_have_exact_owner_dispositions",
                     "live_egress_pressure_has_closed_accounting"
                 )
@@ -5935,10 +5932,9 @@ function Wait-M17Session(
     if ($null -eq $metrics) {
         throw "M17 metrics remained unavailable during the bounded session wait: minimum_generation=$MinimumGeneration expected_active=$ExpectedActive"
     }
-    $restartStarted = Get-M17MetricValue $metrics "ferrum2_tun_session_restart_started" $true
-    $restartSucceeded = Get-M17MetricValue $metrics "ferrum2_tun_session_restart_succeeded" $true
-    $restartFailed = Get-M17MetricValue $metrics "ferrum2_tun_session_restart_failed" $true
-    throw "M17 session state timeout: minimum_generation=$MinimumGeneration expected_active=$ExpectedActive generation=$generation active=$active restart_started=$restartStarted restart_succeeded=$restartSucceeded restart_failed=$restartFailed"
+    $networkReset = Get-M17MetricValue $metrics "ferrum2_network_reset" $true
+    $fullRebuild = Get-M17MetricValue $metrics "ferrum2_network_full_rebuild" $true
+    throw "M17 session state timeout: minimum_generation=$MinimumGeneration expected_active=$ExpectedActive generation=$generation active=$active network_reset_total=$networkReset full_rebuild_total=$fullRebuild"
 }
 
 function Wait-M17FlowDrain(
@@ -6305,7 +6301,7 @@ function Invoke-M17CandidateTests {
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::resolved_socket_binding_applies_interface_then_family_source"; Witnesses = @() },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::only_managed_damage_escalates_a_network_change_to_full_rebuild"; Witnesses = @("owned_state_damage_is_the_only_full_rebuild_trigger") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::reset_retries_transient_readback_errors_without_tearing_down_managed_state"; Witnesses = @("reset_retries_without_managed_teardown") },
-            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::network_reset_bridge_reports_retry_before_completion"; Witnesses = @() },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::network_lifecycle_bridge_reports_retry_before_completion"; Witnesses = @() },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state"; Witnesses = @() },
             @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::client_network_hook_retries_failure_and_accepts_each_generation_once"; Witnesses = @("network_reset_hooks_accept_each_generation_once") }
         ) }
@@ -6321,7 +6317,7 @@ function Invoke-M17CandidateTests {
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::ipv6_extensions_before_and_after_fragment_reassemble_canonically"; Witnesses = @("ipv6_extension_and_fragment") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::strips_atomic_ipv6_fragment_before_reparse"; Witnesses = @("ipv6_atomic_fragment") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::overlap_or_duplicate_drops_the_entire_entry"; Witnesses = @("overlap_drops_entry") },
-            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::timeout_and_generation_change_prevent_cross_epoch_completion"; Witnesses = @("timeout_drops_entry", "restart_rejects_stale_generation") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::timeout_and_generation_change_prevent_cross_epoch_completion"; Witnesses = @("timeout_drops_entry", "network_reset_rejects_stale_generation") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::fragmented_dns_reaches_post_reassembly_udp_dispatch_metadata"; Witnesses = @() },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::fragmented_udp_reaches_admission_only_after_out_of_order_reassembly"; Witnesses = @() },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "reassembly::tests::disabled_family_fragments_are_rejected_before_allocating_reassembly_state"; Witnesses = @("disabled_family_rejects_fragment") }
@@ -6336,7 +6332,7 @@ function Invoke-M17CandidateTests {
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::adf_peer_reservations_are_bounded_and_authorize_only_on_commit"; Witnesses = @("rejected_target_never_authorizes_peer") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c8_lifecycle_control_is_reliable_when_data_queues_are_congested"; Witnesses = @("udp_queue_pressure_is_bounded_and_control_remains_live") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c10_hash_index_free_list_counts_and_generation_deadlines_are_exact"; Witnesses = @() },
-            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @("restart_clears_udp_stale_generation_state") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c17_stale_generation_handles_cannot_commit_close_or_inject"; Witnesses = @("reset_clears_udp_stale_generation_state") },
             @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::synthetic_dns_precedes_one_frozen_ordinary_udp_route"; Witnesses = @("first_ordinary_datagram_freezes_route_and_outbound") },
             @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_authorizes_only_successful_send_or_dns_answer_and_adf_ignores_port"; Witnesses = @() },
             @{ Package = "ferrum2-client"; Target = "bin"; Test = "run::tun::tests::tun_udp_route_snapshot_is_bounded_and_immutable_after_selection"; Witnesses = @("one_eim_association_reuses_first_outbound_for_all_targets") }
@@ -6345,7 +6341,7 @@ function Invoke-M17CandidateTests {
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::capacity_aware_rotation_drains_eight_sixteen_and_sixty_four_packets"; Witnesses = @("rx_bursts_8_16_64_have_no_structural_drop") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "scheduler::tests::rotation_is_stable_across_arbitrary_work_budget_boundaries"; Witnesses = @("work_stages_rotate_fairly") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "udp::tests::c2_response_backpressure_preserves_current_event_and_does_not_consume_next"; Witnesses = @("udp_response_backpressure_is_lossless") },
-            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::ring_full_drops_exactly_one_complete_output_and_fatal_retains_it"; Witnesses = @("ring_full_drops_one_complete_packet", "ring_full_is_not_retried", "ring_full_does_not_restart_session") },
+            @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::ring_full_drops_exactly_one_complete_output_and_fatal_retains_it"; Witnesses = @("ring_full_drops_one_complete_packet", "ring_full_is_not_retried", "ring_full_does_not_reset_or_rebuild_network") },
             @{ Package = "ferrum2-tun"; Target = "lib"; Test = "tests::wintun_error_kinds_have_exact_owner_dispositions"; Witnesses = @("wintun_error_kinds_have_exact_owner_dispositions") },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "tests::operation_error_kinds_are_closed_and_redacted"; Witnesses = @() },
             @{ Package = "ferrum2-wintun"; Target = "lib"; Test = "windows::tests::receive_null_distinguishes_empty_recoverable_eof_and_corruption"; Witnesses = @() },
@@ -6585,13 +6581,29 @@ function Get-M17NetworkResetMetricState([string]$Metrics) {
         NetworkGeneration = Get-M17MetricValue $Metrics "ferrum2_network_generation"
         SessionGeneration = Get-M17MetricValue $Metrics "ferrum2_tun_session_generation"
         SessionActive = Get-M17MetricValue $Metrics "ferrum2_tun_session_active"
-        SessionRestartStarted = Get-M17MetricValue $Metrics "ferrum2_tun_session_restart_started"
-        SessionRestartSucceeded = Get-M17MetricValue $Metrics "ferrum2_tun_session_restart_succeeded"
-        SessionRestartFailed = Get-M17MetricValue $Metrics "ferrum2_tun_session_restart_failed"
         StrictRequested = Get-M17MetricValue $Metrics "ferrum2_tun_strict_route_requested"
         StrictEffective = Get-M17MetricValue $Metrics "ferrum2_tun_strict_route_effective"
         StrictInstallSucceeded = Get-M17LabeledMetricValue $Metrics "ferrum2_tun_strict_route_filter_install" "result" "success" $true
         StrictInstallFailed = Get-M17LabeledMetricValue $Metrics "ferrum2_tun_strict_route_filter_install" "result" "failure" $true
+    }
+}
+
+function Get-M17ManagedRouteRebuildMetricState([string]$Metrics) {
+    $rebuild = {
+        param([string]$Result)
+        Get-M17MetricLabelSetValue $Metrics "ferrum2_network_full_rebuild" ([ordered]@{
+            reason = "route_damage"
+            result = $Result
+        }) $true
+    }
+    return [pscustomobject]@{
+        RouteDamageStarted = & $rebuild "started"
+        RouteDamageSucceeded = & $rebuild "succeeded"
+        RouteDamageFailed = & $rebuild "failed"
+        FullRebuildTotal = Get-M17MetricValue $Metrics "ferrum2_network_full_rebuild" $true
+        NetworkResetTotal = Get-M17MetricValue $Metrics "ferrum2_network_reset" $true
+        NetworkGeneration = Get-M17MetricValue $Metrics "ferrum2_network_generation"
+        SessionGeneration = Get-M17MetricValue $Metrics "ferrum2_tun_session_generation"
     }
 }
 
@@ -6617,9 +6629,6 @@ function Wait-M17NetworkResetCycle(
             $state.NetworkGeneration -eq $ExpectedSessionGeneration -and
             $state.SessionGeneration -eq $ExpectedSessionGeneration -and
             $state.SessionActive -eq 1 -and
-            $state.SessionRestartStarted -eq $Baseline.SessionRestartStarted -and
-            $state.SessionRestartSucceeded -eq $Baseline.SessionRestartSucceeded -and
-            $state.SessionRestartFailed -eq $Baseline.SessionRestartFailed -and
             $state.StrictRequested -eq 1 -and $state.StrictEffective -eq 1 -and
             $state.StrictInstallSucceeded -eq $Baseline.StrictInstallSucceeded -and
             $state.StrictInstallFailed -eq $Baseline.StrictInstallFailed) {
@@ -6636,9 +6645,6 @@ function Wait-M17NetworkResetCycle(
                 $stable.NetworkGeneration -eq $state.NetworkGeneration -and
                 $stable.SessionGeneration -eq $state.SessionGeneration -and
                 $stable.FullRebuild -eq $state.FullRebuild -and
-                $stable.SessionRestartStarted -eq $state.SessionRestartStarted -and
-                $stable.SessionRestartSucceeded -eq $state.SessionRestartSucceeded -and
-                $stable.SessionRestartFailed -eq $state.SessionRestartFailed -and
                 $stable.StrictRequested -eq $state.StrictRequested -and
                 $stable.StrictEffective -eq $state.StrictEffective -and
                 $stable.StrictInstallSucceeded -eq $state.StrictInstallSucceeded -and
@@ -6717,8 +6723,7 @@ final = "resolver"
         $baseline.SessionGeneration -eq $initial.Generation -and
         $baseline.ResetStarted -eq $baseline.ResetSucceeded -and $baseline.ResetFailed -eq 0 -and
         $baseline.RetryStarted -eq 0 -and $baseline.RetrySucceeded -eq 0 -and $baseline.RetryFailed -eq 0 -and
-        $baseline.FullRebuild -eq 0 -and $baseline.SessionRestartStarted -eq 0 -and
-        $baseline.SessionRestartSucceeded -eq 0 -and $baseline.SessionRestartFailed -eq 0) "M17 network-reset strict-route or lifecycle metric baseline is invalid"
+        $baseline.FullRebuild -eq 0) "M17 network-reset strict-route or lifecycle metric baseline is invalid"
     $script:m17CounterBefore = Get-M17CounterSnapshot $initialDrain.Metrics
     Add-M17LiveRow "network-reset-baseline" ([ordered]@{
         process_id = $candidatePid
@@ -6784,9 +6789,6 @@ final = "resolver"
                 $state.SessionGeneration -eq $expectedGeneration -and
                 $state.NetworkGeneration -eq $expectedGeneration -and
                 $state.FullRebuild -eq $baseline.FullRebuild -and
-                $state.SessionRestartStarted -eq $baseline.SessionRestartStarted -and
-                $state.SessionRestartSucceeded -eq $baseline.SessionRestartSucceeded -and
-                $state.SessionRestartFailed -eq $baseline.SessionRestartFailed -and
                 $state.StrictRequested -eq 1 -and $state.StrictEffective -eq 1 -and
                 $state.StrictInstallSucceeded -eq $baseline.StrictInstallSucceeded -and
                 $state.StrictInstallFailed -eq $baseline.StrictInstallFailed) "M17 post-reset health changed lifecycle state"
@@ -6806,7 +6808,6 @@ final = "resolver"
                 reset_started = $state.ResetStarted
                 reset_succeeded = $state.ResetSucceeded
                 reset_failed = $state.ResetFailed
-                session_restart_started = $state.SessionRestartStarted
                 full_rebuild = $state.FullRebuild
                 strict_route_effective = $state.StrictEffective
             }
@@ -6830,9 +6831,6 @@ final = "resolver"
         $finalState.NetworkGeneration -eq $finalState.SessionGeneration -and
         $finalState.NetworkGeneration -gt $baseline.NetworkGeneration -and
         $finalState.FullRebuild -eq $baseline.FullRebuild -and
-        $finalState.SessionRestartStarted -eq $baseline.SessionRestartStarted -and
-        $finalState.SessionRestartSucceeded -eq $baseline.SessionRestartSucceeded -and
-        $finalState.SessionRestartFailed -eq $baseline.SessionRestartFailed -and
         $finalState.StrictRequested -eq 1 -and $finalState.StrictEffective -eq 1 -and
         $finalState.StrictInstallSucceeded -eq $baseline.StrictInstallSucceeded -and
         $finalState.StrictInstallFailed -eq $baseline.StrictInstallFailed) "M17 network-reset final lifecycle contract changed"
@@ -6849,7 +6847,7 @@ final = "resolver"
         "cycle", "mutation", "route_metric", "process_id", "interface_guid", "interface_luid",
         "interface_index", "managed_plane_sha256", "strict_route_wfp_sha256", "wfp_sampled",
         "session_generation", "network_generation", "reset_started", "reset_succeeded",
-        "reset_failed", "session_restart_started", "full_rebuild", "strict_route_effective"
+        "reset_failed", "full_rebuild", "strict_route_effective"
     )
     foreach ($offset in 0..($script:NetworkResetCycles - 1)) {
         $cycle = $offset + 1
@@ -6871,14 +6869,13 @@ final = "resolver"
             $row.wfp_sampled -is [bool] -and $row.wfp_sampled -eq $expectedWfpSample -and
             $row.session_generation -is [double] -and $row.network_generation -is [double] -and
             $row.reset_started -is [double] -and $row.reset_succeeded -is [double] -and
-            $row.reset_failed -is [double] -and $row.session_restart_started -is [double] -and
+            $row.reset_failed -is [double] -and
             $row.full_rebuild -is [double] -and $row.strict_route_effective -is [double] -and
             [double]$row.session_generation -eq $initial.Generation + $cycle -and
             [double]$row.network_generation -eq $initial.Generation + $cycle -and
             [double]$row.reset_started -eq $baseline.ResetStarted + $cycle -and
             [double]$row.reset_succeeded -eq $baseline.ResetSucceeded + $cycle -and
             [double]$row.reset_failed -eq $baseline.ResetFailed -and
-            [double]$row.session_restart_started -eq $baseline.SessionRestartStarted -and
             [double]$row.full_rebuild -eq $baseline.FullRebuild -and
             [double]$row.strict_route_effective -eq 1) "M17 network-reset cycle evidence row values are invalid: cycle=$cycle"
     }
@@ -6893,7 +6890,7 @@ final = "resolver"
     Add-M17Witness "managed_addresses_routes_and_dns_are_unchanged" "live-product" "every reset reproduced the exact managed-plane address, route, DNS, MTU, and adapter snapshot hash"
     Add-M17Witness "strict_route_is_effective_and_filter_identity_is_unchanged" "live-product" "every notification passed exact strict-route health revalidation, and $wfpSamples bounded WFP snapshots retained the same process-owned dynamic session and eight dual-stack DNS guard filter IDs"
     Add-M17Witness "network_generation_and_reset_metrics_advance" "live-product" "network and TUN generations plus successful ResetNetwork counters advanced exactly once per mutation"
-    Add-M17Witness "session_restart_and_full_rebuild_metrics_are_unchanged" "live-product" "session restart, retry, reset failure, and full-rebuild counters remained at baseline"
+    Add-M17Witness "retry_reset_failure_and_full_rebuild_metrics_are_unchanged" "live-product" "retry, reset-failure, and full-rebuild counters remained at baseline"
     Add-M17LiveRow "network-reset-summary" ([ordered]@{
         cycles = $script:NetworkResetCycles
         process_id = $candidatePid
@@ -6903,7 +6900,6 @@ final = "resolver"
         reset_started_delta = $finalState.ResetStarted - $baseline.ResetStarted
         reset_succeeded_delta = $finalState.ResetSucceeded - $baseline.ResetSucceeded
         reset_failed_delta = $finalState.ResetFailed - $baseline.ResetFailed
-        session_restart_delta = $finalState.SessionRestartStarted - $baseline.SessionRestartStarted
         full_rebuild_delta = $finalState.FullRebuild - $baseline.FullRebuild
         strict_route_filter_install_delta = $finalState.StrictInstallSucceeded - $baseline.StrictInstallSucceeded
         managed_plane_sha256 = $managedBaseline.Sha256
@@ -6991,8 +6987,7 @@ final = "resolver"
     $maxSettledHandlerTasks = [Math]::Max($preHealthBaseline.HandlerTasks, $healthBaseline.HandlerTasks)
 
     $generation = $initial.Generation
-    $restartStartedBefore = Get-M17MetricValue $initial.Metrics "ferrum2_tun_session_restart_started"
-    $restartSucceededBefore = Get-M17MetricValue $initial.Metrics "ferrum2_tun_session_restart_succeeded"
+    $lifecycleBefore = Get-M17ManagedRouteRebuildMetricState $initial.Metrics
     foreach ($cycle in 1..$script:RestartCycles) {
         Remove-M17ManagedRouteForRestart $script:ownedInterfaceIndex "$supportAddress/32"
         $expectedGeneration = $generation + 1
@@ -7052,12 +7047,15 @@ final = "resolver"
     $maxSettledUdpAssociations = [Math]::Max($maxSettledUdpAssociations, $finalBaseline.UdpAssociations)
     $maxSettledHandlerTasks = [Math]::Max($maxSettledHandlerTasks, $finalBaseline.HandlerTasks)
     $finalMetrics = $finalBaseline.Metrics
-    $restartStarted = Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_started"
-    $restartSucceeded = Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_succeeded"
+    $lifecycleAfter = Get-M17ManagedRouteRebuildMetricState $finalMetrics
     Assert-True ($generation -eq $initial.Generation + $script:RestartCycles -and
-        $restartStarted -eq $restartStartedBefore + $script:RestartCycles -and
-        $restartSucceeded -eq $restartSucceededBefore + $script:RestartCycles -and
-        (Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_failed") -eq 0 -and
+        $lifecycleAfter.SessionGeneration -eq $generation -and
+        $lifecycleAfter.NetworkGeneration -eq $generation -and
+        $lifecycleAfter.RouteDamageStarted -eq $lifecycleBefore.RouteDamageStarted + $script:RestartCycles -and
+        $lifecycleAfter.RouteDamageSucceeded -eq $lifecycleBefore.RouteDamageSucceeded + $script:RestartCycles -and
+        $lifecycleAfter.RouteDamageFailed -eq $lifecycleBefore.RouteDamageFailed -and
+        $lifecycleAfter.FullRebuildTotal -eq $lifecycleBefore.FullRebuildTotal + (2 * $script:RestartCycles) -and
+        $lifecycleAfter.NetworkResetTotal -eq $lifecycleBefore.NetworkResetTotal -and
         (Get-M17MetricValue $finalMetrics "ferrum2_tun_udp_association_rejected_limit" $true) -eq $associationLimitBefore) "M17 restart stress counters changed"
     $script:m17CounterAfter = Get-M17CounterSnapshot $finalMetrics
     Add-M17Witness "same_process_for_every_restart" "live-product" "$script:RestartCycles observed notifications retained one PID"
@@ -7068,9 +7066,10 @@ final = "resolver"
         process_id = $candidatePid
         initial_generation = $initial.Generation
         final_generation = $generation
-        restart_started = $restartStarted
-        restart_succeeded = $restartSucceeded
-        restart_failed = Get-M17MetricValue $finalMetrics "ferrum2_tun_session_restart_failed"
+        route_damage_rebuild_started = $lifecycleAfter.RouteDamageStarted
+        route_damage_rebuild_succeeded = $lifecycleAfter.RouteDamageSucceeded
+        route_damage_rebuild_failed = $lifecycleAfter.RouteDamageFailed
+        network_reset_delta = $lifecycleAfter.NetworkResetTotal - $lifecycleBefore.NetworkResetTotal
         udp_association_limit = $udpAssociationLimit
         max_settled_udp_associations = $maxSettledUdpAssociations
         max_settled_handler_tasks = $maxSettledHandlerTasks
@@ -7978,7 +7977,8 @@ ready_timeout_ms = 15000
         $warmupAcceptedBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_accepted"
         $warmupRejectedBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_rejected" $true
         $warmupEgressBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_packets_egress"
-        $warmupRestartBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_session_restart_started"
+        $warmupResetBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_network_reset" $true
+        $warmupFullRebuildBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_network_full_rebuild" $true
         $warmupRingBefore = Get-M17MetricValue $warmupMetricsBefore "ferrum2_tun_wintun_ring_full_dropped"
         Invoke-M17UdpEcho $client $target $port ([Text.Encoding]::ASCII.GetBytes("m17-warmup"))
         $warmupStableSamples = 0
@@ -8005,8 +8005,9 @@ ready_timeout_ms = 15000
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $warmupDeadline)
         Assert-True ($warmupStableSamples -ge 2) "M17 scheduler counters did not stabilize: phase=warmup expected=1 raw_ingress_delta=$warmupIngressDelta accepted_before=$warmupAcceptedBefore accepted_after=$warmupAcceptedAfter accepted_delta=$warmupAcceptedDelta rejected_delta=$warmupRejectedDelta egress_before=$warmupEgressBefore egress_after=$warmupEgressAfter egress_delta=$warmupEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses) generation=$(Get-M17MetricValue $ordinaryMetricsBefore 'ferrum2_tun_session_generation') active=$(Get-M17MetricValue $ordinaryMetricsBefore 'ferrum2_tun_session_active')"
-        Assert-True ((Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_session_restart_started") -eq $warmupRestartBefore -and
-            (Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_wintun_ring_full_dropped") -eq $warmupRingBefore) "M17 scheduler warmup unexpectedly restarted or filled the Wintun ring"
+        Assert-True ((Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_network_reset" $true) -eq $warmupResetBefore -and
+            (Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_network_full_rebuild" $true) -eq $warmupFullRebuildBefore -and
+            (Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_wintun_ring_full_dropped") -eq $warmupRingBefore) "M17 scheduler warmup reset/rebuilt the network runtime or filled the Wintun ring"
         Add-M17LiveRow "scheduler-warmup-counter-stability" ([ordered]@{
             stable_samples = $warmupStableSamples
             raw_ingress_delta = $warmupIngressDelta
@@ -8021,7 +8022,8 @@ ready_timeout_ms = 15000
         $acceptedBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_accepted"
         $rejectedBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_rejected" $true
         $egressBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_packets_egress"
-        $restartBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_session_restart_started"
+        $networkResetBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_network_reset" $true
+        $fullRebuildBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_network_full_rebuild" $true
         $ringBefore = Get-M17MetricValue $ordinaryMetricsBefore "ferrum2_tun_wintun_ring_full_dropped"
         $burstSourceCount = 8
         $burstClients = [Collections.Generic.List[Net.Sockets.UdpClient]]::new()
@@ -8075,7 +8077,7 @@ ready_timeout_ms = 15000
             }
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $ordinaryDeadline)
-        Assert-True ($ordinaryStableSamples -ge 2) "M17 scheduler counters did not stabilize: phase=burst expected=88 raw_ingress_delta=$ordinaryIngressDelta accepted_before=$acceptedBefore accepted_after=$ordinaryAcceptedAfter accepted_delta=$ordinaryAcceptedDelta rejected_delta=$ordinaryRejectedDelta egress_before=$egressBefore egress_after=$ordinaryEgressAfter egress_delta=$ordinaryEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses) restart_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_restart_started') - $restartBefore) ring_full_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_wintun_ring_full_dropped') - $ringBefore) generation=$(Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_generation') active=$(Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_active')"
+        Assert-True ($ordinaryStableSamples -ge 2) "M17 scheduler counters did not stabilize: phase=burst expected=88 raw_ingress_delta=$ordinaryIngressDelta accepted_before=$acceptedBefore accepted_after=$ordinaryAcceptedAfter accepted_delta=$ordinaryAcceptedDelta rejected_delta=$ordinaryRejectedDelta egress_before=$egressBefore egress_after=$ordinaryEgressAfter egress_delta=$ordinaryEgressDelta probe_requests=$($probe.Requests) probe_responses=$($probe.Responses) network_reset_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_network_reset' $true) - $networkResetBefore) full_rebuild_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_network_full_rebuild' $true) - $fullRebuildBefore) ring_full_delta=$((Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_wintun_ring_full_dropped') - $ringBefore) generation=$(Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_generation') active=$(Get-M17MetricValue $ordinaryMetrics 'ferrum2_tun_session_active')"
         Add-M17LiveRow "scheduler-burst-counter-stability" ([ordered]@{
             stable_samples = $ordinaryStableSamples
             raw_ingress_delta = $ordinaryIngressDelta
@@ -8086,8 +8088,9 @@ ready_timeout_ms = 15000
             target_requests = $probe.Requests
             target_responses = $probe.Responses
         })
-        Assert-True ((Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_session_restart_started") -eq $restartBefore -and
-            (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_wintun_ring_full_dropped") -eq $ringBefore) "M17 ordinary bursts unexpectedly restarted or filled the Wintun ring"
+        Assert-True ((Get-M17MetricValue $ordinaryMetrics "ferrum2_network_reset" $true) -eq $networkResetBefore -and
+            (Get-M17MetricValue $ordinaryMetrics "ferrum2_network_full_rebuild" $true) -eq $fullRebuildBefore -and
+            (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_wintun_ring_full_dropped") -eq $ringBefore) "M17 ordinary bursts reset/rebuilt the network runtime or filled the Wintun ring"
 
         $pressurePackets = 256
         $pressurePayloadBytes = 1200
@@ -8096,7 +8099,8 @@ ready_timeout_ms = 15000
         $pressureMetricsBefore = $ordinaryMetrics
         $pressureEgressBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_tun_packets_egress"
         $pressureRingBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_tun_wintun_ring_full_dropped"
-        $pressureRestartBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_tun_session_restart_started"
+        $pressureResetBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_network_reset" $true
+        $pressureFullRebuildBefore = Get-M17MetricValue $pressureMetricsBefore "ferrum2_network_full_rebuild" $true
         $pressureBatchPackets = 1
         foreach ($batch in 0..(($pressurePackets / $pressureBatchPackets) - 1)) {
             $batchStart = $batch * $pressureBatchPackets
@@ -8125,7 +8129,8 @@ ready_timeout_ms = 15000
         } while ([DateTime]::UtcNow -lt $pressureDeadline)
         Assert-True ($pressureEgressDelta -ge 0 -and $pressureRingDelta -ge 0 -and
             $pressureEgressDelta + $pressureRingDelta -eq $pressurePackets) "M17 pressure output accounting is not closed"
-        Assert-True ((Get-M17MetricValue $pressureMetrics "ferrum2_tun_session_restart_started") -eq $pressureRestartBefore) "M17 ring pressure restarted the session"
+        Assert-True ((Get-M17MetricValue $pressureMetrics "ferrum2_network_reset" $true) -eq $pressureResetBefore -and
+            (Get-M17MetricValue $pressureMetrics "ferrum2_network_full_rebuild" $true) -eq $pressureFullRebuildBefore) "M17 ring pressure reset or rebuilt the network runtime"
 
         $pressureActual = [Collections.Generic.HashSet[uint32]]::new()
         if ($pressureEgressDelta -gt 0) {
@@ -8152,7 +8157,8 @@ ready_timeout_ms = 15000
     Assert-True ($finalPressureEgressDelta -eq $pressureEgressDelta -and
         $finalPressureRingDelta -eq $pressureRingDelta -and
         $finalPressureEgressDelta + $finalPressureRingDelta -eq $pressurePackets) "M17 pressure output accounting did not remain stable after drain"
-    Assert-True ((Get-M17MetricValue $metrics "ferrum2_tun_session_restart_started") -eq $pressureRestartBefore) "M17 pressure caused a delayed session restart"
+    Assert-True ((Get-M17MetricValue $metrics "ferrum2_network_reset" $true) -eq $pressureResetBefore -and
+        (Get-M17MetricValue $metrics "ferrum2_network_full_rebuild" $true) -eq $pressureFullRebuildBefore) "M17 pressure caused a delayed network reset or full rebuild"
     Add-M17LiveRow "scheduler-egress-pressure" ([ordered]@{
         packets = $pressurePackets
         batch_packets = $pressureBatchPackets
@@ -8160,9 +8166,10 @@ ready_timeout_ms = 15000
         delivered = [int]$finalPressureEgressDelta
         ring_full_dropped = [int]$finalPressureRingDelta
         receive_buffer_bytes = $pressureReceiveBufferBytes
-        restart_delta = 0
+        network_reset_delta = 0
+        full_rebuild_delta = 0
     })
-    Add-M17Witness "live_egress_pressure_has_closed_accounting" "live-product" "256 1200-byte responses were exactly partitioned into delivered and explicit ring-full outcomes without restart"
+    Add-M17Witness "live_egress_pressure_has_closed_accounting" "live-product" "256 1200-byte responses were exactly partitioned into delivered and explicit ring-full outcomes without a network reset or full rebuild"
     Add-M17LiveRow "scheduler-bursts" ([ordered]@{
         sequence_packets = @(8, 16, 64)
         batch_packets = $burstSourceCount
@@ -8174,7 +8181,8 @@ ready_timeout_ms = 15000
         non_accepted_ingress_delta = $ordinaryIngressDelta - $ordinaryAcceptedDelta
         egress_delta = $ordinaryEgressAfter - $egressBefore
         target_requests = $pressureTargetBefore
-        restart_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_session_restart_started") - $restartBefore
+        network_reset_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_network_reset" $true) - $networkResetBefore
+        full_rebuild_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_network_full_rebuild" $true) - $fullRebuildBefore
         live_ring_full_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_wintun_ring_full_dropped") - $ringBefore
     })
     $script:m17CounterAfter = Get-M17CounterSnapshot $metrics

@@ -3,12 +3,13 @@
 
 <#
 .SYNOPSIS
-Runs the Windows TUN qualification controller only inside the approved Hyper-V guest.
+Runs Windows TUN qualification and deterministic fuzz smoke only inside the approved Hyper-V guest.
 
 .DESCRIPTION
-The host side builds the exact clean candidate with Rust 1.97.1 and locked dependencies, then limits
+The host side builds the exact clean candidate with Rust 1.97.1 and locked dependencies, including
+the standalone Windows TUN fuzz smoke executable, then limits
 itself to exact-identity VM lifecycle operations, PowerShell Direct, bounded file staging, and
-evidence export. It stages precompiled client/server/test executables, a portable PowerShell runtime,
+evidence export. It stages precompiled client/server/test/smoke executables, a portable PowerShell runtime,
 Visual C++ runtime libraries, Wintun, and the qualification controller. The guest never requires Git,
 Cargo, rustup, or an installed PowerShell 7. The host never changes an adapter, address, route, DNS
 setting, firewall rule, WFP object, or TUN session.
@@ -31,14 +32,17 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [ValidateSet(
-        "route-detect",
+        "network-reset-10",
+        "network-reset-100",
+        "network-reset-1000",
         "restart-10",
         "restart-100",
         "restart-1000",
         "fragments",
         "dual-stack-dns",
         "udp-policy",
-        "scheduler-ring-full"
+        "scheduler-ring-full",
+        "fuzz-smoke"
     )]
     [string]$Profile,
 
@@ -659,6 +663,26 @@ function Build-CandidateArtifacts {
             -Label "$($spec.Package) test binary"
     }
 
+    $fuzzManifest = Join-Path $script:repositoryRoot "crates\ferrum2-tun\fuzz\Cargo.toml"
+    $fuzzMessages = Get-CargoCompilerArtifacts (Invoke-CapturedNativeCommand `
+        -Executable $rustup `
+        -Arguments ($common + @(
+            "build", "--manifest-path", $fuzzManifest, "--bin", "smoke",
+            "--no-default-features", "--locked", "--target", "x86_64-pc-windows-msvc",
+            "--message-format=json-render-diagnostics"
+        )) `
+        -Label "host Windows TUN fuzz smoke build")
+    $fuzzSmokeSource = Select-CargoExecutable `
+        -Messages $fuzzMessages `
+        -TargetName "smoke" `
+        -TargetKind "bin" `
+        -TestProfile $false `
+        -Label "Windows TUN fuzz smoke binary"
+    $fuzzSmoke = Copy-CandidateArtifact `
+        -Source $fuzzSmokeSource `
+        -Destination (Join-Path $Destination "ferrum2-tun-fuzz-smoke.exe") `
+        -Label "Windows TUN fuzz smoke binary"
+
     if ($client.Sha256 -cne [string]$Ledger.client_sha256 -or
         $server.Sha256 -cne [string]$Ledger.server_sha256) {
         throw "host-built candidate binary hashes do not match the identity ledger"
@@ -672,6 +696,7 @@ function Build-CandidateArtifacts {
         Client = $client
         Server = $server
         Tests = $tests
+        FuzzSmoke = $fuzzSmoke
         RustVersion = $versionLines[0]
     }
 }
@@ -890,10 +915,6 @@ if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne "X64") {
     throw "the Hyper-V host orchestrator requires 64-bit Windows AMD64"
 }
-if (-not $ProbeOnly -and $Profile -ceq "route-detect") {
-    throw "route-detect qualification is unsupported after removal of external route-conflict detection"
-}
-
 # Resolve both exact identities and the DPAPI credential before any VM lifecycle operation.
 $initialContext = Get-ApprovedVmContext
 $guestCredential = Import-ApprovedGuestCredential -Path $CredentialPath
@@ -962,6 +983,17 @@ if ($ProbeOnly) {
         controller_invoked = $false
     } | ConvertTo-Json -Compress
     return
+}
+
+$requestedMode = $Profile
+$requestedRestartCycles = $null
+$requestedNetworkResetCycles = $null
+if ($Profile -cmatch '^restart-(10|100|1000)$') {
+    $requestedMode = "restart-stress"
+    $requestedRestartCycles = [int]$Matches[1]
+} elseif ($Profile -cmatch '^network-reset-(10|100|1000)$') {
+    $requestedMode = "network-reset"
+    $requestedNetworkResetCycles = [int]$Matches[1]
 }
 
 $candidate = Get-CandidateIdentity
@@ -1052,9 +1084,13 @@ try {
         throw "candidate commit changed during host artifact preparation"
     }
     $stagedInput = [ordered]@{
-        schema = "ferrum2.windows-tun.hyperv-staged-input.v1"
+        schema = "ferrum2.windows-tun.hyperv-staged-input.v2"
         candidate_sha = $candidate.Sha
         identity_sha256 = $ledgerIdentity.Sha256
+        profile = $Profile
+        mode = $requestedMode
+        network_reset_cycles = $requestedNetworkResetCycles
+        restart_cycles = $requestedRestartCycles
         files = [ordered]@{
             controller = $controllerEntry
             identity_ledger = $identityEntry
@@ -1064,6 +1100,7 @@ try {
             client_tests = $(New-StagedFileEntry -Path $candidateArtifacts.Tests.client.Path -Name "ferrum2-client-tests.exe")
             tun_tests = $(New-StagedFileEntry -Path $candidateArtifacts.Tests.tun.Path -Name "ferrum2-tun-tests.exe")
             wintun_tests = $(New-StagedFileEntry -Path $candidateArtifacts.Tests.wintun.Path -Name "ferrum2-wintun-tests.exe")
+            fuzz_smoke = $(New-StagedFileEntry -Path $candidateArtifacts.FuzzSmoke.Path -Name "ferrum2-tun-fuzz-smoke.exe")
             powershell_archive = $(New-StagedFileEntry `
                 -Path $portablePowerShell.Path `
                 -Name "portable-pwsh.zip" `
@@ -1148,7 +1185,8 @@ try {
         [ordered]@{ Source = $candidateArtifacts.Server.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-server.exe") },
         [ordered]@{ Source = $candidateArtifacts.Tests.client.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-client-tests.exe") },
         [ordered]@{ Source = $candidateArtifacts.Tests.tun.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-tun-tests.exe") },
-        [ordered]@{ Source = $candidateArtifacts.Tests.wintun.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-wintun-tests.exe") }
+        [ordered]@{ Source = $candidateArtifacts.Tests.wintun.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-wintun-tests.exe") },
+        [ordered]@{ Source = $candidateArtifacts.FuzzSmoke.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-tun-fuzz-smoke.exe") }
     )
     foreach ($library in $runtimeLibraries) {
         $stagedFiles += [ordered]@{
@@ -1164,7 +1202,7 @@ try {
             -ErrorAction Stop
     }
 
-    # BEGIN GUEST_ONLY_NETWORK_EXECUTION
+    # BEGIN GUEST_ONLY_EXECUTION
     $guestResults = @(Invoke-Command `
         -Session $connection.Session `
         -ArgumentList @(
@@ -1236,6 +1274,198 @@ try {
                 return $Value -is [int] -or $Value -is [long]
             }
 
+            function Test-JsonNumber {
+                param([object]$Value)
+                return $Value -is [byte] -or $Value -is [int16] -or $Value -is [int] -or
+                    $Value -is [long] -or $Value -is [single] -or $Value -is [double] -or
+                    $Value -is [decimal]
+            }
+
+            function Test-Sha256 {
+                param([object]$Value)
+                return $Value -is [string] -and [string]$Value -cmatch '^[0-9a-f]{64}$'
+            }
+
+            function Assert-NetworkResetEvidence {
+                param(
+                    [object]$Result,
+                    [string]$ArtifactPath,
+                    [int]$ExpectedCycles
+                )
+                if ($ExpectedCycles -notin @(10, 100, 1000)) {
+                    throw "network-reset evidence cycle count is invalid"
+                }
+                $baselineRows = @($Result.live_checks | Where-Object {
+                    $_.name -ceq "network-reset-baseline"
+                })
+                $summaryRows = @($Result.live_checks | Where-Object {
+                    $_.name -ceq "network-reset-summary"
+                })
+                if ($baselineRows.Count -ne 1 -or $summaryRows.Count -ne 1) {
+                    throw "network-reset WFP live evidence rows are not exact"
+                }
+                $baselineRow = $baselineRows[0]
+                $summaryRow = $summaryRows[0]
+                Assert-ClosedProperties $baselineRow @("name", "status", "evidence") "network-reset baseline row"
+                Assert-ClosedProperties $summaryRow @("name", "status", "evidence") "network-reset summary row"
+                if ($baselineRow.status -cne "pass" -or $summaryRow.status -cne "pass") {
+                    throw "network-reset WFP live evidence did not pass"
+                }
+
+                $baseline = $baselineRow.evidence
+                Assert-ClosedProperties $baseline @(
+                    "process_id", "interface_guid", "interface_luid", "interface_index",
+                    "managed_plane_sha256", "managed_plane", "strict_route_wfp_sha256",
+                    "strict_route_filters", "strict_route_filter_ids", "strict_route_session_key",
+                    "strict_route_sublayer_key", "session_generation", "network_generation"
+                ) "network-reset baseline evidence"
+                $filterIds = @($baseline.strict_route_filter_ids)
+                if (-not (Test-JsonInteger $baseline.process_id) -or [long]$baseline.process_id -le 0 -or
+                    $baseline.interface_guid -isnot [string] -or
+                    [string]$baseline.interface_guid -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+                    $baseline.interface_luid -isnot [string] -or [string]$baseline.interface_luid -cnotmatch '^[1-9][0-9]*$' -or
+                    -not (Test-JsonInteger $baseline.interface_index) -or [long]$baseline.interface_index -le 0 -or
+                    -not (Test-Sha256 $baseline.managed_plane_sha256) -or
+                    -not (Test-Sha256 $baseline.strict_route_wfp_sha256) -or
+                    -not (Test-JsonInteger $baseline.strict_route_filters) -or
+                    [long]$baseline.strict_route_filters -ne 8 -or $filterIds.Count -ne 8 -or
+                    @($filterIds | Sort-Object -Unique).Count -ne 8 -or
+                    @($filterIds | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[1-9][0-9]*$' }).Count -ne 0 -or
+                    $baseline.strict_route_session_key -cne "8ea35b4e-6629-4e26-9776-95c5bf9c6b01" -or
+                    $baseline.strict_route_sublayer_key -cne "ddbc2fa2-d52f-4a79-8a63-8446c308cf02" -or
+                    -not (Test-JsonNumber $baseline.session_generation) -or
+                    -not (Test-JsonNumber $baseline.network_generation)) {
+                    throw "network-reset baseline WFP identity is invalid"
+                }
+
+                $summary = $summaryRow.evidence
+                Assert-ClosedProperties $summary @(
+                    "cycles", "process_id", "initial_session_generation", "final_session_generation",
+                    "final_network_generation", "reset_started_delta", "reset_succeeded_delta",
+                    "reset_failed_delta", "full_rebuild_delta",
+                    "strict_route_filter_install_delta", "managed_plane_sha256",
+                    "strict_route_wfp_sha256", "strict_route_filter_ids",
+                    "strict_route_health_revalidations", "strict_route_wfp_samples",
+                    "cycle_evidence", "cycle_evidence_bytes", "cycle_evidence_sha256"
+                ) "network-reset summary evidence"
+                $summaryFilterIds = @($summary.strict_route_filter_ids)
+                $sampleStride = [Math]::Max(1, [int][Math]::Ceiling($ExpectedCycles / 10.0))
+                $expectedWfpSamples = 1 + @(1..$ExpectedCycles | Where-Object {
+                    $_ -eq 1 -or $_ -eq $ExpectedCycles -or ($_ % $sampleStride) -eq 0
+                }).Count
+                if (-not (Test-JsonInteger $summary.cycles) -or [long]$summary.cycles -ne $ExpectedCycles -or
+                    -not (Test-JsonInteger $summary.process_id) -or
+                    [long]$summary.process_id -ne [long]$baseline.process_id -or
+                    -not (Test-JsonNumber $summary.initial_session_generation) -or
+                    -not (Test-JsonNumber $summary.final_session_generation) -or
+                    -not (Test-JsonNumber $summary.final_network_generation) -or
+                    [double]$summary.final_session_generation -ne [double]$summary.initial_session_generation + $ExpectedCycles -or
+                    [double]$summary.final_network_generation -ne [double]$summary.final_session_generation -or
+                    -not (Test-JsonNumber $summary.reset_started_delta) -or
+                    [double]$summary.reset_started_delta -ne $ExpectedCycles -or
+                    -not (Test-JsonNumber $summary.reset_succeeded_delta) -or
+                    [double]$summary.reset_succeeded_delta -ne $ExpectedCycles -or
+                    -not (Test-JsonNumber $summary.reset_failed_delta) -or [double]$summary.reset_failed_delta -ne 0 -or
+                    -not (Test-JsonNumber $summary.full_rebuild_delta) -or [double]$summary.full_rebuild_delta -ne 0 -or
+                    -not (Test-JsonNumber $summary.strict_route_filter_install_delta) -or
+                    [double]$summary.strict_route_filter_install_delta -ne 0 -or
+                    $summary.managed_plane_sha256 -cne $baseline.managed_plane_sha256 -or
+                    $summary.strict_route_wfp_sha256 -cne $baseline.strict_route_wfp_sha256 -or
+                    ($summaryFilterIds -join "|") -cne ($filterIds -join "|") -or
+                    -not (Test-JsonInteger $summary.strict_route_health_revalidations) -or
+                    [long]$summary.strict_route_health_revalidations -ne $ExpectedCycles -or
+                    -not (Test-JsonInteger $summary.strict_route_wfp_samples) -or
+                    [long]$summary.strict_route_wfp_samples -ne $expectedWfpSamples -or
+                    $summary.cycle_evidence -cne "network-reset-cycles.jsonl" -or
+                    -not (Test-JsonInteger $summary.cycle_evidence_bytes) -or
+                    [long]$summary.cycle_evidence_bytes -le 0 -or
+                    [long]$summary.cycle_evidence_bytes -gt 1048576 -or
+                    -not (Test-Sha256 $summary.cycle_evidence_sha256)) {
+                    throw "network-reset summary WFP evidence is invalid"
+                }
+
+                $cyclePath = Join-Path $ArtifactPath "network-reset-cycles.jsonl"
+                $cycleItem = Get-Item -LiteralPath $cyclePath -Force -ErrorAction Stop
+                if ($cycleItem.PSIsContainer -or
+                    ($cycleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                    $cycleItem.Length -ne [long]$summary.cycle_evidence_bytes -or
+                    (Get-FileHash -LiteralPath $cyclePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                        [string]$summary.cycle_evidence_sha256) {
+                    throw "network-reset cycle evidence identity is invalid"
+                }
+                $cycleBytes = [IO.File]::ReadAllBytes($cyclePath)
+                $lfCount = 0
+                $crCount = 0
+                foreach ($byte in $cycleBytes) {
+                    if ($byte -eq 10) { $lfCount++ }
+                    if ($byte -eq 13) { $crCount++ }
+                }
+                if ($cycleBytes.Length -eq 0 -or $cycleBytes[$cycleBytes.Length - 1] -ne 10 -or
+                    $lfCount -ne $ExpectedCycles -or $crCount -ne 0) {
+                    throw "network-reset cycle evidence framing is invalid"
+                }
+                $cycleText = [Text.UTF8Encoding]::new($false, $true).GetString($cycleBytes)
+                $cycleLines = $cycleText.Split([char[]]@([char]10), [StringSplitOptions]::None)
+                if ($cycleLines.Count -ne $ExpectedCycles + 1 -or $cycleLines[-1].Length -ne 0) {
+                    throw "network-reset cycle evidence row count is invalid"
+                }
+                $cycleProperties = @(
+                    "cycle", "mutation", "route_metric", "process_id", "interface_guid", "interface_luid",
+                    "interface_index", "managed_plane_sha256", "strict_route_wfp_sha256", "wfp_sampled",
+                    "session_generation", "network_generation", "reset_started", "reset_succeeded",
+                    "reset_failed", "full_rebuild", "strict_route_effective"
+                )
+                $sampledRows = 0
+                $resetStartedBaseline = $null
+                $resetSucceededBaseline = $null
+                $resetFailedBaseline = $null
+                $fullRebuildBaseline = $null
+                foreach ($offset in 0..($ExpectedCycles - 1)) {
+                    $cycle = $offset + 1
+                    $row = $cycleLines[$offset] | ConvertFrom-Json -ErrorAction Stop
+                    Assert-ClosedProperties $row $cycleProperties "network-reset cycle evidence row"
+                    $expectedMetric = if ($cycle -eq 1 -or ($cycle % 2) -ne 0) { 4094 } else { 4095 }
+                    $expectedMutation = if ($cycle -eq 1) { "create" } else { "metric_toggle" }
+                    $expectedSample = $cycle -eq 1 -or $cycle -eq $ExpectedCycles -or
+                        ($cycle % $sampleStride) -eq 0
+                    if ($row.wfp_sampled -eq $true) { $sampledRows++ }
+                    if ($cycle -eq 1) {
+                        $resetStartedBaseline = [double]$row.reset_started - 1
+                        $resetSucceededBaseline = [double]$row.reset_succeeded - 1
+                        $resetFailedBaseline = [double]$row.reset_failed
+                        $fullRebuildBaseline = [double]$row.full_rebuild
+                    }
+                    if (-not (Test-JsonInteger $row.cycle) -or [long]$row.cycle -ne $cycle -or
+                        $row.mutation -cne $expectedMutation -or
+                        -not (Test-JsonInteger $row.route_metric) -or [long]$row.route_metric -ne $expectedMetric -or
+                        -not (Test-JsonInteger $row.process_id) -or [long]$row.process_id -ne [long]$baseline.process_id -or
+                        $row.interface_guid -cne $baseline.interface_guid -or
+                        $row.interface_luid -cne $baseline.interface_luid -or
+                        -not (Test-JsonInteger $row.interface_index) -or
+                        [long]$row.interface_index -ne [long]$baseline.interface_index -or
+                        $row.managed_plane_sha256 -cne $baseline.managed_plane_sha256 -or
+                        $row.strict_route_wfp_sha256 -cne $baseline.strict_route_wfp_sha256 -or
+                        $row.wfp_sampled -isnot [bool] -or $row.wfp_sampled -ne $expectedSample -or
+                        -not (Test-JsonNumber $row.session_generation) -or
+                        [double]$row.session_generation -ne [double]$summary.initial_session_generation + $cycle -or
+                        -not (Test-JsonNumber $row.network_generation) -or
+                        [double]$row.network_generation -ne [double]$row.session_generation -or
+                        -not (Test-JsonNumber $row.reset_started) -or
+                        [double]$row.reset_started -ne $resetStartedBaseline + $cycle -or
+                        -not (Test-JsonNumber $row.reset_succeeded) -or
+                        [double]$row.reset_succeeded -ne $resetSucceededBaseline + $cycle -or
+                        -not (Test-JsonNumber $row.reset_failed) -or [double]$row.reset_failed -ne $resetFailedBaseline -or
+                        -not (Test-JsonNumber $row.full_rebuild) -or [double]$row.full_rebuild -ne $fullRebuildBaseline -or
+                        -not (Test-JsonNumber $row.strict_route_effective) -or
+                        [double]$row.strict_route_effective -ne 1) {
+                        throw "network-reset cycle evidence values are invalid: cycle=$cycle"
+                    }
+                }
+                if ($sampledRows + 1 -ne [long]$summary.strict_route_wfp_samples) {
+                    throw "network-reset WFP sample accounting is invalid"
+                }
+            }
+
             function Assert-StagedFileIdentity {
                 param(
                     [string]$Path,
@@ -1279,17 +1509,22 @@ try {
             $runtimeLibraryDirectory = Join-Path $inputPath "runtime\vc-runtime"
             $clientBinary = Join-Path $candidateTestDirectory "ferrum2-client.exe"
             $serverBinary = Join-Path $candidateTestDirectory "ferrum2-server.exe"
+            $fuzzSmokeBinary = Join-Path $candidateTestDirectory "ferrum2-tun-fuzz-smoke.exe"
             New-Item -ItemType Directory -Path $artifactPath -ErrorAction Stop | Out-Null
 
             $mode = $RequestedProfile
-            $restartCycles = 10
+            $restartCycles = $null
+            $networkResetCycles = $null
             if ($RequestedProfile -cmatch '^restart-(10|100|1000)$') {
                 $restartCycles = [int]$Matches[1]
                 $mode = "restart-stress"
+            } elseif ($RequestedProfile -cmatch '^network-reset-(10|100|1000)$') {
+                $networkResetCycles = [int]$Matches[1]
+                $mode = "network-reset"
             }
             $allowedModes = @(
-                "restart-stress", "fragments", "dual-stack-dns", "udp-policy",
-                "scheduler-ring-full"
+                "network-reset", "restart-stress", "fragments", "dual-stack-dns",
+                "udp-policy", "scheduler-ring-full", "fuzz-smoke"
             )
             if ($mode -notin $allowedModes) {
                 throw "guest profile dispatch rejected"
@@ -1299,6 +1534,7 @@ try {
             $qualificationExit = $null
             $cleanupExit = $null
             $controllerStarted = $false
+            $fuzzSmokeResult = $null
             $failurePhase = $null
             try {
                 $inputItems = @(Get-Item -LiteralPath $inputPath -Force) + @(
@@ -1310,7 +1546,7 @@ try {
                 if (@($inputItems | Where-Object {
                         $_.Attributes -band [IO.FileAttributes]::ReparsePoint
                     }).Count -ne 0 -or
-                    $inputFiles.Count -lt 11 -or $inputFiles.Count -gt 13 -or
+                    $inputFiles.Count -lt 12 -or $inputFiles.Count -gt 14 -or
                     $inputDirectories.Count -ne 5 -or
                     $inputBytes -le 0 -or $inputBytes -gt 2147483648) {
                     throw "guest staged input boundary is invalid"
@@ -1324,19 +1560,29 @@ try {
                 $manifest = Get-Content -LiteralPath $inputManifestPath -Raw -Encoding utf8 |
                     ConvertFrom-Json -ErrorAction Stop
                 Assert-ClosedProperties $manifest @(
-                    "schema", "candidate_sha", "identity_sha256", "files", "runtime"
+                    "schema", "candidate_sha", "identity_sha256", "profile", "mode",
+                    "network_reset_cycles", "restart_cycles", "files", "runtime"
                 ) "staged input manifest"
                 Assert-ClosedProperties $manifest.files @(
                     "controller", "identity_ledger", "wintun_zip", "client", "server",
-                    "client_tests", "tun_tests", "wintun_tests", "powershell_archive"
+                    "client_tests", "tun_tests", "wintun_tests", "fuzz_smoke", "powershell_archive"
                 ) "staged input file manifest"
                 Assert-ClosedProperties $manifest.runtime @(
                     "rust_version", "powershell_version", "powershell_executable_sha256",
                     "powershell_file_count", "powershell_expanded_bytes", "vc_libraries"
                 ) "staged runtime manifest"
-                if ($manifest.schema -cne "ferrum2.windows-tun.hyperv-staged-input.v1" -or
+                if ($manifest.schema -cne "ferrum2.windows-tun.hyperv-staged-input.v2" -or
                     $manifest.candidate_sha -cne $CandidateSha -or
                     $manifest.identity_sha256 -cne $ExpectedLedgerHash -or
+                    $manifest.profile -cne $RequestedProfile -or $manifest.mode -cne $mode -or
+                    ($null -eq $networkResetCycles -and $null -ne $manifest.network_reset_cycles) -or
+                    ($null -ne $networkResetCycles -and
+                        (-not (Test-JsonInteger $manifest.network_reset_cycles) -or
+                            [long]$manifest.network_reset_cycles -ne [long]$networkResetCycles)) -or
+                    ($null -eq $restartCycles -and $null -ne $manifest.restart_cycles) -or
+                    ($null -ne $restartCycles -and
+                        (-not (Test-JsonInteger $manifest.restart_cycles) -or
+                            [long]$manifest.restart_cycles -ne [long]$restartCycles)) -or
                     [string]$manifest.runtime.rust_version -cnotmatch '^rustc 1\.97\.1 \(' -or
                     [string]$manifest.runtime.powershell_executable_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
                     -not (Test-JsonInteger $manifest.runtime.powershell_file_count) -or
@@ -1356,6 +1602,7 @@ try {
                     @((Join-Path $candidateTestDirectory "ferrum2-client-tests.exe"), $manifest.files.client_tests, "ferrum2-client-tests.exe", 4096, 536870912),
                     @((Join-Path $candidateTestDirectory "ferrum2-tun-tests.exe"), $manifest.files.tun_tests, "ferrum2-tun-tests.exe", 4096, 536870912),
                     @((Join-Path $candidateTestDirectory "ferrum2-wintun-tests.exe"), $manifest.files.wintun_tests, "ferrum2-wintun-tests.exe", 4096, 536870912),
+                    @($fuzzSmokeBinary, $manifest.files.fuzz_smoke, "ferrum2-tun-fuzz-smoke.exe", 4096, 536870912),
                     @($powerShellArchive, $manifest.files.powershell_archive, "portable-pwsh.zip", 1, 1073741824)
                 )
                 foreach ($check in $fileChecks) {
@@ -1400,7 +1647,8 @@ try {
                     $serverBinary,
                     (Join-Path $candidateTestDirectory "ferrum2-client-tests.exe"),
                     (Join-Path $candidateTestDirectory "ferrum2-tun-tests.exe"),
-                    (Join-Path $candidateTestDirectory "ferrum2-wintun-tests.exe")
+                    (Join-Path $candidateTestDirectory "ferrum2-wintun-tests.exe"),
+                    $fuzzSmokeBinary
                 ) + @($vcEntries | ForEach-Object {
                     Join-Path $runtimeLibraryDirectory ([string]$_.name)
                 })
@@ -1472,29 +1720,92 @@ try {
                     [Text.UTF8Encoding]::new($false)
                 )
 
-                $phase = "qualification"
-                $controllerArguments = @(
-                    "-NoProfile", "-File", $controllerPath,
-                    "-Mode", $mode,
-                    "-RunToken", $Token,
-                    "-IdentityLedger", $ledgerPath,
-                    "-ClientBinary", $clientBinary,
-                    "-ServerBinary", $serverBinary,
-                    "-WintunZip", $wintunPath,
-                    "-CandidateTestDirectory", $candidateTestDirectory,
-                    "-RuntimeLibraryDirectory", $runtimeLibraryDirectory,
-                    "-ProductRoot", $RunRoot,
-                    "-ArtifactDirectory", $artifactPath
-                )
-                if ($mode -ceq "restart-stress") {
-                    $controllerArguments += @("-RestartCycles", [string]$restartCycles)
+                if ($mode -ceq "fuzz-smoke") {
+                    $phase = "fuzz-smoke"
+                    $fuzzStdout = Join-Path $exportPath "fuzz-smoke.stdout.log"
+                    $fuzzStderr = Join-Path $exportPath "fuzz-smoke.stderr.log"
+                    $fuzzResultPath = Join-Path $exportPath "fuzz-smoke-result.json"
+                    $qualificationExit = Invoke-LoggedCommand `
+                        -Executable $fuzzSmokeBinary `
+                        -Arguments @() `
+                        -StdoutPath $fuzzStdout `
+                        -StderrPath $fuzzStderr
+                    $fuzzStdoutLines = @(Get-Content -LiteralPath $fuzzStdout -ErrorAction Stop)
+                    $fuzzStderrItem = Get-Item -LiteralPath $fuzzStderr -Force -ErrorAction Stop
+                    $expectedFuzzTerminal = "TUN state smoke corpora: 4 packet and 3 UDP reset seeds passed"
+                    if ($qualificationExit -ne 0 -or $fuzzStdoutLines.Count -ne 1 -or
+                        [string]$fuzzStdoutLines[0] -cne $expectedFuzzTerminal -or
+                        $fuzzStderrItem.Length -ne 0) {
+                        throw "guest Windows TUN fuzz smoke evidence is invalid"
+                    }
+                    $fuzzSmokeResult = [ordered]@{
+                        schema = "ferrum2.windows-tun.fuzz-smoke-result.v1"
+                        status = "pass"
+                        run_token = $Token
+                        candidate_sha = $CandidateSha
+                        identity_sha256 = $ExpectedLedgerHash
+                        staged_input_sha256 = $ExpectedInputManifestHash
+                        binary_sha256 = [string]$manifest.files.fuzz_smoke.sha256
+                        binary_bytes = [long]$manifest.files.fuzz_smoke.bytes
+                        packet_seed_count = 4
+                        udp_reset_seed_count = 3
+                        terminal = $expectedFuzzTerminal
+                        stdout_sha256 = (Get-FileHash -LiteralPath $fuzzStdout -Algorithm SHA256).Hash.ToLowerInvariant()
+                        stderr_sha256 = (Get-FileHash -LiteralPath $fuzzStderr -Algorithm SHA256).Hash.ToLowerInvariant()
+                        finished_utc = [DateTime]::UtcNow.ToString("o")
+                    }
+                    Write-GuestJsonNew -Path $fuzzResultPath -Value $fuzzSmokeResult
+                    $fuzzSmokeResult = Get-Content -LiteralPath $fuzzResultPath -Raw -Encoding utf8 |
+                        ConvertFrom-Json -ErrorAction Stop
+                    Assert-ClosedProperties $fuzzSmokeResult @(
+                        "schema", "status", "run_token", "candidate_sha", "identity_sha256", "staged_input_sha256",
+                        "binary_sha256", "binary_bytes", "packet_seed_count", "udp_reset_seed_count",
+                        "terminal", "stdout_sha256", "stderr_sha256", "finished_utc"
+                    ) "fuzz smoke result"
+                    if ($fuzzSmokeResult.schema -cne "ferrum2.windows-tun.fuzz-smoke-result.v1" -or
+                        $fuzzSmokeResult.status -cne "pass" -or $fuzzSmokeResult.run_token -cne $Token -or
+                        $fuzzSmokeResult.candidate_sha -cne $CandidateSha -or
+                        $fuzzSmokeResult.identity_sha256 -cne $ExpectedLedgerHash -or
+                        $fuzzSmokeResult.staged_input_sha256 -cne $ExpectedInputManifestHash -or
+                        $fuzzSmokeResult.binary_sha256 -cne [string]$manifest.files.fuzz_smoke.sha256 -or
+                        -not (Test-JsonInteger $fuzzSmokeResult.binary_bytes) -or
+                        [long]$fuzzSmokeResult.binary_bytes -ne [long]$manifest.files.fuzz_smoke.bytes -or
+                        -not (Test-JsonInteger $fuzzSmokeResult.packet_seed_count) -or
+                        [long]$fuzzSmokeResult.packet_seed_count -ne 4 -or
+                        -not (Test-JsonInteger $fuzzSmokeResult.udp_reset_seed_count) -or
+                        [long]$fuzzSmokeResult.udp_reset_seed_count -ne 3 -or
+                        $fuzzSmokeResult.terminal -cne $expectedFuzzTerminal -or
+                        $fuzzSmokeResult.stdout_sha256 -cne (Get-FileHash -LiteralPath $fuzzStdout -Algorithm SHA256).Hash.ToLowerInvariant() -or
+                        $fuzzSmokeResult.stderr_sha256 -cne (Get-FileHash -LiteralPath $fuzzStderr -Algorithm SHA256).Hash.ToLowerInvariant()) {
+                        throw "guest Windows TUN fuzz smoke result readback is invalid"
+                    }
+                } else {
+                    $phase = "qualification"
+                    $controllerArguments = @(
+                        "-NoProfile", "-File", $controllerPath,
+                        "-Mode", $mode,
+                        "-RunToken", $Token,
+                        "-IdentityLedger", $ledgerPath,
+                        "-ClientBinary", $clientBinary,
+                        "-ServerBinary", $serverBinary,
+                        "-WintunZip", $wintunPath,
+                        "-CandidateTestDirectory", $candidateTestDirectory,
+                        "-RuntimeLibraryDirectory", $runtimeLibraryDirectory,
+                        "-ProductRoot", $RunRoot,
+                        "-ArtifactDirectory", $artifactPath
+                    )
+                    if ($mode -ceq "restart-stress") {
+                        $controllerArguments += @("-RestartCycles", [string]$restartCycles)
+                    } elseif ($mode -ceq "network-reset") {
+                        $controllerArguments += @("-NetworkResetCycles", [string]$networkResetCycles)
+                    }
+                    $controllerStarted = $true
+                    $qualificationExit = Invoke-LoggedCommand `
+                        -Executable $pwsh `
+                        -Arguments $controllerArguments `
+                        -StdoutPath $controllerStdout `
+                        -StderrPath $controllerStderr
                 }
-                $controllerStarted = $true
-                $qualificationExit = Invoke-LoggedCommand `
-                    -Executable $pwsh `
-                    -Arguments $controllerArguments `
-                    -StdoutPath $controllerStdout `
-                    -StderrPath $controllerStderr
             } catch {
                 $failurePhase = $phase
             } finally {
@@ -1525,9 +1836,15 @@ try {
             }
 
             $status = "fail"
-                if ($null -eq $failurePhase -and $qualificationExit -eq 0 -and $cleanupExit -eq 0) {
-                    $requiredArtifacts = @(
-                        "identity-ledger.json", "m17-contract.json", "m17-result.json", "external-cleanup.json"
+            if ($mode -ceq "fuzz-smoke") {
+                if ($null -eq $failurePhase -and $qualificationExit -eq 0 -and
+                    $null -eq $cleanupExit -and $null -ne $fuzzSmokeResult -and
+                    $fuzzSmokeResult.status -ceq "pass") {
+                    $status = "pass"
+                }
+            } elseif ($null -eq $failurePhase -and $qualificationExit -eq 0 -and $cleanupExit -eq 0) {
+                $requiredArtifacts = @(
+                    "identity-ledger.json", "m17-contract.json", "m17-result.json", "external-cleanup.json"
                 )
                 $missing = @($requiredArtifacts | Where-Object {
                     -not (Test-Path -LiteralPath (Join-Path $artifactPath $_) -PathType Leaf)
@@ -1539,7 +1856,24 @@ try {
                         ConvertFrom-Json -ErrorAction Stop
                     $cleanup = Get-Content -LiteralPath (Join-Path $artifactPath "external-cleanup.json") -Raw -Encoding utf8 |
                         ConvertFrom-Json -ErrorAction Stop
-                    $expectedCycles = if ($mode -ceq "restart-stress") { [long]$restartCycles } else { $null }
+                    Assert-ClosedProperties $contract @(
+                        "schema", "status", "mode", "network_reset_cycles", "restart_cycles",
+                        "approved_vm_name", "approved_vm_id", "approved_checkpoint_name",
+                        "approved_checkpoint_id", "guest_build", "identity_sha256", "candidate_sha",
+                        "client_sha256", "server_sha256", "controller_sha256", "wintun_zip_sha256",
+                        "wintun_dll_sha256", "test_binaries", "fixtures", "witnesses", "counters"
+                    ) "M17 contract"
+                    Assert-ClosedProperties $result @(
+                        "schema", "status", "mode", "run_token", "network_reset_cycles", "restart_cycles",
+                        "approved_vm_name", "approved_vm_id", "approved_checkpoint_name",
+                        "approved_checkpoint_id", "guest_build", "identity_sha256", "candidate_sha",
+                        "client_sha256", "server_sha256", "controller_sha256", "wintun_zip_sha256",
+                        "wintun_dll_sha256", "test_binaries", "started_utc", "finished_utc", "fixtures",
+                        "processes", "live_checks", "deterministic_tests", "witnesses", "counters_before",
+                        "counters_after", "cleanup", "failure"
+                    ) "M17 result"
+                    $expectedRestartCycles = if ($mode -ceq "restart-stress") { [long]$restartCycles } else { $null }
+                    $expectedNetworkResetCycles = if ($mode -ceq "network-reset") { [long]$networkResetCycles } else { $null }
                     $testKeys = @("client", "tun", "wintun")
                     Assert-ClosedProperties $contract.test_binaries $testKeys "M17 contract test binaries"
                     Assert-ClosedProperties $result.test_binaries $testKeys "M17 result test binaries"
@@ -1555,13 +1889,21 @@ try {
                             $testHashesMatch = $false
                         }
                     }
-                    $restartCyclesMatch = if ($null -eq $expectedCycles) {
+                    $restartCyclesMatch = if ($null -eq $expectedRestartCycles) {
                         $null -eq $contract.restart_cycles -and $null -eq $result.restart_cycles
                     } else {
                         (Test-JsonInteger $contract.restart_cycles) -and
                         (Test-JsonInteger $result.restart_cycles) -and
-                        [long]$contract.restart_cycles -eq $expectedCycles -and
-                        [long]$result.restart_cycles -eq $expectedCycles
+                        [long]$contract.restart_cycles -eq $expectedRestartCycles -and
+                        [long]$result.restart_cycles -eq $expectedRestartCycles
+                    }
+                    $networkResetCyclesMatch = if ($null -eq $expectedNetworkResetCycles) {
+                        $null -eq $contract.network_reset_cycles -and $null -eq $result.network_reset_cycles
+                    } else {
+                        (Test-JsonInteger $contract.network_reset_cycles) -and
+                        (Test-JsonInteger $result.network_reset_cycles) -and
+                        [long]$contract.network_reset_cycles -eq $expectedNetworkResetCycles -and
+                        [long]$result.network_reset_cycles -eq $expectedNetworkResetCycles
                     }
                     Assert-ClosedProperties $result.cleanup @(
                         "status", "processes", "adapters", "sibling_dll", "work_directory",
@@ -1592,10 +1934,44 @@ try {
                         if ($_.status -cne "pass") { throw "M17 result contains a failed witness" }
                         [string]$_.name
                     } | Sort-Object)
-                    $witnessesMatch = $contractWitnesses.Count -gt 0 -and
+                    $expectedWitnessCount = switch ($mode) {
+                        "network-reset" { 15 }
+                        "restart-stress" { 5 }
+                        "fragments" { 9 }
+                        "dual-stack-dns" { 7 }
+                        "udp-policy" { 18 }
+                        "scheduler-ring-full" { 8 }
+                        default { throw "M17 result mode has no closed witness count" }
+                    }
+                    $networkResetWitnessesMatch = $true
+                    if ($mode -ceq "network-reset") {
+                        $expectedNetworkResetWitnesses = @(
+                            "ordinary_route_notifications_reset_network_runtime",
+                            "same_process_and_managed_adapter_identity",
+                            "managed_addresses_routes_and_dns_are_unchanged",
+                            "strict_route_is_effective_and_filter_identity_is_unchanged",
+                            "network_generation_and_reset_metrics_advance",
+                            "retry_reset_failure_and_full_rebuild_metrics_are_unchanged",
+                            "fixed_and_direct_dual_stack_underlay_binding",
+                            "multihoming_prefix_and_metric_selection",
+                            "route_interface_and_address_notifications",
+                            "foreign_route_state_survives_cleanup",
+                            "foreign_address_state_survives_cleanup",
+                            "dad_failure_rolls_back_in_reverse",
+                            "owned_state_damage_is_the_only_full_rebuild_trigger",
+                            "reset_retries_without_managed_teardown",
+                            "network_reset_hooks_accept_each_generation_once"
+                        ) | Sort-Object
+                        $networkResetWitnessesMatch = ($contractWitnesses -join "|") -ceq
+                            ($expectedNetworkResetWitnesses -join "|")
+                    }
+                    $witnessesMatch = $contractWitnesses.Count -eq $expectedWitnessCount -and
+                        $resultWitnesses.Count -eq $expectedWitnessCount -and
+                        $networkResetWitnessesMatch -and
                         ($contractWitnesses -join "|") -ceq ($resultWitnessNames -join "|")
                     $deterministicTests = @($result.deterministic_tests)
                     $expectedTestCount = switch ($mode) {
+                        "network-reset" { 16 }
                         "restart-stress" { 4 }
                         "fragments" { 9 }
                         "dual-stack-dns" { 2 }
@@ -1603,8 +1979,45 @@ try {
                         "scheduler-ring-full" { 8 }
                         default { throw "M17 result mode has no closed exact-test count" }
                     }
+                    foreach ($test in $deterministicTests) {
+                        Assert-ClosedProperties $test @(
+                            "package", "test", "status", "runner", "duration_ms",
+                            "stdout_sha256", "stderr_sha256"
+                        ) "M17 deterministic test"
+                    }
                     $testsPassed = $deterministicTests.Count -eq $expectedTestCount -and
                         @($deterministicTests | Where-Object { $_.status -cne "pass" }).Count -eq 0
+                    if ($mode -ceq "network-reset") {
+                        $expectedNetworkResetTests = @(
+                            "ferrum2-wintun|windows::tests::dual_stack_target_binding_selects_actual_target_and_rejects_tun",
+                            "ferrum2-wintun|windows::tests::target_binding_excludes_tun_and_orders_prefix_then_effective_metric",
+                            "ferrum2-wintun|windows::tests::network_change_notifications_cover_each_callback_and_runtime_owned_events",
+                            "ferrum2-wintun|windows::tests::managed_route_cleanup_preserves_replacements_and_audits_every_delete",
+                            "ferrum2-wintun|windows::tests::managed_address_readback_and_cleanup_are_exact_and_foreign_safe",
+                            "ferrum2-wintun|windows::tests::dad_failure_rolls_back_in_reverse_and_cleanup_conflicts_do_not_short_circuit",
+                            "ferrum2-wintun|windows::tests::managed_state_health_reports_owned_route_dns_and_strict_route_damage",
+                            "ferrum2-wintun|windows::tests::strict_route_health_reads_every_exact_filter_id_and_rejects_damage",
+                            "ferrum2-wintun|windows::tests::network_change_revalidates_underlay_and_owned_routes_before_shutdown",
+                            "ferrum2-wintun|windows::tests::windows_catalog_is_family_aware_and_marks_the_exact_managed_tun",
+                            "ferrum2-wintun|windows::tests::resolved_socket_binding_applies_interface_then_family_source",
+                            "ferrum2-tun|tests::only_managed_damage_escalates_a_network_change_to_full_rebuild",
+                            "ferrum2-tun|tests::reset_retries_transient_readback_errors_without_tearing_down_managed_state",
+                            "ferrum2-tun|tests::network_lifecycle_bridge_reports_retry_before_completion",
+                            "ferrum2-tun|tests::session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state",
+                            "ferrum2-client|run::tun::tests::client_network_hook_retries_failure_and_accepts_each_generation_once"
+                        ) | Sort-Object
+                        $actualNetworkResetTests = @($deterministicTests | ForEach-Object {
+                            "$($_.package)|$($_.test)"
+                        } | Sort-Object)
+                        if (($actualNetworkResetTests -join "`n") -cne
+                            ($expectedNetworkResetTests -join "`n")) {
+                            throw "network-reset exact test set is invalid"
+                        }
+                        Assert-NetworkResetEvidence `
+                            -Result $result `
+                            -ArtifactPath $artifactPath `
+                            -ExpectedCycles ([int]$expectedNetworkResetCycles)
+                    }
                     $terminalLines = @(Get-Content -LiteralPath $controllerStdout -ErrorAction Stop |
                         Where-Object { $_ -cmatch '^m17_windows_tun status=PASS ' })
                     $expectedTerminal = "m17_windows_tun status=PASS mode=$mode " +
@@ -1640,7 +2053,7 @@ try {
                         $result.run_token -ceq $Token -and
                         $result.identity_sha256 -ceq $ExpectedLedgerHash -and
                         $result.guest_build -ceq $ledger.guest_build -and
-                        $null -eq $result.failure -and $restartCyclesMatch -and
+                        $null -eq $result.failure -and $restartCyclesMatch -and $networkResetCyclesMatch -and
                         $identityMatches -and $binaryHashesMatch -and $testHashesMatch -and
                         $witnessesMatch -and $testsPassed -and
                         $result.cleanup.status -ceq "pass" -and
@@ -1661,55 +2074,100 @@ try {
                 }
             }
             if ($status -cne "pass" -and $null -eq $failurePhase) {
-                $failurePhase = if ($qualificationExit -ne 0) { "qualification" } else { "cleanup" }
+                $failurePhase = if ($mode -ceq "fuzz-smoke") {
+                    "fuzz-smoke"
+                } elseif ($qualificationExit -ne 0) {
+                    "qualification"
+                } else {
+                    "cleanup"
+                }
             }
 
             $guestResult = [ordered]@{
-                schema = "ferrum2.windows-tun.hyperv-guest-run.v2"
+                schema = "ferrum2.windows-tun.hyperv-guest-run.v3"
                 status = $status
                 profile = $RequestedProfile
                 mode = $mode
                 restart_cycles = if ($mode -ceq "restart-stress") { [long]$restartCycles } else { $null }
+                network_reset_cycles = if ($mode -ceq "network-reset") { [long]$networkResetCycles } else { $null }
                 run_token = $Token
                 candidate_sha = $CandidateSha
                 identity_sha256 = $ExpectedLedgerHash
                 staged_input_sha256 = $ExpectedInputManifestHash
                 qualification_exit = if ($null -eq $qualificationExit) { $null } else { [long]$qualificationExit }
                 cleanup_exit = if ($null -eq $cleanupExit) { $null } else { [long]$cleanupExit }
+                fuzz_smoke = if ($mode -ceq "fuzz-smoke") { $fuzzSmokeResult } else { $null }
                 failure_phase = $failurePhase
                 finished_utc = [DateTime]::UtcNow.ToString("o")
             }
             Write-GuestJsonNew -Path (Join-Path $exportPath "guest-run.json") -Value $guestResult
             [pscustomobject]$guestResult
         })
-    # END GUEST_ONLY_NETWORK_EXECUTION
+    # END GUEST_ONLY_EXECUTION
     if ($guestResults.Count -ne 1) {
         throw "guest execution did not return one result"
     }
     $guestResult = $guestResults[0]
-    $expectedGuestMode = if ($Profile -cmatch '^restart-(10|100|1000)$') {
-        "restart-stress"
-    } else {
-        $Profile
-    }
-    $expectedRestartCycles = if ($expectedGuestMode -ceq "restart-stress") {
-        [long]($Profile.Substring("restart-".Length))
-    } else {
+    $expectedGuestMode = $requestedMode
+    $expectedRestartCycles = if ($null -eq $requestedRestartCycles) {
         $null
+    } else { [long]$requestedRestartCycles }
+    $expectedNetworkResetCycles = if ($null -eq $requestedNetworkResetCycles) {
+        $null
+    } else { [long]$requestedNetworkResetCycles }
+    $guestResultKeys = @(
+        "schema", "status", "profile", "mode", "restart_cycles", "network_reset_cycles",
+        "run_token", "candidate_sha", "identity_sha256", "staged_input_sha256",
+        "qualification_exit", "cleanup_exit", "fuzz_smoke", "failure_phase", "finished_utc"
+    )
+    if ((@($guestResult.PSObject.Properties.Name) -join "|") -cne ($guestResultKeys -join "|")) {
+        throw "guest qualification result property set is invalid"
     }
-    if ($guestResult.schema -cne "ferrum2.windows-tun.hyperv-guest-run.v2" -or
+    $fuzzSmokeMatches = if ($expectedGuestMode -ceq "fuzz-smoke") {
+        $fuzzResultKeys = @(
+            "schema", "status", "run_token", "candidate_sha", "identity_sha256", "staged_input_sha256",
+            "binary_sha256", "binary_bytes", "packet_seed_count", "udp_reset_seed_count",
+            "terminal", "stdout_sha256", "stderr_sha256", "finished_utc"
+        )
+        $null -ne $guestResult.fuzz_smoke -and
+            (@($guestResult.fuzz_smoke.PSObject.Properties.Name) -join "|") -ceq ($fuzzResultKeys -join "|") -and
+            $guestResult.fuzz_smoke.schema -ceq "ferrum2.windows-tun.fuzz-smoke-result.v1" -and
+            $guestResult.fuzz_smoke.status -ceq "pass" -and
+            $guestResult.fuzz_smoke.run_token -ceq $RunToken -and
+            $guestResult.fuzz_smoke.candidate_sha -ceq $candidate.Sha -and
+            $guestResult.fuzz_smoke.identity_sha256 -ceq $ledgerIdentity.Sha256 -and
+            $guestResult.fuzz_smoke.staged_input_sha256 -ceq $stagedInputSha256 -and
+            $guestResult.fuzz_smoke.binary_sha256 -ceq $candidateArtifacts.FuzzSmoke.Sha256 -and
+            [long]$guestResult.fuzz_smoke.binary_bytes -eq [long]$candidateArtifacts.FuzzSmoke.Bytes -and
+            [long]$guestResult.fuzz_smoke.packet_seed_count -eq 4 -and
+            [long]$guestResult.fuzz_smoke.udp_reset_seed_count -eq 3 -and
+            $guestResult.fuzz_smoke.terminal -ceq "TUN state smoke corpora: 4 packet and 3 UDP reset seeds passed" -and
+            [string]$guestResult.fuzz_smoke.stdout_sha256 -cmatch '^[0-9a-f]{64}$' -and
+            [string]$guestResult.fuzz_smoke.stderr_sha256 -cmatch '^[0-9a-f]{64}$'
+    } else {
+        $null -eq $guestResult.fuzz_smoke
+    }
+    $cleanupExitMatches = if ($expectedGuestMode -ceq "fuzz-smoke") {
+        $null -eq $guestResult.cleanup_exit
+    } else {
+        $null -ne $guestResult.cleanup_exit -and [long]$guestResult.cleanup_exit -eq 0
+    }
+    if ($guestResult.schema -cne "ferrum2.windows-tun.hyperv-guest-run.v3" -or
         $guestResult.profile -cne $Profile -or
         $guestResult.mode -cne $expectedGuestMode -or
         $guestResult.run_token -cne $RunToken -or
         $guestResult.candidate_sha -cne $candidate.Sha -or
         $guestResult.identity_sha256 -cne $ledgerIdentity.Sha256 -or
         $guestResult.staged_input_sha256 -cne $stagedInputSha256 -or
-        [long]$guestResult.qualification_exit -ne 0 -or
-        [long]$guestResult.cleanup_exit -ne 0 -or
+        $null -eq $guestResult.qualification_exit -or [long]$guestResult.qualification_exit -ne 0 -or
+        -not $cleanupExitMatches -or -not $fuzzSmokeMatches -or
         $null -ne $guestResult.failure_phase -or
         ($null -eq $expectedRestartCycles -and $null -ne $guestResult.restart_cycles) -or
         ($null -ne $expectedRestartCycles -and
-            [long]$guestResult.restart_cycles -ne $expectedRestartCycles)) {
+            [long]$guestResult.restart_cycles -ne $expectedRestartCycles) -or
+        ($null -eq $expectedNetworkResetCycles -and $null -ne $guestResult.network_reset_cycles) -or
+        ($null -ne $expectedNetworkResetCycles -and
+            [long]$guestResult.network_reset_cycles -ne $expectedNetworkResetCycles)) {
         throw "guest qualification result binding is invalid"
     }
     if ($guestResult.status -cne "pass") {
@@ -1780,9 +2238,12 @@ $status = if ($null -eq $runFailure -and $finalizationFailures.Count -eq 0) { "p
 if (Test-Path -LiteralPath $hostEvidencePath -PathType Container) {
     try {
         $manifest = [ordered]@{
-            schema = "ferrum2.windows-tun.hyperv-host-run.v2"
+            schema = "ferrum2.windows-tun.hyperv-host-run.v3"
             status = $status
             profile = $Profile
+            mode = $requestedMode
+            restart_cycles = $requestedRestartCycles
+            network_reset_cycles = $requestedNetworkResetCycles
             run_token = $RunToken
             vm_name = $approvedVmName
             vm_id = $approvedVmId.ToString("D")
@@ -1792,6 +2253,8 @@ if (Test-Path -LiteralPath $hostEvidencePath -PathType Container) {
             identity_sha256 = $ledgerIdentity.Sha256
             staged_input_sha256 = $stagedInputSha256
             rust_version = if ($null -eq $candidateArtifacts) { $null } else { $candidateArtifacts.RustVersion }
+            fuzz_smoke_sha256 = if ($null -eq $candidateArtifacts) { $null } else { $candidateArtifacts.FuzzSmoke.Sha256 }
+            fuzz_smoke_bytes = if ($null -eq $candidateArtifacts) { $null } else { $candidateArtifacts.FuzzSmoke.Bytes }
             guest_execution = "host-built-precompiled-artifacts-only"
             guest_build = if ($null -eq $guestResult) { $null } else { [string]$connection.Probe.Build }
             started_utc = $startedUtc

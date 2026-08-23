@@ -152,7 +152,7 @@ const MODES: &[ModeSpec] = &[
             "work_stages_rotate_fairly",
             "ring_full_drops_one_complete_packet",
             "ring_full_is_not_retried",
-            "ring_full_does_not_restart_session",
+            "ring_full_does_not_reset_or_rebuild_network",
             "wintun_error_kinds_have_exact_owner_dispositions",
             "live_egress_pressure_has_closed_accounting",
         ],
