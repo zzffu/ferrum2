@@ -2460,11 +2460,11 @@ fn owner_main(
                         &datagram_output,
                         &session_cancel,
                     );
-                    StepOutcome::from_work(
-                        forwarded_flow
-                            || forwarded_datagram
-                            || stack.process_one_udp_control(elapsed, admitting),
-                    )
+                    StepOutcome::from_work(stack.process_owner_control_stage(
+                        elapsed,
+                        admitting,
+                        forwarded_flow || forwarded_datagram,
+                    ))
                 }
                 WorkStage::FlushOutput => {
                     match stack.flush_output(|packet| match adapter.send(packet) {
@@ -3825,6 +3825,16 @@ impl Stack {
         self.udp
             .process_one_control(now_millis, admitting)
             .is_some()
+    }
+
+    fn process_owner_control_stage(
+        &mut self,
+        now_millis: i64,
+        admitting: bool,
+        forwarding_work: bool,
+    ) -> bool {
+        let udp_control = self.process_one_udp_control(now_millis, admitting);
+        forwarding_work || udp_control
     }
 
     fn process_one_udp_response(&mut self, now_millis: i64) -> udp::ResponseProcessOutcome {
@@ -6407,6 +6417,46 @@ mod tests {
                 payload
             );
         }
+    }
+
+    #[tokio::test]
+    async fn owner_control_stage_services_udp_lifecycle_while_forwarding() {
+        let (mut stack, _flows, mut candidates) = Stack::new_with_udp(
+            (
+                Some((Ipv4Addr::new(198, 18, 0, 2), 30)),
+                Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2), 126)),
+            ),
+            1_420,
+            1,
+            4_096,
+            Duration::from_secs(60),
+            Arc::new(AtomicUsize::new(0)),
+            OwnerRegistry::new(),
+            1,
+            Duration::from_secs(60),
+            UdpFiltering::AddressDependent,
+            7,
+            OwnerWake::default(),
+        )
+        .expect("UDP control-stage stack");
+        assert!(stack.enqueue_at(&ipv4_udp(), true, 0));
+        let candidate = candidates.try_recv().expect("UDP candidate");
+        let commit = tokio::spawn(candidate.commit_association());
+        tokio::task::yield_now().await;
+
+        assert!(
+            stack.process_owner_control_stage(1, true, true),
+            "forwarding work and UDP lifecycle work are both serviced"
+        );
+        let association = commit.await.expect("commit task").expect("association");
+        assert_eq!(stack.live_udp_associations(), 1);
+
+        drop(association);
+        assert!(
+            stack.process_owner_control_stage(2, true, true),
+            "forwarding work cannot starve an association close"
+        );
+        assert_eq!(stack.live_udp_associations(), 0);
     }
 
     #[tokio::test]
