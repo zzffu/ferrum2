@@ -1330,7 +1330,8 @@ mod tests {
     #[test]
     fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         use ferrum2_tun::{
-            TunDiagnosticReason, TunEvent, TunIpFamily, TunRejectReason, UdpResponseDropReason,
+            TunDiagnosticReason, TunEvent, TunIpFamily, TunNetworkResetReason, TunRejectReason,
+            UdpResponseDropReason,
         };
 
         let metrics = ferrum2_observability::Metrics::new();
@@ -1338,6 +1339,12 @@ mod tests {
             TunEvent::PacketAccepted,
             TunEvent::PacketFoundationDropped,
             TunEvent::SessionStarted,
+            TunEvent::NetworkResetStarted(TunNetworkResetReason::NetworkChange),
+            TunEvent::NetworkResetSucceeded(TunNetworkResetReason::NetworkChange),
+            TunEvent::NetworkResetFailed(TunNetworkResetReason::NetworkChange),
+            TunEvent::NetworkResetStarted(TunNetworkResetReason::Retry),
+            TunEvent::NetworkResetSucceeded(TunNetworkResetReason::Retry),
+            TunEvent::NetworkResetFailed(TunNetworkResetReason::Retry),
             TunEvent::SessionRestartStarted,
             TunEvent::SessionRestartSucceeded,
             TunEvent::SessionRestartFailed,
@@ -1413,6 +1420,12 @@ mod tests {
             "ferrum2_tun_packets_accepted_total 1",
             "ferrum2_tun_packets_foundation_dropped_total 1",
             "ferrum2_tun_session_started_total 1",
+            "ferrum2_network_reset_total{reason=\"network_change\",result=\"started\"} 1",
+            "ferrum2_network_reset_total{reason=\"network_change\",result=\"succeeded\"} 1",
+            "ferrum2_network_reset_total{reason=\"network_change\",result=\"failed\"} 1",
+            "ferrum2_network_reset_total{reason=\"retry\",result=\"started\"} 1",
+            "ferrum2_network_reset_total{reason=\"retry\",result=\"succeeded\"} 1",
+            "ferrum2_network_reset_total{reason=\"retry\",result=\"failed\"} 1",
             "ferrum2_tun_session_restart_started_total 1",
             "ferrum2_tun_session_restart_succeeded_total 1",
             "ferrum2_tun_session_restart_failed_total 1",

@@ -3551,11 +3551,14 @@ mod tests {
     #[cfg(all(windows, target_arch = "x86_64"))]
     use super::{AdapterErrorDisposition, classify_adapter_error};
     use super::{
-        Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, OutputFlushOutcome,
-        OutputSendOutcome, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread, OwnerWake,
-        PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink,
-        TunRejectReason, TunRoot, UdpFiltering, UdpPeerAuthorization, UdpResponseDropReason,
-        UdpTuple, finish_stack_setup, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
+        Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NetworkChangeTransition,
+        NetworkResetHealthDisposition, OutputFlushOutcome, OutputSendOutcome, OwnerControl,
+        OwnerExit, OwnerRegistry, OwnerThread, OwnerWake, PacketParser, PacketValidator,
+        ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink, TunRejectReason, TunRoot,
+        UdpFiltering, UdpPeerAuthorization, UdpResponseDropReason, UdpTuple,
+        classify_network_change, classify_network_reset_health,
+        classify_network_reset_refresh_error, finish_stack_setup, map_owner_spawn,
+        reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -5937,6 +5940,91 @@ mod tests {
         assert!(
             !table.recycle(last),
             "exhaustion cannot resurrect an old ID"
+        );
+    }
+
+    #[test]
+    fn only_managed_damage_escalates_a_network_change_to_full_rebuild() {
+        assert_eq!(
+            classify_network_change(ferrum2_wintun::NetworkChangeOutcome::Unchanged),
+            NetworkChangeTransition::Unchanged
+        );
+        assert_eq!(
+            classify_network_change(ferrum2_wintun::NetworkChangeOutcome::Changed),
+            NetworkChangeTransition::ResetNetwork
+        );
+        for damage in [
+            ferrum2_wintun::ManagedStateDamage::Adapter,
+            ferrum2_wintun::ManagedStateDamage::Session,
+            ferrum2_wintun::ManagedStateDamage::Address,
+            ferrum2_wintun::ManagedStateDamage::Route,
+            ferrum2_wintun::ManagedStateDamage::Dns,
+            ferrum2_wintun::ManagedStateDamage::StrictRoute,
+        ] {
+            assert_eq!(
+                classify_network_change(ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(
+                    damage
+                )),
+                NetworkChangeTransition::FullRebuild,
+                "managed damage {damage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_retries_transient_readback_errors_without_tearing_down_managed_state() {
+        assert_eq!(
+            classify_network_reset_health(Ok(ferrum2_wintun::ManagedTunHealth::Healthy)),
+            NetworkResetHealthDisposition::Healthy
+        );
+        for damage in [
+            ferrum2_wintun::ManagedStateDamage::Adapter,
+            ferrum2_wintun::ManagedStateDamage::Session,
+            ferrum2_wintun::ManagedStateDamage::Address,
+            ferrum2_wintun::ManagedStateDamage::Route,
+            ferrum2_wintun::ManagedStateDamage::Dns,
+            ferrum2_wintun::ManagedStateDamage::StrictRoute,
+        ] {
+            assert_eq!(
+                classify_network_reset_health(Ok(ferrum2_wintun::ManagedTunHealth::Damaged(
+                    damage
+                ))),
+                NetworkResetHealthDisposition::FullRebuild
+            );
+        }
+        let recoverable = ferrum2_wintun::Error::new(ferrum2_wintun::ErrorKind::RecoverableSession);
+        assert_eq!(
+            classify_network_reset_health(Err(recoverable)),
+            NetworkResetHealthDisposition::Retry
+        );
+        assert_eq!(
+            classify_network_reset_refresh_error(recoverable),
+            NetworkResetHealthDisposition::Retry
+        );
+        for kind in [
+            ferrum2_wintun::ErrorKind::InvalidInput,
+            ferrum2_wintun::ErrorKind::UnrecoverableCorruption,
+        ] {
+            let error = ferrum2_wintun::Error::new(kind);
+            assert_eq!(
+                classify_network_reset_health(Err(error)),
+                NetworkResetHealthDisposition::RuntimeFailed,
+                "health error {kind:?}"
+            );
+            assert_eq!(
+                classify_network_reset_refresh_error(error),
+                NetworkResetHealthDisposition::RuntimeFailed,
+                "refresh error {kind:?}"
+            );
+        }
+        let cleanup = ferrum2_wintun::Error::new(ferrum2_wintun::ErrorKind::Cleanup);
+        assert_eq!(
+            classify_network_reset_health(Err(cleanup)),
+            NetworkResetHealthDisposition::CleanupFailed
+        );
+        assert_eq!(
+            classify_network_reset_refresh_error(cleanup),
+            NetworkResetHealthDisposition::CleanupFailed
         );
     }
 
