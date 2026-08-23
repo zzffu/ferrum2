@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use crate::{GenerationChange, GenerationSignal};
 
 /// Maximum number of selectors retained by one route table.
 pub const MAX_SELECTORS: usize = 64;
@@ -171,6 +173,8 @@ pub(super) struct Selector {
 pub(super) struct SelectorState {
     pub(super) selectors: Vec<Selector>,
     generation: AtomicU64,
+    update: Mutex<()>,
+    changes: GenerationSignal,
 }
 
 impl SelectorState {
@@ -178,6 +182,8 @@ impl SelectorState {
         Self {
             selectors,
             generation: AtomicU64::new(0),
+            update: Mutex::new(()),
+            changes: GenerationSignal::default(),
         }
     }
 
@@ -205,6 +211,10 @@ impl SelectorState {
     }
 
     fn begin_change(&self) -> SelectorChange<'_> {
+        let update = self
+            .update
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             let generation = self.generation.load(Ordering::Acquire);
             if generation & 1 != 0 {
@@ -223,6 +233,8 @@ impl SelectorState {
             {
                 return SelectorChange {
                     generation: &self.generation,
+                    changes: &self.changes,
+                    update: Some(update),
                     baseline: generation,
                     changed: false,
                 };
@@ -233,6 +245,8 @@ impl SelectorState {
 
 struct SelectorChange<'a> {
     generation: &'a AtomicU64,
+    changes: &'a GenerationSignal,
+    update: Option<MutexGuard<'a, ()>>,
     baseline: u64,
     changed: bool,
 }
@@ -245,10 +259,15 @@ impl SelectorChange<'_> {
 
 impl Drop for SelectorChange<'_> {
     fn drop(&mut self) {
-        self.generation.store(
-            self.baseline.wrapping_add(if self.changed { 2 } else { 0 }),
-            Ordering::Release,
-        );
+        let generation = self.baseline.wrapping_add(if self.changed { 2 } else { 0 });
+        self.generation.store(generation, Ordering::Release);
+        let notification = self
+            .changed
+            .then(|| self.changes.prepare_notification(generation));
+        drop(self.update.take());
+        if let Some(notification) = notification {
+            notification.wake();
+        }
     }
 }
 
@@ -283,6 +302,34 @@ impl SelectorControl {
     /// Failed and no-op switches leave it unchanged.
     pub fn generation(&self) -> u64 {
         self.state.generation()
+    }
+
+    /// Subscribes to the next successful switch away from the current generation.
+    ///
+    /// Each returned future is independent. An empty selector control never
+    /// changes, so its subscription remains pending.
+    pub fn watch_generation(&self) -> GenerationChange {
+        let _update = self
+            .state
+            .update
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.state.changes.watch()
+    }
+
+    /// Subscribes from a generation captured together with an earlier route
+    /// selection.
+    ///
+    /// If an effective switch has already completed, the returned future is
+    /// immediately ready. This closes the interval between selecting a route
+    /// and constructing its change subscription.
+    pub fn watch_generation_from(&self, generation: u64) -> GenerationChange {
+        let _update = self
+            .state
+            .update
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.state.changes.watch_from(generation)
     }
 
     /// Atomically selects one configured immediate member.

@@ -8,6 +8,10 @@ use std::num::NonZeroU16;
 
 use bytes::{Bytes, BytesMut};
 
+mod generation;
+
+pub use generation::{GenerationChange, GenerationNotification, GenerationSignal};
+
 const MAX_DOMAIN_NAME_BYTES: usize = 255;
 
 /// A canonical ASCII domain used by allocation-free policy matchers.
