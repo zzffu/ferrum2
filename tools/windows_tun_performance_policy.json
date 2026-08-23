@@ -1,5 +1,5 @@
 {
-  "policy_id": "windows-tun-m17-calibration-required-v1",
+  "policy_id": "windows-tun-network-model-calibration-required-v2",
   "scenarios": {
     "fragment-reassembly-throughput": {
       "metrics": {
@@ -48,9 +48,9 @@
         }
       }
     },
-    "restart-recovery": {
+    "network-lifecycle": {
       "metrics": {
-        "recovery": {
+        "full_rebuild_p50": {
           "adoption_threshold_percent": null,
           "calibration_artifact_sha256": null,
           "calibration_environment": null,
@@ -61,7 +61,98 @@
           "minimum_wins": null,
           "noise_band_percent": null,
           "regression_threshold_percent": null,
-          "unit": "p99_recovery_nanoseconds"
+          "unit": "p50_full_rebuild_nanoseconds"
+        },
+        "full_rebuild_p95": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "p95_full_rebuild_nanoseconds"
+        },
+        "full_rebuild_p99": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "p99_full_rebuild_nanoseconds"
+        },
+        "interface_resolver_cache_hit": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "higher_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "cache_hits_per_million_resolutions"
+        },
+        "interface_switch_recovery": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "interface_switch_recovery_nanoseconds"
+        },
+        "reset_p50": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "p50_reset_network_nanoseconds"
+        },
+        "reset_p95": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "p95_reset_network_nanoseconds"
+        },
+        "reset_p99": {
+          "adoption_threshold_percent": null,
+          "calibration_artifact_sha256": null,
+          "calibration_environment": null,
+          "calibration_source": null,
+          "direction": "lower_is_better",
+          "minimum_losses": null,
+          "minimum_pairs": null,
+          "minimum_wins": null,
+          "noise_band_percent": null,
+          "regression_threshold_percent": null,
+          "unit": "p99_reset_network_nanoseconds"
         }
       }
     },

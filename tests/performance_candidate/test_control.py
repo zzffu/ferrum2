@@ -765,6 +765,96 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "power_plan_guid": "381b4222-f694-41f0-9685-ff5bb260df2e",
         }
 
+    def network_model_observation(
+        self, *, row: dict[str, object]
+    ) -> dict[str, object]:
+        model = CONTROL.WINDOWS_TUN_NETWORK_MODEL
+        resources = {
+            "process_handles": 120,
+            "process_threads": 12,
+            "udp_associations_active": 0,
+            "managed_adapters_active": 1,
+        }
+        cycles = []
+        identity = "a" * 64
+        for sequence in range(1, model.RESET_CYCLES + model.FULL_REBUILD_CYCLES + 1):
+            reset = sequence <= model.RESET_CYCLES
+            if reset:
+                reason = (
+                    "interface_change"
+                    if sequence == model.INTERFACE_SWITCH_SEQUENCE
+                    else "route_change"
+                )
+                operation = "reset_network"
+                identity_after = identity
+                elapsed = sequence * 1_000
+            else:
+                operation = "full_rebuild"
+                reason = model.FULL_REBUILD_DAMAGE_REASON
+                rebuild = sequence - model.RESET_CYCLES
+                identity_after = f"{rebuild:064x}"
+                elapsed = (10 + rebuild) * 1_000_000
+            udp_before = sequence % 16 + 1
+            tcp_before = sequence % 8
+            cycles.append(
+                {
+                    "sequence": sequence,
+                    "operation": operation,
+                    "reason": reason,
+                    "generation_before": sequence,
+                    "generation_after": sequence + 1,
+                    "elapsed_nanoseconds": elapsed,
+                    "operation_counter_before": sequence - 1,
+                    "operation_counter_after": sequence,
+                    "session_restart_started_before": 0,
+                    "session_restart_started_after": 0,
+                    "managed_identity_before": identity,
+                    "managed_identity_after": identity_after,
+                    "tcp_flows_before": tcp_before,
+                    "udp_associations_before": udp_before,
+                    "tcp_flows_closed": tcp_before,
+                    "udp_associations_closed": udp_before,
+                    "tcp_probe_succeeded": True,
+                    "udp_probe_succeeded": True,
+                    "resources_after": dict(resources),
+                }
+            )
+            identity = identity_after
+        reference = row["network_model_evidence"]
+        environment = row["environment"]
+        return {
+            "schema_version": model.SCHEMA_VERSION,
+            "workload": model.LIFECYCLE_WORKLOAD,
+            "identity": {
+                "run_kind": row["run_kind"],
+                "member": row["member"],
+                "pair": row["pair"],
+                "trial_sequence": row["sequence"],
+                "client_pid": 1234,
+                "server_pid": 1235,
+                "vm_name": environment["vm_name"],
+                "vm_id": environment["vm_id"],
+                "checkpoint_name": environment["checkpoint_name"],
+                "checkpoint_id": environment["checkpoint_id"],
+                "sha": row["sha"],
+                "tree": row["tree"],
+                "client_sha256": row["client_sha256"],
+                "server_sha256": row["server_sha256"],
+                "harness_sha256": row["harness_sha256"],
+                "collector_sha256": reference["collector_sha256"],
+                "recipe_sha256": row["recipe_sha256"],
+                "model_controller_sha256": reference["controller_sha256"],
+                "model_plan_sha256": reference["plan_sha256"],
+            },
+            "baseline_resources": dict(resources),
+            "cycles": cycles,
+            "interface_resolver": {
+                "probes": model.INTERFACE_RESOLVER_PROBES,
+                "resolutions": model.INTERFACE_RESOLVER_PROBES * 2,
+                "cache_hits": model.INTERFACE_RESOLVER_PROBES * 2 - 2,
+            },
+        }
+
     def row(
         self,
         *,
@@ -806,7 +896,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         member_sha = parent_sha if member == "parent" else candidate_sha
         aa = parent_sha == candidate_sha
         identity_digit = "5" if aa or member == "parent" else "6"
-        return {
+        row = {
             "schema_version": CONTROL.WINDOWS_TUN_TRIAL_SCHEMA_VERSION,
             "kind": "windows_tun_performance_trial",
             "selection": CONTROL.WINDOWS_TUN_SELECTION,
@@ -836,8 +926,39 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     check: True for check in contract["correctness_checks"]
                 },
             },
+            "network_model_evidence": None,
             "status": "PASS",
         }
+        if scenario == "network-lifecycle":
+            row["network_model_evidence"] = {
+                "schema_version": 1,
+                "controller_sha256": CONTROL.WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
+                "collector_sha256": "8" * 64,
+                "plan_sha256": CONTROL.WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
+                "observation_file": (
+                    f"{sequence:03d}-network-lifecycle-{member}-pair-{pair}.network-model.json"
+                ),
+                "observation_sha256": "9" * 64,
+            }
+            summary = CONTROL.WINDOWS_TUN_NETWORK_MODEL.summarize_lifecycle_observation(
+                self.network_model_observation(row=row)
+            )
+            values = CONTROL._network_model_trial_values(summary)
+            for metric, value in values.items():
+                row["measurements"][metric]["value"] = value
+            row["correctness"]["checks"] = {
+                "same_process_all_cycles": True,
+                "generation_advanced_once_per_cycle": True,
+                "managed_identity_preserved_across_resets": True,
+                "damage_only_full_rebuild": True,
+                "resource_growth_zero_after_1000_resets": True,
+                "tcp_and_udp_recovered_after_interface_switch": True,
+                "interface_resolver_cache_hit_observed": True,
+                "network_model_evidence_bound": True,
+                "tun_path_observed": True,
+                "clean_drain": True,
+            }
+        return row
 
     def evidence(
         self,
@@ -848,6 +969,8 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         candidate_sha: str,
         regression: bool = False,
     ) -> None:
+        model_root = root / "network-model"
+        model_root.mkdir()
         for trial in plan["trials"]:
             row = self.row(
                 plan=plan,
@@ -858,6 +981,12 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 candidate_sha=candidate_sha,
                 regression=regression,
             )
+            if row["scenario"] == "network-lifecycle":
+                observation = self.network_model_observation(row=row)
+                encoded = json.dumps(observation, sort_keys=True).encode("utf-8")
+                reference = row["network_model_evidence"]
+                reference["observation_sha256"] = hashlib.sha256(encoded).hexdigest()
+                (model_root / reference["observation_file"]).write_bytes(encoded)
             path = root / (
                 f"{trial['scenario']}-{trial['pair']}-{trial['member']}.json"
             )
@@ -873,7 +1002,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self.assertEqual(len(plan["scenarios"]), 8)
         self.assertEqual(
             sum(len(contract["metrics"]) for contract in plan["scenarios"].values()),
-            11,
+            18,
         )
         self.assertEqual(len(plan["trials"]), 80)
         self.assertFalse(plan["calibration_complete"])
@@ -938,6 +1067,11 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self.assertFalse(artifact["thresholds_reviewed"])
         self.assertRegex(artifact["content_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(set(artifact["observations"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
+        self.assertEqual(len(artifact["evidence_files"]), 90)
+        self.assertEqual(
+            artifact["network_model"]["raw_observations"],
+            CONTROL.WINDOWS_TUN_PAIR_COUNT * 2,
+        )
 
     def test_uncalibrated_comparison_is_fail_closed(self) -> None:
         plan = CONTROL.create_windows_tun_plan(
@@ -1022,6 +1156,43 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             second.write_text(json.dumps(row), encoding="utf-8")
             with self.assertRaisesRegex(
                 CONTROL.CandidateControlError, "overlap.*planned order"
+            ):
+                CONTROL.summarize_windows_tun_evidence(
+                    plan=plan,
+                    evidence_root=root,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                )
+
+    def test_lifecycle_sidecar_is_hash_bound_and_reduced_from_raw_cycles(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.evidence(
+                root,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+            trial_path = root / "network-lifecycle-1-parent.json"
+            row = json.loads(trial_path.read_text(encoding="utf-8"))
+            observation_path = (
+                root
+                / "network-model"
+                / row["network_model_evidence"]["observation_file"]
+            )
+            observation = json.loads(observation_path.read_text(encoding="utf-8"))
+            observation["cycles"][499]["elapsed_nanoseconds"] += 1
+            encoded = json.dumps(observation, sort_keys=True).encode("utf-8")
+            observation_path.write_bytes(encoded)
+            row["network_model_evidence"]["observation_sha256"] = hashlib.sha256(
+                encoded
+            ).hexdigest()
+            trial_path.write_text(json.dumps(row), encoding="utf-8")
+            with self.assertRaisesRegex(
+                CONTROL.CandidateControlError, "not recomputed from raw evidence"
             ):
                 CONTROL.summarize_windows_tun_evidence(
                     plan=plan,
