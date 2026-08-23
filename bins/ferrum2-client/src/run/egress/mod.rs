@@ -373,6 +373,10 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         self
     }
 
+    pub(super) fn reset_network(&self) -> usize {
+        self.udp.as_ref().map_or(0, ClientUdpContext::reset_network)
+    }
+
     #[cfg(all(windows, test))]
     fn record_managed_udp_event(&self, event: udp::ManagedUdpEvent) -> Result<(), ()> {
         self.managed_udp_events.lock().unwrap().push(event);

@@ -35,7 +35,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ferrum2_runtime::{
-    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot,
+    NetworkSnapshot, OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture,
+    ProcessRoot,
 };
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use smoltcp::iface::{
@@ -216,6 +217,10 @@ pub enum TunNetworkResetReason {
     Retry,
 }
 
+/// Closed failure returned by the client reset coordinator bridge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TunNetworkResetError;
+
 #[derive(Clone)]
 pub(crate) struct TunEventSink {
     emit: Arc<dyn Fn(TunEvent) + Send + Sync>,
@@ -369,9 +374,12 @@ impl UnderlayPublisher {
 ///
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
+/// The reset callback runs after a replacement stack exists but before underlay publication,
+/// success reporting, or packet admission. Returning an error keeps the managed adapter and
+/// retries the replaceable runtime.
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[allow(clippy::too_many_arguments)]
-pub fn process_root<E, H, U, M>(
+pub fn process_root<E, H, U, R, M>(
     config: Config,
     underlay: UnderlayPublisher,
     startup: E,
@@ -380,6 +388,7 @@ pub fn process_root<E, H, U, M>(
     registry: OwnerRegistry,
     handle_tcp: H,
     handle_udp: U,
+    handle_network_reset: R,
     events: M,
 ) -> ProcessRoot<E>
 where
@@ -389,6 +398,13 @@ where
         + Sync
         + 'static,
     U: Fn(UdpCandidate, ProcessCancellation, SessionCancellation) -> ProcessFuture<()>
+        + Send
+        + Sync
+        + 'static,
+    R: Fn(
+            Arc<NetworkSnapshot>,
+            TunNetworkResetReason,
+        ) -> ProcessFuture<Result<(), TunNetworkResetError>>
         + Send
         + Sync
         + 'static,
@@ -413,6 +429,7 @@ where
                 registry,
                 handle_tcp: Arc::new(handle_tcp),
                 handle_udp: Arc::new(handle_udp),
+                handle_network_reset: Arc::new(handle_network_reset),
                 events,
             },
         )
@@ -423,7 +440,7 @@ where
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 /// Builds a required root that fails during preparation on unsupported targets.
 #[allow(clippy::too_many_arguments)]
-pub fn process_root<E, H, U, M>(
+pub fn process_root<E, H, U, R, M>(
     _config: Config,
     _underlay: UnderlayPublisher,
     startup: E,
@@ -432,6 +449,7 @@ pub fn process_root<E, H, U, M>(
     _registry: OwnerRegistry,
     _handle_tcp: H,
     _handle_udp: U,
+    _handle_network_reset: R,
     _events: M,
 ) -> ProcessRoot<E>
 where
@@ -441,6 +459,13 @@ where
         + Sync
         + 'static,
     U: Fn(UdpCandidate, ProcessCancellation, SessionCancellation) -> ProcessFuture<()>
+        + Send
+        + Sync
+        + 'static,
+    R: Fn(
+            Arc<NetworkSnapshot>,
+            TunNetworkResetReason,
+        ) -> ProcessFuture<Result<(), TunNetworkResetError>>
         + Send
         + Sync
         + 'static,
@@ -483,6 +508,7 @@ struct RootServices {
     registry: OwnerRegistry,
     handle_tcp: TcpHandler,
     handle_udp: UdpHandler,
+    handle_network_reset: NetworkResetHandler,
     events: TunEventSink,
 }
 
@@ -651,6 +677,7 @@ where
         registry,
         handle_tcp,
         handle_udp,
+        handle_network_reset,
         events,
     } = services;
     let timeout = config.ready_timeout;
@@ -661,6 +688,7 @@ where
     let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
     let (flow_sender, flows) = tokio::sync::mpsc::channel(config.max_tcp_flows);
     let (datagram_sender, datagrams) = tokio::sync::mpsc::channel(max_udp_associations);
+    let (network_reset_sender, network_resets) = tokio::sync::mpsc::channel(1);
     let (done_sender, _done_receiver) = tokio::sync::oneshot::channel();
     let control = OwnerControl::new();
     let owner_control = control.clone();
@@ -680,6 +708,7 @@ where
                         underlay,
                         flow_output: flow_sender,
                         datagram_output: datagram_sender,
+                        network_reset_output: network_reset_sender,
                         max_udp_associations,
                     },
                 );
@@ -716,11 +745,13 @@ where
                     cleanup: Some(errors.cleanup),
                     flows,
                     datagrams,
+                    network_resets,
                     flow_count: control.flow_count,
                     association_count: control.association_count,
                     registry,
                     handle_tcp,
                     handle_udp,
+                    handle_network_reset,
                 }));
             }
             Ok(OwnerReady::Failed) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -880,11 +911,13 @@ struct TunRoot<E> {
     cleanup: Option<E>,
     flows: tokio::sync::mpsc::Receiver<SessionItem<TcpFlow>>,
     datagrams: tokio::sync::mpsc::Receiver<SessionItem<UdpCandidate>>,
+    network_resets: tokio::sync::mpsc::Receiver<NetworkResetRequest>,
     flow_count: Arc<AtomicUsize>,
     association_count: Arc<AtomicUsize>,
     registry: OwnerRegistry,
     handle_tcp: TcpHandler,
     handle_udp: UdpHandler,
+    handle_network_reset: NetworkResetHandler,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -910,6 +943,32 @@ type UdpHandler = Arc<
 >;
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+type NetworkResetHandler = Arc<
+    dyn Fn(
+            Arc<NetworkSnapshot>,
+            TunNetworkResetReason,
+        ) -> ProcessFuture<Result<(), TunNetworkResetError>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+struct NetworkResetRequest {
+    snapshot: Arc<NetworkSnapshot>,
+    reason: TunNetworkResetReason,
+    completion: tokio::sync::oneshot::Sender<NetworkResetBridgeOutcome>,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkResetBridgeOutcome {
+    Completed,
+    Retry,
+    Stopped,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl<E> PreparedProcessRoot<E> for TunRoot<E>
 where
     E: Send + 'static,
@@ -928,6 +987,7 @@ where
         Box::pin(async move {
             let mut tasks = tokio::task::JoinSet::new();
             let mut forced = cancellation.clone();
+            let mut network_resets_open = true;
             let reported = 'required: loop {
                 if cancellation.is_cancelled() {
                     self.owner.control.shutdown.store(true, Ordering::Release);
@@ -994,6 +1054,25 @@ where
                                 }
                             });
                         }
+                    }
+                    request = self.network_resets.recv(), if network_resets_open => {
+                        let Some(NetworkResetRequest { snapshot, reason, completion }) = request else {
+                            network_resets_open = false;
+                            continue;
+                        };
+                        let mut reset_cancellation = cancellation.clone();
+                        let mut reset_forced = forced.clone();
+                        let reset = (self.handle_network_reset)(snapshot, reason);
+                        let outcome = tokio::select! {
+                            biased;
+                            () = reset_forced.forced() => NetworkResetBridgeOutcome::Stopped,
+                            () = reset_cancellation.cancelled() => NetworkResetBridgeOutcome::Stopped,
+                            result = reset => match result {
+                                Ok(()) => NetworkResetBridgeOutcome::Completed,
+                                Err(TunNetworkResetError) => NetworkResetBridgeOutcome::Retry,
+                            },
+                        };
+                        let _ = completion.send(outcome);
                     }
                     result = tasks.join_next(), if !tasks.is_empty() => {
                         if result.is_some_and(|result| result.is_err()) {
@@ -1083,6 +1162,7 @@ struct OwnerSessionServices {
     underlay: UnderlayPublisher,
     flow_output: tokio::sync::mpsc::Sender<SessionItem<TcpFlow>>,
     datagram_output: tokio::sync::mpsc::Sender<SessionItem<UdpCandidate>>,
+    network_reset_output: tokio::sync::mpsc::Sender<NetworkResetRequest>,
     max_udp_associations: usize,
 }
 
@@ -1298,6 +1378,28 @@ fn adapter_underlay_is_current(adapter: &ferrum2_wintun::Adapter) -> bool {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
+fn request_client_network_reset(
+    output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    snapshot: Arc<NetworkSnapshot>,
+    reason: TunNetworkResetReason,
+) -> NetworkResetBridgeOutcome {
+    let (completion, completed) = tokio::sync::oneshot::channel();
+    if output
+        .blocking_send(NetworkResetRequest {
+            snapshot,
+            reason,
+            completion,
+        })
+        .is_err()
+    {
+        return NetworkResetBridgeOutcome::Stopped;
+    }
+    completed
+        .blocking_recv()
+        .unwrap_or(NetworkResetBridgeOutcome::Stopped)
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn owner_main(
     config: Config,
     control: OwnerControl,
@@ -1311,6 +1413,7 @@ fn owner_main(
         underlay,
         flow_output,
         datagram_output,
+        network_reset_output,
         max_udp_associations,
     } = services;
     let adapter_config = match build_adapter_config(&config) {
@@ -1628,6 +1731,31 @@ fn owner_main(
             drop(stack);
             retained_adapter = Some((adapter, reason, false));
             continue;
+        }
+        if let Some(reason) = reset_reason {
+            let snapshot =
+                NetworkSnapshot::capture(generation, &adapter.network_interface_catalog())
+                    .map(Arc::new);
+            let outcome = match snapshot {
+                Ok(snapshot) => {
+                    request_client_network_reset(&network_reset_output, snapshot, reason)
+                }
+                Err(_) => NetworkResetBridgeOutcome::Retry,
+            };
+            if outcome != NetworkResetBridgeOutcome::Completed {
+                session_cancel_handle.cancel();
+                stack.quiesce(
+                    generation.wrapping_add(1).max(1),
+                    UdpResponseDropReason::SessionReset,
+                );
+                drop(flows);
+                drop(datagrams);
+                drop(stack);
+                events.emit(TunEvent::NetworkResetFailed(reason));
+                retained_adapter = Some((adapter, TunNetworkResetReason::Retry, true));
+                retry_delay = Some(backoff.next_delay());
+                continue;
+            }
         }
         if underlay.publish(adapter.underlay_policy()).is_err() {
             session_cancel_handle.cancel();
@@ -3552,13 +3680,13 @@ mod tests {
     use super::{AdapterErrorDisposition, classify_adapter_error};
     use super::{
         Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NetworkChangeTransition,
-        NetworkResetHealthDisposition, OutputFlushOutcome, OutputSendOutcome, OwnerControl,
-        OwnerExit, OwnerRegistry, OwnerThread, OwnerWake, PacketParser, PacketValidator,
-        ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink, TunRejectReason, TunRoot,
-        UdpFiltering, UdpPeerAuthorization, UdpResponseDropReason, UdpTuple,
-        classify_network_change, classify_network_reset_health,
-        classify_network_reset_refresh_error, finish_stack_setup, map_owner_spawn,
-        reconcile_owner_exit, reported_owner_exit,
+        NetworkResetBridgeOutcome, NetworkResetHealthDisposition, NetworkResetRequest,
+        OutputFlushOutcome, OutputSendOutcome, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread,
+        OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent,
+        TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering,
+        UdpPeerAuthorization, UdpResponseDropReason, UdpTuple, classify_network_change,
+        classify_network_reset_health, classify_network_reset_refresh_error, finish_stack_setup,
+        map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -6192,6 +6320,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_reset_bridge_reports_retry_before_completion() {
+        use ferrum2_runtime::{NetworkSnapshot, ProcessCause, ProcessRoot, ProcessSupervisor};
+
+        let (_flow_sender, flows) = tokio::sync::mpsc::channel(1);
+        let (_datagram_sender, datagrams) =
+            tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
+        let (network_reset_sender, network_resets) = tokio::sync::mpsc::channel(1);
+        let control = OwnerControl::new();
+        let active = Arc::clone(&control.active);
+        let owner_control = control.clone();
+        let (done_sender, done) = tokio::sync::oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            while !owner_control.stop.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let _ = done_sender.send(OwnerExit::Stopped);
+            OwnerExit::Stopped
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let registry = OwnerRegistry::new();
+        let root_registry = registry.clone();
+        let root = ProcessRoot::new(move || async move {
+            Ok::<_, &'static str>(TunRoot {
+                owner: OwnerThread {
+                    control,
+                    work: OwnerWake::default(),
+                    thread: Some(thread),
+                },
+                done,
+                runtime: Some("runtime"),
+                cleanup: Some("cleanup"),
+                flows,
+                datagrams,
+                network_resets,
+                flow_count: Arc::new(AtomicUsize::new(0)),
+                association_count: Arc::new(AtomicUsize::new(0)),
+                registry: root_registry,
+                handle_tcp: Arc::new(|_, _, _| Box::pin(async {})),
+                handle_udp: Arc::new(|_, _, _| Box::pin(async {})),
+                handle_network_reset: Arc::new(move |_, _| {
+                    let call = handler_calls.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        if call == 0 {
+                            Err(super::TunNetworkResetError)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }),
+            })
+        });
+        let supervisor =
+            ProcessSupervisor::new(vec![root], Duration::from_secs(1), registry).unwrap();
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
+        let run = tokio::spawn(supervisor.run_until(async move {
+            let _ = shutdown_receiver.await;
+        }));
+        while !active.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        for (generation, expected) in [
+            (2, NetworkResetBridgeOutcome::Retry),
+            (3, NetworkResetBridgeOutcome::Completed),
+        ] {
+            let (completion, completed) = tokio::sync::oneshot::channel();
+            network_reset_sender
+                .send(NetworkResetRequest {
+                    snapshot: Arc::new(NetworkSnapshot::new(generation, None, None).unwrap()),
+                    reason: TunNetworkResetReason::NetworkChange,
+                    completion,
+                })
+                .await
+                .unwrap();
+            assert_eq!(completed.await.unwrap(), expected);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        shutdown_sender.send(()).unwrap();
+        let report = run.await.unwrap();
+        assert_eq!(report.cause(), &ProcessCause::ExternalShutdown);
+    }
+
+    #[tokio::test]
     async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
         use ferrum2_runtime::{OwnerRegistry, ProcessCause, ProcessRootExit, ProcessSupervisor};
 
@@ -6200,6 +6413,8 @@ mod tests {
         let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
         let (_udp, datagram_receiver) =
             tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
+        let (_network_reset, network_resets) =
+            tokio::sync::mpsc::channel::<crate::NetworkResetRequest>(1);
         let control = OwnerControl::new();
         let active = Arc::clone(&control.active);
         let owner_control = control.clone();
@@ -6227,6 +6442,7 @@ mod tests {
                 cleanup: Some("cleanup"),
                 flows: flow_receiver,
                 datagrams: datagram_receiver,
+                network_resets,
                 flow_count: Arc::new(AtomicUsize::new(0)),
                 association_count: Arc::new(AtomicUsize::new(0)),
                 registry: root_registry,
@@ -6240,6 +6456,7 @@ mod tests {
                     })
                 }),
                 handle_udp: Arc::new(|_: crate::UdpCandidate, _, _| Box::pin(async {})),
+                handle_network_reset: Arc::new(|_, _| Box::pin(async { Ok(()) })),
             })
         });
         let supervisor =
@@ -6305,6 +6522,8 @@ mod tests {
             let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
             let (_datagram_sender, datagram_receiver) =
                 tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
+            let (_network_reset_sender, network_resets) =
+                tokio::sync::mpsc::channel::<crate::NetworkResetRequest>(1);
             let (owner_requests, requested_admissions) =
                 std::sync::mpsc::channel::<FakeOwnerRequest>();
             let control = OwnerControl::new();
@@ -6380,6 +6599,7 @@ mod tests {
                     cleanup: Some("cleanup"),
                     flows: flow_receiver,
                     datagrams: datagram_receiver,
+                    network_resets,
                     flow_count: root_flow_count,
                     association_count: Arc::new(AtomicUsize::new(0)),
                     registry: root_registry,
@@ -6416,6 +6636,7 @@ mod tests {
                         })
                     }),
                     handle_udp: Arc::new(|_: crate::UdpCandidate, _, _| Box::pin(async {})),
+                    handle_network_reset: Arc::new(|_, _| Box::pin(async { Ok(()) })),
                 })
             });
             let supervisor =

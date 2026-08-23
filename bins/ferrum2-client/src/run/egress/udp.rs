@@ -39,6 +39,10 @@ impl ClientUdpContext {
     pub(in crate::run) fn cancel_all(&self) {
         self.manager.cancel_all();
     }
+
+    pub(in crate::run) fn reset_network(&self) -> usize {
+        self.manager.reset_all()
+    }
 }
 
 #[cfg(test)]
