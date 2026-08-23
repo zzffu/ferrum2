@@ -22,9 +22,7 @@ POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
 SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.json"
 WINDOWS_TUN_POLICY_PATH = ROOT / "tools" / "windows_tun_performance_policy.json"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "performance-candidate.yml"
-WINDOWS_TUN_WORKFLOW_PATH = (
-    ROOT / ".github" / "workflows" / "windows-tun-performance.yml"
-)
+WINDOWS_TUN_RUNNER_PATH = ROOT / "tests" / "platform" / "run_windows_tun_hyperv.ps1"
 WINDOWS_TUN_COLLECTOR_PATH = ROOT / "tools" / "collect_windows_tun_performance_trial.ps1"
 M4_SUPPORT_PATH = ROOT / "tools" / "ferrum2-m4-qualification" / "src" / "m4_support" / "mod.rs"
 SPEC = importlib.util.spec_from_file_location("performance_candidate", MODULE_PATH)
@@ -898,22 +896,28 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             ) else 2
             self.assertEqual(trial["order"], expected)
 
-    def test_guest_workflow_runs_the_reducer_without_the_qualification_script(
+    def test_windows_tun_execution_is_local_hyperv_only(
         self,
     ) -> None:
-        workflow = WINDOWS_TUN_WORKFLOW_PATH.read_text(encoding="utf-8")
-        self.assertIn(
-            "runs-on: [self-hosted, Windows, X64, ferrum2-hyperv-guest]",
-            workflow,
+        self.assertFalse(
+            (ROOT / ".github" / "workflows" / "windows-tun-performance.yml").exists()
         )
-        self.assertIn("windows-tun-plan", workflow)
-        self.assertIn("windows-tun-trials", workflow)
-        self.assertIn("windows-tun-summarize", workflow)
-        self.assertIn('trials.Count -ne 80', workflow)
-        self.assertIn("--calibration-output", workflow)
-        self.assertIn('"raw-evidence"', workflow)
-        self.assertIn("entry.sha256", workflow)
-        self.assertNotIn("qualify_windows_tun.ps1", workflow)
+        runner = WINDOWS_TUN_RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("#requires -Modules Hyper-V", runner)
+        self.assertIn("run_windows_tun_hyperv", WINDOWS_TUN_RUNNER_PATH.name)
+        self.assertIn("82e20295-1d30-48e7-a751-e21d35d872d4", runner)
+        self.assertIn("1e570209-faf7-4248-8167-aa0687cdb8cf", runner)
+        self.assertIn("hyperv-ferrum2-test.credential.xml", runner)
+        self.assertIn("Restore-VMSnapshot", runner)
+        self.assertIn("New-PSSession", runner)
+        self.assertIn("-VMId", runner)
+
+        workflows = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        )
+        self.assertNotIn("ferrum2-hyperv-guest", workflows)
+        self.assertNotIn("qualify_windows_tun.ps1", workflows)
 
     def test_raw_collector_and_traffic_harness_cover_the_closed_catalog(self) -> None:
         collector = WINDOWS_TUN_COLLECTOR_PATH.read_text(encoding="utf-8")

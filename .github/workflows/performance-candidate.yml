@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       selection:
-        description: "Linux paired workload or group; Windows TUN uses windows-tun-performance"
+        description: "Linux paired workload or group; Windows TUN runs only in local Hyper-V"
         required: true
         type: choice
         default: tcp-stream-64k
