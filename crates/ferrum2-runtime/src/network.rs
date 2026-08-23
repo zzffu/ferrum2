@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 /// Address family used by one outbound dial attempt.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum NetworkFamily {
     Ipv4,
     Ipv6,
@@ -89,12 +89,177 @@ impl InterfaceBinding {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InterfaceBindingError;
 
+/// Closed interface kind used when selecting an automatic underlay.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NetworkInterfaceKind {
+    /// An ordinary interface that may carry underlay traffic.
+    Underlay,
+    /// A software loopback interface.
+    Loopback,
+    /// The managed Ferrum TUN interface.
+    ManagedTun,
+}
+
+/// One family-specific interface row captured by a read-only platform adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetworkInterfaceObservation {
+    binding: InterfaceBinding,
+    family: NetworkFamily,
+    operational: bool,
+    connected: bool,
+    kind: NetworkInterfaceKind,
+    interface_metric: u32,
+    default_route_metric: Option<u32>,
+}
+
+impl NetworkInterfaceObservation {
+    /// Builds one family-specific row from the same platform read as its addresses and metrics.
+    pub fn new(
+        binding: InterfaceBinding,
+        family: NetworkFamily,
+        operational: bool,
+        connected: bool,
+        kind: NetworkInterfaceKind,
+        interface_metric: u32,
+        default_route_metric: Option<u32>,
+    ) -> Result<Self, NetworkInterfaceObservationError> {
+        if binding.addresses().is_empty()
+            || binding
+                .addresses()
+                .iter()
+                .any(|address| NetworkFamily::of(*address) != family)
+        {
+            return Err(NetworkInterfaceObservationError);
+        }
+        Ok(Self {
+            binding,
+            family,
+            operational,
+            connected,
+            kind,
+            interface_metric,
+            default_route_metric,
+        })
+    }
+
+    /// Returns the captured family-specific interface binding.
+    pub const fn binding(&self) -> &InterfaceBinding {
+        &self.binding
+    }
+
+    /// Returns the address family described by this row.
+    pub const fn family(&self) -> NetworkFamily {
+        self.family
+    }
+
+    /// Returns whether the interface was operational when captured.
+    pub const fn operational(&self) -> bool {
+        self.operational
+    }
+
+    /// Returns whether the interface media was connected when captured.
+    pub const fn connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Returns the closed interface kind used by automatic selection.
+    pub const fn kind(&self) -> NetworkInterfaceKind {
+        self.kind
+    }
+
+    /// Returns the Windows family-specific interface metric.
+    pub const fn interface_metric(&self) -> u32 {
+        self.interface_metric
+    }
+
+    /// Returns the best default-route metric for this family, if present.
+    pub const fn default_route_metric(&self) -> Option<u32> {
+        self.default_route_metric
+    }
+
+    fn is_available(&self) -> bool {
+        self.operational && self.connected
+    }
+
+    fn automatic_rank(&self) -> Option<(u64, u64, u32, &str)> {
+        (self.is_available()
+            && self.kind == NetworkInterfaceKind::Underlay
+            && self.default_route_metric.is_some())
+        .then(|| {
+            (
+                u64::from(self.interface_metric)
+                    + u64::from(self.default_route_metric.unwrap_or_default()),
+                self.binding.stable_id(),
+                self.binding.index(),
+                self.binding.name(),
+            )
+        })
+    }
+}
+
+/// A platform row mixed address families or did not carry a usable address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkInterfaceObservationError;
+
+/// Stable interface identity returned by a target-aware system route lookup.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SystemBestRoute {
+    stable_id: u64,
+    index: u32,
+}
+
+impl SystemBestRoute {
+    /// Builds one complete route identity, such as a Windows LUID and family index.
+    pub fn new(stable_id: u64, index: u32) -> Result<Self, SystemBestRouteError> {
+        if stable_id == 0 || index == 0 {
+            return Err(SystemBestRouteError);
+        }
+        Ok(Self { stable_id, index })
+    }
+
+    /// Returns the platform-stable interface identity.
+    pub const fn stable_id(self) -> u64 {
+        self.stable_id
+    }
+
+    /// Returns the family-specific platform interface index.
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+}
+
+/// A system best-route result omitted part of its interface identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemBestRouteError;
+
+/// Closed read failure from a platform network catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NetworkInterfaceCatalogError;
+
+/// Read-only platform seam used to capture interfaces and query target-specific routes.
+///
+/// The Windows implementation belongs at the existing platform unsafe boundary and should use
+/// `GetIfTable2`/`GetIpForwardTable2` for rows and `GetBestRoute2` for the actual destination.
+pub trait NetworkInterfaceCatalog: Send + Sync {
+    /// Reads all family-specific interface rows needed for one immutable snapshot.
+    fn read_interfaces(
+        &self,
+    ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError>;
+
+    /// Reads the system best route for the actual destination without changing network state.
+    fn system_best_route(
+        &self,
+        destination: SocketAddr,
+    ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError>;
+}
+
 /// Immutable, family-aware view of the current underlay network.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NetworkSnapshot {
     generation: u64,
     ipv4_default: Option<InterfaceBinding>,
     ipv6_default: Option<InterfaceBinding>,
+    interfaces: Arc<[NetworkInterfaceObservation]>,
 }
 
 impl NetworkSnapshot {
@@ -113,11 +278,37 @@ impl NetworkSnapshot {
         {
             return Err(NetworkSnapshotError);
         }
-        Ok(Self {
-            generation,
-            ipv4_default,
-            ipv6_default,
-        })
+        let mut interfaces = Vec::new();
+        if let Some(binding) = ipv4_default.as_ref() {
+            interfaces.push(default_observation(binding, NetworkFamily::Ipv4)?);
+        }
+        if let Some(binding) = ipv6_default.as_ref() {
+            interfaces.push(default_observation(binding, NetworkFamily::Ipv6)?);
+        }
+        Self::from_interfaces_with_defaults(generation, interfaces, ipv4_default, ipv6_default)
+    }
+
+    /// Captures one immutable snapshot from a read-only platform catalog.
+    pub fn capture(
+        generation: u64,
+        catalog: &impl NetworkInterfaceCatalog,
+    ) -> Result<Self, NetworkSnapshotCaptureError> {
+        let interfaces = catalog
+            .read_interfaces()
+            .map_err(|_| NetworkSnapshotCaptureError::CatalogUnavailable)?;
+        Self::from_interfaces(generation, interfaces)
+            .map_err(|_| NetworkSnapshotCaptureError::InvalidInterfaceCatalog)
+    }
+
+    /// Builds one immutable snapshot from already captured family-specific rows.
+    pub fn from_interfaces(
+        generation: u64,
+        interfaces: Vec<NetworkInterfaceObservation>,
+    ) -> Result<Self, NetworkSnapshotError> {
+        validate_interface_identities(&interfaces)?;
+        let ipv4_default = automatic_default(&interfaces, NetworkFamily::Ipv4);
+        let ipv6_default = automatic_default(&interfaces, NetworkFamily::Ipv6);
+        Self::from_interfaces_with_defaults(generation, interfaces, ipv4_default, ipv6_default)
     }
 
     /// Returns the monotonically increasing network generation.
@@ -132,11 +323,150 @@ impl NetworkSnapshot {
             IpAddr::V6(_) => self.ipv6_default.as_ref(),
         }
     }
+
+    /// Returns all family-specific interface rows captured in this generation.
+    pub fn interfaces(&self) -> &[NetworkInterfaceObservation] {
+        &self.interfaces
+    }
+
+    fn from_interfaces_with_defaults(
+        generation: u64,
+        mut interfaces: Vec<NetworkInterfaceObservation>,
+        ipv4_default: Option<InterfaceBinding>,
+        ipv6_default: Option<InterfaceBinding>,
+    ) -> Result<Self, NetworkSnapshotError> {
+        validate_interface_identities(&interfaces)?;
+        interfaces.sort_by(|left, right| {
+            (
+                left.family(),
+                left.binding().stable_id(),
+                left.binding().index(),
+                left.binding().name(),
+            )
+                .cmp(&(
+                    right.family(),
+                    right.binding().stable_id(),
+                    right.binding().index(),
+                    right.binding().name(),
+                ))
+        });
+        Ok(Self {
+            generation,
+            ipv4_default,
+            ipv6_default,
+            interfaces: interfaces.into(),
+        })
+    }
+
+    /// Resolves one exact interface name from this immutable generation.
+    pub fn resolve_named(&self, name: &str, family: NetworkFamily) -> NamedInterfaceResolution {
+        let named = self
+            .interfaces
+            .iter()
+            .filter(|interface| interface.binding().name() == name)
+            .collect::<Vec<_>>();
+        if named.is_empty() {
+            return NamedInterfaceResolution::Missing;
+        }
+        let mut family_rows = named
+            .into_iter()
+            .filter(|interface| interface.family() == family);
+        let Some(first) = family_rows.next() else {
+            return NamedInterfaceResolution::WrongFamily;
+        };
+        if family_rows.next().is_some() {
+            return NamedInterfaceResolution::Ambiguous;
+        }
+        if first.is_available() {
+            NamedInterfaceResolution::Available(first.binding().clone())
+        } else {
+            NamedInterfaceResolution::Unavailable
+        }
+    }
+
+    fn resolve_system_route(
+        &self,
+        route: SystemBestRoute,
+        family: NetworkFamily,
+    ) -> Option<InterfaceBinding> {
+        self.interfaces
+            .iter()
+            .find(|interface| {
+                interface.family() == family
+                    && interface.is_available()
+                    && interface.binding().stable_id() == route.stable_id()
+                    && interface.binding().index() == route.index()
+            })
+            .map(|interface| interface.binding().clone())
+    }
 }
 
-/// A family default did not own an address in that family.
+fn default_observation(
+    binding: &InterfaceBinding,
+    family: NetworkFamily,
+) -> Result<NetworkInterfaceObservation, NetworkSnapshotError> {
+    let addresses = binding
+        .addresses()
+        .iter()
+        .copied()
+        .filter(|address| NetworkFamily::of(*address) == family)
+        .collect::<Vec<_>>();
+    let family_binding = InterfaceBinding::new(
+        Arc::clone(&binding.name),
+        binding.stable_id(),
+        binding.index(),
+        addresses,
+    )
+    .map_err(|_| NetworkSnapshotError)?;
+    NetworkInterfaceObservation::new(
+        family_binding,
+        family,
+        true,
+        true,
+        NetworkInterfaceKind::Underlay,
+        0,
+        Some(0),
+    )
+    .map_err(|_| NetworkSnapshotError)
+}
+
+fn validate_interface_identities(
+    interfaces: &[NetworkInterfaceObservation],
+) -> Result<(), NetworkSnapshotError> {
+    for (offset, interface) in interfaces.iter().enumerate() {
+        if interfaces[offset + 1..].iter().any(|candidate| {
+            candidate.family() == interface.family()
+                && candidate.binding().stable_id() == interface.binding().stable_id()
+                && candidate.binding().index() == interface.binding().index()
+        }) {
+            return Err(NetworkSnapshotError);
+        }
+    }
+    Ok(())
+}
+
+fn automatic_default(
+    interfaces: &[NetworkInterfaceObservation],
+    family: NetworkFamily,
+) -> Option<InterfaceBinding> {
+    interfaces
+        .iter()
+        .filter(|interface| interface.family() == family)
+        .filter_map(|interface| interface.automatic_rank().map(|rank| (rank, interface)))
+        .min_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, interface)| interface.binding().clone())
+}
+
+/// A family row was invalid or the catalog repeated one family identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NetworkSnapshotError;
+
+/// Closed failure from capturing one immutable platform snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkSnapshotCaptureError {
+    CatalogUnavailable,
+    InvalidInterfaceCatalog,
+}
 
 /// Atomically publishes immutable network generations to all runtime users.
 #[derive(Clone)]
@@ -287,15 +617,7 @@ pub enum NamedInterfaceResolution {
     Missing,
     Ambiguous,
     Unavailable,
-}
-
-/// Platform adapter used by the shared four-tier resolver.
-pub trait NetworkInterfaceCatalog: Send + Sync {
-    /// Resolves one exact interface name for the requested family.
-    fn resolve_named(&self, name: &str, family: NetworkFamily) -> NamedInterfaceResolution;
-
-    /// Resolves the system best route for the actual dial destination.
-    fn system_best_route(&self, destination: SocketAddr) -> Option<InterfaceBinding>;
+    WrongFamily,
 }
 
 /// Low-cardinality source selected by the shared resolver.
@@ -378,7 +700,7 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
     ) -> Result<ResolvedInterface, InterfaceResolutionError> {
         let family = NetworkFamily::of(destination.ip());
         let (binding, selection_source) = if let Some(name) = outbound.bind_interface() {
-            let binding = match self.catalog.resolve_named(name, family) {
+            let binding = match snapshot.resolve_named(name, family) {
                 NamedInterfaceResolution::Available(binding) => binding,
                 NamedInterfaceResolution::Missing => {
                     return Err(InterfaceResolutionError::ExplicitInterfaceMissing);
@@ -389,19 +711,19 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
                 NamedInterfaceResolution::Unavailable => {
                     return Err(InterfaceResolutionError::ExplicitInterfaceUnavailable);
                 }
+                NamedInterfaceResolution::WrongFamily => {
+                    return Err(InterfaceResolutionError::ExplicitInterfaceWrongFamily);
+                }
             };
-            if !binding.supports(family) {
-                return Err(InterfaceResolutionError::ExplicitInterfaceWrongFamily);
-            }
             (binding, InterfaceSelectionSource::OutboundExplicit)
         } else if route.auto_detect_interface() {
             if let Some(binding) = snapshot.auto_interface(destination.ip()) {
                 (binding.clone(), InterfaceSelectionSource::AutoDetected)
             } else {
-                self.resolve_after_auto(route, destination, family)?
+                self.resolve_after_auto(route, destination, family, snapshot)?
             }
         } else {
-            self.resolve_after_auto(route, destination, family)?
+            self.resolve_after_auto(route, destination, family, snapshot)?
         };
 
         if !binding.supports(family) {
@@ -424,17 +746,20 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
         route: &RouteNetworkOptions,
         destination: SocketAddr,
         family: NetworkFamily,
+        snapshot: &NetworkSnapshot,
     ) -> Result<(InterfaceBinding, InterfaceSelectionSource), InterfaceResolutionError> {
         if let Some(name) = route.default_interface()
             && let NamedInterfaceResolution::Available(binding) =
-                self.catalog.resolve_named(name, family)
-            && binding.supports(family)
+                snapshot.resolve_named(name, family)
         {
             return Ok((binding, InterfaceSelectionSource::RouteDefault));
         }
-        let binding = self
+        let route = self
             .catalog
             .system_best_route(destination)
+            .map_err(|_| InterfaceResolutionError::SystemBestRouteUnavailable)?;
+        let binding = snapshot
+            .resolve_system_route(route, family)
             .ok_or(InterfaceResolutionError::SystemBestRouteUnavailable)?;
         Ok((binding, InterfaceSelectionSource::SystemBestRoute))
     }
@@ -442,29 +767,30 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     use super::*;
 
     #[derive(Default)]
     struct Catalog {
-        named: BTreeMap<String, NamedInterfaceResolution>,
-        system: Option<InterfaceBinding>,
+        interfaces: Vec<NetworkInterfaceObservation>,
+        system: Option<SystemBestRoute>,
         system_destinations: Mutex<Vec<SocketAddr>>,
     }
 
     impl NetworkInterfaceCatalog for Catalog {
-        fn resolve_named(&self, name: &str, _family: NetworkFamily) -> NamedInterfaceResolution {
-            self.named
-                .get(name)
-                .cloned()
-                .unwrap_or(NamedInterfaceResolution::Missing)
+        fn read_interfaces(
+            &self,
+        ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
+            Ok(self.interfaces.clone())
         }
 
-        fn system_best_route(&self, destination: SocketAddr) -> Option<InterfaceBinding> {
+        fn system_best_route(
+            &self,
+            destination: SocketAddr,
+        ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError> {
             self.system_destinations.lock().unwrap().push(destination);
-            self.system.clone()
+            self.system.ok_or(NetworkInterfaceCatalogError)
         }
     }
 
@@ -492,28 +818,68 @@ mod tests {
         )
     }
 
+    fn observation(
+        binding: InterfaceBinding,
+        family: NetworkFamily,
+        operational: bool,
+        connected: bool,
+        kind: NetworkInterfaceKind,
+        interface_metric: u32,
+        default_route_metric: Option<u32>,
+    ) -> NetworkInterfaceObservation {
+        NetworkInterfaceObservation::new(
+            binding,
+            family,
+            operational,
+            connected,
+            kind,
+            interface_metric,
+            default_route_metric,
+        )
+        .unwrap()
+    }
+
+    fn available(binding: InterfaceBinding, family: NetworkFamily) -> NetworkInterfaceObservation {
+        observation(
+            binding,
+            family,
+            true,
+            true,
+            NetworkInterfaceKind::Underlay,
+            10,
+            None,
+        )
+    }
+
     #[test]
     fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
         let explicit = v4("explicit", 1, 11, 11);
         let automatic = v4("automatic", 2, 12, 12);
         let route_default = v4("route-default", 3, 13, 13);
         let system = v4("system", 4, 14, 14);
+        let interfaces = vec![
+            available(explicit.clone(), NetworkFamily::Ipv4),
+            observation(
+                automatic.clone(),
+                NetworkFamily::Ipv4,
+                true,
+                true,
+                NetworkInterfaceKind::Underlay,
+                5,
+                Some(5),
+            ),
+            available(route_default.clone(), NetworkFamily::Ipv4),
+            available(system.clone(), NetworkFamily::Ipv4),
+        ];
         let catalog = Catalog {
-            named: BTreeMap::from([
-                (
-                    "explicit".to_owned(),
-                    NamedInterfaceResolution::Available(explicit.clone()),
-                ),
-                (
-                    "route-default".to_owned(),
-                    NamedInterfaceResolution::Available(route_default.clone()),
-                ),
-            ]),
-            system: Some(system.clone()),
+            interfaces: interfaces.clone(),
+            system: Some(SystemBestRoute::new(system.stable_id(), system.index()).unwrap()),
             system_destinations: Mutex::default(),
         };
+        let snapshot = NetworkSnapshot::capture(7, &catalog).unwrap();
+        let no_auto =
+            NetworkSnapshot::from_interfaces_with_defaults(8, interfaces, None, None).unwrap();
         let resolver = NetworkInterfaceResolver::new(catalog);
-        let snapshot = NetworkSnapshot::new(7, Some(automatic.clone()), None).unwrap();
         let target = SocketAddr::from(([203, 0, 113, 9], 443));
 
         let selected = resolver
@@ -544,7 +910,6 @@ mod tests {
             InterfaceSelectionSource::AutoDetected
         );
 
-        let no_auto = NetworkSnapshot::new(8, None, None).unwrap();
         let selected = resolver
             .resolve(
                 &DialOptions::default(),
@@ -585,23 +950,35 @@ mod tests {
 
     #[test]
     fn explicit_lookup_failure_never_falls_back() {
-        for (resolution, expected) in [
+        for (interfaces, expected) in [
+            (vec![], InterfaceResolutionError::ExplicitInterfaceMissing),
             (
-                NamedInterfaceResolution::Missing,
-                InterfaceResolutionError::ExplicitInterfaceMissing,
-            ),
-            (
-                NamedInterfaceResolution::Ambiguous,
+                vec![
+                    available(v4("explicit", 1, 11, 11), NetworkFamily::Ipv4),
+                    available(v4("explicit", 2, 12, 12), NetworkFamily::Ipv4),
+                ],
                 InterfaceResolutionError::ExplicitInterfaceAmbiguous,
             ),
             (
-                NamedInterfaceResolution::Unavailable,
+                vec![observation(
+                    v4("explicit", 1, 11, 11),
+                    NetworkFamily::Ipv4,
+                    false,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    1,
+                    None,
+                )],
                 InterfaceResolutionError::ExplicitInterfaceUnavailable,
+            ),
+            (
+                vec![available(v6("explicit", 1, 11, 11), NetworkFamily::Ipv6)],
+                InterfaceResolutionError::ExplicitInterfaceWrongFamily,
             ),
         ] {
             let resolver = NetworkInterfaceResolver::new(Catalog {
-                named: BTreeMap::from([("explicit".to_owned(), resolution)]),
-                system: Some(v4("system", 4, 14, 14)),
+                interfaces: interfaces.clone(),
+                system: Some(SystemBestRoute::new(4, 14).unwrap()),
                 system_destinations: Mutex::default(),
             });
             let error = resolver
@@ -609,7 +986,7 @@ mod tests {
                     &DialOptions::new(Some("explicit"), None, None),
                     &RouteNetworkOptions::new(true, Some("fallback")),
                     SocketAddr::from(([203, 0, 113, 9], 443)),
-                    &NetworkSnapshot::new(1, Some(v4("auto", 2, 12, 12)), None).unwrap(),
+                    &NetworkSnapshot::from_interfaces(1, interfaces).unwrap(),
                 )
                 .unwrap_err();
             assert_eq!(error, expected);
@@ -688,6 +1065,135 @@ mod tests {
                 )
                 .unwrap_err(),
             InterfaceResolutionError::SourceAddressUnavailable
+        );
+    }
+
+    #[test]
+    fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
+        let ipv4_winner = v4("v4-winner", 20, 20, 20);
+        let ipv6_winner = v6("v6-winner", 60, 60, 60);
+        let catalog = Catalog {
+            interfaces: vec![
+                observation(
+                    v4("managed-tun", 1, 1, 1),
+                    NetworkFamily::Ipv4,
+                    true,
+                    true,
+                    NetworkInterfaceKind::ManagedTun,
+                    1,
+                    Some(1),
+                ),
+                observation(
+                    v4("loopback", 2, 2, 2),
+                    NetworkFamily::Ipv4,
+                    true,
+                    true,
+                    NetworkInterfaceKind::Loopback,
+                    1,
+                    Some(1),
+                ),
+                observation(
+                    v4("down", 3, 3, 3),
+                    NetworkFamily::Ipv4,
+                    false,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    1,
+                    Some(1),
+                ),
+                observation(
+                    v4("disconnected", 4, 4, 4),
+                    NetworkFamily::Ipv4,
+                    true,
+                    false,
+                    NetworkInterfaceKind::Underlay,
+                    1,
+                    Some(1),
+                ),
+                observation(
+                    v4("no-default-route", 5, 5, 5),
+                    NetworkFamily::Ipv4,
+                    true,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    1,
+                    None,
+                ),
+                observation(
+                    ipv4_winner.clone(),
+                    NetworkFamily::Ipv4,
+                    true,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    4,
+                    Some(6),
+                ),
+                observation(
+                    v4("v4-tied-later", 30, 30, 30),
+                    NetworkFamily::Ipv4,
+                    true,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    5,
+                    Some(5),
+                ),
+                observation(
+                    ipv6_winner.clone(),
+                    NetworkFamily::Ipv6,
+                    true,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    2,
+                    Some(3),
+                ),
+                observation(
+                    v6("v6-higher-metric", 61, 61, 61),
+                    NetworkFamily::Ipv6,
+                    true,
+                    true,
+                    NetworkInterfaceKind::Underlay,
+                    3,
+                    Some(3),
+                ),
+            ],
+            system: None,
+            system_destinations: Mutex::default(),
+        };
+
+        let snapshot = NetworkSnapshot::capture(41, &catalog).unwrap();
+        assert_eq!(
+            snapshot.auto_interface(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            Some(&ipv4_winner)
+        );
+        assert_eq!(
+            snapshot.auto_interface(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+            Some(&ipv6_winner)
+        );
+        assert_eq!(snapshot.interfaces().len(), 9);
+    }
+
+    #[test]
+    fn system_route_identity_must_exist_in_the_same_family_snapshot() {
+        let only_ipv4 = v4("system", 7, 17, 7);
+        let snapshot =
+            NetworkSnapshot::from_interfaces(4, vec![available(only_ipv4, NetworkFamily::Ipv4)])
+                .unwrap();
+        let resolver = NetworkInterfaceResolver::new(Catalog {
+            interfaces: vec![],
+            system: Some(SystemBestRoute::new(7, 17).unwrap()),
+            system_destinations: Mutex::default(),
+        });
+
+        assert_eq!(
+            resolver
+                .resolve(
+                    &DialOptions::default(),
+                    &RouteNetworkOptions::default(),
+                    SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443),
+                    &snapshot,
+                )
+                .unwrap_err(),
+            InterfaceResolutionError::SystemBestRouteUnavailable
         );
     }
 

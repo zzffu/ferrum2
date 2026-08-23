@@ -28,9 +28,11 @@ pub use metrics::{
 pub use network::{
     DialOptions, InterfaceBinding, InterfaceBindingError, InterfaceResolutionError,
     InterfaceSelectionSource, NamedInterfaceResolution, NetworkFamily, NetworkInterfaceCatalog,
-    NetworkInterfaceResolver, NetworkResetError, NetworkResetFuture, NetworkSnapshot,
-    NetworkSnapshotError, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,
-    ResolvedInterface, RouteNetworkOptions,
+    NetworkInterfaceCatalogError, NetworkInterfaceKind, NetworkInterfaceObservation,
+    NetworkInterfaceObservationError, NetworkInterfaceResolver, NetworkResetError,
+    NetworkResetFuture, NetworkSnapshot, NetworkSnapshotCaptureError, NetworkSnapshotError,
+    NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork, ResolvedInterface,
+    RouteNetworkOptions, SystemBestRoute, SystemBestRouteError,
 };
 pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
 pub use process::{
