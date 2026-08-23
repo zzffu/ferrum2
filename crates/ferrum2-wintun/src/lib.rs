@@ -76,6 +76,12 @@ pub enum ManagedTunHealth {
 /// Closed reason that Ferrum2-owned managed state no longer matches exact readback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagedStateDamage {
+    /// The adapter handle or its published interface identity is no longer usable.
+    Adapter,
+    /// The Wintun device session is no longer owned by the managed plane.
+    Session,
+    /// One or more owned interface-address rows are absent or no longer exact.
+    Address,
     /// One or more owned capture-route rows are absent or no longer exact.
     Route,
     /// One or more managed DNS leases are absent or no longer exact.

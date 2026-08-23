@@ -954,8 +954,12 @@ impl Adapter {
         self.managed.as_ref().map(|state| state.policy.clone())
     }
 
-    /// Reads back only Ferrum2-owned managed routes and DNS leases.
+    /// Reads back only Ferrum2-owned adapter, address, route, and DNS state.
     pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
+        let device_health = self.managed_device_health();
+        if device_health != ManagedTunHealth::Healthy {
+            return Ok(device_health);
+        }
         let Some(state) = self.managed.as_ref() else {
             return Ok(ManagedTunHealth::Healthy);
         };
@@ -985,8 +989,33 @@ impl Adapter {
         })
     }
 
+    fn managed_device_health(&self) -> ManagedTunHealth {
+        let expected_addresses = usize::from(self.config.ipv4.is_some())
+            .saturating_add(usize::from(self.config.ipv6.is_some()));
+        managed_device_health(
+            self.adapter.is_some_and(|adapter| !adapter.is_null()),
+            self.session
+                .as_ref()
+                .is_some_and(|session| !session.handle.is_null()),
+            self.pending_address.is_none() && self.addresses.len() == expected_addresses,
+            || managed_interface_identity_matches(self.luid, self.interface_index),
+            || {
+                self.addresses.iter().all(|intended| {
+                    read_owned_address(intended)
+                        .is_ok_and(|current| managed_address_matches(intended, &current))
+                })
+            },
+        )
+    }
+
     /// Revalidates one stable, debounced notification burst against managed state.
     pub fn revalidate_network_change(&mut self) -> Result<NetworkChangeOutcome, Error> {
+        if let ManagedTunHealth::Damaged(reason) = self.managed_device_health() {
+            if let Some(state) = &self.managed {
+                state.policy.invalidate();
+            }
+            return Ok(NetworkChangeOutcome::ManagedStateDamaged(reason));
+        }
         match self.revalidate_managed_network_state(true) {
             Ok(ManagedNetworkValidationOutcome::Unchanged) => Ok(NetworkChangeOutcome::Unchanged),
             Ok(ManagedNetworkValidationOutcome::UnderlayChanged) => {
@@ -2336,6 +2365,34 @@ fn managed_routes_match<O: ManagedRouteCleanupOperations>(
     })
 }
 
+fn managed_device_health(
+    adapter_present: bool,
+    session_present: bool,
+    address_ledger_exact: bool,
+    mut identity_matches: impl FnMut() -> bool,
+    mut addresses_match: impl FnMut() -> bool,
+) -> ManagedTunHealth {
+    if !adapter_present || !identity_matches() {
+        return ManagedTunHealth::Damaged(ManagedStateDamage::Adapter);
+    }
+    if !session_present {
+        return ManagedTunHealth::Damaged(ManagedStateDamage::Session);
+    }
+    if !address_ledger_exact || !addresses_match() {
+        return ManagedTunHealth::Damaged(ManagedStateDamage::Address);
+    }
+    ManagedTunHealth::Healthy
+}
+
+fn managed_interface_identity_matches(luid: NET_LUID_LH, expected_index: u32) -> bool {
+    if unsafe { luid.Value } == 0 || expected_index == 0 {
+        return false;
+    }
+    let mut current_index = 0_u32;
+    (unsafe { ConvertInterfaceLuidToIndex(&luid, &mut current_index) }) == ERROR_SUCCESS
+        && current_index == expected_index
+}
+
 fn managed_state_health<O: ManagedRouteCleanupOperations>(
     routes: &[O::Row],
     route_operations: &mut O,
@@ -3096,12 +3153,12 @@ mod tests {
         install_managed_dns, install_managed_routes, interface_changed, interface_socket_option,
         ipv4_dns_settings_input, ipv4_interface_index_option_value, ipv4_sockaddr,
         ipv6_dns_settings_input, ipv6_interface_index_option_value, ipv6_sockaddr,
-        leak_notification_owners, load_transaction, managed_address_matches, managed_dns_matches,
-        managed_notification_family, managed_state_health, normalize_dns_settings,
-        prepare_managed_intent, require_exports, restore_managed_dns, revalidate_managed_network,
-        route_changed, route_matches, setup_transaction, snapshot_underlay_at,
-        snapshot_underlay_with, subscribe_notification_sequence, take_last_owned_route,
-        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        leak_notification_owners, load_transaction, managed_address_matches, managed_device_health,
+        managed_dns_matches, managed_notification_family, managed_state_health,
+        normalize_dns_settings, prepare_managed_intent, require_exports, restore_managed_dns,
+        revalidate_managed_network, route_changed, route_matches, setup_transaction,
+        snapshot_underlay_at, snapshot_underlay_with, subscribe_notification_sequence,
+        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
     };
     use crate::{
         ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix, ManagedStateDamage, ManagedTunHealth,
@@ -4020,6 +4077,91 @@ mod tests {
             managed_state_health(&[1], &mut healthy_route, || Ok(true)).unwrap(),
             ManagedTunHealth::Healthy
         );
+    }
+
+    #[test]
+    fn managed_device_health_is_closed_and_checks_owned_state_in_order() {
+        use std::cell::Cell;
+
+        for (name, adapter, session, address_ledger, identity, addresses, expected) in [
+            (
+                "adapter handle",
+                false,
+                true,
+                true,
+                true,
+                true,
+                ManagedStateDamage::Adapter,
+            ),
+            (
+                "interface identity",
+                true,
+                true,
+                true,
+                false,
+                true,
+                ManagedStateDamage::Adapter,
+            ),
+            (
+                "device session",
+                true,
+                false,
+                true,
+                true,
+                true,
+                ManagedStateDamage::Session,
+            ),
+            (
+                "address ledger",
+                true,
+                true,
+                false,
+                true,
+                true,
+                ManagedStateDamage::Address,
+            ),
+            (
+                "address readback",
+                true,
+                true,
+                true,
+                true,
+                false,
+                ManagedStateDamage::Address,
+            ),
+        ] {
+            assert_eq!(
+                managed_device_health(adapter, session, address_ledger, || identity, || addresses,),
+                ManagedTunHealth::Damaged(expected),
+                "{name}"
+            );
+        }
+
+        assert_eq!(
+            managed_device_health(true, true, true, || true, || true),
+            ManagedTunHealth::Healthy
+        );
+
+        let identity_calls = Cell::new(0);
+        let address_calls = Cell::new(0);
+        assert_eq!(
+            managed_device_health(
+                false,
+                true,
+                true,
+                || {
+                    identity_calls.set(identity_calls.get() + 1);
+                    true
+                },
+                || {
+                    address_calls.set(address_calls.get() + 1);
+                    true
+                },
+            ),
+            ManagedTunHealth::Damaged(ManagedStateDamage::Adapter)
+        );
+        assert_eq!(identity_calls.get(), 0);
+        assert_eq!(address_calls.get(), 0);
     }
 
     #[test]
