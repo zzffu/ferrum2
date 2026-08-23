@@ -3,7 +3,9 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use ferrum2_core::{AbortiveClose, ConnectError, Connector, LocalEndpoint, TargetAddr};
+use ferrum2_core::{AbortiveClose, LocalEndpoint};
+#[cfg(any(not(windows), test))]
+use ferrum2_core::{ConnectError, Connector, TargetAddr};
 use ferrum2_shadowsocks::{FlowTerminal, PlainDuplex, ShadowsocksError, TransportIo};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket};
@@ -51,16 +53,19 @@ pub(super) async fn shutdown_signal() {
     }
 }
 
+#[cfg(any(not(windows), test))]
 pub(super) struct TokioConnector<C> {
     inner: C,
 }
 
+#[cfg(any(not(windows), test))]
 impl<C> TokioConnector<C> {
     pub(super) const fn new(inner: C) -> Self {
         Self { inner }
     }
 }
 
+#[cfg(any(not(windows), test))]
 impl<C> Connector for TokioConnector<C>
 where
     C: Connector,

@@ -8,12 +8,13 @@ use socket2::Socket;
 
 use crate::{
     AdapterConfig, CreateError, Error, ErrorKind, ManagedTunHealth, NetworkChangeOutcome,
-    SendOutcome, WaitOutcome,
+    NetworkChangeWaitOutcome, SendOutcome, WaitOutcome,
 };
 
 const UNSUPPORTED: Error = Error::new(ErrorKind::UnrecoverableCorruption);
 
 pub struct Adapter;
+pub struct WindowsNetworkChangeMonitor;
 pub struct StopSignal;
 pub struct WorkSignal;
 pub struct ReceivedPacket<'a>(&'a [u8]);
@@ -89,6 +90,7 @@ impl Adapter {
         _: AdapterConfig,
         _: std::time::Instant,
         _: &std::sync::atomic::AtomicBool,
+        _: WindowsNetworkInterfaceCatalog,
     ) -> Result<Self, CreateError> {
         Err(CreateError::operation())
     }
@@ -124,6 +126,24 @@ impl Adapter {
     }
     pub fn cleanup(self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+impl WindowsNetworkChangeMonitor {
+    pub fn new() -> Result<Self, Error> {
+        Err(UNSUPPORTED)
+    }
+
+    pub fn wait(&mut self, _: std::time::Duration) -> Result<NetworkChangeWaitOutcome, Error> {
+        Err(UNSUPPORTED)
+    }
+
+    pub fn stop_signal(&self) -> StopSignal {
+        StopSignal
+    }
+
+    pub fn close(self) -> Result<(), Error> {
+        Err(UNSUPPORTED)
     }
 }
 

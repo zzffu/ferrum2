@@ -78,9 +78,16 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::core::GUID;
 
+#[cfg(test)]
+use crate::strict_route::STRICT_ROUTE_BLOCK_WEIGHT;
+use crate::strict_route::{
+    MAX_WFP_APP_ID_BYTES, StrictRouteAction, StrictRouteCondition, StrictRouteLayer,
+    StrictRouteRule, StrictRouteRuleKind, strict_route_rules,
+};
 use crate::{
     ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, IpPrefix,
-    ManagedStateDamage, ManagedTunHealth, NetworkChangeOutcome, SendOutcome, WaitOutcome,
+    ManagedStateDamage, ManagedTunHealth, NetworkChangeOutcome, NetworkChangeWaitOutcome,
+    SendOutcome, WaitOutcome,
 };
 
 type WintunAdapter = *mut c_void;
@@ -350,9 +357,9 @@ struct InterfaceIdentity {
 ///
 /// A catalog created from an [`Adapter`] classifies that exact LUID/index pair as the managed TUN,
 /// so automatic underlay selection cannot feed outbound sockets back into Ferrum2's own adapter.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct WindowsNetworkInterfaceCatalog {
-    managed_tun: Option<InterfaceIdentity>,
+    managed_tun: Arc<std::sync::Mutex<Option<InterfaceIdentity>>>,
 }
 
 impl WindowsNetworkInterfaceCatalog {
@@ -360,8 +367,8 @@ impl WindowsNetworkInterfaceCatalog {
     ///
     /// This is suitable for processes that do not own a Wintun adapter. TUN-owning callers should
     /// obtain the catalog from [`Adapter::network_interface_catalog`] instead.
-    pub const fn system() -> Self {
-        Self { managed_tun: None }
+    pub fn system() -> Self {
+        Self::default()
     }
 
     /// Builds a catalog that classifies one exact managed TUN LUID/index pair.
@@ -369,20 +376,51 @@ impl WindowsNetworkInterfaceCatalog {
         if stable_id == 0 || index == 0 {
             return Err(Error::invalid_input());
         }
-        Ok(Self {
-            managed_tun: Some(InterfaceIdentity {
-                luid: stable_id,
-                index,
-            }),
-        })
+        let catalog = Self::system();
+        catalog.set_managed_tun(InterfaceIdentity {
+            luid: stable_id,
+            index,
+        })?;
+        Ok(catalog)
+    }
+
+    fn managed_tun(&self) -> Result<Option<InterfaceIdentity>, Error> {
+        self.managed_tun
+            .lock()
+            .map(|managed_tun| *managed_tun)
+            .map_err(|_| Error)
+    }
+
+    fn set_managed_tun(&self, identity: InterfaceIdentity) -> Result<(), Error> {
+        if identity.luid == 0 || identity.index == 0 {
+            return Err(Error);
+        }
+        *self.managed_tun.lock().map_err(|_| Error)? = Some(identity);
+        Ok(())
+    }
+
+    fn clear_managed_tun(&self, identity: InterfaceIdentity) -> Result<(), Error> {
+        let mut managed_tun = self.managed_tun.lock().map_err(|_| Error)?;
+        match *managed_tun {
+            Some(current) if current == identity => {
+                *managed_tun = None;
+                Ok(())
+            }
+            None => Ok(()),
+            Some(_) => Err(Error),
+        }
     }
 }
 
 impl fmt::Debug for WindowsNetworkInterfaceCatalog {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let managed_tun = self
+            .managed_tun()
+            .map(|managed_tun| managed_tun.is_some())
+            .unwrap_or(true);
         formatter
             .debug_struct("WindowsNetworkInterfaceCatalog")
-            .field("managed_tun", &self.managed_tun.is_some())
+            .field("managed_tun", &managed_tun)
             .finish()
     }
 }
@@ -391,15 +429,20 @@ impl RuntimeNetworkInterfaceCatalog for WindowsNetworkInterfaceCatalog {
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
-        read_network_interface_observations(self.managed_tun)
-            .map_err(|_| NetworkInterfaceCatalogError)
+        let managed_tun = self
+            .managed_tun()
+            .map_err(|_| NetworkInterfaceCatalogError)?;
+        read_network_interface_observations(managed_tun).map_err(|_| NetworkInterfaceCatalogError)
     }
 
     fn system_best_route(
         &self,
         destination: std::net::SocketAddr,
     ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError> {
-        system_best_route(destination, self.managed_tun).map_err(|_| NetworkInterfaceCatalogError)
+        let managed_tun = self
+            .managed_tun()
+            .map_err(|_| NetworkInterfaceCatalogError)?;
+        system_best_route(destination, managed_tun).map_err(|_| NetworkInterfaceCatalogError)
     }
 }
 
@@ -916,10 +959,27 @@ impl NotificationOwners {
     }
 
     fn cancel_all(&mut self) -> bool {
-        cancel_notification_handles(&mut self.handles, &mut self.context, |handle| unsafe {
-            CancelMibChangeNotify2(*handle) == ERROR_SUCCESS
-        })
+        cancel_notification_handles(
+            &mut self.handles,
+            &mut self.context,
+            cancel_mib_notification,
+        )
     }
+
+    fn close(&mut self) -> Result<(), Error> {
+        close_notification_handles(
+            &mut self.handles,
+            &mut self.context,
+            cancel_mib_notification,
+        )
+    }
+}
+
+fn cancel_mib_notification(handle: &HANDLE) -> bool {
+    // SAFETY: every handle came from one successful Notify*Change registration owned by this
+    // context. Ownership paths never run inside those callbacks, so synchronous cancellation
+    // cannot deadlock by waiting for the callback that invoked it.
+    unsafe { CancelMibChangeNotify2(*handle) == ERROR_SUCCESS }
 }
 
 fn cancel_notification_handles<T, C>(
@@ -946,6 +1006,22 @@ fn leak_notification_owners<T, C>(handles: &mut Vec<T>, context: &mut Option<C>)
     std::mem::forget(context.take());
 }
 
+fn close_notification_handles<T, C>(
+    handles: &mut Vec<T>,
+    context: &mut Option<C>,
+    cancel: impl FnMut(&T) -> bool,
+) -> Result<(), Error> {
+    if cancel_notification_handles(handles, context, cancel) {
+        // A failed deregistration leaves callback reachability unknown. Leak the remaining
+        // handles together with their context rather than allowing a late callback to use freed
+        // memory, while reporting that exact cleanup could not be proven.
+        leak_notification_owners(handles, context);
+        Err(Error::cleanup())
+    } else {
+        Ok(())
+    }
+}
+
 fn subscribe_notification_sequence<H, C>(
     context: C,
     mut subscribe: impl FnMut(usize) -> Result<H, Error>,
@@ -969,9 +1045,7 @@ fn subscribe_notification_sequence<H, C>(
 
 impl Drop for NotificationOwners {
     fn drop(&mut self) {
-        if self.cancel_all() {
-            leak_notification_owners(&mut self.handles, &mut self.context);
-        }
+        let _ = self.close();
     }
 }
 
@@ -1065,17 +1139,8 @@ fn classify_notification_luid(
 const STRICT_ROUTE_SESSION_KEY: GUID = GUID::from_u128(0x8ea35b4e_6629_4e26_9776_95c5bf9c6b01);
 const STRICT_ROUTE_SUBLAYER_KEY: GUID = GUID::from_u128(0xddbc2fa2_d52f_4a79_8a63_8446c308cf02);
 const STRICT_ROUTE_SUBLAYER_WEIGHT: u16 = 0x7fff;
-const STRICT_ROUTE_PERMIT_WEIGHT: u8 = 15;
-const STRICT_ROUTE_BLOCK_WEIGHT: u8 = 5;
 const STRICT_ROUTE_SESSION_NAME: &str = "Ferrum2 strict route dynamic session";
 const STRICT_ROUTE_SUBLAYER_NAME: &str = "Ferrum2 strict route";
-const MAX_WFP_APP_ID_BYTES: usize = 131_072;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StrictRouteLayer {
-    V4,
-    V6,
-}
 
 impl StrictRouteLayer {
     const fn key(self) -> GUID {
@@ -1086,12 +1151,6 @@ impl StrictRouteLayer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StrictRouteAction {
-    Permit,
-    Block,
-}
-
 impl StrictRouteAction {
     const fn raw(self) -> u32 {
         match self {
@@ -1099,20 +1158,6 @@ impl StrictRouteAction {
             Self::Block => FWP_ACTION_BLOCK,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StrictRouteRuleKind {
-    AppPermitV4,
-    AppPermitV6,
-    TunPermitV4,
-    TunPermitV6,
-    FamilyBlockV4,
-    FamilyBlockV6,
-    DnsTcpBlockV4,
-    DnsUdpBlockV4,
-    DnsTcpBlockV6,
-    DnsUdpBlockV6,
 }
 
 impl StrictRouteRuleKind {
@@ -1148,14 +1193,6 @@ impl StrictRouteRuleKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum StrictRouteCondition {
-    AppId(Box<[u8]>),
-    LocalInterfaceLuid(u64),
-    IpProtocol(u8),
-    RemotePort(u16),
-}
-
 impl StrictRouteCondition {
     const fn field_key(&self) -> GUID {
         match self {
@@ -1174,107 +1211,6 @@ impl StrictRouteCondition {
             Self::RemotePort(_) => FWP_UINT16,
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct StrictRouteRule {
-    kind: StrictRouteRuleKind,
-    layer: StrictRouteLayer,
-    action: StrictRouteAction,
-    weight: u8,
-    conditions: Box<[StrictRouteCondition]>,
-}
-
-fn strict_route_rules(
-    has_ipv4: bool,
-    has_ipv6: bool,
-    has_managed_dns: bool,
-    app_id: &[u8],
-    interface_luid: u64,
-) -> Result<Vec<StrictRouteRule>, Error> {
-    if (!has_ipv4 && !has_ipv6)
-        || app_id.is_empty()
-        || app_id.len() > MAX_WFP_APP_ID_BYTES
-        || interface_luid == 0
-    {
-        return Err(Error);
-    }
-    let mut rules = Vec::with_capacity(10);
-    let mut push = |kind, layer, action, weight, conditions| {
-        rules.push(StrictRouteRule {
-            kind,
-            layer,
-            action,
-            weight,
-            conditions,
-        });
-    };
-    push(
-        StrictRouteRuleKind::AppPermitV4,
-        StrictRouteLayer::V4,
-        StrictRouteAction::Permit,
-        STRICT_ROUTE_PERMIT_WEIGHT,
-        Box::new([StrictRouteCondition::AppId(app_id.into())]),
-    );
-    push(
-        StrictRouteRuleKind::AppPermitV6,
-        StrictRouteLayer::V6,
-        StrictRouteAction::Permit,
-        STRICT_ROUTE_PERMIT_WEIGHT,
-        Box::new([StrictRouteCondition::AppId(app_id.into())]),
-    );
-    push(
-        StrictRouteRuleKind::TunPermitV4,
-        StrictRouteLayer::V4,
-        StrictRouteAction::Permit,
-        STRICT_ROUTE_PERMIT_WEIGHT,
-        Box::new([StrictRouteCondition::LocalInterfaceLuid(interface_luid)]),
-    );
-    push(
-        StrictRouteRuleKind::TunPermitV6,
-        StrictRouteLayer::V6,
-        StrictRouteAction::Permit,
-        STRICT_ROUTE_PERMIT_WEIGHT,
-        Box::new([StrictRouteCondition::LocalInterfaceLuid(interface_luid)]),
-    );
-    if !has_ipv4 {
-        push(
-            StrictRouteRuleKind::FamilyBlockV4,
-            StrictRouteLayer::V4,
-            StrictRouteAction::Block,
-            STRICT_ROUTE_BLOCK_WEIGHT,
-            Box::new([]),
-        );
-    }
-    if !has_ipv6 {
-        push(
-            StrictRouteRuleKind::FamilyBlockV6,
-            StrictRouteLayer::V6,
-            StrictRouteAction::Block,
-            STRICT_ROUTE_BLOCK_WEIGHT,
-            Box::new([]),
-        );
-    }
-    if has_managed_dns {
-        for (kind, layer, protocol) in [
-            (StrictRouteRuleKind::DnsTcpBlockV4, StrictRouteLayer::V4, 6),
-            (StrictRouteRuleKind::DnsUdpBlockV4, StrictRouteLayer::V4, 17),
-            (StrictRouteRuleKind::DnsTcpBlockV6, StrictRouteLayer::V6, 6),
-            (StrictRouteRuleKind::DnsUdpBlockV6, StrictRouteLayer::V6, 17),
-        ] {
-            push(
-                kind,
-                layer,
-                StrictRouteAction::Block,
-                STRICT_ROUTE_BLOCK_WEIGHT,
-                Box::new([
-                    StrictRouteCondition::IpProtocol(protocol),
-                    StrictRouteCondition::RemotePort(53),
-                ]),
-            );
-        }
-    }
-    Ok(rules)
 }
 
 trait StrictRouteOperations {
@@ -1767,6 +1703,186 @@ struct ManagedState {
     strict_route: Option<PlatformStrictRouteSession>,
 }
 
+#[derive(Clone, Copy)]
+struct ManagedOwnershipLedgerView<'a> {
+    capture_routes: &'a [IpPrefix],
+    pending_route: bool,
+    route_count: usize,
+    ipv4_dns_address: Option<std::net::Ipv4Addr>,
+    ipv6_dns_address: Option<std::net::Ipv6Addr>,
+    dns_interface: bool,
+    ipv4_dns_lease: bool,
+    ipv6_dns_lease: bool,
+    strict_route_intent: bool,
+    strict_route_session: bool,
+}
+
+/// Read-only owner of Windows route, interface, and unicast-address notifications.
+///
+/// This monitor does not create or mutate a TUN adapter. It lets binaries that use the shared
+/// network socket service observe ordinary Windows network changes even when no managed TUN is
+/// configured. Callers should debounce successful observations before capturing and publishing a
+/// replacement network snapshot.
+pub struct WindowsNetworkChangeMonitor {
+    stop: StopSignal,
+    network_change: StopSignal,
+    notifications: NotificationOwners,
+    observed_generation: u64,
+}
+
+// SAFETY: notification handles are not thread-affine and both events are thread-safe kernel
+// objects. The callback context stays at one stable heap address, and callbacks from the three
+// registrations touch only atomics and `SetEvent`. A successful `CancelMibChangeNotify2` drains
+// pending callbacks before the context is released; a failed cancellation leaks the still-live
+// handles, callback context, and wake event together instead of freeing callback-reachable memory.
+unsafe impl Send for WindowsNetworkChangeMonitor {}
+
+trait NetworkChangeWaitOperations {
+    fn stop_is_set(&mut self) -> Result<bool, Error>;
+    fn generation(&mut self) -> u64;
+    fn reset_network_change(&mut self) -> Result<(), Error>;
+    fn wait_for_signal(&mut self, timeout_millis: u32) -> Result<NetworkChangeWaitOutcome, Error>;
+}
+
+struct PlatformNetworkChangeWait<'a> {
+    stop: &'a StopSignal,
+    network_change: &'a StopSignal,
+    notifications: &'a NotificationOwners,
+}
+
+impl NetworkChangeWaitOperations for PlatformNetworkChangeWait<'_> {
+    fn stop_is_set(&mut self) -> Result<bool, Error> {
+        let handles = [self.stop.0.0];
+        // SAFETY: the slice contains exactly one live event handle retained by `self.stop`, and
+        // its length matches the count passed to the API.
+        match unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(Error),
+            _ => Err(Error),
+        }
+    }
+
+    fn generation(&mut self) -> u64 {
+        self.notifications.generation()
+    }
+
+    fn reset_network_change(&mut self) -> Result<(), Error> {
+        // SAFETY: the handle is a live manual-reset event retained by `self.network_change`.
+        if unsafe { ResetEvent(self.network_change.0.0) } == 0 {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn wait_for_signal(&mut self, timeout_millis: u32) -> Result<NetworkChangeWaitOutcome, Error> {
+        let handles = [self.stop.0.0, self.network_change.0.0];
+        // SAFETY: both entries are live event handles retained by the borrowed signals, and the
+        // slice length matches the count. Stop is first so Windows gives it deterministic priority
+        // when both manual-reset events are signalled.
+        match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, timeout_millis) } {
+            WAIT_OBJECT_0 => Ok(NetworkChangeWaitOutcome::Stopped),
+            value if value == WAIT_OBJECT_0 + 1 => Ok(NetworkChangeWaitOutcome::Changed),
+            WAIT_TIMEOUT => Ok(NetworkChangeWaitOutcome::TimedOut),
+            WAIT_FAILED => Err(Error),
+            _ => Err(Error),
+        }
+    }
+}
+
+fn wait_for_network_change(
+    observed_generation: &mut u64,
+    timeout: Duration,
+    operations: &mut impl NetworkChangeWaitOperations,
+) -> Result<NetworkChangeWaitOutcome, Error> {
+    let started = Instant::now();
+    loop {
+        if operations.stop_is_set()? {
+            return Ok(NetworkChangeWaitOutcome::Stopped);
+        }
+
+        let current = operations.generation();
+        if current != *observed_generation {
+            operations.reset_network_change()?;
+            // Load after resetting the manual event. A callback racing with ResetEvent is either
+            // folded into this observation or leaves the event set for the next wait.
+            *observed_generation = operations.generation();
+            if operations.stop_is_set()? {
+                return Ok(NetworkChangeWaitOutcome::Stopped);
+            }
+            return Ok(NetworkChangeWaitOutcome::Changed);
+        }
+
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(NetworkChangeWaitOutcome::TimedOut);
+        }
+        let millis = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX - 1);
+        if millis == 0 {
+            return Ok(NetworkChangeWaitOutcome::TimedOut);
+        }
+        match operations.wait_for_signal(millis)? {
+            NetworkChangeWaitOutcome::Stopped => {
+                return Ok(NetworkChangeWaitOutcome::Stopped);
+            }
+            NetworkChangeWaitOutcome::Changed => {
+                // Clear this wake before inspecting the generation at the top of the loop. A
+                // callback racing with this reset either advances that generation or re-signals.
+                operations.reset_network_change()?;
+            }
+            NetworkChangeWaitOutcome::TimedOut => {
+                // Recheck both sources at the timeout boundary. The next loop performs the same
+                // stop-first ordering and folds any generation that raced with the kernel wait.
+                continue;
+            }
+        }
+    }
+}
+
+impl WindowsNetworkChangeMonitor {
+    pub fn new() -> Result<Self, Error> {
+        require_windows_10()?;
+        let stop = StopSignal(Arc::new(OwnedHandle(create_event(true)?)));
+        let network_change = StopSignal(Arc::new(OwnedHandle(create_event(true)?)));
+        let notifications = subscribe_network_changes(network_change.clone())?;
+        notifications.monitor_runtime();
+        let observed_generation = notifications.generation();
+        Ok(Self {
+            stop,
+            network_change,
+            notifications,
+            observed_generation,
+        })
+    }
+
+    /// Returns a cloneable signal that interrupts a blocking wait during process shutdown.
+    pub fn stop_signal(&self) -> StopSignal {
+        self.stop.clone()
+    }
+
+    /// Waits for an ordinary network change without touching managed TUN state.
+    ///
+    /// Stop is a distinct, highest-priority outcome. The method may be called repeatedly from one
+    /// blocking owner thread; callers should debounce [`NetworkChangeWaitOutcome::Changed`].
+    pub fn wait(&mut self, timeout: Duration) -> Result<NetworkChangeWaitOutcome, Error> {
+        let mut operations = PlatformNetworkChangeWait {
+            stop: &self.stop,
+            network_change: &self.network_change,
+            notifications: &self.notifications,
+        };
+        wait_for_network_change(&mut self.observed_generation, timeout, &mut operations)
+    }
+
+    /// Explicitly deregisters all three notifications and proves callback-context release.
+    ///
+    /// If Windows cannot cancel any registration, its handle and callback context are leaked
+    /// together to prevent use-after-free and a cleanup-classified error is returned.
+    pub fn close(mut self) -> Result<(), Error> {
+        self.notifications.close()
+    }
+}
+
 /// Safe RAII owner of the exact Wintun adapter, address, MTU, session and DLL transaction.
 pub struct Adapter {
     config: AdapterConfig,
@@ -1782,6 +1898,7 @@ pub struct Adapter {
     stop: StopSignal,
     work: WorkSignal,
     network_change: StopSignal,
+    network_catalog: WindowsNetworkInterfaceCatalog,
     managed: Option<ManagedState>,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -1791,6 +1908,7 @@ impl Adapter {
         config: AdapterConfig,
         deadline: Instant,
         cancelled: &AtomicBool,
+        network_catalog: WindowsNetworkInterfaceCatalog,
     ) -> Result<Self, CreateError> {
         require_windows_10().map_err(|_| CreateError::operation())?;
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
@@ -1820,6 +1938,7 @@ impl Adapter {
             stop,
             work,
             network_change,
+            network_catalog,
             managed: None,
             _not_send: PhantomData,
         };
@@ -1852,12 +1971,7 @@ impl Adapter {
 
     /// Returns a read-only platform catalog that recognizes this exact adapter as managed TUN.
     pub fn network_interface_catalog(&self) -> WindowsNetworkInterfaceCatalog {
-        WindowsNetworkInterfaceCatalog {
-            managed_tun: Some(InterfaceIdentity {
-                luid: unsafe { self.luid.Value },
-                index: self.interface_index,
-            }),
-        }
+        self.network_catalog.clone()
     }
 
     /// Replaces only the generation-bound underlay snapshot.
@@ -1934,12 +2048,40 @@ impl Adapter {
     fn managed_device_health(&self) -> ManagedTunHealth {
         let expected_addresses = usize::from(self.config.ipv4.is_some())
             .saturating_add(usize::from(self.config.ipv6.is_some()));
+        let owned = InterfaceIdentity {
+            luid: unsafe { self.luid.Value },
+            index: self.interface_index,
+        };
+        let managed = self
+            .managed
+            .as_ref()
+            .map(|state| ManagedOwnershipLedgerView {
+                capture_routes: &state.capture_routes,
+                pending_route: state.pending_route.is_some(),
+                route_count: state.routes.len(),
+                ipv4_dns_address: state.ipv4_dns_address,
+                ipv6_dns_address: state.ipv6_dns_address,
+                dns_interface: state.dns_interface.is_some(),
+                ipv4_dns_lease: state.ipv4_dns.is_some(),
+                ipv6_dns_lease: state.ipv6_dns.is_some(),
+                strict_route_intent: state.strict_route_intent,
+                strict_route_session: state.strict_route.is_some(),
+            });
+        let ownership_ledger_exact = managed_ownership_ledger_exact(
+            self.config.managed_network(),
+            managed,
+            self.pending_address.is_some(),
+            self.addresses.len(),
+            expected_addresses,
+            self.network_catalog.managed_tun().ok().flatten(),
+            owned,
+        );
         managed_device_health(
             self.adapter.is_some_and(|adapter| !adapter.is_null()),
             self.session
                 .as_ref()
                 .is_some_and(|session| !session.handle.is_null()),
-            self.pending_address.is_none() && self.addresses.len() == expected_addresses,
+            ownership_ledger_exact,
             || managed_interface_identity_matches(self.luid, self.interface_index),
             || {
                 self.addresses.iter().all(|intended| {
@@ -2360,7 +2502,15 @@ impl Adapter {
     }
 
     fn cleanup_inner(&mut self) -> bool {
-        cleanup_transaction(&mut PlatformCleanup(self))
+        let identity = InterfaceIdentity {
+            luid: unsafe { self.luid.Value },
+            index: self.interface_index,
+        };
+        let failed = cleanup_transaction(&mut PlatformCleanup(self));
+        failed
+            || (identity.luid != 0
+                && identity.index != 0
+                && self.network_catalog.clear_managed_tun(identity).is_err())
     }
 }
 
@@ -3831,7 +3981,7 @@ fn managed_routes_match<O: ManagedRouteCleanupOperations>(
 fn managed_device_health(
     adapter_present: bool,
     session_present: bool,
-    address_ledger_exact: bool,
+    ownership_ledger_exact: bool,
     mut identity_matches: impl FnMut() -> bool,
     mut addresses_match: impl FnMut() -> bool,
 ) -> ManagedTunHealth {
@@ -3841,10 +3991,50 @@ fn managed_device_health(
     if !session_present {
         return ManagedTunHealth::Damaged(ManagedStateDamage::Session);
     }
-    if !address_ledger_exact || !addresses_match() {
+    if !ownership_ledger_exact {
+        return ManagedTunHealth::Damaged(ManagedStateDamage::OwnershipLedger);
+    }
+    if !addresses_match() {
         return ManagedTunHealth::Damaged(ManagedStateDamage::Address);
     }
     ManagedTunHealth::Healthy
+}
+
+fn managed_ownership_ledger_exact(
+    config: Option<&crate::ManagedNetworkConfig>,
+    state: Option<ManagedOwnershipLedgerView<'_>>,
+    pending_address: bool,
+    address_count: usize,
+    expected_address_count: usize,
+    catalog_identity: Option<InterfaceIdentity>,
+    owned_identity: InterfaceIdentity,
+) -> bool {
+    if pending_address
+        || address_count != expected_address_count
+        || owned_identity.luid == 0
+        || owned_identity.index == 0
+        || catalog_identity != Some(owned_identity)
+    {
+        return false;
+    }
+    match (config, state) {
+        (None, None) => true,
+        (Some(config), Some(state)) => {
+            let has_dns =
+                config.ipv4_dns_address().is_some() || config.ipv6_dns_address().is_some();
+            state.capture_routes == config.capture_routes()
+                && !state.pending_route
+                && state.route_count == state.capture_routes.len()
+                && state.ipv4_dns_address == config.ipv4_dns_address()
+                && state.ipv6_dns_address == config.ipv6_dns_address()
+                && state.ipv4_dns_lease == config.ipv4_dns_address().is_some()
+                && state.ipv6_dns_lease == config.ipv6_dns_address().is_some()
+                && state.dns_interface == has_dns
+                && state.strict_route_intent == config.strict_route()
+                && state.strict_route_session == config.strict_route()
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
 }
 
 fn managed_interface_identity_matches(luid: NET_LUID_LH, expected_index: u32) -> bool {
@@ -4299,7 +4489,12 @@ impl SetupOperations for PlatformSetup<'_> {
         {
             return Err(Error);
         }
-        Ok(())
+        self.owner
+            .network_catalog
+            .set_managed_tun(InterfaceIdentity {
+                luid: unsafe { self.owner.luid.Value },
+                index: self.owner.interface_index,
+            })
     }
 
     fn check_driver(&mut self) -> Result<(), Error> {
@@ -4632,35 +4827,38 @@ mod tests {
         IpDadStateTentative, Ipv4DnsSettings, Ipv6DnsSettings, LoaderOperations, MIB_IF_ROW2,
         MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
         ManagedAddressCleanupOperations, ManagedAddressRead, ManagedDnsLease, ManagedDnsOperations,
-        ManagedNetworkValidation, ManagedNetworkValidationOutcome, ManagedRouteCleanupOperations,
-        ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH, NotificationContext,
-        NotificationOwners, OwnedHandle, ResolvedSocketBindingOperations, RouteFingerprint,
-        SessionJournal, SetupOperations, SocketBindingOperations, StopSignal, StrictRouteAction,
-        StrictRouteCondition, StrictRouteLayer, StrictRouteOperations, StrictRouteRule,
-        StrictRouteRuleKind, StrictRouteSession, UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0,
-        WAIT_TIMEOUT, WaitForMultipleObjects, WindowsNetworkInterfaceCatalog, WorkSignal,
-        address_changed, bind_fixed_with, bind_resolved_socket_with, bind_target_with,
+        ManagedNetworkValidation, ManagedNetworkValidationOutcome, ManagedOwnershipLedgerView,
+        ManagedRouteCleanupOperations, ManagedRouteOperations, ManagedRouteRead, NET_LUID_LH,
+        NetworkChangeWaitOperations, NotificationContext, NotificationOwners, OwnedHandle,
+        ResolvedSocketBindingOperations, RouteFingerprint, SessionJournal, SetupOperations,
+        SocketBindingOperations, StopSignal, StrictRouteAction, StrictRouteCondition,
+        StrictRouteLayer, StrictRouteOperations, StrictRouteRule, StrictRouteRuleKind,
+        StrictRouteSession, UnderlayOperations, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        WaitForMultipleObjects, WindowsNetworkInterfaceCatalog, WorkSignal, address_changed,
+        bind_fixed_with, bind_resolved_socket_with, bind_target_with,
         build_network_interface_observations, cancel_notification_handles, capture_route_row,
         catalog_default_route, catalog_fallback_interface_identity,
         classify_adapter_create_failure, classify_notification_luid, classify_receive_null,
         classify_send_allocation_failure, classify_underlay_refresh, classify_wait_result,
-        cleanup_transaction, copy_bounded_wide, create_event, dad_snapshot, delete_managed_address,
-        delete_managed_route, dns_settings_query_flags, eligible_interface_identity,
-        finish_setup_transaction, initialize_managed_address, install_managed_dns,
-        install_managed_routes, interface_changed, interface_socket_option,
+        cleanup_transaction, close_notification_handles, copy_bounded_wide, create_event,
+        dad_snapshot, delete_managed_address, delete_managed_route, dns_settings_query_flags,
+        eligible_interface_identity, finish_setup_transaction, initialize_managed_address,
+        install_managed_dns, install_managed_routes, interface_changed, interface_socket_option,
         ipv4_dns_settings_input, ipv4_interface_index_option_value, ipv4_sockaddr,
         ipv6_dns_settings_input, ipv6_interface_index_option_value, ipv6_sockaddr,
         leak_notification_owners, load_transaction, managed_address_matches, managed_device_health,
-        managed_dns_matches, managed_notification_family, managed_state_health,
-        normalize_dns_settings, prepare_managed_intent, refresh_underlay_with, require_exports,
-        restore_managed_dns, revalidate_managed_network, route_changed, route_matches,
-        setup_transaction, snapshot_underlay_at, snapshot_underlay_with, socket_addr_sockaddr,
-        strict_route_rules, strict_route_state_matches, subscribe_notification_sequence,
-        take_last_owned_route, underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        managed_dns_matches, managed_notification_family, managed_ownership_ledger_exact,
+        managed_state_health, normalize_dns_settings, prepare_managed_intent,
+        refresh_underlay_with, require_exports, restore_managed_dns, revalidate_managed_network,
+        route_changed, route_matches, setup_transaction, snapshot_underlay_at,
+        snapshot_underlay_with, socket_addr_sockaddr, strict_route_rules,
+        strict_route_state_matches, subscribe_notification_sequence, take_last_owned_route,
+        underlay_matches_with, underlay_snapshot_matches, validate_artifact,
+        wait_for_network_change,
     };
     use crate::{
         ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix, ManagedStateDamage, ManagedTunHealth,
-        SendOutcome, WaitOutcome,
+        NetworkChangeWaitOutcome, SendOutcome, WaitOutcome,
     };
     use ferrum2_runtime::{
         DialOptions, InterfaceBinding, NetworkFamily, NetworkInterfaceCatalog,
@@ -4722,6 +4920,118 @@ mod tests {
             }
             std::thread::yield_now();
         }
+    }
+
+    struct InjectedNetworkChangeWait {
+        stop_reads: std::collections::VecDeque<bool>,
+        generations: std::collections::VecDeque<u64>,
+        current_generation: u64,
+        signals: std::collections::VecDeque<NetworkChangeWaitOutcome>,
+        reset_calls: usize,
+        wait_calls: usize,
+    }
+
+    impl InjectedNetworkChangeWait {
+        fn new(
+            stop_reads: impl IntoIterator<Item = bool>,
+            generations: impl IntoIterator<Item = u64>,
+            signals: impl IntoIterator<Item = NetworkChangeWaitOutcome>,
+        ) -> Self {
+            Self {
+                stop_reads: stop_reads.into_iter().collect(),
+                generations: generations.into_iter().collect(),
+                current_generation: 0,
+                signals: signals.into_iter().collect(),
+                reset_calls: 0,
+                wait_calls: 0,
+            }
+        }
+    }
+
+    impl NetworkChangeWaitOperations for InjectedNetworkChangeWait {
+        fn stop_is_set(&mut self) -> Result<bool, Error> {
+            Ok(self.stop_reads.pop_front().unwrap_or(false))
+        }
+
+        fn generation(&mut self) -> u64 {
+            if let Some(generation) = self.generations.pop_front() {
+                self.current_generation = generation;
+            }
+            self.current_generation
+        }
+
+        fn reset_network_change(&mut self) -> Result<(), Error> {
+            self.reset_calls += 1;
+            Ok(())
+        }
+
+        fn wait_for_signal(&mut self, _: u32) -> Result<NetworkChangeWaitOutcome, Error> {
+            self.wait_calls += 1;
+            self.signals.pop_front().ok_or(Error)
+        }
+    }
+
+    #[test]
+    fn network_change_wait_state_machine_closes_stop_change_and_timeout() {
+        let mut observed = 7;
+        let mut stopped = InjectedNetworkChangeWait::new([true], [], []);
+        assert_eq!(
+            wait_for_network_change(&mut observed, std::time::Duration::ZERO, &mut stopped),
+            Ok(NetworkChangeWaitOutcome::Stopped)
+        );
+        assert_eq!(observed, 7);
+        assert_eq!(stopped.reset_calls, 0);
+        assert_eq!(stopped.wait_calls, 0);
+
+        let mut observed = 0;
+        let mut changed = InjectedNetworkChangeWait::new([false, false], [1, 2], []);
+        assert_eq!(
+            wait_for_network_change(&mut observed, std::time::Duration::ZERO, &mut changed),
+            Ok(NetworkChangeWaitOutcome::Changed)
+        );
+        assert_eq!(
+            observed, 2,
+            "generation racing with ResetEvent is folded into the observation"
+        );
+        assert_eq!(changed.reset_calls, 1);
+        assert_eq!(changed.wait_calls, 0);
+
+        let mut observed = 11;
+        let mut timed_out = InjectedNetworkChangeWait::new([false], [11], []);
+        assert_eq!(
+            wait_for_network_change(&mut observed, std::time::Duration::ZERO, &mut timed_out,),
+            Ok(NetworkChangeWaitOutcome::TimedOut)
+        );
+        assert_eq!(observed, 11);
+        assert_eq!(timed_out.reset_calls, 0);
+        assert_eq!(timed_out.wait_calls, 0);
+    }
+
+    #[test]
+    fn network_change_wait_stop_wins_after_reset_or_change_wake() {
+        let mut observed = 0;
+        let mut during_reset = InjectedNetworkChangeWait::new([false, true], [1, 2], []);
+        assert_eq!(
+            wait_for_network_change(&mut observed, std::time::Duration::ZERO, &mut during_reset,),
+            Ok(NetworkChangeWaitOutcome::Stopped)
+        );
+        assert_eq!(observed, 2);
+        assert_eq!(during_reset.reset_calls, 1);
+
+        let mut observed = 0;
+        let mut after_wake =
+            InjectedNetworkChangeWait::new([false, true], [0], [NetworkChangeWaitOutcome::Changed]);
+        assert_eq!(
+            wait_for_network_change(
+                &mut observed,
+                std::time::Duration::from_secs(1),
+                &mut after_wake,
+            ),
+            Ok(NetworkChangeWaitOutcome::Stopped)
+        );
+        assert_eq!(observed, 0);
+        assert_eq!(after_wake.reset_calls, 1);
+        assert_eq!(after_wake.wait_calls, 1);
     }
 
     #[test]
@@ -5156,6 +5466,46 @@ mod tests {
             drops.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "persistent callback ownership is intentionally retained"
+        );
+    }
+
+    #[test]
+    fn explicit_notification_close_is_exact_or_reports_safe_leak() {
+        struct Context(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Context {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = vec![1_u8, 2, 3];
+        let mut context = Some(Context(drops.clone()));
+        let mut cancelled = Vec::new();
+        assert_eq!(
+            close_notification_handles(&mut handles, &mut context, |handle| {
+                cancelled.push(*handle);
+                true
+            }),
+            Ok(())
+        );
+        assert_eq!(cancelled, [3, 2, 1]);
+        assert!(handles.is_empty());
+        assert!(context.is_none());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = vec![4_u8, 5, 6];
+        let mut context = Some(Context(drops.clone()));
+        let error = close_notification_handles(&mut handles, &mut context, |handle| *handle != 5)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Cleanup);
+        assert!(handles.is_empty());
+        assert!(context.is_none());
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "failed cancellation intentionally leaks callback-reachable context"
         );
     }
 
@@ -5998,7 +6348,7 @@ mod tests {
                 false,
                 true,
                 true,
-                ManagedStateDamage::Address,
+                ManagedStateDamage::OwnershipLedger,
             ),
             (
                 "address readback",
@@ -6042,6 +6392,115 @@ mod tests {
         );
         assert_eq!(identity_calls.get(), 0);
         assert_eq!(address_calls.get(), 0);
+    }
+
+    #[test]
+    fn ownership_ledger_damage_is_constructible_from_every_managed_owner_family() {
+        let capture = [IpPrefix::V4(
+            crate::Ipv4Prefix::new("198.18.0.0".parse().unwrap(), 30).unwrap(),
+        )];
+        let other_capture = [IpPrefix::V4(
+            crate::Ipv4Prefix::new("198.18.1.0".parse().unwrap(), 30).unwrap(),
+        )];
+        let dns = "198.18.0.1".parse().unwrap();
+        let config =
+            crate::ManagedNetworkConfig::new(capture.to_vec(), Vec::new(), false, Some(dns), None)
+                .unwrap()
+                .with_strict_route(true);
+        let owned = InterfaceIdentity { luid: 7, index: 17 };
+        let healthy = ManagedOwnershipLedgerView {
+            capture_routes: &capture,
+            pending_route: false,
+            route_count: 1,
+            ipv4_dns_address: Some(dns),
+            ipv6_dns_address: None,
+            dns_interface: true,
+            ipv4_dns_lease: true,
+            ipv6_dns_lease: false,
+            strict_route_intent: true,
+            strict_route_session: true,
+        };
+        let exact = |state| {
+            managed_ownership_ledger_exact(Some(&config), state, false, 1, 1, Some(owned), owned)
+        };
+        assert!(exact(Some(healthy)));
+        assert!(
+            !exact(None),
+            "configured managed state cannot lose its journal"
+        );
+        assert!(!managed_ownership_ledger_exact(
+            None,
+            Some(healthy),
+            false,
+            1,
+            1,
+            Some(owned),
+            owned,
+        ));
+        assert!(!managed_ownership_ledger_exact(
+            Some(&config),
+            Some(healthy),
+            true,
+            1,
+            1,
+            Some(owned),
+            owned,
+        ));
+        assert!(!managed_ownership_ledger_exact(
+            Some(&config),
+            Some(healthy),
+            false,
+            0,
+            1,
+            Some(owned),
+            owned,
+        ));
+        assert!(!managed_ownership_ledger_exact(
+            Some(&config),
+            Some(healthy),
+            false,
+            1,
+            1,
+            None,
+            owned,
+        ));
+
+        for damaged in [
+            ManagedOwnershipLedgerView {
+                capture_routes: &other_capture,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                pending_route: true,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                route_count: 0,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                ipv4_dns_address: None,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                dns_interface: false,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                ipv4_dns_lease: false,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                strict_route_intent: false,
+                ..healthy
+            },
+            ManagedOwnershipLedgerView {
+                strict_route_session: false,
+                ..healthy
+            },
+        ] {
+            assert!(!exact(Some(damaged)));
+        }
     }
 
     #[test]
@@ -8093,6 +8552,11 @@ mod tests {
         assert!(!debug.contains(&managed.luid.to_string()));
         assert!(!debug.contains(&managed.index.to_string()));
         assert!(WindowsNetworkInterfaceCatalog::excluding_managed_tun(0, 1).is_err());
+        let shared_catalog = catalog.clone();
+        catalog.clear_managed_tun(managed).unwrap();
+        assert_eq!(shared_catalog.managed_tun().unwrap(), None);
+        shared_catalog.set_managed_tun(managed).unwrap();
+        assert_eq!(catalog.managed_tun().unwrap(), Some(managed));
 
         let virtual_underlay = MIB_IF_ROW2 {
             InterfaceLuid: NET_LUID_LH { Value: 91 },

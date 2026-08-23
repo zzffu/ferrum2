@@ -56,11 +56,15 @@ use context::{ClientContext, ClientRouting};
 use dns::ClientDnsRoot;
 use observation::{ClientMetricsRoot, log_level};
 use socks::{ClientTcpListeners, ClientTcpRoot};
-use tokio_io::{TokioConnector, bind_listener, shutdown_signal};
+#[cfg(any(not(windows), test))]
+use tokio_io::TokioConnector;
+use tokio_io::{bind_listener, shutdown_signal};
 
 #[cfg(test)]
 use egress::IdSequenceRandom;
-use egress::{ClientEgressEngine, ClientUdpContext, prepare_client_outbounds};
+use egress::{
+    ClientEgressEngine, ClientUdpContext, prepare_client_outbounds, runtime_route_network,
+};
 
 fn initial_network_snapshot() -> Result<Arc<NetworkSnapshot>, RunError> {
     #[cfg(windows)]
@@ -76,6 +80,32 @@ fn initial_network_snapshot() -> Result<Arc<NetworkSnapshot>, RunError> {
             .map(Arc::new)
             .map_err(|_| RunError::StartupProtocol)
     }
+}
+
+#[cfg(all(windows, not(test)))]
+fn client_network_runtime(
+    registry: OwnerRegistry,
+    metrics: Arc<Metrics>,
+) -> Result<
+    (
+        ferrum2_runtime::NetworkResetCoordinator,
+        ferrum2_wintun::WindowsNetworkInterfaceCatalog,
+        Arc<egress::ClientNetworkSocketService>,
+    ),
+    RunError,
+> {
+    let catalog = ferrum2_wintun::WindowsNetworkInterfaceCatalog::system();
+    let snapshot = NetworkSnapshot::capture(1, &catalog)
+        .map(Arc::new)
+        .map_err(|_| RunError::StartupProtocol)?;
+    let coordinator = tun::network_reset_coordinator(snapshot, registry);
+    metrics.set_network_generation(coordinator.status().published_generation());
+    let service = Arc::new(egress::ClientNetworkSocketService::new(
+        coordinator.clone(),
+        catalog.clone(),
+        metrics,
+    ));
+    Ok((coordinator, catalog, service))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,6 +245,8 @@ enum ClientRootName {
     Bootstrap,
     Socks,
     Dns,
+    #[cfg(all(windows, not(test)))]
+    Network,
     Metrics,
     Tun,
 }
@@ -225,6 +257,8 @@ impl ClientRootName {
             Self::Bootstrap => "bootstrap",
             Self::Socks => "socks",
             Self::Dns => "dns",
+            #[cfg(all(windows, not(test)))]
+            Self::Network => "network",
             Self::Metrics => "metrics",
             Self::Tun => "tun",
         }
@@ -812,26 +846,81 @@ pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
         .map_err(|_| RunError::StartupRuntime)?;
     runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
+        let registry = OwnerRegistry::new();
+        #[cfg(all(windows, not(test)))]
+        let mut network_change_monitor = if prepared.has_tun() {
+            None
+        } else {
+            Some(
+                ferrum2_wintun::WindowsNetworkChangeMonitor::new()
+                    .map_err(|_| RunError::StartupRuntime)?,
+            )
+        };
+        #[cfg(all(windows, not(test)))]
+        let (network_reset_coordinator, network_interface_catalog, network_socket_service) =
+            match client_network_runtime(registry.clone(), Arc::clone(&metrics)) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    if let Some(monitor) = network_change_monitor.take() {
+                        monitor.close().map_err(|_| RunError::ShutdownCleanup)?;
+                    }
+                    return Err(error);
+                }
+            };
+        #[cfg(not(all(windows, not(test))))]
+        let network_reset_coordinator =
+            tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone());
         let underlay = ferrum2_tun::UnderlayPublisher::new();
-        let context = materialize::ClientV2MaterializeContext::new(Arc::clone(&metrics), underlay);
-        let materialized = materialize::materialize_prepared(prepared, &context).await?;
+        let context = materialize::ClientV2MaterializeContext::new(
+            Arc::clone(&metrics),
+            underlay,
+            #[cfg(all(windows, not(test)))]
+            Arc::clone(&network_socket_service),
+        );
+        let materialized = match materialize::materialize_prepared(prepared, &context).await {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                #[cfg(all(windows, not(test)))]
+                if let Some(monitor) = network_change_monitor.take() {
+                    monitor.close().map_err(|_| RunError::ShutdownCleanup)?;
+                }
+                return Err(error);
+            }
+        };
         let subscriber = json_subscriber(
             std::io::stderr,
             log_level(materialized.config().logging.level),
         );
         if tracing::subscriber::set_global_default(subscriber).is_err() {
-            materialized.validate_only_shutdown().await?;
+            let materialized_cleanup = materialized.validate_only_shutdown().await;
+            #[cfg(all(windows, not(test)))]
+            let network_cleanup = match network_change_monitor.take() {
+                Some(monitor) => monitor.close().map_err(|_| RunError::ShutdownCleanup),
+                None => Ok(()),
+            };
+            materialized_cleanup?;
+            #[cfg(all(windows, not(test)))]
+            network_cleanup?;
             return Err(RunError::StartupObservability);
         }
         let (config, materialization_root, materialized_cache, underlay) =
-            materialized.into_run_parts().await?;
+            match materialized.into_run_parts().await {
+                Ok(parts) => parts,
+                Err(error) => {
+                    #[cfg(all(windows, not(test)))]
+                    if let Some(monitor) = network_change_monitor.take() {
+                        monitor.close().map_err(|_| RunError::ShutdownCleanup)?;
+                    }
+                    return Err(error);
+                }
+            };
         let dns_specs = config
             .dns
             .as_ref()
             .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
         run_with_registry_and_metrics_inner(
             config,
-            OwnerRegistry::new(),
+            registry,
             shutdown_signal(),
             metrics,
             None,
@@ -842,6 +931,13 @@ pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
                 materialized_cache,
                 materialized_underlay: Some(underlay),
                 dns_specs,
+                network_reset_coordinator: Some(network_reset_coordinator),
+                #[cfg(all(windows, not(test)))]
+                network_interface_catalog: Some(network_interface_catalog),
+                #[cfg(all(windows, not(test)))]
+                network_socket_service: Some(network_socket_service),
+                #[cfg(all(windows, not(test)))]
+                network_change_monitor,
             },
         )
         .await
@@ -859,9 +955,17 @@ pub(crate) fn validate_prepared_materialization(
         .map_err(|_| RunError::StartupRuntime)?;
     runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
+        #[cfg(all(windows, not(test)))]
+        let network_socket_service = {
+            let registry = OwnerRegistry::new();
+            let (_, _, service) = client_network_runtime(registry, Arc::clone(&metrics))?;
+            service
+        };
         let context = materialize::ClientV2MaterializeContext::new(
             metrics,
             ferrum2_tun::UnderlayPublisher::new(),
+            #[cfg(all(windows, not(test)))]
+            network_socket_service,
         );
         let materialized = materialize::materialize_prepared(prepared, &context).await?;
         materialized.validate_only_shutdown().await.map(|_| ())
@@ -873,6 +977,13 @@ struct ClientRunResources {
     materialized_cache: Option<DnsCache>,
     materialized_underlay: Option<ferrum2_tun::UnderlayPublisher>,
     dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
+    network_reset_coordinator: Option<ferrum2_runtime::NetworkResetCoordinator>,
+    #[cfg(all(windows, not(test)))]
+    network_interface_catalog: Option<ferrum2_wintun::WindowsNetworkInterfaceCatalog>,
+    #[cfg(all(windows, not(test)))]
+    network_socket_service: Option<Arc<egress::ClientNetworkSocketService>>,
+    #[cfg(all(windows, not(test)))]
+    network_change_monitor: Option<ferrum2_wintun::WindowsNetworkChangeMonitor>,
 }
 
 impl ClientRunResources {
@@ -883,6 +994,13 @@ impl ClientRunResources {
             materialized_cache: None,
             materialized_underlay: None,
             dns_specs,
+            network_reset_coordinator: None,
+            #[cfg(all(windows, not(test)))]
+            network_interface_catalog: None,
+            #[cfg(all(windows, not(test)))]
+            network_socket_service: None,
+            #[cfg(all(windows, not(test)))]
+            network_change_monitor: None,
         }
     }
 }
@@ -945,12 +1063,44 @@ where
         materialized_cache,
         materialized_underlay,
         dns_specs,
+        network_reset_coordinator,
+        #[cfg(all(windows, not(test)))]
+        network_interface_catalog,
+        #[cfg(all(windows, not(test)))]
+        network_socket_service,
+        #[cfg(all(windows, not(test)))]
+        mut network_change_monitor,
     } = resources;
+    let network_reset_coordinator = match network_reset_coordinator {
+        Some(coordinator) => coordinator,
+        None => tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone()),
+    };
+    #[cfg(all(windows, not(test)))]
+    let network_interface_catalog = match network_interface_catalog {
+        Some(catalog) => catalog,
+        None => {
+            if let Some(monitor) = network_change_monitor.take() {
+                monitor.close().map_err(|_| RunError::ShutdownCleanup)?;
+            }
+            return Err(RunError::StartupProtocol);
+        }
+    };
+    #[cfg(all(windows, not(test)))]
+    let network_socket_service = match network_socket_service {
+        Some(service) => service,
+        None => {
+            if let Some(monitor) = network_change_monitor.take() {
+                monitor.close().map_err(|_| RunError::ShutdownCleanup)?;
+            }
+            return Err(RunError::StartupProtocol);
+        }
+    };
+    #[cfg(any(not(windows), test))]
+    let network_interface_catalog = ferrum2_wintun::WindowsNetworkInterfaceCatalog::system();
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
         let selector = config.selector_control();
         let tun_config = config.tun;
-        let tun_auto_route = tun_config.as_ref().is_some_and(|tun| tun.auto_route);
         let tun_direct = tun_config.is_some()
             && config.outbounds.iter().any(|outbound| {
                 matches!(
@@ -959,8 +1109,6 @@ where
                 )
             });
         let underlay = materialized_underlay.unwrap_or_default();
-        let network_reset_coordinator =
-            tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone());
         let mut dns = match (config.dns, config.dns_route, dns_specs) {
             (
                 Some(DnsConfig {
@@ -1074,13 +1222,7 @@ where
             None
         };
         #[cfg(all(windows, not(test)))]
-        let connector =
-            TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
-                ferrum2_runtime::SystemSocketInspector,
-                egress::ManagedTcpDialer::new(underlay.clone()),
-                application_resolver.clone(),
-                config.runtime.connect_timeout,
-            ));
+        let connector = egress::NetworkServiceConnector::new(Arc::clone(&network_socket_service));
         #[cfg(any(not(windows), test))]
         let connector =
             TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
@@ -1089,24 +1231,25 @@ where
                 application_resolver.clone(),
                 config.runtime.connect_timeout,
             ));
-        let egress = Arc::new(
-            ClientEgressEngine::new_with_direct_resolvers(
-                Arc::clone(&outbounds),
-                connector,
-                SystemClock::new(),
-                SystemRandom,
-                (
-                    config.runtime.connect_timeout,
-                    config.runtime.handshake_timeout,
-                ),
-                udp,
-                application_resolver,
-                direct_resolvers,
-                #[cfg(test)]
-                _udp_id_random,
-            )
-            .with_underlay(underlay.clone(), tun_auto_route),
-        );
+        let egress = ClientEgressEngine::new_with_direct_resolvers(
+            Arc::clone(&outbounds),
+            connector,
+            SystemClock::new(),
+            SystemRandom,
+            (
+                config.runtime.connect_timeout,
+                config.runtime.handshake_timeout,
+            ),
+            udp,
+            application_resolver,
+            direct_resolvers,
+            #[cfg(test)]
+            _udp_id_random,
+        )
+        .with_route_network(runtime_route_network(&config.route_network));
+        #[cfg(all(windows, not(test)))]
+        let egress = egress.with_shared_network_reset(&network_socket_service)?;
+        let egress = Arc::new(egress);
         let context = Arc::new(ClientContext {
             inbound: Socks5Inbound::new(),
             egress: Arc::clone(&egress),
@@ -1145,6 +1288,21 @@ where
         let tcp_context = Arc::clone(&context);
         let tcp_routing = Arc::clone(&routing);
         let mut roots = ClientProcessRoots::default();
+        #[cfg(all(windows, not(test)))]
+        if tun_config.is_none() {
+            let monitor = network_change_monitor
+                .take()
+                .ok_or(RunError::StartupProtocol)?;
+            roots.push(
+                ClientRootName::Network,
+                tun::network_change_process_root(
+                    Arc::clone(&context),
+                    network_reset_coordinator.clone(),
+                    network_interface_catalog.clone(),
+                    monitor,
+                ),
+            );
+        }
         if let Some(prepared) = materialization_root.take() {
             roots.push(
                 ClientRootName::Bootstrap,
@@ -1195,8 +1353,10 @@ where
                     )
                     .await
                     .map_err(|_| RunError::StartupBind)?;
-                    let egress =
-                        Arc::new(dns_egress::ClientDnsEgress::new(Arc::clone(&dns_egress)));
+                    let egress = Arc::new(
+                        dns_egress::ClientDnsEgress::new(Arc::clone(&dns_egress))
+                            .map_err(|()| RunError::StartupProtocol)?,
+                    );
                     let (resolver, owner) =
                         TaggedResolver::new(servers, timeout, max_inflight, egress)
                             .map_err(|_| RunError::StartupProtocol)?;
@@ -1304,6 +1464,7 @@ where
                     tun::TunNetworkServices {
                         coordinator: network_reset_coordinator,
                         underlay,
+                        network_interface_catalog,
                     },
                     tun_direct,
                 ),
@@ -1330,6 +1491,11 @@ where
         report_result(report)
     }
     .await;
+    #[cfg(all(windows, not(test)))]
+    let result = match network_change_monitor {
+        Some(monitor) => result.and(monitor.close().map_err(|_| RunError::ShutdownCleanup)),
+        None => result,
+    };
     if let Some(mut root) = materialization_root {
         let cleanup = root.cleanup().await;
         return result.and(cleanup);

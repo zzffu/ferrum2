@@ -214,7 +214,10 @@ mod tests {
         let target =
             TargetAddr::ip("192.0.2.44:443".parse().expect("numeric target")).expect("target");
         let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(
+                ferrum2_runtime::DialOptions::default(),
+            )]
+            .into(),
             DeadlineConnector {
                 delay: Duration::ZERO,
                 targets: Mutex::new(Vec::new()),
@@ -893,6 +896,7 @@ mod tests {
                     keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
                         ferrum2_crypto::MethodPsk::aes128([key; 16]),
                     )),
+                    dial_options: ferrum2_runtime::DialOptions::default(),
                 },
             )]
             .into(),
@@ -1045,6 +1049,7 @@ mod tests {
                     keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
                         ferrum2_crypto::MethodPsk::aes128([0x15; 16]),
                     )),
+                    dial_options: ferrum2_runtime::DialOptions::default(),
                 },
             )]
             .into(),

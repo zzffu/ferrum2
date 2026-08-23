@@ -1,21 +1,38 @@
 mod tcp;
 mod udp;
 
+#[cfg(any(windows, test))]
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ferrum2_core::route::EgressPlanSnapshot;
-use ferrum2_core::{ConnectErrorKind, Connector, LocalEndpoint, TargetAddr, TargetHostRef};
+use ferrum2_core::{
+    ConnectError, ConnectErrorKind, Connector, LocalEndpoint, TargetAddr, TargetHostRef,
+};
 use ferrum2_crypto::{Clock, MethodSinglePskProvider, SecureRandom};
 #[cfg(test)]
 use ferrum2_dns::{ApplicationResolver, DnsStrategy};
-use ferrum2_runtime::{ApplicationResolverAdapter, MAX_RESOLVED_CANDIDATES, TcpResolver};
+#[cfg(any(windows, test))]
+use ferrum2_observability::{InterfaceResolutionResult, InterfaceResolutionSource, Metrics};
+#[cfg(all(windows, not(test)))]
+use ferrum2_runtime::NetworkResetCoordinator;
+use ferrum2_runtime::{
+    ApplicationResolverAdapter, DialOptions, MAX_RESOLVED_CANDIDATES, RouteNetworkOptions,
+    TcpResolver,
+};
+#[cfg(any(windows, test))]
+use ferrum2_runtime::{
+    InterfaceResolutionErrorKind, InterfaceSelectionSource, NetworkRuntimeResourceAdmissionError,
+    NetworkSocketServiceError, SystemNetworkSocketError,
+};
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 use ferrum2_shadowsocks::{MethodKeyAdapter, ShadowsocksError, TransportIo};
 
 use super::RunError;
+#[cfg(any(not(windows), test))]
 use super::tokio_io::TokioConnector;
 
 pub(super) use udp::{
@@ -30,7 +47,7 @@ pub(super) use udp::{
 
 pub(super) enum ClientOutboundContext {
     Shadowsocks(ClientShadowsocksContext),
-    Direct,
+    Direct { dial_options: DialOptions },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,150 +60,544 @@ pub(super) enum ClientRequestOrigin {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SelectedEgress {
-    Direct { outbound: Option<usize> },
-    Shadowsocks { first_server: SocketAddr },
+    Direct {
+        outbound: Option<usize>,
+    },
+    Shadowsocks {
+        first_outbound: usize,
+        first_server: SocketAddr,
+    },
 }
 
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TcpBinding {
-    None,
-    Fixed,
-    Target,
+const MAX_CLIENT_EGRESS_RESET_TARGETS: usize = ferrum2_runtime::MAX_NETWORK_RESET_HOOKS;
+const MAX_CLIENT_DNS_RESET_ACTIONS: usize = 8;
+
+pub(super) type ClientDnsResetAction = dyn Fn() -> usize + Send + Sync;
+
+struct ClientEgressNetworkResetState {
+    udp_manager: Option<ferrum2_runtime::UdpSessionManager>,
+    dns_actions: std::sync::Mutex<Vec<std::sync::Weak<ClientDnsResetAction>>>,
 }
 
-#[cfg(any(windows, test))]
-fn direct_tcp_binding(
-    origin: ClientRequestOrigin,
-    auto_route: bool,
-    application_target: &TargetAddr,
-) -> TcpBinding {
-    match (origin, auto_route) {
-        (ClientRequestOrigin::Tun, _) => TcpBinding::Target,
-        (ClientRequestOrigin::Dns, true) if application_target.as_socket_addr().is_some() => {
-            TcpBinding::Fixed
+impl ClientEgressNetworkResetState {
+    fn new(udp: Option<&ClientUdpContext>) -> Self {
+        Self {
+            udp_manager: udp.map(|udp| udp.manager.clone()),
+            dns_actions: std::sync::Mutex::new(Vec::new()),
         }
-        (ClientRequestOrigin::Dns, true) => TcpBinding::Target,
-        (ClientRequestOrigin::Socks | ClientRequestOrigin::RuleSet, true) => TcpBinding::Target,
-        (
-            ClientRequestOrigin::Socks | ClientRequestOrigin::Dns | ClientRequestOrigin::RuleSet,
-            false,
-        ) => TcpBinding::None,
+    }
+
+    fn register_dns_action(&self, action: &Arc<ClientDnsResetAction>) -> Result<(), ()> {
+        let mut actions = self
+            .dns_actions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        actions.retain(|registered| registered.strong_count() != 0);
+        if actions.len() >= MAX_CLIENT_DNS_RESET_ACTIONS {
+            return Err(());
+        }
+        actions.push(Arc::downgrade(action));
+        Ok(())
+    }
+
+    fn reset(&self) -> usize {
+        let actions = {
+            let mut registered = self
+                .dns_actions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut actions = Vec::with_capacity(registered.len());
+            registered.retain(|action| match action.upgrade() {
+                Some(action) => {
+                    actions.push(action);
+                    true
+                }
+                None => false,
+            });
+            actions
+        };
+        let pooled = actions
+            .into_iter()
+            .fold(0_usize, |total, action| total.saturating_add(action()));
+        pooled.saturating_add(
+            self.udp_manager
+                .as_ref()
+                .map_or(0, ferrum2_runtime::UdpSessionManager::reset_all),
+        )
     }
 }
 
-#[cfg(any(windows, test))]
-const fn proxy_tcp_binding(auto_route: bool) -> TcpBinding {
-    if auto_route {
-        TcpBinding::Fixed
-    } else {
-        TcpBinding::None
-    }
+#[derive(Clone, Default)]
+struct ClientNetworkResetHub {
+    inner: Arc<std::sync::Mutex<ClientNetworkResetHubState>>,
 }
 
-#[cfg(any(windows, test))]
-tokio::task_local! {
-    static TCP_BINDING: TcpBinding;
+#[derive(Default)]
+struct ClientNetworkResetHubState {
+    next_id: u64,
+    targets: std::collections::BTreeMap<u64, std::sync::Weak<ClientEgressNetworkResetState>>,
 }
 
-#[cfg(any(windows, test))]
-trait ManagedTcpOperations {
-    type Socket;
-    type Stream;
-
-    fn new_v4(&self) -> std::io::Result<Self::Socket>;
-    fn new_v6(&self) -> std::io::Result<Self::Socket>;
-    fn bind_fixed(&self, socket: &Self::Socket, endpoint: SocketAddr) -> std::io::Result<()>;
-    fn bind_target(&self, socket: &Self::Socket, target: SocketAddr) -> std::io::Result<()>;
-    async fn connect(
+impl ClientNetworkResetHub {
+    fn register(
         &self,
-        socket: Self::Socket,
-        address: SocketAddr,
-    ) -> std::io::Result<Self::Stream>;
+        target: &Arc<ClientEgressNetworkResetState>,
+    ) -> Result<ClientNetworkResetTargetRegistration, ()> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.targets.retain(|_, target| target.strong_count() != 0);
+        if state.targets.len() >= MAX_CLIENT_EGRESS_RESET_TARGETS {
+            return Err(());
+        }
+        let id = state.next_id;
+        state.next_id = state.next_id.checked_add(1).ok_or(())?;
+        state.targets.insert(id, Arc::downgrade(target));
+        Ok(ClientNetworkResetTargetRegistration {
+            hub: Arc::downgrade(&self.inner),
+            id,
+        })
+    }
+
+    fn reset(&self) -> usize {
+        let targets = {
+            let mut state = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut targets = Vec::with_capacity(state.targets.len());
+            state.targets.retain(|_, target| match target.upgrade() {
+                Some(target) => {
+                    targets.push(target);
+                    true
+                }
+                None => false,
+            });
+            targets
+        };
+        targets.into_iter().fold(0_usize, |total, target| {
+            total.saturating_add(target.reset())
+        })
+    }
 }
 
-#[cfg(any(windows, test))]
-async fn connect_managed_tcp<O: ManagedTcpOperations>(
-    operations: &O,
-    address: SocketAddr,
-) -> std::io::Result<O::Stream> {
-    let binding = TCP_BINDING
-        .try_with(|binding| *binding)
-        .map_err(|_| std::io::Error::other("managed TCP binding context missing"))?;
-    let socket = match address {
-        SocketAddr::V4(_) => operations.new_v4()?,
-        SocketAddr::V6(_) => operations.new_v6()?,
-    };
-    match binding {
-        TcpBinding::Fixed => operations.bind_fixed(&socket, address)?,
-        TcpBinding::Target => operations.bind_target(&socket, address)?,
-        TcpBinding::None => {}
+struct ClientNetworkResetTargetRegistration {
+    hub: std::sync::Weak<std::sync::Mutex<ClientNetworkResetHubState>>,
+    id: u64,
+}
+
+impl Drop for ClientNetworkResetTargetRegistration {
+    fn drop(&mut self) {
+        let Some(hub) = self.hub.upgrade() else {
+            return;
+        };
+        hub.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .targets
+            .remove(&self.id);
     }
-    operations.connect(socket, address).await
+}
+
+#[cfg(all(windows, not(test)))]
+type ClientPlatformNetworkSocketService = ferrum2_runtime::NetworkSocketService<
+    ferrum2_wintun::WindowsNetworkInterfaceCatalog,
+    ferrum2_runtime::SystemNetworkSocketOperations<ferrum2_wintun::WindowsResolvedSocketBinder>,
+>;
+
+#[cfg(all(windows, not(test)))]
+pub(super) struct ClientNetworkSocketService {
+    inner: ClientPlatformNetworkSocketService,
+    metrics: Arc<Metrics>,
+    reset_hub: ClientNetworkResetHub,
+}
+
+#[cfg(all(windows, not(test)))]
+impl ClientNetworkSocketService {
+    pub(super) fn new(
+        coordinator: NetworkResetCoordinator,
+        catalog: ferrum2_wintun::WindowsNetworkInterfaceCatalog,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            inner: ferrum2_runtime::NetworkSocketService::new(
+                coordinator,
+                ferrum2_runtime::NetworkInterfaceResolver::new(catalog),
+                ferrum2_runtime::SystemNetworkSocketOperations::new(
+                    ferrum2_wintun::WindowsResolvedSocketBinder,
+                ),
+            ),
+            metrics,
+            reset_hub: ClientNetworkResetHub::default(),
+        }
+    }
+
+    fn published_generation(&self) -> u64 {
+        self.inner.published_generation()
+    }
+
+    fn generation_is_admissible(&self, expected_generation: u64) -> bool {
+        let status = self.inner.coordinator().status();
+        status.admission_open() && status.published_generation() == expected_generation
+    }
+
+    fn reset_hub(&self) -> ClientNetworkResetHub {
+        self.reset_hub.clone()
+    }
+
+    async fn connect_tcp(
+        &self,
+        dial_options: &DialOptions,
+        route_network: &RouteNetworkOptions,
+        destination: SocketAddr,
+    ) -> Result<
+        ferrum2_runtime::GenerationBoundTcpStream<ferrum2_runtime::RuntimeTcpStream>,
+        NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_wintun::Error>>,
+    > {
+        let result = self
+            .inner
+            .connect_tcp(dial_options, route_network, destination)
+            .await;
+        match &result {
+            Ok(stream) => {
+                record_interface_resolution_success(&self.metrics, stream.resolved_interface())
+            }
+            Err(error) => record_interface_resolution(
+                &self.metrics,
+                error.attempted_source(),
+                interface_resolution_result(error),
+            ),
+        }
+        result
+    }
+
+    fn open_udp(
+        &self,
+        expected_generation: u64,
+        dial_options: &DialOptions,
+        route_network: &RouteNetworkOptions,
+        selection_destination: SocketAddr,
+    ) -> Result<
+        ferrum2_runtime::GenerationBoundUdpSocket<tokio::net::UdpSocket>,
+        NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_wintun::Error>>,
+    > {
+        let result = self.inner.open_udp_for_generation(
+            expected_generation,
+            dial_options,
+            route_network,
+            selection_destination,
+        );
+        match &result {
+            Ok(socket) => {
+                record_interface_resolution_success(&self.metrics, socket.resolved_interface())
+            }
+            Err(error) => record_interface_resolution(
+                &self.metrics,
+                error.attempted_source(),
+                interface_resolution_result(error),
+            ),
+        }
+        result
+    }
 }
 
 #[cfg(all(windows, not(test)))]
 #[derive(Clone)]
-pub(super) struct ManagedTcpDialer {
-    underlay: ferrum2_tun::UnderlayPublisher,
+pub(super) struct NetworkServiceConnector {
+    service: Arc<ClientNetworkSocketService>,
 }
 
 #[cfg(all(windows, not(test)))]
-impl ManagedTcpDialer {
-    pub(super) const fn new(underlay: ferrum2_tun::UnderlayPublisher) -> Self {
-        Self { underlay }
+impl NetworkServiceConnector {
+    pub(super) const fn new(service: Arc<ClientNetworkSocketService>) -> Self {
+        Self { service }
     }
 }
 
-#[cfg(all(windows, not(test)))]
-impl ManagedTcpOperations for ManagedTcpDialer {
-    type Socket = tokio::net::TcpSocket;
-    type Stream = tokio::net::TcpStream;
+pub(super) trait ClientPhysicalConnector: Send + Sync {
+    type Stream: LocalEndpoint;
 
-    fn new_v4(&self) -> std::io::Result<Self::Socket> {
-        tokio::net::TcpSocket::new_v4()
-    }
-
-    fn new_v6(&self) -> std::io::Result<Self::Socket> {
-        tokio::net::TcpSocket::new_v6()
-    }
-
-    fn bind_fixed(&self, socket: &Self::Socket, endpoint: SocketAddr) -> std::io::Result<()> {
-        self.underlay
-            .bind_fixed(socket, endpoint)
-            .map_err(|_| std::io::Error::other("managed TCP binding failed"))
-    }
-
-    fn bind_target(&self, socket: &Self::Socket, target: SocketAddr) -> std::io::Result<()> {
-        self.underlay
-            .bind_target(socket, target)
-            .map_err(|_| std::io::Error::other("managed TCP binding failed"))
-    }
-
-    async fn connect(
+    fn connect_physical(
         &self,
-        socket: Self::Socket,
-        address: SocketAddr,
-    ) -> std::io::Result<Self::Stream> {
-        socket.connect(address).await
+        target: &TargetAddr,
+        dial_options: &DialOptions,
+        route_network: &RouteNetworkOptions,
+    ) -> impl std::future::Future<Output = Result<Self::Stream, ConnectError>> + Send;
+
+    fn udp_socket_factory(
+        &self,
+        expected_generation: Option<u64>,
+        dial_options: &DialOptions,
+        route_network: &RouteNetworkOptions,
+    ) -> udp::ClientUdpSocketFactory;
+
+    fn network_generation(&self) -> Option<u64> {
+        None
+    }
+
+    fn network_generation_is_admissible(&self, expected_generation: Option<u64>) -> bool {
+        expected_generation.is_none()
+    }
+}
+
+impl<C> ClientPhysicalConnector for C
+where
+    C: Connector,
+{
+    type Stream = C::Stream;
+
+    async fn connect_physical(
+        &self,
+        target: &TargetAddr,
+        _dial_options: &DialOptions,
+        _route_network: &RouteNetworkOptions,
+    ) -> Result<Self::Stream, ConnectError> {
+        self.connect(target).await
+    }
+
+    fn udp_socket_factory(
+        &self,
+        _expected_generation: Option<u64>,
+        _dial_options: &DialOptions,
+        _route_network: &RouteNetworkOptions,
+    ) -> udp::ClientUdpSocketFactory {
+        udp::ClientUdpSocketFactory::system()
     }
 }
 
 #[cfg(all(windows, not(test)))]
-impl ferrum2_runtime::TcpDialer for ManagedTcpDialer {
-    async fn connect(&self, address: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
-        connect_managed_tcp(self, address).await
+impl ClientPhysicalConnector for NetworkServiceConnector {
+    type Stream = super::tokio_io::TokioTransport<
+        ferrum2_runtime::GenerationBoundTcpStream<ferrum2_runtime::RuntimeTcpStream>,
+    >;
+
+    async fn connect_physical(
+        &self,
+        target: &TargetAddr,
+        dial_options: &DialOptions,
+        route_network: &RouteNetworkOptions,
+    ) -> Result<Self::Stream, ConnectError> {
+        let destination = target
+            .as_socket_addr()
+            .ok_or_else(|| ConnectError::new(ConnectErrorKind::HostUnreachable))?;
+        self.service
+            .connect_tcp(dial_options, route_network, destination)
+            .await
+            .map(super::tokio_io::TokioTransport::new)
+            .map_err(connect_error_from_network_service)
+    }
+
+    fn udp_socket_factory(
+        &self,
+        expected_generation: Option<u64>,
+        dial_options: &DialOptions,
+        route_network: &RouteNetworkOptions,
+    ) -> udp::ClientUdpSocketFactory {
+        udp::ClientUdpSocketFactory::network(
+            Arc::clone(&self.service),
+            expected_generation.expect("production UDP associations freeze a network generation"),
+            dial_options.clone(),
+            route_network.clone(),
+        )
+    }
+
+    fn network_generation(&self) -> Option<u64> {
+        Some(self.service.published_generation())
+    }
+
+    fn network_generation_is_admissible(&self, expected_generation: Option<u64>) -> bool {
+        expected_generation
+            .is_some_and(|generation| self.service.generation_is_admissible(generation))
     }
 }
 
 #[cfg(all(windows, not(test)))]
-type DefaultClientConnector = TokioConnector<
-    ferrum2_runtime::TcpConnector<
-        ferrum2_runtime::SystemSocketInspector,
-        ManagedTcpDialer,
-        ApplicationResolverAdapter,
-    >,
->;
+fn record_interface_resolution_success(
+    metrics: &Metrics,
+    resolved: &ferrum2_runtime::ResolvedInterface,
+) {
+    // Publish the denominator before its hit subset so concurrent scrapes cannot observe
+    // cache hits greater than completed interface resolutions.
+    record_interface_resolution(
+        metrics,
+        resolved.selection_source(),
+        InterfaceResolutionResult::Success,
+    );
+    if resolved.cache_hit() {
+        metrics.outbound_interface_resolution_cache_hit();
+    }
+}
+
+#[cfg(any(windows, test))]
+fn record_interface_resolution(
+    metrics: &Metrics,
+    source: InterfaceSelectionSource,
+    result: InterfaceResolutionResult,
+) {
+    metrics.outbound_interface_resolution(interface_resolution_source(source), result);
+}
+
+#[cfg(any(windows, test))]
+const fn interface_resolution_source(
+    source: InterfaceSelectionSource,
+) -> InterfaceResolutionSource {
+    match source {
+        InterfaceSelectionSource::OutboundExplicit => InterfaceResolutionSource::OutboundExplicit,
+        InterfaceSelectionSource::AutoDetected => InterfaceResolutionSource::AutoDetected,
+        InterfaceSelectionSource::RouteDefault => InterfaceResolutionSource::RouteDefault,
+        InterfaceSelectionSource::SystemBestRoute => InterfaceResolutionSource::SystemBestRoute,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn interface_resolution_result<E>(
+    error: &NetworkSocketServiceError<E>,
+) -> InterfaceResolutionResult {
+    match error {
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::InterfaceResolution(_)
+            | NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. },
+        ) => InterfaceResolutionResult::Failure,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation { .. }
+            | NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration { .. },
+        )
+        | NetworkSocketServiceError::Connection { .. }
+        | NetworkSocketServiceError::Cancelled { .. } => InterfaceResolutionResult::Success,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn connect_error_from_network_service<E>(
+    error: NetworkSocketServiceError<SystemNetworkSocketError<E>>,
+) -> ConnectError {
+    let kind = match error {
+        NetworkSocketServiceError::Connection {
+            error: SystemNetworkSocketError::Socket(error),
+            ..
+        }
+        | NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation {
+                error: SystemNetworkSocketError::Socket(error),
+                ..
+            },
+        ) => connect_error_kind_from_io(&error),
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::InterfaceResolution(error),
+        ) => match error.kind() {
+            InterfaceResolutionErrorKind::ExplicitInterfaceMissing
+            | InterfaceResolutionErrorKind::ExplicitInterfaceAmbiguous
+            | InterfaceResolutionErrorKind::ExplicitInterfaceUnavailable
+            | InterfaceResolutionErrorKind::ExplicitInterfaceWrongFamily
+            | InterfaceResolutionErrorKind::SelectedInterfaceWrongFamily
+            | InterfaceResolutionErrorKind::SourceAddressUnavailable => {
+                ConnectErrorKind::PolicyDenied
+            }
+            InterfaceResolutionErrorKind::SystemBestRouteUnavailable => {
+                ConnectErrorKind::NetworkUnreachable
+            }
+        },
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. },
+        ) => ConnectErrorKind::NetworkUnreachable,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation {
+                error: SystemNetworkSocketError::Binding(_),
+                ..
+            }
+            | NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration { .. },
+        )
+        | NetworkSocketServiceError::Connection {
+            error: SystemNetworkSocketError::Binding(_),
+            ..
+        }
+        | NetworkSocketServiceError::Cancelled { .. } => ConnectErrorKind::Other,
+    };
+    ConnectError::new(kind)
+}
+
+#[cfg(any(windows, test))]
+fn connect_error_kind_from_io(error: &io::Error) -> ConnectErrorKind {
+    match error.kind() {
+        io::ErrorKind::NetworkUnreachable => ConnectErrorKind::NetworkUnreachable,
+        io::ErrorKind::HostUnreachable => ConnectErrorKind::HostUnreachable,
+        io::ErrorKind::ConnectionRefused => ConnectErrorKind::ConnectionRefused,
+        io::ErrorKind::TimedOut => ConnectErrorKind::Timeout,
+        io::ErrorKind::PermissionDenied => ConnectErrorKind::PolicyDenied,
+        _ => ConnectErrorKind::Other,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn io_error_from_network_service<E>(
+    error: NetworkSocketServiceError<SystemNetworkSocketError<E>>,
+) -> io::Error {
+    let kind = match error {
+        NetworkSocketServiceError::Connection {
+            error: SystemNetworkSocketError::Socket(error),
+            ..
+        }
+        | NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation {
+                error: SystemNetworkSocketError::Socket(error),
+                ..
+            },
+        ) => error.kind(),
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::InterfaceResolution(error),
+        ) => match error.kind() {
+            InterfaceResolutionErrorKind::ExplicitInterfaceMissing
+            | InterfaceResolutionErrorKind::ExplicitInterfaceAmbiguous
+            | InterfaceResolutionErrorKind::ExplicitInterfaceUnavailable
+            | InterfaceResolutionErrorKind::ExplicitInterfaceWrongFamily
+            | InterfaceResolutionErrorKind::SelectedInterfaceWrongFamily
+            | InterfaceResolutionErrorKind::SourceAddressUnavailable => {
+                io::ErrorKind::PermissionDenied
+            }
+            InterfaceResolutionErrorKind::SystemBestRouteUnavailable => {
+                io::ErrorKind::NetworkUnreachable
+            }
+        },
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. },
+        ) => io::ErrorKind::NetworkUnreachable,
+        NetworkSocketServiceError::Cancelled { .. } => io::ErrorKind::ConnectionAborted,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation {
+                error: SystemNetworkSocketError::Binding(_),
+                ..
+            }
+            | NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration { .. },
+        )
+        | NetworkSocketServiceError::Connection {
+            error: SystemNetworkSocketError::Binding(_),
+            ..
+        } => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, "network UDP socket unavailable")
+}
+
+struct PolicyConnector<C> {
+    connector: Arc<C>,
+    dial_options: DialOptions,
+    route_network: RouteNetworkOptions,
+}
+
+impl<C> Connector for PolicyConnector<C>
+where
+    C: ClientPhysicalConnector,
+{
+    type Stream = C::Stream;
+
+    async fn connect(&self, target: &TargetAddr) -> Result<Self::Stream, ConnectError> {
+        self.connector
+            .connect_physical(target, &self.dial_options, &self.route_network)
+            .await
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+type DefaultClientConnector = NetworkServiceConnector;
 
 #[cfg(any(not(windows), test))]
 type DefaultClientConnector = TokioConnector<
@@ -210,15 +621,41 @@ pub(super) struct ClientShadowsocksContext {
     pub(super) tcp_server: TargetAddr,
     pub(super) udp_server: SocketAddr,
     pub(super) keys: MethodKeyAdapter<MethodSinglePskProvider>,
+    pub(super) dial_options: DialOptions,
 }
 
 impl ClientOutboundContext {
+    pub(super) fn direct(dial_options: DialOptions) -> Self {
+        Self::Direct { dial_options }
+    }
+
     pub(super) fn shadowsocks(&self) -> Option<&ClientShadowsocksContext> {
         match self {
             Self::Shadowsocks(outbound) => Some(outbound),
-            Self::Direct => None,
+            Self::Direct { .. } => None,
         }
     }
+
+    pub(super) fn dial_options(&self) -> &DialOptions {
+        match self {
+            Self::Shadowsocks(outbound) => &outbound.dial_options,
+            Self::Direct { dial_options } => dial_options,
+        }
+    }
+}
+
+pub(super) fn runtime_dial_options(options: &ferrum2_config::OutboundDialOptions) -> DialOptions {
+    DialOptions::new(
+        options.bind_interface(),
+        options.inet4_bind_address(),
+        options.inet6_bind_address(),
+    )
+}
+
+pub(super) fn runtime_route_network(
+    route: &ferrum2_config::RouteNetworkConfig,
+) -> RouteNetworkOptions {
+    RouteNetworkOptions::new(route.auto_detect_interface, route.default_interface())
 }
 
 pub(super) fn prepare_client_outbounds(
@@ -231,16 +668,18 @@ pub(super) fn prepare_client_outbounds(
         .into_iter()
         .map(|outbound| {
             Ok(match outbound {
-                ferrum2_config::ClientOutboundConfig::Shadowsocks { server, psk, .. } => {
-                    ClientOutboundContext::Shadowsocks(ClientShadowsocksContext {
-                        tcp_server: TargetAddr::ip(server)
-                            .map_err(|_| RunError::StartupProtocol)?,
-                        udp_server: server,
-                        keys: MethodKeyAdapter::new(MethodSinglePskProvider::from_shared(psk)),
-                    })
-                }
-                ferrum2_config::ClientOutboundConfig::Direct { .. } => {
-                    ClientOutboundContext::Direct
+                ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                    server,
+                    psk,
+                    dial_options,
+                } => ClientOutboundContext::Shadowsocks(ClientShadowsocksContext {
+                    tcp_server: TargetAddr::ip(server).map_err(|_| RunError::StartupProtocol)?,
+                    udp_server: server,
+                    keys: MethodKeyAdapter::new(MethodSinglePskProvider::from_shared(psk)),
+                    dial_options: runtime_dial_options(&dial_options),
+                }),
+                ferrum2_config::ClientOutboundConfig::Direct { dial_options, .. } => {
+                    ClientOutboundContext::direct(runtime_dial_options(&dial_options))
                 }
             })
         })
@@ -254,19 +693,18 @@ pub(super) struct ClientEgressEngine<
     R = ferrum2_crypto::SystemRandom,
 > {
     pub(super) outbounds: Arc<[ClientOutboundContext]>,
-    connector: C,
+    connector: Arc<C>,
+    proxy_connectors: Arc<[PolicyConnector<C>]>,
     pub(super) clock: T,
     pub(super) random: R,
     phase_deadlines: (Duration, Duration),
     pub(super) udp: Option<ClientUdpContext>,
     pub(super) application_resolver: ApplicationResolverAdapter,
     direct_resolvers: Arc<[Option<ApplicationResolverAdapter>]>,
-    underlay: ferrum2_tun::UnderlayPublisher,
-    auto_route: bool,
-    #[cfg(all(windows, test))]
-    managed_udp_events: std::sync::Mutex<Vec<udp::ManagedUdpEvent>>,
-    #[cfg(all(windows, test))]
-    managed_udp_binding_fails: std::sync::atomic::AtomicBool,
+    pub(super) route_network: RouteNetworkOptions,
+    network_reset_state: Arc<ClientEgressNetworkResetState>,
+    network_reset_hub: ClientNetworkResetHub,
+    _network_reset_registration: ClientNetworkResetTargetRegistration,
     #[cfg(test)]
     pub(super) udp_id_random: Option<Arc<dyn SecureRandom>>,
 }
@@ -311,7 +749,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let direct_resolvers = outbounds
             .iter()
             .map(|outbound| {
-                matches!(outbound, ClientOutboundContext::Direct)
+                matches!(outbound, ClientOutboundContext::Direct { .. })
                     .then(|| application_resolver.clone())
             })
             .collect::<Vec<_>>()
@@ -343,80 +781,79 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         #[cfg(test)] udp_id_random: Option<Arc<dyn SecureRandom>>,
     ) -> Self {
         debug_assert_eq!(outbounds.len(), direct_resolvers.len());
+        let connector = Arc::new(connector);
+        let route_network = RouteNetworkOptions::default();
+        let network_reset_state = Arc::new(ClientEgressNetworkResetState::new(udp.as_ref()));
+        let network_reset_hub = ClientNetworkResetHub::default();
+        let network_reset_registration = network_reset_hub
+            .register(&network_reset_state)
+            .expect("a private client reset hub always accepts its only engine");
+        let proxy_connectors = outbounds
+            .iter()
+            .map(|outbound| PolicyConnector {
+                connector: Arc::clone(&connector),
+                dial_options: outbound.dial_options().clone(),
+                route_network: route_network.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
         Self {
             outbounds,
             connector,
+            proxy_connectors,
             clock,
             random,
             phase_deadlines,
             udp,
             application_resolver,
             direct_resolvers,
-            underlay: ferrum2_tun::UnderlayPublisher::new(),
-            auto_route: false,
-            #[cfg(all(windows, test))]
-            managed_udp_events: std::sync::Mutex::new(Vec::new()),
-            #[cfg(all(windows, test))]
-            managed_udp_binding_fails: std::sync::atomic::AtomicBool::new(false),
+            route_network,
+            network_reset_state,
+            network_reset_hub,
+            _network_reset_registration: network_reset_registration,
             #[cfg(test)]
             udp_id_random,
         }
     }
 
-    pub(super) fn with_underlay(
-        mut self,
-        underlay: ferrum2_tun::UnderlayPublisher,
-        auto_route: bool,
-    ) -> Self {
-        self.underlay = underlay;
-        self.auto_route = auto_route;
+    pub(super) fn with_route_network(mut self, route_network: RouteNetworkOptions) -> Self {
+        self.proxy_connectors = self
+            .outbounds
+            .iter()
+            .map(|outbound| PolicyConnector {
+                connector: Arc::clone(&self.connector),
+                dial_options: outbound.dial_options().clone(),
+                route_network: route_network.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        self.route_network = route_network;
         self
     }
 
+    #[cfg(all(windows, not(test)))]
+    pub(super) fn with_shared_network_reset(
+        mut self,
+        service: &ClientNetworkSocketService,
+    ) -> Result<Self, RunError> {
+        let hub = service.reset_hub();
+        let registration = hub
+            .register(&self.network_reset_state)
+            .map_err(|()| RunError::StartupProtocol)?;
+        self._network_reset_registration = registration;
+        self.network_reset_hub = hub;
+        Ok(self)
+    }
+
+    pub(super) fn register_dns_reset_action(
+        &self,
+        action: &Arc<ClientDnsResetAction>,
+    ) -> Result<(), ()> {
+        self.network_reset_state.register_dns_action(action)
+    }
+
     pub(super) fn reset_network(&self) -> usize {
-        self.udp.as_ref().map_or(0, ClientUdpContext::reset_network)
-    }
-
-    #[cfg(all(windows, test))]
-    fn record_managed_udp_event(&self, event: udp::ManagedUdpEvent) -> Result<(), ()> {
-        self.managed_udp_events.lock().unwrap().push(event);
-        if matches!(
-            event,
-            udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindTarget(_)
-        ) && self
-            .managed_udp_binding_fails
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            Err(())
-        } else {
-            Ok(())
-        }
-    }
-
-    #[cfg(all(windows, test))]
-    pub(super) fn managed_binding_calls(&self) -> usize {
-        self.managed_udp_events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    udp::ManagedUdpEvent::BindFixed(_) | udp::ManagedUdpEvent::BindTarget(_)
-                )
-            })
-            .count()
-    }
-
-    #[cfg(all(windows, test))]
-    fn managed_udp_events(&self) -> Vec<udp::ManagedUdpEvent> {
-        self.managed_udp_events.lock().unwrap().clone()
-    }
-
-    #[cfg(all(windows, test))]
-    fn fail_managed_udp_binding(&self) {
-        self.managed_udp_binding_fails
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.network_reset_hub.reset()
     }
 
     fn classify_selected(
@@ -447,7 +884,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         for hop in hops {
             match self.outbounds.get(*hop) {
                 Some(ClientOutboundContext::Shadowsocks(_)) => {}
-                Some(ClientOutboundContext::Direct) => direct += 1,
+                Some(ClientOutboundContext::Direct { .. }) => direct += 1,
                 None => return Err(ClientPlanFailure::Invalid),
             }
         }
@@ -460,6 +897,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             return Err(ClientPlanFailure::Invalid);
         }
         Ok(SelectedEgress::Shadowsocks {
+            first_outbound: hops[0],
             first_server: self.outbounds[hops[0]]
                 .shadowsocks()
                 .expect("classified Shadowsocks plan")
@@ -476,7 +914,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
     ) -> Result<tcp::ClientTcpFlow<'a, C::Stream>, ClientOpenFailure>
     where
-        C: Connector,
+        C: ClientPhysicalConnector,
         C::Stream: TransportIo + LocalEndpoint + 'a,
         T: Clock + Sync,
         R: SecureRandom,
@@ -503,7 +941,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
     ) -> Result<tcp::ClientTcpFlow<'a, C::Stream>, ClientOpenFailure>
     where
-        C: Connector,
+        C: ClientPhysicalConnector,
         C::Stream: TransportIo + LocalEndpoint + 'a,
         T: Clock + Sync,
         R: SecureRandom,
@@ -553,6 +991,10 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
                         .collect()
                 }
             };
+            let default_dial_options = DialOptions::default();
+            let dial_options = outbound
+                .and_then(|index| self.outbounds.get(index))
+                .map_or(&default_dial_options, ClientOutboundContext::dial_options);
             let mut attempted = false;
             let mut last = ConnectErrorKind::HostUnreachable;
             for target in candidates {
@@ -560,13 +1002,9 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
                     return Err(ClientOpenFailure::Connect(ConnectErrorKind::Timeout));
                 }
                 attempted = true;
-                #[cfg(any(windows, test))]
-                let connect = TCP_BINDING.scope(
-                    direct_tcp_binding(origin, self.auto_route, application_target),
-                    self.connector.connect(&target),
-                );
-                #[cfg(not(any(windows, test)))]
-                let connect = self.connector.connect(&target);
+                let connect =
+                    self.connector
+                        .connect_physical(&target, dial_options, &self.route_network);
                 match tokio::time::timeout_at(deadline, connect).await {
                     Ok(Ok(stream)) => return Ok(tcp::ClientTcpFlow::Direct(stream)),
                     Ok(Err(error)) => last = error.kind(),
@@ -582,6 +1020,9 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             }));
         }
         let plan = plan.expect("classified proxy plan has a snapshot");
+        let SelectedEgress::Shadowsocks { first_outbound, .. } = selected else {
+            unreachable!("classified proxy plan")
+        };
         let deadlines = timeout_limit.map_or(self.phase_deadlines, |limit| {
             (
                 limit.min(self.phase_deadlines.0),
@@ -591,7 +1032,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let open = tcp::open(
             &self.outbounds,
             plan.hops(),
-            &self.connector,
+            &self.proxy_connectors[first_outbound],
             &self.clock,
             &self.random,
             application_target,
@@ -599,8 +1040,6 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             #[cfg(test)]
             observers,
         );
-        #[cfg(any(windows, test))]
-        let open = TCP_BINDING.scope(proxy_tcp_binding(self.auto_route), open);
         open.await.map(tcp::ClientTcpFlow::Proxy)
     }
 
@@ -609,7 +1048,10 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         origin: ClientRequestOrigin,
         plan: Option<EgressPlanSnapshot>,
         target: Option<&TargetAddr>,
-    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure> {
+    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure>
+    where
+        C: ClientPhysicalConnector,
+    {
         self.prepare_udp_for_ingress(origin, 0, plan, target).await
     }
 
@@ -619,7 +1061,10 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         ingress: usize,
         plan: Option<EgressPlanSnapshot>,
         target: Option<&TargetAddr>,
-    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure> {
+    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure>
+    where
+        C: ClientPhysicalConnector,
+    {
         let selected = self
             .classify_selected(origin, plan.as_ref(), target)
             .map_err(ClientUdpPrepareFailure::Plan)?;
@@ -643,6 +1088,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         bind: F,
     ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure>
     where
+        C: ClientPhysicalConnector,
         F: FnMut(SocketAddr) -> Fut,
         Fut: std::future::Future<Output = std::io::Result<tokio::net::UdpSocket>>,
     {
@@ -687,106 +1133,371 @@ mod m16_tests {
     use super::*;
     use crate::run::test_support::*;
 
+    #[test]
+    fn shared_network_reset_hub_resets_all_live_engines_and_drops_registration_exactly() {
+        let hub = ClientNetworkResetHub::default();
+        let first = Arc::new(ClientEgressNetworkResetState::new(None));
+        let second = Arc::new(ClientEgressNetworkResetState::new(None));
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let first_action: Arc<ClientDnsResetAction> = {
+            let calls = Arc::clone(&first_calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                2
+            })
+        };
+        let second_action: Arc<ClientDnsResetAction> = {
+            let calls = Arc::clone(&second_calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                3
+            })
+        };
+        first.register_dns_action(&first_action).unwrap();
+        second.register_dns_action(&second_action).unwrap();
+        let _first_registration = hub.register(&first).unwrap();
+        let second_registration = hub.register(&second).unwrap();
+
+        assert_eq!(hub.reset(), 5);
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+
+        drop(second_registration);
+        assert_eq!(hub.reset(), 2);
+        assert_eq!(first_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn validated_network_policies_are_retained_per_outbound_and_route() {
+        let explicit = ferrum2_config::OutboundDialOptions {
+            bind_interface: Some("policy-interface".into()),
+            inet4_bind_address: Some("192.0.2.44".parse().unwrap()),
+            inet6_bind_address: Some("2001:db8::44".parse().unwrap()),
+        };
+        let expected = DialOptions::new(
+            Some("policy-interface"),
+            Some("192.0.2.44".parse().unwrap()),
+            Some("2001:db8::44".parse().unwrap()),
+        );
+        let outbounds = prepare_client_outbounds(vec![
+            ferrum2_config::ClientOutboundConfig::Direct {
+                domain_resolver: ferrum2_config::DirectDomainResolver::System,
+                dial_options: explicit.clone(),
+            },
+            ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                server: "198.51.100.44:443".parse().unwrap(),
+                psk: Arc::new(ferrum2_crypto::MethodPsk::aes128([0x44; 16])),
+                dial_options: explicit,
+            },
+        ])
+        .unwrap();
+        assert_eq!(outbounds[0].dial_options(), &expected);
+        assert_eq!(outbounds[1].dial_options(), &expected);
+
+        let route = ferrum2_config::RouteNetworkConfig {
+            auto_detect_interface: true,
+            default_interface: Some("route-interface".into()),
+        };
+        assert_eq!(
+            runtime_route_network(&route),
+            RouteNetworkOptions::new(true, Some("route-interface"))
+        );
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct PhysicalPolicyAttempt {
+        target: TargetAddr,
+        dial_options: DialOptions,
+        route_network: RouteNetworkOptions,
+    }
+
     #[derive(Default)]
-    struct InjectedManagedTcp {
-        events: std::sync::Mutex<Vec<&'static str>>,
-        fail_binding: bool,
+    struct PhysicalPolicyTrace {
+        tcp: Mutex<Vec<PhysicalPolicyAttempt>>,
+        udp: Mutex<Vec<(DialOptions, RouteNetworkOptions)>>,
+        udp_socket: Arc<udp::InjectedUdpSocketTrace>,
     }
 
-    #[derive(Clone)]
-    struct RecordedTcpDialer {
-        events: Arc<std::sync::Mutex<Vec<&'static str>>>,
-        fail_binding: bool,
+    struct RecordingPhysicalConnector {
+        trace: Arc<PhysicalPolicyTrace>,
     }
 
-    impl ManagedTcpOperations for RecordedTcpDialer {
-        type Socket = tokio::net::TcpSocket;
-        type Stream = tokio::net::TcpStream;
+    impl ClientPhysicalConnector for RecordingPhysicalConnector {
+        type Stream = crate::run::tokio_io::TokioTransport<ScriptedIo>;
 
-        fn new_v4(&self) -> std::io::Result<Self::Socket> {
-            self.events.lock().unwrap().push("socket-v4");
-            tokio::net::TcpSocket::new_v4()
-        }
-
-        fn new_v6(&self) -> std::io::Result<Self::Socket> {
-            self.events.lock().unwrap().push("socket-v6");
-            tokio::net::TcpSocket::new_v6()
-        }
-
-        fn bind_fixed(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> std::io::Result<()> {
-            self.events.lock().unwrap().push("bind-fixed");
-            if self.fail_binding {
-                Err(std::io::Error::other("injected binding failure"))
-            } else {
-                Ok(())
-            }
-        }
-
-        fn bind_target(&self, _socket: &Self::Socket, _target: SocketAddr) -> std::io::Result<()> {
-            self.events.lock().unwrap().push("bind-target");
-            if self.fail_binding {
-                Err(std::io::Error::other("injected binding failure"))
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn connect(
+        async fn connect_physical(
             &self,
-            socket: Self::Socket,
-            address: SocketAddr,
-        ) -> std::io::Result<Self::Stream> {
-            self.events.lock().unwrap().push("connect");
-            socket.connect(address).await
-        }
-    }
-
-    impl ferrum2_runtime::TcpDialer for RecordedTcpDialer {
-        async fn connect(&self, address: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
-            connect_managed_tcp(self, address).await
-        }
-    }
-
-    impl ManagedTcpOperations for InjectedManagedTcp {
-        type Socket = ();
-        type Stream = ();
-
-        fn new_v4(&self) -> std::io::Result<Self::Socket> {
-            self.events.lock().unwrap().push("socket-v4");
-            Ok(())
+            target: &TargetAddr,
+            dial_options: &DialOptions,
+            route_network: &RouteNetworkOptions,
+        ) -> Result<Self::Stream, ConnectError> {
+            self.trace
+                .tcp
+                .lock()
+                .expect("physical TCP attempts")
+                .push(PhysicalPolicyAttempt {
+                    target: target.clone(),
+                    dial_options: dial_options.clone(),
+                    route_network: route_network.clone(),
+                });
+            Err(ConnectError::new(ConnectErrorKind::ConnectionRefused))
         }
 
-        fn new_v6(&self) -> std::io::Result<Self::Socket> {
-            self.events.lock().unwrap().push("socket-v6");
-            Ok(())
-        }
-
-        fn bind_fixed(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> std::io::Result<()> {
-            self.events.lock().unwrap().push("bind-fixed");
-            if self.fail_binding {
-                Err(std::io::Error::other("injected binding failure"))
-            } else {
-                Ok(())
-            }
-        }
-
-        fn bind_target(&self, _socket: &Self::Socket, _target: SocketAddr) -> std::io::Result<()> {
-            self.events.lock().unwrap().push("bind-target");
-            if self.fail_binding {
-                Err(std::io::Error::other("injected binding failure"))
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn connect(
+        fn udp_socket_factory(
             &self,
-            _socket: Self::Socket,
-            _address: SocketAddr,
-        ) -> std::io::Result<Self::Stream> {
-            self.events.lock().unwrap().push("connect");
-            Ok(())
+            _expected_generation: Option<u64>,
+            dial_options: &DialOptions,
+            route_network: &RouteNetworkOptions,
+        ) -> udp::ClientUdpSocketFactory {
+            self.trace
+                .udp
+                .lock()
+                .expect("physical UDP policies")
+                .push((dial_options.clone(), route_network.clone()));
+            udp::ClientUdpSocketFactory::injected(Arc::clone(&self.trace.udp_socket))
         }
+    }
+
+    #[tokio::test]
+    async fn physical_connector_receives_selected_policy_and_first_concrete_target() {
+        let direct_dial = DialOptions::new(
+            Some("direct-interface"),
+            Some("192.0.2.10".parse().unwrap()),
+            None,
+        );
+        let proxy_dial = DialOptions::new(
+            Some("proxy-interface"),
+            Some("192.0.2.20".parse().unwrap()),
+            None,
+        );
+        let route_network = RouteNetworkOptions::new(true, Some("route-interface"));
+        let proxy_server: SocketAddr = "198.51.100.20:443".parse().unwrap();
+        let trace = Arc::new(PhysicalPolicyTrace::default());
+        let engine = ClientEgressEngine::new(
+            vec![
+                ClientOutboundContext::direct(direct_dial.clone()),
+                ClientOutboundContext::Shadowsocks(ClientShadowsocksContext {
+                    tcp_server: TargetAddr::ip(proxy_server).unwrap(),
+                    udp_server: proxy_server,
+                    keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                        ferrum2_crypto::MethodPsk::aes128([0x20; 16]),
+                    )),
+                    dial_options: proxy_dial.clone(),
+                }),
+            ]
+            .into(),
+            RecordingPhysicalConnector {
+                trace: Arc::clone(&trace),
+            },
+            SystemClock::new(),
+            SystemRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            Some(ClientUdpContext {
+                manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
+                live_ids: Arc::new(Mutex::new(HashSet::new())),
+            }),
+            None,
+        )
+        .with_route_network(route_network.clone());
+        let direct_plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+        let proxy_plan = ferrum2_core::route::EgressPlanHandle::direct(1).snapshot_owned();
+        let direct_target = TargetAddr::ip("203.0.113.10:8443".parse().unwrap()).unwrap();
+        let application_target = TargetAddr::ip("203.0.113.30:5353".parse().unwrap()).unwrap();
+
+        assert!(matches!(
+            engine
+                .open_tcp(
+                    ClientRequestOrigin::Socks,
+                    Some(direct_plan.clone()),
+                    &direct_target,
+                    None,
+                    None,
+                )
+                .await,
+            Err(ClientOpenFailure::Connect(
+                ConnectErrorKind::ConnectionRefused
+            ))
+        ));
+        assert!(matches!(
+            engine
+                .open_tcp(
+                    ClientRequestOrigin::Socks,
+                    Some(proxy_plan.clone()),
+                    &application_target,
+                    None,
+                    None,
+                )
+                .await,
+            Err(ClientOpenFailure::Protocol(ShadowsocksError::Connect(
+                ConnectErrorKind::ConnectionRefused
+            )))
+        ));
+
+        let mut direct_udp = engine
+            .prepare_udp(
+                ClientRequestOrigin::Socks,
+                Some(direct_plan),
+                Some(&direct_target),
+            )
+            .await
+            .unwrap();
+        let wire_length = match direct_udp.prepare_application_request(
+            &engine,
+            &engine.outbounds,
+            direct_target.clone(),
+            b"first",
+            Instant::now(),
+        ) {
+            Ok(length) => length,
+            Err(_) => panic!("direct UDP request should encode"),
+        };
+        assert!(matches!(
+            direct_udp.send_encoded_request(wire_length).await,
+            Ok(length) if length == wire_length
+        ));
+        let _proxy_udp = engine
+            .prepare_udp(
+                ClientRequestOrigin::Socks,
+                Some(proxy_plan),
+                Some(&application_target),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            trace.tcp.lock().unwrap().as_slice(),
+            &[
+                PhysicalPolicyAttempt {
+                    target: direct_target.clone(),
+                    dial_options: direct_dial.clone(),
+                    route_network: route_network.clone(),
+                },
+                PhysicalPolicyAttempt {
+                    target: TargetAddr::ip(proxy_server).unwrap(),
+                    dial_options: proxy_dial.clone(),
+                    route_network: route_network.clone(),
+                },
+            ]
+        );
+        assert_eq!(
+            trace.udp.lock().unwrap().as_slice(),
+            &[
+                (direct_dial, route_network.clone()),
+                (proxy_dial, route_network),
+            ]
+        );
+        assert_eq!(
+            trace.udp_socket.opened(),
+            vec![direct_target.as_socket_addr().unwrap(), proxy_server]
+        );
+        assert_eq!(
+            trace.udp_socket.sent(),
+            vec![direct_target.as_socket_addr().unwrap()]
+        );
+    }
+
+    struct EmptyNetworkCatalog;
+
+    impl ferrum2_runtime::NetworkInterfaceCatalog for EmptyNetworkCatalog {
+        fn read_interfaces(
+            &self,
+        ) -> Result<
+            Vec<ferrum2_runtime::NetworkInterfaceObservation>,
+            ferrum2_runtime::NetworkInterfaceCatalogError,
+        > {
+            Ok(Vec::new())
+        }
+
+        fn system_best_route(
+            &self,
+            _destination: SocketAddr,
+        ) -> Result<ferrum2_runtime::SystemBestRoute, ferrum2_runtime::NetworkInterfaceCatalogError>
+        {
+            Err(ferrum2_runtime::NetworkInterfaceCatalogError)
+        }
+    }
+
+    fn explicit_interface_error() -> NetworkSocketServiceError<SystemNetworkSocketError<()>> {
+        let snapshot = ferrum2_runtime::NetworkSnapshot::new(1, None, None).unwrap();
+        let resolver = ferrum2_runtime::NetworkInterfaceResolver::new(EmptyNetworkCatalog);
+        let resolution = resolver
+            .resolve(
+                &DialOptions::new(Some("missing-interface"), None, None),
+                &RouteNetworkOptions::default(),
+                "203.0.113.1:443".parse().unwrap(),
+                &snapshot,
+            )
+            .unwrap_err();
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::InterfaceResolution(resolution),
+        )
+    }
+
+    #[test]
+    fn generation_bound_socket_errors_and_interface_metrics_keep_closed_categories() {
+        let refused = NetworkSocketServiceError::Connection {
+            attempted_source: InterfaceSelectionSource::SystemBestRoute,
+            error: SystemNetworkSocketError::<()>::Socket(io::Error::from(
+                io::ErrorKind::ConnectionRefused,
+            )),
+        };
+        assert_eq!(
+            interface_resolution_result(&refused),
+            InterfaceResolutionResult::Success
+        );
+        assert_eq!(
+            connect_error_from_network_service(refused).kind(),
+            ConnectErrorKind::ConnectionRefused
+        );
+
+        let denied = explicit_interface_error();
+        assert_eq!(
+            interface_resolution_result(&denied),
+            InterfaceResolutionResult::Failure
+        );
+        assert_eq!(
+            connect_error_from_network_service(denied).kind(),
+            ConnectErrorKind::PolicyDenied
+        );
+        assert_eq!(
+            io_error_from_network_service(explicit_interface_error()).kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let stale = NetworkSocketServiceError::Admission(NetworkRuntimeResourceAdmissionError::<
+            SystemNetworkSocketError<()>,
+        >::NetworkGenerationChanged {
+            attempted_source: InterfaceSelectionSource::AutoDetected,
+        });
+        assert_eq!(
+            interface_resolution_result(&stale),
+            InterfaceResolutionResult::Failure
+        );
+        assert_eq!(
+            connect_error_from_network_service(stale).kind(),
+            ConnectErrorKind::NetworkUnreachable
+        );
+
+        let metrics = Metrics::new();
+        record_interface_resolution(
+            &metrics,
+            InterfaceSelectionSource::OutboundExplicit,
+            InterfaceResolutionResult::Success,
+        );
+        record_interface_resolution(
+            &metrics,
+            InterfaceSelectionSource::SystemBestRoute,
+            InterfaceResolutionResult::Failure,
+        );
+        let encoded = metrics.encode_text().unwrap();
+        assert!(encoded.contains(
+            "ferrum2_outbound_interface_resolution_total{source=\"outbound_explicit\",result=\"success\"} 1"
+        ));
+        assert!(encoded.contains(
+            "ferrum2_outbound_interface_resolution_total{source=\"system_best_route\",result=\"failure\"} 1"
+        ));
     }
 
     #[derive(Clone, Copy)]
@@ -856,7 +1567,7 @@ mod m16_tests {
                 Duration::from_secs(1),
             ));
         let engine = ClientEgressEngine::new_with_direct_resolvers(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(DialOptions::default())].into(),
             connector,
             SystemClock::new(),
             SystemRandom,
@@ -943,7 +1654,7 @@ mod m16_tests {
             ));
         let registry = OwnerRegistry::new();
         let engine = ClientEgressEngine::new_with_application_resolver(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(DialOptions::default())].into(),
             connector,
             SystemClock::new(),
             SystemRandom,
@@ -1131,281 +1842,6 @@ mod m16_tests {
             );
         }
         assert_eq!(observed.len(), 9);
-    }
-
-    #[tokio::test]
-    async fn managed_tcp_binding_is_task_local_and_precedes_the_only_connect() {
-        let target: SocketAddr = "198.51.100.8:443".parse().unwrap();
-        let missing = InjectedManagedTcp::default();
-        assert!(connect_managed_tcp(&missing, target).await.is_err());
-        assert!(missing.events.lock().unwrap().is_empty());
-
-        let fixed = InjectedManagedTcp::default();
-        TCP_BINDING
-            .scope(TcpBinding::Fixed, connect_managed_tcp(&fixed, target))
-            .await
-            .unwrap();
-        assert_eq!(
-            *fixed.events.lock().unwrap(),
-            ["socket-v4", "bind-fixed", "connect"]
-        );
-
-        let failed = InjectedManagedTcp {
-            fail_binding: true,
-            ..Default::default()
-        };
-        assert!(
-            TCP_BINDING
-                .scope(TcpBinding::Target, connect_managed_tcp(&failed, target))
-                .await
-                .is_err()
-        );
-        assert_eq!(*failed.events.lock().unwrap(), ["socket-v4", "bind-target"]);
-
-        let default = InjectedManagedTcp::default();
-        let none = InjectedManagedTcp::default();
-        let (default_result, none_result) = tokio::join!(
-            TCP_BINDING.scope(TcpBinding::Target, connect_managed_tcp(&default, target)),
-            TCP_BINDING.scope(TcpBinding::None, connect_managed_tcp(&none, target)),
-        );
-        default_result.unwrap();
-        none_result.unwrap();
-        assert_eq!(
-            *default.events.lock().unwrap(),
-            ["socket-v4", "bind-target", "connect"]
-        );
-        assert_eq!(*none.events.lock().unwrap(), ["socket-v4", "connect"]);
-
-        let ipv6: SocketAddr = "[2001:db8::8]:443".parse().unwrap();
-        let fixed_ipv6 = InjectedManagedTcp::default();
-        let target_ipv6 = InjectedManagedTcp::default();
-        TCP_BINDING
-            .scope(TcpBinding::Fixed, connect_managed_tcp(&fixed_ipv6, ipv6))
-            .await
-            .unwrap();
-        TCP_BINDING
-            .scope(TcpBinding::Target, connect_managed_tcp(&target_ipv6, ipv6))
-            .await
-            .unwrap();
-        assert_eq!(
-            *fixed_ipv6.events.lock().unwrap(),
-            ["socket-v6", "bind-fixed", "connect"]
-        );
-        assert_eq!(
-            *target_ipv6.events.lock().unwrap(),
-            ["socket-v6", "bind-target", "connect"]
-        );
-    }
-
-    #[tokio::test]
-    async fn managed_tcp_binding_runs_in_the_real_egress_connector_path() {
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let endpoint = listener.local_addr().unwrap();
-        let target = TargetAddr::ip(endpoint).unwrap();
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let dialer = RecordedTcpDialer {
-            events: events.clone(),
-            fail_binding: false,
-        };
-        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
-            ferrum2_runtime::SystemSocketInspector,
-            dialer,
-            Duration::from_secs(1),
-        ));
-        let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
-            connector,
-            ferrum2_crypto::SystemClock::new(),
-            ferrum2_crypto::SystemRandom,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            None,
-            None,
-        )
-        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
-        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let flow = engine
-            .open_tcp(ClientRequestOrigin::Dns, None, &target, None, None)
-            .await
-            .unwrap();
-        drop(flow);
-        drop(accept.await.unwrap());
-        assert_eq!(
-            *events.lock().unwrap(),
-            ["socket-v4", "bind-fixed", "connect"]
-        );
-
-        let deferred_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let deferred_endpoint = deferred_listener.local_addr().unwrap();
-        let deferred_events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let deferred_dialer = RecordedTcpDialer {
-            events: deferred_events.clone(),
-            fail_binding: false,
-        };
-        let deferred_backend = Arc::new(RoutedApplicationBackend {
-            routes: vec![ApplicationRoute {
-                ingress: 0,
-                network: ferrum2_core::route::Network::Tcp,
-                endpoint: deferred_endpoint,
-            }],
-            observed: Mutex::new(Vec::new()),
-        });
-        let deferred_resolver = ApplicationResolverAdapter::new(
-            Arc::new(ApplicationResolver::configured(deferred_backend)),
-            0,
-            DnsStrategy::PreferIpv4,
-        );
-        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
-            ferrum2_runtime::SystemSocketInspector,
-            deferred_dialer,
-            Duration::from_secs(1),
-        ));
-        let engine = ClientEgressEngine::new_with_application_resolver(
-            vec![ClientOutboundContext::Direct].into(),
-            connector,
-            ferrum2_crypto::SystemClock::new(),
-            ferrum2_crypto::SystemRandom,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            None,
-            deferred_resolver,
-            None,
-        )
-        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
-        let deferred_accept =
-            tokio::spawn(async move { deferred_listener.accept().await.unwrap() });
-        let deferred_target =
-            TargetAddr::domain("deferred-dns.invalid", deferred_endpoint.port()).unwrap();
-        let direct = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
-        let flow = engine
-            .open_tcp(
-                ClientRequestOrigin::Dns,
-                Some(direct),
-                &deferred_target,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        drop(flow);
-        drop(deferred_accept.await.unwrap());
-        assert_eq!(
-            *deferred_events.lock().unwrap(),
-            ["socket-v4", "bind-target", "connect"]
-        );
-
-        let ruleset_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let ruleset_endpoint = ruleset_listener.local_addr().unwrap();
-        let ruleset_target = TargetAddr::ip(ruleset_endpoint).unwrap();
-        let ruleset_events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let ruleset_dialer = RecordedTcpDialer {
-            events: ruleset_events.clone(),
-            fail_binding: false,
-        };
-        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
-            ferrum2_runtime::SystemSocketInspector,
-            ruleset_dialer,
-            Duration::from_secs(1),
-        ));
-        let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
-            connector,
-            ferrum2_crypto::SystemClock::new(),
-            ferrum2_crypto::SystemRandom,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            None,
-            None,
-        )
-        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
-        let ruleset_accept = tokio::spawn(async move { ruleset_listener.accept().await.unwrap() });
-        let flow = engine
-            .open_tcp(
-                ClientRequestOrigin::RuleSet,
-                None,
-                &ruleset_target,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        drop(flow);
-        drop(ruleset_accept.await.unwrap());
-        assert_eq!(
-            *ruleset_events.lock().unwrap(),
-            ["socket-v4", "bind-target", "connect"]
-        );
-
-        let failed_events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let failed = RecordedTcpDialer {
-            events: failed_events.clone(),
-            fail_binding: true,
-        };
-        let connector = TokioConnector::new(ferrum2_runtime::TcpConnector::with_adapters(
-            ferrum2_runtime::SystemSocketInspector,
-            failed.clone(),
-            Duration::from_secs(1),
-        ));
-        let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
-            connector,
-            ferrum2_crypto::SystemClock::new(),
-            ferrum2_crypto::SystemRandom,
-            (Duration::from_secs(1), Duration::from_secs(1)),
-            None,
-            None,
-        )
-        .with_underlay(ferrum2_tun::UnderlayPublisher::new(), true);
-        assert!(
-            engine
-                .open_tcp(ClientRequestOrigin::Dns, None, &target, None, None)
-                .await
-                .is_err()
-        );
-        assert_eq!(*failed_events.lock().unwrap(), ["socket-v4", "bind-fixed"]);
-
-        failed_events.lock().unwrap().clear();
-        assert!(
-            ferrum2_runtime::TcpDialer::connect(&failed, endpoint)
-                .await
-                .is_err()
-        );
-        assert!(failed_events.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn dns_direct_fixed_binding_maps_actual_bootstrap_as_fixed() {
-        let numeric = TargetAddr::ip("198.51.100.8:53".parse().unwrap()).unwrap();
-        let domain = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
-        assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Dns, true, &numeric),
-            TcpBinding::Fixed
-        );
-        assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Dns, false, &numeric),
-            TcpBinding::None
-        );
-        assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Dns, true, &domain),
-            TcpBinding::Target
-        );
-        assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
-        assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
-        assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Socks, true, &numeric),
-            TcpBinding::Target
-        );
-        assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::Tun, false, &numeric),
-            TcpBinding::Target
-        );
-        assert_eq!(
-            direct_tcp_binding(ClientRequestOrigin::RuleSet, true, &numeric),
-            TcpBinding::Target
-        );
     }
 
     #[derive(Clone, Default)]
@@ -1686,46 +2122,16 @@ mod m16_tests {
         assert_eq!(connector_calls.load(Ordering::SeqCst), 1);
         assert_eq!(registry.snapshot(), baseline);
 
-        #[cfg(windows)]
-        {
-            let numeric = TargetAddr::ip("198.51.100.8:53".parse().unwrap()).unwrap();
-            assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Socks, true, &numeric),
-                TcpBinding::Target
-            );
-            assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Tun, false, &numeric),
-                TcpBinding::Target
-            );
-            assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Dns, true, &numeric),
-                TcpBinding::Fixed
-            );
-            assert_eq!(
-                direct_tcp_binding(ClientRequestOrigin::Dns, false, &numeric),
-                TcpBinding::None
-            );
-            assert_eq!(proxy_tcp_binding(true), TcpBinding::Fixed);
-            assert_eq!(proxy_tcp_binding(false), TcpBinding::None);
-            let ipv6 = TargetAddr::ip("[2001:db8::1]:443".parse().unwrap()).unwrap();
-            let plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
-            assert!(
-                matches!(
-                    engine.classify_selected(ClientRequestOrigin::Tun, Some(&plan), Some(&ipv6)),
-                    Ok(SelectedEgress::Direct { .. })
-                ),
-                "TUN TCP direct IPv6 is a valid managed target"
-            );
-            assert!(
-                matches!(
-                    engine.classify_selected(ClientRequestOrigin::Dns, Some(&plan), Some(&ipv6)),
-                    Ok(SelectedEgress::Direct { .. })
-                ),
-                "DNS UDP direct IPv6 is a valid managed target"
-            );
-            assert_eq!(connector_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(registry.snapshot(), baseline);
-        }
+        let ipv6 = TargetAddr::ip("[2001:db8::1]:443".parse().unwrap()).unwrap();
+        let plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+        assert!(matches!(
+            engine.classify_selected(ClientRequestOrigin::Tun, Some(&plan), Some(&ipv6)),
+            Ok(SelectedEgress::Direct { .. })
+        ));
+        assert!(matches!(
+            engine.classify_selected(ClientRequestOrigin::Dns, Some(&plan), Some(&ipv6)),
+            Ok(SelectedEgress::Direct { .. })
+        ));
 
         let direct = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
         assert!(matches!(

@@ -31,14 +31,14 @@ use ferrum2_observability::{
 };
 use ferrum2_rule::{RuleEngineRegistry, RuleEngineSnapshot, RuleSetId};
 use ferrum2_runtime::{
-    ApplicationResolverAdapter, ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, OwnerRegistry,
-    PreparedProcessRoot, ProcessCancellation, ProcessFuture, RuleSetCacheName, RuleSetDialTargets,
-    RuleSetDialer, RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadMode,
-    RuleSetDownloadResolver, RuleSetDownloader, RuleSetHostResolveObserver,
-    RuleSetHostResolveOutcome, RuleSetHostResolverKind, RuleSetLoadDisposition, RuleSetLoadError,
-    RuleSetLoadErrorKind, RuleSetLoader, RuleSetLoaderConfig, RuleSetRefreshOutcome,
-    RuleSetRefreshService, RuleSetRemoteSource, UdpRuntimeLimits, UdpSessionManager,
-    materialize_rule_set_snapshot,
+    ApplicationResolverAdapter, DialOptions, ExplicitRuleSetHostResolver, HttpsRuleSetDownloader,
+    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, RouteNetworkOptions,
+    RuleSetCacheName, RuleSetDialTargets, RuleSetDialer, RuleSetDownloadError,
+    RuleSetDownloadErrorKind, RuleSetDownloadMode, RuleSetDownloadResolver, RuleSetDownloader,
+    RuleSetHostResolveObserver, RuleSetHostResolveOutcome, RuleSetHostResolverKind,
+    RuleSetLoadDisposition, RuleSetLoadError, RuleSetLoadErrorKind, RuleSetLoader,
+    RuleSetLoaderConfig, RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRemoteSource,
+    UdpRuntimeLimits, UdpSessionManager, materialize_rule_set_snapshot,
 };
 use ferrum2_shadowsocks::MethodKeyAdapter;
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
@@ -48,9 +48,11 @@ use tokio::time::Instant;
 use super::dns_egress::ClientDnsEgress;
 use super::egress::{
     ClientEgressEngine, ClientOutboundContext, ClientRequestOrigin, ClientShadowsocksContext,
-    ClientUdpContext,
+    ClientUdpContext, runtime_dial_options, runtime_route_network,
 };
-use super::tokio_io::{TokioConnector, TokioFramed};
+#[cfg(any(not(windows), test))]
+use super::tokio_io::TokioConnector;
+use super::tokio_io::TokioFramed;
 use super::{RunError, dns_strategy};
 
 const INITIAL_RULESET_GENERATION: u64 = 1;
@@ -75,11 +77,19 @@ pub(super) struct ClientV2MaterializeContext {
     cache: Mutex<Option<DnsCache>>,
     failure: Mutex<Option<RunError>>,
     underlay: ferrum2_tun::UnderlayPublisher,
+    #[cfg(all(windows, not(test)))]
+    network_socket_service: Arc<super::egress::ClientNetworkSocketService>,
     used: AtomicBool,
 }
 
 impl ClientV2MaterializeContext {
-    pub(super) fn new(metrics: Arc<Metrics>, underlay: ferrum2_tun::UnderlayPublisher) -> Self {
+    pub(super) fn new(
+        metrics: Arc<Metrics>,
+        underlay: ferrum2_tun::UnderlayPublisher,
+        #[cfg(all(windows, not(test)))] network_socket_service: Arc<
+            super::egress::ClientNetworkSocketService,
+        >,
+    ) -> Self {
         Self {
             metrics,
             downloader: None,
@@ -87,6 +97,8 @@ impl ClientV2MaterializeContext {
             cache: Mutex::new(None),
             failure: Mutex::new(None),
             underlay,
+            #[cfg(all(windows, not(test)))]
+            network_socket_service,
             used: AtomicBool::new(false),
         }
     }
@@ -145,6 +157,8 @@ impl ClientV2MaterializeContext {
             Arc::clone(&blueprint),
             targets,
             Arc::clone(&self.metrics),
+            #[cfg(all(windows, not(test)))]
+            Arc::clone(&self.network_socket_service),
         );
         materialize_fixed_endpoints(
             &plan,
@@ -188,8 +202,8 @@ impl ClientV2MaterializeContext {
                 addresses: addresses.clone(),
                 loader_config: loader_config.clone(),
                 cache: cache.clone(),
-                underlay: self.underlay.clone(),
-                auto_route: prepared.tun_auto_route(),
+                #[cfg(all(windows, not(test)))]
+                network_socket_service: Arc::clone(&self.network_socket_service),
                 needs_tagged,
                 metrics: Arc::clone(&self.metrics),
             }),
@@ -208,8 +222,8 @@ impl ClientV2MaterializeContext {
                     addresses,
                     loader_config,
                     cache: cache.clone(),
-                    underlay: self.underlay.clone(),
-                    auto_route: false,
+                    #[cfg(all(windows, not(test)))]
+                    network_socket_service: Arc::clone(&self.network_socket_service),
                     needs_tagged,
                     metrics: Arc::clone(&self.metrics),
                 }
@@ -384,8 +398,8 @@ struct ProductionRuleSetTransport {
     addresses: BootstrapAddresses,
     loader_config: RuleSetLoaderConfig,
     cache: Option<DnsCache>,
-    underlay: ferrum2_tun::UnderlayPublisher,
-    auto_route: bool,
+    #[cfg(all(windows, not(test)))]
+    network_socket_service: Arc<super::egress::ClientNetworkSocketService>,
     needs_tagged: bool,
     metrics: Arc<Metrics>,
 }
@@ -393,9 +407,11 @@ struct ProductionRuleSetTransport {
 impl ProductionRuleSetTransport {
     async fn activate(self, generation: u64) -> Result<ActiveRuleSetTransport, RunError> {
         let bridges = Arc::new(RuleSetBridgeTasks::default());
-        let engine =
-            self.blueprint
-                .build_engine(&self.addresses, self.underlay, self.auto_route)?;
+        let engine = self.blueprint.build_engine(
+            &self.addresses,
+            #[cfg(all(windows, not(test)))]
+            Arc::clone(&self.network_socket_service),
+        )?;
         let (tagged, owner) = if self.needs_tagged {
             let (resolver, mut owner) = self
                 .blueprint
@@ -534,10 +550,12 @@ impl PreparedProcessRoot<RunError> for ClientV2RuntimeRoot {
 enum BootstrapOutbound {
     Direct {
         domain_resolver: DirectDomainResolver,
+        dial_options: DialOptions,
     },
     Shadowsocks {
         psk: Arc<MethodPsk>,
         endpoint: DialEndpoint,
+        dial_options: DialOptions,
     },
 }
 
@@ -552,6 +570,7 @@ struct BootstrapDnsServer {
 
 struct BootstrapBlueprint {
     outbounds: Vec<BootstrapOutbound>,
+    route_network: RouteNetworkOptions,
     dns_servers: Vec<BootstrapDnsServer>,
     dns_timeout: Duration,
     dns_max_inflight: std::num::NonZeroU16,
@@ -574,11 +593,13 @@ impl BootstrapBlueprint {
             let descriptor = prepared
                 .outbound(u32::try_from(index).map_err(|_| RunError::StartupProtocol)?)
                 .ok_or(RunError::StartupProtocol)?;
+            let dial_options = runtime_dial_options(descriptor.dial_options());
             outbounds.push(match descriptor.kind() {
                 PreparedClientOutboundKind::Direct => BootstrapOutbound::Direct {
                     domain_resolver: descriptor
                         .domain_resolver()
                         .ok_or(RunError::StartupProtocol)?,
+                    dial_options,
                 },
                 PreparedClientOutboundKind::Shadowsocks => BootstrapOutbound::Shadowsocks {
                     psk: Arc::clone(descriptor.psk().ok_or(RunError::StartupProtocol)?),
@@ -586,6 +607,7 @@ impl BootstrapBlueprint {
                         .endpoint()
                         .ok_or(RunError::StartupProtocol)?
                         .clone(),
+                    dial_options,
                 },
             });
         }
@@ -616,6 +638,7 @@ impl BootstrapBlueprint {
             });
         Ok(Self {
             outbounds,
+            route_network: runtime_route_network(prepared.route_network()),
             dns_servers,
             dns_timeout,
             dns_max_inflight,
@@ -634,8 +657,14 @@ impl BootstrapBlueprint {
             .map_err(|_| RunError::RuleAllocation)?;
         for (index, outbound) in self.outbounds.iter().enumerate() {
             outbounds.push(match outbound {
-                BootstrapOutbound::Direct { .. } => ClientOutboundContext::Direct,
-                BootstrapOutbound::Shadowsocks { psk, endpoint } => {
+                BootstrapOutbound::Direct { dial_options, .. } => {
+                    ClientOutboundContext::direct(dial_options.clone())
+                }
+                BootstrapOutbound::Shadowsocks {
+                    psk,
+                    endpoint,
+                    dial_options,
+                } => {
                     let address = addresses.outbounds[index]
                         .or_else(|| endpoint_address(endpoint))
                         .unwrap_or(UNRESOLVED_ENDPOINT);
@@ -646,6 +675,7 @@ impl BootstrapBlueprint {
                         keys: MethodKeyAdapter::new(MethodSinglePskProvider::from_shared(
                             Arc::clone(psk),
                         )),
+                        dial_options: dial_options.clone(),
                     })
                 }
             });
@@ -656,8 +686,9 @@ impl BootstrapBlueprint {
     fn build_engine(
         &self,
         addresses: &BootstrapAddresses,
-        underlay: ferrum2_tun::UnderlayPublisher,
-        auto_route: bool,
+        #[cfg(all(windows, not(test)))] network_socket_service: Arc<
+            super::egress::ClientNetworkSocketService,
+        >,
     ) -> Result<BootstrapEngine, RunError> {
         let outbounds = self.build_outbounds(addresses)?;
         let tagged = Arc::new(std::sync::OnceLock::new());
@@ -670,7 +701,9 @@ impl BootstrapBlueprint {
             .outbounds
             .iter()
             .map(|outbound| match outbound {
-                BootstrapOutbound::Direct { domain_resolver } => {
+                BootstrapOutbound::Direct {
+                    domain_resolver, ..
+                } => {
                     let (resolver, strategy) = match *domain_resolver {
                         DirectDomainResolver::System => (
                             ApplicationResolver::system_default(),
@@ -698,12 +731,7 @@ impl BootstrapBlueprint {
             .into();
         #[cfg(all(windows, not(test)))]
         let connector =
-            TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
-                ferrum2_runtime::SystemSocketInspector,
-                super::egress::ManagedTcpDialer::new(underlay.clone()),
-                application_resolver.clone(),
-                self.runtime.connect_timeout,
-            ));
+            super::egress::NetworkServiceConnector::new(Arc::clone(&network_socket_service));
         #[cfg(any(not(windows), test))]
         let connector =
             TokioConnector::new(ferrum2_runtime::TcpConnector::with_resolution_adapters(
@@ -716,21 +744,22 @@ impl BootstrapBlueprint {
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
             live_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         };
-        let engine = Arc::new(
-            ClientEgressEngine::new_with_direct_resolvers(
-                outbounds,
-                connector,
-                SystemClock::new(),
-                SystemRandom,
-                (self.runtime.connect_timeout, self.runtime.handshake_timeout),
-                Some(udp),
-                application_resolver,
-                direct_resolvers,
-                #[cfg(test)]
-                None,
-            )
-            .with_underlay(underlay, auto_route),
-        );
+        let engine = ClientEgressEngine::new_with_direct_resolvers(
+            outbounds,
+            connector,
+            SystemClock::new(),
+            SystemRandom,
+            (self.runtime.connect_timeout, self.runtime.handshake_timeout),
+            Some(udp),
+            application_resolver,
+            direct_resolvers,
+            #[cfg(test)]
+            None,
+        )
+        .with_route_network(self.route_network.clone());
+        #[cfg(all(windows, not(test)))]
+        let engine = engine.with_shared_network_reset(&network_socket_service)?;
+        let engine = Arc::new(engine);
         Ok(BootstrapEngine { engine, tagged })
     }
 
@@ -771,11 +800,13 @@ impl BootstrapBlueprint {
         engine: &BootstrapEngine,
         addresses: &BootstrapAddresses,
     ) -> Result<(Arc<TaggedResolver>, TaggedResolverOwner), RunError> {
+        let dns_egress = ClientDnsEgress::new(Arc::clone(&engine.engine))
+            .map_err(|()| RunError::StartupProtocol)?;
         let (resolver, owner) = TaggedResolver::new(
             self.dns_specs(addresses),
             self.dns_timeout,
             self.dns_max_inflight,
-            Arc::new(ClientDnsEgress::new(Arc::clone(&engine.engine))),
+            Arc::new(dns_egress),
         )
         .map_err(|_| RunError::StartupProtocol)?;
         let resolver = Arc::new(resolver);
@@ -823,6 +854,8 @@ struct BootstrapEndpointBackend {
     next_target: AtomicUsize,
     addresses: Mutex<BootstrapAddresses>,
     metrics: Arc<Metrics>,
+    #[cfg(all(windows, not(test)))]
+    network_socket_service: Arc<super::egress::ClientNetworkSocketService>,
 }
 
 impl BootstrapEndpointBackend {
@@ -830,6 +863,9 @@ impl BootstrapEndpointBackend {
         blueprint: Arc<BootstrapBlueprint>,
         targets: Vec<PreparedFixedEndpointTarget>,
         metrics: Arc<Metrics>,
+        #[cfg(all(windows, not(test)))] network_socket_service: Arc<
+            super::egress::ClientNetworkSocketService,
+        >,
     ) -> Self {
         let addresses = blueprint.initial_addresses();
         Self {
@@ -838,6 +874,8 @@ impl BootstrapEndpointBackend {
             next_target: AtomicUsize::new(0),
             addresses: Mutex::new(addresses),
             metrics,
+            #[cfg(all(windows, not(test)))]
+            network_socket_service,
         }
     }
 
@@ -918,7 +956,11 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
             let addresses = self.addresses();
             let engine = self
                 .blueprint
-                .build_engine(&addresses, ferrum2_tun::UnderlayPublisher::new(), false)
+                .build_engine(
+                    &addresses,
+                    #[cfg(all(windows, not(test)))]
+                    Arc::clone(&self.network_socket_service),
+                )
                 .map_err(|_| DnsError::Runtime)?;
             let (tagged, mut owner) = self
                 .blueprint

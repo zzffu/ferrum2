@@ -55,6 +55,17 @@ pub enum WaitOutcome {
     Work,
 }
 
+/// Closed result of one bounded read-only Windows network-change wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkChangeWaitOutcome {
+    /// One or more route, interface, or unicast-address notifications were coalesced.
+    Changed,
+    /// The bounded wait elapsed without observing a network change.
+    TimedOut,
+    /// Process-level stop was signalled and takes precedence over a pending change.
+    Stopped,
+}
+
 /// Stable semantic result after one debounced network-notification burst.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetworkChangeOutcome {
@@ -88,6 +99,8 @@ pub enum ManagedStateDamage {
     Dns,
     /// One or more owned strict-route WFP objects are absent or no longer exact.
     StrictRoute,
+    /// The internal ownership journal is incomplete or contradicts the configured managed plane.
+    OwnershipLedger,
 }
 
 /// Complete validated setup input for one newly-created Wintun adapter.
@@ -440,21 +453,28 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+#[cfg(any(all(windows, target_arch = "x86_64"), feature = "fuzzing"))]
+mod strict_route;
+#[cfg(feature = "fuzzing")]
+pub use strict_route::{
+    FUZZ_MAX_WFP_APP_ID_BYTES, StrictRouteRulePlanObservation, fuzz_strict_route_rule_plan,
+};
+
 #[cfg(all(windows, target_arch = "x86_64"))]
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub use windows::{
-    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog,
-    WindowsResolvedSocketBinder, WorkSignal, bind_resolved_socket,
+    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkChangeMonitor,
+    WindowsNetworkInterfaceCatalog, WindowsResolvedSocketBinder, WorkSignal, bind_resolved_socket,
 };
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 mod unsupported;
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 pub use unsupported::{
-    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog,
-    WindowsResolvedSocketBinder, WorkSignal,
+    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkChangeMonitor,
+    WindowsNetworkInterfaceCatalog, WindowsResolvedSocketBinder, WorkSignal,
 };
 
 #[cfg(test)]
@@ -464,7 +484,7 @@ mod tests {
 
     use super::{
         ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, ErrorKind, IpPrefix,
-        Ipv4Prefix, Ipv6Prefix, ManagedNetworkConfig,
+        Ipv4Prefix, Ipv6Prefix, ManagedNetworkConfig, NetworkChangeWaitOutcome,
     };
 
     #[test]
@@ -520,6 +540,23 @@ mod tests {
             assert!(!format!("{error:?}").is_empty());
         }
         assert_eq!(Error::cleanup().kind(), ErrorKind::Cleanup);
+    }
+
+    #[test]
+    fn network_change_wait_outcomes_are_closed() {
+        assert_eq!(
+            [
+                NetworkChangeWaitOutcome::Changed,
+                NetworkChangeWaitOutcome::TimedOut,
+                NetworkChangeWaitOutcome::Stopped,
+            ]
+            .map(|outcome| match outcome {
+                NetworkChangeWaitOutcome::Changed => "changed",
+                NetworkChangeWaitOutcome::TimedOut => "timed_out",
+                NetworkChangeWaitOutcome::Stopped => "stopped",
+            }),
+            ["changed", "timed_out", "stopped"]
+        );
     }
 
     #[test]

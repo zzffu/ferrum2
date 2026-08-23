@@ -564,6 +564,7 @@ pub(in crate::run) fn test_routing(
                 tcp_server: TargetAddr::ipv4(server).expect("server target"),
                 udp_server: server.into(),
                 keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
+                dial_options: ferrum2_runtime::DialOptions::default(),
             },
         )]
         .into(),

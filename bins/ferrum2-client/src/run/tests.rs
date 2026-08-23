@@ -1711,6 +1711,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
                             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
                                 psk_for_method(MethodProfile::Blake3Aes128Gcm2022),
                             )),
+                            dial_options: ferrum2_runtime::DialOptions::default(),
                         })
                     })
                     .into(),

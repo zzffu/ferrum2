@@ -37,7 +37,55 @@ type Packet = Vec<u8>;
 type ReserveFuture = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<Packet>, mpsc::error::SendError<()>>> + Send>,
 >;
-type DnsUdpPool = Arc<Mutex<Vec<IdleDnsUdp>>>;
+type DnsUdpPool = Arc<DnsUdpPoolState<IdleDnsUdp>>;
+
+struct DnsUdpPoolState<T> {
+    inner: Mutex<DnsUdpPoolInner<T>>,
+}
+
+struct DnsUdpPoolInner<T> {
+    generation: u64,
+    accepts_reuse: bool,
+    idle: Vec<T>,
+}
+
+impl<T> Default for DnsUdpPoolState<T> {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(DnsUdpPoolInner {
+                generation: 0,
+                accepts_reuse: true,
+                idle: Vec::new(),
+            }),
+        }
+    }
+}
+
+impl<T> DnsUdpPoolState<T> {
+    fn reset(&self) -> usize {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.generation.checked_add(1) {
+            Some(generation) => inner.generation = generation,
+            None => inner.accepts_reuse = false,
+        }
+        let count = inner.idle.len();
+        inner.idle.clear();
+        count
+    }
+
+    fn put(&self, generation: u64, value: T) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.accepts_reuse && inner.generation == generation {
+            inner.idle.push(value);
+        }
+    }
+}
 
 /// Configured application resolver backend bound to the one prepared client
 /// DNS proxy graph. Absence or shutdown is terminal and never reaches system
@@ -121,14 +169,21 @@ pub(super) fn dns_query_type(code: u16) -> Option<DnsQueryType> {
 pub(super) struct ClientDnsEgress {
     engine: Arc<ClientEgressEngine>,
     udp_pool: DnsUdpPool,
+    _network_reset_action: Arc<super::egress::ClientDnsResetAction>,
 }
 
 impl ClientDnsEgress {
-    pub(super) fn new(engine: Arc<ClientEgressEngine>) -> Self {
-        Self {
+    pub(super) fn new(engine: Arc<ClientEgressEngine>) -> Result<Self, ()> {
+        let udp_pool = Arc::new(DnsUdpPoolState::default());
+        let weak_pool = Arc::downgrade(&udp_pool);
+        let network_reset_action: Arc<super::egress::ClientDnsResetAction> =
+            Arc::new(move || weak_pool.upgrade().map_or(0, |pool| pool.reset()));
+        engine.register_dns_reset_action(&network_reset_action)?;
+        Ok(Self {
             engine,
-            udp_pool: Arc::new(Mutex::new(Vec::new())),
-        }
+            udp_pool,
+            _network_reset_action: network_reset_action,
+        })
     }
 }
 
@@ -146,6 +201,7 @@ struct IdleDnsUdp {
 struct PooledDnsUdp {
     idle: Option<IdleDnsUdp>,
     pool: DnsUdpPool,
+    pool_generation: u64,
     reusable: bool,
 }
 
@@ -188,21 +244,21 @@ impl Drop for PooledDnsUdp {
         let Some(idle) = self.idle.take() else {
             return;
         };
-        if let Ok(mut pool) = self.pool.lock() {
-            pool.push(idle);
-        }
+        self.pool.put(self.pool_generation, idle);
     }
 }
 
 fn take_dns_udp(
     pool: &DnsUdpPool,
     key: &DnsUdpPoolKey,
-) -> io::Result<(Option<IdleDnsUdp>, Option<IdleDnsUdp>)> {
-    let mut idle = pool.lock().map_err(|_| invalid_target())?;
-    Ok(match idle.iter().position(|idle| idle.key == *key) {
-        Some(index) => (Some(idle.swap_remove(index)), None),
-        None => (None, idle.pop()),
-    })
+) -> io::Result<(Option<IdleDnsUdp>, Option<IdleDnsUdp>, u64)> {
+    let mut pool = pool.inner.lock().map_err(|_| invalid_target())?;
+    let generation = pool.generation;
+    let (matching, stale) = match pool.idle.iter().position(|idle| idle.key == *key) {
+        Some(index) => (Some(pool.idle.swap_remove(index)), None),
+        None => (None, pool.idle.pop()),
+    };
+    Ok((matching, stale, generation))
 }
 
 impl DnsEgress for ClientDnsEgress {
@@ -257,7 +313,7 @@ impl DnsEgress for ClientDnsEgress {
                 plan: plan.clone(),
                 target: target.clone(),
             };
-            let (idle, stale) = take_dns_udp(&pool, &key)?;
+            let (idle, stale, pool_generation) = take_dns_udp(&pool, &key)?;
             let reusable = idle.is_some();
             drop(stale);
             let idle = match idle {
@@ -273,6 +329,7 @@ impl DnsEgress for ClientDnsEgress {
             let mut prepared = PooledDnsUdp {
                 idle: Some(idle),
                 pool,
+                pool_generation,
                 reusable,
             };
 
@@ -420,6 +477,35 @@ mod tests {
         ClientRunResources, dns_egress, run_with_registry_and_metrics,
         run_with_registry_and_metrics_inner,
     };
+
+    #[test]
+    fn dns_udp_pool_reset_synchronously_drops_every_idle_owner() {
+        struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = DnsUdpPoolState::default();
+        pool.inner.lock().unwrap().idle.extend([
+            DropCounter(Arc::clone(&drops)),
+            DropCounter(Arc::clone(&drops)),
+        ]);
+
+        assert_eq!(pool.reset(), 2);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(pool.reset(), 0, "a repeated reset is idempotent");
+
+        pool.put(0, DropCounter(Arc::clone(&drops)));
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "an owner acquired before reset cannot return to the new pool generation"
+        );
+    }
 
     #[test]
     fn proxy_qtype_codes_map_to_the_closed_config_vocabulary() {
@@ -930,14 +1016,18 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 .prepare_udp_with(selected.clone(), UdpSocket::bind)
                 .await
                 .expect("key association");
-            let pool = Arc::new(Mutex::new(vec![IdleDnsUdp {
-                key: DnsUdpPoolKey {
-                    plan: Some(selected.clone()),
-                    target: target.clone(),
+            let pool = Arc::new(DnsUdpPoolState::default());
+            pool.put(
+                0,
+                IdleDnsUdp {
+                    key: DnsUdpPoolKey {
+                        plan: Some(selected.clone()),
+                        target: target.clone(),
+                    },
+                    association,
                 },
-                association,
-            }]));
-            let (matched, stale) = take_dns_udp(&pool, &candidate).expect("key lookup");
+            );
+            let (matched, stale, _) = take_dns_udp(&pool, &candidate).expect("key lookup");
             assert_eq!(matched.is_some(), reusable, "{case}");
             assert_eq!(stale.is_some(), !reusable, "{case}");
             drop((matched, stale));
@@ -963,7 +1053,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             association
                 .activate(&context.egress)
                 .expect("mutation activation");
-            let pool = Arc::new(Mutex::new(Vec::new()));
+            let pool = Arc::new(DnsUdpPoolState::default());
             let (session_responses, mut responses) = mpsc::channel(1);
             let mut pooled = PooledDnsUdp {
                 idle: Some(IdleDnsUdp {
@@ -974,6 +1064,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     association,
                 }),
                 pool: Arc::clone(&pool),
+                pool_generation: 0,
                 reusable: false,
             };
             let mutation_handle = pooled
@@ -1021,7 +1112,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             assert_eq!(response, payload, "{case}");
             assert!(fully_reusable, "{case} healthy mutation tainted");
             drop(pooled);
-            assert_eq!(pool.lock().expect("healthy mutation pool").len(), 1);
+            assert_eq!(
+                pool.inner.lock().expect("healthy mutation pool").idle.len(),
+                1
+            );
             assert_eq!(
                 protocol_server
                     .session_count()
@@ -1033,13 +1127,15 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 plan: Some(plan.clone()),
                 target: numeric_target.clone(),
             };
-            let (matched, stale) = take_dns_udp(&pool, &key).expect("mutation exact reuse");
+            let (matched, stale, pool_generation) =
+                take_dns_udp(&pool, &key).expect("mutation exact reuse");
             assert!(stale.is_none(), "{case} healthy exact key was discarded");
             let idle = matched.expect("mutation exact-key association");
             assert_eq!(idle.association.handle(), mutation_handle, "{case}");
             let mut pooled = PooledDnsUdp {
                 idle: Some(idle),
                 pool: Arc::clone(&pool),
+                pool_generation,
                 reusable: true,
             };
             match case {
@@ -1168,7 +1264,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 "{case} request start retained reusable state"
             );
             drop(pooled);
-            assert!(pool.lock().expect("mutation pool").is_empty(), "{case}");
+            assert!(
+                pool.inner.lock().expect("mutation pool").idle.is_empty(),
+                "{case}"
+            );
 
             let sessions_before = protocol_server
                 .session_count()
@@ -1186,21 +1285,27 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 association,
             });
             for valid in 0..2_u8 {
-                let (idle, reusable) = match initial.take() {
-                    Some(idle) => (idle, false),
+                let (idle, reusable, pool_generation) = match initial.take() {
+                    Some(idle) => (idle, false, 0),
                     None => {
                         let key = DnsUdpPoolKey {
                             plan: Some(plan.clone()),
                             target: numeric_target.clone(),
                         };
-                        let (matched, stale) = take_dns_udp(&pool, &key).expect("healthy reuse");
+                        let (matched, stale, pool_generation) =
+                            take_dns_udp(&pool, &key).expect("healthy reuse");
                         assert!(stale.is_none(), "healthy exact key was discarded");
-                        (matched.expect("healthy exact-key association"), true)
+                        (
+                            matched.expect("healthy exact-key association"),
+                            true,
+                            pool_generation,
+                        )
                     }
                 };
                 let mut healthy = PooledDnsUdp {
                     idle: Some(idle),
                     pool: Arc::clone(&pool),
+                    pool_generation,
                     reusable,
                 };
                 let payload = vec![0x30 + valid];
@@ -1242,7 +1347,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 assert_eq!(response, payload, "{case}");
                 assert!(fully_reusable, "{case} healthy association tainted");
                 drop(healthy);
-                assert_eq!(pool.lock().expect("healthy pool").len(), 1, "{case}");
+                assert_eq!(
+                    pool.inner.lock().expect("healthy pool").idle.len(),
+                    1,
+                    "{case}"
+                );
             }
             assert_eq!(
                 protocol_server
@@ -1251,7 +1360,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 sessions_before + 1,
                 "{case} exact-key reuse created another SIP022 session"
             );
-            drop(pool.lock().expect("healthy pool").pop());
+            drop(pool.inner.lock().expect("healthy pool").idle.pop());
             assert_eq!(registry.snapshot(), baseline, "{case}");
         }
         drop((context, protocol_server, keys));

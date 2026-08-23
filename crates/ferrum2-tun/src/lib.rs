@@ -426,6 +426,7 @@ pub fn process_root<E, H, U, R, M>(
     config: Config,
     initial_network_generation: u64,
     underlay: UnderlayPublisher,
+    network_catalog: ferrum2_wintun::WindowsNetworkInterfaceCatalog,
     startup: E,
     runtime: E,
     cleanup: E,
@@ -472,6 +473,7 @@ where
             cancellation,
             RootServices {
                 registry,
+                network_catalog,
                 handle_tcp: Arc::new(handle_tcp),
                 handle_udp: Arc::new(handle_udp),
                 handle_network_lifecycle: Arc::new(handle_network_lifecycle),
@@ -489,6 +491,7 @@ pub fn process_root<E, H, U, R, M>(
     _config: Config,
     _initial_network_generation: u64,
     _underlay: UnderlayPublisher,
+    _network_catalog: ferrum2_wintun::WindowsNetworkInterfaceCatalog,
     startup: E,
     _runtime: E,
     _cleanup: E,
@@ -552,6 +555,7 @@ struct RootErrors<E> {
 #[cfg(all(windows, target_arch = "x86_64"))]
 struct RootServices {
     registry: OwnerRegistry,
+    network_catalog: ferrum2_wintun::WindowsNetworkInterfaceCatalog,
     handle_tcp: TcpHandler,
     handle_udp: UdpHandler,
     handle_network_lifecycle: NetworkLifecycleHandler,
@@ -722,6 +726,7 @@ where
 {
     let RootServices {
         registry,
+        network_catalog,
         handle_tcp,
         handle_udp,
         handle_network_lifecycle,
@@ -752,6 +757,7 @@ where
                     OwnerSessionServices {
                         ready: ready_sender,
                         registry: owner_registry,
+                        network_catalog,
                         events,
                         underlay,
                         flow_output: flow_sender,
@@ -1238,6 +1244,7 @@ fn finish_stack_setup<T, A, C>(
 struct OwnerSessionServices {
     ready: std::sync::mpsc::SyncSender<OwnerReady>,
     registry: OwnerRegistry,
+    network_catalog: ferrum2_wintun::WindowsNetworkInterfaceCatalog,
     events: TunEventSink,
     underlay: UnderlayPublisher,
     flow_output: tokio::sync::mpsc::Sender<SessionItem<TcpFlow>>,
@@ -1335,6 +1342,9 @@ const fn map_managed_state_damage(
         ferrum2_wintun::ManagedStateDamage::Dns => TunNetworkFullRebuildReason::DnsDamage,
         ferrum2_wintun::ManagedStateDamage::StrictRoute => {
             TunNetworkFullRebuildReason::StrictRouteDamage
+        }
+        ferrum2_wintun::ManagedStateDamage::OwnershipLedger => {
+            TunNetworkFullRebuildReason::OwnershipLedgerDamage
         }
     }
 }
@@ -1614,6 +1624,7 @@ fn owner_main(
     let OwnerSessionServices {
         ready,
         registry,
+        network_catalog,
         events,
         underlay,
         flow_output,
@@ -1716,7 +1727,12 @@ fn owner_main(
         } else if let Some(adapter) = retained_rebuild {
             adapter
         } else {
-            match ferrum2_wintun::Adapter::create(adapter_config.clone(), deadline, &control.stop) {
+            match ferrum2_wintun::Adapter::create(
+                adapter_config.clone(),
+                deadline,
+                &control.stop,
+                network_catalog.clone(),
+            ) {
                 Ok(adapter) => {
                     if config.strict_route {
                         events.emit(TunEvent::StrictRouteFilterInstalled);
@@ -6641,6 +6657,7 @@ mod tests {
             ferrum2_wintun::ManagedStateDamage::Route,
             ferrum2_wintun::ManagedStateDamage::Dns,
             ferrum2_wintun::ManagedStateDamage::StrictRoute,
+            ferrum2_wintun::ManagedStateDamage::OwnershipLedger,
         ] {
             assert_eq!(
                 classify_network_change(ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(
@@ -6665,6 +6682,7 @@ mod tests {
             ferrum2_wintun::ManagedStateDamage::Route,
             ferrum2_wintun::ManagedStateDamage::Dns,
             ferrum2_wintun::ManagedStateDamage::StrictRoute,
+            ferrum2_wintun::ManagedStateDamage::OwnershipLedger,
         ] {
             assert_eq!(
                 classify_network_reset_health(Ok(ferrum2_wintun::ManagedTunHealth::Damaged(

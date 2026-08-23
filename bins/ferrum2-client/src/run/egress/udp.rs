@@ -1,6 +1,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(any(not(windows), test))]
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
@@ -9,11 +11,14 @@ use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 #[cfg(test)]
 use ferrum2_crypto::MethodProfile;
 use ferrum2_crypto::{Clock, MethodKeyProvider, SecureRandom, UdpSessionId};
+#[cfg(all(windows, not(test)))]
+use ferrum2_runtime::RouteNetworkOptions;
 use ferrum2_runtime::{
-    AccountedDatagram, DirectUdpSocket, DirectUdpSocketFactory, MAX_UDP_RESOLVED_CANDIDATES,
-    MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram, PendingUdpSession, SystemDirectUdpSocket,
-    SystemDirectUdpSocketFactory, UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation, UdpCommitError,
-    UdpDirection, UdpResolver, UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
+    AccountedDatagram, DialOptions, DirectUdpSocket, DirectUdpSocketFactory,
+    MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram,
+    PendingUdpSession, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
+    UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation, UdpCommitError, UdpDirection, UdpResolver,
+    UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
 };
 #[cfg(test)]
 use ferrum2_shadowsocks::MethodKeyAdapter;
@@ -38,10 +43,6 @@ pub(in crate::run) struct ClientUdpContext {
 impl ClientUdpContext {
     pub(in crate::run) fn cancel_all(&self) {
         self.manager.cancel_all();
-    }
-
-    pub(in crate::run) fn reset_network(&self) -> usize {
-        self.manager.reset_all()
     }
 }
 
@@ -103,6 +104,7 @@ impl UdpIoFaultPlan {
 
 pub(in crate::run) struct ClientUdpAssociation {
     plan: Option<EgressPlanSnapshot>,
+    _network_generation: Option<u64>,
     first_server: Option<SocketAddr>,
     protocol: Option<ClientUdpPlan>,
     pending_session: Option<PendingUdpSession>,
@@ -120,7 +122,7 @@ pub(in crate::run) struct ClientUdpAssociation {
     pending_direct_response: Option<(BytesMut, SocketAddr)>,
     direct_wire: Option<BytesMut>,
     inner_wire: Option<Vec<u8>>,
-    upstream_wire: Option<Vec<u8>>,
+    upstream_wire: Option<BytesMut>,
     scratch: Option<UdpPacketScratch>,
     _metered_fixed_capacity: Vec<UdpBufferReservation>,
     #[cfg(test)]
@@ -128,14 +130,133 @@ pub(in crate::run) struct ClientUdpAssociation {
 }
 
 enum ClientUdpUpstream {
-    Shadowsocks(UdpSocket),
-    Direct(ClientDirectUdpSocket),
+    Shadowsocks {
+        socket: ClientDirectUdpSocket,
+        peer: SocketAddr,
+    },
+    Direct {
+        socket: Option<ClientDirectUdpSocket>,
+        factory: ClientUdpSocketFactory,
+    },
 }
 
-enum ClientDirectUdpSocket {
+pub(super) enum ClientDirectUdpSocket {
     System(SystemDirectUdpSocket),
-    #[cfg(windows)]
-    Managed(UdpSocket),
+    #[cfg(any(not(windows), test))]
+    Raw(UdpSocket),
+    #[cfg(all(windows, not(test)))]
+    Network(ferrum2_runtime::GenerationBoundUdpSocket<UdpSocket>),
+    #[cfg(test)]
+    Injected(InjectedDirectUdpSocket),
+}
+
+pub(in crate::run) enum ClientUdpSocketFactory {
+    System,
+    #[cfg(all(windows, not(test)))]
+    Network {
+        service: Arc<super::ClientNetworkSocketService>,
+        expected_generation: u64,
+        dial_options: DialOptions,
+        route_network: RouteNetworkOptions,
+    },
+    #[cfg(test)]
+    Injected {
+        trace: Arc<InjectedUdpSocketTrace>,
+    },
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(in crate::run) struct InjectedUdpSocketTrace {
+    opened: Mutex<Vec<SocketAddr>>,
+    sent: Mutex<Vec<SocketAddr>>,
+}
+
+#[cfg(test)]
+impl InjectedUdpSocketTrace {
+    pub(super) fn opened(&self) -> Vec<SocketAddr> {
+        self.opened.lock().expect("injected UDP opens").clone()
+    }
+
+    pub(super) fn sent(&self) -> Vec<SocketAddr> {
+        self.sent.lock().expect("injected UDP sends").clone()
+    }
+
+    fn record_open(&self, destination: SocketAddr) {
+        self.opened
+            .lock()
+            .expect("injected UDP opens")
+            .push(destination);
+    }
+
+    fn record_send(&self, destination: SocketAddr) {
+        self.sent
+            .lock()
+            .expect("injected UDP sends")
+            .push(destination);
+    }
+}
+
+#[cfg(test)]
+pub(super) struct InjectedDirectUdpSocket {
+    trace: Arc<InjectedUdpSocketTrace>,
+}
+
+impl ClientUdpSocketFactory {
+    pub(super) const fn system() -> Self {
+        Self::System
+    }
+
+    #[cfg(test)]
+    pub(super) const fn injected(trace: Arc<InjectedUdpSocketTrace>) -> Self {
+        Self::Injected { trace }
+    }
+
+    #[cfg(all(windows, not(test)))]
+    pub(super) const fn network(
+        service: Arc<super::ClientNetworkSocketService>,
+        expected_generation: u64,
+        dial_options: DialOptions,
+        route_network: RouteNetworkOptions,
+    ) -> Self {
+        Self::Network {
+            service,
+            expected_generation,
+            dial_options,
+            route_network,
+        }
+    }
+
+    async fn open(&self, selection_destination: SocketAddr) -> io::Result<ClientDirectUdpSocket> {
+        match self {
+            Self::System => SystemDirectUdpSocketFactory
+                .open((), selection_destination)
+                .await
+                .map(ClientDirectUdpSocket::System),
+            #[cfg(all(windows, not(test)))]
+            Self::Network {
+                service,
+                expected_generation,
+                dial_options,
+                route_network,
+            } => service
+                .open_udp(
+                    *expected_generation,
+                    dial_options,
+                    route_network,
+                    selection_destination,
+                )
+                .map(ClientDirectUdpSocket::Network)
+                .map_err(super::io_error_from_network_service),
+            #[cfg(test)]
+            Self::Injected { trace } => {
+                trace.record_open(selection_destination);
+                Ok(ClientDirectUdpSocket::Injected(InjectedDirectUdpSocket {
+                    trace: Arc::clone(trace),
+                }))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,124 +345,55 @@ impl DirectUdpCandidateHints {
     }
 }
 
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ManagedUdpBinding {
-    Fixed(SocketAddr),
-    Target(SocketAddr),
-}
-
-#[cfg(all(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ManagedUdpEvent {
-    OpenV4,
-    OpenV6,
-    BindFixed(SocketAddr),
-    BindTarget(SocketAddr),
-    Connect(SocketAddr),
-}
-
-#[cfg(any(windows, test))]
-fn managed_udp_binding(
-    origin: ClientRequestOrigin,
-    selected: SelectedEgress,
-    auto_route: bool,
-    target: Option<&TargetAddr>,
-) -> Result<Option<ManagedUdpBinding>, ()> {
-    match selected {
-        SelectedEgress::Shadowsocks { first_server } if auto_route => {
-            Ok(Some(ManagedUdpBinding::Fixed(first_server)))
-        }
-        SelectedEgress::Shadowsocks { .. } => Ok(None),
-        SelectedEgress::Direct { .. } if auto_route && origin == ClientRequestOrigin::Dns => {
-            match target.and_then(TargetAddr::as_socket_addr) {
-                Some(endpoint) => Ok(Some(ManagedUdpBinding::Fixed(endpoint))),
-                // There is no safe adapter-wide fallback: a deferred destination
-                // must be resolved to a numeric bootstrap before opening its socket.
-                None => Err(()),
-            }
-        }
-        SelectedEgress::Direct { .. } if auto_route || origin == ClientRequestOrigin::Tun => target
-            .and_then(TargetAddr::as_socket_addr)
-            .map(ManagedUdpBinding::Target)
-            .map(Some)
-            .ok_or(()),
-        SelectedEgress::Direct { .. } => Ok(None),
-    }
-}
-
-#[cfg(any(windows, test))]
-trait ManagedUdpOperations {
-    type Socket;
-
-    async fn open_v4(&mut self) -> io::Result<Self::Socket>;
-    async fn open_v6(&mut self) -> io::Result<Self::Socket>;
-    fn bind_fixed(&self, socket: &Self::Socket, endpoint: SocketAddr) -> Result<(), ()>;
-    fn bind_target(&self, socket: &Self::Socket, target: SocketAddr) -> Result<(), ()>;
-    async fn connect(&self, socket: &Self::Socket, endpoint: SocketAddr) -> io::Result<()>;
-}
-
-#[cfg(any(windows, test))]
-async fn open_managed_udp<O: ManagedUdpOperations>(
-    operations: &mut O,
-    binding: ManagedUdpBinding,
-    connect: Option<SocketAddr>,
-) -> Result<O::Socket, ()> {
-    let binding_endpoint = match binding {
-        ManagedUdpBinding::Fixed(endpoint) | ManagedUdpBinding::Target(endpoint) => endpoint,
-    };
-    if connect.is_some_and(|endpoint| endpoint.is_ipv4() != binding_endpoint.is_ipv4()) {
-        return Err(());
-    }
-    let socket = if binding_endpoint.is_ipv4() {
-        operations.open_v4().await
-    } else {
-        operations.open_v6().await
-    }
-    .map_err(|_| ())?;
-    match binding {
-        ManagedUdpBinding::Fixed(endpoint) => operations.bind_fixed(&socket, endpoint)?,
-        ManagedUdpBinding::Target(target) => operations.bind_target(&socket, target)?,
-    }
-    if let Some(endpoint) = connect {
-        operations
-            .connect(&socket, endpoint)
-            .await
-            .map_err(|_| ())?;
-    }
-    Ok(socket)
-}
-
 impl DirectUdpSocket for ClientDirectUdpSocket {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         match self {
             Self::System(socket) => socket.send_to(payload, target).await,
-            #[cfg(windows)]
-            Self::Managed(socket) => socket.send_to(payload, target).await,
+            #[cfg(any(not(windows), test))]
+            Self::Raw(socket) => socket.send_to(payload, target).await,
+            #[cfg(all(windows, not(test)))]
+            Self::Network(socket) => socket.send_to(payload, target).await,
+            #[cfg(test)]
+            Self::Injected(socket) => {
+                socket.trace.record_send(target);
+                Ok(payload.len())
+            }
         }
     }
 
     async fn readable(&self) -> io::Result<()> {
         match self {
             Self::System(socket) => socket.readable().await,
-            #[cfg(windows)]
-            Self::Managed(socket) => socket.readable().await,
+            #[cfg(any(not(windows), test))]
+            Self::Raw(socket) => socket.readable().await,
+            #[cfg(all(windows, not(test)))]
+            Self::Network(socket) => socket.readable().await,
+            #[cfg(test)]
+            Self::Injected(_) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
         }
     }
 
     async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.recv_buf_from(payload).await,
-            #[cfg(windows)]
-            Self::Managed(socket) => socket.recv_buf_from(payload).await,
+            #[cfg(any(not(windows), test))]
+            Self::Raw(socket) => socket.recv_buf_from(payload).await,
+            #[cfg(all(windows, not(test)))]
+            Self::Network(socket) => socket.recv_buf_from(payload).await,
+            #[cfg(test)]
+            Self::Injected(_) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
         }
     }
 
     fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.try_recv_buf_from(payload),
-            #[cfg(windows)]
-            Self::Managed(socket) => socket.try_recv_buf_from(payload),
+            #[cfg(any(not(windows), test))]
+            Self::Raw(socket) => socket.try_recv_buf_from(payload),
+            #[cfg(all(windows, not(test)))]
+            Self::Network(socket) => socket.try_recv_buf_from(payload),
+            #[cfg(test)]
+            Self::Injected(_) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
         }
     }
 }
@@ -376,7 +428,7 @@ impl ClientUdpAssociation {
     where
         R: SecureRandom,
     {
-        if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+        if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
             return Ok(());
         }
         if self.protocol.is_some() {
@@ -434,6 +486,7 @@ impl ClientUdpAssociation {
         let upstream_wire = upstream_wire
             .as_mut()
             .expect("proxy UDP association owns its upstream wire buffer");
+        upstream_wire.resize(MAX_UDP_WIRE_LEN, 0);
         let scratch = scratch
             .as_mut()
             .expect("proxy UDP association owns its packet scratch");
@@ -680,8 +733,8 @@ impl ClientUdpAssociation {
         encoded_target_len: usize,
     ) -> usize {
         match &self.upstream {
-            ClientUdpUpstream::Direct(_) => MAX_UDP_WIRE_DATAGRAM_BYTES,
-            ClientUdpUpstream::Shadowsocks(_) => composed_udp_plan_limit(
+            ClientUdpUpstream::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
+            ClientUdpUpstream::Shadowsocks { .. } => composed_udp_plan_limit(
                 outbounds,
                 self.plan.as_ref().expect("proxy UDP plan").hops(),
                 response,
@@ -742,7 +795,7 @@ impl ClientUdpAssociation {
         let datagram = self
             .commit_application_datagram(reservation, datagram, now)
             .map_err(UdpPlanResponseError::Runtime)?;
-        let wire_len = if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+        let wire_len = if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
             self.direct_target = Some(datagram.datagram().target().clone());
             let direct_wire = self
                 .direct_wire
@@ -767,7 +820,7 @@ impl ClientUdpAssociation {
     where
         T: Clock,
     {
-        let response = if matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+        let response = if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
             let (payload, source) =
                 self.pending_direct_response
                     .take()
@@ -808,7 +861,7 @@ impl ClientUdpAssociation {
     }
 
     pub(in crate::run) fn recycle_application_response(&mut self, response: AccountedDatagram) {
-        if !matches!(self.upstream, ClientUdpUpstream::Direct(_)) {
+        if !matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
             drop(response);
             return;
         }
@@ -834,15 +887,15 @@ impl ClientUdpAssociation {
         {
             return Err(io::Error::other("injected upstream send failure"));
         }
-        match &self.upstream {
-            ClientUdpUpstream::Shadowsocks(socket) => {
+        match &mut self.upstream {
+            ClientUdpUpstream::Shadowsocks { socket, peer } => {
                 let upstream_wire = self
                     .upstream_wire
                     .as_ref()
                     .expect("proxy UDP association owns its upstream wire buffer");
-                socket.send(&upstream_wire[..wire_len]).await
+                socket.send_to(&upstream_wire[..wire_len], *peer).await
             }
-            ClientUdpUpstream::Direct(socket) => {
+            ClientUdpUpstream::Direct { socket, factory } => {
                 let tracks_outstanding =
                     self.direct_response_policy == DirectUdpResponsePolicy::OutstandingPeers;
                 if tracks_outstanding && self.direct_peers.len() >= UDP_SESSION_QUEUE_DEPTH {
@@ -859,8 +912,9 @@ impl ClientUdpAssociation {
                     .direct_wire
                     .as_ref()
                     .expect("direct UDP association owns its request wire buffer");
-                let (length, peer) = send_direct_target(
+                let (length, peer) = send_direct_target_lazy(
                     socket,
+                    factory,
                     &self.direct_resolver,
                     &mut self.direct_candidate_hints,
                     target,
@@ -886,14 +940,17 @@ impl ClientUdpAssociation {
             return Err(io::Error::other("injected upstream receive failure"));
         }
         match &self.upstream {
-            ClientUdpUpstream::Shadowsocks(socket) => {
+            ClientUdpUpstream::Shadowsocks { socket, peer } => {
                 let upstream_wire = self
                     .upstream_wire
                     .as_mut()
                     .expect("proxy UDP association owns its upstream wire buffer");
-                socket.recv(upstream_wire).await
+                receive_proxy_response(socket, *peer, upstream_wire).await
             }
-            ClientUdpUpstream::Direct(socket) => {
+            ClientUdpUpstream::Direct {
+                socket: Some(socket),
+                ..
+            } => {
                 if self.pending_direct_response.is_some() {
                     return Err(io::Error::other("direct UDP response was not consumed"));
                 }
@@ -918,14 +975,22 @@ impl ClientUdpAssociation {
                 self.pending_direct_response = Some((payload, source));
                 Ok(length)
             }
+            ClientUdpUpstream::Direct { socket: None, .. } => {
+                Err(io::Error::other("direct UDP socket unavailable"))
+            }
         }
     }
 
     #[cfg(test)]
     pub(in crate::run) fn upstream_local_addr(&self) -> io::Result<SocketAddr> {
         match &self.upstream {
-            ClientUdpUpstream::Shadowsocks(socket) => socket.local_addr(),
-            ClientUdpUpstream::Direct(_) => Err(io::Error::other("direct UDP socket is opaque")),
+            ClientUdpUpstream::Shadowsocks {
+                socket: ClientDirectUdpSocket::Raw(socket),
+                ..
+            } => socket.local_addr(),
+            ClientUdpUpstream::Shadowsocks { .. } | ClientUdpUpstream::Direct { .. } => {
+                Err(io::Error::other("UDP socket is opaque"))
+            }
         }
     }
 
@@ -1019,70 +1084,6 @@ fn dns_response_target_matches(expected: &TargetAddr, actual: &TargetAddr) -> bo
     }
 }
 
-#[cfg(windows)]
-struct ClientManagedUdpOperations<'a, C, T, R, F, Fut> {
-    egress: &'a ClientEgressEngine<C, T, R>,
-    bind: &'a mut F,
-    _future: std::marker::PhantomData<fn() -> Fut>,
-}
-
-#[cfg(windows)]
-impl<C, T, R, F, Fut> ManagedUdpOperations for ClientManagedUdpOperations<'_, C, T, R, F, Fut>
-where
-    F: FnMut(SocketAddr) -> Fut,
-    Fut: std::future::Future<Output = io::Result<UdpSocket>>,
-{
-    type Socket = UdpSocket;
-
-    async fn open_v4(&mut self) -> io::Result<Self::Socket> {
-        #[cfg(test)]
-        self.egress
-            .record_managed_udp_event(ManagedUdpEvent::OpenV4)
-            .map_err(|()| io::Error::other("injected managed UDP open failure"))?;
-        (self.bind)(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await
-    }
-
-    async fn open_v6(&mut self) -> io::Result<Self::Socket> {
-        #[cfg(test)]
-        self.egress
-            .record_managed_udp_event(ManagedUdpEvent::OpenV6)
-            .map_err(|()| io::Error::other("injected managed UDP open failure"))?;
-        (self.bind)(SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)).await
-    }
-
-    fn bind_fixed(&self, _socket: &Self::Socket, endpoint: SocketAddr) -> Result<(), ()> {
-        #[cfg(test)]
-        return self
-            .egress
-            .record_managed_udp_event(ManagedUdpEvent::BindFixed(endpoint));
-        #[cfg(not(test))]
-        self.egress
-            .underlay
-            .bind_fixed(_socket, endpoint)
-            .map_err(|_| ())
-    }
-
-    fn bind_target(&self, _socket: &Self::Socket, target: SocketAddr) -> Result<(), ()> {
-        #[cfg(test)]
-        return self
-            .egress
-            .record_managed_udp_event(ManagedUdpEvent::BindTarget(target));
-        #[cfg(not(test))]
-        self.egress
-            .underlay
-            .bind_target(_socket, target)
-            .map_err(|_| ())
-    }
-
-    async fn connect(&self, socket: &Self::Socket, endpoint: SocketAddr) -> io::Result<()> {
-        #[cfg(test)]
-        self.egress
-            .record_managed_udp_event(ManagedUdpEvent::Connect(endpoint))
-            .map_err(|()| io::Error::other("injected managed UDP connect failure"))?;
-        socket.connect(endpoint).await
-    }
-}
-
 pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
     egress: &ClientEgressEngine<C, T, R>,
     origin: ClientRequestOrigin,
@@ -1090,16 +1091,18 @@ pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
     plan: Option<EgressPlanSnapshot>,
     selected: SelectedEgress,
     target: Option<&TargetAddr>,
-    mut bind: F,
+    bind: F,
 ) -> Result<ClientUdpAssociation, ()>
 where
+    C: super::ClientPhysicalConnector,
     F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
-    #[cfg(windows)]
-    let managed_binding = managed_udp_binding(origin, selected, egress.auto_route, target)?;
-    #[cfg(not(windows))]
-    let _ = (origin, target);
+    #[cfg(any(not(windows), test))]
+    let mut bind = bind;
+    #[cfg(all(windows, not(test)))]
+    let _ = bind;
+    let expected_network_generation = egress.connector.network_generation();
     let udp = egress.udp.as_ref().ok_or(())?;
     let direct_resolver = match selected {
         SelectedEgress::Direct {
@@ -1137,12 +1140,15 @@ where
     }
     let inner_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
         .then(|| vec![0_u8; MAX_UDP_WIRE_LEN]);
-    let upstream_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
-        .then(|| vec![0_u8; MAX_UDP_WIRE_LEN]);
+    let upstream_wire = matches!(selected, SelectedEgress::Shadowsocks { .. }).then(|| {
+        let mut wire = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
+        wire.resize(MAX_UDP_WIRE_LEN, 0);
+        wire
+    });
     let scratch =
         matches!(selected, SelectedEgress::Shadowsocks { .. }).then(UdpPacketScratch::new);
     let first_server = match selected {
-        SelectedEgress::Shadowsocks { first_server } => Some(first_server),
+        SelectedEgress::Shadowsocks { first_server, .. } => Some(first_server),
         SelectedEgress::Direct { .. } => None,
     };
     let direct_response_policy = match (selected, origin) {
@@ -1157,69 +1163,75 @@ where
         _ => DirectUdpResponsePolicy::OutstandingPeers,
     };
     let upstream = match selected {
-        SelectedEgress::Shadowsocks { first_server } => {
-            #[cfg(windows)]
-            let upstream = if let Some(binding) = managed_binding {
-                open_managed_udp(
-                    &mut ClientManagedUdpOperations {
-                        egress,
-                        bind: &mut bind,
-                        _future: std::marker::PhantomData,
-                    },
-                    binding,
-                    Some(first_server),
-                )
-                .await?
-            } else {
+        SelectedEgress::Shadowsocks {
+            first_outbound,
+            first_server,
+        } => {
+            let dial_options = egress
+                .outbounds
+                .get(first_outbound)
+                .ok_or(())?
+                .dial_options();
+            let factory = egress.connector.udp_socket_factory(
+                expected_network_generation,
+                dial_options,
+                &egress.route_network,
+            );
+            #[cfg(all(windows, not(test)))]
+            let socket = factory.open(first_server).await.map_err(|_| ())?;
+            #[cfg(all(not(windows), not(test)))]
+            let socket = {
+                let _ = factory;
                 let bind_address = if first_server.is_ipv4() {
                     SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
                 } else {
                     SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
                 };
-                let upstream = bind(bind_address).await.map_err(|_| ())?;
-                upstream.connect(first_server).await.map_err(|_| ())?;
-                upstream
+                ClientDirectUdpSocket::Raw(bind(bind_address).await.map_err(|_| ())?)
             };
-            #[cfg(not(windows))]
-            let upstream = {
-                let bind_address = if first_server.is_ipv4() {
-                    SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
-                } else {
-                    SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
-                };
-                let upstream = bind(bind_address).await.map_err(|_| ())?;
-                upstream.connect(first_server).await.map_err(|_| ())?;
-                upstream
+            #[cfg(test)]
+            let socket = match &factory {
+                ClientUdpSocketFactory::Injected { .. } => {
+                    factory.open(first_server).await.map_err(|_| ())?
+                }
+                ClientUdpSocketFactory::System => {
+                    let bind_address = if first_server.is_ipv4() {
+                        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
+                    } else {
+                        SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
+                    };
+                    ClientDirectUdpSocket::Raw(bind(bind_address).await.map_err(|_| ())?)
+                }
             };
-            ClientUdpUpstream::Shadowsocks(upstream)
-        }
-        SelectedEgress::Direct { .. } => {
-            #[cfg(windows)]
-            if let Some(binding) = managed_binding {
-                let socket = open_managed_udp(
-                    &mut ClientManagedUdpOperations {
-                        egress,
-                        bind: &mut bind,
-                        _future: std::marker::PhantomData,
-                    },
-                    binding,
-                    None,
-                )
-                .await?;
-                ClientUdpUpstream::Direct(ClientDirectUdpSocket::Managed(socket))
-            } else {
-                ClientUdpUpstream::Direct(ClientDirectUdpSocket::System(
-                    SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?,
-                ))
+            ClientUdpUpstream::Shadowsocks {
+                socket,
+                peer: first_server,
             }
-            #[cfg(not(windows))]
-            ClientUdpUpstream::Direct(ClientDirectUdpSocket::System(
-                SystemDirectUdpSocketFactory.open().await.map_err(|_| ())?,
-            ))
+        }
+        SelectedEgress::Direct { outbound } => {
+            let default_dial_options = DialOptions::default();
+            let dial_options = outbound
+                .and_then(|index| egress.outbounds.get(index))
+                .map_or(&default_dial_options, ClientOutboundContext::dial_options);
+            ClientUdpUpstream::Direct {
+                socket: None,
+                factory: egress.connector.udp_socket_factory(
+                    expected_network_generation,
+                    dial_options,
+                    &egress.route_network,
+                ),
+            }
         }
     };
+    if !egress
+        .connector
+        .network_generation_is_admissible(expected_network_generation)
+    {
+        return Err(());
+    }
     Ok(ClientUdpAssociation {
         plan,
+        _network_generation: expected_network_generation,
         first_server,
         protocol: None,
         pending_session: Some(pending_session),
@@ -1246,6 +1258,60 @@ where
     })
 }
 
+async fn send_direct_target_lazy(
+    socket: &mut Option<ClientDirectUdpSocket>,
+    factory: &ClientUdpSocketFactory,
+    resolver: &impl UdpResolver,
+    candidate_hints: &mut DirectUdpCandidateHints,
+    target: &TargetAddr,
+    payload: &[u8],
+    timeout: std::time::Duration,
+) -> io::Result<(usize, SocketAddr)> {
+    let deadline = Instant::now() + timeout;
+    if let Some(target) = target.as_socket_addr() {
+        if socket.is_none() {
+            *socket = Some(factory.open(target).await?);
+        }
+        let length = send_direct_candidate(
+            socket.as_ref().expect("direct UDP socket opened"),
+            payload,
+            target,
+            deadline,
+        )
+        .await?;
+        return Ok((length, target));
+    }
+    let TargetHostRef::Domain(host) = target.host() else {
+        return Err(io::Error::other("direct UDP target unavailable"));
+    };
+    let port = target.port().get();
+    let candidates = tokio::time::timeout_at(deadline, resolver.resolve(host, port))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "direct UDP resolve timeout"))??;
+    let candidates = candidates
+        .into_iter()
+        .take(MAX_UDP_RESOLVED_CANDIDATES)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(io::Error::other("direct UDP resolution was empty"));
+    }
+    let first_index = candidate_hints.start_index(host, port) % candidates.len();
+    if socket.is_none() {
+        *socket = Some(factory.open(candidates[first_index]).await?);
+    }
+    let (length, peer, last_successful_index) = send_direct_candidates(
+        socket.as_ref().expect("direct UDP socket opened"),
+        payload,
+        &candidates,
+        first_index,
+        deadline,
+    )
+    .await?;
+    candidate_hints.record_success(host, port, last_successful_index);
+    Ok((length, peer))
+}
+
+#[cfg(test)]
 async fn send_direct_target(
     socket: &impl DirectUdpSocket,
     resolver: &impl UdpResolver,
@@ -1275,6 +1341,26 @@ async fn send_direct_target(
         send_direct_candidates(socket, payload, &candidates, first_index, deadline).await?;
     candidate_hints.record_success(host, port, last_successful_index);
     Ok((length, peer))
+}
+
+async fn receive_proxy_response(
+    socket: &impl DirectUdpSocket,
+    expected_peer: SocketAddr,
+    payload: &mut BytesMut,
+) -> io::Result<usize> {
+    loop {
+        payload.clear();
+        let (length, source) = socket.recv_buf_from(payload).await?;
+        if length != payload.len() || length > MAX_UDP_WIRE_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid proxy UDP receive length",
+            ));
+        }
+        if source == expected_peer {
+            return Ok(length);
+        }
+    }
 }
 
 async fn send_direct_candidates(
@@ -1459,6 +1545,7 @@ pub(in crate::run) async fn send_with_lifecycle(
     idle_deadline: Instant,
 ) -> Result<usize, UdpSendError> {
     tokio::select! {
+        biased;
         _ = cancellation.cancelled() => Err(UdpSendError::Cancelled),
         _ = session_cancellation.changed() => Err(UdpSendError::Cancelled),
         _ = tokio::time::sleep_until(idle_deadline) => Err(UdpSendError::Idle),
@@ -1508,7 +1595,7 @@ pub(in crate::run) fn composed_udp_plan_limit(
     if hops.len() == 1
         && outbounds
             .get(hops[0])
-            .is_some_and(|outbound| matches!(outbound, ClientOutboundContext::Direct))
+            .is_some_and(|outbound| matches!(outbound, ClientOutboundContext::Direct { .. }))
     {
         return socks;
     }
@@ -1592,167 +1679,6 @@ mod tests {
         }
     }
 
-    struct InjectedManagedUdp {
-        events: Mutex<Vec<&'static str>>,
-        fail_binding: bool,
-    }
-
-    impl ManagedUdpOperations for InjectedManagedUdp {
-        type Socket = ();
-
-        async fn open_v4(&mut self) -> io::Result<Self::Socket> {
-            self.events.lock().unwrap().push("open-v4");
-            Ok(())
-        }
-
-        async fn open_v6(&mut self) -> io::Result<Self::Socket> {
-            self.events.lock().unwrap().push("open-v6");
-            Ok(())
-        }
-
-        fn bind_fixed(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> Result<(), ()> {
-            self.events.lock().unwrap().push("bind-fixed");
-            if self.fail_binding { Err(()) } else { Ok(()) }
-        }
-
-        fn bind_target(&self, _socket: &Self::Socket, _target: SocketAddr) -> Result<(), ()> {
-            self.events.lock().unwrap().push("bind-target");
-            if self.fail_binding { Err(()) } else { Ok(()) }
-        }
-
-        async fn connect(&self, _socket: &Self::Socket, _endpoint: SocketAddr) -> io::Result<()> {
-            self.events.lock().unwrap().push("connect");
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn managed_udp_children_open_isolated_dual_stack_sockets_in_binding_order() {
-        let endpoint: SocketAddr = "198.51.100.8:53".parse().unwrap();
-        let mut fixed = InjectedManagedUdp {
-            events: Mutex::new(Vec::new()),
-            fail_binding: false,
-        };
-        open_managed_udp(
-            &mut fixed,
-            ManagedUdpBinding::Fixed(endpoint),
-            Some(endpoint),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            *fixed.events.lock().unwrap(),
-            ["open-v4", "bind-fixed", "connect"]
-        );
-
-        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
-        let mut fixed_ipv6 = InjectedManagedUdp {
-            events: Mutex::new(Vec::new()),
-            fail_binding: false,
-        };
-        open_managed_udp(&mut fixed_ipv6, ManagedUdpBinding::Fixed(ipv6), Some(ipv6))
-            .await
-            .unwrap();
-        assert_eq!(
-            *fixed_ipv6.events.lock().unwrap(),
-            ["open-v6", "bind-fixed", "connect"]
-        );
-
-        let mut failed = InjectedManagedUdp {
-            events: Mutex::new(Vec::new()),
-            fail_binding: true,
-        };
-        assert!(
-            open_managed_udp(&mut failed, ManagedUdpBinding::Target(ipv6), Some(ipv6),)
-                .await
-                .is_err()
-        );
-        assert_eq!(*failed.events.lock().unwrap(), ["open-v6", "bind-target"]);
-    }
-
-    #[test]
-    fn dns_direct_fixed_binding_uses_the_numeric_bootstrap() {
-        let endpoint: SocketAddr = "198.51.100.8:53".parse().unwrap();
-        let target = TargetAddr::ip(endpoint).unwrap();
-        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
-        let ipv6_target = TargetAddr::ip(ipv6).unwrap();
-        let deferred = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Dns,
-                SelectedEgress::Direct { outbound: None },
-                true,
-                Some(&target),
-            ),
-            Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Dns,
-                SelectedEgress::Direct { outbound: None },
-                true,
-                Some(&ipv6_target),
-            ),
-            Ok(Some(ManagedUdpBinding::Fixed(ipv6)))
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Dns,
-                SelectedEgress::Direct { outbound: None },
-                false,
-                Some(&target),
-            ),
-            Ok(None)
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Dns,
-                SelectedEgress::Direct { outbound: Some(0) },
-                true,
-                Some(&deferred),
-            ),
-            Err(())
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::RuleSet,
-                SelectedEgress::Direct { outbound: Some(0) },
-                true,
-                Some(&target),
-            ),
-            Ok(Some(ManagedUdpBinding::Target(endpoint)))
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Tun,
-                SelectedEgress::Direct { outbound: None },
-                false,
-                Some(&target),
-            ),
-            Ok(Some(ManagedUdpBinding::Target(endpoint)))
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Socks,
-                SelectedEgress::Direct { outbound: None },
-                true,
-                Some(&target),
-            ),
-            Ok(Some(ManagedUdpBinding::Target(endpoint)))
-        );
-        assert_eq!(
-            managed_udp_binding(
-                ClientRequestOrigin::Socks,
-                SelectedEgress::Shadowsocks {
-                    first_server: endpoint,
-                },
-                true,
-                None,
-            ),
-            Ok(Some(ManagedUdpBinding::Fixed(endpoint)))
-        );
-    }
-
     #[test]
     fn dns_connected_response_binding_is_exact_or_a_port_preserving_remote_resolution() {
         let numeric = TargetAddr::ip("192.0.2.53:53".parse().unwrap()).unwrap();
@@ -1787,118 +1713,6 @@ mod tests {
             &deferred,
             &TargetAddr::domain("other.example.test", 53).unwrap()
         ));
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn dns_direct_fixed_binding_runs_in_the_real_prepare_order() {
-        let make_engine = |auto_route| {
-            let registry = OwnerRegistry::new();
-            ClientEgressEngine::new(
-                vec![ClientOutboundContext::Direct].into(),
-                TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
-                ferrum2_crypto::SystemClock::new(),
-                ferrum2_crypto::SystemRandom,
-                (Duration::from_secs(1), Duration::from_secs(1)),
-                Some(ClientUdpContext {
-                    manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry),
-                    live_ids: Arc::new(Mutex::new(HashSet::new())),
-                }),
-                None,
-            )
-            .with_underlay(ferrum2_tun::UnderlayPublisher::new(), auto_route)
-        };
-        let endpoint: SocketAddr = "198.51.100.8:53".parse().unwrap();
-        let target = TargetAddr::ip(endpoint).unwrap();
-
-        let engine = make_engine(true);
-        let association = engine
-            .prepare_udp(ClientRequestOrigin::Dns, None, Some(&target))
-            .await
-            .unwrap();
-        assert_eq!(
-            engine.managed_udp_events(),
-            [
-                ManagedUdpEvent::OpenV4,
-                ManagedUdpEvent::BindFixed(endpoint)
-            ]
-        );
-        drop(association);
-
-        let deferred = TargetAddr::domain("deferred-dns.invalid", 53).unwrap();
-        let deferred_engine = make_engine(true);
-        assert_eq!(
-            deferred_engine
-                .prepare_udp(
-                    ClientRequestOrigin::Dns,
-                    Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
-                    Some(&deferred),
-                )
-                .await
-                .err(),
-            Some(super::super::ClientUdpPrepareFailure::Unavailable)
-        );
-        assert!(deferred_engine.managed_udp_events().is_empty());
-
-        let failed = make_engine(true);
-        failed.fail_managed_udp_binding();
-        assert_eq!(
-            failed
-                .prepare_udp(ClientRequestOrigin::Dns, None, Some(&target))
-                .await
-                .err(),
-            Some(super::super::ClientUdpPrepareFailure::Unavailable)
-        );
-        assert_eq!(
-            failed.managed_udp_events(),
-            [
-                ManagedUdpEvent::OpenV4,
-                ManagedUdpEvent::BindFixed(endpoint)
-            ]
-        );
-
-        let manual = make_engine(false);
-        let association = manual
-            .prepare_udp(ClientRequestOrigin::Dns, None, Some(&target))
-            .await
-            .unwrap();
-        assert!(manual.managed_udp_events().is_empty());
-        drop(association);
-
-        let tun = make_engine(false);
-        let association = tun
-            .prepare_udp(
-                ClientRequestOrigin::Tun,
-                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
-                Some(&target),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            tun.managed_udp_events(),
-            [
-                ManagedUdpEvent::OpenV4,
-                ManagedUdpEvent::BindTarget(endpoint)
-            ]
-        );
-        drop(association);
-
-        let ipv6: SocketAddr = "[2001:db8::8]:53".parse().unwrap();
-        let ipv6_target = TargetAddr::ip(ipv6).unwrap();
-        let tun_ipv6 = make_engine(false);
-        let association = tun_ipv6
-            .prepare_udp(
-                ClientRequestOrigin::Tun,
-                Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
-                Some(&ipv6_target),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            tun_ipv6.managed_udp_events(),
-            [ManagedUdpEvent::OpenV6, ManagedUdpEvent::BindTarget(ipv6)]
-        );
-        drop(association);
     }
 
     struct DirectTestResolver {
@@ -2151,7 +1965,10 @@ mod tests {
         let held_budget = exhaust_budget(&budget, budget_limit);
         assert_eq!(budget.reserved_bytes(), budget_limit);
         let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(
+                ferrum2_runtime::DialOptions::default(),
+            )]
+            .into(),
             TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
             ferrum2_crypto::SystemClock::new(),
             ferrum2_crypto::SystemRandom,
@@ -2419,7 +2236,10 @@ mod tests {
         );
         let budget = manager.buffer_budget();
         let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(
+                ferrum2_runtime::DialOptions::default(),
+            )]
+            .into(),
             TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
             ferrum2_crypto::SystemClock::new(),
             ferrum2_crypto::SystemRandom,
@@ -2729,7 +2549,10 @@ mod tests {
         );
         let registry = OwnerRegistry::new();
         let engine = ClientEgressEngine::new_with_application_resolver(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(
+                ferrum2_runtime::DialOptions::default(),
+            )]
+            .into(),
             TokioConnector::new(connector),
             ferrum2_crypto::SystemClock::new(),
             ferrum2_crypto::SystemRandom,
@@ -2780,7 +2603,10 @@ mod tests {
         let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
         let live_ids = Arc::new(Mutex::new(HashSet::new()));
         let engine = ClientEgressEngine::new(
-            vec![ClientOutboundContext::Direct].into(),
+            vec![ClientOutboundContext::direct(
+                ferrum2_runtime::DialOptions::default(),
+            )]
+            .into(),
             TokioConnector::new(ferrum2_runtime::TcpConnector::new(
                 std::time::Duration::from_secs(1),
             )),
