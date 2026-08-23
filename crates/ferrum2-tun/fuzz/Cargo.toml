@@ -21,10 +21,19 @@ libfuzzer = ["dep:libfuzzer-sys"]
 
 [dependencies]
 libfuzzer-sys = { version = "=0.4.12", optional = true }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt", "sync"] }
 
 [[bin]]
 name = "packet_reassembly"
 path = "fuzz_targets/packet_reassembly.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "udp_reset_races"
+path = "fuzz_targets/udp_reset_races.rs"
 test = false
 doc = false
 bench = false

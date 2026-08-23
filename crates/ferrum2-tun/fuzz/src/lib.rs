@@ -8,11 +8,93 @@ mod packet;
 #[allow(dead_code)]
 #[path = "../../src/reassembly.rs"]
 mod reassembly;
+#[allow(dead_code)]
+#[path = "../../src/udp.rs"]
+mod udp;
+#[allow(dead_code)]
+#[path = "../../src/wake.rs"]
+mod wake;
+
+mod udp_reset;
+
+use std::sync::Arc;
 
 use packet::{Families, PacketParser, ParsedPacket};
 use reassembly::{
     MAX_REASSEMBLY_ENTRIES, REASSEMBLY_TIMEOUT_MILLIS, ReassemblyOutcome, ReassemblyTable,
 };
+pub use udp_reset::{MAX_UDP_RESET_FUZZ_INPUT_BYTES, fuzz_udp_reset_races};
+pub(crate) use wake::OwnerWake;
+
+/// Closed reasons needed by the production UDP state machine compiled into this fuzz package.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TunRejectReason {
+    InvalidIpChecksum,
+    InvalidTransportLength,
+    InvalidSource,
+    InvalidDestination,
+    UdpAssociationLimit,
+    UdpCandidateTimeout,
+    UdpQueueFull,
+    UdpResponseFiltered,
+    UdpResponseClosed,
+    StaleGeneration,
+}
+
+/// Closed terminal outcomes needed by the production UDP response path.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UdpResponseDropReason {
+    StaleGeneration,
+    AssociationClosed,
+    QueueFull,
+    MalformedResponse,
+    Filtered,
+    InjectionRejected,
+    SessionReset,
+    Shutdown,
+    OwnerFatal,
+}
+
+/// Identity-free events emitted while fuzzing the production UDP state machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TunEvent {
+    PacketRejected(TunRejectReason),
+    UdpAssociationsActive(usize),
+    UdpCandidatesActive(usize),
+    UdpAssociationCreated,
+    UdpAssociationRejectedLimit,
+    UdpDatagramQueueFull,
+    UdpResponseQueueFull,
+    UdpResponseFiltered,
+    UdpResponseDropped(UdpResponseDropReason),
+    UdpPendingResponses(usize),
+    UdpStaleGeneration,
+}
+
+#[derive(Clone)]
+pub(crate) struct TunEventSink {
+    emit: Arc<dyn Fn(TunEvent) + Send + Sync>,
+}
+
+impl TunEventSink {
+    pub(crate) fn new(emit: impl Fn(TunEvent) + Send + Sync + 'static) -> Self {
+        Self {
+            emit: Arc::new(emit),
+        }
+    }
+
+    pub(crate) fn emit(&self, event: TunEvent) {
+        (self.emit)(event);
+    }
+}
+
+impl Default for TunEventSink {
+    fn default() -> Self {
+        Self::new(|_| {})
+    }
+}
 
 /// Hard upper bound accepted by this target, including framing bytes.
 pub const MAX_FUZZ_INPUT_BYTES: usize = 256 * 1024;
