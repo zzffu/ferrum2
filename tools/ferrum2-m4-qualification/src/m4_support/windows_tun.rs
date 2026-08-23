@@ -29,7 +29,7 @@ const ASSOCIATION_LOOKUP_ROUNDS: usize = 64;
 const ASSOCIATION_WARMUP: Duration = Duration::from_secs(5);
 const FRAGMENT_WARMUP: Duration = Duration::from_secs(5);
 const FRAGMENT_ACTIVE: Duration = Duration::from_secs(30);
-const FRAGMENT_PAYLOAD: usize = 4_096;
+const FRAGMENT_PAYLOAD: usize = 1_440;
 const FRAGMENT_BATCH: usize = 8;
 const FRAGMENT_MINIMUM_DATAGRAMS: u64 = 4_096;
 const FRAGMENT_REQUEST_TAG: [u8; 8] = *b"F2FRQ001";
@@ -37,6 +37,7 @@ const FRAGMENT_ACK_TAG: [u8; 8] = *b"F2FAK001";
 const FRAGMENT_ACK_LEN: usize = 24;
 const FRAGMENT_REPLY_BUFFER: usize = FRAGMENT_ACK_LEN + 1;
 const PERFORMANCE_TUN_MTU: usize = 1_420;
+const SUPPORT_UNDERLAY_IPV4_MTU: usize = 1_500;
 const IPV4_HEADER_LEN: usize = 20;
 const UDP_HEADER_LEN: usize = 8;
 const FRAGMENT_IPV4_RESPONSE_BOUND: usize = PERFORMANCE_TUN_MTU - IPV4_HEADER_LEN - UDP_HEADER_LEN;
@@ -1058,6 +1059,11 @@ fn probe(arguments: &ProbeArgs) -> Result<(), String> {
         let mut udp_reply = vec![0; payload.len()];
         udp_round_trip(&socket, &payload, &mut udp_reply)?;
     }
+    let fragment_socket = connected_udp(SocketAddr::new(arguments.target_ip, arguments.udp_port))?;
+    let mut fragment_reply = [0_u8; FRAGMENT_REPLY_BUFFER];
+    if fragment_batch_round_trip(&fragment_socket, 1, 0, &mut fragment_reply)? != 1 {
+        return Err("Windows TUN fragment path probe sequence mismatch".to_owned());
+    }
     Ok(())
 }
 
@@ -1232,8 +1238,15 @@ pub(super) fn self_check() -> Result<(), String> {
     }
     let fragment_data_capacity = ((PERFORMANCE_TUN_MTU - IPV4_HEADER_LEN) / 8) * 8;
     let fragment_count = (FRAGMENT_PAYLOAD + UDP_HEADER_LEN).div_ceil(fragment_data_capacity);
-    if fragment_count != 3 {
-        return Err("Windows TUN fragment request is not exactly three IPv4 fragments".to_owned());
+    let fragment_ipv4_len = FRAGMENT_PAYLOAD + UDP_HEADER_LEN + IPV4_HEADER_LEN;
+    if fragment_count != 2
+        || fragment_ipv4_len <= PERFORMANCE_TUN_MTU
+        || fragment_ipv4_len > SUPPORT_UNDERLAY_IPV4_MTU
+    {
+        return Err(
+            "Windows TUN fragment request must split at the TUN MTU without fragmenting the support underlay"
+                .to_owned(),
+        );
     }
     if fragment_ack_for_request(&fragment_request[..FRAGMENT_PAYLOAD - 1]).is_ok() {
         return Err("truncated fragment request was accepted".to_owned());
@@ -1262,7 +1275,7 @@ pub(super) fn self_check() -> Result<(), String> {
         return Err("fragment ACK with an invalid tag was accepted".to_owned());
     }
     let mut invalid_ack_request_len = expected_ack;
-    invalid_ack_request_len[16..24].copy_from_slice(&4_095_u64.to_be_bytes());
+    invalid_ack_request_len[16..24].copy_from_slice(&((FRAGMENT_PAYLOAD - 1) as u64).to_be_bytes());
     if fragment_ack_sequence(&invalid_ack_request_len).is_ok() {
         return Err("fragment ACK with an invalid request length was accepted".to_owned());
     }

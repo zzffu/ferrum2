@@ -1131,6 +1131,65 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self.assertEqual(len(plan["trials"]), 90)
         self.assertFalse(plan["calibration_complete"])
         self.assertFalse(plan["adoption_eligible"])
+        self.assertEqual(
+            {
+                scenario: contract["recipe"]["topology"]
+                for scenario, contract in plan["scenarios"].items()
+            },
+            {
+                "tcp-single-flow": "tun-shadowsocks-external-echo",
+                "tcp-256-flow-fairness": "tun-shadowsocks-external-echo",
+                "udp-packets-per-second": "tun-direct-external-echo",
+                "udp-8192-association-lookup-expiry": "tun-direct-external-echo",
+                "fragment-reassembly-throughput": (
+                    "tun-direct-external-fragment-ack"
+                ),
+                "idle-cpu-wakeup": "tun-idle-no-traffic",
+                "wintun-ring-full-drop-rate": "tun-direct-external-echo",
+                "udp-route-once": "tun-mixed-direct-shadowsocks-external-echo",
+                "network-lifecycle": "tun-mixed-direct-shadowsocks-external-echo",
+            },
+        )
+        fragment_recipe = plan["scenarios"]["fragment-reassembly-throughput"][
+            "recipe"
+        ]
+        self.assertEqual(
+            (
+                fragment_recipe["tun_mtu_bytes"],
+                fragment_recipe["support_underlay_minimum_ipv4_packet_bytes"],
+                fragment_recipe["fragments_per_datagram"],
+                fragment_recipe["batch_datagrams"],
+                fragment_recipe["payload_bytes"],
+                fragment_recipe["tun_tcp_buffer_bytes"],
+            ),
+            (1_420, 1_468, 2, 8, 1_440, 32_768),
+        )
+        self.assertEqual(
+            fragment_recipe["runner_source_sha256"],
+            hashlib.sha256(CONTROL.WINDOWS_TUN_RUNNER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            fragment_recipe["preflight_probe"],
+            {
+                "tcp_payload_bytes": 1_024,
+                "udp_payload_bytes": 1_024,
+                "udp_target_slots": 4,
+                "fragment_payload_bytes": 1_440,
+                "fragment_datagrams": 1,
+                "fragment_ack_bytes": 24,
+            },
+        )
+        self.assertEqual(
+            plan["scenarios"]["udp-8192-association-lookup-expiry"]["recipe"][
+                "payload_bytes"
+            ],
+            32,
+        )
+        self.assertEqual(
+            plan["scenarios"]["wintun-ring-full-drop-rate"]["recipe"]
+            ["payload_bytes"],
+            1_200,
+        )
         route_once = plan["scenarios"]["udp-route-once"]
         self.assertEqual(
             set(route_once["metrics"]),

@@ -825,7 +825,7 @@ try {
                 "ferrum2_tun_reassembly_dropped_limit",
                 "ferrum2_tun_reassembly_dropped_malformed"
             ) | ForEach-Object { Get-Metric $after $_ $true } | Measure-Object -Sum
-            Assert-Condition ($fragmentIngressDelta -ge $checkedUnits * 3) "fragment workload did not produce the fixed three-fragment recipe"
+            Assert-Condition ($fragmentIngressDelta -ge $checkedUnits * 2) "fragment workload did not produce the fixed two-fragment recipe"
             Assert-Condition ($completedDelta -ge $checkedUnits) "fragment workload did not reach product reassembly"
             Assert-Condition ($dropsAfter.Sum -eq $dropsBefore.Sum) "fragment workload changed a reassembly drop counter"
             $measurements.reassembly_rate = [ordered]@{

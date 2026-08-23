@@ -24,6 +24,10 @@ param(
     [ValidatePattern('^[^\r\n]{1,128}$')]
     [string]$ManagedAdapterName,
 
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(576, 65535)]
+    [int]$MinimumUnderlayIpv4PacketBytes,
+
     [switch]$AsJson
 )
 
@@ -132,6 +136,13 @@ if ($adapters.Count -ne 1 -or
     [string]$adapters[0].Name -ceq $ManagedAdapterName) {
     throw "guest underlay adapter is not uniquely active"
 }
+$ipInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 `
+    -InterfaceIndex ([int]$source.InterfaceIndex) -PolicyStore ActiveStore -ErrorAction Stop)
+if ($ipInterfaces.Count -ne 1 -or
+    [string]$ipInterfaces[0].ConnectionState -cne "Connected" -or
+    [int]$ipInterfaces[0].NlMtu -lt $MinimumUnderlayIpv4PacketBytes) {
+    throw "guest underlay IPv4 MTU cannot carry the support probe without fragmentation"
+}
 $macAddress = ([string]$adapters[0].MacAddress -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
 if ($macAddress -cnotmatch '^[0-9A-F]{12}$') {
     throw "guest underlay adapter MAC address is invalid"
@@ -159,6 +170,7 @@ $result = [pscustomobject][ordered]@{
     guest_prefix_length = [int]$source.PrefixLength
     guest_interface_index = [int]$source.InterfaceIndex
     guest_interface_alias = [string]$adapters[0].Name
+    guest_interface_mtu_bytes = [int]$ipInterfaces[0].NlMtu
     guest_mac_address = $macAddress
     guest_route_prefix = [string]$route.DestinationPrefix
     guest_route_next_hop = $nextHop

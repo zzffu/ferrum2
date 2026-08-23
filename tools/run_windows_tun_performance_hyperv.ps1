@@ -115,6 +115,7 @@ $expectedWintunZipSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79
 $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
 $expectedPowerShellVersion = "7.4.19"
 $expectedPowerShellZipSha256 = "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9"
+$minimumSupportIpv4PacketBytes = 1468
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -ErrorAction Stop).Path
 $policyPath = Join-Path $PSScriptRoot "windows_tun_performance_policy.json"
 $controlPath = Join-Path $PSScriptRoot "performance_candidate.py"
@@ -126,6 +127,8 @@ $hostNetworkPathHelperPath = Join-Path $PSScriptRoot `
 $networkModelControllerPath = Join-Path $repositoryRoot `
     "tests\performance_candidate\windows_tun_network_model.py"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
+$runnerSourceSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).
+    Hash.ToLowerInvariant()
 
 function Test-PathWithinRoot {
     param(
@@ -437,6 +440,13 @@ function New-CanonicalPlan {
         $null -eq $plan.scenarios."network-lifecycle") {
         throw "canonical Windows TUN plan shape is invalid"
     }
+    $plannedRunnerHashes = @($plan.scenarios.PSObject.Properties | ForEach-Object {
+        [string]$_.Value.recipe.runner_source_sha256
+    } | Sort-Object -Unique)
+    if ($plannedRunnerHashes.Count -ne 1 -or
+        $plannedRunnerHashes[0] -cne $script:runnerSourceSha256) {
+        throw "canonical Windows TUN plan does not bind this runner source"
+    }
     return $plan
 }
 
@@ -741,8 +751,10 @@ if ($LASTEXITCODE -ne 0) { throw "run mode requires no unstaged tracked changes"
 if ($LASTEXITCODE -ne 0) { throw "run mode requires no staged changes" }
 $supportHostBaseline = Get-HostSupportContext `
     -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
-    -ProcessId $SupportPid -ProcessOwner $SupportOwner
-$vmNetworkBaseline = Get-ApprovedVmNetworkContext
+    -ProcessId $SupportPid -ProcessOwner $SupportOwner `
+    -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
+$vmNetworkBaseline = Get-ApprovedVmNetworkContext `
+    -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
 
 if ([string]::IsNullOrWhiteSpace($PowerShellZip)) {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -850,12 +862,13 @@ schema_version = 2
 tag = "tun-in"
 adapter_name = "{{ADAPTER_NAME}}"
 ipv4_address = "198.18.0.2/30"
+mtu = 1420
 auto_route = true
 route_address = ["{{SUPPORT_IPV4}}/32"]
 ring_capacity = 131072
 ready_timeout_ms = 30000
 max_tcp_flows = 4096
-tcp_buffer_bytes = 262144
+tcp_buffer_bytes = 32768
 max_udp_mappings = 8192
 udp_filtering = "endpoint_independent"
 [[outbounds]]
@@ -918,10 +931,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
     $supportHostReadback = Get-HostSupportContext `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
-        -ProcessId $SupportPid -ProcessOwner $SupportOwner
+        -ProcessId $SupportPid -ProcessOwner $SupportOwner `
+        -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-HostSupportContextUnchanged `
         -Expected $supportHostBaseline -Actual $supportHostReadback
-    $vmNetworkReadback = Get-ApprovedVmNetworkContext
+    $vmNetworkReadback = Get-ApprovedVmNetworkContext `
+        -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-ApprovedVmNetworkContextUnchanged `
         -Expected $vmNetworkBaseline -Actual $vmNetworkReadback
     $context = Get-ApprovedVmContext
@@ -952,7 +967,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         -ArgumentList @(
             $guestRoot, $SupportIpv4, $SupportTcpPort, $SupportUdpPort,
             $guestNetworkPathProbeSha256, $candidateBuild.HarnessSha256,
-            $portableRuntime.PowerShellExecutableSha256
+            $portableRuntime.PowerShellExecutableSha256,
+            $minimumSupportIpv4PacketBytes
         ) -ScriptBlock {
             param(
                 [string]$Root,
@@ -961,7 +977,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 [int]$SupportUdp,
                 [string]$ExpectedNetworkPathProbeSha256,
                 [string]$ExpectedHarnessSha256,
-                [string]$ExpectedPowerShellSha256
+                [string]$ExpectedPowerShellSha256,
+                [int]$MinimumSupportIpv4PacketBytes
             )
             Set-StrictMode -Version Latest
             $ErrorActionPreference = "Stop"
@@ -1008,7 +1025,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             }
             $pathOutput = @(& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
                 -File $networkPathProbe -SupportIpv4 $SupportAddress `
-                -SupportPort $SupportUdp -ManagedAdapterName "Ferrum2Perf" -AsJson 2>&1)
+                -SupportPort $SupportUdp -ManagedAdapterName "Ferrum2Perf" `
+                -MinimumUnderlayIpv4PacketBytes $MinimumSupportIpv4PacketBytes `
+                -AsJson 2>&1)
             if ($LASTEXITCODE -ne 0 -or $pathOutput.Count -ne 1) {
                 throw "guest network-path preflight returned an invalid result count"
             }
@@ -1039,10 +1058,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $guestNetworkPath = $guestNetworkPathJson | ConvertFrom-Json -Depth 5
     $supportHostAfterProbe = Get-HostSupportContext `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
-        -ProcessId $SupportPid -ProcessOwner $SupportOwner
+        -ProcessId $SupportPid -ProcessOwner $SupportOwner `
+        -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-HostSupportContextUnchanged `
         -Expected $supportHostBaseline -Actual $supportHostAfterProbe
-    $vmNetworkAfterProbe = Get-ApprovedVmNetworkContext
+    $vmNetworkAfterProbe = Get-ApprovedVmNetworkContext `
+        -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-ApprovedVmNetworkContextUnchanged `
         -Expected $vmNetworkBaseline -Actual $vmNetworkAfterProbe
     $hostReturnPath = Get-HostGuestReturnPath `
@@ -1057,6 +1078,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         host_return_path = $hostReturnPath
         guest_probe_sha256 = $guestNetworkPathProbeSha256
         host_helper_sha256 = $hostNetworkPathHelperSha256
+        support_path_probe = [ordered]@{
+            status = "PASS"
+            harness_sha256 = $candidateBuild.HarnessSha256
+            minimum_ipv4_packet_bytes = $minimumSupportIpv4PacketBytes
+            fragment_payload_bytes = 1440
+            fragment_ack_bytes = 24
+        }
         host_tun_bypassed = $true
         host_network_mutations = 0
     }
@@ -1090,7 +1118,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $SupportTcpPort,
         $SupportUdpPort,
         $SupportPid,
-        $SupportOwner
+        $SupportOwner,
+        $minimumSupportIpv4PacketBytes
     ) -ScriptBlock {
         param(
             [string]$Root,
@@ -1118,7 +1147,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [int]$SupportTcp,
             [int]$SupportUdp,
             [int]$SupportProcessId,
-            [string]$SupportProcessOwner
+            [string]$SupportProcessOwner,
+            [int]$MinimumSupportIpv4PacketBytes
         )
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -1499,7 +1529,9 @@ public static class Ferrum2PerfProcessGroup {
                 "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                 "-File", $probe, "-SupportIpv4", $SupportAddress,
                 "-SupportPort", [string]$SupportUdp,
-                "-ManagedAdapterName", $AdapterName, "-AsJson"
+                "-ManagedAdapterName", $AdapterName,
+                "-MinimumUnderlayIpv4PacketBytes",
+                [string]$MinimumSupportIpv4PacketBytes, "-AsJson"
             )
             if ($probeResult.ExitCode -ne 0 -or @($probeResult.Output).Count -ne 1) {
                 throw "guest network-path probe result is not unique"
@@ -1507,7 +1539,8 @@ public static class Ferrum2PerfProcessGroup {
             $actual = [string]$probeResult.Output[0] | ConvertFrom-Json
             $fields = @(
                 "schema", "support_ipv4", "guest_ipv4", "guest_prefix_length",
-                "guest_interface_index", "guest_interface_alias", "guest_mac_address",
+                "guest_interface_index", "guest_interface_alias", "guest_interface_mtu_bytes",
+                "guest_mac_address",
                 "guest_route_prefix", "guest_route_next_hop", "guest_dns_ipv4"
             )
             if ((@($actual.PSObject.Properties.Name) -join "|") -cne ($fields -join "|") -or
@@ -1518,7 +1551,8 @@ public static class Ferrum2PerfProcessGroup {
             }
             foreach ($field in @(
                 "support_ipv4", "guest_ipv4", "guest_prefix_length", "guest_interface_index",
-                "guest_interface_alias", "guest_mac_address", "guest_route_prefix",
+                "guest_interface_alias", "guest_interface_mtu_bytes", "guest_mac_address",
+                "guest_route_prefix",
                 "guest_route_next_hop"
             )) {
                 if ([string]$actual.$field -cne [string]$ExpectedGuestNetworkPath.$field) {

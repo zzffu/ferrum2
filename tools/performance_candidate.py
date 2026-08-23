@@ -47,6 +47,12 @@ WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256 = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 WINDOWS_TUN_REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent.parent
+WINDOWS_TUN_RUNNER_PATH = (
+    WINDOWS_TUN_REPOSITORY_ROOT / "tools" / "run_windows_tun_performance_hyperv.ps1"
+)
+WINDOWS_TUN_RUNNER_SOURCE_SHA256 = hashlib.sha256(
+    WINDOWS_TUN_RUNNER_PATH.read_bytes()
+).hexdigest()
 WINDOWS_TUN_COLLECTOR_SOURCE_SHA256 = hashlib.sha256(
     (WINDOWS_TUN_REPOSITORY_ROOT / "tools" / "collect_windows_tun_performance_trial.ps1").read_bytes()
 ).hexdigest()
@@ -220,16 +226,28 @@ WINDOWS_TUN_GUEST = {
     "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
 }
 WINDOWS_TUN_RUNTIME_RECIPE = {
-    "topology": "tun-shadowsocks-external-echo",
+    "runner_source_sha256": WINDOWS_TUN_RUNNER_SOURCE_SHA256,
     "collector_source_sha256": WINDOWS_TUN_COLLECTOR_SOURCE_SHA256,
     "harness_source_sha256": WINDOWS_TUN_HARNESS_SOURCE_SHA256,
+    "preflight_probe": {
+        "tcp_payload_bytes": 1_024,
+        "udp_payload_bytes": 1_024,
+        "udp_target_slots": 4,
+        "fragment_payload_bytes": 1_440,
+        "fragment_datagrams": 1,
+        "fragment_ack_bytes": 24,
+    },
     "tun_mtu_bytes": 1_420,
+    "support_underlay_minimum_ipv4_packet_bytes": 1_468,
     "tun_ring_capacity_bytes": 131_072,
     "tun_max_tcp_flows": 4_096,
     "tun_tcp_buffer_bytes": 32_768,
     "tun_max_udp_mappings": 8_192,
+    "tun_udp_filtering": "endpoint_independent",
     "udp_max_sessions": 16_384,
+    "udp_max_buffered_bytes": 268_435_456,
     "udp_idle_timeout_milliseconds": 60_000,
+    "shadowsocks_method": "2022-blake3-aes-128-gcm",
     "gso": False,
 }
 
@@ -240,6 +258,7 @@ WINDOWS_TUN_SCENARIOS = {
     "tcp-single-flow": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-shadowsocks-external-echo",
             "warmup_seconds": 10,
             "active_seconds": 60,
             "flows": 1,
@@ -269,6 +288,7 @@ WINDOWS_TUN_SCENARIOS = {
     "tcp-256-flow-fairness": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-shadowsocks-external-echo",
             "warmup_seconds": 10,
             "active_seconds": 30,
             "flows": 256,
@@ -293,6 +313,7 @@ WINDOWS_TUN_SCENARIOS = {
     "udp-packets-per-second": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-direct-external-echo",
             "warmup_seconds": 5,
             "active_seconds": 30,
             "associations": 1,
@@ -318,11 +339,13 @@ WINDOWS_TUN_SCENARIOS = {
     "udp-8192-association-lookup-expiry": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-direct-external-echo",
             "warmup_seconds": 5,
             "associations": 8_192,
             "batch_associations": 256,
             "lookup_rounds": 64,
             "expiry_rounds": 1,
+            "payload_bytes": 32,
         },
         "metrics": {
             "lookup_rate": {
@@ -347,12 +370,13 @@ WINDOWS_TUN_SCENARIOS = {
     "fragment-reassembly-throughput": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-direct-external-fragment-ack",
             "warmup_seconds": 5,
             "active_seconds": 30,
             "ip_families": 1,
-            "fragments_per_datagram": 3,
-            "batch_datagrams": 16,
-            "payload_bytes": 4_096,
+            "fragments_per_datagram": 2,
+            "batch_datagrams": 8,
+            "payload_bytes": 1_440,
         },
         "metrics": {
             "reassembly_rate": {
@@ -373,6 +397,7 @@ WINDOWS_TUN_SCENARIOS = {
     "idle-cpu-wakeup": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-idle-no-traffic",
             "settle_seconds": 10,
             "active_seconds": 60,
             "sample_interval_milliseconds": 1_000,
@@ -400,9 +425,12 @@ WINDOWS_TUN_SCENARIOS = {
     "wintun-ring-full-drop-rate": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-direct-external-echo",
             "warmup_seconds": 5,
             "burst_attempts": 1_000_000,
             "packets_per_event": 1,
+            "payload_bytes": 1_200,
+            "post_burst_settle_seconds": 5,
             "drop_rate_denominator": "tun_response_attempts",
         },
         "metrics": {
@@ -430,6 +458,7 @@ WINDOWS_TUN_SCENARIOS = {
     "udp-route-once": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-mixed-direct-shadowsocks-external-echo",
             "network_model_schema_version": WINDOWS_TUN_NETWORK_MODEL.SCHEMA_VERSION,
             "network_model_controller_sha256": WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
             "network_model_plan_sha256": WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
@@ -437,6 +466,8 @@ WINDOWS_TUN_SCENARIOS = {
             "source_slots": WINDOWS_TUN_NETWORK_MODEL.ROUTE_SOURCE_SLOTS,
             "target_slots": WINDOWS_TUN_NETWORK_MODEL.ROUTE_TARGET_SLOTS,
             "datagrams_per_target": WINDOWS_TUN_NETWORK_MODEL.ROUTE_DATAGRAMS_PER_TARGET,
+            "payload_bytes": 32,
+            "settle_seconds": 5,
             "required_outbounds": ["direct", "proxy"],
             "generation_transition": "guest_route_metric_reset_network",
         },
@@ -476,6 +507,7 @@ WINDOWS_TUN_SCENARIOS = {
     "network-lifecycle": {
         "recipe": {
             **WINDOWS_TUN_RUNTIME_RECIPE,
+            "topology": "tun-mixed-direct-shadowsocks-external-echo",
             "network_model_schema_version": WINDOWS_TUN_NETWORK_MODEL.SCHEMA_VERSION,
             "network_model_controller_sha256": WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
             "network_model_plan_sha256": WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
@@ -486,7 +518,16 @@ WINDOWS_TUN_SCENARIOS = {
             "interface_switch_sequence": WINDOWS_TUN_NETWORK_MODEL.INTERFACE_SWITCH_SEQUENCE,
             "interface_resolver_probes": WINDOWS_TUN_NETWORK_MODEL.INTERFACE_RESOLVER_PROBES,
             "recovery_timeout_seconds": 30,
-            "probe_protocols": 2,
+            "settle_seconds": 5,
+            "recovery_probe": {
+                "protocols": 2,
+                "tcp_payload_bytes": 1_024,
+                "udp_payload_bytes": 1_024,
+                "udp_target_slots": 4,
+                "fragment_payload_bytes": 1_440,
+                "fragment_datagrams": 1,
+                "fragment_ack_bytes": 24,
+            },
         },
         "metrics": {
             "reset_p50": {

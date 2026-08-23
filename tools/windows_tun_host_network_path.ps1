@@ -47,7 +47,8 @@ function Get-HostSupportContext {
         [Parameter(Mandatory = $true)][int]$TcpPort,
         [Parameter(Mandatory = $true)][int]$UdpPort,
         [Parameter(Mandatory = $true)][int]$ProcessId,
-        [Parameter(Mandatory = $true)][string]$ProcessOwner
+        [Parameter(Mandatory = $true)][string]$ProcessOwner,
+        [Parameter(Mandatory = $true)][int]$MinimumIpv4PacketBytes
     )
     $addressRows = @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $Address `
         -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
@@ -68,6 +69,13 @@ function Get-HostSupportContext {
         $adapters[0].Virtual -ne $false -or
         [string]$addressRows[0].InterfaceAlias -cne [string]$adapters[0].Name) {
         throw "support address must belong to one active physical host adapter"
+    }
+    $ipInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 `
+        -InterfaceIndex $interfaceIndex -PolicyStore ActiveStore -ErrorAction Stop)
+    if ($ipInterfaces.Count -ne 1 -or
+        [string]$ipInterfaces[0].ConnectionState -cne "Connected" -or
+        [int]$ipInterfaces[0].NlMtu -lt $MinimumIpv4PacketBytes) {
+        throw "support physical IPv4 MTU cannot carry the support probe without fragmentation"
     }
     $localRoute = Get-SelectedIpv4Route -RemoteAddress $Address -Label "host support"
     if ([string]$localRoute.Source.IPAddress -cne $Address -or
@@ -119,6 +127,7 @@ function Get-HostSupportContext {
         ipv4 = $Address
         interface_index = $interfaceIndex
         interface_alias = [string]$adapters[0].Name
+        interface_mtu_bytes = [int]$ipInterfaces[0].NlMtu
         tcp_port = $TcpPort
         udp_port = $UdpPort
         pid = $ProcessId
@@ -135,8 +144,8 @@ function Assert-HostSupportContextUnchanged {
         [Parameter(Mandatory = $true)][object]$Actual
     )
     foreach ($field in @(
-        "ipv4", "interface_index", "interface_alias", "tcp_port", "udp_port", "pid", "owner",
-        "executable", "executable_sha256", "creation_utc"
+        "ipv4", "interface_index", "interface_alias", "interface_mtu_bytes", "tcp_port",
+        "udp_port", "pid", "owner", "executable", "executable_sha256", "creation_utc"
     )) {
         if ([string]$Expected.$field -cne [string]$Actual.$field) {
             throw "support listener context changed: field=$field"
@@ -145,6 +154,8 @@ function Assert-HostSupportContextUnchanged {
 }
 
 function Get-ApprovedVmNetworkContext {
+    param([Parameter(Mandatory = $true)][int]$MinimumIpv4PacketBytes)
+
     $context = Get-ApprovedVmContext
     $vmAdapters = @(Get-VMNetworkAdapter -VM $context.Vm -ErrorAction Stop)
     if ($vmAdapters.Count -ne 1 -or $vmAdapters[0].Connected -ne $true -or
@@ -176,6 +187,14 @@ function Get-ApprovedVmNetworkContext {
         $hostAdapters[0].Virtual -ne $true) {
         throw "approved switch host adapter is not uniquely active"
     }
+    $hostIpInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 `
+        -InterfaceIndex ([int]$hostAdapters[0].ifIndex) -PolicyStore ActiveStore `
+        -ErrorAction Stop)
+    if ($hostIpInterfaces.Count -ne 1 -or
+        [string]$hostIpInterfaces[0].ConnectionState -cne "Connected" -or
+        [int]$hostIpInterfaces[0].NlMtu -lt $MinimumIpv4PacketBytes) {
+        throw "approved switch IPv4 MTU cannot carry the support probe without fragmentation"
+    }
     return [pscustomobject][ordered]@{
         vm_mac_address = ConvertTo-CanonicalMacAddress `
             -Value ([string]$vmAdapters[0].MacAddress) -Label "approved VM"
@@ -184,6 +203,7 @@ function Get-ApprovedVmNetworkContext {
         host_interface_index = [int]$hostAdapters[0].ifIndex
         host_interface_alias = [string]$hostAdapters[0].Name
         host_interface_guid = ([Guid][string]$hostAdapters[0].InterfaceGuid).ToString("D")
+        host_interface_mtu_bytes = [int]$hostIpInterfaces[0].NlMtu
     }
 }
 
@@ -194,7 +214,7 @@ function Assert-ApprovedVmNetworkContextUnchanged {
     )
     foreach ($field in @(
         "vm_mac_address", "switch_id", "switch_name", "host_interface_index",
-        "host_interface_alias", "host_interface_guid"
+        "host_interface_alias", "host_interface_guid", "host_interface_mtu_bytes"
     )) {
         if ([string]$Expected.$field -cne [string]$Actual.$field) {
             throw "approved VM network context changed: field=$field"
@@ -210,7 +230,8 @@ function Get-HostGuestReturnPath {
     )
     $expectedFields = @(
         "schema", "support_ipv4", "guest_ipv4", "guest_prefix_length",
-        "guest_interface_index", "guest_interface_alias", "guest_mac_address",
+        "guest_interface_index", "guest_interface_alias", "guest_interface_mtu_bytes",
+        "guest_mac_address",
         "guest_route_prefix", "guest_route_next_hop", "guest_dns_ipv4"
     )
     if ((@($GuestPath.PSObject.Properties.Name) -join "|") -cne
@@ -290,6 +311,7 @@ function Get-HostGuestReturnPath {
         protocol = [string]$route.Protocol
         interface_index = [int]$route.InterfaceIndex
         interface_alias = [string]$route.InterfaceAlias
+        interface_mtu_bytes = [int]$VmNetworkContext.host_interface_mtu_bytes
         neighbor_state = [string]$neighbor.State
         neighbor_mac_address = $guestMac
     }
