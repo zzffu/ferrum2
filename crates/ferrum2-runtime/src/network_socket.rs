@@ -107,6 +107,11 @@ impl<C, O> NetworkSocketService<C, O> {
     pub const fn operations(&self) -> &O {
         &self.operations
     }
+
+    /// Returns the generation currently published by the shared reset coordinator.
+    pub fn published_generation(&self) -> u64 {
+        self.coordinator.status().published_generation()
+    }
 }
 
 impl<C, O> NetworkSocketService<C, O>
@@ -173,6 +178,34 @@ where
         let admitted = self
             .coordinator
             .prepare_and_admit_runtime_resource(
+                &self.resolver,
+                outbound,
+                route,
+                selection_destination,
+                NetworkRuntimeOwnerKind::UdpAssociation,
+                |resolved| self.operations.prepare_udp(selection_destination, resolved),
+            )
+            .map_err(NetworkSocketServiceError::Admission)?;
+        let (socket, resolved, owner) = admitted.into_parts();
+        Ok(GenerationBoundUdpSocket::new(socket, resolved, owner))
+    }
+
+    /// Opens one bound, unconnected UDP socket only for an already-frozen generation.
+    ///
+    /// This path never retries into a newer generation. It is used by logical UDP associations
+    /// whose route and network generation were fixed before their physical socket is opened
+    /// lazily; a reset therefore fails the old association closed instead of rebinding it.
+    pub fn open_udp_for_generation(
+        &self,
+        expected_generation: u64,
+        outbound: &DialOptions,
+        route: &RouteNetworkOptions,
+        selection_destination: SocketAddr,
+    ) -> Result<GenerationBoundUdpSocket<O::UdpSocket>, NetworkSocketServiceError<O::Error>> {
+        let admitted = self
+            .coordinator
+            .prepare_and_admit_runtime_resource_for_generation(
+                expected_generation,
                 &self.resolver,
                 outbound,
                 route,
@@ -298,7 +331,7 @@ pub struct GenerationBoundTcpStream<T> {
     resolved: ResolvedInterface,
     local_socket_addr: SocketAddr,
     closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
-    cancellation: Pin<Box<dyn Future<Output = NetworkRuntimeOwnerCancellation> + Send>>,
+    cancellation: StdMutex<Pin<Box<dyn Future<Output = NetworkRuntimeOwnerCancellation> + Send>>>,
     drop_signal: Option<oneshot::Sender<()>>,
     _monitor: tokio::task::JoinHandle<()>,
 }
@@ -331,7 +364,9 @@ impl<T: LocalEndpoint + Send + 'static> GenerationBoundTcpStream<T> {
             resolved,
             local_socket_addr,
             closed,
-            cancellation: Box::pin(async move { operation_cancellation.cancelled().await }),
+            cancellation: StdMutex::new(Box::pin(async move {
+                operation_cancellation.cancelled().await
+            })),
             drop_signal: Some(drop_signal),
             _monitor: monitor,
         }
@@ -363,7 +398,11 @@ impl<T> GenerationBoundTcpStream<T> {
         if let Some(cancellation) = self.closed() {
             return Poll::Ready(closed_io_error(cancellation));
         }
-        match self.cancellation.as_mut().poll(context) {
+        let cancellation = {
+            let mut cancellation = lock_unpoisoned(&self.cancellation);
+            cancellation.as_mut().poll(context)
+        };
+        match cancellation {
             Poll::Ready(cancellation) => {
                 self.close(cancellation);
                 Poll::Ready(closed_io_error(cancellation))

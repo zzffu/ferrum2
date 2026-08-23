@@ -29,8 +29,9 @@ pub use metrics::{
 };
 pub use network::{
     DialOptions, InterfaceBinding, InterfaceBindingError, InterfaceResolutionError,
-    InterfaceResolutionErrorKind, InterfaceSelectionSource, NamedInterfaceResolution,
-    NetworkFamily, NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
+    InterfaceResolutionErrorKind, InterfaceSelectionSource,
+    NETWORK_INTERFACE_RESOLUTION_CACHE_CAPACITY, NamedInterfaceResolution, NetworkFamily,
+    NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
     NetworkInterfaceObservation, NetworkInterfaceObservationError, NetworkInterfaceResolver,
     NetworkResetError, NetworkResetFuture, NetworkSnapshot, NetworkSnapshotCaptureError,
     NetworkSnapshotError, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,

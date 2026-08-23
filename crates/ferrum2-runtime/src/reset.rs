@@ -710,6 +710,104 @@ impl NetworkResetCoordinator {
         unreachable!("generation-bound admission has exactly two complete attempts")
     }
 
+    /// Resolves, prepares, and admits one resource only if `expected_generation` is still active.
+    ///
+    /// Unlike [`Self::prepare_and_admit_runtime_resource`], this method never follows a network
+    /// change to a newer generation. It is intended for a logical owner that already froze its
+    /// network generation before the physical resource is created lazily. Any generation change
+    /// drops the prepared resource and returns the existing closed generation-change category.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_and_admit_runtime_resource_for_generation<C, T, E>(
+        &self,
+        expected_generation: u64,
+        resolver: &NetworkInterfaceResolver<C>,
+        outbound: &DialOptions,
+        route: &RouteNetworkOptions,
+        destination: SocketAddr,
+        kind: NetworkRuntimeOwnerKind,
+        prepare: impl FnOnce(&ResolvedInterface) -> Result<T, E>,
+    ) -> Result<AdmittedNetworkRuntimeResource<T>, NetworkRuntimeResourceAdmissionError<E>>
+    where
+        C: NetworkInterfaceCatalog,
+    {
+        let snapshot = self.inner.snapshots.snapshot();
+        let resolved = match resolver.resolve(outbound, route, destination, &snapshot) {
+            Ok(resolved) => {
+                if snapshot.generation() != expected_generation {
+                    return Err(
+                        NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                            attempted_source: resolved.selection_source(),
+                        },
+                    );
+                }
+                resolved
+            }
+            Err(error) => {
+                if snapshot.generation() != expected_generation
+                    || !self.inner.snapshots.is_current(expected_generation)
+                {
+                    return Err(
+                        NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                            attempted_source: error.attempted_source(),
+                        },
+                    );
+                }
+                return Err(NetworkRuntimeResourceAdmissionError::InterfaceResolution(
+                    error,
+                ));
+            }
+        };
+        let attempted_source = resolved.selection_source();
+        let resource = match prepare(&resolved) {
+            Ok(resource) => resource,
+            Err(error) => {
+                if !self.inner.snapshots.is_current(expected_generation) {
+                    return Err(
+                        NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                            attempted_source,
+                        },
+                    );
+                }
+                return Err(NetworkRuntimeResourceAdmissionError::Preparation {
+                    attempted_source,
+                    error,
+                });
+            }
+        };
+
+        if !self.inner.snapshots.is_current(expected_generation) {
+            drop(resource);
+            return Err(
+                NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { attempted_source },
+            );
+        }
+
+        match self.register_runtime_owner(expected_generation, kind) {
+            Ok(owner) => Ok(AdmittedNetworkRuntimeResource {
+                resource,
+                resolved_interface: resolved,
+                owner,
+            }),
+            Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration) => {
+                drop(resource);
+                Err(
+                    NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                        attempted_source,
+                    },
+                )
+            }
+            Err(error) => {
+                drop(resource);
+                Err(
+                    NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration {
+                        attempted_source,
+                        error,
+                    },
+                )
+            }
+        }
+    }
+
     /// Queues and serially drives one ordinary reset or full-rebuild intent.
     ///
     /// Newer queued generations replace older pending generations. A full-rebuild intent is never

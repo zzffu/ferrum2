@@ -1,8 +1,8 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Address family used by one outbound dial attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -546,7 +546,7 @@ pub trait ResetNetwork: Send + Sync {
 }
 
 /// Shared source-address constraints for one outbound.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DialOptions {
     bind_interface: Option<Arc<str>>,
     inet4_bind_address: Option<Ipv4Addr>,
@@ -581,7 +581,7 @@ impl DialOptions {
 }
 
 /// Route-level inputs to the shared interface resolver.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RouteNetworkOptions {
     auto_detect_interface: bool,
     default_interface: Option<Arc<str>>,
@@ -636,6 +636,7 @@ pub struct ResolvedInterface {
     binding: InterfaceBinding,
     source_address: Option<IpAddr>,
     selection_source: InterfaceSelectionSource,
+    cache_hit: bool,
 }
 
 impl ResolvedInterface {
@@ -657,6 +658,11 @@ impl ResolvedInterface {
     /// Returns the closed, low-cardinality selection source.
     pub const fn selection_source(&self) -> InterfaceSelectionSource {
         self.selection_source
+    }
+
+    /// Returns whether this invocation reused a successful resolver-cache entry.
+    pub const fn cache_hit(&self) -> bool {
+        self.cache_hit
     }
 }
 
@@ -704,15 +710,70 @@ impl InterfaceResolutionError {
     }
 }
 
+/// Maximum successful interface decisions retained for one published network generation.
+pub const NETWORK_INTERFACE_RESOLUTION_CACHE_CAPACITY: usize = 256;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct NetworkInterfaceResolutionCacheKey {
+    snapshot_generation: u64,
+    destination: SocketAddr,
+    outbound: DialOptions,
+    route: RouteNetworkOptions,
+}
+
+#[derive(Default)]
+struct NetworkInterfaceResolutionCache {
+    generation: Option<u64>,
+    entries: BTreeMap<NetworkInterfaceResolutionCacheKey, ResolvedInterface>,
+    insertion_order: VecDeque<NetworkInterfaceResolutionCacheKey>,
+}
+
+impl NetworkInterfaceResolutionCache {
+    fn lookup(&mut self, key: &NetworkInterfaceResolutionCacheKey) -> Option<ResolvedInterface> {
+        match self.generation {
+            None => self.generation = Some(key.snapshot_generation),
+            Some(generation) if key.snapshot_generation > generation => {
+                self.entries.clear();
+                self.insertion_order.clear();
+                self.generation = Some(key.snapshot_generation);
+            }
+            Some(generation) if key.snapshot_generation < generation => return None,
+            Some(_) => {}
+        }
+        self.entries.get(key).cloned().map(|mut resolved| {
+            resolved.cache_hit = true;
+            resolved
+        })
+    }
+
+    fn insert(&mut self, key: NetworkInterfaceResolutionCacheKey, resolved: ResolvedInterface) {
+        if self.generation != Some(key.snapshot_generation) || self.entries.contains_key(&key) {
+            return;
+        }
+        while self.entries.len() >= NETWORK_INTERFACE_RESOLUTION_CACHE_CAPACITY {
+            let Some(evicted) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+        self.insertion_order.push_back(key.clone());
+        self.entries.insert(key, resolved);
+    }
+}
+
 /// The one shared implementation of outbound interface priority.
 pub struct NetworkInterfaceResolver<C> {
     catalog: C,
+    successful: Mutex<NetworkInterfaceResolutionCache>,
 }
 
 impl<C> NetworkInterfaceResolver<C> {
     /// Creates a resolver over one platform catalog.
-    pub const fn new(catalog: C) -> Self {
-        Self { catalog }
+    pub fn new(catalog: C) -> Self {
+        Self {
+            catalog,
+            successful: Mutex::new(NetworkInterfaceResolutionCache::default()),
+        }
     }
 
     /// Returns the platform catalog, primarily for lifecycle composition.
@@ -724,6 +785,35 @@ impl<C> NetworkInterfaceResolver<C> {
 impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
     /// Resolves outbound explicit, auto-detected, route-default, then system-best-route.
     pub fn resolve(
+        &self,
+        outbound: &DialOptions,
+        route: &RouteNetworkOptions,
+        destination: SocketAddr,
+        snapshot: &NetworkSnapshot,
+    ) -> Result<ResolvedInterface, InterfaceResolutionError> {
+        let key = NetworkInterfaceResolutionCacheKey {
+            snapshot_generation: snapshot.generation(),
+            destination,
+            outbound: outbound.clone(),
+            route: route.clone(),
+        };
+        if let Some(resolved) = self
+            .successful
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup(&key)
+        {
+            return Ok(resolved);
+        }
+        let resolved = self.resolve_uncached(outbound, route, destination, snapshot)?;
+        self.successful
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn resolve_uncached(
         &self,
         outbound: &DialOptions,
         route: &RouteNetworkOptions,
@@ -788,6 +878,7 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
             binding,
             source_address,
             selection_source,
+            cache_hit: false,
         })
     }
 

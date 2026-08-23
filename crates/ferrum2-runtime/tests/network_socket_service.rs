@@ -9,15 +9,21 @@ use std::task::{Context, Poll};
 use bytes::BytesMut;
 use ferrum2_core::{AbortiveClose, LocalEndpoint};
 use ferrum2_runtime::{
-    DialOptions, DirectUdpSocket, InterfaceBinding, InterfaceSelectionSource,
-    NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceObservation,
-    NetworkInterfaceResolver, NetworkResetCoordinator, NetworkResetIntent, NetworkResetLimits,
-    NetworkResetReason, NetworkRuntimeResourceAdmissionError, NetworkSnapshot,
-    NetworkSnapshotPublisher, NetworkSocketOperations, NetworkSocketService,
-    NetworkSocketServiceError, OwnerRegistry, ResolvedInterface, RouteNetworkOptions,
-    SystemBestRoute,
+    DialOptions, DirectUdpSocket, GenerationBoundTcpStream, InterfaceBinding,
+    InterfaceSelectionSource, NetworkInterfaceCatalog, NetworkInterfaceCatalogError,
+    NetworkInterfaceObservation, NetworkInterfaceResolver, NetworkResetCoordinator,
+    NetworkResetIntent, NetworkResetLimits, NetworkResetReason,
+    NetworkRuntimeResourceAdmissionError, NetworkSnapshot, NetworkSnapshotPublisher,
+    NetworkSocketOperations, NetworkSocketService, NetworkSocketServiceError, OwnerRegistry,
+    ResolvedInterface, RouteNetworkOptions, RuntimeTcpStream, SystemBestRoute,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+
+#[test]
+fn generation_bound_tcp_stream_satisfies_shared_protocol_io_contract() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<GenerationBoundTcpStream<RuntimeTcpStream>>();
+}
 
 #[derive(Default)]
 struct Catalog;
@@ -372,6 +378,56 @@ async fn unconnected_udp_uses_first_target_only_for_selection_and_allows_send_to
     assert_eq!(owners.snapshot().network_runtime_owners, 1);
     drop(socket);
     wait_for_owner_count(&owners, 0).await;
+}
+
+#[tokio::test]
+async fn frozen_udp_generation_never_retries_into_the_new_generation() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    state.race_publications.store(1, Ordering::SeqCst);
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+
+    let error = service
+        .open_udp_for_generation(1, &DialOptions::default(), &route(), destination(53))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
+                attempted_source: InterfaceSelectionSource::AutoDetected,
+            }
+        )
+    ));
+    assert_eq!(
+        state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.kind == CallKind::PrepareUdp)
+            .count(),
+        1,
+        "an exact-generation association must not retry preparation on generation 2"
+    );
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(coordinator.snapshots().generation(), 2);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+
+    let calls_before = state.calls.lock().unwrap().len();
+    let stale = service
+        .open_udp_for_generation(1, &DialOptions::default(), &route(), destination(5353))
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. }
+        )
+    ));
+    assert_eq!(
+        state.calls.lock().unwrap().len(),
+        calls_before,
+        "an already-stale generation must fail before socket preparation"
+    );
 }
 
 #[tokio::test]
