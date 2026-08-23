@@ -704,6 +704,7 @@ dependencies = [
 name = "ferrum2-wintun"
 version = "0.1.0"
 dependencies = [
+ "ferrum2-runtime",
  "windows-sys 0.61.2",
 ]
 

@@ -1,5 +1,10 @@
 use std::ops::Deref;
 
+use ferrum2_runtime::{
+    NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceObservation,
+    SystemBestRoute,
+};
+
 use crate::{
     AdapterConfig, CreateError, Error, ErrorKind, ManagedTunHealth, NetworkChangeOutcome,
     SendOutcome, WaitOutcome,
@@ -13,6 +18,53 @@ pub struct WorkSignal;
 pub struct ReceivedPacket<'a>(&'a [u8]);
 #[derive(Clone)]
 pub struct UnderlayPolicy;
+
+/// Fail-closed placeholder for the Windows read-only network catalog.
+#[derive(Clone, Copy, Default)]
+pub struct WindowsNetworkInterfaceCatalog {
+    managed_tun: Option<(u64, u32)>,
+}
+
+impl WindowsNetworkInterfaceCatalog {
+    /// Builds a catalog without a managed TUN identity.
+    pub const fn system() -> Self {
+        Self { managed_tun: None }
+    }
+
+    /// Builds a catalog that classifies one exact managed TUN identity.
+    pub fn excluding_managed_tun(stable_id: u64, index: u32) -> Result<Self, Error> {
+        if stable_id == 0 || index == 0 {
+            return Err(Error::invalid_input());
+        }
+        Ok(Self {
+            managed_tun: Some((stable_id, index)),
+        })
+    }
+}
+
+impl std::fmt::Debug for WindowsNetworkInterfaceCatalog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsNetworkInterfaceCatalog")
+            .field("managed_tun", &self.managed_tun.is_some())
+            .finish()
+    }
+}
+
+impl NetworkInterfaceCatalog for WindowsNetworkInterfaceCatalog {
+    fn read_interfaces(
+        &self,
+    ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
+        Err(NetworkInterfaceCatalogError)
+    }
+
+    fn system_best_route(
+        &self,
+        _: std::net::SocketAddr,
+    ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError> {
+        Err(NetworkInterfaceCatalogError)
+    }
+}
 
 impl Adapter {
     pub fn create(
@@ -30,6 +82,9 @@ impl Adapter {
     }
     pub fn underlay_policy(&self) -> Option<UnderlayPolicy> {
         None
+    }
+    pub fn network_interface_catalog(&self) -> WindowsNetworkInterfaceCatalog {
+        WindowsNetworkInterfaceCatalog::system()
     }
     pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
         Err(UNSUPPORTED)

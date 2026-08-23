@@ -428,12 +428,17 @@ impl std::error::Error for Error {}
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
-pub use windows::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WorkSignal};
+pub use windows::{
+    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog,
+    WorkSignal, bind_resolved_socket,
+};
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 mod unsupported;
 #[cfg(not(all(windows, target_arch = "x86_64")))]
-pub use unsupported::{Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WorkSignal};
+pub use unsupported::{
+    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkInterfaceCatalog, WorkSignal,
+};
 
 #[cfg(test)]
 mod tests {

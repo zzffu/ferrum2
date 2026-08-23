@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::ffi::{OsString, c_void};
+use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -13,6 +14,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use ferrum2_runtime::{
+    InterfaceBinding, NetworkFamily, NetworkInterfaceCatalog as RuntimeNetworkInterfaceCatalog,
+    NetworkInterfaceCatalogError, NetworkInterfaceKind, NetworkInterfaceObservation,
+    ResolvedInterface, SystemBestRoute,
+};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BUFFER_OVERFLOW,
     ERROR_HANDLE_EOF, ERROR_NO_MORE_ITEMS, ERROR_NOT_FOUND, ERROR_SUCCESS, FWP_E_FILTER_NOT_FOUND,
@@ -25,9 +31,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER,
     DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeInterfaceDnsSettings, FreeMibTable,
     GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetInterfaceDnsSettings, GetIpForwardEntry2,
-    GetIpInterfaceEntry, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
-    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
-    MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, NotifyIpInterfaceChange,
+    GetIpForwardTable2, GetIpInterfaceEntry, GetUnicastIpAddressEntry, GetUnicastIpAddressTable,
+    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
+    MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
+    MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE, NotifyIpInterfaceChange,
     NotifyRouteChange2, NotifyUnicastIpAddressChange, SetInterfaceDnsSettings, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
@@ -49,7 +56,7 @@ use windows_sys::Win32::Networking::WinSock::{
     IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IpDadStateDeprecated, IpDadStateDuplicate,
     IpDadStateInvalid, IpDadStatePreferred, IpDadStateTentative, IpPrefixOriginManual,
     IpSuffixOriginManual, MIB_IPPROTO_NETMGMT, NL_DAD_STATE, NlroManual, SOCKADDR, SOCKADDR_IN,
-    SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, setsockopt,
+    SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET, bind as winsock_bind, setsockopt,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -338,6 +345,63 @@ struct InterfaceIdentity {
     index: u32,
 }
 
+/// Read-only Windows interface catalog used by the shared runtime resolver.
+///
+/// A catalog created from an [`Adapter`] classifies that exact LUID/index pair as the managed TUN,
+/// so automatic underlay selection cannot feed outbound sockets back into Ferrum2's own adapter.
+#[derive(Clone, Copy, Default)]
+pub struct WindowsNetworkInterfaceCatalog {
+    managed_tun: Option<InterfaceIdentity>,
+}
+
+impl WindowsNetworkInterfaceCatalog {
+    /// Builds a catalog without a managed TUN identity.
+    ///
+    /// This is suitable for processes that do not own a Wintun adapter. TUN-owning callers should
+    /// obtain the catalog from [`Adapter::network_interface_catalog`] instead.
+    pub const fn system() -> Self {
+        Self { managed_tun: None }
+    }
+
+    /// Builds a catalog that classifies one exact managed TUN LUID/index pair.
+    pub fn excluding_managed_tun(stable_id: u64, index: u32) -> Result<Self, Error> {
+        if stable_id == 0 || index == 0 {
+            return Err(Error::invalid_input());
+        }
+        Ok(Self {
+            managed_tun: Some(InterfaceIdentity {
+                luid: stable_id,
+                index,
+            }),
+        })
+    }
+}
+
+impl fmt::Debug for WindowsNetworkInterfaceCatalog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WindowsNetworkInterfaceCatalog")
+            .field("managed_tun", &self.managed_tun.is_some())
+            .finish()
+    }
+}
+
+impl RuntimeNetworkInterfaceCatalog for WindowsNetworkInterfaceCatalog {
+    fn read_interfaces(
+        &self,
+    ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
+        read_network_interface_observations(self.managed_tun)
+            .map_err(|_| NetworkInterfaceCatalogError)
+    }
+
+    fn system_best_route(
+        &self,
+        destination: std::net::SocketAddr,
+    ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError> {
+        system_best_route(destination, self.managed_tun).map_err(|_| NetworkInterfaceCatalogError)
+    }
+}
+
 /// Immutable, redacted dual-stack socket-binding policy frozen before capture.
 #[derive(Clone)]
 pub struct UnderlayPolicy {
@@ -519,6 +583,95 @@ impl<T: AsRawSocket> SocketBindingOperations for PlatformSocketBinder<'_, T> {
     }
 }
 
+/// Applies one shared runtime interface decision to an unconnected Windows socket.
+///
+/// The family-specific `IP_UNICAST_IF`/`IPV6_UNICAST_IF` constraint is installed first. When the
+/// decision carries an explicit source address, the socket is then bound to that address and an
+/// ephemeral port. Generation validation remains owned by the runtime resolver's prepare/commit
+/// boundary; callers must discard the socket when this function or that commit fails.
+pub fn bind_resolved_socket<T: AsRawSocket>(
+    socket: &T,
+    destination: std::net::SocketAddr,
+    resolved: &ResolvedInterface,
+) -> Result<(), Error> {
+    bind_resolved_socket_with(
+        destination,
+        resolved,
+        &mut PlatformResolvedSocketBinder(socket),
+    )
+}
+
+trait ResolvedSocketBindingOperations {
+    fn bind_interface(
+        &mut self,
+        family: std::net::IpAddr,
+        interface_index: u32,
+    ) -> Result<(), Error>;
+    fn bind_source(&mut self, source: std::net::SocketAddr) -> Result<(), Error>;
+}
+
+fn bind_resolved_socket_with(
+    destination: std::net::SocketAddr,
+    resolved: &ResolvedInterface,
+    operations: &mut impl ResolvedSocketBindingOperations,
+) -> Result<(), Error> {
+    let family = NetworkFamily::of(destination.ip());
+    let binding = resolved.binding();
+    if !binding.supports(family) {
+        return Err(Error::invalid_input());
+    }
+    let source = resolved.source_address();
+    if source.is_some_and(|source| {
+        NetworkFamily::of(source) != family || !binding.addresses().contains(&source)
+    }) {
+        return Err(Error::invalid_input());
+    }
+
+    operations.bind_interface(destination.ip(), binding.index())?;
+    if let Some(source) = source {
+        let scope_id = match source {
+            std::net::IpAddr::V6(address) if address.is_unicast_link_local() => binding.index(),
+            _ => 0,
+        };
+        operations.bind_source(std::net::SocketAddr::new(source, 0).with_scope_id(scope_id))?;
+    }
+    Ok(())
+}
+
+trait SocketAddrScopeExt {
+    fn with_scope_id(self, scope_id: u32) -> Self;
+}
+
+impl SocketAddrScopeExt for std::net::SocketAddr {
+    fn with_scope_id(self, scope_id: u32) -> Self {
+        match self {
+            Self::V4(_) => self,
+            Self::V6(address) => Self::V6(std::net::SocketAddrV6::new(
+                *address.ip(),
+                address.port(),
+                address.flowinfo(),
+                scope_id,
+            )),
+        }
+    }
+}
+
+struct PlatformResolvedSocketBinder<'a, T>(&'a T);
+
+impl<T: AsRawSocket> ResolvedSocketBindingOperations for PlatformResolvedSocketBinder<'_, T> {
+    fn bind_interface(
+        &mut self,
+        family: std::net::IpAddr,
+        interface_index: u32,
+    ) -> Result<(), Error> {
+        bind_socket(self.0, family, interface_index)
+    }
+
+    fn bind_source(&mut self, source: std::net::SocketAddr) -> Result<(), Error> {
+        bind_source_socket(self.0, source)
+    }
+}
+
 fn bind_socket<T: AsRawSocket>(
     socket: &T,
     family: std::net::IpAddr,
@@ -532,6 +685,25 @@ fn bind_socket<T: AsRawSocket>(
             option,
             (&raw const value).cast(),
             i32::try_from(std::mem::size_of_val(&value)).map_err(|_| Error)?,
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(Error) }
+}
+
+fn bind_source_socket<T: AsRawSocket>(
+    socket: &T,
+    source: std::net::SocketAddr,
+) -> Result<(), Error> {
+    let raw = socket_addr_sockaddr(source);
+    let length = match source {
+        std::net::SocketAddr::V4(_) => std::mem::size_of::<SOCKADDR_IN>(),
+        std::net::SocketAddr::V6(_) => std::mem::size_of::<SOCKADDR_IN6>(),
+    };
+    let status = unsafe {
+        winsock_bind(
+            socket.as_raw_socket() as usize,
+            (&raw const raw).cast::<SOCKADDR>(),
+            i32::try_from(length).map_err(|_| Error)?,
         )
     };
     if status == 0 { Ok(()) } else { Err(Error) }
@@ -1658,12 +1830,22 @@ impl Adapter {
         self.managed.as_ref().map(|state| state.policy.clone())
     }
 
+    /// Returns a read-only platform catalog that recognizes this exact adapter as managed TUN.
+    pub fn network_interface_catalog(&self) -> WindowsNetworkInterfaceCatalog {
+        WindowsNetworkInterfaceCatalog {
+            managed_tun: Some(InterfaceIdentity {
+                luid: unsafe { self.luid.Value },
+                index: self.interface_index,
+            }),
+        }
+    }
+
     /// Replaces only the generation-bound underlay snapshot.
     ///
     /// The adapter, Wintun session, managed addresses and routes, DNS leases, notification
     /// subscriptions, and strict-route WFP session remain owned by this adapter.
     pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
-        if self.managed_device_health() != ManagedTunHealth::Healthy {
+        if self.managed_health()? != ManagedTunHealth::Healthy {
             return Err(Error::recoverable_session());
         }
         let Some(config) = self.config.managed_network().cloned() else {
@@ -1675,14 +1857,14 @@ impl Adapter {
         };
         let state = self.managed.as_mut().ok_or(Error)?;
         let generation = state.notifications.generation_counter();
-        let next = refresh_underlay_with(
+        let next = classify_underlay_refresh(refresh_underlay_with(
             &config,
             &state.policy,
             owned,
             &mut state.validated_generation,
             generation,
             &mut PlatformUnderlay,
-        )?;
+        ))?;
         state.policy = next.clone();
         Ok(Some(next))
     }
@@ -2655,6 +2837,10 @@ fn refresh_underlay_with(
     unreachable!("underlay refresh has exactly two attempts")
 }
 
+fn classify_underlay_refresh<T>(result: Result<T, Error>) -> Result<T, Error> {
+    result.map_err(|_| Error::recoverable_session())
+}
+
 fn underlay_matches_with(
     policy: &UnderlayPolicy,
     owned: InterfaceIdentity,
@@ -2739,6 +2925,447 @@ impl UnderlayOperations for PlatformUnderlay {
     }
 }
 
+const MAX_CATALOG_INTERFACES: usize = 4_096;
+const MAX_CATALOG_ADDRESSES: usize = 16_384;
+const MAX_CATALOG_ROUTES: usize = 65_536;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CatalogInterfaceRow {
+    identity: InterfaceIdentity,
+    name: Box<str>,
+    operational: bool,
+    connected: bool,
+    kind: NetworkInterfaceKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CatalogAddressGroup {
+    identity: InterfaceIdentity,
+    family: NetworkFamily,
+    addresses: Vec<std::net::IpAddr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CatalogFamilyRow {
+    identity: InterfaceIdentity,
+    family: NetworkFamily,
+    addresses: Vec<std::net::IpAddr>,
+    connected: bool,
+    interface_metric: u32,
+    default_route_metric: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CatalogDefaultRoute {
+    identity: InterfaceIdentity,
+    family: NetworkFamily,
+    metric: u32,
+}
+
+fn read_network_interface_observations(
+    managed_tun: Option<InterfaceIdentity>,
+) -> Result<Vec<NetworkInterfaceObservation>, Error> {
+    require_catalog_managed_identity(managed_tun)?;
+    let interfaces = read_catalog_interfaces()?;
+    let address_groups = read_catalog_address_groups()?;
+    let default_routes = read_catalog_default_routes()?;
+    let mut families = Vec::with_capacity(address_groups.len());
+    for group in address_groups {
+        let (connected, interface_metric) =
+            read_catalog_family_state(group.identity, group.family)?;
+        let default_route_metric = default_routes
+            .iter()
+            .filter(|route| route.identity == group.identity && route.family == group.family)
+            .map(|route| route.metric)
+            .min();
+        families.push(CatalogFamilyRow {
+            identity: group.identity,
+            family: group.family,
+            addresses: group.addresses,
+            connected,
+            interface_metric,
+            default_route_metric,
+        });
+    }
+    build_network_interface_observations(&interfaces, &families, managed_tun)
+}
+
+fn build_network_interface_observations(
+    interfaces: &[CatalogInterfaceRow],
+    families: &[CatalogFamilyRow],
+    managed_tun: Option<InterfaceIdentity>,
+) -> Result<Vec<NetworkInterfaceObservation>, Error> {
+    let mut observations = Vec::with_capacity(families.len());
+    for family in families {
+        let mut matches = interfaces
+            .iter()
+            .filter(|interface| interface.identity == family.identity);
+        let Some(interface) = matches.next() else {
+            // The address may have disappeared between the independently allocated MIB tables.
+            continue;
+        };
+        if matches.next().is_some() {
+            return Err(Error);
+        }
+        let kind = if managed_tun == Some(interface.identity) {
+            NetworkInterfaceKind::ManagedTun
+        } else {
+            interface.kind
+        };
+        let binding = InterfaceBinding::new(
+            Arc::<str>::from(interface.name.as_ref()),
+            interface.identity.luid,
+            interface.identity.index,
+            family.addresses.clone(),
+        )
+        .map_err(|_| Error)?;
+        observations.push(
+            NetworkInterfaceObservation::new(
+                binding,
+                family.family,
+                interface.operational,
+                interface.connected && family.connected,
+                kind,
+                family.interface_metric,
+                family.default_route_metric,
+            )
+            .map_err(|_| Error)?,
+        );
+    }
+    Ok(observations)
+}
+
+fn read_catalog_interfaces() -> Result<Vec<CatalogInterfaceRow>, Error> {
+    let mut table: *mut MIB_IF_TABLE2 = null_mut();
+    if unsafe { GetIfTable2(&mut table) } != ERROR_SUCCESS || table.is_null() {
+        return Err(Error);
+    }
+    let owner = MibTable(table.cast());
+    let count = unsafe { (*table).NumEntries as usize };
+    if count > MAX_CATALOG_INTERFACES {
+        return Err(Error);
+    }
+    // SAFETY: GetIfTable2 allocated one table with NumEntries contiguous rows. `owner` keeps the
+    // allocation live through this copy and releases it exactly once with FreeMibTable.
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+    let result = rows.iter().filter_map(catalog_interface_row).collect();
+    drop(owner);
+    Ok(result)
+}
+
+fn catalog_interface_row(row: &MIB_IF_ROW2) -> Option<CatalogInterfaceRow> {
+    // SAFETY: InterfaceLuid.Value is the active NET_LUID_LH representation returned by
+    // GetIfTable2; reading it does not outlive the copied row.
+    let luid = unsafe { row.InterfaceLuid.Value };
+    let identity = InterfaceIdentity {
+        luid,
+        index: row.InterfaceIndex,
+    };
+    if identity.luid == 0 || identity.index == 0 {
+        return None;
+    }
+    let name = decode_interface_name(&row.Alias)?;
+    Some(CatalogInterfaceRow {
+        identity,
+        name,
+        operational: row.OperStatus == IfOperStatusUp && row.AdminStatus == NET_IF_ADMIN_STATUS_UP,
+        connected: row.MediaConnectState == MediaConnectStateConnected,
+        kind: if row.Type
+            == windows_sys::Win32::NetworkManagement::IpHelper::IF_TYPE_SOFTWARE_LOOPBACK
+        {
+            NetworkInterfaceKind::Loopback
+        } else {
+            NetworkInterfaceKind::Underlay
+        },
+    })
+}
+
+fn decode_interface_name(raw: &[u16]) -> Option<Box<str>> {
+    let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
+    if end == 0 {
+        return None;
+    }
+    String::from_utf16(&raw[..end])
+        .ok()
+        .map(String::into_boxed_str)
+}
+
+fn read_catalog_address_groups() -> Result<Vec<CatalogAddressGroup>, Error> {
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = null_mut();
+    if unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut table) } != ERROR_SUCCESS
+        || table.is_null()
+    {
+        return Err(Error);
+    }
+    let owner = MibTable(table.cast());
+    let count = unsafe { (*table).NumEntries as usize };
+    if count > MAX_CATALOG_ADDRESSES {
+        return Err(Error);
+    }
+    // SAFETY: GetUnicastIpAddressTable allocated NumEntries contiguous rows. `owner` holds the
+    // allocation until every address has been copied into owned Rust values.
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+    let mut groups = Vec::<CatalogAddressGroup>::new();
+    for row in rows {
+        let Some((identity, family, address)) = catalog_unicast_address(row) else {
+            continue;
+        };
+        let group = if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.identity == identity && group.family == family)
+        {
+            group
+        } else {
+            groups.push(CatalogAddressGroup {
+                identity,
+                family,
+                addresses: Vec::new(),
+            });
+            groups.last_mut().ok_or(Error)?
+        };
+        group.addresses.push(address);
+    }
+    for group in &mut groups {
+        group.addresses.sort_unstable();
+        group.addresses.dedup();
+    }
+    drop(owner);
+    Ok(groups)
+}
+
+fn catalog_unicast_address(
+    row: &MIB_UNICASTIPADDRESS_ROW,
+) -> Option<(InterfaceIdentity, NetworkFamily, std::net::IpAddr)> {
+    if row.DadState != IpDadStatePreferred && row.DadState != IpDadStateDeprecated {
+        return None;
+    }
+    // SAFETY: InterfaceLuid.Value is the active NET_LUID_LH representation in this IP Helper row.
+    let luid = unsafe { row.InterfaceLuid.Value };
+    let identity = InterfaceIdentity {
+        luid,
+        index: row.InterfaceIndex,
+    };
+    if identity.luid == 0 || identity.index == 0 {
+        return None;
+    }
+    let address = sockaddr_ip(&row.Address).ok()?;
+    if address.is_unspecified() || address.is_multicast() {
+        return None;
+    }
+    Some((identity, NetworkFamily::of(address), address))
+}
+
+fn read_catalog_default_routes() -> Result<Vec<CatalogDefaultRoute>, Error> {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = null_mut();
+    if unsafe { GetIpForwardTable2(AF_UNSPEC, &mut table) } != ERROR_SUCCESS || table.is_null() {
+        return Err(Error);
+    }
+    let owner = MibTable(table.cast());
+    let count = unsafe { (*table).NumEntries as usize };
+    if count > MAX_CATALOG_ROUTES {
+        return Err(Error);
+    }
+    // SAFETY: GetIpForwardTable2 allocated NumEntries contiguous rows. `owner` keeps the table
+    // alive while each default-route identity and metric is copied.
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+    let routes = rows.iter().filter_map(catalog_default_route).collect();
+    drop(owner);
+    Ok(routes)
+}
+
+fn catalog_default_route(row: &MIB_IPFORWARD_ROW2) -> Option<CatalogDefaultRoute> {
+    if row.DestinationPrefix.PrefixLength != 0 {
+        return None;
+    }
+    let destination = sockaddr_ip(&row.DestinationPrefix.Prefix).ok()?;
+    if !destination.is_unspecified() {
+        return None;
+    }
+    // SAFETY: InterfaceLuid.Value is the active NET_LUID_LH representation in this route row.
+    let luid = unsafe { row.InterfaceLuid.Value };
+    let identity = InterfaceIdentity {
+        luid,
+        index: row.InterfaceIndex,
+    };
+    if identity.luid == 0 || identity.index == 0 {
+        return None;
+    }
+    Some(CatalogDefaultRoute {
+        identity,
+        family: NetworkFamily::of(destination),
+        metric: row.Metric,
+    })
+}
+
+fn read_catalog_family_state(
+    identity: InterfaceIdentity,
+    family: NetworkFamily,
+) -> Result<(bool, u32), Error> {
+    let mut row = MIB_IPINTERFACE_ROW::default();
+    unsafe { InitializeIpInterfaceEntry(&mut row) };
+    row.Family = match family {
+        NetworkFamily::Ipv4 => AF_INET,
+        NetworkFamily::Ipv6 => AF_INET6,
+    };
+    row.InterfaceLuid = NET_LUID_LH {
+        Value: identity.luid,
+    };
+    if unsafe { GetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS {
+        return Err(Error);
+    }
+    // SAFETY: GetIpInterfaceEntry returned a fully initialized NET_LUID_LH row.
+    if unsafe { row.InterfaceLuid.Value } != identity.luid || row.InterfaceIndex != identity.index {
+        return Err(Error);
+    }
+    Ok((row.Connected, row.Metric))
+}
+
+fn system_best_route(
+    destination: std::net::SocketAddr,
+    managed_tun: Option<InterfaceIdentity>,
+) -> Result<SystemBestRoute, Error> {
+    require_catalog_managed_identity(managed_tun)?;
+    let primary = unconstrained_route(destination)?;
+    let primary_identity = route_identity(primary)?;
+    let selected = if managed_tun != Some(primary_identity) {
+        primary
+    } else {
+        let mut selected = None::<(RouteFingerprint, u64)>;
+        for identity in catalog_fallback_interfaces(managed_tun)? {
+            let Ok(route) = constrained_route(destination, identity.index, true) else {
+                continue;
+            };
+            if route.interface_luid != identity.luid
+                || route.interface_index != identity.index
+                || !same_ip_family(destination.ip(), route.destination)
+                || route
+                    .source
+                    .is_none_or(|source| !same_ip_family(destination.ip(), source))
+            {
+                continue;
+            }
+            let Ok(interface_metric) =
+                PlatformUnderlay.interface_metric(destination.ip(), identity.index)
+            else {
+                continue;
+            };
+            let effective_metric = u64::from(route.metric) + u64::from(interface_metric);
+            if selected.as_ref().is_none_or(|(current, current_metric)| {
+                system_route_is_preferred(route, effective_metric, *current, *current_metric)
+            }) {
+                selected = Some((route, effective_metric));
+            }
+        }
+        selected.map(|(route, _)| route).ok_or(Error)?
+    };
+    let identity = route_identity(selected)?;
+    SystemBestRoute::new(identity.luid, identity.index).map_err(|_| Error)
+}
+
+fn require_catalog_managed_identity(managed_tun: Option<InterfaceIdentity>) -> Result<(), Error> {
+    let Some(managed_tun) = managed_tun else {
+        return Ok(());
+    };
+    let luid = NET_LUID_LH {
+        Value: managed_tun.luid,
+    };
+    managed_interface_identity_matches(luid, managed_tun.index)
+        .then_some(())
+        .ok_or(Error)
+}
+
+fn unconstrained_route(destination: std::net::SocketAddr) -> Result<RouteFingerprint, Error> {
+    let destination_sockaddr = socket_addr_sockaddr(destination);
+    let mut route = MIB_IPFORWARD_ROW2::default();
+    let mut source = SOCKADDR_INET::default();
+    if unsafe {
+        GetBestRoute2(
+            null(),
+            0,
+            null(),
+            &destination_sockaddr,
+            0,
+            &mut route,
+            &mut source,
+        )
+    } != ERROR_SUCCESS
+    {
+        return Err(Error);
+    }
+    let source = sockaddr_ip(&source)?;
+    if source.is_unspecified() || !same_ip_family(destination.ip(), source) {
+        return Err(Error);
+    }
+    route_fingerprint(&route, Some(source))
+}
+
+fn route_identity(route: RouteFingerprint) -> Result<InterfaceIdentity, Error> {
+    if route.interface_luid == 0 || route.interface_index == 0 {
+        return Err(Error);
+    }
+    Ok(InterfaceIdentity {
+        luid: route.interface_luid,
+        index: route.interface_index,
+    })
+}
+
+fn system_route_is_preferred(
+    candidate: RouteFingerprint,
+    candidate_metric: u64,
+    current: RouteFingerprint,
+    current_metric: u64,
+) -> bool {
+    candidate.prefix_length > current.prefix_length
+        || (candidate.prefix_length == current.prefix_length
+            && (candidate_metric < current_metric
+                || (candidate_metric == current_metric
+                    && (candidate.interface_luid, candidate.interface_index)
+                        < (current.interface_luid, current.interface_index))))
+}
+
+fn catalog_fallback_interfaces(
+    excluded: Option<InterfaceIdentity>,
+) -> Result<Vec<InterfaceIdentity>, Error> {
+    let mut table: *mut MIB_IF_TABLE2 = null_mut();
+    if unsafe { GetIfTable2(&mut table) } != ERROR_SUCCESS || table.is_null() {
+        return Err(Error);
+    }
+    let owner = MibTable(table.cast());
+    let count = unsafe { (*table).NumEntries as usize };
+    if count > MAX_CATALOG_INTERFACES {
+        return Err(Error);
+    }
+    // SAFETY: GetIfTable2 allocated NumEntries contiguous rows and `owner` retains the allocation
+    // until every selected LUID/index pair has been copied.
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
+    let result = rows
+        .iter()
+        .filter_map(|row| catalog_fallback_interface_identity(row, excluded))
+        .collect();
+    drop(owner);
+    Ok(result)
+}
+
+fn catalog_fallback_interface_identity(
+    row: &MIB_IF_ROW2,
+    excluded: Option<InterfaceIdentity>,
+) -> Option<InterfaceIdentity> {
+    // SAFETY: InterfaceLuid.Value is the active representation returned by GetIfTable2.
+    let luid = unsafe { row.InterfaceLuid.Value };
+    let identity = InterfaceIdentity {
+        luid,
+        index: row.InterfaceIndex,
+    };
+    (identity.luid != 0
+        && identity.index != 0
+        && row.Type != windows_sys::Win32::NetworkManagement::IpHelper::IF_TYPE_SOFTWARE_LOOPBACK
+        && row.OperStatus == IfOperStatusUp
+        && row.AdminStatus == NET_IF_ADMIN_STATUS_UP
+        && row.MediaConnectState == MediaConnectStateConnected
+        && excluded != Some(identity))
+    .then_some(identity)
+}
+
 fn eligible_interfaces(
     excluded: Option<InterfaceIdentity>,
 ) -> Result<Vec<InterfaceIdentity>, Error> {
@@ -2748,6 +3375,9 @@ fn eligible_interfaces(
     }
     let owner = MibTable(table.cast());
     let count = unsafe { (*table).NumEntries as usize };
+    if count > MAX_CATALOG_INTERFACES {
+        return Err(Error);
+    }
     let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), count) };
     let result = rows
         .iter()
@@ -2853,9 +3483,15 @@ fn sockaddr_ip(address: &SOCKADDR_INET) -> Result<std::net::IpAddr, Error> {
 
 fn socket_addr_sockaddr(address: std::net::SocketAddr) -> SOCKADDR_INET {
     match address {
-        std::net::SocketAddr::V4(address) => ipv4_sockaddr(*address.ip()),
+        std::net::SocketAddr::V4(address) => {
+            let mut raw = ipv4_sockaddr(*address.ip());
+            raw.Ipv4.sin_port = address.port().to_be();
+            raw
+        }
         std::net::SocketAddr::V6(address) => {
             let mut raw = ipv6_sockaddr(*address.ip());
+            raw.Ipv6.sin6_port = address.port().to_be();
+            raw.Ipv6.sin6_flowinfo = address.flowinfo().to_be();
             raw.Ipv6.Anonymous.sin6_scope_id = address.scope_id();
             raw
         }
