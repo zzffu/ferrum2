@@ -15,8 +15,8 @@ tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
 udp_filtering = "endpoint_independent"
 auto_route = true
-# The strict-route configuration contract defaults to false. Runtime WFP enforcement
-# is intentionally not part of the current configuration-only implementation.
+# Strict route defaults to false. When both auto_route and strict_route are true,
+# Windows installs the unsupported-family and traditional DNS-port WFP guards.
 strict_route = false
 route_address = ["0.0.0.0/0", "::/0"]
 route_exclude_address = [
@@ -38,7 +38,7 @@ type = "direct"
 # inet6_bind_address = "2001:db8::10"
 
 [route]
-# Route-level interface selection is configuration-only until client dial wiring lands.
+# Automatic detection is family-aware and excludes the managed TUN interface.
 auto_detect_interface = false
 # default_interface is absent by default; set a validated Windows interface name when needed.
 # default_interface = "Ethernet"
@@ -75,8 +75,8 @@ final = "resolver"
 enabled = true
 max_sessions = 4096
 # This shared byte budget still meters ordinary SOCKS/DNS/RuleSet UDP. Managed
-# TUN Direct/Shadowsocks target-child requests and responses do not charge it;
-# their association, packet-queue, payload, timeout, and generation bounds remain.
+# TUN Direct/Shadowsocks EIM associations do not charge it; their single frozen
+# route, packet queue, payload, timeout, and generation bounds remain.
 max_buffered_bytes = 16777216
 idle_timeout_ms = 300000
 
