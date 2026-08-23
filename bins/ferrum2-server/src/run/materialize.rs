@@ -33,11 +33,11 @@ use ferrum2_runtime::{
     RuleSetLoadErrorKind, RuleSetLoader, RuleSetLoaderConfig, RuleSetRefreshOutcome,
     RuleSetRefreshService, RuleSetRemoteSource, TcpResolver, materialize_rule_set_snapshot,
 };
-use tokio::net::TcpStream;
 use tokio::time::Instant;
 
-use super::RunError;
-use super::dns_egress::ServerDnsEgress;
+use super::dns_egress::{ServerDnsEgress, ServerPhysicalSocketContext};
+use super::tcp::{ServerNetworkSocketService, ServerPhysicalTcpStream};
+use super::{RunError, runtime_dial_options, runtime_route_network};
 
 const INITIAL_RULESET_GENERATION: u64 = 1;
 
@@ -56,6 +56,7 @@ const UNRESOLVED_ENDPOINT: SocketAddr =
 /// construction plan is retained until it is transferred to the supervisor.
 pub(super) struct ServerV2MaterializeContext {
     metrics: Arc<Metrics>,
+    network_sockets: Arc<ServerNetworkSocketService>,
     downloader: Option<Arc<dyn RuleSetDownloader>>,
     pending: Mutex<Option<PendingServerV2Runtime>>,
     cache: Mutex<Option<DnsCache>>,
@@ -64,9 +65,22 @@ pub(super) struct ServerV2MaterializeContext {
 }
 
 impl ServerV2MaterializeContext {
+    #[cfg(test)]
     pub(super) fn new(metrics: Arc<Metrics>) -> Self {
+        let registry = ferrum2_runtime::OwnerRegistry::new();
+        let network_sockets =
+            super::tcp::prepare_server_network_socket_service(&registry, &metrics)
+                .expect("test materialization network socket service");
+        Self::with_network_sockets(metrics, network_sockets)
+    }
+
+    pub(super) fn with_network_sockets(
+        metrics: Arc<Metrics>,
+        network_sockets: Arc<ServerNetworkSocketService>,
+    ) -> Self {
         Self {
             metrics,
+            network_sockets,
             downloader: None,
             pending: Mutex::new(None),
             cache: Mutex::new(None),
@@ -77,8 +91,13 @@ impl ServerV2MaterializeContext {
 
     #[cfg(test)]
     fn with_downloader(metrics: Arc<Metrics>, downloader: Arc<dyn RuleSetDownloader>) -> Self {
+        let registry = ferrum2_runtime::OwnerRegistry::new();
+        let network_sockets =
+            super::tcp::prepare_server_network_socket_service(&registry, &metrics)
+                .expect("test materialization network socket service");
         Self {
             metrics,
+            network_sockets,
             downloader: Some(downloader),
             pending: Mutex::new(None),
             cache: Mutex::new(None),
@@ -120,6 +139,7 @@ impl ServerV2MaterializeContext {
         let blueprint = Arc::new(BootstrapBlueprint::new(
             prepared,
             Arc::clone(&self.metrics),
+            Arc::clone(&self.network_sockets),
         )?);
         let (plan, targets) = fixed_endpoint_plan(prepared)?;
         let cache = materialization_cache(prepared, &self.metrics)?;
@@ -395,7 +415,7 @@ impl ProductionRuleSetTransport {
         }));
         let downloader: Arc<dyn RuleSetDownloader> = Arc::new(HttpsRuleSetDownloader::new(
             resolver,
-            ServerRuleSetDialer::new(direct_resolvers),
+            ServerRuleSetDialer::new(direct_resolvers, Arc::clone(&self.blueprint.physical)),
         ));
         Ok(ActiveRuleSetTransport {
             loader: Arc::new(RuleSetLoader::new(self.loader_config, downloader)),
@@ -518,11 +538,16 @@ struct BootstrapBlueprint {
     max_inflight: std::num::NonZeroU16,
     strategy: DnsStrategy,
     outbounds: Vec<DirectDomainResolver>,
+    physical: Arc<ServerPhysicalSocketContext>,
     metrics: Arc<Metrics>,
 }
 
 impl BootstrapBlueprint {
-    fn new(prepared: &PreparedServerV2, metrics: Arc<Metrics>) -> Result<Self, RunError> {
+    fn new(
+        prepared: &PreparedServerV2,
+        metrics: Arc<Metrics>,
+        network_sockets: Arc<ServerNetworkSocketService>,
+    ) -> Result<Self, RunError> {
         let mut dns_servers = Vec::new();
         dns_servers
             .try_reserve_exact(prepared.dns_server_count())
@@ -531,11 +556,16 @@ impl BootstrapBlueprint {
         outbounds
             .try_reserve_exact(prepared.outbound_count())
             .map_err(|_| RunError::RuleAllocation)?;
+        let mut outbound_dial_options = Vec::new();
+        outbound_dial_options
+            .try_reserve_exact(prepared.outbound_count())
+            .map_err(|_| RunError::RuleAllocation)?;
         for index in 0..prepared.outbound_count() {
             let descriptor = prepared
                 .outbound(u32::try_from(index).map_err(|_| RunError::StartupProtocol)?)
                 .ok_or(RunError::StartupProtocol)?;
             outbounds.push(descriptor.domain_resolver());
+            outbound_dial_options.push(runtime_dial_options(descriptor.dial_options()));
         }
         for index in 0..prepared.dns_server_count() {
             let descriptor = prepared
@@ -556,6 +586,12 @@ impl BootstrapBlueprint {
                 return Err(RunError::StartupProtocol);
             }
         }
+        let physical = Arc::new(ServerPhysicalSocketContext::new(
+            network_sockets,
+            outbound_dial_options.into(),
+            Arc::new(runtime_route_network(prepared.route_network())),
+            Arc::clone(&metrics),
+        ));
         Ok(Self {
             dns_servers,
             timeout: prepared.dns_timeout().unwrap_or(Duration::from_secs(5)),
@@ -568,6 +604,7 @@ impl BootstrapBlueprint {
                     dns_strategy(runtime.strategy())
                 }),
             outbounds,
+            physical,
             metrics,
         })
     }
@@ -657,7 +694,7 @@ impl BootstrapBlueprint {
             self.timeout,
             self.max_inflight,
             Arc::new(
-                ServerDnsEgress::new(self.outbounds.len())
+                ServerDnsEgress::new(Arc::clone(&self.physical))
                     .with_outbound_resolvers(direct_resolvers),
             ),
         )
@@ -831,23 +868,28 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
 }
 
 /// Server RuleSet downloads use the resolver owned by the exact Direct detour.
-/// Resolved targets remain ordinary direct sockets, while deferred domains are
-/// never allowed to escape through an ambient or policy resolver.
+/// Resolved targets use the default physical policy or the exact Direct
+/// detour, while deferred domains never escape through an ambient resolver.
 #[derive(Clone)]
 struct ServerRuleSetDialer {
     direct_resolvers: Arc<[super::dns_egress::ServerDnsResolver]>,
+    physical: Arc<ServerPhysicalSocketContext>,
 }
 
 impl ServerRuleSetDialer {
-    fn new(direct_resolvers: Vec<super::dns_egress::ServerDnsResolver>) -> Self {
+    fn new(
+        direct_resolvers: Vec<super::dns_egress::ServerDnsResolver>,
+        physical: Arc<ServerPhysicalSocketContext>,
+    ) -> Self {
         Self {
             direct_resolvers: direct_resolvers.into(),
+            physical,
         }
     }
 }
 
 impl RuleSetDialer for ServerRuleSetDialer {
-    type Io = TcpStream;
+    type Io = ServerPhysicalTcpStream;
 
     fn connect(
         &self,
@@ -857,16 +899,21 @@ impl RuleSetDialer for ServerRuleSetDialer {
     ) -> impl Future<Output = Result<Self::Io, RuleSetDownloadError>> + Send {
         let targets = targets.clone();
         let direct_resolvers = Arc::clone(&self.direct_resolvers);
+        let physical = Arc::clone(&self.physical);
         let detour = detour.map(|plan| plan.hops().to_vec());
         async move {
-            let candidates = match targets {
+            let (candidates, outbound) = match targets {
                 RuleSetDialTargets::Resolved(candidates) => {
                     if detour.as_deref().is_some_and(
                         |hops| !matches!(hops, [outbound] if *outbound < direct_resolvers.len()),
                     ) {
                         return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect));
                     }
-                    candidates.into_vec()
+                    let outbound = detour.as_deref().and_then(|hops| match hops {
+                        [outbound] => Some(*outbound),
+                        _ => None,
+                    });
+                    (candidates.into_vec(), outbound)
                 }
                 RuleSetDialTargets::Domain(target) => {
                     let [outbound] = detour.as_deref().unwrap_or(&[]) else {
@@ -878,25 +925,26 @@ impl RuleSetDialer for ServerRuleSetDialer {
                     let TargetHostRef::Domain(host) = target.host() else {
                         return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect));
                     };
-                    tokio::time::timeout_at(
+                    let candidates = tokio::time::timeout_at(
                         deadline,
                         TcpResolver::resolve(resolver, host, target.port().get()),
                     )
                     .await
                     .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout))?
-                    .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect))?
+                    .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect))?;
+                    (candidates, Some(*outbound))
                 }
             };
-            for candidate in candidates {
-                match tokio::time::timeout_at(deadline, TcpStream::connect(candidate)).await {
-                    Ok(Ok(stream)) => {
-                        let _ = stream.set_nodelay(true);
-                        return Ok(stream);
-                    }
-                    Ok(Err(_)) => {}
-                    Err(_) => {
+            for candidate in candidates
+                .into_iter()
+                .take(ferrum2_runtime::MAX_RESOLVED_CANDIDATES)
+            {
+                match physical.connect_tcp(candidate, outbound, deadline).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
                         return Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout));
                     }
+                    Err(_) => {}
                 }
             }
             Err(RuleSetDownloadError::new(RuleSetDownloadErrorKind::Connect))
@@ -1572,7 +1620,10 @@ mod tests {
             DirectDomainResolver::System,
             Arc::new(std::sync::OnceLock::new()),
         );
-        let dialer = ServerRuleSetDialer::new(vec![unavailable, system]);
+        let dialer = ServerRuleSetDialer::new(
+            vec![unavailable, system],
+            ServerPhysicalSocketContext::test(2, Arc::new(Metrics::new())),
+        );
         let target = RuleSetDialTargets::Domain(
             TargetAddr::domain("localhost", address.port()).expect("deferred RuleSet target"),
         );
@@ -1952,6 +2003,7 @@ listen = "{listen}"
 
 [[outbounds]]
 tag = "direct"
+bind_interface = "test-loopback"
 
 [route]
 final = "direct"
@@ -2033,6 +2085,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         for expected in [
             "ferrum2_dns_resolve_total{resolver=\"configured\",purpose=\"ruleset_download\",result=\"success\"} 1",
             "ferrum2_dns_implicit_system_fallback_total 0",
+            "ferrum2_outbound_interface_resolution_total{source=\"outbound_explicit\",result=\"success\"} 1",
+            "ferrum2_outbound_interface_resolution_total{source=\"system_best_route\",result=\"success\"} 1",
         ] {
             assert!(
                 encoded.contains(expected),
@@ -2225,6 +2279,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 materialized_cache: None,
                 dns_specs,
                 materialized: true,
+                network_sockets: None,
             },
         )
         .await;

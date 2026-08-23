@@ -13,31 +13,46 @@ use ferrum2_core::{
 };
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
-    Direction, Event, Inbound, InterfaceResolutionResult, InterfaceResolutionSource, LogLevel,
-    Metrics, Outcome, Reason, Role, RuleMatchResult, RuleMatchType, RuleProgram, RuleSource, Stage,
-    TraceRecord, Transport as ObservationTransport, emit,
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, RuleMatchResult,
+    RuleMatchType, RuleProgram, RuleSource, Stage, TraceRecord, Transport as ObservationTransport,
+    emit,
 };
+#[cfg(any(windows, test))]
+use ferrum2_observability::{InterfaceResolutionResult, InterfaceResolutionSource};
+#[cfg(all(windows, not(test)))]
+use ferrum2_observability::{NetworkLifecycleResult, NetworkResetReason};
 use ferrum2_rule::{
     RouteMatchObservation as EngineMatchObservation, RouteMatchSource as EngineMatchSource,
     RouteMatchType as EngineMatchType, RouteMetadata, RouteProgramAction, RouteTable,
     RuleCompileError, RuleEvaluationScratch,
 };
-#[cfg(not(test))]
+#[cfg(all(windows, not(test)))]
 use ferrum2_runtime::SystemNetworkSocketOperations;
 use ferrum2_runtime::{
-    AcceptListener, BoundedSupervisor, CancellationToken, DialOptions, GenerationBoundTcpStream,
-    InterfaceResolutionErrorKind, InterfaceSelectionSource, MAX_RESOLVED_CANDIDATES,
+    AcceptListener, BoundedSupervisor, CancellationToken, DialOptions, MAX_RESOLVED_CANDIDATES,
+    OwnerRegistry, PrefixDecision, PreparedProcessRoot, ProcessCancellation, ProcessFuture,
+    RelayRunError, RouteNetworkOptions, RuntimeTcpStream, SniffPrefix, SniffPrefixOutcome,
+    TcpResolver, collect_sniff_prefix, relay_lifecycle,
+};
+#[cfg(any(windows, test))]
+use ferrum2_runtime::{
+    GenerationBoundTcpStream, InterfaceResolutionErrorKind, InterfaceSelectionSource,
     NetworkInterfaceResolver, NetworkResetCoordinator, NetworkResetLimits,
     NetworkRuntimeResourceAdmissionError, NetworkSnapshot, NetworkSnapshotPublisher,
-    NetworkSocketService, NetworkSocketServiceError, OwnerRegistry, PrefixDecision,
-    PreparedProcessRoot, ProcessCancellation, ProcessFuture, RelayRunError, RouteNetworkOptions,
-    RuntimeTcpStream, SniffPrefix, SniffPrefixOutcome, SystemNetworkSocketError, TcpResolver,
-    collect_sniff_prefix, relay_lifecycle,
+    NetworkSocketService, NetworkSocketServiceError, SystemNetworkSocketError,
+};
+#[cfg(all(windows, not(test)))]
+use ferrum2_runtime::{
+    NetworkResetHookRegistration, NetworkResetHookStage, NetworkResetIntent, NetworkResetOutcome,
+    NetworkResetReason as RuntimeNetworkResetReason, ProcessRoot,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, PlainDuplex, ShadowsocksTcpInbound, TcpReplayStore};
 use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress, Protocol, Transport};
-#[cfg(not(test))]
-use ferrum2_wintun::{WindowsNetworkInterfaceCatalog, WindowsResolvedSocketBinder};
+#[cfg(all(windows, not(test)))]
+use ferrum2_wintun::{
+    NetworkChangeWaitOutcome, WindowsNetworkChangeMonitor, WindowsNetworkInterfaceCatalog,
+    WindowsResolvedSocketBinder,
+};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
@@ -49,7 +64,7 @@ use super::observation::{
 };
 use super::tokio_io::{TokioFramed, TokioTransport};
 
-#[cfg(not(test))]
+#[cfg(all(windows, not(test)))]
 pub(super) type ServerNetworkSocketService = NetworkSocketService<
     WindowsNetworkInterfaceCatalog,
     SystemNetworkSocketOperations<WindowsResolvedSocketBinder>,
@@ -59,25 +74,300 @@ pub(super) type ServerNetworkSocketService = NetworkSocketService<
 pub(super) type ServerNetworkSocketService =
     NetworkSocketService<TestNetworkCatalog, TestNetworkSocketOperations>;
 
-#[cfg(not(test))]
-pub(super) fn prepare_server_network_socket_service(
+/// Non-Windows servers retain the portable Tokio socket path. The marker keeps
+/// composition shared without consulting the Windows-only catalog or binder.
+#[cfg(all(not(windows), not(test)))]
+pub(super) struct ServerNetworkSocketService;
+
+#[cfg(any(windows, test))]
+pub(super) type ServerPhysicalTcpStream = GenerationBoundTcpStream<RuntimeTcpStream>;
+#[cfg(all(not(windows), not(test)))]
+pub(super) type ServerPhysicalTcpStream = RuntimeTcpStream;
+
+#[cfg(all(windows, not(test)))]
+pub(super) fn prepare_server_network_runtime(
     registry: &OwnerRegistry,
     metrics: &Metrics,
-) -> Result<Arc<ServerNetworkSocketService>, RunError> {
+) -> Result<(Arc<ServerNetworkSocketService>, WindowsNetworkChangeMonitor), RunError> {
+    // Subscribe before generation 1 is captured so changes racing startup remain observable.
+    let monitor = WindowsNetworkChangeMonitor::new().map_err(|_| RunError::StartupRuntime)?;
     let catalog = WindowsNetworkInterfaceCatalog::system();
-    let initial =
-        Arc::new(NetworkSnapshot::capture(1, &catalog).map_err(|_| RunError::StartupRuntime)?);
+    let initial = match NetworkSnapshot::capture(1, &catalog) {
+        Ok(initial) => Arc::new(initial),
+        Err(_) => {
+            close_server_network_change_monitor(monitor)?;
+            return Err(RunError::StartupRuntime);
+        }
+    };
     metrics.set_network_generation(initial.generation());
     let coordinator = NetworkResetCoordinator::new(
         NetworkSnapshotPublisher::new(initial),
         NetworkResetLimits::default(),
         registry.clone(),
     );
-    Ok(Arc::new(ServerNetworkSocketService::new(
-        coordinator,
-        NetworkInterfaceResolver::new(catalog),
-        SystemNetworkSocketOperations::new(WindowsResolvedSocketBinder),
-    )))
+    Ok((
+        Arc::new(ServerNetworkSocketService::new(
+            coordinator,
+            NetworkInterfaceResolver::new(catalog),
+            SystemNetworkSocketOperations::new(WindowsResolvedSocketBinder),
+        )),
+        monitor,
+    ))
+}
+
+#[cfg(all(windows, not(test)))]
+pub(super) fn close_server_network_change_monitor(
+    monitor: WindowsNetworkChangeMonitor,
+) -> Result<(), RunError> {
+    monitor.close().map_err(|_| RunError::ShutdownCleanup)
+}
+
+#[cfg(all(windows, not(test)))]
+const NETWORK_CHANGE_QUIET_PERIOD: Duration = Duration::from_millis(350);
+#[cfg(all(windows, not(test)))]
+const NETWORK_RESET_RETRY_DELAY: Duration = Duration::from_millis(250);
+#[cfg(all(windows, not(test)))]
+const NETWORK_CHANGE_WAIT_BOUND: Duration = Duration::from_secs(1);
+
+#[cfg(all(windows, not(test)))]
+pub(super) fn network_change_process_root(
+    monitor: WindowsNetworkChangeMonitor,
+    sockets: Arc<ServerNetworkSocketService>,
+    metrics: Arc<Metrics>,
+    udp_reset: Option<Arc<super::udp::ServerUdpNetworkReset>>,
+) -> ProcessRoot<RunError> {
+    // The monitor predates the process supervisor, so even cancellation racing
+    // root preparation must await this factory and drive explicit rollback.
+    ProcessRoot::new_cancellable(move |_| async move {
+        let coordinator = sockets.coordinator().clone();
+        let udp_reset_registration = match udp_reset {
+            Some(hook) => {
+                match coordinator.register_reset_hook(NetworkResetHookStage::Outbound, hook) {
+                    Ok(registration) => Some(registration),
+                    Err(_) => {
+                        close_server_network_change_monitor(monitor)?;
+                        return Err(RunError::StartupRuntime);
+                    }
+                }
+            }
+            None => None,
+        };
+        Ok(Some(ServerNetworkChangeRoot {
+            monitor,
+            catalog: sockets.resolver().catalog().clone(),
+            coordinator,
+            metrics,
+            _udp_reset_registration: udp_reset_registration,
+        }))
+    })
+}
+
+#[cfg(all(windows, not(test)))]
+struct ServerNetworkChangeRoot {
+    monitor: ferrum2_wintun::WindowsNetworkChangeMonitor,
+    catalog: WindowsNetworkInterfaceCatalog,
+    coordinator: NetworkResetCoordinator,
+    metrics: Arc<Metrics>,
+    _udp_reset_registration: Option<NetworkResetHookRegistration>,
+}
+
+#[cfg(all(windows, not(test)))]
+impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
+    fn activate(&mut self) -> Result<(), RunError> {
+        Ok(())
+    }
+
+    fn run(
+        self: Box<Self>,
+        mut cancellation: ProcessCancellation,
+    ) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async move {
+            let Self {
+                mut monitor,
+                catalog,
+                coordinator,
+                metrics,
+                _udp_reset_registration,
+            } = *self;
+            loop {
+                match wait_for_network_change(monitor, NETWORK_CHANGE_WAIT_BOUND, &mut cancellation)
+                    .await?
+                {
+                    ServerNetworkChangeWait::Changed(next_monitor) => {
+                        monitor = next_monitor;
+                    }
+                    ServerNetworkChangeWait::TimedOut(next_monitor) => {
+                        monitor = next_monitor;
+                        continue;
+                    }
+                    ServerNetworkChangeWait::Closed => return Ok(()),
+                }
+                loop {
+                    match wait_for_network_change(
+                        monitor,
+                        NETWORK_CHANGE_QUIET_PERIOD,
+                        &mut cancellation,
+                    )
+                    .await?
+                    {
+                        ServerNetworkChangeWait::Changed(next_monitor) => {
+                            monitor = next_monitor;
+                        }
+                        ServerNetworkChangeWait::TimedOut(next_monitor) => {
+                            monitor = next_monitor;
+                            break;
+                        }
+                        ServerNetworkChangeWait::Closed => return Ok(()),
+                    }
+                }
+                let mut retry = false;
+                loop {
+                    let metric_reason = if retry {
+                        NetworkResetReason::Retry
+                    } else {
+                        NetworkResetReason::NetworkChange
+                    };
+                    metrics.network_reset(metric_reason, NetworkLifecycleResult::Started);
+                    let runtime_reason = if retry {
+                        RuntimeNetworkResetReason::ExplicitRequest
+                    } else {
+                        RuntimeNetworkResetReason::InterfaceChanged
+                    };
+                    let reset = reset_server_network(&catalog, &coordinator, runtime_reason);
+                    tokio::pin!(reset);
+                    let reset_result = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => {
+                            metrics.network_reset(
+                                metric_reason,
+                                NetworkLifecycleResult::Failed,
+                            );
+                            return close_server_network_change_monitor(monitor);
+                        }
+                        result = &mut reset => result,
+                    };
+                    match reset_result {
+                        Ok(generation) => {
+                            metrics.set_network_generation(generation);
+                            metrics.network_reset(metric_reason, NetworkLifecycleResult::Succeeded);
+                            break;
+                        }
+                        Err(()) => {
+                            metrics.network_reset(metric_reason, NetworkLifecycleResult::Failed);
+                            retry = true;
+                            tokio::select! {
+                                biased;
+                                _ = cancellation.cancelled() => {
+                                    return close_server_network_change_monitor(monitor);
+                                }
+                                _ = tokio::time::sleep(NETWORK_RESET_RETRY_DELAY) => {}
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
+        Box::pin(async move { close_server_network_change_monitor(self.monitor) })
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+enum ServerNetworkChangeWait {
+    Changed(WindowsNetworkChangeMonitor),
+    TimedOut(WindowsNetworkChangeMonitor),
+    Closed,
+}
+
+#[cfg(all(windows, not(test)))]
+async fn reset_server_network(
+    catalog: &WindowsNetworkInterfaceCatalog,
+    coordinator: &NetworkResetCoordinator,
+    reason: RuntimeNetworkResetReason,
+) -> Result<u64, ()> {
+    let status = coordinator.status();
+    let report = if status.pending_generation().is_some() {
+        coordinator.retry_reset().await.map_err(|_| ())?
+    } else {
+        let generation = status.published_generation().checked_add(1).ok_or(())?;
+        let catalog = catalog.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            NetworkSnapshot::capture(generation, &catalog).map(Arc::new)
+        })
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+        coordinator
+            .reset_network(snapshot, NetworkResetIntent::Ordinary(reason))
+            .await
+            .map_err(|_| ())?
+    };
+    (report.outcome() == NetworkResetOutcome::ResetCompleted)
+        .then_some(report.published_generation())
+        .ok_or(())
+}
+
+#[cfg(all(windows, not(test)))]
+async fn wait_for_network_change(
+    mut monitor: WindowsNetworkChangeMonitor,
+    timeout: Duration,
+    cancellation: &mut ProcessCancellation,
+) -> Result<ServerNetworkChangeWait, RunError> {
+    let stop = monitor.stop_signal();
+    let mut waiting = tokio::task::spawn_blocking(move || {
+        let result = monitor.wait(timeout);
+        (monitor, result)
+    });
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            let stop_failed = stop.signal().is_err();
+            let joined = (&mut waiting).await;
+            let Ok((monitor, outcome)) = joined else {
+                return Err(RunError::ShutdownCleanup);
+            };
+            let wait_failed = match outcome {
+                Ok(NetworkChangeWaitOutcome::Changed
+                    | NetworkChangeWaitOutcome::TimedOut
+                    | NetworkChangeWaitOutcome::Stopped) => false,
+                Err(_) => true,
+            };
+            let close_failed = monitor.close().is_err();
+            if stop_failed || wait_failed || close_failed {
+                Err(RunError::ShutdownCleanup)
+            } else {
+                Ok(ServerNetworkChangeWait::Closed)
+            }
+        }
+        result = &mut waiting => {
+            let (monitor, outcome) = result.map_err(|_| RunError::ShutdownCleanup)?;
+            match outcome {
+                Ok(NetworkChangeWaitOutcome::Changed) => {
+                    Ok(ServerNetworkChangeWait::Changed(monitor))
+                }
+                Ok(NetworkChangeWaitOutcome::TimedOut) => {
+                    Ok(ServerNetworkChangeWait::TimedOut(monitor))
+                }
+                Ok(NetworkChangeWaitOutcome::Stopped) | Err(_) => {
+                    close_server_network_change_monitor(monitor)?;
+                    Err(RunError::RuntimeRoot)
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(test)))]
+pub(super) fn prepare_server_network_socket_service(
+    _: &OwnerRegistry,
+    metrics: &Metrics,
+) -> Result<Arc<ServerNetworkSocketService>, RunError> {
+    // Portable servers do not have a platform network-change catalog. Their
+    // sockets remain owned by Tokio and keep the single startup generation.
+    metrics.set_network_generation(1);
+    Ok(Arc::new(ServerNetworkSocketService))
 }
 
 #[cfg(test)]
@@ -482,7 +772,7 @@ struct ServerNetworkTcpOutbound {
 }
 
 impl ferrum2_core::Outbound for ServerNetworkTcpOutbound {
-    type Stream = GenerationBoundTcpStream<RuntimeTcpStream>;
+    type Stream = ServerPhysicalTcpStream;
     type Error = ConnectError;
 
     async fn open(&self, target: &TargetAddr) -> Result<Self::Stream, Self::Error> {
@@ -532,36 +822,70 @@ impl ServerNetworkTcpOutbound {
         &self,
         address: std::net::SocketAddr,
         deadline: tokio::time::Instant,
-    ) -> Result<GenerationBoundTcpStream<RuntimeTcpStream>, ConnectError> {
-        let result = match tokio::time::timeout_at(
-            deadline,
-            self.sockets
-                .connect_tcp(&self.outbound, self.route.as_ref(), address),
-        )
-        .await
+    ) -> Result<ServerPhysicalTcpStream, ConnectError> {
+        #[cfg(all(not(windows), not(test)))]
         {
-            Ok(result) => result,
-            Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
-        };
-        match result {
-            Ok(stream) => {
-                self.metrics.outbound_interface_resolution(
-                    interface_resolution_source(stream.resolved_interface().selection_source()),
-                    InterfaceResolutionResult::Success,
-                );
-                Ok(stream)
-            }
-            Err(error) => {
-                self.metrics.outbound_interface_resolution(
-                    interface_resolution_source(error.attempted_source()),
-                    interface_resolution_result(&error),
-                );
-                Err(connect_error_from_network_service(error))
+            let _ = (&self.sockets, &self.outbound, &self.route, &self.metrics);
+            let stream =
+                match tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(address))
+                    .await
+                {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => {
+                        return Err(ConnectError::new(connect_error_kind_from_io(&error)));
+                    }
+                    Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
+                };
+            RuntimeTcpStream::from_connected(stream)
+                .map_err(|error| ConnectError::new(connect_error_kind_from_io(&error)))
+        }
+
+        #[cfg(any(windows, test))]
+        {
+            let result = match tokio::time::timeout_at(
+                deadline,
+                self.sockets
+                    .connect_tcp(&self.outbound, self.route.as_ref(), address),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
+            };
+            match result {
+                Ok(stream) => {
+                    record_interface_resolution_success(&self.metrics, stream.resolved_interface());
+                    Ok(stream)
+                }
+                Err(error) => {
+                    self.metrics.outbound_interface_resolution(
+                        interface_resolution_source(error.attempted_source()),
+                        interface_resolution_result(&error),
+                    );
+                    Err(connect_error_from_network_service(error))
+                }
             }
         }
     }
 }
 
+#[cfg(any(windows, test))]
+pub(super) fn record_interface_resolution_success(
+    metrics: &Metrics,
+    resolved: &ferrum2_runtime::ResolvedInterface,
+) {
+    // Publish the denominator before its hit subset so concurrent scrapes cannot observe
+    // cache hits greater than completed interface resolutions.
+    metrics.outbound_interface_resolution(
+        interface_resolution_source(resolved.selection_source()),
+        InterfaceResolutionResult::Success,
+    );
+    if resolved.cache_hit() {
+        metrics.outbound_interface_resolution_cache_hit();
+    }
+}
+
+#[cfg(any(windows, test))]
 pub(super) fn interface_resolution_source(
     source: InterfaceSelectionSource,
 ) -> InterfaceResolutionSource {
@@ -573,6 +897,7 @@ pub(super) fn interface_resolution_source(
     }
 }
 
+#[cfg(any(windows, test))]
 pub(super) fn interface_resolution_result(
     error: &NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_wintun::Error>>,
 ) -> InterfaceResolutionResult {
@@ -590,6 +915,7 @@ pub(super) fn interface_resolution_result(
     }
 }
 
+#[cfg(any(windows, test))]
 fn connect_error_from_network_service(
     error: NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_wintun::Error>>,
 ) -> ConnectError {

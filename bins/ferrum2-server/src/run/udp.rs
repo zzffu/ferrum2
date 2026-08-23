@@ -10,17 +10,17 @@ use ferrum2_core::route::Network;
 use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_crypto::{Clock as _, SystemClock, SystemRandom};
 use ferrum2_observability::{
-    Direction, InterfaceResolutionResult, Metrics, Outcome, Reason, Role, Stage,
-    Transport as ObservationTransport,
+    Direction, Metrics, Outcome, Reason, Role, Stage, Transport as ObservationTransport,
 };
 use ferrum2_rule::{RouteMetadata, RouteProgramAction, RuleCompileError, RuleEvaluationScratch};
+#[cfg(any(windows, test))]
+use ferrum2_runtime::GenerationBoundUdpSocket;
 use ferrum2_runtime::{
     AccountedDatagram, DialOptions, DirectUdpPacketHandler, DirectUdpRuntime,
-    DirectUdpSocketFactory, GenerationBoundUdpSocket, MAX_UDP_RESOLVED_CANDIDATES,
-    MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
-    ProcessFuture, RouteNetworkOptions, SniffPrefixOutcome, UdpBufferBudget, UdpBufferReservation,
-    UdpCommitError, UdpResolver, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
-    UdpSessionManager,
+    DirectUdpSocketFactory, MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES,
+    OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture, RouteNetworkOptions,
+    SniffPrefixOutcome, UdpBufferBudget, UdpBufferReservation, UdpCommitError, UdpResolver,
+    UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
 #[cfg(test)]
 use ferrum2_runtime::{SystemDirectUdpSocket, SystemDirectUdpSocketFactory};
@@ -35,7 +35,11 @@ use super::observation::{
 };
 use super::tcp::{
     RouteProgramObservation, ServerNetworkSocketService, ServerRouting, ServerTerminalRoute,
-    interface_resolution_result, interface_resolution_source, route_metadata, sniff_order,
+    route_metadata, sniff_order,
+};
+#[cfg(any(windows, test))]
+use super::tcp::{
+    interface_resolution_result, interface_resolution_source, record_interface_resolution_success,
 };
 use super::{RunError, run_error_for_rule_compile};
 
@@ -176,6 +180,29 @@ impl UdpMappings {
         self.published.notify_waiters();
     }
 
+    #[cfg(any(windows, test))]
+    fn reset_runtime(&self) -> usize {
+        let mut state = self.state.lock().expect("UDP mapping lock poisoned");
+        let mut active = std::mem::take(&mut state.by_capability);
+        let handles = std::mem::take(&mut state.by_handle);
+        let removed = active.len();
+        for (handle, capability) in handles {
+            if let Some(binding) = active.remove(&capability) {
+                state.orphaned.insert(capability, binding.inbound);
+            }
+            retire_mapping_handle(&mut state, handle, self.limit);
+        }
+        for (capability, binding) in active {
+            state.orphaned.insert(capability, binding.inbound);
+            retire_mapping_handle(&mut state, binding.handle, self.limit);
+        }
+        drop(state);
+        if removed != 0 {
+            self.published.notify_waiters();
+        }
+        removed
+    }
+
     fn reconcile_runtime(&self, sessions: &UdpSessionManager) {
         let candidates: Vec<_> = self
             .state
@@ -214,6 +241,58 @@ impl UdpMappings {
         for capability in removed {
             state.orphaned.remove(&capability);
         }
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(super) struct ServerUdpNetworkReset {
+    accepted_generation: std::sync::atomic::AtomicU64,
+    sessions: UdpSessionManager,
+    mappings: Arc<UdpMappings>,
+    admission: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[cfg(any(windows, test))]
+impl ServerUdpNetworkReset {
+    pub(super) fn new(
+        initial_generation: u64,
+        sessions: UdpSessionManager,
+        mappings: Arc<UdpMappings>,
+        admission: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
+        Self {
+            accepted_generation: std::sync::atomic::AtomicU64::new(initial_generation),
+            sessions,
+            mappings,
+            admission,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl ferrum2_runtime::ResetNetwork for ServerUdpNetworkReset {
+    fn reset_network(
+        &self,
+        snapshot: Arc<ferrum2_runtime::NetworkSnapshot>,
+    ) -> ferrum2_runtime::NetworkResetFuture<'_> {
+        Box::pin(async move {
+            let generation = snapshot.generation();
+            let _admission = self.admission.lock().await;
+            let current = self
+                .accepted_generation
+                .load(std::sync::atomic::Ordering::Acquire);
+            if generation < current {
+                return Err(ferrum2_runtime::NetworkResetError);
+            }
+            if generation == current {
+                return Ok(());
+            }
+            self.sessions.reset_all();
+            self.mappings.reset_runtime();
+            self.accepted_generation
+                .store(generation, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
     }
 }
 
@@ -483,8 +562,13 @@ pub(super) struct ServerNetworkUdpSocketFactory {
     metrics: Arc<Metrics>,
 }
 
+#[cfg(any(windows, test))]
+type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
+#[cfg(all(not(windows), not(test)))]
+type ServerPhysicalUdpSocket = UdpSocket;
+
 impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
-    type Socket = GenerationBoundUdpSocket<UdpSocket>;
+    type Socket = ServerPhysicalUdpSocket;
     type OpenContext = Option<ServerUdpNetworkPolicy>;
 
     async fn open(
@@ -493,25 +577,40 @@ impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
         selection_destination: SocketAddr,
     ) -> io::Result<Self::Socket> {
         let policy = policy.ok_or_else(closed_udp_socket_error)?;
-        let result = self.sockets.open_udp(
-            &policy.outbound,
-            policy.route.as_ref(),
-            selection_destination,
-        );
-        match result {
-            Ok(socket) => {
-                self.metrics.outbound_interface_resolution(
-                    interface_resolution_source(socket.resolved_interface().selection_source()),
-                    InterfaceResolutionResult::Success,
-                );
-                Ok(socket)
-            }
-            Err(error) => {
-                self.metrics.outbound_interface_resolution(
-                    interface_resolution_source(error.attempted_source()),
-                    interface_resolution_result(&error),
-                );
-                Err(closed_udp_socket_error())
+        #[cfg(all(not(windows), not(test)))]
+        {
+            let _ = (
+                &self.sockets,
+                &self.metrics,
+                &policy.outbound,
+                &policy.route,
+            );
+            let local = match selection_destination {
+                SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+                SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+            };
+            UdpSocket::bind(local).await
+        }
+
+        #[cfg(any(windows, test))]
+        {
+            let result = self.sockets.open_udp(
+                &policy.outbound,
+                policy.route.as_ref(),
+                selection_destination,
+            );
+            match result {
+                Ok(socket) => {
+                    record_interface_resolution_success(&self.metrics, socket.resolved_interface());
+                    Ok(socket)
+                }
+                Err(error) => {
+                    self.metrics.outbound_interface_resolution(
+                        interface_resolution_source(error.attempted_source()),
+                        interface_resolution_result(&error),
+                    );
+                    Err(closed_udp_socket_error())
+                }
             }
         }
     }
@@ -3103,6 +3202,112 @@ mod tests {
         );
         assert_eq!(manager_registry.snapshot().udp_sessions, 0);
         assert_eq!(manager_registry.snapshot().udp_buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuild() {
+        let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
+        let clock = SystemClock::new();
+        let keys = aes_keys();
+        let protocol = UdpServer::new(&keys).expect("reset server protocol");
+        let registry = OwnerRegistry::new();
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(1, 1_048_576, Duration::from_secs(60)).expect("reset limits"),
+            registry.clone(),
+        );
+        let mappings = Arc::new(UdpMappings::new(1));
+        let admission = Arc::new(tokio::sync::Mutex::new(()));
+        let hook = ServerUdpNetworkReset::new(1, manager.clone(), Arc::clone(&mappings), admission);
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_092));
+        let mut scratch = UdpPacketScratch::new();
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("reset client");
+        let (capability, old_handle) = commit_lifecycle_generation(
+            &mut client,
+            &protocol,
+            &manager,
+            &mappings,
+            &clock,
+            target,
+            peer,
+            b"before-reset",
+            ferrum2_crypto::MonotonicInstant::ZERO,
+            &mut scratch,
+        );
+
+        ferrum2_runtime::ResetNetwork::reset_network(
+            &hook,
+            Arc::new(
+                ferrum2_runtime::NetworkSnapshot::new(2, None, None)
+                    .expect("generation two snapshot"),
+            ),
+        )
+        .await
+        .expect("generation two reset");
+
+        assert_eq!(registry.snapshot().udp_sessions, 0);
+        assert_eq!(mappings.handle(capability), None);
+        assert_eq!(mappings.inbound(capability), Some(0));
+        assert_eq!(mappings.capability(old_handle).await, None);
+        assert_eq!(
+            manager
+                .reserve_datagram(old_handle, UdpDirection::ToTarget, 1)
+                .expect_err("old runtime handle is retired"),
+            UdpRuntimeError::Cancelled
+        );
+        {
+            let state = mappings.state.lock().expect("reset mapping state");
+            assert!(state.by_capability.is_empty());
+            assert!(state.by_handle.is_empty());
+            assert!(state.retired.contains(&old_handle));
+        }
+
+        let (rebuilt_capability, new_handle) = commit_lifecycle_generation(
+            &mut client,
+            &protocol,
+            &manager,
+            &mappings,
+            &clock,
+            target,
+            peer,
+            b"after-reset",
+            ferrum2_crypto::MonotonicInstant::from_duration(Duration::from_secs(1)),
+            &mut scratch,
+        );
+        assert_eq!(rebuilt_capability, capability);
+        assert_ne!(new_handle, old_handle);
+        assert_eq!(
+            mappings.handle(capability).map(|binding| binding.handle),
+            Some(new_handle)
+        );
+
+        ferrum2_runtime::ResetNetwork::reset_network(
+            &hook,
+            Arc::new(
+                ferrum2_runtime::NetworkSnapshot::new(2, None, None)
+                    .expect("idempotent generation snapshot"),
+            ),
+        )
+        .await
+        .expect("same generation reset is idempotent");
+        assert_eq!(registry.snapshot().udp_sessions, 1);
+        assert_eq!(
+            mappings.handle(capability).map(|binding| binding.handle),
+            Some(new_handle)
+        );
+
+        ferrum2_runtime::ResetNetwork::reset_network(
+            &hook,
+            Arc::new(
+                ferrum2_runtime::NetworkSnapshot::new(3, None, None)
+                    .expect("generation three snapshot"),
+            ),
+        )
+        .await
+        .expect("generation three reset");
+        assert_eq!(registry.snapshot().udp_sessions, 0);
+        assert_eq!(mappings.handle(capability), None);
+        assert_eq!(mappings.capability(new_handle).await, None);
     }
 
     #[tokio::test]

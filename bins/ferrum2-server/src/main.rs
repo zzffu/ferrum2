@@ -27,11 +27,11 @@ fn main() -> ExitCode {
         }
     };
     if cli.check_config {
-        if cli.materialize {
-            if let Err(error) = run::materialize_only(prepared) {
-                eprintln!("{error}");
-                return ExitCode::from(2);
-            }
+        if cli.materialize
+            && let Err(error) = run::materialize_only(prepared)
+        {
+            eprintln!("{error}");
+            return ExitCode::from(2);
         }
         println!("configuration valid");
         return ExitCode::SUCCESS;

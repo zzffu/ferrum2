@@ -26,11 +26,16 @@ mod udp;
 
 use dns::{ServerDnsDependentRoot, ServerDnsDrain, ServerDnsRoot};
 use observation::{ServerMetricsRoot, log_level};
+#[cfg(all(windows, not(test)))]
+use tcp::prepare_server_network_runtime;
+#[cfg(any(not(windows), test))]
+use tcp::prepare_server_network_socket_service;
 use tcp::{
-    ServerContext, ServerRouting, ServerTcpListeners, ServerTcpRoot,
-    prepare_server_network_socket_service,
+    ServerContext, ServerNetworkSocketService, ServerRouting, ServerTcpListeners, ServerTcpRoot,
 };
 use tokio_io::{bind_listener, shutdown_signal};
+#[cfg(all(windows, not(test)))]
+use udp::ServerUdpNetworkReset;
 use udp::{ServerUdpShared, UdpMappings, prepare_udp_server_with_network, udp_runtime_limits};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,35 +177,59 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
         .map_err(|_| RunError::StartupRuntime)?;
     runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
-        let context = materialize::ServerV2MaterializeContext::new(Arc::clone(&metrics));
-        let materialized = materialize::materialize_prepared(prepared, &context).await?;
-        let subscriber = json_subscriber(
-            std::io::stderr,
-            log_level(materialized.config().logging.level),
-        );
-        if tracing::subscriber::set_global_default(subscriber).is_err() {
-            materialized.validate_only_shutdown().await?;
-            return Err(RunError::StartupObservability);
+        let registry = OwnerRegistry::new();
+        #[cfg(all(windows, not(test)))]
+        let (network_sockets, network_change_monitor) =
+            prepare_server_network_runtime(&registry, &metrics)?;
+        #[cfg(all(windows, not(test)))]
+        let mut network_change_monitor = Some(network_change_monitor);
+        #[cfg(any(not(windows), test))]
+        let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
+        let result = async {
+            let context = materialize::ServerV2MaterializeContext::with_network_sockets(
+                Arc::clone(&metrics),
+                Arc::clone(&network_sockets),
+            );
+            let materialized = materialize::materialize_prepared(prepared, &context).await?;
+            let subscriber = json_subscriber(
+                std::io::stderr,
+                log_level(materialized.config().logging.level),
+            );
+            if tracing::subscriber::set_global_default(subscriber).is_err() {
+                materialized.validate_only_shutdown().await?;
+                return Err(RunError::StartupObservability);
+            }
+            let (config, materialization_root, materialized_cache) =
+                materialized.into_run_parts().await?;
+            let dns_specs = config
+                .dns
+                .as_ref()
+                .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
+            run_with_registry_prepared(
+                config,
+                registry,
+                shutdown_signal(),
+                metrics,
+                ServerRunResources {
+                    materialization_root,
+                    materialized_cache,
+                    dns_specs,
+                    materialized: true,
+                    network_sockets: Some(network_sockets),
+                    #[cfg(all(windows, not(test)))]
+                    network_change_monitor: network_change_monitor
+                        .take()
+                        .ok_or(RunError::StartupRuntime)?,
+                },
+            )
+            .await
         }
-        let (config, materialization_root, materialized_cache) =
-            materialized.into_run_parts().await?;
-        let dns_specs = config
-            .dns
-            .as_ref()
-            .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
-        run_with_registry_prepared(
-            config,
-            OwnerRegistry::new(),
-            shutdown_signal(),
-            metrics,
-            ServerRunResources {
-                materialization_root,
-                materialized_cache,
-                dns_specs,
-                materialized: true,
-            },
-        )
-        .await
+        .await;
+        #[cfg(all(windows, not(test)))]
+        if let Some(monitor) = network_change_monitor {
+            tcp::close_server_network_change_monitor(monitor)?;
+        }
+        result
     })
 }
 
@@ -212,12 +241,22 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
         .build()
         .map_err(|_| RunError::StartupRuntime)?;
     runtime.block_on(async move {
-        let context = materialize::ServerV2MaterializeContext::new(Arc::new(Metrics::new()));
-        materialize::materialize_prepared(prepared, &context)
-            .await?
-            .validate_only_shutdown()
-            .await
-            .map(drop)
+        let metrics = Arc::new(Metrics::new());
+        let registry = OwnerRegistry::new();
+        #[cfg(all(windows, not(test)))]
+        let (network_sockets, network_change_monitor) =
+            prepare_server_network_runtime(&registry, &metrics)?;
+        #[cfg(any(not(windows), test))]
+        let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
+        let context =
+            materialize::ServerV2MaterializeContext::with_network_sockets(metrics, network_sockets);
+        let result = match materialize::materialize_prepared(prepared, &context).await {
+            Ok(materialized) => materialized.validate_only_shutdown().await.map(drop),
+            Err(error) => Err(error),
+        };
+        #[cfg(all(windows, not(test)))]
+        tcp::close_server_network_change_monitor(network_change_monitor)?;
+        result
     })
 }
 
@@ -226,6 +265,9 @@ struct ServerRunResources {
     materialized_cache: Option<DnsCache>,
     dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
     materialized: bool,
+    network_sockets: Option<Arc<ServerNetworkSocketService>>,
+    #[cfg(all(windows, not(test)))]
+    network_change_monitor: ferrum2_wintun::WindowsNetworkChangeMonitor,
 }
 
 impl ServerRunResources {
@@ -236,6 +278,7 @@ impl ServerRunResources {
             materialized_cache: None,
             dns_specs,
             materialized: false,
+            network_sockets: None,
         }
     }
 }
@@ -278,7 +321,12 @@ where
         materialized_cache,
         dns_specs,
         materialized,
+        network_sockets,
+        #[cfg(all(windows, not(test)))]
+        network_change_monitor,
     } = resources;
+    #[cfg(all(windows, not(test)))]
+    let mut network_change_monitor = Some(network_change_monitor);
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
         let route_network = Arc::new(runtime_route_network(&config.route_network));
@@ -288,7 +336,25 @@ where
             .map(|outbound| runtime_dial_options(outbound.dial_options()))
             .collect::<Vec<_>>()
             .into();
-        let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
+        let network_sockets = match network_sockets {
+            Some(network_sockets) => network_sockets,
+            None => {
+                #[cfg(test)]
+                {
+                    prepare_server_network_socket_service(&registry, &metrics)?
+                }
+                #[cfg(not(test))]
+                {
+                    return Err(RunError::StartupRuntime);
+                }
+            }
+        };
+        let physical_sockets = Arc::new(dns_egress::ServerPhysicalSocketContext::new(
+            Arc::clone(&network_sockets),
+            Arc::clone(&outbound_dial_options),
+            Arc::clone(&route_network),
+            Arc::clone(&metrics),
+        ));
         let dns = match (config.dns, config.dns_route, dns_specs) {
             (
                 Some(DnsConfig {
@@ -350,11 +416,15 @@ where
             .into();
         let mut roots = Vec::with_capacity(
             config.inbounds.len() * usize::from(config.udp.enabled)
-                + 1
+                + 2
                 + usize::from(dns.is_some())
                 + usize::from(config.metrics.is_some())
                 + usize::from(materialization_root.is_some()),
         );
+        #[cfg(all(windows, not(test)))]
+        let network_change_metrics = Arc::clone(&metrics);
+        #[cfg(all(windows, not(test)))]
+        let mut udp_network_reset = None;
         let _dns = match dns {
             Some((servers, route, policy, timeout, max_inflight, runtime)) => {
                 let state = if materialized {
@@ -371,8 +441,8 @@ where
                 .with_policy_observer(dns_egress::dns_policy_observer(&metrics));
                 let state = Arc::new(state);
                 let root_state = Arc::clone(&state);
-                let outbound_count = routing.outbound_count;
                 let root_direct_resolvers = Arc::clone(&direct_resolvers);
+                let root_physical_sockets = Arc::clone(&physical_sockets);
                 let root_tagged_dns = Arc::clone(&tagged_dns);
                 let root_dns_drain = dns_drain
                     .as_ref()
@@ -380,9 +450,10 @@ where
                     .ok_or(RunError::StartupProtocol)?;
                 roots.push(ProcessRoot::new(move || async move {
                     let egress = Arc::new(
-                        dns_egress::ServerDnsEgress::new(outbound_count).with_outbound_resolvers(
-                            root_direct_resolvers.iter().cloned().collect(),
-                        ),
+                        dns_egress::ServerDnsEgress::new(root_physical_sockets)
+                            .with_outbound_resolvers(
+                                root_direct_resolvers.iter().cloned().collect(),
+                            ),
                     );
                     let (resolver, mut owner) =
                         TaggedResolver::new(servers, timeout, max_inflight, egress)
@@ -458,6 +529,18 @@ where
             let sessions = UdpSessionManager::new(limits, registry.clone());
             let mappings = Arc::new(UdpMappings::new(udp_config.max_sessions));
             let admission = Arc::new(tokio::sync::Mutex::new(()));
+            #[cfg(all(windows, not(test)))]
+            {
+                udp_network_reset = Some(Arc::new(ServerUdpNetworkReset::new(
+                    network_sockets
+                        .coordinator()
+                        .status()
+                        .published_generation(),
+                    sessions.clone(),
+                    Arc::clone(&mappings),
+                    Arc::clone(&admission),
+                )));
+            }
             let shared = ServerUdpShared {
                 routing: Arc::clone(&routing),
                 protocol,
@@ -513,13 +596,33 @@ where
         if let Some(prepared) = materialization_root.take() {
             roots.insert(0, ProcessRoot::new(move || async move { Ok(prepared) }));
         }
+        // This must be the first required root. If any later root cannot prepare,
+        // its rollback explicitly closes the pre-start network-change monitor.
+        #[cfg(all(windows, not(test)))]
+        roots.insert(
+            0,
+            tcp::network_change_process_root(
+                network_change_monitor
+                    .take()
+                    .ok_or(RunError::StartupRuntime)?,
+                Arc::clone(&network_sockets),
+                network_change_metrics,
+                udp_network_reset,
+            ),
+        );
         let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry)
             .map_err(|_| RunError::StartupProtocol)?;
         report_result(supervisor.run_until(shutdown).await)
     }
     .await;
-    if let Some(mut root) = materialization_root {
-        return result.and(root.cleanup().await);
+    let result = if let Some(mut root) = materialization_root {
+        result.and(root.cleanup().await)
+    } else {
+        result
+    };
+    #[cfg(all(windows, not(test)))]
+    if let Some(monitor) = network_change_monitor {
+        tcp::close_server_network_change_monitor(monitor)?;
     }
     result
 }

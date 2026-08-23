@@ -2,11 +2,15 @@
 
 //! Server adapters for the shared tagged DNS resolver.
 
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use bytes::BytesMut;
 use ferrum2_config::{
     DirectDomainResolver, DnsRuntimeConfig, DnsServerConfig, DnsTransport, ServerDnsRoute,
 };
@@ -16,21 +20,50 @@ use ferrum2_dns::{
     ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveOutcome,
     ApplicationResolveRequest, ApplicationResolver, ApplicationResolverMode, BoxedDnsDatagramIo,
     BoxedDnsTcpIo, DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheError, DnsCacheKey,
-    DnsCacheQtype, DnsEgress, DnsError, DnsIoFuture, DnsPolicyCompileError, DnsPolicyMatchResult,
-    DnsPolicyMatchSource, DnsPolicyMatchType, DnsPolicyObservation, DnsPolicyObserver,
-    DnsPolicyProgram, DnsPolicyStage, DnsProxy, DnsServerId, DnsStrategy, DnsTaskRegistrar,
-    DnsUpstreamSpec, DnsUpstreamTransport, FixedEndpointLookup, ResolverGeneration,
-    SystemDnsEgress, TaggedResolver, TaggedServerApplicationResolveBackend,
+    DnsCacheQtype, DnsDatagramIo, DnsEgress, DnsEgressResourceKind, DnsEgressTaskKind, DnsError,
+    DnsIoFuture, DnsPolicyCompileError, DnsPolicyMatchResult, DnsPolicyMatchSource,
+    DnsPolicyMatchType, DnsPolicyObservation, DnsPolicyObserver, DnsPolicyProgram, DnsPolicyStage,
+    DnsProxy, DnsServerId, DnsStrategy, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
+    FixedEndpointLookup, ResolverGeneration, TaggedResolver, TaggedServerApplicationResolveBackend,
 };
 use ferrum2_observability::{
     DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics, RuleMatchResult, RuleMatchType,
     RuleProgram, RuleSource,
 };
 use ferrum2_rule::{ActionTable, RuleCompileError, RuleEngineRegistry, RuleEvaluationScratch};
+#[cfg(all(not(windows), not(test)))]
+use ferrum2_runtime::RuntimeTcpStream;
 use ferrum2_runtime::{
-    ApplicationResolverAdapter, MAX_RESOLVED_CANDIDATES, TcpResolver, UdpResolver,
+    ApplicationResolverAdapter, DialOptions, MAX_RESOLVED_CANDIDATES, RouteNetworkOptions,
+    TcpResolver, UdpResolver,
 };
+#[cfg(any(windows, test))]
+use ferrum2_runtime::{DirectUdpSocket, GenerationBoundUdpSocket};
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tokio::time::Instant as TokioInstant;
+
+use super::tcp::{ServerNetworkSocketService, ServerPhysicalTcpStream};
+#[cfg(any(windows, test))]
+use super::tcp::{
+    interface_resolution_result, interface_resolution_source, record_interface_resolution_success,
+};
+
+const DNS_UDP_QUEUE_DEPTH: usize = 1;
+const MAX_DNS_UDP_DATAGRAM_BYTES: usize = 65_535;
+
+#[cfg(any(windows, test))]
+type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
+#[cfg(all(not(windows), not(test)))]
+type ServerPhysicalUdpSocket = UdpSocket;
+
+type DnsPacket = Vec<u8>;
+type DnsPacketReserveFuture = Pin<
+    Box<
+        dyn Future<Output = Result<mpsc::OwnedPermit<DnsPacket>, mpsc::error::SendError<()>>>
+            + Send,
+    >,
+>;
 
 pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamSpec> {
     servers
@@ -571,17 +604,175 @@ const fn dns_strategy(strategy: ferrum2_config::DnsStrategy) -> DnsStrategy {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ServerPhysicalSocketContext {
+    sockets: Arc<ServerNetworkSocketService>,
+    outbound_dial_options: Arc<[DialOptions]>,
+    route_network: Arc<RouteNetworkOptions>,
+    default_dial_options: DialOptions,
+    metrics: Arc<Metrics>,
+}
+
+impl ServerPhysicalSocketContext {
+    pub(super) fn new(
+        sockets: Arc<ServerNetworkSocketService>,
+        outbound_dial_options: Arc<[DialOptions]>,
+        route_network: Arc<RouteNetworkOptions>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            sockets,
+            outbound_dial_options,
+            route_network,
+            default_dial_options: DialOptions::default(),
+            metrics,
+        }
+    }
+
+    pub(super) fn outbound_count(&self) -> usize {
+        self.outbound_dial_options.len()
+    }
+
+    fn dial_options(&self, outbound: Option<usize>) -> io::Result<&DialOptions> {
+        match outbound {
+            Some(outbound) => self
+                .outbound_dial_options
+                .get(outbound)
+                .ok_or_else(closed_physical_socket_error),
+            None => Ok(&self.default_dial_options),
+        }
+    }
+
+    pub(super) async fn connect_tcp(
+        &self,
+        destination: SocketAddr,
+        outbound: Option<usize>,
+        deadline: TokioInstant,
+    ) -> io::Result<ServerPhysicalTcpStream> {
+        let dial_options = self.dial_options(outbound)?;
+        #[cfg(all(not(windows), not(test)))]
+        {
+            let _ = (
+                &self.sockets,
+                dial_options,
+                &self.route_network,
+                &self.metrics,
+            );
+            let stream =
+                tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(destination))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "physical TCP connect timeout")
+                    })??;
+            RuntimeTcpStream::from_connected(stream)
+        }
+
+        #[cfg(any(windows, test))]
+        {
+            let result = tokio::time::timeout_at(
+                deadline,
+                self.sockets
+                    .connect_tcp(dial_options, self.route_network.as_ref(), destination),
+            )
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "physical TCP connect timeout"))?;
+            match result {
+                Ok(stream) => {
+                    record_interface_resolution_success(&self.metrics, stream.resolved_interface());
+                    Ok(stream)
+                }
+                Err(error) => {
+                    self.metrics.outbound_interface_resolution(
+                        interface_resolution_source(error.attempted_source()),
+                        interface_resolution_result(&error),
+                    );
+                    Err(closed_physical_socket_error())
+                }
+            }
+        }
+    }
+
+    async fn connect_udp(
+        &self,
+        destination: SocketAddr,
+        outbound: Option<usize>,
+    ) -> io::Result<ServerPhysicalUdpSocket> {
+        let dial_options = self.dial_options(outbound)?;
+        #[cfg(all(not(windows), not(test)))]
+        {
+            let _ = (
+                &self.sockets,
+                dial_options,
+                &self.route_network,
+                &self.metrics,
+            );
+            let local = match destination {
+                SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+                SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+            };
+            UdpSocket::bind(local).await
+        }
+
+        #[cfg(any(windows, test))]
+        {
+            let result = self
+                .sockets
+                .connect_udp(dial_options, self.route_network.as_ref(), destination)
+                .await;
+            match result {
+                Ok(socket) => {
+                    record_interface_resolution_success(&self.metrics, socket.resolved_interface());
+                    Ok(socket)
+                }
+                Err(error) => {
+                    self.metrics.outbound_interface_resolution(
+                        interface_resolution_source(error.attempted_source()),
+                        interface_resolution_result(&error),
+                    );
+                    Err(closed_physical_socket_error())
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test(outbound_count: usize, metrics: Arc<Metrics>) -> Arc<Self> {
+        let registry = ferrum2_runtime::OwnerRegistry::new();
+        let sockets = super::tcp::prepare_server_network_socket_service(&registry, &metrics)
+            .expect("test network socket service");
+        Arc::new(Self::new(
+            sockets,
+            vec![DialOptions::default(); outbound_count].into(),
+            Arc::new(RouteNetworkOptions::default()),
+            metrics,
+        ))
+    }
+}
+
+fn closed_physical_socket_error() -> io::Error {
+    io::Error::other("generation-bound physical socket unavailable")
+}
+
 pub(super) struct ServerDnsEgress {
     outbound_count: usize,
     outbound_resolvers: Arc<[Option<ServerDnsResolver>]>,
+    physical: Arc<ServerPhysicalSocketContext>,
 }
 
 impl ServerDnsEgress {
-    pub(super) fn new(outbound_count: usize) -> Self {
+    pub(super) fn new(physical: Arc<ServerPhysicalSocketContext>) -> Self {
+        let outbound_count = physical.outbound_count();
         Self {
             outbound_count,
             outbound_resolvers: vec![None; outbound_count].into(),
+            physical,
         }
+    }
+
+    #[cfg(test)]
+    fn test(outbound_count: usize) -> Self {
+        let metrics = Arc::new(Metrics::new());
+        Self::new(ServerPhysicalSocketContext::test(outbound_count, metrics))
     }
 
     pub(super) fn with_outbound_resolvers(mut self, resolvers: Vec<ServerDnsResolver>) -> Self {
@@ -623,60 +814,52 @@ impl DnsEgress for ServerDnsEgress {
         target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         timeout: Duration,
-        tasks: DnsTaskRegistrar,
+        _tasks: DnsTaskRegistrar,
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
         let outbound = match self.selected_outbound(&plan) {
             Ok(outbound) => outbound,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let TargetHostRef::Domain(host) = target.host() else {
-            return SystemDnsEgress.connect_tcp(target, None, timeout, tasks);
+        let physical = Arc::clone(&self.physical);
+        let resolved = target.as_socket_addr();
+        let domain = match target.host() {
+            TargetHostRef::Domain(host) => Some((host.to_owned(), target.port().get())),
+            TargetHostRef::Ip(_) => None,
         };
-        let Some(outbound) = outbound else {
-            return Box::pin(async {
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "server DNS domain target requires a Direct detour",
-                ))
-            });
+        let resolver = match (resolved, outbound) {
+            (Some(_), _) => None,
+            (None, Some(outbound)) => match self.resolver(outbound) {
+                Ok(resolver) => Some(resolver),
+                Err(error) => return Box::pin(async move { Err(error) }),
+            },
+            (None, None) => {
+                return Box::pin(async {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "server DNS domain target requires a Direct detour",
+                    ))
+                });
+            }
         };
-        let resolver = match self.resolver(outbound) {
-            Ok(resolver) => resolver,
-            Err(error) => return Box::pin(async move { Err(error) }),
-        };
-        let host = host.to_owned();
-        let port = target.port().get();
         Box::pin(async move {
             let deadline = TokioInstant::now() + timeout;
-            let candidates =
-                tokio::time::timeout_at(deadline, TcpResolver::resolve(&resolver, &host, port))
-                    .await
-                    .map_err(|_| {
-                        io::Error::new(io::ErrorKind::TimedOut, "server DNS resolve timeout")
-                    })??;
-            let mut last_error = None;
-            for candidate in candidates {
-                let remaining = deadline.saturating_duration_since(TokioInstant::now());
-                if remaining.is_zero() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "server DNS connect timeout",
-                    ));
+            let candidates = match (resolved, resolver, domain) {
+                (Some(destination), None, None) => vec![destination],
+                (None, Some(resolver), Some((host, port))) => {
+                    tokio::time::timeout_at(deadline, TcpResolver::resolve(&resolver, &host, port))
+                        .await
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::TimedOut, "server DNS resolve timeout")
+                        })??
                 }
-                let candidate = TargetAddr::ip(candidate).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "invalid resolved DNS target")
-                })?;
-                let connect =
-                    SystemDnsEgress.connect_tcp(candidate, None, remaining, tasks.clone());
-                match tokio::time::timeout_at(deadline, connect).await {
-                    Ok(Ok(stream)) => return Ok(stream),
-                    Ok(Err(error)) => last_error = Some(error),
-                    Err(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "server DNS connect timeout",
-                        ));
-                    }
+                _ => return Err(closed_physical_socket_error()),
+            };
+            let mut last_error = None;
+            for candidate in candidates.into_iter().take(MAX_RESOLVED_CANDIDATES) {
+                match physical.connect_tcp(candidate, outbound, deadline).await {
+                    Ok(stream) => return Ok(Box::new(stream) as BoxedDnsTcpIo),
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
+                    Err(error) => last_error = Some(error),
                 }
             }
             Err(last_error.unwrap_or_else(|| {
@@ -698,36 +881,147 @@ impl DnsEgress for ServerDnsEgress {
             Ok(outbound) => outbound,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let TargetHostRef::Domain(host) = target.host() else {
-            return SystemDnsEgress.bind_udp(target, None, tasks);
+        let physical = Arc::clone(&self.physical);
+        let resolved = target.as_socket_addr();
+        let domain = match target.host() {
+            TargetHostRef::Domain(host) => Some((host.to_owned(), target.port().get())),
+            TargetHostRef::Ip(_) => None,
         };
-        let Some(outbound) = outbound else {
-            return Box::pin(async {
-                Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "server DNS domain target requires a Direct detour",
-                ))
-            });
+        let resolver = match (resolved, outbound) {
+            (Some(_), _) => None,
+            (None, Some(outbound)) => match self.resolver(outbound) {
+                Ok(resolver) => Some(resolver),
+                Err(error) => return Box::pin(async move { Err(error) }),
+            },
+            (None, None) => {
+                return Box::pin(async {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "server DNS domain target requires a Direct detour",
+                    ))
+                });
+            }
         };
-        let resolver = match self.resolver(outbound) {
-            Ok(resolver) => resolver,
-            Err(error) => return Box::pin(async move { Err(error) }),
-        };
-        let host = host.to_owned();
-        let port = target.port().get();
         Box::pin(async move {
-            let candidates = UdpResolver::resolve(&resolver, &host, port).await?;
-            let candidate = candidates.into_iter().next().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::AddrNotAvailable,
-                    "server Direct resolver returned no candidates",
-                )
-            })?;
-            let candidate = TargetAddr::ip(candidate).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid resolved DNS target")
-            })?;
-            SystemDnsEgress.bind_udp(candidate, None, tasks).await
+            let candidate = match (resolved, resolver, domain) {
+                (Some(destination), None, None) => destination,
+                (None, Some(resolver), Some((host, port))) => {
+                    UdpResolver::resolve(&resolver, &host, port)
+                        .await?
+                        .into_iter()
+                        .take(MAX_RESOLVED_CANDIDATES)
+                        .next()
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::AddrNotAvailable,
+                                "server Direct resolver returned no candidates",
+                            )
+                        })?
+                }
+                _ => return Err(closed_physical_socket_error()),
+            };
+            let socket = physical.connect_udp(candidate, outbound).await?;
+            Ok(server_dns_datagram(socket, candidate, tasks))
         })
+    }
+}
+
+fn server_dns_datagram(
+    socket: ServerPhysicalUdpSocket,
+    target: SocketAddr,
+    tasks: DnsTaskRegistrar,
+) -> BoxedDnsDatagramIo {
+    let (outgoing, mut outgoing_packets) = mpsc::channel::<DnsPacket>(DNS_UDP_QUEUE_DEPTH);
+    let (incoming_packets, incoming) = mpsc::channel::<DnsPacket>(DNS_UDP_QUEUE_DEPTH);
+    let outgoing_queue = tasks.own(DnsEgressResourceKind::Queue);
+    let incoming_queue = tasks.own(DnsEgressResourceKind::Queue);
+    let buffer = tasks.own(DnsEgressResourceKind::Buffer);
+    tasks.spawn(DnsEgressTaskKind::Session, async move {
+        let (_outgoing_queue, _incoming_queue, _buffer) = (outgoing_queue, incoming_queue, buffer);
+        let mut response = BytesMut::with_capacity(MAX_DNS_UDP_DATAGRAM_BYTES);
+        while let Some(packet) = outgoing_packets.recv().await {
+            let sent = socket.send_to(&packet, target).await;
+            if !matches!(sent, Ok(length) if length == packet.len()) {
+                break;
+            }
+            response.clear();
+            let Ok((length, source)) = socket.recv_buf_from(&mut response).await else {
+                break;
+            };
+            if source != target || length > MAX_DNS_UDP_DATAGRAM_BYTES {
+                break;
+            }
+            if incoming_packets
+                .send(response[..length].to_vec())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    Box::new(ServerDnsDatagram {
+        outgoing,
+        reserve: Mutex::new(None),
+        incoming: Mutex::new(incoming),
+    })
+}
+
+struct ServerDnsDatagram {
+    outgoing: mpsc::Sender<DnsPacket>,
+    reserve: Mutex<Option<DnsPacketReserveFuture>>,
+    incoming: Mutex<mpsc::Receiver<DnsPacket>>,
+}
+
+impl DnsDatagramIo for ServerDnsDatagram {
+    fn poll_recv(&self, context: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>> {
+        let Ok(mut incoming) = self.incoming.lock() else {
+            return Poll::Ready(Err(io::Error::other("DNS UDP receive lock")));
+        };
+        match incoming.poll_recv(context) {
+            Poll::Ready(Some(packet)) if packet.len() <= buffer.len() => {
+                buffer[..packet.len()].copy_from_slice(&packet);
+                Poll::Ready(Ok(packet.len()))
+            }
+            Poll::Ready(Some(_)) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DNS UDP receive too large",
+            ))),
+            Poll::Ready(None) => Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_send(&self, context: &mut Context<'_>, buffer: &[u8]) -> Poll<io::Result<usize>> {
+        if buffer.len() > MAX_DNS_UDP_DATAGRAM_BYTES {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DNS UDP send too large",
+            )));
+        }
+        let Ok(mut reserve) = self.reserve.lock() else {
+            return Poll::Ready(Err(io::Error::other("DNS UDP send lock")));
+        };
+        if reserve.is_none() {
+            *reserve = Some(Box::pin(self.outgoing.clone().reserve_owned()));
+        }
+        match reserve
+            .as_mut()
+            .expect("DNS UDP reserve future")
+            .as_mut()
+            .poll(context)
+        {
+            Poll::Ready(Ok(permit)) => {
+                reserve.take();
+                permit.send(buffer.to_vec());
+                Poll::Ready(Ok(buffer.len()))
+            }
+            Poll::Ready(Err(_)) => {
+                reserve.take();
+                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -915,7 +1209,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             specs,
             dns.timeout,
             dns.max_inflight,
-            Arc::new(ServerDnsEgress::new(config.outbounds.len())),
+            Arc::new(ServerDnsEgress::test(config.outbounds.len())),
         )
         .expect("tagged resolver");
         owner.ready().await.expect("tagged ready");
@@ -1185,7 +1479,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         );
         let logical = TargetAddr::domain("exact-upstream.test", upstream_address.port())
             .expect("logical upstream");
-        let egress = Arc::new(ServerDnsEgress::new(1).with_outbound_resolvers(vec![direct]));
+        let egress = Arc::new(ServerDnsEgress::test(1).with_outbound_resolvers(vec![direct]));
         let (resolver, mut owner) = TaggedResolver::new(
             vec![
                 upstream_spec(
@@ -1266,7 +1560,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let system =
             ServerDnsResolver::for_direct(DirectDomainResolver::System, Arc::new(OnceLock::new()));
         let egress =
-            Arc::new(ServerDnsEgress::new(2).with_outbound_resolvers(vec![unavailable, system]));
+            Arc::new(ServerDnsEgress::test(2).with_outbound_resolvers(vec![unavailable, system]));
         let (resolver, mut owner) = TaggedResolver::new(
             vec![DnsUpstreamSpec {
                 target: TargetAddr::domain("localhost", address.port()).expect("localhost target"),
@@ -1318,7 +1612,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             },
             Arc::new(OnceLock::new()),
         );
-        let egress = Arc::new(ServerDnsEgress::new(1).with_outbound_resolvers(vec![direct]));
+        let egress = Arc::new(ServerDnsEgress::test(1).with_outbound_resolvers(vec![direct]));
         let (resolver, mut owner) = TaggedResolver::new(
             vec![upstream_spec(
                 TargetAddr::ip(address).expect("numeric target"),
@@ -1361,7 +1655,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let address = listener.local_addr().expect("no-plan target address");
         let direct =
             ServerDnsResolver::for_direct(DirectDomainResolver::System, Arc::new(OnceLock::new()));
-        let egress = Arc::new(ServerDnsEgress::new(1).with_outbound_resolvers(vec![direct]));
+        let egress = Arc::new(ServerDnsEgress::test(1).with_outbound_resolvers(vec![direct]));
         let (resolver, mut owner) = TaggedResolver::new(
             vec![upstream_spec(
                 TargetAddr::domain("localhost", address.port()).expect("no-plan domain target"),
@@ -1534,7 +1828,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             specs,
             dns.timeout,
             dns.max_inflight,
-            Arc::new(ServerDnsEgress::new(config.outbounds.len())),
+            Arc::new(ServerDnsEgress::test(config.outbounds.len())),
         )
         .expect("tagged DNS resolver");
         owner.ready().await.expect("tagged DNS ready");
@@ -1781,7 +2075,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             )
             .await;
         });
-        let egress = Arc::new(ServerDnsEgress::new(config.outbounds.len()));
+        let egress = Arc::new(ServerDnsEgress::test(config.outbounds.len()));
         let (resolver, mut owner) =
             TaggedResolver::new(specs, dns.timeout, dns.max_inflight, egress)
                 .expect("server DNS resolver");
