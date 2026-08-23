@@ -102,6 +102,8 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -Err
 $policyPath = Join-Path $PSScriptRoot "windows_tun_performance_policy.json"
 $controlPath = Join-Path $PSScriptRoot "performance_candidate.py"
 $collectorPath = Join-Path $PSScriptRoot "collect_windows_tun_performance_trial.ps1"
+$networkModelControllerPath = Join-Path $repositoryRoot `
+    "tests\performance_candidate\windows_tun_network_model.py"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 
 function Test-PathWithinRoot {
@@ -363,12 +365,35 @@ function New-CanonicalPlan {
         "--output", $Output
     )
     $plan = Get-Content -LiteralPath $Output -Raw -Encoding utf8 | ConvertFrom-Json -Depth 30
-    if ($plan.kind -cne "windows_tun_performance_plan" -or
+    if ($plan.schema_version -ne 2 -or
+        $plan.kind -cne "windows_tun_performance_plan" -or
         $plan.run_kind -cne $RunKindValue -or
-        @($plan.trials).Count -ne 80) {
+        @($plan.trials).Count -ne 80 -or
+        $null -eq $plan.scenarios."network-lifecycle") {
         throw "canonical Windows TUN plan shape is invalid"
     }
     return $plan
+}
+
+function New-NetworkModelPlan {
+    param([string]$Python, [string]$Output, [string]$ExpectedSha256)
+    Invoke-NativeChecked -Executable $Python -Label "Windows TUN network-model plan" `
+        -Arguments @(
+            "-B", $script:networkModelControllerPath, "plan", "--output", $Output
+        )
+    $digest = (Get-FileHash -LiteralPath $Output -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($digest -cne $ExpectedSha256) {
+        throw "Windows TUN network-model plan identity mismatch"
+    }
+    $model = Get-Content -LiteralPath $Output -Raw -Encoding utf8 |
+        ConvertFrom-Json -Depth 12
+    if ($model.schema_version -ne 2 -or
+        $model.execution -cne "local_hyperv_guest" -or
+        $model.host_network_mutation -cne "forbidden" -or
+        [int]$model.workloads."network-lifecycle".reset_network_cycles -ne 1000) {
+        throw "Windows TUN network-model plan shape is invalid"
+    }
+    return $model
 }
 
 function Export-CommitSource {
@@ -529,7 +554,9 @@ function Stage-PortableRuntime {
 
 $git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0].Source
 $python = @(Get-Command python -CommandType Application -ErrorAction Stop)[0].Source
-foreach ($required in @($policyPath, $controlPath, $collectorPath)) {
+foreach ($required in @(
+    $policyPath, $controlPath, $collectorPath, $networkModelControllerPath
+)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "required performance controller file is missing: $required"
     }
@@ -560,8 +587,11 @@ if ($PlanOnly) {
     try {
         $planPath = Join-Path $planRoot "plan.json"
         $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $planPath
+        $networkModelPlanPath = Join-Path $planRoot "network-model-plan.json"
+        [void](New-NetworkModelPlan -Python $python -Output $networkModelPlanPath `
+            -ExpectedSha256 ([string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256))
         [pscustomobject]@{
-            schema = "ferrum2.windows-tun.hyperv-performance-plan.v1"
+            schema = "ferrum2.windows-tun.hyperv-performance-plan.v2"
             run_kind = $RunKind
             parent_sha = $ParentSha
             candidate_sha = $CandidateSha
@@ -569,12 +599,17 @@ if ($PlanOnly) {
             candidate_tree = $candidateTree
             trials = @($plan.trials).Count
             recipe_sha256 = [string]$plan.recipe_sha256
+            network_model_controller_sha256 = [string]$plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256
+            network_model_plan_sha256 = [string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256
             vm_name = $approvedVmName
             vm_id = $approvedVmId.ToString("D")
             checkpoint_name = $approvedCheckpointName
             checkpoint_id = $approvedCheckpointId.ToString("D")
             host_actions = @("archive exact commits", "build profiling binaries", "stage files", "reduce evidence")
-            guest_actions = @("probe support", "run 80 collector trials", "clean each TUN session")
+            guest_actions = @(
+                "probe support", "run 80 collector trials",
+                "collect 10 raw lifecycle sidecars", "clean each TUN session"
+            )
             host_network_mutations = 0
         } | ConvertTo-Json -Depth 6
     } finally {
@@ -608,6 +643,7 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 $artifactRoot = Join-Path $temporaryRoot "input\artifacts"
 $runtimeRoot = Join-Path $temporaryRoot "input\runtime"
 $hostPlanPath = Join-Path $hostEvidenceRoot "plan.json"
+$hostNetworkModelPlanPath = Join-Path $hostEvidenceRoot "network-model-plan.json"
 $hostSchedulePath = Join-Path $hostEvidenceRoot "trial-schedule.tsv"
 $hostSummaryPath = Join-Path $hostEvidenceRoot "summary.json"
 $hostMarkdownPath = Join-Path $hostEvidenceRoot "summary.md"
@@ -625,6 +661,8 @@ try {
     [IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
     [IO.Directory]::CreateDirectory($runtimeRoot) | Out-Null
     $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $hostPlanPath
+    [void](New-NetworkModelPlan -Python $python -Output $hostNetworkModelPlanPath `
+        -ExpectedSha256 ([string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256))
     $scheduleLines = @($plan.trials | ForEach-Object {
         "$($_.sequence)`t$($_.scenario)`t$($_.member)`t$($_.pair)`t$($_.order)"
     })
@@ -654,9 +692,15 @@ try {
 
     Copy-Item -LiteralPath $collectorPath -Destination (Join-Path $temporaryRoot "input") `
         -ErrorAction Stop
+    Copy-Item -LiteralPath $networkModelControllerPath `
+        -Destination (Join-Path $temporaryRoot "input\windows_tun_network_model.py") `
+        -ErrorAction Stop
     Copy-Item -LiteralPath $resolvedWintunZip `
         -Destination (Join-Path $temporaryRoot "input\wintun-0.14.1.zip") -ErrorAction Stop
     Copy-Item -LiteralPath $hostPlanPath -Destination (Join-Path $temporaryRoot "input\plan.json") `
+        -ErrorAction Stop
+    Copy-Item -LiteralPath $hostNetworkModelPlanPath `
+        -Destination (Join-Path $temporaryRoot "input\network-model-plan.json") `
         -ErrorAction Stop
     Stage-PortableRuntime -Rustup $rustup -Destination $runtimeRoot
 
@@ -678,6 +722,9 @@ outbound = "direct"
 [[outbounds]]
 tag = "direct"
 type = "direct"
+[route]
+auto_detect_interface = true
+final = "direct"
 [udp]
 enabled = true
 max_sessions = 16384
@@ -753,6 +800,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $parentTree,
         $candidateTree,
         [string]$plan.recipe_sha256,
+        [string]$plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256,
+        [string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256,
         $SupportIpv4,
         $SupportTcpPort,
         $SupportUdpPort,
@@ -773,6 +822,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [string]$ParentTree,
             [string]$CandidateTree,
             [string]$RecipeSha256,
+            [string]$NetworkModelControllerSha256,
+            [string]$NetworkModelPlanSha256,
             [string]$SupportAddress,
             [int]$SupportTcp,
             [int]$SupportUdp,
@@ -785,6 +836,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $Utf8NoBom = New-Object Text.UTF8Encoding($false)
         $InputRoot = Join-Path $Root "input"
         $EvidenceRoot = Join-Path $Root "raw-evidence"
+        $NetworkModelEvidenceRoot = Join-Path $EvidenceRoot "network-model"
         $AdapterName = "Ferrum2Perf"
         if (-not $Root.StartsWith("C:\Windows\Temp\ferrum2-tun-performance-", [StringComparison]::OrdinalIgnoreCase) -or
             -not (Test-Path -LiteralPath $InputRoot -PathType Container) -or
@@ -811,6 +863,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             throw "guest staging cannot contain a reparse point"
         }
         New-Item -ItemType Directory -Path $EvidenceRoot | Out-Null
+        New-Item -ItemType Directory -Path $NetworkModelEvidenceRoot | Out-Null
 
         $RustRoot = Join-Path $InputRoot "runtime\rust"
         $PowerShell = Join-Path $InputRoot "runtime\pwsh\pwsh.exe"
@@ -822,6 +875,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $pwshVersion = @(& $PowerShell -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
         if ($LASTEXITCODE -ne 0 -or [Version]$pwshVersion[0] -lt [Version]"7.4") {
             throw "staged PowerShell 7 runtime verification failed"
+        }
+        $networkModelController = Join-Path $InputRoot "windows_tun_network_model.py"
+        $networkModelPlan = Join-Path $InputRoot "network-model-plan.json"
+        if (
+            (Get-FileHash -LiteralPath $networkModelController -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -cne $NetworkModelControllerSha256 -or
+            (Get-FileHash -LiteralPath $networkModelPlan -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -cne $NetworkModelPlanSha256
+        ) {
+            throw "staged network-model controller or plan identity changed"
         }
 
         $wintunZip = Join-Path $InputRoot "wintun-0.14.1.zip"
@@ -1075,7 +1138,13 @@ public static class Ferrum2PerfProcessGroup {
         $collectorHash = (Get-FileHash -LiteralPath $collector -Algorithm SHA256).Hash.ToLowerInvariant()
         $plan = Get-Content -LiteralPath (Join-Path $InputRoot "plan.json") -Raw -Encoding utf8 |
             ConvertFrom-Json
-        if (@($plan.trials).Count -ne 80 -or $plan.recipe_sha256 -cne $RecipeSha256) {
+        if ($plan.schema_version -ne 2 -or
+            @($plan.trials).Count -ne 80 -or
+            $plan.recipe_sha256 -cne $RecipeSha256 -or
+            $plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256 `
+                -cne $NetworkModelControllerSha256 -or
+            $plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256 `
+                -cne $NetworkModelPlanSha256) {
             throw "guest trial plan changed during staging"
         }
         & $harness "windows-tun-probe" "--target-ip" $SupportAddress `
@@ -1150,11 +1219,21 @@ public static class Ferrum2PerfProcessGroup {
                     "-ServerBinary", $server,
                     "-HarnessBinary", $harness,
                     "-IdentityLedger", $ledger,
+                    "-NetworkModelPlan", $networkModelPlan,
+                    "-NetworkModelController", $networkModelController,
+                    "-AdapterName", $AdapterName,
                     "-ClientPid", [string]$clientPid,
                     "-ServerPid", [string]$serverPid,
                     "-MetricsPort", [string]$metricsPort,
                     "-Output", $output
                 )
+                if ([string]$trial.scenario -ceq "network-lifecycle") {
+                    $networkModelOutput = Join-Path $NetworkModelEvidenceRoot (
+                        "{0:D3}-network-lifecycle-{1}-pair-{2}.network-model.json" -f `
+                            [int]$trial.sequence, $member, [int]$trial.pair
+                    )
+                    $collectorArguments += @("-NetworkModelOutput", $networkModelOutput)
+                }
                 & $PowerShell @collectorArguments
                 if ($LASTEXITCODE -ne 0 -or
                     -not (Test-Path -LiteralPath $output -PathType Leaf) -or
@@ -1184,17 +1263,25 @@ public static class Ferrum2PerfProcessGroup {
             if ($null -ne $trialFailure) { throw $trialFailure }
         }
         $files = @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Filter "*.json")
-        if ($files.Count -ne 80) { throw "guest evidence set is incomplete" }
+        $networkModelFiles = @(
+            Get-ChildItem -LiteralPath $NetworkModelEvidenceRoot -File `
+                -Filter "*.network-model.json"
+        )
+        if ($files.Count -ne 80 -or $networkModelFiles.Count -ne 10) {
+            throw "guest evidence set is incomplete"
+        }
         [pscustomobject]@{
             status = "PASS"
             trials = $files.Count
+            network_model_observations = $networkModelFiles.Count
             evidence_path = $EvidenceRoot
             guest_build = "$($version.CurrentBuildNumber).$($version.UBR)"
         }
     }
     # END GUEST_ONLY_NETWORK_EXECUTION
     if (@($guestResult).Count -ne 1 -or $guestResult.status -cne "PASS" -or
-        [int]$guestResult.trials -ne 80) {
+        [int]$guestResult.trials -ne 80 -or
+        [int]$guestResult.network_model_observations -ne 10) {
         throw "guest performance controller did not return a complete result"
     }
     $guestEvidenceAvailable = $true
@@ -1208,7 +1295,7 @@ public static class Ferrum2PerfProcessGroup {
                 -ErrorAction Stop -ScriptBlock {
                     param([string]$Path)
                     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-                        return [pscustomobject]@{ Safe = $false; Files = 0 }
+                        return [pscustomobject]@{ Safe = $false; Files = 0; ModelFiles = 0 }
                     }
                     $items = @(Get-Item -LiteralPath $Path -Force) + @(
                         Get-ChildItem -LiteralPath $Path -Force -Recurse
@@ -1218,9 +1305,15 @@ public static class Ferrum2PerfProcessGroup {
                             $_.Attributes -band [IO.FileAttributes]::ReparsePoint
                         }).Count -eq 0
                         Files = @(Get-ChildItem -LiteralPath $Path -File -Filter "*.json").Count
+                        ModelFiles = @(
+                            Get-ChildItem -LiteralPath (Join-Path $Path "network-model") `
+                                -File -Filter "*.network-model.json" -ErrorAction SilentlyContinue
+                        ).Count
                     }
                 })
-            if ($boundary.Count -eq 1 -and $boundary[0].Safe -eq $true) {
+            if ($boundary.Count -eq 1 -and $boundary[0].Safe -eq $true -and
+                [int]$boundary[0].Files -eq 80 -and
+                [int]$boundary[0].ModelFiles -eq 10) {
                 Copy-Item -FromSession $session -LiteralPath $guestEvidencePath `
                     -Destination $hostEvidenceRoot -Recurse -ErrorAction Stop
             }
@@ -1258,8 +1351,12 @@ if ($null -ne $runFailure) { throw $runFailure }
 if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complete" }
 
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
+$rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"
 if (-not (Test-Path -LiteralPath $rawEvidence -PathType Container) -or
-    @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 80) {
+    @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 80 -or
+    -not (Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container) -or
+    @(Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
+        -Filter "*.network-model.json").Count -ne 10) {
     throw "exported raw evidence is incomplete"
 }
 $summaryArguments = @(
@@ -1282,11 +1379,15 @@ if (-not (Test-Path -LiteralPath $hostSummaryPath -PathType Leaf)) {
 }
 $summary = Get-Content -LiteralPath $hostSummaryPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 30
 [pscustomobject]@{
-    schema = "ferrum2.windows-tun.hyperv-performance-result.v1"
+    schema = "ferrum2.windows-tun.hyperv-performance-result.v2"
     status = [string]$summary.status
     reducer_exit_code = $summaryExit
     evidence_directory = $hostEvidenceRoot
     raw_trials = @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count
+    raw_network_model_observations = @(
+        Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
+            -Filter "*.network-model.json"
+    ).Count
     final_vm_state = [string](Get-ApprovedVmContext).Vm.State
     checkpoint_restored = $true
     host_network_mutations = 0

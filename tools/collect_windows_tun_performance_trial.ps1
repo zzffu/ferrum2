@@ -8,7 +8,7 @@ param(
         "fragment-reassembly-throughput",
         "idle-cpu-wakeup",
         "wintun-ring-full-drop-rate",
-        "restart-recovery"
+        "network-lifecycle"
     )]
     [string]$Scenario,
 
@@ -36,6 +36,10 @@ param(
     [Parameter(Mandatory = $true)][string]$ServerBinary,
     [Parameter(Mandatory = $true)][string]$HarnessBinary,
     [Parameter(Mandatory = $true)][string]$IdentityLedger,
+    [Parameter(Mandatory = $true)][string]$NetworkModelPlan,
+    [Parameter(Mandatory = $true)][string]$NetworkModelController,
+    [Parameter(Mandatory = $true)][string]$AdapterName,
+    [string]$NetworkModelOutput,
     [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ClientPid,
     [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ServerPid,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$MetricsPort,
@@ -96,6 +100,41 @@ function Get-Metric([string]$Metrics, [string]$Name, [bool]$AllowAbsent = $false
         )
     }
     return $total
+}
+
+function Get-LabeledMetric(
+    [string]$Metrics,
+    [string]$Name,
+    [hashtable]$Labels,
+    [bool]$AllowAbsent = $false
+) {
+    $pattern = "(?m)^$([regex]::Escape($Name))(?:_total)?\{(?<labels>[^}`r`n]*)\} (?<value>[0-9]+(?:\.[0-9]+)?)$"
+    $selected = @([regex]::Matches($Metrics, $pattern) | Where-Object {
+        $encoded = $_.Groups["labels"].Value
+        @($Labels.GetEnumerator() | Where-Object {
+            $encoded -cnotmatch "(?:^|,)$([regex]::Escape([string]$_.Key))=`"$([regex]::Escape([string]$_.Value))`"(?:,|$)"
+        }).Count -eq 0
+    })
+    if ($selected.Count -eq 0 -and $AllowAbsent) { return [double]0 }
+    Assert-Condition ($selected.Count -eq 1) "missing or ambiguous labeled product metric: $Name"
+    return [double]::Parse(
+        $selected[0].Groups["value"].Value,
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+}
+
+function Get-ElapsedNanoseconds([Diagnostics.Stopwatch]$Timer) {
+    return [uint64][Math]::Ceiling(
+        ([decimal]$Timer.ElapsedTicks * [decimal]1000000000) /
+        [decimal][Diagnostics.Stopwatch]::Frequency
+    )
+}
+
+function Get-NearestRank([uint64[]]$Values, [ValidateSet(50, 95, 99)][int]$Percentile) {
+    Assert-Condition ($Values.Count -gt 0) "latency sample set is empty"
+    $ordered = @($Values | Sort-Object)
+    $rank = [int][Math]::Ceiling(([decimal]$Percentile * $ordered.Count) / 100)
+    return [uint64]$ordered[$rank - 1]
 }
 
 function Get-ProcessCpuNanoseconds([Diagnostics.Process[]]$Processes) {
@@ -212,10 +251,123 @@ function Wait-CleanDrain([bool]$Udp) {
     throw "product flow/association/reassembly state did not drain"
 }
 
-function Get-P99Nanoseconds([uint64[]]$Values) {
-    Assert-Condition ($Values.Count -eq 10) "restart recovery requires exactly ten values"
-    $ordered = @($Values | Sort-Object)
-    return [uint64]$ordered[9]
+function Get-ManagedAdapter {
+    $rows = @(Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction Stop)
+    Assert-Condition ($rows.Count -eq 1) "managed performance adapter identity is not exact"
+    return $rows[0]
+}
+
+function Get-ManagedIdentity {
+    $adapter = Get-ManagedAdapter
+    $addresses = @(
+        Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction Stop |
+            ForEach-Object {
+                "$($_.AddressFamily)|$($_.IPAddress)|$($_.PrefixLength)|$($_.PrefixOrigin)|$($_.SuffixOrigin)|$($_.SkipAsSource)"
+            } | Sort-Object
+    )
+    $routes = @(
+        Get-NetRoute -InterfaceIndex $adapter.ifIndex -PolicyStore ActiveStore -ErrorAction Stop |
+            ForEach-Object {
+                "$($_.AddressFamily)|$($_.DestinationPrefix)|$($_.NextHop)|$($_.RouteMetric)|$($_.Protocol)"
+            } | Sort-Object
+    )
+    $dns = @(
+        Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ErrorAction Stop |
+            ForEach-Object {
+                "$($_.AddressFamily)|$(@($_.ServerAddresses | Sort-Object) -join ',')"
+            } | Sort-Object
+    )
+    $identity = [ordered]@{
+        interface_guid = ([Guid]$adapter.InterfaceGuid).ToString("D").ToLowerInvariant()
+        net_luid = [uint64]$adapter.NetLuid
+        interface_index = [uint32]$adapter.ifIndex
+        interface_description = [string]$adapter.InterfaceDescription
+        addresses = $addresses
+        routes = $routes
+        dns = $dns
+    }
+    $bytes = $script:Utf8NoBom.GetBytes(($identity | ConvertTo-Json -Compress -Depth 5))
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function Get-LifecycleResources([string]$Metrics) {
+    $clientProcess.Refresh()
+    Assert-Condition (-not $clientProcess.HasExited) "client exited during lifecycle sampling"
+    $managedAdapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction Stop).Count
+    return [ordered]@{
+        process_handles = [uint64]$clientProcess.HandleCount
+        process_threads = [uint64]$clientProcess.Threads.Count
+        udp_associations_active = [uint64](
+            Get-Metric $Metrics "ferrum2_tun_udp_associations_active"
+        )
+        managed_adapters_active = [uint64]$managedAdapters
+    }
+}
+
+function Get-PhysicalDefaultRoute {
+    $managed = Get-ManagedAdapter
+    $rows = @(
+        Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" `
+            -PolicyStore ActiveStore -ErrorAction Stop |
+            Where-Object { [uint32]$_.InterfaceIndex -ne [uint32]$managed.ifIndex } |
+            ForEach-Object {
+                $adapter = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden `
+                    -ErrorAction Stop
+                $interface = Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex `
+                    -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
+                [pscustomobject]@{
+                    Route = $_
+                    Adapter = $adapter
+                    EffectiveMetric = [uint64]$_.RouteMetric + [uint64]$interface.InterfaceMetric
+                }
+            } | Sort-Object EffectiveMetric, @{ Expression = { $_.Route.InterfaceIndex } }
+    )
+    Assert-Condition (
+        $rows.Count -gt 0 -and
+        [bool]$rows[0].Adapter.HardwareInterface -and
+        [string]$rows[0].Adapter.Status -ceq "Up" -and
+        ($rows.Count -eq 1 -or $rows[0].EffectiveMetric -lt $rows[1].EffectiveMetric)
+    ) "one preferred physical IPv4 default route is required"
+    return $rows[0]
+}
+
+function Wait-LifecycleTransition(
+    [ValidateSet("reset_network", "full_rebuild")][string]$Operation,
+    [double]$GenerationBefore,
+    [double]$SuccessBefore,
+    [int]$TimeoutSeconds = 30
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 25
+        $metrics = Get-Metrics $script:MetricsPort 2
+        $generation = Get-Metric $metrics "ferrum2_network_generation"
+        $active = Get-Metric $metrics "ferrum2_tun_session_active"
+        if ($Operation -ceq "reset_network") {
+            $success = Get-LabeledMetric $metrics "ferrum2_network_reset" @{
+                reason = "network_change"; result = "succeeded"
+            } $true
+        } else {
+            $success = Get-LabeledMetric $metrics "ferrum2_network_full_rebuild" @{
+                reason = "route_damage"; result = "succeeded"
+            } $true
+        }
+        if (
+            $generation -eq $GenerationBefore + 1 -and
+            $success -eq $SuccessBefore + 1 -and
+            $active -eq 1
+        ) {
+            return [pscustomobject]@{
+                Metrics = $metrics
+                Generation = $generation
+                Success = $success
+            }
+        }
+        Assert-Condition (
+            $generation -le $GenerationBefore + 1 -and $success -le $SuccessBefore + 1
+        ) "network lifecycle transition advanced more than once"
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "$Operation recovery exceeded $TimeoutSeconds seconds"
 }
 
 foreach ($digest in @($ParentSha, $CandidateSha, $Tree)) {
@@ -232,7 +384,7 @@ $scenarioOrder = @(
     "fragment-reassembly-throughput",
     "idle-cpu-wakeup",
     "wintun-ring-full-drop-rate",
-    "restart-recovery"
+    "network-lifecycle"
 )
 $scenarioIndex = [Array]::IndexOf($scenarioOrder, $Scenario)
 Assert-Condition ($scenarioIndex -ge 0) "scenario is outside the fixed schedule"
@@ -248,12 +400,58 @@ $script:ClientPath = Resolve-Leaf $ClientBinary "client binary"
 $script:ServerPath = Resolve-Leaf $ServerBinary "server binary"
 $script:HarnessPath = Resolve-Leaf $HarnessBinary "traffic harness"
 $ledgerPath = Resolve-Leaf $IdentityLedger "identity ledger"
+$modelPlanPath = Resolve-Leaf $NetworkModelPlan "network-model plan"
+$modelControllerPath = Resolve-Leaf $NetworkModelController "network-model controller"
+$modelPlanHash = Get-LowerSha256 $modelPlanPath
+$modelControllerHash = Get-LowerSha256 $modelControllerPath
+$modelPlan = Get-Content -LiteralPath $modelPlanPath -Raw -Encoding utf8 |
+    ConvertFrom-Json -Depth 12
+Assert-ExactProperties $modelPlan @(
+    "schema_version", "execution", "host_network_mutation", "workloads",
+    "lifecycle_observation_identity_fields"
+) "network-model plan"
+Assert-Condition (
+    $modelPlan.schema_version -eq 2 -and
+    $modelPlan.execution -ceq "local_hyperv_guest" -and
+    $modelPlan.host_network_mutation -ceq "forbidden"
+) "network-model plan execution boundary changed"
+Assert-ExactProperties $modelPlan.workloads @("network-lifecycle", "udp-route-once") `
+    "network-model workloads"
+$lifecyclePlan = $modelPlan.workloads."network-lifecycle"
+Assert-Condition (
+    [int]$lifecyclePlan.reset_network_cycles -eq 1000 -and
+    [int]$lifecyclePlan.full_rebuild_cycles -eq 10 -and
+    [string]$lifecyclePlan.full_rebuild_damage_reason -ceq "route_damage" -and
+    [string]$lifecyclePlan.interface_switch_kind -ceq "approved_underlay_disable_enable" -and
+    [int]$lifecyclePlan.interface_switch_sequence -eq 500 -and
+    [int]$lifecyclePlan.interface_resolver_probes -eq 32
+) "network-model lifecycle recipe changed"
 $outputPath = [IO.Path]::GetFullPath($Output)
 $outputParent = Split-Path -Parent $outputPath
 Assert-Condition (-not (Test-Path -LiteralPath $outputPath)) "trial output baseline is not absent"
 Assert-Condition (Test-Path -LiteralPath $outputParent -PathType Container) "trial output parent does not exist"
 $outputParentItem = Get-Item -LiteralPath $outputParent -Force
 Assert-Condition (-not ($outputParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) "trial output parent cannot be a reparse point"
+$modelOutputPath = $null
+if ($Scenario -ceq "network-lifecycle") {
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($NetworkModelOutput)) `
+        "network-lifecycle requires raw network-model output"
+    $modelOutputPath = [IO.Path]::GetFullPath($NetworkModelOutput)
+    $modelOutputParent = Split-Path -Parent $modelOutputPath
+    Assert-Condition (
+        -not (Test-Path -LiteralPath $modelOutputPath) -and
+        (Test-Path -LiteralPath $modelOutputParent -PathType Container) -and
+        -not ((Get-Item -LiteralPath $modelOutputParent -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -and
+        [IO.Path]::GetFileName($modelOutputPath) -ceq (
+            "{0:D3}-network-lifecycle-{1}-pair-{2}.network-model.json" -f `
+                $sequence, $Member, $Pair
+        )
+    ) "network-model output boundary or identity is invalid"
+} else {
+    Assert-Condition ([string]::IsNullOrWhiteSpace($NetworkModelOutput)) `
+        "non-lifecycle trial cannot write network-model evidence"
+}
 
 $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 6
 $requiredLedger = @(
@@ -266,6 +464,7 @@ Assert-Condition (@($requiredLedger | Where-Object { $ledgerNames -cnotcontains 
 $clientHash = Get-LowerSha256 $script:ClientPath
 $serverHash = Get-LowerSha256 $script:ServerPath
 $harnessHash = Get-LowerSha256 $script:HarnessPath
+$collectorHash = Get-LowerSha256 $PSCommandPath
 Assert-Condition (
     $ledger.schema -eq 1 -and
     $ledger.vm_name -ceq $ExpectedVmName -and
@@ -274,7 +473,7 @@ Assert-Condition (
     $ledger.checkpoint_id -ceq $ExpectedCheckpointId -and
     $ledger.guest_architecture -ceq "AMD64" -and
     $ledger.candidate_sha -ceq $memberSha -and
-    [string]$ledger.probe_sha256 -cmatch '^[0-9a-f]{64}$' -and
+    $ledger.probe_sha256 -ceq $collectorHash -and
     $ledger.client_sha256 -ceq $clientHash -and
     $ledger.server_sha256 -ceq $serverHash
 ) "identity ledger does not bind this member and approved guest"
@@ -335,6 +534,8 @@ Assert-Condition (
 New-Item -ItemType Directory -Path $script:WorkRoot | Out-Null
 $measurements = [ordered]@{}
 $checks = [ordered]@{}
+$modelEvidenceReference = $null
+$modelPending = $null
 [uint64]$checkedUnits = 0
 $startedUtc = [DateTime]::UtcNow.ToString("o")
 
@@ -518,65 +719,381 @@ try {
             $checks.no_ring_full_retry = $true
             $checks.no_session_restart = $true
         }
-        "restart-recovery" {
+        "network-lifecycle" {
             Start-Sleep -Seconds 5
-            $prefix = "$script:TargetAddress/32"
-            $routes = @(Get-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction Stop)
-            Assert-Condition ($routes.Count -eq 1) "restart workload requires one exact managed target route"
-            $route = $routes[0]
-            $routeIdentity = [ordered]@{
-                interface_index = [uint32]$route.InterfaceIndex
-                destination_prefix = [string]$route.DestinationPrefix
-                next_hop = [string]$route.NextHop
-                route_metric = [uint32]$route.RouteMetric
+            $physical = Get-PhysicalDefaultRoute
+            $physicalRoute = $physical.Route
+            $physicalRouteIdentity = [ordered]@{
+                interface_index = [uint32]$physicalRoute.InterfaceIndex
+                interface_guid = ([Guid]$physical.Adapter.InterfaceGuid).ToString("D").ToLowerInvariant()
+                interface_name = [string]$physical.Adapter.Name
+                destination_prefix = [string]$physicalRoute.DestinationPrefix
+                next_hop = [string]$physicalRoute.NextHop
+                route_metric = [uint32]$physicalRoute.RouteMetric
             }
-            $journal = Join-Path $script:WorkRoot "restart-route-journal.json"
-            [IO.File]::WriteAllText($journal, (($routeIdentity | ConvertTo-Json -Compress) + "`n"), $script:Utf8NoBom)
+            $physicalJournal = Join-Path $script:WorkRoot "physical-route-journal.json"
+            [IO.File]::WriteAllText(
+                $physicalJournal,
+                (($physicalRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                $script:Utf8NoBom
+            )
+            [uint64[]]$routeMetrics = if ($physicalRouteIdentity.route_metric -le 4294967293) {
+                @(
+                    [uint64]$physicalRouteIdentity.route_metric + 1,
+                    [uint64]$physicalRouteIdentity.route_metric + 2,
+                    [uint64]$physicalRouteIdentity.route_metric
+                )
+            } elseif ($physicalRouteIdentity.route_metric -ge 2) {
+                @(
+                    [uint64]$physicalRouteIdentity.route_metric - 1,
+                    [uint64]$physicalRouteIdentity.route_metric - 2,
+                    [uint64]$physicalRouteIdentity.route_metric
+                )
+            } else {
+                throw "physical route metric has no bounded three-state mutation"
+            }
             $initial = Get-Metrics $MetricsPort 5
-            [double]$generation = Get-Metric $initial "ferrum2_tun_session_generation"
-            [double]$restartSucceeded = Get-Metric $initial "ferrum2_tun_session_restart_succeeded" $true
-            [double]$restartFailed = Get-Metric $initial "ferrum2_tun_session_restart_failed" $true
-            $recoveries = [System.Collections.Generic.List[uint64]]::new()
-            foreach ($cycle in 1..10) {
+            [double]$generation = Get-Metric $initial "ferrum2_network_generation"
+            Assert-Condition ($generation -ge 1) "published network generation is unavailable"
+            [double]$resetSucceeded = Get-LabeledMetric $initial "ferrum2_network_reset" @{
+                reason = "network_change"; result = "succeeded"
+            } $true
+            [double]$rebuildSucceeded = Get-LabeledMetric $initial `
+                "ferrum2_network_full_rebuild" @{
+                    reason = "route_damage"; result = "succeeded"
+                } $true
+            [double]$restartStarted = Get-Metric $initial `
+                "ferrum2_tun_session_restart_started" $true
+            $managedIdentity = Get-ManagedIdentity
+            $baselineResources = Get-LifecycleResources $initial
+            Assert-Condition (
+                $baselineResources.udp_associations_active -eq 0 -and
+                $baselineResources.managed_adapters_active -eq 1
+            ) "network lifecycle resource baseline is not quiescent"
+            $cycles = [Collections.Generic.List[object]]::new()
+            $resetLatencies = [Collections.Generic.List[uint64]]::new()
+            $rebuildLatencies = [Collections.Generic.List[uint64]]::new()
+            $routeMutationIndex = 0
+            Invoke-Probe
+
+            foreach ($cycle in 1..1000) {
+                $before = Get-Metrics $MetricsPort 5
+                [uint64]$tcpBefore = Get-Metric $before "ferrum2_tun_tcp_flows_active"
+                [uint64]$udpBefore = Get-Metric $before "ferrum2_tun_udp_associations_active"
+                Assert-Condition ($udpBefore -ge 1) "reset cycle lacks a live UDP association"
+                $identityBefore = $managedIdentity
+                [double]$generationBefore = $generation
+                [double]$successBefore = $resetSucceeded
+                [double]$restartBefore = Get-Metric $before `
+                    "ferrum2_tun_session_restart_started" $true
                 $timer = [Diagnostics.Stopwatch]::StartNew()
-                Remove-NetRoute -InterfaceIndex $routeIdentity.interface_index `
-                    -DestinationPrefix $routeIdentity.destination_prefix `
-                    -NextHop $routeIdentity.next_hop -PolicyStore ActiveStore `
-                    -Confirm:$false -ErrorAction Stop
-                $deadline = [DateTime]::UtcNow.AddSeconds(30)
-                do {
-                    Start-Sleep -Milliseconds 50
-                    $metrics = Get-Metrics $MetricsPort 2
-                    $newGeneration = Get-Metric $metrics "ferrum2_tun_session_generation"
-                    $active = Get-Metric $metrics "ferrum2_tun_session_active"
-                    $succeeded = Get-Metric $metrics "ferrum2_tun_session_restart_succeeded" $true
-                    if ($newGeneration -eq $generation + 1 -and $active -eq 1 -and $succeeded -eq $restartSucceeded + 1) { break }
-                } while ([DateTime]::UtcNow -lt $deadline)
-                Assert-Condition ($newGeneration -eq $generation + 1 -and $active -eq 1 -and $succeeded -eq $restartSucceeded + 1) "restart recovery exceeded 30 seconds"
+                $reason = "route_change"
+                if ($cycle -eq 500) {
+                    $reason = "interface_change"
+                    $interfaceJournal = Join-Path $script:WorkRoot "physical-interface-journal.json"
+                    [IO.File]::WriteAllText(
+                        $interfaceJournal,
+                        (($physicalRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                        $script:Utf8NoBom
+                    )
+                    Disable-NetAdapter -Name $physicalRouteIdentity.interface_name `
+                        -Confirm:$false -ErrorAction Stop
+                    Start-Sleep -Milliseconds 100
+                    Enable-NetAdapter -Name $physicalRouteIdentity.interface_name `
+                        -Confirm:$false -ErrorAction Stop
+                } else {
+                    $currentRoutes = @(
+                        Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
+                            -DestinationPrefix $physicalRouteIdentity.destination_prefix `
+                            -PolicyStore ActiveStore -ErrorAction Stop |
+                            Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
+                    )
+                    Assert-Condition ($currentRoutes.Count -eq 1) `
+                        "physical route mutation target is not exact"
+                    $nextMetric = $routeMetrics[$routeMutationIndex % $routeMetrics.Count]
+                    $routeMutationIndex++
+                    Set-NetRoute -InputObject $currentRoutes[0] -RouteMetric $nextMetric `
+                        -ErrorAction Stop
+                }
+                $transition = Wait-LifecycleTransition "reset_network" `
+                    $generationBefore $successBefore 30
+                $identityAfter = Get-ManagedIdentity
+                $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                Assert-Condition (
+                    (Get-Metric $transition.Metrics "ferrum2_tun_tcp_flows_active") -eq 0 -and
+                    (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
+                ) "ResetNetwork retained a connection"
                 Invoke-Probe
                 $timer.Stop()
-                $recoveries.Add([uint64][Math]::Ceiling(
-                    ([decimal]$timer.ElapsedTicks * [decimal]1000000000) /
-                    [decimal][Diagnostics.Stopwatch]::Frequency
-                ))
-                $generation = $newGeneration
-                $restartSucceeded = $succeeded
-                $restored = @(Get-NetRoute -InterfaceIndex $routeIdentity.interface_index `
-                    -DestinationPrefix $routeIdentity.destination_prefix -PolicyStore ActiveStore `
-                    -ErrorAction SilentlyContinue)
-                Assert-Condition ($restored.Count -eq 1 -and $restored[0].NextHop -ceq $routeIdentity.next_hop) "managed route was not restored exactly"
+                $afterProbe = Get-Metrics $MetricsPort 5
+                [double]$restartAfter = Get-Metric $afterProbe `
+                    "ferrum2_tun_session_restart_started" $true
+                Assert-Condition ($restartAfter -eq $restartBefore) `
+                    "ordinary ResetNetwork used the session-restart path"
+                $elapsed = Get-ElapsedNanoseconds $timer
+                $resetLatencies.Add($elapsed)
+                $cycles.Add([ordered]@{
+                    sequence = [uint64]$cycle
+                    operation = "reset_network"
+                    reason = $reason
+                    generation_before = [uint64]$generationBefore
+                    generation_after = [uint64]$transition.Generation
+                    elapsed_nanoseconds = $elapsed
+                    operation_counter_before = [uint64]$successBefore
+                    operation_counter_after = [uint64]$transition.Success
+                    session_restart_started_before = [uint64]$restartBefore
+                    session_restart_started_after = [uint64]$restartAfter
+                    managed_identity_before = $identityBefore
+                    managed_identity_after = $identityAfter
+                    tcp_flows_before = $tcpBefore
+                    udp_associations_before = $udpBefore
+                    tcp_flows_closed = $tcpBefore
+                    udp_associations_closed = $udpBefore
+                    tcp_probe_succeeded = $true
+                    udp_probe_succeeded = $true
+                    resources_after = $resourcesAfter
+                })
+                $managedIdentity = $identityAfter
+                $generation = $transition.Generation
+                $resetSucceeded = $transition.Success
+                $restartStarted = $restartAfter
+                if ($cycle -eq 500) {
+                    $currentAdapter = Get-NetAdapter -Name $physicalRouteIdentity.interface_name `
+                        -IncludeHidden -ErrorAction Stop
+                    Assert-Condition (
+                        [string]$currentAdapter.Status -ceq "Up" -and
+                        ([Guid]$currentAdapter.InterfaceGuid).ToString("D").ToLowerInvariant() `
+                            -ceq $physicalRouteIdentity.interface_guid
+                    ) "physical interface switch did not restore its identity"
+                    Remove-Item -LiteralPath $interfaceJournal -Force
+                }
             }
-            $final = Get-Metrics $MetricsPort 5
-            Assert-Condition ((Get-Metric $final "ferrum2_tun_session_restart_failed" $true) -eq $restartFailed) "restart failure counter changed"
-            Remove-Item -LiteralPath $journal -Force
-            $checkedUnits = 10
-            $measurements.recovery = [ordered]@{
-                unit = "p99_recovery_nanoseconds"; value = Get-P99Nanoseconds $recoveries.ToArray()
+            Assert-Condition (
+                $routeMutationIndex -eq 999 -and
+                $routeMetrics[($routeMutationIndex - 1) % $routeMetrics.Count] -eq
+                    $physicalRouteIdentity.route_metric
+            ) "physical route metric schedule did not end at its baseline"
+            $physicalReadback = @(
+                Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
+                    -DestinationPrefix $physicalRouteIdentity.destination_prefix `
+                    -PolicyStore ActiveStore -ErrorAction Stop |
+                    Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
+            )
+            Assert-Condition (
+                $physicalReadback.Count -eq 1 -and
+                [uint32]$physicalReadback[0].RouteMetric -eq
+                    [uint32]$physicalRouteIdentity.route_metric
+            ) "physical route metric baseline was not restored in-band"
+
+            foreach ($rebuild in 1..10) {
+                $before = Get-Metrics $MetricsPort 5
+                [uint64]$tcpBefore = Get-Metric $before "ferrum2_tun_tcp_flows_active"
+                [uint64]$udpBefore = Get-Metric $before "ferrum2_tun_udp_associations_active"
+                Assert-Condition ($udpBefore -ge 1) "full rebuild cycle lacks a live UDP association"
+                $identityBefore = $managedIdentity
+                [double]$generationBefore = $generation
+                [double]$successBefore = $rebuildSucceeded
+                [double]$restartBefore = Get-Metric $before `
+                    "ferrum2_tun_session_restart_started" $true
+                $managed = Get-ManagedAdapter
+                $prefix = "$script:TargetAddress/32"
+                $managedRoutes = @(
+                    Get-NetRoute -InterfaceIndex $managed.ifIndex -DestinationPrefix $prefix `
+                        -PolicyStore ActiveStore -ErrorAction Stop
+                )
+                Assert-Condition ($managedRoutes.Count -eq 1) `
+                    "full rebuild damage target is not one exact managed route"
+                $managedRouteIdentity = [ordered]@{
+                    interface_guid = ([Guid]$managed.InterfaceGuid).ToString("D").ToLowerInvariant()
+                    destination_prefix = [string]$managedRoutes[0].DestinationPrefix
+                    next_hop = [string]$managedRoutes[0].NextHop
+                    route_metric = [uint32]$managedRoutes[0].RouteMetric
+                }
+                $managedJournal = Join-Path $script:WorkRoot "managed-route-journal.json"
+                [IO.File]::WriteAllText(
+                    $managedJournal,
+                    (($managedRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                    $script:Utf8NoBom
+                )
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                $managedRoutes[0] | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+                $transition = Wait-LifecycleTransition "full_rebuild" `
+                    $generationBefore $successBefore 30
+                $identityAfter = Get-ManagedIdentity
+                $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                Assert-Condition (
+                    (Get-Metric $transition.Metrics "ferrum2_tun_tcp_flows_active") -eq 0 -and
+                    (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
+                ) "managed full rebuild retained a connection"
+                $restoredAdapter = Get-ManagedAdapter
+                $restoredRoutes = @(
+                    Get-NetRoute -InterfaceIndex $restoredAdapter.ifIndex `
+                        -DestinationPrefix $managedRouteIdentity.destination_prefix `
+                        -PolicyStore ActiveStore -ErrorAction Stop
+                )
+                Assert-Condition (
+                    $restoredRoutes.Count -eq 1 -and
+                    [string]$restoredRoutes[0].NextHop -ceq $managedRouteIdentity.next_hop -and
+                    [uint32]$restoredRoutes[0].RouteMetric -eq $managedRouteIdentity.route_metric
+                ) "managed route was not rebuilt exactly"
+                Remove-Item -LiteralPath $managedJournal -Force
+                Invoke-Probe
+                $timer.Stop()
+                $afterProbe = Get-Metrics $MetricsPort 5
+                [double]$restartAfter = Get-Metric $afterProbe `
+                    "ferrum2_tun_session_restart_started" $true
+                Assert-Condition ($restartAfter -eq $restartBefore) `
+                    "managed full rebuild used the session-restart path"
+                $elapsed = Get-ElapsedNanoseconds $timer
+                $rebuildLatencies.Add($elapsed)
+                $cycles.Add([ordered]@{
+                    sequence = [uint64](1000 + $rebuild)
+                    operation = "full_rebuild"
+                    reason = "route_damage"
+                    generation_before = [uint64]$generationBefore
+                    generation_after = [uint64]$transition.Generation
+                    elapsed_nanoseconds = $elapsed
+                    operation_counter_before = [uint64]$successBefore
+                    operation_counter_after = [uint64]$transition.Success
+                    session_restart_started_before = [uint64]$restartBefore
+                    session_restart_started_after = [uint64]$restartAfter
+                    managed_identity_before = $identityBefore
+                    managed_identity_after = $identityAfter
+                    tcp_flows_before = $tcpBefore
+                    udp_associations_before = $udpBefore
+                    tcp_flows_closed = $tcpBefore
+                    udp_associations_closed = $udpBefore
+                    tcp_probe_succeeded = $true
+                    udp_probe_succeeded = $true
+                    resources_after = $resourcesAfter
+                })
+                $managedIdentity = $identityAfter
+                $generation = $transition.Generation
+                $rebuildSucceeded = $transition.Success
+                $restartStarted = $restartAfter
             }
-            $checks.same_process_all_cycles = (-not $clientProcess.HasExited)
-            $checks.generation_advanced_once_per_cycle = $true
-            $checks.tcp_and_udp_recovered_each_cycle = $true
+
+            $resolverBefore = Get-Metrics $MetricsPort 5
+            [double]$resolutionsBefore = Get-Metric $resolverBefore `
+                "ferrum2_outbound_interface_resolution" $true
+            [double]$cacheHitsBefore = Get-Metric $resolverBefore `
+                "ferrum2_outbound_interface_resolution_cache_hit" $true
+            foreach ($probe in 1..32) { Invoke-Probe }
+            $resolverAfter = Get-Metrics $MetricsPort 5
+            [uint64]$resolutions = (Get-Metric $resolverAfter `
+                "ferrum2_outbound_interface_resolution" $true) - $resolutionsBefore
+            [uint64]$cacheHits = (Get-Metric $resolverAfter `
+                "ferrum2_outbound_interface_resolution_cache_hit" $true) - $cacheHitsBefore
+            Assert-Condition ($resolutions -ge 32 -and $resolutions -le 256 -and $cacheHits -gt 0 `
+                -and $cacheHits -le $resolutions) "interface resolver cache-hit evidence is invalid"
             [void](Wait-CleanDrain $true)
+            $finalMetrics = Get-Metrics $MetricsPort 5
+            Assert-Condition (
+                (Get-Metric $finalMetrics "ferrum2_tun_udp_associations_active") -eq 0 -and
+                -not $clientProcess.HasExited -and -not $serverProcess.HasExited
+            ) "network lifecycle did not reach a clean final drain"
+
+            $rawIdentity = [ordered]@{
+                run_kind = $RunKind
+                member = $Member
+                pair = [uint64]$Pair
+                trial_sequence = [uint64]$sequence
+                client_pid = [uint64]$ClientPid
+                server_pid = [uint64]$ServerPid
+                vm_name = $ExpectedVmName
+                vm_id = $ExpectedVmId
+                checkpoint_name = $ExpectedCheckpointName
+                checkpoint_id = $ExpectedCheckpointId
+                sha = $memberSha
+                tree = $Tree
+                client_sha256 = $clientHash
+                server_sha256 = $serverHash
+                harness_sha256 = $harnessHash
+                collector_sha256 = $collectorHash
+                recipe_sha256 = $RecipeSha256
+                model_controller_sha256 = $modelControllerHash
+                model_plan_sha256 = $modelPlanHash
+            }
+            $rawObservation = [ordered]@{
+                schema_version = 2
+                workload = "network-lifecycle"
+                identity = $rawIdentity
+                baseline_resources = $baselineResources
+                cycles = $cycles.ToArray()
+                interface_resolver = [ordered]@{
+                    probes = [uint64]32
+                    resolutions = $resolutions
+                    cache_hits = $cacheHits
+                }
+            }
+            $modelPending = "$modelOutputPath.pending"
+            Assert-Condition (-not (Test-Path -LiteralPath $modelPending)) `
+                "network-model pending output baseline is not absent"
+            [IO.File]::WriteAllText(
+                $modelPending,
+                (($rawObservation | ConvertTo-Json -Depth 12) + "`n"),
+                $script:Utf8NoBom
+            )
+            Assert-Condition ((Get-Item -LiteralPath $modelPending).Length -le 2097152) `
+                "network-model observation exceeds 2 MiB"
+            Move-Item -LiteralPath $modelPending -Destination $modelOutputPath -ErrorAction Stop
+            $modelEvidenceReference = [ordered]@{
+                schema_version = 1
+                controller_sha256 = $modelControllerHash
+                collector_sha256 = $collectorHash
+                plan_sha256 = $modelPlanHash
+                observation_file = [IO.Path]::GetFileName($modelOutputPath)
+                observation_sha256 = Get-LowerSha256 $modelOutputPath
+            }
+            $checkedUnits = 1000
+            $measurements.reset_p50 = [ordered]@{
+                unit = "p50_reset_network_nanoseconds"
+                value = Get-NearestRank $resetLatencies.ToArray() 50
+            }
+            $measurements.reset_p95 = [ordered]@{
+                unit = "p95_reset_network_nanoseconds"
+                value = Get-NearestRank $resetLatencies.ToArray() 95
+            }
+            $measurements.reset_p99 = [ordered]@{
+                unit = "p99_reset_network_nanoseconds"
+                value = Get-NearestRank $resetLatencies.ToArray() 99
+            }
+            $measurements.full_rebuild_p50 = [ordered]@{
+                unit = "p50_full_rebuild_nanoseconds"
+                value = Get-NearestRank $rebuildLatencies.ToArray() 50
+            }
+            $measurements.full_rebuild_p95 = [ordered]@{
+                unit = "p95_full_rebuild_nanoseconds"
+                value = Get-NearestRank $rebuildLatencies.ToArray() 95
+            }
+            $measurements.full_rebuild_p99 = [ordered]@{
+                unit = "p99_full_rebuild_nanoseconds"
+                value = Get-NearestRank $rebuildLatencies.ToArray() 99
+            }
+            $measurements.interface_switch_recovery = [ordered]@{
+                unit = "interface_switch_recovery_nanoseconds"
+                value = [uint64]$resetLatencies[499]
+            }
+            $measurements.interface_resolver_cache_hit = [ordered]@{
+                unit = "cache_hits_per_million_resolutions"
+                value = [uint64][Math]::Floor(
+                    ([decimal]$cacheHits * [decimal]1000000) / [decimal]$resolutions
+                )
+            }
+            $resetFinal = $cycles[999].resources_after
+            $checks.same_process_all_cycles = $true
+            $checks.generation_advanced_once_per_cycle = $true
+            $checks.managed_identity_preserved_across_resets = $true
+            $checks.damage_only_full_rebuild = $true
+            $checks.resource_growth_zero_after_1000_resets = (
+                $resetFinal.process_handles -le $baselineResources.process_handles -and
+                $resetFinal.process_threads -le $baselineResources.process_threads -and
+                $resetFinal.udp_associations_active -le $baselineResources.udp_associations_active -and
+                $resetFinal.managed_adapters_active -le $baselineResources.managed_adapters_active
+            )
+            $checks.tcp_and_udp_recovered_after_interface_switch = $true
+            $checks.interface_resolver_cache_hit_observed = $true
+            $checks.network_model_evidence_bound = $true
             $checks.clean_drain = $true
         }
     }
@@ -611,7 +1128,7 @@ try {
     }
     $finishedUtc = [DateTime]::UtcNow.ToString("o")
     $document = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "windows_tun_performance_trial"
         selection = "windows-tun-m17"
         run_kind = $RunKind
@@ -642,11 +1159,12 @@ try {
                 "fragment-reassembly-throughput" { "reassembled_datagrams" }
                 "idle-cpu-wakeup" { "idle_samples" }
                 "wintun-ring-full-drop-rate" { "ring_full_events" }
-                "restart-recovery" { "successful_restart_cycles" }
+                "network-lifecycle" { "successful_reset_network_cycles" }
             }
             checked_units = $checkedUnits
             checks = $checks
         }
+        network_model_evidence = $modelEvidenceReference
         status = "PASS"
     }
     $temporary = "$outputPath.pending"
@@ -665,27 +1183,89 @@ try {
             $resolvedWorkRoot.StartsWith($workPrefix, [StringComparison]::OrdinalIgnoreCase) -and
             -not $resolvedWorkRoot.Equals([IO.Path]::GetFullPath($outputParent), [StringComparison]::OrdinalIgnoreCase)
         ) "refusing to remove an out-of-scope trial work directory"
-        $journalPath = Join-Path $script:WorkRoot "restart-route-journal.json"
-        if (Test-Path -LiteralPath $journalPath -PathType Leaf) {
-            $routeIdentity = Get-Content -LiteralPath $journalPath -Raw -Encoding utf8 | ConvertFrom-Json
-            $present = @(Get-NetRoute -InterfaceIndex $routeIdentity.interface_index `
-                -DestinationPrefix $routeIdentity.destination_prefix -PolicyStore ActiveStore `
-                -ErrorAction SilentlyContinue)
-            $exact = (
-                $present.Count -eq 1 -and
-                [string]$present[0].NextHop -ceq [string]$routeIdentity.next_hop -and
-                [uint32]$present[0].RouteMetric -eq [uint32]$routeIdentity.route_metric
+        $interfaceJournalPath = Join-Path $script:WorkRoot "physical-interface-journal.json"
+        if (Test-Path -LiteralPath $interfaceJournalPath -PathType Leaf) {
+            $identity = Get-Content -LiteralPath $interfaceJournalPath -Raw -Encoding utf8 |
+                ConvertFrom-Json
+            $adapter = Get-NetAdapter -Name $identity.interface_name -IncludeHidden `
+                -ErrorAction Stop
+            Assert-Condition (
+                ([Guid]$adapter.InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
+                    [string]$identity.interface_guid
+            ) "refusing to enable a changed physical interface identity"
+            if ([string]$adapter.Status -cne "Up") {
+                Enable-NetAdapter -Name $identity.interface_name -Confirm:$false -ErrorAction Stop
+            }
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                $adapter = Get-NetAdapter -Name $identity.interface_name -IncludeHidden `
+                    -ErrorAction Stop
+                if ([string]$adapter.Status -ceq "Up") { break }
+                Start-Sleep -Milliseconds 100
+            } while ([DateTime]::UtcNow -lt $deadline)
+            Assert-Condition ([string]$adapter.Status -ceq "Up") `
+                "physical interface did not return Up during journal recovery"
+        }
+        $physicalJournalPath = Join-Path $script:WorkRoot "physical-route-journal.json"
+        if (Test-Path -LiteralPath $physicalJournalPath -PathType Leaf) {
+            $identity = Get-Content -LiteralPath $physicalJournalPath -Raw -Encoding utf8 |
+                ConvertFrom-Json
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                $present = @(
+                    Get-NetRoute -InterfaceIndex $identity.interface_index `
+                        -DestinationPrefix $identity.destination_prefix -PolicyStore ActiveStore `
+                        -ErrorAction SilentlyContinue |
+                        Where-Object { $_.NextHop -ceq [string]$identity.next_hop }
+                )
+                if ($present.Count -eq 1) { break }
+                Start-Sleep -Milliseconds 100
+            } while ([DateTime]::UtcNow -lt $deadline)
+            Assert-Condition ($present.Count -eq 1) `
+                "physical route restore target is not exact"
+            if ([uint32]$present[0].RouteMetric -ne [uint32]$identity.route_metric) {
+                Set-NetRoute -InputObject $present[0] -RouteMetric $identity.route_metric `
+                    -ErrorAction Stop
+            }
+        }
+        $managedJournalPath = Join-Path $script:WorkRoot "managed-route-journal.json"
+        if (Test-Path -LiteralPath $managedJournalPath -PathType Leaf) {
+            $identity = Get-Content -LiteralPath $managedJournalPath -Raw -Encoding utf8 |
+                ConvertFrom-Json
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                $managedRows = @(
+                    Get-NetAdapter -Name $AdapterName -IncludeHidden `
+                        -ErrorAction SilentlyContinue
+                )
+                if ($managedRows.Count -eq 1) { break }
+                Start-Sleep -Milliseconds 100
+            } while ([DateTime]::UtcNow -lt $deadline)
+            Assert-Condition ($managedRows.Count -eq 1) `
+                "managed adapter did not return during journal recovery"
+            $managed = $managedRows[0]
+            $present = @(
+                Get-NetRoute -InterfaceIndex $managed.ifIndex `
+                    -DestinationPrefix $identity.destination_prefix -PolicyStore ActiveStore `
+                    -ErrorAction SilentlyContinue
             )
-            if (-not $exact) {
-                foreach ($entry in $present) {
-                    $entry | Remove-NetRoute -Confirm:$false -ErrorAction Stop
-                }
-                New-NetRoute -InterfaceIndex $routeIdentity.interface_index `
-                    -DestinationPrefix $routeIdentity.destination_prefix `
-                    -NextHop $routeIdentity.next_hop -RouteMetric $routeIdentity.route_metric `
+            Assert-Condition ($present.Count -le 1) `
+                "managed route recovery target is ambiguous"
+            if ($present.Count -eq 0) {
+                New-NetRoute -InterfaceIndex $managed.ifIndex `
+                    -DestinationPrefix $identity.destination_prefix `
+                    -NextHop $identity.next_hop -RouteMetric $identity.route_metric `
                     -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
             }
         }
         Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction Stop
+    }
+    if ($null -ne $modelPending -and (Test-Path -LiteralPath $modelPending -PathType Leaf)) {
+        Remove-Item -LiteralPath $modelPending -Force -ErrorAction Stop
+    }
+    if ($null -ne $modelOutputPath -and
+        (Test-Path -LiteralPath $modelOutputPath -PathType Leaf) -and
+        -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $modelOutputPath -Force -ErrorAction Stop
     }
 }
