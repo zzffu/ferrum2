@@ -48,7 +48,7 @@ def lifecycle_observation() -> dict[str, object]:
         "process_handles": 120,
         "process_threads": 12,
         "udp_associations_active": 0,
-        "managed_transactions_active": 1,
+        "managed_adapters_active": 1,
     }
     cycles = []
     identity = "a" * 64
@@ -56,15 +56,17 @@ def lifecycle_observation() -> dict[str, object]:
     for sequence in range(1, total_cycles + 1):
         if sequence <= MODEL.RESET_CYCLES:
             operation = "reset_network"
-            reason = MODEL.ORDINARY_RESET_REASONS[
-                (sequence - 1) % len(MODEL.ORDINARY_RESET_REASONS)
-            ]
+            reason = (
+                "interface_change"
+                if sequence == MODEL.INTERFACE_SWITCH_SEQUENCE
+                else "route_change"
+            )
             elapsed = sequence * 1_000
             identity_after = identity
         else:
             rebuild_index = sequence - MODEL.RESET_CYCLES - 1
             operation = "full_rebuild"
-            reason = MODEL.FULL_REBUILD_REASONS[rebuild_index]
+            reason = MODEL.FULL_REBUILD_DAMAGE_REASON
             elapsed = (11 + rebuild_index) * 1_000_000
             identity_after = f"{rebuild_index + 1:064x}"
         tcp_before = sequence % 8
@@ -77,12 +79,18 @@ def lifecycle_observation() -> dict[str, object]:
                 "generation_before": sequence,
                 "generation_after": sequence + 1,
                 "elapsed_nanoseconds": elapsed,
+                "operation_counter_before": sequence - 1,
+                "operation_counter_after": sequence,
+                "session_restart_started_before": 0,
+                "session_restart_started_after": 0,
                 "managed_identity_before": identity,
                 "managed_identity_after": identity_after,
                 "tcp_flows_before": tcp_before,
                 "udp_associations_before": udp_before,
                 "tcp_flows_closed": tcp_before,
                 "udp_associations_closed": udp_before,
+                "tcp_probe_succeeded": True,
+                "udp_probe_succeeded": True,
                 "resources_after": dict(resources),
             }
         )
@@ -90,15 +98,41 @@ def lifecycle_observation() -> dict[str, object]:
     return {
         "schema_version": MODEL.SCHEMA_VERSION,
         "workload": MODEL.LIFECYCLE_WORKLOAD,
+        "identity": {
+            "run_kind": "comparison",
+            "member": "candidate",
+            "pair": 1,
+            "trial_sequence": 72,
+            "client_pid": 1234,
+            "server_pid": 1235,
+            "vm_name": "Windows 10 MSIX packaging environment",
+            "vm_id": "82e20295-1d30-48e7-a751-e21d35d872d4",
+            "checkpoint_name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
+            "checkpoint_id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
+            "sha": "1" * 40,
+            "tree": "2" * 40,
+            "client_sha256": "3" * 64,
+            "server_sha256": "4" * 64,
+            "harness_sha256": "5" * 64,
+            "collector_sha256": "6" * 64,
+            "recipe_sha256": "7" * 64,
+            "model_controller_sha256": "8" * 64,
+            "model_plan_sha256": "9" * 64,
+        },
         "baseline_resources": dict(resources),
         "cycles": cycles,
+        "interface_resolver": {
+            "probes": MODEL.INTERFACE_RESOLVER_PROBES,
+            "resolutions": MODEL.INTERFACE_RESOLVER_PROBES * 2,
+            "cache_hits": MODEL.INTERFACE_RESOLVER_PROBES * 2 - 2,
+        },
     }
 
 
 class LocalHypervPerformancePlanTests(unittest.TestCase):
     def test_plan_is_closed_bounded_and_guest_only(self) -> None:
         plan = MODEL.create_local_hyperv_plan()
-        self.assertEqual(plan["schema_version"], 1)
+        self.assertEqual(plan["schema_version"], 2)
         self.assertEqual(plan["execution"], "local_hyperv_guest")
         self.assertEqual(plan["host_network_mutation"], "forbidden")
         self.assertEqual(
@@ -118,7 +152,11 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
         lifecycle = plan["workloads"][MODEL.LIFECYCLE_WORKLOAD]
         self.assertEqual(lifecycle["reset_network_cycles"], 1_000)
         self.assertEqual(
-            lifecycle["full_rebuild_cycles"], len(MODEL.FULL_REBUILD_REASONS)
+            lifecycle["interface_switch_kind"],
+            "approved_underlay_disable_enable",
+        )
+        self.assertEqual(
+            lifecycle["full_rebuild_cycles"], MODEL.FULL_REBUILD_CYCLES
         )
         self.assertEqual(lifecycle["latency_percentiles"], [50, 95, 99])
         self.assertTrue(
@@ -207,7 +245,7 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
             summary["cycles"],
             {
                 "reset_network": 1_000,
-                "full_rebuild": len(MODEL.FULL_REBUILD_REASONS),
+                "full_rebuild": MODEL.FULL_REBUILD_CYCLES,
             },
         )
         reset = summary["latency_nanoseconds"]["reset_network"]
@@ -226,19 +264,19 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         self.assertEqual(
             rebuild,
             {
-                "count": 7,
+                "count": 10,
                 "minimum": 11_000_000,
-                "p50": 14_000_000,
-                "p95": 17_000_000,
-                "p99": 17_000_000,
-                "maximum": 17_000_000,
+                "p50": 15_000_000,
+                "p95": 20_000_000,
+                "p99": 20_000_000,
+                "maximum": 20_000_000,
             },
         )
         self.assertEqual(
             summary["latency_nanoseconds"][
                 "full_rebuild_p95_over_reset_p95_basis_points"
             ],
-            178_947,
+            210_526,
         )
         for operation in ("reset_network", "full_rebuild"):
             with self.subTest(operation=operation):
@@ -253,6 +291,14 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         self.assertTrue(summary["managed_identity_preserved_across_resets"])
         self.assertTrue(summary["connections_closed"])
         self.assertTrue(summary["damage_only_full_rebuild"])
+        self.assertEqual(
+            summary["interface_switch_recovery_nanoseconds"],
+            MODEL.INTERFACE_SWITCH_SEQUENCE * 1_000,
+        )
+        self.assertEqual(
+            summary["interface_resolver"]["cache_hits_per_million_resolutions"],
+            968_750,
+        )
 
     def test_lifecycle_contract_rejects_restart_identity_leak_and_reason_errors(
         self,
@@ -280,6 +326,12 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
             "process_handles"
         ] += 1
         cases.append((resource_growth, "retained resource growth"))
+        bad_identity = lifecycle_observation()
+        bad_identity["identity"]["recipe_sha256"] = "not-a-digest"
+        cases.append((bad_identity, "recipe_sha256"))
+        no_cache_hit = lifecycle_observation()
+        no_cache_hit["interface_resolver"]["cache_hits"] = 0
+        cases.append((no_cache_hit, "cache_hits"))
         for observation, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(MODEL.NetworkModelError, message):
@@ -290,6 +342,19 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         self.assertEqual(MODEL._nearest_rank(list(range(1, 1_001)), 95), 950)
         self.assertEqual(MODEL._nearest_rank(list(range(1, 1_001)), 99), 990)
         self.assertEqual(MODEL._nearest_rank(list(range(1, 8)), 95), 7)
+
+    def test_transient_resource_peak_is_reported_without_being_called_a_leak(self) -> None:
+        observation = lifecycle_observation()
+        observation["cycles"][0]["resources_after"]["process_handles"] += 5
+        summary = MODEL.summarize_lifecycle_observation(observation)
+        self.assertEqual(
+            summary["resources"]["reset_network"]["peak_growth"]["process_handles"],
+            5,
+        )
+        self.assertEqual(
+            summary["resources"]["reset_network"]["growth"]["process_handles"],
+            0,
+        )
 
 
 class ObservationInputTests(unittest.TestCase):

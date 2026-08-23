@@ -17,7 +17,7 @@ import re
 import sys
 from typing import NoReturn
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 MAX_ELAPSED_NANOSECONDS = 120 * 1_000_000_000
 
@@ -29,13 +29,7 @@ ROUTE_SOURCE_SLOTS = 64
 ROUTE_TARGET_SLOTS = 4
 ROUTE_DATAGRAMS_PER_TARGET = 32
 
-ORDINARY_RESET_REASONS = (
-    "route_change",
-    "interface_change",
-    "address_change",
-    "dhcp_renew",
-    "explicit",
-)
+ORDINARY_RESET_REASONS = ("route_change", "interface_change")
 FULL_REBUILD_REASONS = (
     "adapter_damage",
     "session_damage",
@@ -46,21 +40,48 @@ FULL_REBUILD_REASONS = (
     "ownership_ledger_damage",
 )
 RESET_CYCLES = 1_000
-FULL_REBUILD_CYCLES = len(FULL_REBUILD_REASONS)
+INTERFACE_SWITCH_SEQUENCE = 500
+FULL_REBUILD_CYCLES = 10
+FULL_REBUILD_DAMAGE_REASON = "route_damage"
+INTERFACE_RESOLVER_PROBES = 32
 
 RESOURCE_FIELDS = (
     "process_handles",
     "process_threads",
     "udp_associations_active",
-    "managed_transactions_active",
+    "managed_adapters_active",
 )
 RESOURCE_LIMITS = {
     "process_handles": 1_000_000,
     "process_threads": 100_000,
     "udp_associations_active": 65_536,
-    "managed_transactions_active": 1_024,
+    "managed_adapters_active": 16,
 }
 IDENTITY = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_IDENTITY = re.compile(r"^[0-9a-f]{40}$")
+RUN_KINDS = frozenset({"comparison", "calibration-aa"})
+MEMBERS = frozenset({"parent", "candidate"})
+OBSERVATION_IDENTITY_FIELDS = {
+    "run_kind",
+    "member",
+    "pair",
+    "trial_sequence",
+    "client_pid",
+    "server_pid",
+    "vm_name",
+    "vm_id",
+    "checkpoint_name",
+    "checkpoint_id",
+    "sha",
+    "tree",
+    "client_sha256",
+    "server_sha256",
+    "harness_sha256",
+    "collector_sha256",
+    "recipe_sha256",
+    "model_controller_sha256",
+    "model_plan_sha256",
+}
 
 
 class NetworkModelError(ValueError):
@@ -87,12 +108,17 @@ def create_local_hyperv_plan() -> dict[str, object]:
                 "full_rebuild_cycles": FULL_REBUILD_CYCLES,
                 "ordinary_reset_reasons": list(ORDINARY_RESET_REASONS),
                 "full_rebuild_reasons": list(FULL_REBUILD_REASONS),
+                "full_rebuild_damage_reason": FULL_REBUILD_DAMAGE_REASON,
+                "interface_switch_kind": "approved_underlay_disable_enable",
+                "interface_switch_sequence": INTERFACE_SWITCH_SEQUENCE,
+                "interface_resolver_probes": INTERFACE_RESOLVER_PROBES,
                 "latency_percentiles": [50, 95, 99],
                 "maximum_retained_resource_growth": {
                     field: 0 for field in RESOURCE_FIELDS
                 },
             },
         },
+        "lifecycle_observation_identity_fields": sorted(OBSERVATION_IDENTITY_FIELDS),
     }
 
 
@@ -139,6 +165,43 @@ def _resource_snapshot(value: object, *, label: str) -> dict[str, int]:
         )
         for field in RESOURCE_FIELDS
     }
+
+
+def _observation_identity(value: object) -> dict[str, object]:
+    identity = _exact_fields(value, OBSERVATION_IDENTITY_FIELDS, "observation identity")
+    if identity["run_kind"] not in RUN_KINDS or identity["member"] not in MEMBERS:
+        _fail("observation identity run_kind/member is invalid")
+    _integer(identity["pair"], label="observation identity.pair", minimum=1, maximum=5)
+    _integer(
+        identity["trial_sequence"],
+        label="observation identity.trial_sequence",
+        minimum=1,
+        maximum=80,
+    )
+    for field in ("client_pid", "server_pid"):
+        _integer(
+            identity[field],
+            label=f"observation identity.{field}",
+            minimum=1,
+            maximum=2_147_483_647,
+        )
+    for field in ("vm_name", "vm_id", "checkpoint_name", "checkpoint_id"):
+        if type(identity[field]) is not str or not identity[field].strip():
+            _fail(f"observation identity.{field} must be non-empty")
+    for field in ("sha", "tree"):
+        if type(identity[field]) is not str or COMMIT_IDENTITY.fullmatch(identity[field]) is None:
+            _fail(f"observation identity.{field} must be lowercase 40-hex")
+    for field in (
+        "client_sha256",
+        "server_sha256",
+        "harness_sha256",
+        "collector_sha256",
+        "recipe_sha256",
+        "model_controller_sha256",
+        "model_plan_sha256",
+    ):
+        _identity(identity[field], label=f"observation identity.{field}")
+    return identity
 
 
 def summarize_route_once_observation(observation: object) -> dict[str, object]:
@@ -266,7 +329,7 @@ def _resource_accounting(
         for field in RESOURCE_FIELDS
     }
     peak_growth = {field: peak[field] - baseline[field] for field in RESOURCE_FIELDS}
-    positive = {field: value for field, value in peak_growth.items() if value > 0}
+    positive = {field: value for field, value in growth.items() if value > 0}
     if positive:
         _fail(f"{label} retained resource growth is not zero: {positive}")
     return {
@@ -283,18 +346,26 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
 
     row = _exact_fields(
         observation,
-        {"schema_version", "workload", "baseline_resources", "cycles"},
+        {
+            "schema_version",
+            "workload",
+            "identity",
+            "baseline_resources",
+            "cycles",
+            "interface_resolver",
+        },
         "lifecycle observation",
     )
     if row["schema_version"] != SCHEMA_VERSION or row["workload"] != LIFECYCLE_WORKLOAD:
         _fail("lifecycle observation schema is unsupported")
+    identity = _observation_identity(row["identity"])
     baseline = _resource_snapshot(row["baseline_resources"], label="baseline_resources")
     if baseline["process_handles"] == 0 or baseline["process_threads"] == 0:
         _fail("lifecycle baseline process resources must be nonzero")
     if baseline["udp_associations_active"] != 0:
         _fail("lifecycle baseline must not contain a UDP association")
-    if baseline["managed_transactions_active"] != 1:
-        _fail("lifecycle baseline must contain exactly one managed transaction")
+    if baseline["managed_adapters_active"] != 1:
+        _fail("lifecycle baseline must contain exactly one managed adapter")
     cycles = row["cycles"]
     expected_count = RESET_CYCLES + FULL_REBUILD_CYCLES
     if type(cycles) is not list or len(cycles) != expected_count:
@@ -317,12 +388,18 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
                 "generation_before",
                 "generation_after",
                 "elapsed_nanoseconds",
+                "operation_counter_before",
+                "operation_counter_after",
+                "session_restart_started_before",
+                "session_restart_started_after",
                 "managed_identity_before",
                 "managed_identity_after",
                 "tcp_flows_before",
                 "udp_associations_before",
                 "tcp_flows_closed",
                 "udp_associations_closed",
+                "tcp_probe_succeeded",
+                "udp_probe_succeeded",
                 "resources_after",
             },
             label,
@@ -367,6 +444,31 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             minimum=1,
             maximum=MAX_ELAPSED_NANOSECONDS,
         )
+        operation_before = _integer(
+            cycle["operation_counter_before"],
+            label=f"{label}.operation_counter_before",
+            maximum=1_000_000,
+        )
+        operation_after = _integer(
+            cycle["operation_counter_after"],
+            label=f"{label}.operation_counter_after",
+            minimum=1,
+            maximum=1_000_001,
+        )
+        if operation_after != operation_before + 1:
+            _fail(f"{label} must advance its lifecycle success counter exactly once")
+        restart_before = _integer(
+            cycle["session_restart_started_before"],
+            label=f"{label}.session_restart_started_before",
+            maximum=1_000_000,
+        )
+        restart_after = _integer(
+            cycle["session_restart_started_after"],
+            label=f"{label}.session_restart_started_after",
+            maximum=1_000_000,
+        )
+        if restart_after != restart_before:
+            _fail(f"{label} used the obsolete session-restart path")
         tcp_before = _integer(
             cycle["tcp_flows_before"],
             label=f"{label}.tcp_flows_before",
@@ -382,14 +484,23 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             _fail(f"{label} did not close every TCP flow")
         if cycle["udp_associations_closed"] != udp_before:
             _fail(f"{label} did not close every UDP association")
+        if (
+            cycle["tcp_probe_succeeded"] is not True
+            or cycle["udp_probe_succeeded"] is not True
+        ):
+            _fail(f"{label} did not recover both TCP and UDP probes")
         resources = _resource_snapshot(cycle["resources_after"], label=f"{label}.resources_after")
         if resources["udp_associations_active"] != 0:
             _fail(f"{label} retained a UDP association after lifecycle transition")
-        if resources["managed_transactions_active"] != baseline["managed_transactions_active"]:
-            _fail(f"{label} changed the managed transaction count")
+        if resources["managed_adapters_active"] != baseline["managed_adapters_active"]:
+            _fail(f"{label} changed the managed adapter count")
 
         if sequence <= RESET_CYCLES:
-            expected_reason = ORDINARY_RESET_REASONS[(sequence - 1) % len(ORDINARY_RESET_REASONS)]
+            expected_reason = (
+                "interface_change"
+                if sequence == INTERFACE_SWITCH_SEQUENCE
+                else "route_change"
+            )
             if cycle["operation"] != "reset_network" or cycle["reason"] != expected_reason:
                 _fail(f"{label} does not match the ordinary ResetNetwork schedule")
             if identity_before != identity_after:
@@ -397,12 +508,36 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             reset_latencies.append(elapsed)
             reset_resources.append(resources)
         else:
-            rebuild_index = sequence - RESET_CYCLES - 1
-            expected_reason = FULL_REBUILD_REASONS[rebuild_index]
+            expected_reason = FULL_REBUILD_DAMAGE_REASON
             if cycle["operation"] != "full_rebuild" or cycle["reason"] != expected_reason:
                 _fail(f"{label} does not match the managed-damage rebuild schedule")
             rebuild_latencies.append(elapsed)
             rebuild_resources.append(resources)
+
+    switch_cycle = cycles[INTERFACE_SWITCH_SEQUENCE - 1]
+    resolver = _exact_fields(
+        row["interface_resolver"],
+        {"probes", "resolutions", "cache_hits"},
+        "interface_resolver",
+    )
+    probes = _integer(
+        resolver["probes"],
+        label="interface_resolver.probes",
+        minimum=INTERFACE_RESOLVER_PROBES,
+        maximum=INTERFACE_RESOLVER_PROBES,
+    )
+    resolutions = _integer(
+        resolver["resolutions"],
+        label="interface_resolver.resolutions",
+        minimum=probes,
+        maximum=probes * 8,
+    )
+    cache_hits = _integer(
+        resolver["cache_hits"],
+        label="interface_resolver.cache_hits",
+        minimum=1,
+        maximum=resolutions,
+    )
 
     reset_accounting = _resource_accounting(
         baseline, reset_resources, label="ResetNetwork"
@@ -415,6 +550,7 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
         "workload": LIFECYCLE_WORKLOAD,
+        "identity": identity,
         "cycles": {
             "reset_network": RESET_CYCLES,
             "full_rebuild": FULL_REBUILD_CYCLES,
@@ -433,6 +569,15 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
         "managed_identity_preserved_across_resets": True,
         "connections_closed": True,
         "damage_only_full_rebuild": True,
+        "tcp_and_udp_recovered_each_cycle": True,
+        "interface_switch_recovery_nanoseconds": switch_cycle["elapsed_nanoseconds"],
+        "interface_switch_kind": "approved_underlay_disable_enable",
+        "interface_resolver": {
+            "probes": probes,
+            "resolutions": resolutions,
+            "cache_hits": cache_hits,
+            "cache_hits_per_million_resolutions": cache_hits * 1_000_000 // resolutions,
+        },
     }
 
 
