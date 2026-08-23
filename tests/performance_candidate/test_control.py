@@ -1577,6 +1577,253 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                         candidate_sha=self.CANDIDATE_SHA,
                     )
 
+    def test_fragment_diagnostics_are_required_and_scenario_scoped(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        fragment = self.row(
+            plan=plan,
+            scenario="fragment-reassembly-throughput",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        CONTROL.validate_windows_tun_trial(
+            fragment,
+            plan=plan,
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+
+        missing = copy.deepcopy(fragment)
+        missing["diagnostics"] = None
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "diagnostics must be an object"
+        ):
+            CONTROL.validate_windows_tun_trial(
+                missing,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+
+        non_fragment = self.row(
+            plan=plan,
+            scenario="tcp-single-flow",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        non_fragment["diagnostics"] = copy.deepcopy(fragment["diagnostics"])
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "non-fragment.*must be null"
+        ):
+            CONTROL.validate_windows_tun_trial(
+                non_fragment,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+
+    def test_fragment_diagnostics_reject_closed_schema_and_accounting_tampering(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="fragment-reassembly-throughput",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        cases = []
+
+        extra_field = copy.deepcopy(row)
+        extra_field["diagnostics"]["unexpected"] = 0
+        cases.append((extra_field, "fragment diagnostics schema mismatch"))
+
+        wrong_schema = copy.deepcopy(row)
+        wrong_schema["diagnostics"]["schema_version"] = 2
+        cases.append((wrong_schema, "schema_version is unsupported"))
+
+        wrong_kind = copy.deepcopy(row)
+        wrong_kind["diagnostics"]["kind"] = "fragment_ack_summary"
+        cases.append((wrong_kind, "diagnostics kind is invalid"))
+
+        accounting_extra = copy.deepcopy(row)
+        accounting_extra["diagnostics"]["accounting"]["unexpected"] = 0
+        cases.append((accounting_extra, "diagnostics accounting schema mismatch"))
+
+        adapter_missing = copy.deepcopy(row)
+        adapter_missing["diagnostics"]["adapter_counter_deltas"].pop(
+            "OutboundPacketErrors"
+        )
+        cases.append((adapter_missing, "adapter counter deltas schema mismatch"))
+
+        wrong_recipe = copy.deepcopy(row)
+        wrong_recipe["diagnostics"]["ack_window_milliseconds"] = 501
+        cases.append((wrong_recipe, "does not match the recipe"))
+
+        wrong_batch = copy.deepcopy(row)
+        wrong_batch["diagnostics"]["batch_datagrams"] = 7
+        cases.append((wrong_batch, "does not match the recipe"))
+
+        negative = copy.deepcopy(row)
+        negative["diagnostics"]["accounting"]["retransmissions"] = -1
+        cases.append((negative, "non-negative u64"))
+
+        boolean = copy.deepcopy(row)
+        boolean["diagnostics"]["accounting"]["duplicate_or_stale_acks"] = False
+        cases.append((boolean, "non-negative u64"))
+
+        zero_warmup = copy.deepcopy(row)
+        zero_accounting = zero_warmup["diagnostics"]["accounting"]
+        zero_accounting["warmup_unique_datagrams"] = 0
+        zero_accounting["warmup_request_attempts"] = 0
+        zero_accounting["total_unique_datagrams"] = zero_accounting[
+            "active_unique_datagrams"
+        ]
+        zero_accounting["total_request_attempts"] = zero_accounting[
+            "active_request_attempts"
+        ]
+        cases.append((zero_warmup, "warmup_unique_datagrams must be positive"))
+
+        misaligned = copy.deepcopy(row)
+        misaligned_accounting = misaligned["diagnostics"]["accounting"]
+        misaligned_accounting["warmup_unique_datagrams"] += 1
+        misaligned_accounting["warmup_request_attempts"] += 1
+        misaligned_accounting["total_unique_datagrams"] += 1
+        misaligned_accounting["total_request_attempts"] += 1
+        cases.append((misaligned, "warmup_unique_datagrams is not batch-aligned"))
+
+        active_mismatch = copy.deepcopy(row)
+        active_mismatch["diagnostics"]["accounting"][
+            "active_unique_datagrams"
+        ] += 8
+        cases.append((active_mismatch, "active unique count"))
+
+        phase_attempts = copy.deepcopy(row)
+        phase_attempts["diagnostics"]["accounting"][
+            "active_request_attempts"
+        ] = 0
+        cases.append((phase_attempts, "active attempts are below"))
+
+        total_unique = copy.deepcopy(row)
+        total_unique["diagnostics"]["accounting"]["total_unique_datagrams"] += 8
+        cases.append((total_unique, "total unique count"))
+
+        total_attempts = copy.deepcopy(row)
+        total_attempts["diagnostics"]["accounting"][
+            "total_request_attempts"
+        ] += 1
+        cases.append((total_attempts, "total attempt count"))
+
+        retransmissions = copy.deepcopy(row)
+        retransmissions["diagnostics"]["accounting"]["retransmissions"] = 0
+        cases.append((retransmissions, "retransmission count"))
+
+        expirations = copy.deepcopy(row)
+        expirations["diagnostics"]["accounting"]["ack_window_expirations"] = 0
+        cases.append((expirations, "ACK-window expiration count"))
+
+        duplicate_acks = copy.deepcopy(row)
+        duplicate_acks["diagnostics"]["accounting"][
+            "duplicate_or_stale_acks"
+        ] = 2
+        cases.append((duplicate_acks, "duplicate/stale ACK count"))
+
+        wrong_budget = copy.deepcopy(row)
+        wrong_budget["diagnostics"]["accounting"]["retry_budget"] = 2
+        cases.append((wrong_budget, "retry budget is inconsistent"))
+
+        exceeded_budget = copy.deepcopy(row)
+        exceeded_accounting = exceeded_budget["diagnostics"]["accounting"]
+        exceeded_accounting["active_request_attempts"] += 1
+        exceeded_accounting["total_request_attempts"] += 1
+        exceeded_accounting["retransmissions"] += 1
+        exceeded_accounting["ack_window_expirations"] += 1
+        cases.append((exceeded_budget, "exceeded the retry budget"))
+
+        adapter_loss = copy.deepcopy(row)
+        adapter_loss["diagnostics"]["adapter_counter_deltas"][
+            "ReceivedDiscardedPackets"
+        ] = 1
+        cases.append((adapter_loss, "recorded packet loss"))
+
+        adapter_sent = copy.deepcopy(row)
+        adapter_sent["diagnostics"]["adapter_counter_deltas"][
+            "SentUnicastPackets"
+        ] -= 1
+        cases.append((adapter_sent, "adapter sent-packet accounting"))
+
+        adapter_received = copy.deepcopy(row)
+        adapter_received["diagnostics"]["adapter_counter_deltas"][
+            "ReceivedUnicastPackets"
+        ] = 0
+        cases.append((adapter_received, "adapter received-packet accounting"))
+
+        for candidate, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(CONTROL.CandidateControlError, message):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+    def test_fragment_diagnostics_retry_budget_uses_unique_datagram_ceiling(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="fragment-reassembly-throughput",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        accounting = row["diagnostics"]["accounting"]
+        accounting["warmup_unique_datagrams"] = 1_000_000
+        accounting["warmup_request_attempts"] = 1_000_000
+        accounting["total_unique_datagrams"] = (
+            accounting["warmup_unique_datagrams"]
+            + accounting["active_unique_datagrams"]
+        )
+        accounting["total_request_attempts"] = (
+            accounting["warmup_request_attempts"]
+            + accounting["active_request_attempts"]
+        )
+        accounting["retry_budget"] = 2
+        adapter = row["diagnostics"]["adapter_counter_deltas"]
+        adapter["ReceivedUnicastPackets"] = accounting["total_request_attempts"]
+        adapter["SentUnicastPackets"] = accounting["total_request_attempts"] * 2
+        CONTROL.validate_windows_tun_trial(
+            row,
+            plan=plan,
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+
+        accounting["retry_budget"] = 1
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "retry budget is inconsistent"
+        ):
+            CONTROL.validate_windows_tun_trial(
+                row,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+
     def test_single_trial_cli_validates_collector_output(self) -> None:
         plan = CONTROL.create_windows_tun_plan(
             run_kind="comparison", decision_policy=self.policy()
