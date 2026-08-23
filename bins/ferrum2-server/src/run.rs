@@ -26,7 +26,10 @@ mod udp;
 
 use dns::{ServerDnsDependentRoot, ServerDnsDrain, ServerDnsRoot};
 use observation::{ServerMetricsRoot, log_level};
-use tcp::{ServerContext, ServerRouting, ServerTcpListeners, ServerTcpRoot};
+use tcp::{
+    ServerContext, ServerRouting, ServerTcpListeners, ServerTcpRoot,
+    prepare_server_network_socket_service,
+};
 use tokio_io::{bind_listener, shutdown_signal};
 use udp::{ServerUdpShared, UdpMappings, prepare_udp_server, udp_runtime_limits};
 
@@ -278,6 +281,14 @@ where
     } = resources;
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
+        let route_network = Arc::new(runtime_route_network(&config.route_network));
+        let outbound_dial_options: Arc<[DialOptions]> = config
+            .outbounds
+            .iter()
+            .map(|outbound| runtime_dial_options(outbound.dial_options()))
+            .collect::<Vec<_>>()
+            .into();
+        let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
         let dns = match (config.dns, config.dns_route, dns_specs) {
             (
                 Some(DnsConfig {
@@ -409,6 +420,9 @@ where
                 replay: Arc::clone(&replay),
                 runtime: config.runtime,
                 direct_resolvers: Arc::clone(&direct_resolvers),
+                outbound_dial_options: Arc::clone(&outbound_dial_options),
+                route_network: Arc::clone(&route_network),
+                network_sockets: Arc::clone(&network_sockets),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             });

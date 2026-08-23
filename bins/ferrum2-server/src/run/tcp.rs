@@ -8,27 +8,36 @@ use std::time::{Duration, Instant};
 use ferrum2_config::{CompiledRoute, RouteAction, RouteProtocol, RuntimeConfig, Sniffers};
 use ferrum2_core::route::Network;
 use ferrum2_core::{
-    ConnectErrorKind, DomainName, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr,
+    ConnectError, ConnectErrorKind, DomainName, Inbound as _, LocalEndpoint, SessionReply as _,
+    TargetAddr, TargetHostRef,
 };
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, RuleMatchResult,
-    RuleMatchType, RuleProgram, RuleSource, Stage, TraceRecord, Transport as ObservationTransport,
-    emit,
+    Direction, Event, Inbound, InterfaceResolutionResult, InterfaceResolutionSource, LogLevel,
+    Metrics, Outcome, Reason, Role, RuleMatchResult, RuleMatchType, RuleProgram, RuleSource, Stage,
+    TraceRecord, Transport as ObservationTransport, emit,
 };
 use ferrum2_rule::{
     RouteMatchObservation as EngineMatchObservation, RouteMatchSource as EngineMatchSource,
     RouteMatchType as EngineMatchType, RouteMetadata, RouteProgramAction, RouteTable,
     RuleCompileError, RuleEvaluationScratch,
 };
+#[cfg(not(test))]
+use ferrum2_runtime::SystemNetworkSocketOperations;
 use ferrum2_runtime::{
-    AcceptListener, BoundedSupervisor, CancellationToken, DirectOutbound, OwnerRegistry,
-    PrefixDecision, PreparedProcessRoot, ProcessCancellation, ProcessFuture, RelayRunError,
-    RuntimeTcpStream, SniffPrefix, SniffPrefixOutcome, SystemSocketInspector, SystemTcpDialer,
-    TcpConnector, collect_sniff_prefix, relay_lifecycle,
+    AcceptListener, BoundedSupervisor, CancellationToken, DialOptions, GenerationBoundTcpStream,
+    InterfaceResolutionErrorKind, InterfaceSelectionSource, MAX_RESOLVED_CANDIDATES,
+    NetworkInterfaceResolver, NetworkResetCoordinator, NetworkResetLimits,
+    NetworkRuntimeResourceAdmissionError, NetworkSnapshot, NetworkSnapshotPublisher,
+    NetworkSocketService, NetworkSocketServiceError, OwnerRegistry, PrefixDecision,
+    PreparedProcessRoot, ProcessCancellation, ProcessFuture, RelayRunError, RouteNetworkOptions,
+    RuntimeTcpStream, SniffPrefix, SniffPrefixOutcome, SystemNetworkSocketError, TcpResolver,
+    collect_sniff_prefix, relay_lifecycle,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, PlainDuplex, ShadowsocksTcpInbound, TcpReplayStore};
 use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress, Protocol, Transport};
+#[cfg(not(test))]
+use ferrum2_wintun::{WindowsNetworkInterfaceCatalog, WindowsResolvedSocketBinder};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
@@ -39,6 +48,160 @@ use super::observation::{
     record_sniff, run_error_for_supervisor, update_replay_metric,
 };
 use super::tokio_io::{TokioFramed, TokioTransport};
+
+#[cfg(not(test))]
+pub(super) type ServerNetworkSocketService = NetworkSocketService<
+    WindowsNetworkInterfaceCatalog,
+    SystemNetworkSocketOperations<WindowsResolvedSocketBinder>,
+>;
+
+#[cfg(test)]
+pub(super) type ServerNetworkSocketService =
+    NetworkSocketService<TestNetworkCatalog, TestNetworkSocketOperations>;
+
+#[cfg(not(test))]
+pub(super) fn prepare_server_network_socket_service(
+    registry: &OwnerRegistry,
+    metrics: &Metrics,
+) -> Result<Arc<ServerNetworkSocketService>, RunError> {
+    let catalog = WindowsNetworkInterfaceCatalog::system();
+    let initial =
+        Arc::new(NetworkSnapshot::capture(1, &catalog).map_err(|_| RunError::StartupRuntime)?);
+    metrics.set_network_generation(initial.generation());
+    let coordinator = NetworkResetCoordinator::new(
+        NetworkSnapshotPublisher::new(initial),
+        NetworkResetLimits::default(),
+        registry.clone(),
+    );
+    Ok(Arc::new(ServerNetworkSocketService::new(
+        coordinator,
+        NetworkInterfaceResolver::new(catalog),
+        SystemNetworkSocketOperations::new(WindowsResolvedSocketBinder),
+    )))
+}
+
+#[cfg(test)]
+pub(super) fn prepare_server_network_socket_service(
+    registry: &OwnerRegistry,
+    metrics: &Metrics,
+) -> Result<Arc<ServerNetworkSocketService>, RunError> {
+    let binding = ferrum2_runtime::InterfaceBinding::new(
+        "test-loopback",
+        1,
+        1,
+        [
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ],
+    )
+    .map_err(|_| RunError::StartupRuntime)?;
+    let initial = Arc::new(
+        NetworkSnapshot::new(1, Some(binding.clone()), Some(binding))
+            .map_err(|_| RunError::StartupRuntime)?,
+    );
+    metrics.set_network_generation(initial.generation());
+    let coordinator = NetworkResetCoordinator::new(
+        NetworkSnapshotPublisher::new(initial),
+        NetworkResetLimits::default(),
+        registry.clone(),
+    );
+    Ok(Arc::new(ServerNetworkSocketService::new(
+        coordinator,
+        NetworkInterfaceResolver::new(TestNetworkCatalog),
+        TestNetworkSocketOperations,
+    )))
+}
+
+#[cfg(test)]
+pub(super) struct TestNetworkCatalog;
+
+#[cfg(test)]
+impl ferrum2_runtime::NetworkInterfaceCatalog for TestNetworkCatalog {
+    fn read_interfaces(
+        &self,
+    ) -> Result<
+        Vec<ferrum2_runtime::NetworkInterfaceObservation>,
+        ferrum2_runtime::NetworkInterfaceCatalogError,
+    > {
+        Err(ferrum2_runtime::NetworkInterfaceCatalogError)
+    }
+
+    fn system_best_route(
+        &self,
+        _: std::net::SocketAddr,
+    ) -> Result<ferrum2_runtime::SystemBestRoute, ferrum2_runtime::NetworkInterfaceCatalogError>
+    {
+        ferrum2_runtime::SystemBestRoute::new(1, 1)
+            .map_err(|_| ferrum2_runtime::NetworkInterfaceCatalogError)
+    }
+}
+
+#[cfg(test)]
+pub(super) struct TestNetworkSocketOperations;
+
+#[cfg(test)]
+impl ferrum2_runtime::NetworkSocketOperations for TestNetworkSocketOperations {
+    type TcpSocket = tokio::net::TcpSocket;
+    type TcpStream = RuntimeTcpStream;
+    type UdpSocket = tokio::net::UdpSocket;
+    type Error = SystemNetworkSocketError<ferrum2_wintun::Error>;
+
+    fn prepare_tcp(
+        &self,
+        destination: std::net::SocketAddr,
+        _: &ferrum2_runtime::ResolvedInterface,
+    ) -> Result<Self::TcpSocket, Self::Error> {
+        match destination {
+            std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        }
+        .map_err(SystemNetworkSocketError::Socket)
+    }
+
+    async fn connect_tcp(
+        &self,
+        socket: Self::TcpSocket,
+        destination: std::net::SocketAddr,
+    ) -> Result<Self::TcpStream, Self::Error> {
+        let stream = socket
+            .connect(destination)
+            .await
+            .map_err(SystemNetworkSocketError::Socket)?;
+        RuntimeTcpStream::from_connected(stream).map_err(SystemNetworkSocketError::Socket)
+    }
+
+    fn prepare_udp(
+        &self,
+        destination: std::net::SocketAddr,
+        _: &ferrum2_runtime::ResolvedInterface,
+    ) -> Result<Self::UdpSocket, Self::Error> {
+        let local = match destination {
+            std::net::SocketAddr::V4(_) => {
+                std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+            }
+            std::net::SocketAddr::V6(_) => {
+                std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+            }
+        };
+        let socket = std::net::UdpSocket::bind(local).map_err(SystemNetworkSocketError::Socket)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(SystemNetworkSocketError::Socket)?;
+        tokio::net::UdpSocket::from_std(socket).map_err(SystemNetworkSocketError::Socket)
+    }
+
+    async fn connect_udp(
+        &self,
+        socket: Self::UdpSocket,
+        destination: std::net::SocketAddr,
+    ) -> Result<Self::UdpSocket, Self::Error> {
+        socket
+            .connect(destination)
+            .await
+            .map_err(SystemNetworkSocketError::Socket)?;
+        Ok(socket)
+    }
+}
 
 pub(super) struct ServerRouting {
     pub(super) legacy: RouteTable,
@@ -302,8 +465,188 @@ pub(super) struct ServerContext {
     pub(super) replay: Arc<TcpReplayStore>,
     pub(super) runtime: RuntimeConfig,
     pub(super) direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
+    pub(super) outbound_dial_options: Arc<[DialOptions]>,
+    pub(super) route_network: Arc<RouteNetworkOptions>,
+    pub(super) network_sockets: Arc<ServerNetworkSocketService>,
     pub(super) registry: OwnerRegistry,
     pub(super) metrics: Arc<Metrics>,
+}
+
+struct ServerNetworkTcpOutbound {
+    sockets: Arc<ServerNetworkSocketService>,
+    resolver: dns_egress::ServerDnsResolver,
+    outbound: DialOptions,
+    route: Arc<RouteNetworkOptions>,
+    connect_timeout: Duration,
+    metrics: Arc<Metrics>,
+}
+
+impl ferrum2_core::Outbound for ServerNetworkTcpOutbound {
+    type Stream = GenerationBoundTcpStream<RuntimeTcpStream>;
+    type Error = ConnectError;
+
+    async fn open(&self, target: &TargetAddr) -> Result<Self::Stream, Self::Error> {
+        let deadline = tokio::time::Instant::now() + self.connect_timeout;
+        if let Some(address) = target.as_socket_addr() {
+            return self.connect_candidate(address, deadline).await;
+        }
+
+        let TargetHostRef::Domain(host) = target.host() else {
+            return Err(ConnectError::new(ConnectErrorKind::Other));
+        };
+        let candidates = match tokio::time::timeout_at(
+            deadline,
+            self.resolver.resolve(host, target.port().get()),
+        )
+        .await
+        {
+            Ok(Ok(candidates)) => candidates,
+            Ok(Err(_)) => {
+                return Err(ConnectError::new(ConnectErrorKind::HostUnreachable));
+            }
+            Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
+        };
+
+        let mut attempted = false;
+        let mut last_error = ConnectError::new(ConnectErrorKind::HostUnreachable);
+        for address in candidates.into_iter().take(MAX_RESOLVED_CANDIDATES) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ConnectError::new(ConnectErrorKind::Timeout));
+            }
+            attempted = true;
+            match self.connect_candidate(address, deadline).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last_error = error,
+            }
+        }
+        if attempted {
+            Err(last_error)
+        } else {
+            Err(ConnectError::new(ConnectErrorKind::HostUnreachable))
+        }
+    }
+}
+
+impl ServerNetworkTcpOutbound {
+    async fn connect_candidate(
+        &self,
+        address: std::net::SocketAddr,
+        deadline: tokio::time::Instant,
+    ) -> Result<GenerationBoundTcpStream<RuntimeTcpStream>, ConnectError> {
+        let result = match tokio::time::timeout_at(
+            deadline,
+            self.sockets
+                .connect_tcp(&self.outbound, self.route.as_ref(), address),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return Err(ConnectError::new(ConnectErrorKind::Timeout)),
+        };
+        match result {
+            Ok(stream) => {
+                self.metrics.outbound_interface_resolution(
+                    interface_resolution_source(stream.resolved_interface().selection_source()),
+                    InterfaceResolutionResult::Success,
+                );
+                Ok(stream)
+            }
+            Err(error) => {
+                self.metrics.outbound_interface_resolution(
+                    interface_resolution_source(error.attempted_source()),
+                    interface_resolution_result(&error),
+                );
+                Err(connect_error_from_network_service(error))
+            }
+        }
+    }
+}
+
+pub(super) fn interface_resolution_source(
+    source: InterfaceSelectionSource,
+) -> InterfaceResolutionSource {
+    match source {
+        InterfaceSelectionSource::OutboundExplicit => InterfaceResolutionSource::OutboundExplicit,
+        InterfaceSelectionSource::AutoDetected => InterfaceResolutionSource::AutoDetected,
+        InterfaceSelectionSource::RouteDefault => InterfaceResolutionSource::RouteDefault,
+        InterfaceSelectionSource::SystemBestRoute => InterfaceResolutionSource::SystemBestRoute,
+    }
+}
+
+pub(super) fn interface_resolution_result(
+    error: &NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_wintun::Error>>,
+) -> InterfaceResolutionResult {
+    match error {
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::InterfaceResolution(_)
+            | NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. },
+        ) => InterfaceResolutionResult::Failure,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation { .. }
+            | NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration { .. },
+        )
+        | NetworkSocketServiceError::Connection { .. }
+        | NetworkSocketServiceError::Cancelled { .. } => InterfaceResolutionResult::Success,
+    }
+}
+
+fn connect_error_from_network_service(
+    error: NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_wintun::Error>>,
+) -> ConnectError {
+    let kind = match error {
+        NetworkSocketServiceError::Connection {
+            error: SystemNetworkSocketError::Socket(error),
+            ..
+        }
+        | NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation {
+                error: SystemNetworkSocketError::Socket(error),
+                ..
+            },
+        ) => connect_error_kind_from_io(&error),
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::InterfaceResolution(error),
+        ) => match error.kind() {
+            InterfaceResolutionErrorKind::ExplicitInterfaceMissing
+            | InterfaceResolutionErrorKind::ExplicitInterfaceAmbiguous
+            | InterfaceResolutionErrorKind::ExplicitInterfaceUnavailable
+            | InterfaceResolutionErrorKind::ExplicitInterfaceWrongFamily
+            | InterfaceResolutionErrorKind::SelectedInterfaceWrongFamily
+            | InterfaceResolutionErrorKind::SourceAddressUnavailable => {
+                ConnectErrorKind::PolicyDenied
+            }
+            InterfaceResolutionErrorKind::SystemBestRouteUnavailable => {
+                ConnectErrorKind::NetworkUnreachable
+            }
+        },
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. },
+        ) => ConnectErrorKind::NetworkUnreachable,
+        NetworkSocketServiceError::Admission(
+            NetworkRuntimeResourceAdmissionError::Preparation {
+                error: SystemNetworkSocketError::Binding(_),
+                ..
+            }
+            | NetworkRuntimeResourceAdmissionError::RuntimeOwnerRegistration { .. },
+        )
+        | NetworkSocketServiceError::Connection {
+            error: SystemNetworkSocketError::Binding(_),
+            ..
+        }
+        | NetworkSocketServiceError::Cancelled { .. } => ConnectErrorKind::Other,
+    };
+    ConnectError::new(kind)
+}
+
+fn connect_error_kind_from_io(error: &io::Error) -> ConnectErrorKind {
+    match error.kind() {
+        io::ErrorKind::NetworkUnreachable => ConnectErrorKind::NetworkUnreachable,
+        io::ErrorKind::HostUnreachable => ConnectErrorKind::HostUnreachable,
+        io::ErrorKind::ConnectionRefused => ConnectErrorKind::ConnectionRefused,
+        io::ErrorKind::TimedOut => ConnectErrorKind::Timeout,
+        io::ErrorKind::PermissionDenied => ConnectErrorKind::PolicyDenied,
+        _ => ConnectErrorKind::Other,
+    }
 }
 
 #[derive(Debug)]
@@ -597,7 +940,10 @@ async fn server_connection(
             .active_connections_dec(Role::Server, Inbound::Shadowsocks);
         return;
     };
-    let Some(resolver) = context.direct_resolvers.get(outbound).cloned() else {
+    let (Some(resolver), Some(dial_options)) = (
+        context.direct_resolvers.get(outbound).cloned(),
+        context.outbound_dial_options.get(outbound).cloned(),
+    ) else {
         record_failure(
             &context,
             Stage::Config,
@@ -611,12 +957,14 @@ async fn server_connection(
         return;
     };
     let prefix = selection.prefix;
-    let direct = DirectOutbound::new(TcpConnector::with_resolution_adapters(
-        SystemSocketInspector,
-        SystemTcpDialer,
-        resolver.for_inbound(context.inbound),
-        context.runtime.connect_timeout,
-    ));
+    let direct = ServerNetworkTcpOutbound {
+        sockets: Arc::clone(&context.network_sockets),
+        resolver: resolver.for_inbound(context.inbound),
+        outbound: dial_options,
+        route: Arc::clone(&context.route_network),
+        connect_timeout: context.runtime.connect_timeout,
+        metrics: Arc::clone(&context.metrics),
+    };
     let opened = open_and_prefix(
         &direct,
         &target,

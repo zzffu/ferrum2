@@ -654,6 +654,7 @@ dependencies = [
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
+ "ferrum2-wintun",
  "hickory-proto",
  "tokio",
  "tracing",
