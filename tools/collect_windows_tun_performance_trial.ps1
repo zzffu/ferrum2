@@ -129,6 +129,25 @@ function Get-LabeledMetric(
     )
 }
 
+function Get-StrictUInt64Property(
+    [object]$Value,
+    [string]$PropertyName,
+    [string]$Name
+) {
+    Assert-Condition ($null -ne $Value) "$Name is null"
+    $property = $Value.PSObject.Properties[$PropertyName]
+    Assert-Condition ($null -ne $property) "$Name is missing $PropertyName"
+    $raw = $property.Value
+    $isInteger = (
+        $raw -is [byte] -or $raw -is [uint16] -or $raw -is [uint32] -or
+        $raw -is [uint64] -or $raw -is [sbyte] -or $raw -is [int16] -or
+        $raw -is [int32] -or $raw -is [int64]
+    )
+    Assert-Condition $isInteger "$Name $PropertyName must be an integer"
+    Assert-Condition ([decimal]$raw -ge 0) "$Name $PropertyName must be non-negative"
+    return [uint64]$raw
+}
+
 function Get-NetworkLifecycleMetrics([string]$Metrics) {
     return [ordered]@{
         network_generation = [uint64](
@@ -392,7 +411,12 @@ function Wait-CleanDrain([bool]$Udp) {
         $tcp = Get-Metric $metrics "ferrum2_tun_tcp_flows_active"
         $fragments = Get-Metric $metrics "ferrum2_tun_reassembly_entries_active"
         $udpAssociations = Get-Metric $metrics "ferrum2_tun_udp_associations_active"
-        if ($tcp -eq 0 -and $fragments -eq 0 -and ((-not $Udp) -or $udpAssociations -eq 0)) {
+        $pendingUdpResponses = Get-Metric $metrics "ferrum2_tun_pending_udp_responses"
+        if (
+            $tcp -eq 0 -and
+            $fragments -eq 0 -and
+            ((-not $Udp) -or ($udpAssociations -eq 0 -and $pendingUdpResponses -eq 0))
+        ) {
             return $metrics
         }
         Start-Sleep -Milliseconds 100
@@ -404,6 +428,71 @@ function Get-ManagedAdapter {
     $rows = @(Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction Stop)
     Assert-Condition ($rows.Count -eq 1) "managed performance adapter identity is not exact"
     return $rows[0]
+}
+
+function Get-ManagedAdapterCounter {
+    $rows = @(Get-NetAdapterStatistics -Name $AdapterName -ErrorAction Stop)
+    Assert-Condition ($rows.Count -eq 1) "managed performance adapter statistics are not exact"
+    $statistics = $rows[0]
+    return [ordered]@{
+        ReceivedUnicastPackets = [uint64]$statistics.ReceivedUnicastPackets
+        ReceivedDiscardedPackets = [uint64]$statistics.ReceivedDiscardedPackets
+        ReceivedPacketErrors = [uint64]$statistics.ReceivedPacketErrors
+        SentUnicastPackets = [uint64]$statistics.SentUnicastPackets
+        OutboundDiscardedPackets = [uint64]$statistics.OutboundDiscardedPackets
+        OutboundPacketErrors = [uint64]$statistics.OutboundPacketErrors
+    }
+}
+
+function Get-AdapterCounterDelta([object]$Before, [object]$After) {
+    $deltas = [ordered]@{}
+    foreach ($name in @(
+        "ReceivedUnicastPackets", "ReceivedDiscardedPackets", "ReceivedPacketErrors",
+        "SentUnicastPackets", "OutboundDiscardedPackets", "OutboundPacketErrors"
+    )) {
+        [uint64]$beforeValue = $Before[$name]
+        [uint64]$afterValue = $After[$name]
+        Assert-Condition ($afterValue -ge $beforeValue) `
+            "managed performance adapter counter decreased: $name"
+        $deltas[$name] = [uint64]($afterValue - $beforeValue)
+    }
+    return $deltas
+}
+
+function Get-ProductDropCounter([string]$Metrics) {
+    $counters = [ordered]@{}
+    foreach ($name in @(
+        "ferrum2_tun_internal_egress_backpressured",
+        "ferrum2_tun_packets_foundation_dropped",
+        "ferrum2_tun_packets_rejected",
+        "ferrum2_tun_reassembly_dropped_limit",
+        "ferrum2_tun_reassembly_dropped_malformed",
+        "ferrum2_tun_reassembly_dropped_overlap",
+        "ferrum2_tun_reassembly_dropped_timeout",
+        "ferrum2_tun_tcp_bridge_blocked",
+        "ferrum2_tun_tcp_flows_rejected_limit",
+        "ferrum2_tun_tcp_flows_reset_restart",
+        "ferrum2_tun_udp_association_rejected_limit",
+        "ferrum2_tun_udp_datagram_queue_full",
+        "ferrum2_tun_udp_response_filtered",
+        "ferrum2_tun_udp_response_dropped",
+        "ferrum2_tun_udp_response_queue_full",
+        "ferrum2_tun_udp_stale_generation",
+        "ferrum2_tun_underlay_bind_stale",
+        "ferrum2_tun_wintun_ring_full_dropped"
+    )) {
+        $counters[$name] = [uint64](Get-Metric `
+            -Metrics $Metrics -Name $name -AllowAbsent $true
+        )
+    }
+    return $counters
+}
+
+function Assert-ProductDropCounterUnchanged([object]$Before, [object]$After) {
+    foreach ($name in $Before.Keys) {
+        Assert-Condition ([uint64]$After[$name] -eq [uint64]$Before[$name]) `
+            "fragment workload changed product drop counter: $name"
+    }
 }
 
 function Get-ManagedIdentity {
@@ -712,6 +801,7 @@ Assert-Condition (
 New-Item -ItemType Directory -Path $script:WorkRoot | Out-Null
 $measurements = [ordered]@{}
 $checks = [ordered]@{}
+$diagnostics = $null
 $modelEvidenceReference = $null
 $modelPending = $null
 [uint64]$checkedUnits = 0
@@ -806,36 +896,160 @@ try {
         }
         "fragment-reassembly-throughput" {
             $before = Get-Metrics $MetricsPort 5
-            $fragmentIngressBefore = Get-Metric $before "ferrum2_tun_packets_ingress" $true
-            $completedBefore = Get-Metric $before "ferrum2_tun_reassembly_completed" $true
-            $dropsBefore = @(
-                "ferrum2_tun_reassembly_dropped_overlap",
-                "ferrum2_tun_reassembly_dropped_timeout",
-                "ferrum2_tun_reassembly_dropped_limit",
-                "ferrum2_tun_reassembly_dropped_malformed"
-            ) | ForEach-Object { Get-Metric $before $_ $true } | Measure-Object -Sum
+            $adapterCountersBefore = Get-ManagedAdapterCounter
+            $dropCountersBefore = Get-ProductDropCounter -Metrics $before
+            [uint64]$fragmentIngressBefore = Get-Metric -Metrics $before `
+                -Name "ferrum2_tun_packets_ingress" -AllowAbsent $true
+            [uint64]$completedBefore = Get-Metric -Metrics $before `
+                -Name "ferrum2_tun_reassembly_completed" -AllowAbsent $true
             $observation = Invoke-Workload $Scenario 120
-            $checkedUnits = [uint64]$observation.checked_units
+            Assert-ExactProperties -Value $observation -Expected @(
+                "measurements", "checked_units", "accounting", "checks"
+            ) -Name "fragment workload observation"
+            Assert-ExactProperties -Value $observation.measurements `
+                -Expected @("reassembly_rate") -Name "fragment workload measurements"
+            Assert-ExactProperties -Value $observation.checks -Expected @(
+                "payload_exact", "no_gso", "all_sequences_acknowledged",
+                "bounded_retransmissions"
+            ) -Name "fragment workload checks"
+            Assert-ExactProperties -Value $observation.accounting -Expected @(
+                "warmup_unique_datagrams", "warmup_request_attempts",
+                "active_unique_datagrams", "active_request_attempts",
+                "total_unique_datagrams", "total_request_attempts", "retransmissions",
+                "ack_window_expirations", "duplicate_or_stale_acks", "retry_budget"
+            ) -Name "fragment workload accounting"
+
+            $checkedUnits = Get-StrictUInt64Property -Value $observation `
+                -PropertyName "checked_units" -Name "fragment workload observation"
+            $accounting = [ordered]@{}
+            foreach ($name in @(
+                "warmup_unique_datagrams", "warmup_request_attempts",
+                "active_unique_datagrams", "active_request_attempts",
+                "total_unique_datagrams", "total_request_attempts", "retransmissions",
+                "ack_window_expirations", "duplicate_or_stale_acks", "retry_budget"
+            )) {
+                $accounting[$name] = Get-StrictUInt64Property `
+                    -Value $observation.accounting -PropertyName $name `
+                    -Name "fragment workload accounting"
+            }
+            Assert-Condition (
+                [uint64]$accounting.warmup_unique_datagrams -gt 0 -and
+                [uint64]$accounting.active_unique_datagrams -gt 0 -and
+                [uint64]$accounting.warmup_unique_datagrams % 8 -eq 0 -and
+                [uint64]$accounting.active_unique_datagrams % 8 -eq 0 -and
+                [uint64]$accounting.total_unique_datagrams % 8 -eq 0
+            ) "fragment unique datagram accounting is not batch-aligned"
+            Assert-Condition (
+                [uint64]$accounting.active_unique_datagrams -eq $checkedUnits
+            ) "fragment active unique datagrams do not match checked units"
+            Assert-Condition (
+                [uint64]$accounting.warmup_request_attempts -ge
+                    [uint64]$accounting.warmup_unique_datagrams -and
+                [uint64]$accounting.active_request_attempts -ge
+                    [uint64]$accounting.active_unique_datagrams
+            ) "fragment phase request attempts are below unique datagrams"
+            Assert-Condition (
+                [decimal]$accounting.total_unique_datagrams -eq
+                    [decimal]$accounting.warmup_unique_datagrams +
+                        [decimal]$accounting.active_unique_datagrams
+            ) "fragment total unique datagram accounting is inconsistent"
+            Assert-Condition (
+                [decimal]$accounting.total_request_attempts -eq
+                    [decimal]$accounting.warmup_request_attempts +
+                        [decimal]$accounting.active_request_attempts
+            ) "fragment total request attempt accounting is inconsistent"
+            Assert-Condition (
+                [uint64]$accounting.total_request_attempts -ge
+                    [uint64]$accounting.total_unique_datagrams -and
+                [decimal]$accounting.total_request_attempts -
+                    [decimal]$accounting.total_unique_datagrams -eq
+                    [decimal]$accounting.retransmissions
+            ) "fragment retransmission accounting is inconsistent"
+            Assert-Condition (
+                [uint64]$accounting.ack_window_expirations -eq
+                    [uint64]$accounting.retransmissions -and
+                [uint64]$accounting.duplicate_or_stale_acks -le
+                    [uint64]$accounting.retransmissions
+            ) "fragment ACK-window accounting is inconsistent"
+            [uint64]$expectedRetryBudget = [uint64][Math]::Ceiling(
+                [decimal]$accounting.total_unique_datagrams / [decimal]1000000
+            )
+            if ($expectedRetryBudget -lt 1) { $expectedRetryBudget = 1 }
+            Assert-Condition (
+                [uint64]$accounting.retry_budget -eq $expectedRetryBudget -and
+                [uint64]$accounting.retransmissions -le [uint64]$accounting.retry_budget
+            ) "fragment retransmission budget accounting is inconsistent"
+
+            [void](Wait-CleanDrain $true)
+            $checks.clean_drain = $true
             $after = Get-Metrics $MetricsPort 5
-            $fragmentIngressDelta = (Get-Metric $after "ferrum2_tun_packets_ingress" $true) - $fragmentIngressBefore
-            $completedDelta = (Get-Metric $after "ferrum2_tun_reassembly_completed" $true) - $completedBefore
-            $dropsAfter = @(
-                "ferrum2_tun_reassembly_dropped_overlap",
-                "ferrum2_tun_reassembly_dropped_timeout",
-                "ferrum2_tun_reassembly_dropped_limit",
-                "ferrum2_tun_reassembly_dropped_malformed"
-            ) | ForEach-Object { Get-Metric $after $_ $true } | Measure-Object -Sum
-            Assert-Condition ($fragmentIngressDelta -ge $checkedUnits * 2) "fragment workload did not produce the fixed two-fragment recipe"
-            Assert-Condition ($completedDelta -ge $checkedUnits) "fragment workload did not reach product reassembly"
-            Assert-Condition ($dropsAfter.Sum -eq $dropsBefore.Sum) "fragment workload changed a reassembly drop counter"
+            $adapterCountersAfter = Get-ManagedAdapterCounter
+            $dropCountersAfter = Get-ProductDropCounter -Metrics $after
+            Assert-ProductDropCounterUnchanged `
+                -Before $dropCountersBefore -After $dropCountersAfter
+            [uint64]$fragmentIngressAfter = Get-Metric -Metrics $after `
+                -Name "ferrum2_tun_packets_ingress" -AllowAbsent $true
+            [uint64]$completedAfter = Get-Metric -Metrics $after `
+                -Name "ferrum2_tun_reassembly_completed" -AllowAbsent $true
+            Assert-Condition (
+                $fragmentIngressAfter -ge $fragmentIngressBefore -and
+                $completedAfter -ge $completedBefore
+            ) "fragment product counters decreased"
+            [uint64]$fragmentIngressDelta = $fragmentIngressAfter - $fragmentIngressBefore
+            [uint64]$completedDelta = $completedAfter - $completedBefore
+            Assert-Condition (
+                [decimal]$accounting.total_request_attempts -le
+                    [decimal][uint64]::MaxValue / [decimal]2
+            ) "fragment request attempt count exceeds the packet denominator"
+            [uint64]$expectedFragmentPackets = [uint64]$accounting.total_request_attempts * 2
+            Assert-Condition ($fragmentIngressDelta -eq $expectedFragmentPackets) `
+                "fragment workload did not produce exactly two fragments per request attempt"
+            Assert-Condition (
+                $completedDelta -eq [uint64]$accounting.total_request_attempts
+            ) "fragment request attempts did not all reach product reassembly"
+
+            $adapterCounterDeltas = Get-AdapterCounterDelta `
+                -Before $adapterCountersBefore -After $adapterCountersAfter
+            foreach ($name in @(
+                "ReceivedDiscardedPackets", "ReceivedPacketErrors",
+                "OutboundDiscardedPackets", "OutboundPacketErrors"
+            )) {
+                Assert-Condition ([uint64]$adapterCounterDeltas[$name] -eq 0) `
+                    "fragment workload recorded adapter packet loss: $name"
+            }
+            Assert-Condition (
+                [uint64]$adapterCounterDeltas.SentUnicastPackets -eq
+                    $expectedFragmentPackets
+            ) "fragment workload adapter sent-packet accounting is inconsistent"
+            Assert-Condition (
+                [uint64]$adapterCounterDeltas.ReceivedUnicastPackets -ge
+                    [uint64]$accounting.total_unique_datagrams
+            ) "fragment workload adapter received-packet accounting is inconsistent"
+            $diagnostics = [ordered]@{
+                schema_version = 1
+                kind = "fragment_ack_accounting"
+                batch_datagrams = 8
+                ack_window_milliseconds = 500
+                max_missing_per_batch = 1
+                max_retransmissions_per_sequence = 1
+                retry_budget_unique_datagrams = 1000000
+                minimum_retry_budget = 1
+                retry_scope = "missing-sequence-only"
+                accounting = $accounting
+                adapter_counter_deltas = $adapterCounterDeltas
+            }
             $measurements.reassembly_rate = [ordered]@{
                 unit = "reassembled_payload_bytes_per_second"; value = [uint64]$observation.measurements.reassembly_rate
             }
             $checks.fragment_packets_observed = $true
             $checks.no_reassembly_drop = $true
             $checks.payload_exact = $observation.checks.payload_exact -eq $true
-            [void](Wait-CleanDrain $true)
-            $checks.clean_drain = $true
+            $checks.no_gso = $observation.checks.no_gso -eq $true
+            $checks.all_sequences_acknowledged = `
+                $observation.checks.all_sequences_acknowledged -eq $true
+            $checks.bounded_retransmissions = `
+                $observation.checks.bounded_retransmissions -eq $true
+            $checks.no_adapter_packet_loss = $true
         }
         "idle-cpu-wakeup" {
             Start-Sleep -Seconds 10
@@ -1562,7 +1776,7 @@ try {
     }
     $finishedUtc = [DateTime]::UtcNow.ToString("o")
     $document = [ordered]@{
-        schema_version = 2
+        schema_version = 3
         kind = "windows_tun_performance_trial"
         selection = "windows-tun-m17"
         run_kind = $RunKind
@@ -1599,6 +1813,7 @@ try {
             checked_units = $checkedUnits
             checks = $checks
         }
+        diagnostics = $diagnostics
         network_model_evidence = $modelEvidenceReference
         status = "PASS"
     }

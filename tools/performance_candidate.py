@@ -207,7 +207,7 @@ WINDOWS_TUN_SELECTION = "windows-tun-m17"
 WINDOWS_TUN_RUN_KINDS = frozenset({"comparison", "calibration-aa"})
 WINDOWS_TUN_PAIR_COUNT = 5
 WINDOWS_TUN_PLAN_SCHEMA_VERSION = 2
-WINDOWS_TUN_TRIAL_SCHEMA_VERSION = 2
+WINDOWS_TUN_TRIAL_SCHEMA_VERSION = 3
 WINDOWS_TUN_SUMMARY_SCHEMA_VERSION = 2
 WINDOWS_TUN_CALIBRATION_SCHEMA_VERSION = 2
 WINDOWS_TUN_POLICY_SCHEMA_VERSION = 2
@@ -377,6 +377,12 @@ WINDOWS_TUN_SCENARIOS = {
             "fragments_per_datagram": 2,
             "batch_datagrams": 8,
             "payload_bytes": 1_440,
+            "ack_window_milliseconds": 500,
+            "max_missing_per_batch": 1,
+            "max_retransmissions_per_sequence": 1,
+            "retry_budget_unique_datagrams": 1_000_000,
+            "minimum_retry_budget": 1,
+            "retry_scope": "missing-sequence-only",
         },
         "metrics": {
             "reassembly_rate": {
@@ -390,6 +396,10 @@ WINDOWS_TUN_SCENARIOS = {
             "fragment_packets_observed",
             "no_reassembly_drop",
             "payload_exact",
+            "no_gso",
+            "all_sequences_acknowledged",
+            "bounded_retransmissions",
+            "no_adapter_packet_loss",
             "tun_path_observed",
             "clean_drain",
         ),
@@ -653,6 +663,7 @@ WINDOWS_TUN_TRIAL_FIELDS = frozenset(
         "environment",
         "measurements",
         "correctness",
+        "diagnostics",
         "network_model_evidence",
         "status",
     }
@@ -670,6 +681,50 @@ WINDOWS_TUN_ENVIRONMENT_FIELDS = frozenset(
 WINDOWS_TUN_MEASUREMENT_FIELDS = frozenset({"unit", "value"})
 WINDOWS_TUN_CORRECTNESS_FIELDS = frozenset(
     {"status", "checked_unit", "checked_units", "checks"}
+)
+WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_PARAMETER_FIELDS = frozenset(
+    {
+        "batch_datagrams",
+        "ack_window_milliseconds",
+        "max_missing_per_batch",
+        "max_retransmissions_per_sequence",
+        "retry_budget_unique_datagrams",
+        "minimum_retry_budget",
+        "retry_scope",
+    }
+)
+WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        *WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_PARAMETER_FIELDS,
+        "accounting",
+        "adapter_counter_deltas",
+    }
+)
+WINDOWS_TUN_FRAGMENT_ACCOUNTING_FIELDS = frozenset(
+    {
+        "warmup_unique_datagrams",
+        "warmup_request_attempts",
+        "active_unique_datagrams",
+        "active_request_attempts",
+        "total_unique_datagrams",
+        "total_request_attempts",
+        "retransmissions",
+        "ack_window_expirations",
+        "duplicate_or_stale_acks",
+        "retry_budget",
+    }
+)
+WINDOWS_TUN_FRAGMENT_ADAPTER_COUNTER_FIELDS = frozenset(
+    {
+        "ReceivedUnicastPackets",
+        "ReceivedDiscardedPackets",
+        "ReceivedPacketErrors",
+        "SentUnicastPackets",
+        "OutboundDiscardedPackets",
+        "OutboundPacketErrors",
+    }
 )
 WINDOWS_TUN_NETWORK_MODEL_EVIDENCE_FIELDS = frozenset(
     {
@@ -3746,6 +3801,179 @@ def _validate_windows_tun_network_model_reference(
         raise CandidateControlError("Windows TUN network-model observation SHA-256 is invalid")
 
 
+def _windows_tun_diagnostic_u64(value: object, field: str) -> int:
+    if type(value) is not int or not 0 <= value <= U64_MAX:
+        raise CandidateControlError(
+            f"Windows TUN fragment diagnostics {field} must be a non-negative u64"
+        )
+    return value
+
+
+def _validate_windows_tun_diagnostics(
+    value: object,
+    *,
+    scenario: str,
+    contract: dict[str, object],
+    checked_units: int,
+) -> None:
+    if scenario != "fragment-reassembly-throughput":
+        if value is not None:
+            raise CandidateControlError(
+                "non-fragment Windows TUN trial diagnostics must be null"
+            )
+        return
+    if type(value) is not dict:
+        raise CandidateControlError(
+            "fragment Windows TUN trial diagnostics must be an object"
+        )
+    _exact_fields(
+        value,
+        WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_FIELDS,
+        "Windows TUN fragment diagnostics",
+    )
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics schema_version is unsupported"
+        )
+    if value["kind"] != "fragment_ack_accounting":
+        raise CandidateControlError("Windows TUN fragment diagnostics kind is invalid")
+
+    recipe = contract["recipe"]
+    for field in WINDOWS_TUN_FRAGMENT_DIAGNOSTIC_PARAMETER_FIELDS:
+        expected = recipe[field]
+        if type(value[field]) is not type(expected) or value[field] != expected:
+            raise CandidateControlError(
+                f"Windows TUN fragment diagnostics {field} does not match the recipe"
+            )
+
+    accounting = value["accounting"]
+    if type(accounting) is not dict:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics accounting must be an object"
+        )
+    _exact_fields(
+        accounting,
+        WINDOWS_TUN_FRAGMENT_ACCOUNTING_FIELDS,
+        "Windows TUN fragment diagnostics accounting",
+    )
+    counts = {
+        field: _windows_tun_diagnostic_u64(
+            accounting[field], f"accounting.{field}"
+        )
+        for field in WINDOWS_TUN_FRAGMENT_ACCOUNTING_FIELDS
+    }
+    for field in (
+        "warmup_unique_datagrams",
+        "active_unique_datagrams",
+        "total_unique_datagrams",
+    ):
+        if counts[field] == 0:
+            raise CandidateControlError(
+                f"Windows TUN fragment diagnostics {field} must be positive"
+            )
+        if counts[field] % recipe["batch_datagrams"] != 0:
+            raise CandidateControlError(
+                f"Windows TUN fragment diagnostics {field} is not batch-aligned"
+            )
+    if counts["active_unique_datagrams"] != checked_units:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics active unique count does not match correctness"
+        )
+    for phase in ("warmup", "active"):
+        if counts[f"{phase}_request_attempts"] < counts[f"{phase}_unique_datagrams"]:
+            raise CandidateControlError(
+                f"Windows TUN fragment diagnostics {phase} attempts are below unique datagrams"
+            )
+    if counts["total_unique_datagrams"] != (
+        counts["warmup_unique_datagrams"] + counts["active_unique_datagrams"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics total unique count is inconsistent"
+        )
+    if counts["total_request_attempts"] != (
+        counts["warmup_request_attempts"] + counts["active_request_attempts"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics total attempt count is inconsistent"
+        )
+    if counts["retransmissions"] != (
+        counts["total_request_attempts"] - counts["total_unique_datagrams"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics retransmission count is inconsistent"
+        )
+    if counts["ack_window_expirations"] != counts["retransmissions"]:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics ACK-window expiration count is inconsistent"
+        )
+    if counts["duplicate_or_stale_acks"] > counts["retransmissions"]:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics duplicate/stale ACK count is inconsistent"
+        )
+    maximum_retransmissions = (
+        counts["total_unique_datagrams"]
+        * recipe["max_retransmissions_per_sequence"]
+    )
+    if counts["retransmissions"] > maximum_retransmissions:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics exceeded the per-sequence retry bound"
+        )
+    retry_budget = max(
+        recipe["minimum_retry_budget"],
+        (
+            counts["total_unique_datagrams"]
+            + recipe["retry_budget_unique_datagrams"]
+            - 1
+        )
+        // recipe["retry_budget_unique_datagrams"],
+    )
+    if counts["retry_budget"] != retry_budget:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics retry budget is inconsistent"
+        )
+    if counts["retransmissions"] > counts["retry_budget"]:
+        raise CandidateControlError(
+            "Windows TUN fragment diagnostics retransmissions exceeded the retry budget"
+        )
+
+    adapter = value["adapter_counter_deltas"]
+    if type(adapter) is not dict:
+        raise CandidateControlError(
+            "Windows TUN fragment adapter counter deltas must be an object"
+        )
+    _exact_fields(
+        adapter,
+        WINDOWS_TUN_FRAGMENT_ADAPTER_COUNTER_FIELDS,
+        "Windows TUN fragment adapter counter deltas",
+    )
+    adapter_counts = {
+        field: _windows_tun_diagnostic_u64(
+            adapter[field], f"adapter_counter_deltas.{field}"
+        )
+        for field in WINDOWS_TUN_FRAGMENT_ADAPTER_COUNTER_FIELDS
+    }
+    for field in (
+        "ReceivedDiscardedPackets",
+        "ReceivedPacketErrors",
+        "OutboundDiscardedPackets",
+        "OutboundPacketErrors",
+    ):
+        if adapter_counts[field] != 0:
+            raise CandidateControlError(
+                f"Windows TUN fragment adapter counter {field} recorded packet loss"
+            )
+    if adapter_counts["SentUnicastPackets"] != (
+        counts["total_request_attempts"] * recipe["fragments_per_datagram"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN fragment adapter sent-packet accounting is inconsistent"
+        )
+    if adapter_counts["ReceivedUnicastPackets"] < counts["total_unique_datagrams"]:
+        raise CandidateControlError(
+            "Windows TUN fragment adapter received-packet accounting is inconsistent"
+        )
+
+
 def validate_windows_tun_trial(
     row: object,
     *,
@@ -3867,6 +4095,12 @@ def validate_windows_tun_trial(
         raise CandidateControlError("Windows TUN correctness checks are incomplete")
     if any(value is not True for value in checks.values()):
         raise CandidateControlError("Windows TUN correctness check failed")
+    _validate_windows_tun_diagnostics(
+        row["diagnostics"],
+        scenario=scenario,
+        contract=contract,
+        checked_units=correctness["checked_units"],
+    )
     if row["status"] != "PASS":
         raise CandidateControlError("Windows TUN trial status did not pass")
     return scenario, pair, member

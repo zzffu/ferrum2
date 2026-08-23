@@ -1026,9 +1026,46 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     check: True for check in contract["correctness_checks"]
                 },
             },
+            "diagnostics": None,
             "network_model_evidence": None,
             "status": "PASS",
         }
+        if scenario == "fragment-reassembly-throughput":
+            active_unique = row["correctness"]["checked_units"]
+            warmup_unique = 8
+            retransmissions = 1
+            total_unique = warmup_unique + active_unique
+            row["diagnostics"] = {
+                "schema_version": 1,
+                "kind": "fragment_ack_accounting",
+                "batch_datagrams": 8,
+                "ack_window_milliseconds": 500,
+                "max_missing_per_batch": 1,
+                "max_retransmissions_per_sequence": 1,
+                "retry_budget_unique_datagrams": 1_000_000,
+                "minimum_retry_budget": 1,
+                "retry_scope": "missing-sequence-only",
+                "accounting": {
+                    "warmup_unique_datagrams": warmup_unique,
+                    "warmup_request_attempts": warmup_unique,
+                    "active_unique_datagrams": active_unique,
+                    "active_request_attempts": active_unique + retransmissions,
+                    "total_unique_datagrams": total_unique,
+                    "total_request_attempts": total_unique + retransmissions,
+                    "retransmissions": retransmissions,
+                    "ack_window_expirations": retransmissions,
+                    "duplicate_or_stale_acks": 0,
+                    "retry_budget": 1,
+                },
+                "adapter_counter_deltas": {
+                    "ReceivedUnicastPackets": total_unique + retransmissions,
+                    "ReceivedDiscardedPackets": 0,
+                    "ReceivedPacketErrors": 0,
+                    "SentUnicastPackets": (total_unique + retransmissions) * 2,
+                    "OutboundDiscardedPackets": 0,
+                    "OutboundPacketErrors": 0,
+                },
+            }
         if scenario in {"udp-route-once", "network-lifecycle"}:
             row["network_model_evidence"] = {
                 "schema_version": 1,
@@ -1122,6 +1159,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         plan = CONTROL.create_windows_tun_plan(
             run_kind="comparison", decision_policy=policy
         )
+        self.assertEqual(CONTROL.WINDOWS_TUN_TRIAL_SCHEMA_VERSION, 3)
         self.assertEqual(set(plan["scenarios"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
         self.assertEqual(len(plan["scenarios"]), 9)
         self.assertEqual(
@@ -1178,6 +1216,41 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 "fragment_datagrams": 1,
                 "fragment_ack_bytes": 24,
             },
+        )
+        self.assertEqual(
+            {
+                field: fragment_recipe[field]
+                for field in (
+                    "batch_datagrams",
+                    "ack_window_milliseconds",
+                    "max_missing_per_batch",
+                    "max_retransmissions_per_sequence",
+                    "retry_budget_unique_datagrams",
+                    "minimum_retry_budget",
+                    "retry_scope",
+                )
+            },
+            {
+                "batch_datagrams": 8,
+                "ack_window_milliseconds": 500,
+                "max_missing_per_batch": 1,
+                "max_retransmissions_per_sequence": 1,
+                "retry_budget_unique_datagrams": 1_000_000,
+                "minimum_retry_budget": 1,
+                "retry_scope": "missing-sequence-only",
+            },
+        )
+        self.assertTrue(
+            {
+                "no_gso",
+                "all_sequences_acknowledged",
+                "bounded_retransmissions",
+                "no_adapter_packet_loss",
+            }.issubset(
+                plan["scenarios"]["fragment-reassembly-throughput"][
+                    "correctness_checks"
+                ]
+            )
         )
         self.assertEqual(
             plan["scenarios"]["udp-8192-association-lookup-expiry"]["recipe"][
