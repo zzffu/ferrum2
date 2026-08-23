@@ -61,10 +61,6 @@ const PACKET_REJECT_REASONS: &[(TunPacketRejectReason, &str)] = &[
         "udp_response_filtered",
     ),
     (TunPacketRejectReason::StaleGeneration, "stale_generation"),
-    (
-        TunPacketRejectReason::InternalOutputBackpressured,
-        "internal_output_backpressured",
-    ),
     (TunPacketRejectReason::WintunRingFull, "wintun_ring_full"),
     (TunPacketRejectReason::RouteConflict, "route_conflict"),
 ];
@@ -109,6 +105,7 @@ fn record_one_of_every_tun_event(metrics: &Metrics) {
         metrics.tun_packet_rejected(*reason);
     }
     metrics.tun_internal_egress_backpressured();
+    metrics.set_tun_pending_udp_responses(1);
     metrics.tun_wintun_ring_full_dropped();
 
     metrics.set_tun_tcp_flows_active(11);
@@ -170,6 +167,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
         BTreeSet::from([
             "ferrum2_tun_internal_egress_backpressured TUN internal egress backpressure observations; packets are retained for retry.",
             "ferrum2_tun_network_change Semantic network changes observed by the TUN session.",
+            "ferrum2_tun_pending_udp_responses TUN UDP responses retained for owner-thread injection.",
             "ferrum2_tun_packets_egress Packets sent successfully to Wintun by the TUN owner.",
             "ferrum2_tun_packets_ingress Packets received from Wintun by the TUN owner.",
             "ferrum2_tun_packets_rejected TUN packets rejected by a closed low-cardinality reason.",
@@ -216,6 +214,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
         BTreeSet::from([
             "ferrum2_tun_internal_egress_backpressured counter",
             "ferrum2_tun_network_change counter",
+            "ferrum2_tun_pending_udp_responses gauge",
             "ferrum2_tun_packets_egress counter",
             "ferrum2_tun_packets_ingress counter",
             "ferrum2_tun_packets_rejected counter",
@@ -254,6 +253,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
     for expected in [
         "ferrum2_tun_session_generation 7",
         "ferrum2_tun_session_active 1",
+        "ferrum2_tun_pending_udp_responses 1",
         "ferrum2_tun_tcp_flows_active 11",
         "ferrum2_tun_udp_associations_active 13",
         "ferrum2_tun_udp_candidates_active 17",

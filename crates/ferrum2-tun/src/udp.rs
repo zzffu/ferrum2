@@ -1217,10 +1217,10 @@ impl UdpTable {
         now_millis: i64,
         mut inject: impl FnMut(UdpTuple, &[u8]) -> InjectOutcome,
     ) -> ResponseProcessOutcome {
-        let response = match self.pending_response.take() {
-            Some(response) => response,
+        let (response, was_pending) = match self.pending_response.take() {
+            Some(response) => (response, true),
             None => match self.responses.try_recv() {
-                Ok(response) => response,
+                Ok(response) => (response, false),
                 Err(_) => return ResponseProcessOutcome::Idle,
             },
         };
@@ -1243,12 +1243,18 @@ impl UdpTable {
                     && Arc::ptr_eq(peer_policy, &response.peer_policy)
             );
         if !valid {
+            if was_pending {
+                self.events.emit(TunEvent::UdpPendingResponses(0));
+            }
             self.events.emit(TunEvent::UdpStaleGeneration);
             self.events
                 .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
             return ResponseProcessOutcome::Dropped;
         }
         if response.peer_policy.allows(response.response_source) != Ok(true) {
+            if was_pending {
+                self.events.emit(TunEvent::UdpPendingResponses(0));
+            }
             self.events.emit(TunEvent::UdpResponseFiltered);
             self.events.emit(TunEvent::PacketRejected(
                 TunRejectReason::UdpResponseFiltered,
@@ -1258,6 +1264,9 @@ impl UdpTable {
         let tuple = UdpTuple::new(response.association_source, response.response_source);
         match inject(tuple, &response.payload) {
             InjectOutcome::Injected => {
+                if was_pending {
+                    self.events.emit(TunEvent::UdpPendingResponses(0));
+                }
                 let deadline_millis = now_millis.saturating_add(self.idle_millis);
                 if let Some(Slot::Association {
                     deadline_millis: current,
@@ -1271,9 +1280,15 @@ impl UdpTable {
             }
             InjectOutcome::Backpressured => {
                 self.pending_response = Some(response);
+                if !was_pending {
+                    self.events.emit(TunEvent::UdpPendingResponses(1));
+                }
                 ResponseProcessOutcome::Backpressured
             }
             InjectOutcome::Rejected(reason) => {
+                if was_pending {
+                    self.events.emit(TunEvent::UdpPendingResponses(0));
+                }
                 self.events.emit(TunEvent::PacketRejected(reason));
                 ResponseProcessOutcome::Dropped
             }
@@ -1399,7 +1414,9 @@ impl UdpTable {
                 self.remove(id);
             }
         }
-        self.pending_response = None;
+        if self.pending_response.take().is_some() {
+            self.events.emit(TunEvent::UdpPendingResponses(0));
+        }
         while self.responses.try_recv().is_ok() {}
         self.deadlines.clear();
         self.session_generation = new_generation;
@@ -1433,6 +1450,9 @@ impl UdpTable {
 
 impl Drop for UdpTable {
     fn drop(&mut self) {
+        if self.pending_response.is_some() {
+            self.events.emit(TunEvent::UdpPendingResponses(0));
+        }
         self.session_epoch
             .store(self.session_generation.wrapping_add(1), Ordering::Release);
         for slot in self.slots.iter().flatten() {

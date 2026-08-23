@@ -250,10 +250,6 @@ impl OwnerSessionHarness {
                     ResponseProcessOutcome::Idle => StepOutcome::Idle,
                     ResponseProcessOutcome::Backpressured => {
                         emit(events, TunEvent::InternalEgressBackpressured);
-                        emit(
-                            events,
-                            TunEvent::PacketRejected(TunRejectReason::InternalOutputBackpressured),
-                        );
                         StepOutcome::Worked
                     }
                     ResponseProcessOutcome::Injected | ResponseProcessOutcome::Dropped => {
@@ -591,6 +587,14 @@ async fn occupied_output_preserves_udp_response_order_and_ring_full_is_nonfatal(
         association.send_response(remote, b"second"),
         UdpResponseSendOutcome::Queued
     );
+    assert_eq!(
+        harness
+            .events()
+            .iter()
+            .filter(|event| matches!(event, TunEvent::PacketRejected(_)))
+            .count(),
+        0
+    );
 
     assert_eq!(
         harness.run_single_stage(WorkStage::UdpResponse).work_units,
@@ -619,6 +623,26 @@ async fn occupied_output_preserves_udp_response_order_and_ring_full_is_nonfatal(
     assert_eq!(
         harness.run_single_stage(WorkStage::UdpResponse).work_units,
         1
+    );
+    let delayed_then_success = harness.events();
+    assert_eq!(
+        delayed_then_success
+            .iter()
+            .filter(|event| matches!(event, TunEvent::PacketRejected(_)))
+            .count(),
+        0,
+        "a response retained and later injected is never rejected"
+    );
+    assert_eq!(
+        delayed_then_success
+            .iter()
+            .filter_map(|event| match event {
+                TunEvent::UdpPendingResponses(pending) => Some(*pending),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [1, 0],
+        "the pending-response gauge follows the deferred response lifecycle"
     );
     harness.adapter.sends.push_back(FakeSendOutcome::RingFull);
     assert_eq!(

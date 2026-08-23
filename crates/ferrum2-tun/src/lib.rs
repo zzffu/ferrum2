@@ -127,7 +127,6 @@ pub enum TunRejectReason {
     UdpQueueFull,
     UdpResponseFiltered,
     StaleGeneration,
-    InternalOutputBackpressured,
     WintunRingFull,
     RouteConflict,
 }
@@ -181,6 +180,7 @@ pub enum TunEvent {
     UdpDatagramQueueFull,
     UdpResponseQueueFull,
     UdpResponseFiltered,
+    UdpPendingResponses(usize),
     UdpStaleGeneration,
     ReassemblyEntriesActive(usize),
     ReassemblyStarted,
@@ -1573,9 +1573,6 @@ fn owner_main(
                     udp::ResponseProcessOutcome::Idle => StepOutcome::Idle,
                     udp::ResponseProcessOutcome::Backpressured => {
                         events.emit(TunEvent::InternalEgressBackpressured);
-                        events.emit(TunEvent::PacketRejected(
-                            TunRejectReason::InternalOutputBackpressured,
-                        ));
                         StepOutcome::Worked
                     }
                     udp::ResponseProcessOutcome::Injected

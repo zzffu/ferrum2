@@ -174,9 +174,6 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
                 TunPacketRejectReason::UdpResponseFiltered
             }
             ferrum2_tun::TunRejectReason::StaleGeneration => TunPacketRejectReason::StaleGeneration,
-            ferrum2_tun::TunRejectReason::InternalOutputBackpressured => {
-                TunPacketRejectReason::InternalOutputBackpressured
-            }
             ferrum2_tun::TunRejectReason::WintunRingFull => TunPacketRejectReason::WintunRingFull,
             ferrum2_tun::TunRejectReason::RouteConflict => TunPacketRejectReason::RouteConflict,
         }),
@@ -197,6 +194,9 @@ fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
         TunEvent::UdpDatagramQueueFull => metrics.tun_udp_datagram_queue_full(),
         TunEvent::UdpResponseQueueFull => metrics.tun_udp_response_queue_full(),
         TunEvent::UdpResponseFiltered => metrics.tun_udp_response_filtered(),
+        TunEvent::UdpPendingResponses(responses) => {
+            metrics.set_tun_pending_udp_responses(responses);
+        }
         TunEvent::UdpStaleGeneration => metrics.tun_udp_stale_generation(),
         TunEvent::ReassemblyEntriesActive(entries) => {
             metrics.set_tun_reassembly_entries_active(entries);
@@ -1188,6 +1188,7 @@ mod tests {
             TunEvent::UdpDatagramQueueFull,
             TunEvent::UdpResponseQueueFull,
             TunEvent::UdpResponseFiltered,
+            TunEvent::UdpPendingResponses(1),
             TunEvent::UdpStaleGeneration,
             TunEvent::ReassemblyEntriesActive(19),
             TunEvent::ReassemblyStarted,
@@ -1232,7 +1233,6 @@ mod tests {
             TunRejectReason::UdpQueueFull,
             TunRejectReason::UdpResponseFiltered,
             TunRejectReason::StaleGeneration,
-            TunRejectReason::InternalOutputBackpressured,
             TunRejectReason::WintunRingFull,
             TunRejectReason::RouteConflict,
         ];
@@ -1263,6 +1263,7 @@ mod tests {
             "ferrum2_tun_udp_association_created_total 1",
             "ferrum2_tun_udp_association_rejected_limit_total 1",
             "ferrum2_tun_udp_datagram_queue_full_total 1",
+            "ferrum2_tun_pending_udp_responses 1",
             "ferrum2_tun_udp_response_queue_full_total 1",
             "ferrum2_tun_udp_response_filtered_total 1",
             "ferrum2_tun_udp_stale_generation_total 1",
@@ -1298,6 +1299,35 @@ mod tests {
                 )
                 .count(),
             reject_reasons.len()
+        );
+    }
+
+    #[test]
+    fn deferred_then_injected_udp_response_keeps_rejected_metrics_at_zero() {
+        let metrics = ferrum2_observability::Metrics::new();
+        record_tun_event(&metrics, ferrum2_tun::TunEvent::InternalEgressBackpressured);
+        record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(1));
+        record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(0));
+
+        let output = metrics.encode_text().expect("deferred TUN UDP metrics");
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "ferrum2_tun_internal_egress_backpressured_total 1")
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "ferrum2_tun_pending_udp_responses 0")
+        );
+        let rejected = output
+            .lines()
+            .filter(|line| line.starts_with("ferrum2_tun_packets_rejected_total{"))
+            .collect::<Vec<_>>();
+        assert!(!rejected.is_empty(), "closed reject series are prebound");
+        assert!(
+            rejected.iter().all(|line| line.ends_with(" 0")),
+            "a delayed response that is later injected is not rejected: {rejected:?}"
         );
     }
 

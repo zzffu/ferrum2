@@ -417,7 +417,6 @@ pub enum TunPacketRejectReason {
     UdpQueueFull,
     UdpResponseFiltered,
     StaleGeneration,
-    InternalOutputBackpressured,
     WintunRingFull,
     RouteConflict,
 }
@@ -447,7 +446,6 @@ impl TunPacketRejectReason {
             Self::UdpQueueFull => "udp_queue_full",
             Self::UdpResponseFiltered => "udp_response_filtered",
             Self::StaleGeneration => "stale_generation",
-            Self::InternalOutputBackpressured => "internal_output_backpressured",
             Self::WintunRingFull => "wintun_ring_full",
             Self::RouteConflict => "route_conflict",
         }
@@ -1285,7 +1283,6 @@ const TUN_PACKET_REJECT_REASONS: &[TunPacketRejectReason] = &[
     TunPacketRejectReason::UdpQueueFull,
     TunPacketRejectReason::UdpResponseFiltered,
     TunPacketRejectReason::StaleGeneration,
-    TunPacketRejectReason::InternalOutputBackpressured,
     TunPacketRejectReason::WintunRingFull,
     TunPacketRejectReason::RouteConflict,
 ];
@@ -1716,6 +1713,7 @@ pub struct Metrics {
     tun_packets_egress: Counter,
     tun_packets_rejected: TunPacketRejectFamily,
     tun_internal_egress_backpressured: Counter,
+    tun_pending_udp_responses: Gauge,
     tun_wintun_ring_full_dropped: Counter,
     tun_tcp_flows_active: Gauge,
     tun_tcp_flows_rejected_limit: Counter,
@@ -1864,6 +1862,7 @@ impl Metrics {
                 TunPacketRejectLabels { reason }
             }));
         let tun_internal_egress_backpressured = Counter::default();
+        let tun_pending_udp_responses = Gauge::default();
         let tun_wintun_ring_full_dropped = Counter::default();
         let tun_tcp_flows_active = Gauge::default();
         let tun_tcp_flows_rejected_limit = Counter::default();
@@ -2098,6 +2097,11 @@ impl Metrics {
             "ferrum2_tun_internal_egress_backpressured",
             "TUN internal egress backpressure observations; packets are retained for retry",
             tun_internal_egress_backpressured.clone(),
+        );
+        registry.register(
+            "ferrum2_tun_pending_udp_responses",
+            "TUN UDP responses retained for owner-thread injection",
+            tun_pending_udp_responses.clone(),
         );
         registry.register(
             "ferrum2_tun_wintun_ring_full_dropped",
@@ -2339,6 +2343,7 @@ impl Metrics {
             tun_packets_egress,
             tun_packets_rejected,
             tun_internal_egress_backpressured,
+            tun_pending_udp_responses,
             tun_wintun_ring_full_dropped,
             tun_tcp_flows_active,
             tun_tcp_flows_rejected_limit,
@@ -2631,9 +2636,15 @@ impl Metrics {
         self.tun_packets_rejected.metric(reason as usize).inc();
     }
 
-    /// Records one packet dropped at the bounded internal egress queue.
+    /// Records one observation of bounded internal egress backpressure.
     pub fn tun_internal_egress_backpressured(&self) {
         self.tun_internal_egress_backpressured.inc();
+    }
+
+    /// Sets whether one TUN UDP response is retained for owner-thread injection.
+    pub fn set_tun_pending_udp_responses(&self, responses: usize) {
+        debug_assert!(responses <= 1);
+        self.tun_pending_udp_responses.set(usize_gauge(responses));
     }
 
     /// Records one expected packet drop caused by a full Wintun send ring.

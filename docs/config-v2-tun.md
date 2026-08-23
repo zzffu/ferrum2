@@ -144,7 +144,8 @@ The principal counters and gauges are `ferrum2_tun_session_started_total`,
 `ferrum2_tun_session_restart_failed_total`, `ferrum2_tun_session_generation`,
 `ferrum2_tun_session_active`, `ferrum2_tun_packets_ingress_total`,
 `ferrum2_tun_packets_egress_total`, `ferrum2_tun_packets_rejected_total`,
-`ferrum2_tun_internal_egress_backpressured_total`, `ferrum2_tun_wintun_ring_full_dropped_total`,
+`ferrum2_tun_internal_egress_backpressured_total`, `ferrum2_tun_pending_udp_responses`,
+`ferrum2_tun_wintun_ring_full_dropped_total`,
 `ferrum2_tun_tcp_flows_active`, `ferrum2_tun_udp_associations_active`,
 `ferrum2_tun_udp_candidates_active`, `ferrum2_tun_reassembly_entries_active`,
 `ferrum2_tun_network_change_total`, `ferrum2_tun_route_detect_total`,
@@ -153,8 +154,9 @@ aggregate TUN memory budget gauge.
 
 Internal egress backpressure is lossless: the owner retains the pending response and retries it
 after the occupied output is flushed. Its dedicated counter records retry observations, not
-permanent packet drops. The fixed `internal_output_backpressured` reason on the general rejection
-counter classifies the same deferred attempt and must not be interpreted as a discarded datagram.
+permanent packet drops. The pending-response gauge is one while that response awaits retry and
+returns to zero after injection or terminal removal. A deferred response does not increment the
+general packet-rejection counter.
 
 ## Migration from earlier schema-v2 TUN configuration
 
