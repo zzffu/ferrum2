@@ -4,6 +4,7 @@ mod application_resolver;
 mod connector;
 mod deadline;
 mod metrics;
+mod network;
 mod owner;
 mod process;
 mod relay;
@@ -23,6 +24,12 @@ pub use deadline::{DeadlineError, with_deadline};
 pub use metrics::{
     METRICS_CONNECTION_LIMIT, METRICS_HEADER_BYTES, METRICS_HEADER_TIMEOUT, MetricsEndpoint,
     MetricsEndpointError, serve_metrics_connection,
+};
+pub use network::{
+    DialOptions, InterfaceBinding, InterfaceBindingError, InterfaceResolutionError,
+    InterfaceSelectionSource, NamedInterfaceResolution, NetworkFamily, NetworkInterfaceCatalog,
+    NetworkInterfaceResolver, NetworkSnapshot, NetworkSnapshotError, ResolvedInterface,
+    RouteNetworkOptions,
 };
 pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
 pub use process::{
