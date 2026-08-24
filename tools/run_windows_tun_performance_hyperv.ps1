@@ -31,6 +31,10 @@ the VM, loading a credential, staging files, or executing traffic.
 DiagnosticTrialSequence runs exactly one canonical A/A trial while retaining the complete plan and
 the ordinary evidence-export and VM-restore boundaries. Diagnostic evidence is explicitly not a
 qualification result and cannot be used for comparison or calibration adoption.
+
+DiagnosticProfile UdpFlowBoundary is restricted to calibration-aa sequence 31. It writes an
+independent bounded guest/host flow diagnostic under udp-diagnostic and preserves the canonical
+performance and diagnostic evidence paths unchanged.
 #>
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -102,6 +106,21 @@ param(
     [int]$DiagnosticTrialSequence,
 
     [Parameter(ParameterSetName = "Run")]
+    [ValidateSet("UdpFlowBoundary")]
+    [string]$DiagnosticProfile,
+
+    [Parameter(ParameterSetName = "Run")]
+    [string]$SupportDiagnosticLedger,
+
+    [Parameter(ParameterSetName = "Run")]
+    [ValidatePattern('^[1-9][0-9]{0,19}$')]
+    [string]$SupportDiagnosticRunNonce,
+
+    [Parameter(ParameterSetName = "Run")]
+    [ValidateRange(1, 65536)]
+    [int]$SupportDiagnosticMaxEvents,
+
+    [Parameter(ParameterSetName = "Run")]
     [ValidateRange(30, 900)]
     [int]$ReadinessTimeoutSeconds = 180,
 
@@ -114,8 +133,41 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $diagnosticMode = $PSBoundParameters.ContainsKey("DiagnosticTrialSequence")
+$instrumentedDiagnosticMode = $PSBoundParameters.ContainsKey("DiagnosticProfile")
 if ($diagnosticMode -and $RunKind -cne "calibration-aa") {
     throw "DiagnosticTrialSequence is restricted to calibration-aa runs"
+}
+$supportDiagnosticParameterNames = @(
+    "SupportDiagnosticLedger",
+    "SupportDiagnosticRunNonce",
+    "SupportDiagnosticMaxEvents"
+)
+$supportDiagnosticParametersSupplied = @($supportDiagnosticParameterNames | Where-Object {
+    $PSBoundParameters.ContainsKey($_)
+})
+if ($instrumentedDiagnosticMode) {
+    if (-not $diagnosticMode -or $DiagnosticTrialSequence -ne 31 -or
+        $RunKind -cne "calibration-aa") {
+        throw "UdpFlowBoundary requires calibration-aa and DiagnosticTrialSequence 31"
+    }
+    if ($supportDiagnosticParametersSupplied.Count -ne
+        $supportDiagnosticParameterNames.Count) {
+        throw "UdpFlowBoundary requires the complete support diagnostic ledger parameter group"
+    }
+    $parsedDiagnosticRunNonce = [uint64]0
+    if (-not [uint64]::TryParse(
+            $SupportDiagnosticRunNonce,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsedDiagnosticRunNonce
+        ) -or $parsedDiagnosticRunNonce -eq 0 -or
+        $parsedDiagnosticRunNonce.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        ) -cne $SupportDiagnosticRunNonce) {
+        throw "support diagnostic run nonce must be a canonical nonzero u64"
+    }
+} elseif ($supportDiagnosticParametersSupplied.Count -ne 0) {
+    throw "support diagnostic ledger parameters require DiagnosticProfile UdpFlowBoundary"
 }
 
 $approvedVmName = "Windows 10 MSIX packaging environment"
@@ -129,9 +181,13 @@ $expectedPowerShellVersion = "7.4.19"
 $expectedPowerShellZipSha256 = "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9"
 $minimumSupportIpv4PacketBytes = 1468
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -ErrorAction Stop).Path
+$approvedRustTarget = "x86_64-pc-windows-msvc"
+$reproducibleRustSourceRoot = "C:\ferrum2-reproducible-source"
 $policyPath = Join-Path $PSScriptRoot "windows_tun_performance_policy.json"
 $controlPath = Join-Path $PSScriptRoot "performance_candidate.py"
 $collectorPath = Join-Path $PSScriptRoot "collect_windows_tun_performance_trial.ps1"
+$udpBoundaryCollectorPath = Join-Path $PSScriptRoot `
+    "collect_windows_tun_udp_boundary_diagnostic.ps1"
 $guestNetworkPathProbePath = Join-Path $PSScriptRoot `
     "get_windows_tun_guest_network_path.ps1"
 $hostNetworkPathHelperPath = Join-Path $PSScriptRoot `
@@ -545,16 +601,42 @@ function Build-MemberArtifacts {
     $source = Join-Path $TemporaryRoot "source-$Member"
     $archive = Join-Path $TemporaryRoot "source-$Member.tar"
     Export-CommitSource -Git $Git -Tar $Tar -Sha $Sha -Destination $source -Archive $archive
+    $remapFlag = "--remap-path-prefix=$source=$script:reproducibleRustSourceRoot"
+    if ($remapFlag -cmatch '[\r\n"]') {
+        throw "host $Member build source remap cannot be encoded safely"
+    }
+    # /Brepro makes the PE timestamp and CodeView identity content-derived.
+    $encodedRustFlags = @($remapFlag, "-C", "link-arg=/Brepro") -join [char]0x1f
+    $targetRoot = Join-Path $source "target"
     $arguments = @(
-        "+1.97.1", "build", "-p", "ferrum2-client", "-p", "ferrum2-server"
+        "+1.97.1", "build", "--target", $script:approvedRustTarget,
+        "--target-dir", $targetRoot,
+        "-p", "ferrum2-client", "-p", "ferrum2-server"
     )
     if ($IncludeHarness) { $arguments += @("-p", "ferrum2-m4-qualification") }
     $arguments += @("--bins", "--locked", "--profile", "profiling")
-    Invoke-NativeChecked -Executable $Cargo -Arguments $arguments -Label "host $Member build" `
-        -WorkingDirectory $source
+    $previousEncodedRustFlags = [Environment]::GetEnvironmentVariable(
+        "CARGO_ENCODED_RUSTFLAGS",
+        [EnvironmentVariableTarget]::Process
+    )
+    try {
+        [Environment]::SetEnvironmentVariable(
+            "CARGO_ENCODED_RUSTFLAGS",
+            $encodedRustFlags,
+            [EnvironmentVariableTarget]::Process
+        )
+        Invoke-NativeChecked -Executable $Cargo -Arguments $arguments `
+            -Label "host $Member build" -WorkingDirectory $source
+    } finally {
+        [Environment]::SetEnvironmentVariable(
+            "CARGO_ENCODED_RUSTFLAGS",
+            $previousEncodedRustFlags,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
     $destination = Join-Path $ArtifactRoot $Member
     [IO.Directory]::CreateDirectory($destination) | Out-Null
-    $profile = Join-Path $source "target\profiling"
+    $profile = Join-Path (Join-Path $targetRoot $script:approvedRustTarget) "profiling"
     $client = Join-Path $destination "ferrum2-client.exe"
     $server = Join-Path $destination "ferrum2-server.exe"
     $clientHash = Copy-BuiltBinary -Source (Join-Path $profile "ferrum2-client.exe") `
@@ -590,6 +672,841 @@ function Write-Utf8FileNew {
     } finally {
         $stream.Dispose()
     }
+}
+
+function Invoke-BoundedNativeText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int]$MaximumLines = 4096,
+        [int]$MaximumBytes = 4194304,
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds = 60,
+        [switch]$AllowFailure
+    )
+    foreach ($argument in $Arguments) {
+        if ($argument -cmatch '["\r\n]') {
+            throw "$Label contains an unsupported native argument"
+        }
+    }
+    $temporaryName = "ferrum2-native-capture-$([Guid]::NewGuid().ToString('N'))"
+    $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) $temporaryName
+    $stdoutPath = Join-Path $temporaryDirectory "stdout.txt"
+    $stderrPath = Join-Path $temporaryDirectory "stderr.txt"
+    [IO.Directory]::CreateDirectory($temporaryDirectory) | Out-Null
+    $process = $null
+    try {
+        $quotedArguments = @($Arguments | ForEach-Object {
+            if ($_ -cmatch '\s') { '"{0}"' -f $_ } else { $_ }
+        })
+        $process = Start-Process -FilePath $Executable -ArgumentList $quotedArguments `
+            -WindowStyle Hidden -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -PassThru -ErrorAction Stop
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $boundaryExceeded = $false
+        do {
+            $stdoutBytes = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                [long](Get-Item -LiteralPath $stdoutPath -Force).Length
+            } else { [long]0 }
+            $stderrBytes = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                [long](Get-Item -LiteralPath $stderrPath -Force).Length
+            } else { [long]0 }
+            if ($stdoutBytes + $stderrBytes -gt $MaximumBytes) {
+                $boundaryExceeded = $true
+                try { $process.Kill($true) } catch { $process.Kill() }
+                break
+            }
+            if ($process.HasExited) { break }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $process.HasExited) {
+            try { $process.Kill($true) } catch { $process.Kill() }
+        }
+        if (-not $process.WaitForExit(10000)) {
+            throw "$Label process could not be reaped"
+        }
+        if ($boundaryExceeded) { throw "$Label output exceeded its byte boundary" }
+        if ([DateTime]::UtcNow -ge $deadline) { throw "$Label exceeded its timeout" }
+        $lines = [Collections.Generic.List[string]]::new()
+        $totalLines = 0
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            foreach ($line in [IO.File]::ReadLines($path)) {
+                $totalLines++
+                if ($totalLines -le $MaximumLines) {
+                    $lines.Add(([string]$line -replace '[\r\n]+', ' ').TrimEnd())
+                }
+            }
+        }
+        if ($totalLines -gt $MaximumLines) {
+            throw "$Label output exceeded its line boundary"
+        }
+        $textValue = $lines.ToArray() -join "`n"
+        if ($script:utf8NoBom.GetByteCount($textValue) -gt $MaximumBytes) {
+            throw "$Label output exceeded its decoded byte boundary"
+        }
+        $exitCode = $process.ExitCode
+        if (-not $AllowFailure -and $exitCode -ne 0) {
+            $detail = if ($textValue.Length -gt 2048) {
+                $textValue.Substring(0, 2048)
+            } else {
+                $textValue
+            }
+            throw "$Label failed with exit code ${exitCode}: $detail"
+        }
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Lines = $lines.ToArray()
+            TotalLines = $totalLines
+            Truncated = $false
+            Text = $textValue
+        }
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                [IO.File]::Delete($path)
+            }
+        }
+        if ((Test-Path -LiteralPath $temporaryDirectory -PathType Container) -and
+            [IO.Path]::GetFileName($temporaryDirectory) -ceq $temporaryName -and
+            [IO.Path]::GetDirectoryName($temporaryDirectory).TrimEnd('\', '/') -ceq
+                [IO.Path]::GetTempPath().TrimEnd('\', '/')) {
+            [IO.Directory]::Delete($temporaryDirectory, $false)
+        }
+    }
+}
+
+function Write-HostUdpEndpointSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][int]$SupportProcessId
+    )
+    $dynamic = Invoke-BoundedNativeText -Executable "netsh.exe" -Arguments @(
+        "interface", "ipv4", "show", "dynamicport", "udp"
+    ) -Label "host UDP dynamic-port snapshot" -MaximumLines 512 -MaximumBytes 131072
+    $excluded = Invoke-BoundedNativeText -Executable "netsh.exe" -Arguments @(
+        "interface", "ipv4", "show", "excludedportrange", "protocol=udp"
+    ) -Label "host UDP excluded-port snapshot" -MaximumLines 512 -MaximumBytes 131072
+    $endpoints = @(Get-NetUDPEndpoint -ErrorAction Stop)
+    $supportEndpoints = @($endpoints | Where-Object {
+        [int]$_.OwningProcess -eq $SupportProcessId
+    } | Sort-Object LocalAddress, LocalPort | ForEach-Object {
+        [ordered]@{
+            local_address = [string]$_.LocalAddress
+            local_port = [int]$_.LocalPort
+            owning_process = [int]$_.OwningProcess
+        }
+    })
+    $topOwners = @($endpoints | Group-Object OwningProcess | Sort-Object Count -Descending |
+        Select-Object -First 64 | ForEach-Object {
+            $ownerPid = [int]$_.Name
+            $processName = $null
+            try {
+                $processName = [string](Get-Process -Id $ownerPid -ErrorAction Stop).ProcessName
+            } catch {
+                $processName = $null
+            }
+            [ordered]@{
+                owning_process = $ownerPid
+                process_name = $processName
+                endpoint_count = $_.Count
+                support_process = $ownerPid -eq $SupportProcessId
+            }
+        })
+    $snapshot = [ordered]@{
+        schema = "ferrum2.windows-tun.host-udp-endpoint-snapshot.v1"
+        stage = $Stage
+        captured_utc = [DateTime]::UtcNow.ToString("o")
+        dynamic_port_udp = [ordered]@{
+            exit_code = $dynamic.ExitCode
+            total_lines = $dynamic.TotalLines
+            truncated = $dynamic.Truncated
+            lines = $dynamic.Lines
+        }
+        excluded_port_ranges_udp = [ordered]@{
+            exit_code = $excluded.ExitCode
+            total_lines = $excluded.TotalLines
+            truncated = $excluded.Truncated
+            lines = $excluded.Lines
+        }
+        endpoint_count = $endpoints.Count
+        support_endpoints = $supportEndpoints
+        top_endpoint_owners = $topOwners
+    }
+    $textValue = ($snapshot | ConvertTo-Json -Depth 8) + "`n"
+    if ($script:utf8NoBom.GetByteCount($textValue) -gt 1048576) {
+        throw "host UDP endpoint snapshot exceeded 1 MiB"
+    }
+    Write-Utf8FileNew -Path $Path -Text $textValue
+}
+
+function Write-HostUdpEndpointErrorSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][int]$SupportProcessId,
+        [Parameter(Mandatory = $true)][string]$Failure
+    )
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($existing.PSIsContainer -or
+            $existing.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "host UDP endpoint error snapshot target is unsafe"
+        }
+        [IO.File]::Delete($existing.FullName)
+    }
+    $boundedFailure = ($Failure -replace '[\r\n]+', ' ').Trim()
+    if ($boundedFailure.Length -gt 2048) {
+        $boundedFailure = $boundedFailure.Substring(0, 2048)
+    }
+    $snapshot = [ordered]@{
+        schema = "ferrum2.windows-tun.host-udp-endpoint-snapshot.v1"
+        stage = $Stage
+        captured_utc = [DateTime]::UtcNow.ToString("o")
+        support_pid = $SupportProcessId
+        state = "PARTIAL"
+        error = $boundedFailure
+    }
+    Write-Utf8FileNew -Path $Path `
+        -Text (($snapshot | ConvertTo-Json -Depth 4) + "`n")
+}
+
+function Assert-PktmonCaptureLifecycleState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Running", "Stopped")]
+        [string]$ExpectedState
+    )
+    $status = Invoke-BoundedNativeText -Executable "pktmon.exe" -Arguments @("status") `
+        -Label "Pktmon lifecycle status" -MaximumLines 64 -MaximumBytes 16384 `
+        -AllowFailure
+    $session = Invoke-BoundedNativeText -Executable "logman.exe" `
+        -Arguments @("query", "-ets", "PktMon") `
+        -Label "Pktmon lifecycle ETW session query" `
+        -MaximumLines 64 -MaximumBytes 16384 -AllowFailure
+    $statusSaysStopped = $status.ExitCode -eq 0 -and
+        $status.Text -cmatch '(?i)(not\s+running|没有运行)'
+    $sessionSaysRunning = $session.ExitCode -eq 0
+    if ($ExpectedState -ceq "Running") {
+        if ($status.ExitCode -ne 0 -or $statusSaysStopped -or
+            -not $sessionSaysRunning) {
+            throw "Pktmon running state was not proven by status and ETW session readback"
+        }
+    } elseif (-not $statusSaysStopped -or $sessionSaysRunning) {
+        throw "Pktmon stopped state was not proven by status and ETW session readback"
+    }
+}
+
+function Stop-PktmonCaptureAndAssertStopped {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [string]$OutputPath
+    )
+    $stop = Invoke-BoundedNativeText -Executable "pktmon.exe" `
+        -Arguments @("stop") -Label $Label -MaximumLines 256 `
+        -MaximumBytes 65536 -AllowFailure
+    if (-not [string]::IsNullOrWhiteSpace($OutputPath) -and
+        -not (Test-Path -LiteralPath $OutputPath)) {
+        Write-Utf8FileNew -Path $OutputPath -Text ($stop.Text + "`n")
+    }
+    try {
+        Assert-PktmonCaptureLifecycleState -ExpectedState "Stopped"
+    } catch {
+        throw "$Label did not prove Pktmon stopped (stop exit=$($stop.ExitCode)): $($_.Exception.Message)"
+    }
+}
+
+function Assert-PktmonUnused {
+    Assert-PktmonCaptureLifecycleState -ExpectedState "Stopped"
+    $filters = Invoke-BoundedNativeText -Executable "pktmon.exe" `
+        -Arguments @("filter", "list") -Label "Pktmon filter list" `
+        -MaximumLines 256 -MaximumBytes 65536
+    if ($filters.Text -cnotmatch `
+        '(?im)^\s*(none|无|No packet filters are specified\.|未指定数据包筛选器。)\s*$') {
+        throw "Pktmon filter baseline is not empty"
+    }
+    return $filters.Text
+}
+
+function Get-PktmonFilterListText {
+    $filters = Invoke-BoundedNativeText -Executable "pktmon.exe" `
+        -Arguments @("filter", "list") -Label "Pktmon owned filter readback" `
+        -MaximumLines 512 -MaximumBytes 131072
+    return $filters.Text
+}
+
+function Remove-OwnedPktmonFiltersSafely {
+    param([Parameter(Mandatory = $true)][string]$ExpectedFilterListText)
+    $actualFilterListText = Get-PktmonFilterListText
+    if ($actualFilterListText -cne $ExpectedFilterListText) {
+        throw "Pktmon filter set changed after Ferrum2 acquired ownership; filters were preserved"
+    }
+    [void](Invoke-BoundedNativeText -Executable "pktmon.exe" `
+        -Arguments @("filter", "remove") -Label "Pktmon filter cleanup" `
+        -MaximumLines 128 -MaximumBytes 32768)
+    $remaining = Get-PktmonFilterListText
+    if ($remaining -cnotmatch `
+        '(?im)^\s*(none|无|No packet filters are specified\.|未指定数据包筛选器。)\s*$') {
+        throw "Pktmon owned filter cleanup did not restore the empty baseline"
+    }
+}
+
+function Start-HostUdpDiagnosticCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$SupportAddress,
+        [Parameter(Mandatory = $true)][int]$FirstUdpPort
+    )
+    $mutex = [Threading.Mutex]::new(
+        $false,
+        "Global\Ferrum2WindowsTunUdpDiagnosticPktmon"
+    )
+    $mutexHeld = $false
+    $filtersAdded = $false
+    $captureStarted = $false
+    $captureStartAttempted = $false
+    $ownedFilterListText = $null
+    try {
+        try { $mutexHeld = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $mutexHeld = $true }
+        if (-not $mutexHeld) {
+            throw "another Ferrum2 UDP diagnostic owns the global Pktmon mutex"
+        }
+        $ownedFilterListText = Assert-PktmonUnused
+        $filterRows = [Collections.Generic.List[object]]::new()
+        foreach ($port in $FirstUdpPort..($FirstUdpPort + 3)) {
+            $filterName = "Ferrum2UdpDiagnostic-$port"
+            $filterResult = Invoke-BoundedNativeText -Executable "pktmon.exe" -Arguments @(
+                "filter", "add", $filterName,
+                "--ip", $SupportAddress,
+                "--transport", "UDP",
+                "--port", [string]$port
+            ) -Label "Pktmon UDP filter $port" -MaximumLines 64 -MaximumBytes 16384
+            $filterRows.Add([ordered]@{
+                name = $filterName
+                support_ipv4 = $SupportAddress
+                protocol = "UDP"
+                port = $port
+                command_exit_code = $filterResult.ExitCode
+            })
+            $filtersAdded = $true
+            $ownedFilterListText = Get-PktmonFilterListText
+        }
+        $etlPath = Join-Path $Directory "PktMon.etl"
+        $captureStartAttempted = $true
+        $startResult = Invoke-BoundedNativeText -Executable "pktmon.exe" -Arguments @(
+            "start", "--capture", "--comp", "all", "--type", "all",
+            "--pkt-size", "128", "--file-name", $etlPath,
+            "--file-size", "16", "--log-mode", "circular"
+        ) -Label "Pktmon capture start" -MaximumLines 128 -MaximumBytes 32768
+        Assert-PktmonCaptureLifecycleState -ExpectedState "Running"
+        $captureStarted = $true
+        return [pscustomobject]@{
+            Mutex = $mutex
+            MutexHeld = $mutexHeld
+            FiltersAdded = $filtersAdded
+            CaptureStarted = $captureStarted
+            Directory = $Directory
+            EtlPath = $etlPath
+            Filters = $filterRows.ToArray()
+            OwnedFilterListText = $ownedFilterListText
+            StartOutput = $startResult.Lines
+            StartedUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    } catch {
+        $startFailure = $_
+        $cleanupFailures = [Collections.Generic.List[string]]::new()
+        $captureStopped = -not $captureStartAttempted
+        if ($captureStartAttempted) {
+            try {
+                Stop-PktmonCaptureAndAssertStopped `
+                    -Label "Pktmon failed-start stop"
+                $captureStopped = $true
+            } catch {
+                $cleanupFailures.Add("capture stop: $($_.Exception.Message)")
+            }
+        }
+        if ($filtersAdded -and $captureStopped) {
+            try {
+                Remove-OwnedPktmonFiltersSafely `
+                    -ExpectedFilterListText $ownedFilterListText
+            } catch {
+                $cleanupFailures.Add("filter cleanup: $($_.Exception.Message)")
+            }
+        } elseif ($filtersAdded) {
+            $cleanupFailures.Add(
+                "filter cleanup skipped because stopped capture state was not proven; filters were preserved"
+            )
+        } elseif ($mutexHeld -and -not [string]::IsNullOrWhiteSpace(
+            $ownedFilterListText
+        )) {
+            try {
+                if ((Get-PktmonFilterListText) -cne $ownedFilterListText) {
+                    $cleanupFailures.Add(
+                        "filter mutation could not be attributed safely; filters were preserved"
+                    )
+                }
+            } catch {
+                $cleanupFailures.Add("filter readback: $($_.Exception.Message)")
+            }
+        }
+        if ($mutexHeld) {
+            try { $mutex.ReleaseMutex() }
+            catch { $cleanupFailures.Add("mutex release: $($_.Exception.Message)") }
+        }
+        $mutex.Dispose()
+        if ($cleanupFailures.Count -ne 0) {
+            throw "$($startFailure.Exception.Message); Pktmon failed-start cleanup: $($cleanupFailures -join '; ')"
+        }
+        throw $startFailure
+    }
+}
+
+function Complete-HostUdpDiagnosticCapture {
+    param([Parameter(Mandatory = $true)][object]$State)
+    $failures = [Collections.Generic.List[string]]::new()
+    $captureStopStatus = "NOT_STARTED"
+    try {
+        if ($State.CaptureStarted) {
+            try {
+                $counters = Invoke-BoundedNativeText -Executable "pktmon.exe" `
+                    -Arguments @("counters", "--json") -Label "Pktmon counters" `
+                    -MaximumLines 65536 -MaximumBytes 8388608
+                Write-Utf8FileNew -Path (Join-Path $State.Directory "pktmon-counters.json") `
+                    -Text ($counters.Text + "`n")
+            } catch {
+                $failures.Add("counters: $($_.Exception.Message)")
+            }
+            try {
+                Stop-PktmonCaptureAndAssertStopped `
+                    -Label "Pktmon capture stop" `
+                    -OutputPath (Join-Path $State.Directory "pktmon-stop.txt")
+                $captureStopStatus = "PASS"
+                $State.CaptureStarted = $false
+            } catch {
+                $captureStopStatus = "FAIL"
+                $failures.Add("stop: $($_.Exception.Message)")
+            }
+        }
+        if (-not $State.CaptureStarted -and
+            (Test-Path -LiteralPath $State.EtlPath -PathType Leaf)) {
+            try {
+                $etl = Get-Item -LiteralPath $State.EtlPath -Force
+                if ($etl.Length -le 0 -or $etl.Length -gt 33554432) {
+                    throw "Pktmon ETL size is outside its boundary"
+                }
+                [void](Invoke-BoundedNativeText -Executable "pktmon.exe" -Arguments @(
+                    "etl2txt", $State.EtlPath,
+                    "--out", (Join-Path $State.Directory "PktMon.txt"),
+                    "--hex"
+                ) -Label "Pktmon ETL text conversion" -MaximumLines 256 `
+                    -MaximumBytes 65536)
+                [void](Invoke-BoundedNativeText -Executable "pktmon.exe" -Arguments @(
+                    "etl2pcap", $State.EtlPath,
+                    "--out", (Join-Path $State.Directory "PktMon.pcapng")
+                ) -Label "Pktmon ETL pcap conversion" -MaximumLines 256 `
+                    -MaximumBytes 65536)
+                foreach ($captureFile in @(
+                    (Join-Path $State.Directory "PktMon.txt"),
+                    (Join-Path $State.Directory "PktMon.pcapng")
+                )) {
+                    $item = Get-Item -LiteralPath $captureFile -Force -ErrorAction Stop
+                    if ($item.Length -le 0 -or $item.Length -gt 134217728) {
+                        throw "converted Pktmon artifact size is outside its boundary"
+                    }
+                }
+            } catch {
+                $failures.Add("conversion: $($_.Exception.Message)")
+            }
+        }
+    } finally {
+        if ($State.CaptureStarted) {
+            try {
+                Stop-PktmonCaptureAndAssertStopped `
+                    -Label "Pktmon final capture stop" `
+                    -OutputPath (Join-Path $State.Directory "pktmon-stop.txt")
+                $captureStopStatus = "PASS"
+                $State.CaptureStarted = $false
+            } catch {
+                $captureStopStatus = "FAIL"
+                $failures.Add("final stop: $($_.Exception.Message)")
+            }
+        }
+        if ($State.FiltersAdded -and -not $State.CaptureStarted) {
+            try {
+                Remove-OwnedPktmonFiltersSafely `
+                    -ExpectedFilterListText $State.OwnedFilterListText
+                $State.FiltersAdded = $false
+            } catch {
+                $failures.Add("filter cleanup: $($_.Exception.Message)")
+            }
+        } elseif ($State.FiltersAdded) {
+            $failures.Add(
+                "filter cleanup skipped because stopped capture state was not proven; filters were preserved"
+            )
+        }
+        if ($State.MutexHeld) {
+            try { $State.Mutex.ReleaseMutex() }
+            catch { $failures.Add("mutex release: $($_.Exception.Message)") }
+            $State.MutexHeld = $false
+        }
+        $State.Mutex.Dispose()
+    }
+    return [pscustomobject]@{
+        CaptureStopStatus = $captureStopStatus
+        Status = if ($failures.Count -eq 0) { "PASS" } else { "FAIL" }
+        Failures = $failures.ToArray()
+    }
+}
+
+function New-SharedUdpDiagnosticLedgerReader {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [IO.FileStream]::new(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),
+        4096,
+        [IO.FileOptions]::SequentialScan
+    )
+    try {
+        return [IO.StreamReader]::new(
+            $stream,
+            [Text.UTF8Encoding]::new($false, $true),
+            $true,
+            4096,
+            $false
+        )
+    } catch {
+        $stream.Dispose()
+        throw
+    }
+}
+
+function Get-SharedUdpDiagnosticLedgerSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [IO.FileStream]::new(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),
+        4096,
+        [IO.FileOptions]::SequentialScan
+    )
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($hasher.ComputeHash($stream)).
+            Replace("-", "").ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Copy-SharedUdpDiagnosticLedgerFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $sourceStream = $null
+    $destinationStream = $null
+    try {
+        $sourceStream = [IO.FileStream]::new(
+            $Source,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),
+            81920,
+            [IO.FileOptions]::SequentialScan
+        )
+        $destinationStream = [IO.FileStream]::new(
+            $Destination,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::Read,
+            81920,
+            [IO.FileOptions]::None
+        )
+        $sourceStream.CopyTo($destinationStream, 81920)
+        $destinationStream.Flush()
+    } finally {
+        if ($null -ne $destinationStream) { $destinationStream.Dispose() }
+        if ($null -ne $sourceStream) { $sourceStream.Dispose() }
+    }
+}
+
+function Get-UdpDiagnosticLedgerSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSchema,
+        [Parameter(Mandatory = $true)][string]$ExpectedRunNonce,
+        [Parameter(Mandatory = $true)][int]$ExpectedMaxEvents,
+        [long]$MaximumBytes = 268451840
+    )
+    $resolved = Resolve-ExternalFile -Path $Path -Label "UDP diagnostic ledger" `
+        -MaximumBytes $MaximumBytes
+    $recordCount = 0
+    $eventCount = 0
+    $matchingRunNonceEvents = 0
+    $headerRecord = $null
+    $lastRecord = $null
+    $truncationRecord = $null
+    $reader = New-SharedUdpDiagnosticLedgerReader -Path $resolved
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            $recordCount++
+            if ($recordCount -gt ($ExpectedMaxEvents + 3)) {
+                throw "UDP diagnostic ledger exceeds its record boundary"
+            }
+            if ($script:utf8NoBom.GetByteCount($line) -gt 4096) {
+                throw "UDP diagnostic ledger line exceeds 4096 bytes"
+            }
+            $record = $line | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$record.schema -cne $ExpectedSchema) {
+                throw "UDP diagnostic ledger schema mismatch"
+            }
+            if ($recordCount -eq 1) {
+                if ([string]$record.record_type -cne "header" -or
+                    [string]$record.run_nonce -cne $ExpectedRunNonce -or
+                    [int]$record.max_events -ne $ExpectedMaxEvents) {
+                    throw "UDP diagnostic ledger header identity mismatch"
+                }
+                $headerRecord = $record
+            } elseif ([string]$record.record_type -ceq "event") {
+                $eventCount++
+                if ($record.PSObject.Properties.Name -ccontains
+                        "payload_run_nonce_match" -and
+                    $record.payload_run_nonce_match -eq $true -and
+                    [string]$record.payload_run_nonce -ceq $ExpectedRunNonce) {
+                    $matchingRunNonceEvents++
+                }
+            } elseif ([string]$record.record_type -ceq "truncation") {
+                $truncationRecord = $record
+            }
+            $lastRecord = $record
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    if ($recordCount -lt 1) { throw "UDP diagnostic ledger is empty" }
+    $closed = [string]$lastRecord.record_type -ceq "footer" -and
+        [string]$lastRecord.run_nonce -ceq $ExpectedRunNonce -and
+        $lastRecord.closed -eq $true
+    $droppedEvents = if ($closed) {
+        [long]$lastRecord.dropped_events
+    } elseif ($null -ne $truncationRecord) {
+        [long]$truncationRecord.dropped_events_at_least
+    } elseif ([string]$lastRecord.record_type -ceq "event" -and
+        $null -ne $lastRecord.ledger_counters) {
+        [long]$lastRecord.ledger_counters.dropped_events
+    } else {
+        [long]0
+    }
+    $writeFailures = if ($closed) {
+        [long]$lastRecord.write_failures
+    } elseif ($null -ne $truncationRecord) {
+        [long]$truncationRecord.write_failures
+    } elseif ([string]$lastRecord.record_type -ceq "event" -and
+        $null -ne $lastRecord.ledger_counters) {
+        [long]$lastRecord.ledger_counters.write_failures
+    } else {
+        [long]0
+    }
+    return [pscustomobject]@{
+        Path = $resolved
+        Bytes = [long](Get-Item -LiteralPath $resolved -Force).Length
+        Sha256 = Get-SharedUdpDiagnosticLedgerSha256 -Path $resolved
+        Records = $recordCount
+        Events = $eventCount
+        MatchingRunNonceEvents = $matchingRunNonceEvents
+        Header = $headerRecord
+        Closed = $closed
+        DroppedEvents = $droppedEvents
+        WriteFailures = $writeFailures
+    }
+}
+
+function Get-StableUdpDiagnosticLedgerFileState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $before = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($before.PSIsContainer -or
+        $before.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+        $before.Length -le 0 -or $before.Length -gt 268451840) {
+        throw "$Label is outside its stable-copy boundary"
+    }
+    $beforeLength = [long]$before.Length
+    $beforeWriteTicks = [long]$before.LastWriteTimeUtc.Ticks
+    $sha256 = Get-SharedUdpDiagnosticLedgerSha256 -Path $before.FullName
+    $afterHash = Get-Item -LiteralPath $before.FullName -Force -ErrorAction Stop
+    if ([long]$afterHash.Length -ne $beforeLength -or
+        [long]$afterHash.LastWriteTimeUtc.Ticks -ne $beforeWriteTicks) {
+        throw "$Label changed while its hash was calculated"
+    }
+    return [pscustomobject]@{
+        Path = $before.FullName
+        Bytes = $beforeLength
+        LastWriteTimeUtcTicks = $beforeWriteTicks
+        Sha256 = $sha256
+    }
+}
+
+function Copy-StableUdpDiagnosticLedger {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (Test-Path -LiteralPath $Destination) {
+        throw "support diagnostic ledger copy baseline is not absent"
+    }
+    $sourceBefore = Get-StableUdpDiagnosticLedgerFileState `
+        -Path $Source -Label "support diagnostic ledger before copy"
+    Copy-SharedUdpDiagnosticLedgerFile -Source $sourceBefore.Path `
+        -Destination $Destination
+    $sourceAfter = Get-StableUdpDiagnosticLedgerFileState `
+        -Path $sourceBefore.Path -Label "support diagnostic ledger after copy"
+    $destinationState = Get-StableUdpDiagnosticLedgerFileState `
+        -Path $Destination -Label "support diagnostic ledger copy"
+    if ($sourceBefore.Bytes -ne $sourceAfter.Bytes -or
+        $sourceBefore.LastWriteTimeUtcTicks -ne
+            $sourceAfter.LastWriteTimeUtcTicks -or
+        $sourceBefore.Sha256 -cne $sourceAfter.Sha256 -or
+        $destinationState.Bytes -ne $sourceAfter.Bytes -or
+        $destinationState.Sha256 -cne $sourceAfter.Sha256) {
+        throw "support diagnostic ledger changed during its single stable-copy attempt"
+    }
+    return $destinationState
+}
+
+function New-UdpDiagnosticArtifactRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$Role,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [object]$LedgerSummary,
+        [int]$MaxEvents = 0,
+        [ValidateSet("COMPLETE", "PARTIAL")]
+        [string]$StateOverride
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "required UDP diagnostic artifact is missing: role=$Role"
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        $item.Attributes -band [IO.FileAttributes]::ReparsePoint -or
+        $item.Length -le 0 -or $item.Length -gt 134217728) {
+        throw "UDP diagnostic artifact boundary is invalid: role=$Role"
+    }
+    return [ordered]@{
+        role = $Role
+        state = if (-not [string]::IsNullOrWhiteSpace($StateOverride)) {
+            $StateOverride
+        } elseif ($null -ne $LedgerSummary -and (
+            -not $LedgerSummary.Closed -or
+            $LedgerSummary.DroppedEvents -ne 0 -or
+            $LedgerSummary.WriteFailures -ne 0
+        )) { "PARTIAL" } else { "COMPLETE" }
+        file = [IO.Path]::GetRelativePath($script:hostDiagnosticRoot, $item.FullName).
+            Replace('\', '/')
+        sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+        bytes = [long]$item.Length
+        records = if ($null -ne $LedgerSummary) {
+            [long]$LedgerSummary.Events
+        } else {
+            $null
+        }
+        max_events = if ($MaxEvents -gt 0) { $MaxEvents } else { $null }
+        dropped_events = if ($null -ne $LedgerSummary) {
+            [long]$LedgerSummary.DroppedEvents
+        } else {
+            [long]0
+        }
+        write_failures = if ($null -ne $LedgerSummary) {
+            [long]$LedgerSummary.WriteFailures
+        } else {
+            [long]0
+        }
+    }
+}
+
+function Get-FirstFailedUdpDiagnosticFlow {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$MaximumEvents
+    )
+    $eventCount = 0
+    $firstNotObserved = $null
+    $reader = New-SharedUdpDiagnosticLedgerReader -Path $Path
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ($script:utf8NoBom.GetByteCount($line) -gt 4096) {
+                throw "workload flow ledger line exceeds 4096 bytes"
+            }
+            $record = $line | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$record.record_type -cne "event") { continue }
+            $eventCount++
+            if ($eventCount -gt $MaximumEvents) {
+                throw "workload flow ledger exceeds its event boundary"
+            }
+            $sendResult = [string]$record.send_result
+            $replyResult = [string]$record.reply_result
+            if ($sendResult -cne "success" -or
+                $replyResult -notin @("success", "not_observed") -or
+                ($replyResult -ceq "success" -and $record.payload_match -ne $true)) {
+                return $record
+            }
+            if ($replyResult -ceq "not_observed" -and $null -eq $firstNotObserved) {
+                $firstNotObserved = $record
+            }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    return $firstNotObserved
+}
+
+function Get-SupportUdpBoundaryForFlow {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RunNonce,
+        [Parameter(Mandatory = $true)][object]$Flow,
+        [Parameter(Mandatory = $true)][int]$MaximumEvents
+    )
+    $rx = $null
+    $tx = $null
+    $eventCount = 0
+    $reader = New-SharedUdpDiagnosticLedgerReader -Path $Path
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ($script:utf8NoBom.GetByteCount($line) -gt 4096) {
+                throw "support ledger line exceeds 4096 bytes"
+            }
+            $record = $line | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$record.record_type -cne "event") { continue }
+            $eventCount++
+            if ($eventCount -gt $MaximumEvents) {
+                throw "support ledger exceeds its event boundary"
+            }
+            if ([string]$record.payload_run_nonce -cne $RunNonce -or
+                [string]$record.packet_nonce -cne [string]$Flow.packet_nonce -or
+                [int]$record.trial_sequence -ne [int]$Flow.trial_sequence -or
+                [string]$record.phase -cne [string]$Flow.phase -or
+                [int]$record.association_index -ne [int]$Flow.association_index -or
+                [int]$record.round -ne [int]$Flow.round) {
+                continue
+            }
+            if ([string]$record.stage -ceq "rx" -and $null -eq $rx) { $rx = $record }
+            if ([string]$record.stage -ceq "tx" -and $null -eq $tx) { $tx = $record }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    return [pscustomobject]@{ Rx = $rx; Tx = $tx }
 }
 
 function Stage-PortableRuntime {
@@ -701,6 +1618,10 @@ foreach ($required in @(
         throw "required performance controller file is missing: $required"
     }
 }
+if ($instrumentedDiagnosticMode -and
+    -not (Test-Path -LiteralPath $udpBoundaryCollectorPath -PathType Leaf)) {
+    throw "required UDP boundary collector file is missing: $udpBoundaryCollectorPath"
+}
 . $hostNetworkPathHelperPath
 $hostNetworkPathHelperSha256 = (Get-FileHash -LiteralPath $hostNetworkPathHelperPath `
     -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -715,6 +1636,9 @@ $parentTree = Get-TreeSha -Git $git -Sha $ParentSha
 $candidateTree = Get-TreeSha -Git $git -Sha $CandidateSha
 if ($RunKind -ceq "calibration-aa" -and $ParentSha -cne $CandidateSha) {
     throw "calibration-aa requires identical parent and candidate SHAs"
+}
+if ($instrumentedDiagnosticMode -and $ParentSha -cne $CandidateSha) {
+    throw "UdpFlowBoundary requires identical parent and candidate SHAs"
 }
 if ($RunKind -ceq "comparison") {
     if ($ParentSha -ceq $CandidateSha) { throw "comparison requires distinct commits" }
@@ -802,11 +1726,71 @@ if ((Get-FileHash -LiteralPath $resolvedWintunZip -Algorithm SHA256).Hash.ToLowe
     $expectedWintunZipSha256) {
     throw "Wintun ZIP hash mismatch"
 }
+$resolvedSupportDiagnosticLedger = $null
+$supportDiagnosticBaseline = $null
+if ($instrumentedDiagnosticMode) {
+    $resolvedSupportDiagnosticLedger = Resolve-ExternalFile `
+        -Path $SupportDiagnosticLedger -Label "support diagnostic ledger" `
+        -MaximumBytes 268451840
+    $supportDiagnosticBaseline = Get-UdpDiagnosticLedgerSummary `
+        -Path $resolvedSupportDiagnosticLedger `
+        -ExpectedSchema "ferrum2.windows-tun.udp-support-ledger.v1" `
+        -ExpectedRunNonce $SupportDiagnosticRunNonce `
+        -ExpectedMaxEvents $SupportDiagnosticMaxEvents
+    $expectedSupportHeaderFields = @(
+        "listen_ip", "max_events", "pid", "record_type", "run_nonce",
+        "schema", "tcp_port", "timestamp_clock", "udp_ports"
+    )
+    $actualSupportHeaderFields = @(
+        $supportDiagnosticBaseline.Header.PSObject.Properties.Name |
+            Sort-Object
+    )
+    $supportHeaderPorts = @($supportDiagnosticBaseline.Header.udp_ports)
+    $supportHeaderPortsMatch = $supportHeaderPorts.Count -eq 4
+    if ($supportHeaderPortsMatch) {
+        for ($portOffset = 0; $portOffset -lt 4; $portOffset++) {
+            if ([int]$supportHeaderPorts[$portOffset] -ne
+                ($SupportUdpPort + $portOffset)) {
+                $supportHeaderPortsMatch = $false
+                break
+            }
+        }
+    }
+    if (($actualSupportHeaderFields -join "`n") -cne
+            ($expectedSupportHeaderFields -join "`n") -or
+        [int]$supportDiagnosticBaseline.Header.pid -ne $SupportPid -or
+        [string]$supportDiagnosticBaseline.Header.listen_ip -cne $SupportIpv4 -or
+        [int]$supportDiagnosticBaseline.Header.tcp_port -ne $SupportTcpPort -or
+        -not $supportHeaderPortsMatch) {
+        throw "support diagnostic ledger header does not match the pinned support process"
+    }
+    if ($supportDiagnosticBaseline.Closed -or
+        $supportDiagnosticBaseline.DroppedEvents -ne 0 -or
+        $supportDiagnosticBaseline.WriteFailures -ne 0 -or
+        $supportDiagnosticBaseline.MatchingRunNonceEvents -ne 0) {
+        throw "support diagnostic ledger baseline is stale, closed, or degraded"
+    }
+}
 $hostEvidenceRoot = Resolve-NewExternalDirectory -Path $EvidenceDirectory -Label "evidence directory"
 $credential = Import-ApprovedGuestCredential -Path $CredentialPath
 $cargo = @(Get-Command cargo -CommandType Application -ErrorAction Stop)[0].Source
 $rustup = @(Get-Command rustup -CommandType Application -ErrorAction Stop)[0].Source
 $tar = @(Get-Command tar -CommandType Application -ErrorAction Stop)[0].Source
+if (-not [string]::IsNullOrEmpty($env:RUSTFLAGS) -or
+    -not [string]::IsNullOrEmpty($env:CARGO_ENCODED_RUSTFLAGS)) {
+    throw "run mode requires empty host Rust flag environment variables"
+}
+$hostRustc = [string](& $rustup which --toolchain 1.97.1 rustc 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostRustc -PathType Leaf)) {
+    throw "host Rust 1.97.1 compiler is unavailable"
+}
+$hostRustIdentity = @(& $hostRustc -vV 2>&1)
+$hostRustIdentityText = $hostRustIdentity -join "`n"
+if ($LASTEXITCODE -ne 0 -or
+    $hostRustIdentityText -cnotmatch '^rustc 1\.97\.1 \(' -or
+    $hostRustIdentityText -cnotmatch '(?m)^host: x86_64-pc-windows-msvc$') {
+    throw "host Rust toolchain must be Rust 1.97.1 x86_64-pc-windows-msvc"
+}
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     "ferrum2-tun-performance-" + [Guid]::NewGuid().ToString("N")
 )
@@ -819,6 +1803,12 @@ $hostSchedulePath = Join-Path $hostEvidenceRoot "trial-schedule.tsv"
 $hostSummaryPath = Join-Path $hostEvidenceRoot "summary.json"
 $hostMarkdownPath = Join-Path $hostEvidenceRoot "summary.md"
 $hostCalibrationPath = Join-Path $hostEvidenceRoot "aa-calibration.json"
+$hostDiagnosticRoot = Join-Path $hostEvidenceRoot "udp-diagnostic"
+$hostDiagnosticGuestRoot = Join-Path $hostDiagnosticRoot "guest"
+$hostDiagnosticHostRoot = Join-Path $hostDiagnosticRoot "host"
+$hostDiagnosticSupportRoot = Join-Path $hostDiagnosticRoot "support"
+$hostDiagnosticPath = Join-Path $hostDiagnosticRoot "udp-diagnostic.json"
+$hostDiagnosticFailurePath = Join-Path $hostDiagnosticRoot "failure-summary.json"
 $guestToken = [Guid]::NewGuid().ToString("N")
 $guestRoot = "C:\Windows\Temp\ferrum2-tun-performance-$guestToken"
 $session = $null
@@ -826,11 +1816,20 @@ $vmWindowStarted = $false
 $guestEvidenceAvailable = $false
 $runFailure = $null
 $restoreFailure = $null
+$hostCaptureState = $null
+$hostCaptureResult = $null
+$hostCaptureFailure = $null
+$hostEndpointSnapshotFailures = [Collections.Generic.List[string]]::new()
 
 try {
     [IO.Directory]::CreateDirectory($hostEvidenceRoot) | Out-Null
     [IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
     [IO.Directory]::CreateDirectory($runtimeRoot) | Out-Null
+    if ($instrumentedDiagnosticMode) {
+        [IO.Directory]::CreateDirectory($hostDiagnosticRoot) | Out-Null
+        [IO.Directory]::CreateDirectory($hostDiagnosticHostRoot) | Out-Null
+        [IO.Directory]::CreateDirectory($hostDiagnosticSupportRoot) | Out-Null
+    }
     $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $hostPlanPath
     $runtimeIdleTimeoutMilliseconds = [int]$plan.scenarios."tcp-single-flow".recipe.
         client_runtime_idle_timeout_milliseconds
@@ -849,11 +1848,27 @@ try {
         (-not $diagnosticMode -and $executionTrials.Count -ne 90)) {
         throw "canonical Windows TUN execution selection is invalid"
     }
-    $expectedTrialCount = $executionTrials.Count
-    $expectedNetworkModelObservationCount = @($executionTrials | Where-Object {
-        [string]$_.scenario -in @("udp-route-once", "network-lifecycle")
-    }).Count
+    if ($instrumentedDiagnosticMode -and (
+        [string]$executionTrials[0].scenario -cne
+            "udp-8192-association-lookup-expiry" -or
+        [string]$executionTrials[0].member -cne "parent"
+    )) {
+        throw "UdpFlowBoundary trial identity is not canonical sequence 31 parent"
+    }
+    $expectedTrialCount = if ($instrumentedDiagnosticMode) {
+        0
+    } else {
+        $executionTrials.Count
+    }
+    $expectedNetworkModelObservationCount = if ($instrumentedDiagnosticMode) {
+        0
+    } else {
+        @($executionTrials | Where-Object {
+            [string]$_.scenario -in @("udp-route-once", "network-lifecycle")
+        }).Count
+    }
     $expectedProcessLogCount = 4 * $expectedTrialCount
+    $expectedDiagnosticProcessLogCount = if ($instrumentedDiagnosticMode) { 4 } else { 0 }
     $diagnosticTrial = if ($diagnosticMode) { $executionTrials[0] } else { $null }
     $diagnosticSequenceValue = if ($diagnosticMode) { $DiagnosticTrialSequence } else { 0 }
     $scheduleLines = @($plan.trials | ForEach-Object {
@@ -885,6 +1900,14 @@ try {
 
     Copy-Item -LiteralPath $collectorPath -Destination (Join-Path $temporaryRoot "input") `
         -ErrorAction Stop
+    $udpBoundaryCollectorSha256 = ""
+    if ($instrumentedDiagnosticMode) {
+        Copy-Item -LiteralPath $udpBoundaryCollectorPath `
+            -Destination (Join-Path $temporaryRoot "input") -ErrorAction Stop
+        $udpBoundaryCollectorSha256 = (Get-FileHash `
+            -LiteralPath $udpBoundaryCollectorPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
     Copy-Item -LiteralPath $guestNetworkPathProbePath `
         -Destination (Join-Path $temporaryRoot "input") -ErrorAction Stop
     $guestNetworkPathProbeSha256 = (Get-FileHash -LiteralPath $guestNetworkPathProbePath `
@@ -991,6 +2014,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-HostSupportContextUnchanged `
         -Expected $supportHostBaseline -Actual $supportHostReadback
+    if ($instrumentedDiagnosticMode -and
+        [string]$supportHostReadback.executable_sha256 -cne
+            $candidateBuild.HarnessSha256) {
+        throw "support diagnostic binary does not match the candidate harness"
+    }
     $vmNetworkReadback = Get-ApprovedVmNetworkContext `
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-ApprovedVmNetworkContextUnchanged `
@@ -1147,6 +2175,24 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     Write-Utf8FileNew -Path $hostNetworkPathPath `
         -Text (($networkPathEvidence | ConvertTo-Json -Depth 6) + "`n")
 
+    if ($instrumentedDiagnosticMode) {
+        $hostEndpointPrePath = Join-Path $hostDiagnosticHostRoot `
+            "host-endpoints-pre.json"
+        try {
+            Write-HostUdpEndpointSnapshot -Path $hostEndpointPrePath `
+                -Stage "pre_workload" -SupportProcessId $SupportPid
+        } catch {
+            $hostEndpointSnapshotFailures.Add("pre: $($_.Exception.Message)")
+            Write-HostUdpEndpointErrorSnapshot -Path $hostEndpointPrePath `
+                -Stage "pre_workload" -SupportProcessId $SupportPid `
+                -Failure $_.Exception.Message
+        }
+        $hostCaptureState = Start-HostUdpDiagnosticCapture `
+            -Directory $hostDiagnosticHostRoot `
+            -SupportAddress $SupportIpv4 `
+            -FirstUdpPort $SupportUdpPort
+    }
+
     # BEGIN GUEST_ONLY_NETWORK_EXECUTION
     $guestResult = Invoke-Command -Session $session -ErrorAction Stop -ArgumentList @(
         $guestRoot,
@@ -1176,7 +2222,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $SupportPid,
         $SupportOwner,
         $minimumSupportIpv4PacketBytes,
-        $diagnosticSequenceValue
+        $diagnosticSequenceValue,
+        $(if ($instrumentedDiagnosticMode) { $DiagnosticProfile } else { "" }),
+        $(if ($instrumentedDiagnosticMode) { $SupportDiagnosticRunNonce } else { "" }),
+        $(if ($instrumentedDiagnosticMode) { $SupportDiagnosticMaxEvents } else { 0 }),
+        $udpBoundaryCollectorSha256
     ) -ScriptBlock {
         param(
             [string]$Root,
@@ -1206,7 +2256,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [int]$SupportProcessId,
             [string]$SupportProcessOwner,
             [int]$MinimumSupportIpv4PacketBytes,
-            [int]$DiagnosticTrialSequenceValue
+            [int]$DiagnosticTrialSequenceValue,
+            [string]$DiagnosticProfileValue,
+            [string]$DiagnosticRunNonce,
+            [int]$DiagnosticMaxEvents,
+            [string]$UdpBoundaryCollectorSha256
         )
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -1214,8 +2268,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $Utf8NoBom = New-Object Text.UTF8Encoding($false)
         $InputRoot = Join-Path $Root "input"
         $EvidenceRoot = Join-Path $Root "raw-evidence"
+        $DiagnosticEvidenceRoot = Join-Path $Root "udp-diagnostic"
         $NetworkModelEvidenceRoot = Join-Path $EvidenceRoot "network-model"
-        $ProcessLogRoot = Join-Path $EvidenceRoot "process-logs"
+        $InstrumentedDiagnostic = -not [string]::IsNullOrWhiteSpace(
+            $DiagnosticProfileValue
+        )
+        $ProcessLogRoot = if ($InstrumentedDiagnostic) {
+            Join-Path $DiagnosticEvidenceRoot "process-logs"
+        } else {
+            Join-Path $EvidenceRoot "process-logs"
+        }
         $AdapterName = "Ferrum2Perf"
         if ($GuestNetworkPathProbeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
             [string]::IsNullOrWhiteSpace($ExpectedGuestNetworkPathJson) -or
@@ -1226,8 +2288,24 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $ExpectedGuestNetworkPath = $ExpectedGuestNetworkPathJson | ConvertFrom-Json
         if (-not $Root.StartsWith("C:\Windows\Temp\ferrum2-tun-performance-", [StringComparison]::OrdinalIgnoreCase) -or
             -not (Test-Path -LiteralPath $InputRoot -PathType Container) -or
-            (Test-Path -LiteralPath $EvidenceRoot)) {
+            (Test-Path -LiteralPath $EvidenceRoot) -or
+            ($InstrumentedDiagnostic -and
+                (Test-Path -LiteralPath $DiagnosticEvidenceRoot))) {
             throw "guest performance boundary is invalid"
+        }
+        if ($InstrumentedDiagnostic) {
+            if ($DiagnosticProfileValue -cne "UdpFlowBoundary" -or
+                $DiagnosticTrialSequenceValue -ne 31 -or
+                $RunKindValue -cne "calibration-aa" -or
+                $ParentCommit -cne $CandidateCommit -or
+                $DiagnosticRunNonce -cnotmatch '^[1-9][0-9]{0,19}$' -or
+                $DiagnosticMaxEvents -lt 1 -or $DiagnosticMaxEvents -gt 65536 -or
+                $UdpBoundaryCollectorSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                throw "guest UdpFlowBoundary diagnostic identity is invalid"
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($DiagnosticRunNonce) -or
+            $DiagnosticMaxEvents -ne 0) {
+            throw "guest support diagnostic arguments require UdpFlowBoundary"
         }
         $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
@@ -1248,8 +2326,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         }).Count -ne 0) {
             throw "guest staging cannot contain a reparse point"
         }
-        New-Item -ItemType Directory -Path $EvidenceRoot | Out-Null
-        New-Item -ItemType Directory -Path $NetworkModelEvidenceRoot | Out-Null
+        if ($InstrumentedDiagnostic) {
+            New-Item -ItemType Directory -Path $DiagnosticEvidenceRoot | Out-Null
+        } else {
+            New-Item -ItemType Directory -Path $EvidenceRoot | Out-Null
+            New-Item -ItemType Directory -Path $NetworkModelEvidenceRoot | Out-Null
+        }
         New-Item -ItemType Directory -Path $ProcessLogRoot | Out-Null
 
         $RustRoot = Join-Path $InputRoot "runtime\rust"
@@ -1917,8 +2999,17 @@ public static class Ferrum2PerfProcessGroup {
         }
 
         $collector = Join-Path $InputRoot "collect_windows_tun_performance_trial.ps1"
+        $udpBoundaryCollector = Join-Path $InputRoot `
+            "collect_windows_tun_udp_boundary_diagnostic.ps1"
         $harness = Join-Path $InputRoot "artifacts\m4-qualification.exe"
         $collectorHash = (Get-FileHash -LiteralPath $collector -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($InstrumentedDiagnostic -and (
+            -not (Test-Path -LiteralPath $udpBoundaryCollector -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $udpBoundaryCollector -Algorithm SHA256).
+                Hash.ToLowerInvariant() -cne $UdpBoundaryCollectorSha256
+        )) {
+            throw "guest UDP boundary collector identity changed during staging"
+        }
         $plan = Get-Content -LiteralPath (Join-Path $InputRoot "plan.json") -Raw -Encoding utf8 |
             ConvertFrom-Json
         if ($plan.schema_version -ne 2 -or
@@ -1946,11 +3037,26 @@ public static class Ferrum2PerfProcessGroup {
             ($DiagnosticTrialSequenceValue -eq 0 -and $executionTrials.Count -ne 90)) {
             throw "guest canonical trial execution selection is invalid"
         }
-        $expectedTrialCount = $executionTrials.Count
-        $expectedNetworkModelObservationCount = @($executionTrials | Where-Object {
-            [string]$_.scenario -in @("udp-route-once", "network-lifecycle")
-        }).Count
-        $expectedProcessLogCount = 4 * $expectedTrialCount
+        if ($InstrumentedDiagnostic -and (
+            [string]$executionTrials[0].scenario -cne
+                "udp-8192-association-lookup-expiry" -or
+            [string]$executionTrials[0].member -cne "parent"
+        )) {
+            throw "guest UdpFlowBoundary trial identity mismatch"
+        }
+        $expectedTrialCount = if ($InstrumentedDiagnostic) { 0 } else {
+            $executionTrials.Count
+        }
+        $expectedNetworkModelObservationCount = if ($InstrumentedDiagnostic) { 0 } else {
+            @($executionTrials | Where-Object {
+                [string]$_.scenario -in @("udp-route-once", "network-lifecycle")
+            }).Count
+        }
+        $expectedProcessLogCount = if ($InstrumentedDiagnostic) { 4 } else {
+            4 * $expectedTrialCount
+        }
+        $instrumentedTrialStatus = $null
+        $instrumentedEvidenceStatus = $null
         $guestNetworkPath = Get-GuestNetworkPath
         $guestUnderlayAddress = [string]$guestNetworkPath.guest_ipv4
         $supportProbeResult = Invoke-NativeCapture $harness @(
@@ -2079,6 +3185,74 @@ public static class Ferrum2PerfProcessGroup {
                 Wait-ProcessListener -ProcessId $serverPid `
                     -LocalAddress "127.0.0.1" -Port $serverMetricsPort -RequireUdp $false
                 Wait-TunReady $clientPid $metricsPort
+                if ($InstrumentedDiagnostic) {
+                    $diagnosticRawOutput = Join-Path $DiagnosticEvidenceRoot `
+                        "guest-raw.json"
+                    $boundaryArguments = @(
+                        "-NoProfile", "-File", $udpBoundaryCollector,
+                        "-Profile", $DiagnosticProfileValue,
+                        "-RunKind", $RunKindValue,
+                        "-Member", $member,
+                        "-TrialSequence", [string]$trial.sequence,
+                        "-ParentSha", $ParentCommit,
+                        "-CandidateSha", $CandidateCommit,
+                        "-Tree", $memberTree,
+                        "-RecipeSha256", $RecipeSha256,
+                        "-HarnessBinary", $harness,
+                        "-TargetIpv4", $SupportAddress,
+                        "-TargetTcpPort", [string]$SupportTcp,
+                        "-TargetUdpPort", [string]$SupportUdp,
+                        "-ClientPid", [string]$clientPid,
+                        "-ServerPid", [string]$serverPid,
+                        "-ClientMetricsPort", [string]$metricsPort,
+                        "-DiagnosticRunNonce", $DiagnosticRunNonce,
+                        "-DiagnosticMaxEvents", [string]$DiagnosticMaxEvents,
+                        "-OutputDirectory", $DiagnosticEvidenceRoot,
+                        "-Output", $diagnosticRawOutput
+                    )
+                    $boundaryResult = Invoke-NativeCapture $PowerShell $boundaryArguments
+                    $boundaryLines = @($boundaryResult.Output | ForEach-Object {
+                        if ($_ -is [Management.Automation.ErrorRecord]) {
+                            [string]$_.Exception.Message
+                        } else {
+                            [string]$_
+                        }
+                    })
+                    if ($boundaryResult.ExitCode -ne 0 -or
+                        $boundaryLines.Count -ne 1 -or
+                        [string]$boundaryLines[0] -cnotmatch
+                            '^windows_tun_udp_boundary evidence=(COMPLETE|PARTIAL) trial=(PASS|FAIL) output=' -or
+                        -not (Test-Path -LiteralPath $diagnosticRawOutput -PathType Leaf) -or
+                        (Get-Item -LiteralPath $diagnosticRawOutput).Length -gt 1048576) {
+                        throw "Windows TUN UDP boundary helper did not retain a valid raw result"
+                    }
+                    $diagnosticRaw = Get-Content -LiteralPath $diagnosticRawOutput `
+                        -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
+                    if ([string]$diagnosticRaw.schema -cne
+                            "ferrum2.windows-tun.hyperv-udp-diagnostic-guest-raw.v1" -or
+                        $diagnosticRaw.qualification -ne $false -or
+                        [string]$diagnosticRaw.profile -cne $DiagnosticProfileValue -or
+                        [string]$diagnosticRaw.identity.run_kind -cne $RunKindValue -or
+                        [string]$diagnosticRaw.identity.member -cne $member -or
+                        [int]$diagnosticRaw.identity.trial_sequence -ne
+                            [int]$trial.sequence -or
+                        [string]$diagnosticRaw.identity.parent_sha -cne $ParentCommit -or
+                        [string]$diagnosticRaw.identity.candidate_sha -cne
+                            $CandidateCommit -or
+                        [string]$diagnosticRaw.identity.collector_sha256 -cne
+                            $UdpBoundaryCollectorSha256 -or
+                        [string]$diagnosticRaw.identity.diagnostic_run_nonce -cne
+                            $DiagnosticRunNonce -or
+                        [int]$diagnosticRaw.identity.diagnostic_max_events -ne
+                            $DiagnosticMaxEvents -or
+                        [string]$diagnosticRaw.evidence_status -cnotin
+                            @("COMPLETE", "PARTIAL") -or
+                        [string]$diagnosticRaw.trial_status -cnotin @("PASS", "FAIL")) {
+                        throw "Windows TUN UDP boundary raw result identity mismatch"
+                    }
+                    $instrumentedTrialStatus = [string]$diagnosticRaw.trial_status
+                    $instrumentedEvidenceStatus = [string]$diagnosticRaw.evidence_status
+                } else {
                 $outputName = "{0:D3}-{1}-{2}-pair-{3}.json" -f @(
                     [int]$trial.sequence, [string]$trial.scenario, $member, [int]$trial.pair
                 )
@@ -2193,6 +3367,7 @@ public static class Ferrum2PerfProcessGroup {
                     $trialEvidence.order -ne $trial.order) {
                     throw "Windows TUN collector output identity does not match the planned trial"
                 }
+                }
             } catch {
                 $trialFailure = $_
             } finally {
@@ -2224,47 +3399,142 @@ public static class Ferrum2PerfProcessGroup {
             }
             if ($null -ne $trialFailure) { throw $trialFailure }
         }
-        $files = @(Get-ChildItem -LiteralPath $EvidenceRoot -File -Filter "*.json")
-        $networkModelFiles = @(
+        $files = @(if ($InstrumentedDiagnostic) { @() } else {
+            Get-ChildItem -LiteralPath $EvidenceRoot -File -Filter "*.json"
+        })
+        $networkModelFiles = @(if ($InstrumentedDiagnostic) { @() } else {
             Get-ChildItem -LiteralPath $NetworkModelEvidenceRoot -File `
                 -Filter "*.network-model.json"
-        )
+        })
         $processLogFiles = @(Get-ChildItem -LiteralPath $ProcessLogRoot -File -Filter "*.log")
         if ($files.Count -ne $expectedTrialCount -or
             $networkModelFiles.Count -ne $expectedNetworkModelObservationCount -or
             $processLogFiles.Count -ne $expectedProcessLogCount) {
             throw "guest evidence set is incomplete"
         }
-        [pscustomobject]@{
+        if ($InstrumentedDiagnostic) {
+            $diagnosticFiles = @(Get-ChildItem -LiteralPath $DiagnosticEvidenceRoot `
+                -File -Recurse -ErrorAction Stop)
+            $diagnosticLengths = @($diagnosticFiles | ForEach-Object { [long]$_.Length })
+            if ($instrumentedTrialStatus -cnotin @("PASS", "FAIL") -or
+                $instrumentedEvidenceStatus -cnotin @("COMPLETE", "PARTIAL") -or
+                $diagnosticFiles.Count -lt 8 -or $diagnosticFiles.Count -gt 32 -or
+                [long]($diagnosticLengths | Measure-Object -Sum).Sum -gt 335544320 -or
+                [long]($diagnosticLengths | Measure-Object -Maximum).Maximum -gt 268451840) {
+                throw "guest UDP diagnostic evidence set exceeds its closed boundary"
+            }
+        }
+        $guestControllerResult = [ordered]@{
             status = "PASS"
             trials = $files.Count
             network_model_observations = $networkModelFiles.Count
             process_logs = $processLogFiles.Count
-            evidence_path = $EvidenceRoot
-            guest_build = "$($version.CurrentBuildNumber).$($version.UBR)"
+            evidence_path = if ($InstrumentedDiagnostic) {
+                $DiagnosticEvidenceRoot
+            } else {
+                $EvidenceRoot
+            }
             powershell_version = [string]$pwshVersion[0]
             powershell_executable_sha256 = $PowerShellExecutableSha256
         }
+        if ($InstrumentedDiagnostic) {
+            $cpuRows = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)
+            if ($cpuRows.Count -le 0) { throw "guest CPU identity is unavailable" }
+            $powerText = (& powercfg.exe /getactivescheme 2>&1 | Out-String)
+            $powerMatch = [regex]::Match(
+                $powerText,
+                '[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}'
+            )
+            if (-not $powerMatch.Success) {
+                throw "guest active power plan identity is unavailable"
+            }
+            $guestControllerResult["diagnostic_profile"] = $DiagnosticProfileValue
+            $guestControllerResult["diagnostic_evidence_status"] = `
+                $instrumentedEvidenceStatus
+            $guestControllerResult["diagnostic_trial_status"] = $instrumentedTrialStatus
+            $guestControllerResult["guest_build"] = `
+                "$($version.CurrentBuildNumber).$($version.UBR)"
+            $guestControllerResult["cpu_model"] = `
+                (@($cpuRows | ForEach-Object { $_.Name.Trim() }) -join " | ")
+            $guestControllerResult["cpu_count"] = `
+                [int]$computer.NumberOfLogicalProcessors
+            $guestControllerResult["memory_bytes"] = `
+                [uint64]$computer.TotalPhysicalMemory
+            $guestControllerResult["power_plan_guid"] = `
+                $powerMatch.Value.ToLowerInvariant()
+        }
+        [pscustomobject]$guestControllerResult
     }
     # END GUEST_ONLY_NETWORK_EXECUTION
     if (@($guestResult).Count -ne 1 -or $guestResult.status -cne "PASS" -or
         [int]$guestResult.trials -ne $expectedTrialCount -or
         [int]$guestResult.network_model_observations -ne
             $expectedNetworkModelObservationCount -or
-        [int]$guestResult.process_logs -ne $expectedProcessLogCount -or
+        [int]$guestResult.process_logs -ne $(if ($instrumentedDiagnosticMode) {
+            $expectedDiagnosticProcessLogCount
+        } else {
+            $expectedProcessLogCount
+        }) -or
         [string]$guestResult.powershell_version -cne $portableRuntime.PowerShellVersion -or
         [string]$guestResult.powershell_executable_sha256 -cne
             $portableRuntime.PowerShellExecutableSha256) {
         throw "guest performance controller did not return a complete result"
     }
+    if ($instrumentedDiagnosticMode -and (
+        [string]$guestResult.diagnostic_profile -cne $DiagnosticProfile -or
+        [string]$guestResult.diagnostic_evidence_status -cnotin @("COMPLETE", "PARTIAL") -or
+        [string]$guestResult.diagnostic_trial_status -cnotin @("PASS", "FAIL")
+    )) {
+        throw "guest UDP diagnostic controller result is invalid"
+    }
     $guestEvidenceAvailable = $true
 } catch {
     $runFailure = $_
 } finally {
+    if ($instrumentedDiagnosticMode) {
+        $hostEndpointPostPath = Join-Path $hostDiagnosticHostRoot `
+            "host-endpoints-post.json"
+        try {
+            Write-HostUdpEndpointSnapshot `
+                -Path $hostEndpointPostPath `
+                -Stage "post_workload" -SupportProcessId $SupportPid
+        } catch {
+            $hostEndpointSnapshotFailures.Add("post: $($_.Exception.Message)")
+            try {
+                Write-HostUdpEndpointErrorSnapshot -Path $hostEndpointPostPath `
+                    -Stage "post_workload" -SupportProcessId $SupportPid `
+                    -Failure $_.Exception.Message
+            } catch {
+                $hostEndpointSnapshotFailures.Add(
+                    "post error document: $($_.Exception.Message)"
+                )
+            }
+        }
+        if ($null -ne $hostCaptureState) {
+            try {
+                $hostCaptureResult = Complete-HostUdpDiagnosticCapture `
+                    -State $hostCaptureState
+                if ($hostCaptureResult.Status -cne "PASS") {
+                    throw "Pktmon completion failed: $($hostCaptureResult.Failures -join '; ')"
+                }
+            } catch {
+                $hostCaptureFailure = $_
+            }
+        }
+    }
     if ($null -ne $session) {
         $evidenceExportFailure = $null
         try {
-            $guestEvidencePath = Join-Path $guestRoot "raw-evidence"
+            $guestEvidencePath = Join-Path $guestRoot $(if ($instrumentedDiagnosticMode) {
+                "udp-diagnostic"
+            } else {
+                "raw-evidence"
+            })
+            $guestEvidenceDestination = if ($instrumentedDiagnosticMode) {
+                $hostDiagnosticGuestRoot
+            } else {
+                $hostEvidenceRoot
+            }
             $guestProductRoot = Join-Path $guestRoot "input\artifacts"
             $boundary = @(Invoke-Command -Session $session `
                 -ArgumentList $guestEvidencePath, $guestProductRoot `
@@ -2352,10 +3622,13 @@ public static class Ferrum2PerfProcessGroup {
                         OwnedProcesses = $ownedProcessesAfter
                         Files = @(Get-ChildItem -LiteralPath $Path -File -Filter "*.json" `
                             -ErrorAction Stop).Count
-                        ModelFiles = @(
+                        ModelFiles = @(if (
+                            Test-Path -LiteralPath (Join-Path $Path "network-model") `
+                                -PathType Container
+                        ) {
                             Get-ChildItem -LiteralPath (Join-Path $Path "network-model") `
                                 -File -Filter "*.network-model.json" -ErrorAction Stop
-                        ).Count
+                        }).Count
                         TotalFiles = $artifactPaths.Count
                         TotalBytes = [long]($fileLengths | Measure-Object -Sum).Sum
                         LargestFileBytes = [long]($fileLengths | Measure-Object -Maximum).Maximum
@@ -2370,11 +3643,11 @@ public static class Ferrum2PerfProcessGroup {
                 }
             } elseif ($boundary[0].Safe -eq $true -and
                 [int]$boundary[0].OwnedProcesses -eq 0 -and
-                [int]$boundary[0].Files -le 90 -and
-                [int]$boundary[0].ModelFiles -le 20 -and
-                [int]$boundary[0].TotalFiles -le 512 -and
-                [long]$boundary[0].TotalBytes -le 536870912 -and
-                [long]$boundary[0].LargestFileBytes -le 8388608) {
+                [int]$boundary[0].Files -le $(if ($instrumentedDiagnosticMode) { 8 } else { 90 }) -and
+                [int]$boundary[0].ModelFiles -le $(if ($instrumentedDiagnosticMode) { 0 } else { 20 }) -and
+                [int]$boundary[0].TotalFiles -le $(if ($instrumentedDiagnosticMode) { 32 } else { 512 }) -and
+                [long]$boundary[0].TotalBytes -le $(if ($instrumentedDiagnosticMode) { 335544320 } else { 536870912 }) -and
+                [long]$boundary[0].LargestFileBytes -le $(if ($instrumentedDiagnosticMode) { 268451840 } else { 8388608 })) {
                 # WinPS 5.1's Copy-Item remoting helper reads Length from the source
                 # DirectoryInfo. The guest controller leaves this persistent runspace in
                 # strict mode, which turns that helper implementation detail into an error.
@@ -2382,7 +3655,7 @@ public static class Ferrum2PerfProcessGroup {
                     Set-StrictMode -Off
                 }
                 Copy-Item -FromSession $session -LiteralPath $guestEvidencePath `
-                    -Destination $hostEvidenceRoot -Recurse -ErrorAction Stop
+                    -Destination $guestEvidenceDestination -Recurse -ErrorAction Stop
             } else {
                 throw (
                     "guest evidence export boundary rejected: reason={0} owned={1} " +
@@ -2441,6 +3714,638 @@ if ($null -ne $restoreFailure) {
 }
 if ($null -ne $runFailure) { throw $runFailure }
 if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complete" }
+
+if ($instrumentedDiagnosticMode) {
+    $finalVmState = [string](Get-ApprovedVmContext).Vm.State
+    if ($finalVmState -cne "Off") {
+        throw "approved VM final UDP diagnostic state is not Off"
+    }
+    if (-not (Test-Path -LiteralPath $hostDiagnosticGuestRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $hostDiagnosticHostRoot -PathType Container)) {
+        throw "exported UDP diagnostic evidence roots are incomplete"
+    }
+    $supportFinalContext = Get-HostSupportContext `
+        -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
+        -ProcessId $SupportPid -ProcessOwner $SupportOwner `
+        -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
+    Assert-HostSupportContextUnchanged `
+        -Expected $supportHostBaseline -Actual $supportFinalContext
+    if ([string]$supportFinalContext.executable_sha256 -cne
+        $candidateBuild.HarnessSha256) {
+        throw "support diagnostic binary does not match the candidate harness"
+    }
+
+    $supportLedgerCopy = Join-Path $hostDiagnosticSupportRoot `
+        "udp-support-ledger.ndjson"
+    [void](Copy-StableUdpDiagnosticLedger `
+        -Source $resolvedSupportDiagnosticLedger `
+        -Destination $supportLedgerCopy)
+    $supportLedgerSummary = Get-UdpDiagnosticLedgerSummary `
+        -Path $supportLedgerCopy `
+        -ExpectedSchema "ferrum2.windows-tun.udp-support-ledger.v1" `
+        -ExpectedRunNonce $SupportDiagnosticRunNonce `
+        -ExpectedMaxEvents $SupportDiagnosticMaxEvents
+    if ($supportLedgerSummary.Events -lt $supportDiagnosticBaseline.Events) {
+        throw "support diagnostic ledger regressed below its validated baseline"
+    }
+
+    $diagnosticNetworkPath = Join-Path $hostDiagnosticHostRoot `
+        "host-network-path.json"
+    Copy-Item -LiteralPath $hostNetworkPathPath -Destination $diagnosticNetworkPath `
+        -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $diagnosticNetworkPath -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $hostNetworkPathPath -Algorithm SHA256).Hash) {
+        throw "UDP diagnostic host network-path copy changed"
+    }
+
+    $guestRawPath = Join-Path $hostDiagnosticGuestRoot "guest-raw.json"
+    $workloadLedgerPath = Join-Path $hostDiagnosticGuestRoot `
+        "udp-workload-flow-ledger.ndjson"
+    $guestRaw = Get-Content -LiteralPath $guestRawPath -Raw -Encoding utf8 |
+        ConvertFrom-Json -Depth 12 -ErrorAction Stop
+    if ([string]$guestRaw.schema -cne
+            "ferrum2.windows-tun.hyperv-udp-diagnostic-guest-raw.v1" -or
+        [string]$guestRaw.profile -cne $DiagnosticProfile -or
+        [string]$guestRaw.identity.parent_sha -cne $ParentSha -or
+        [string]$guestRaw.identity.candidate_sha -cne $CandidateSha -or
+        [string]$guestRaw.identity.harness_sha256 -cne
+            $candidateBuild.HarnessSha256 -or
+        [string]$guestRaw.identity.collector_sha256 -cne
+            $udpBoundaryCollectorSha256 -or
+        [string]$guestRaw.identity.diagnostic_run_nonce -cne
+            $SupportDiagnosticRunNonce -or
+        [int]$guestRaw.identity.diagnostic_max_events -ne
+            $SupportDiagnosticMaxEvents) {
+        throw "exported guest UDP diagnostic raw identity mismatch"
+    }
+    $workloadLedgerSummary = Get-UdpDiagnosticLedgerSummary `
+        -Path $workloadLedgerPath `
+        -ExpectedSchema "ferrum2.windows-tun.udp-workload-flow-ledger.v1" `
+        -ExpectedRunNonce $SupportDiagnosticRunNonce `
+        -ExpectedMaxEvents $SupportDiagnosticMaxEvents
+    $firstFailedFlow = Get-FirstFailedUdpDiagnosticFlow `
+        -Path $workloadLedgerPath -MaximumEvents $SupportDiagnosticMaxEvents
+    $supportBoundary = if ($null -ne $firstFailedFlow) {
+        Get-SupportUdpBoundaryForFlow `
+            -Path $supportLedgerCopy `
+            -RunNonce $SupportDiagnosticRunNonce `
+            -Flow $firstFailedFlow `
+            -MaximumEvents $SupportDiagnosticMaxEvents
+    } else {
+        [pscustomobject]@{ Rx = $null; Tx = $null }
+    }
+
+    $cleanupStatus = if ($null -ne $hostCaptureFailure -or
+        $hostEndpointSnapshotFailures.Count -ne 0 -or
+        $null -eq $hostCaptureResult -or
+        [string]$hostCaptureResult.Status -cne "PASS") {
+        "FAIL"
+    } else {
+        "PASS"
+    }
+    $trialStatus = [string]$guestRaw.trial_status
+    $cleanup = [ordered]@{
+        status = $cleanupStatus
+        checkpoint_restored = $true
+        final_vm_state = $finalVmState
+        capture_stop_status = if ($null -ne $hostCaptureResult) {
+            [string]$hostCaptureResult.CaptureStopStatus
+        } elseif ($null -ne $hostCaptureState) {
+            "FAIL"
+        } else {
+            "NOT_STARTED"
+        }
+        guest_owned_processes = 0
+    }
+
+    $captureManifestPath = Join-Path $hostDiagnosticHostRoot `
+        "host-capture-manifest.json"
+    $captureManifestFiles = @(
+        "PktMon.etl", "PktMon.txt", "PktMon.pcapng",
+        "pktmon-counters.json", "pktmon-stop.txt"
+    )
+    $captureManifestRows = [Collections.Generic.List[object]]::new()
+    $captureManifestFailures = [Collections.Generic.List[string]]::new()
+    if ($null -ne $hostCaptureFailure) {
+        $captureManifestFailures.Add(
+            "capture: $($hostCaptureFailure.Exception.Message)"
+        )
+    }
+    if ($null -eq $hostCaptureResult) {
+        $captureManifestFailures.Add("capture completion result is unavailable")
+    } else {
+        foreach ($failure in @($hostCaptureResult.Failures)) {
+            $captureManifestFailures.Add([string]$failure)
+        }
+    }
+    foreach ($failure in @($hostEndpointSnapshotFailures)) {
+        $captureManifestFailures.Add("endpoint snapshot: $failure")
+    }
+    $hostCaptureNativeAvailable = $false
+    foreach ($captureFileName in $captureManifestFiles) {
+        $capturePath = Join-Path $hostDiagnosticHostRoot $captureFileName
+        if (-not (Test-Path -LiteralPath $capturePath -PathType Leaf)) {
+            $captureManifestFailures.Add("missing: $captureFileName")
+            continue
+        }
+        try {
+            $captureItem = Get-Item -LiteralPath $capturePath -Force `
+                -ErrorAction Stop
+            $maximumCaptureBytes = if ($captureFileName -ceq "PktMon.etl") {
+                33554432
+            } else {
+                134217728
+            }
+            if ($captureItem.PSIsContainer -or $captureItem.Length -le 0 -or
+                $captureItem.Length -gt $maximumCaptureBytes -or
+                $captureItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "size or file identity is outside its boundary"
+            }
+            $captureManifestRows.Add([ordered]@{
+                file = $captureFileName
+                bytes = [long]$captureItem.Length
+                sha256 = (Get-FileHash -LiteralPath $capturePath `
+                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            })
+            if ($captureFileName -ceq "PktMon.etl") {
+                $hostCaptureNativeAvailable = $true
+            }
+        } catch {
+            $captureManifestFailures.Add(
+                "invalid ${captureFileName}: $($_.Exception.Message)"
+            )
+        }
+    }
+    if ($captureManifestFailures.Count -ne 0) {
+        $cleanupStatus = "FAIL"
+        $cleanup["status"] = "FAIL"
+    }
+    $boundedCaptureFailures = @($captureManifestFailures | Select-Object -First 32 |
+        ForEach-Object {
+            $value = ([string]$_ -replace '[\r\n]+', ' ').Trim()
+            if ($value.Length -gt 2048) { $value.Substring(0, 2048) } else { $value }
+        })
+    Write-Utf8FileNew -Path $captureManifestPath -Text (([ordered]@{
+        schema = "ferrum2.windows-tun.host-capture-manifest.v1"
+        state = if ($captureManifestFailures.Count -eq 0) { "COMPLETE" } else { "PARTIAL" }
+        filters = if ($null -ne $hostCaptureState) {
+            @($hostCaptureState.Filters)
+        } else {
+            @()
+        }
+        started_utc = if ($null -ne $hostCaptureState) {
+            [string]$hostCaptureState.StartedUtc
+        } else {
+            $null
+        }
+        stop_status = if ($null -ne $hostCaptureResult) {
+            [string]$hostCaptureResult.CaptureStopStatus
+        } elseif ($null -ne $hostCaptureState) {
+            "FAIL"
+        } else {
+            "NOT_STARTED"
+        }
+        expected_files = $captureManifestFiles
+        files = $captureManifestRows.ToArray()
+        failures = $boundedCaptureFailures
+    } | ConvertTo-Json -Depth 6) + "`n")
+
+    $guestProcessLogPath = Join-Path $hostDiagnosticGuestRoot `
+        "guest-process-logs.txt"
+    $guestProcessLogText = [Text.StringBuilder]::new()
+    foreach ($processLog in @(Get-ChildItem `
+        -LiteralPath (Join-Path $hostDiagnosticGuestRoot "process-logs") `
+        -File -Filter "*.log" -ErrorAction Stop | Sort-Object Name)) {
+        [void]$guestProcessLogText.AppendLine("===== $($processLog.Name) =====")
+        [void]$guestProcessLogText.AppendLine(
+            (Get-Content -LiteralPath $processLog.FullName -Raw -Encoding utf8)
+        )
+        if ($utf8NoBom.GetByteCount($guestProcessLogText.ToString()) -gt 8388608) {
+            throw "combined guest process log exceeded 8 MiB"
+        }
+    }
+    Write-Utf8FileNew -Path $guestProcessLogPath `
+        -Text $guestProcessLogText.ToString()
+
+    $failureSummary = $null
+    $failureSummaryReference = $null
+    if ($trialStatus -ceq "FAIL") {
+        $supportRx = $null -ne $supportBoundary.Rx
+        $supportTxObserved = $null -ne $supportBoundary.Tx
+        $supportTxSuccess = $supportTxObserved -and
+            [string]$supportBoundary.Tx.send_result -ceq "success"
+        $lastConfirmedStage = if ($supportTxObserved) {
+            "support_tx"
+        } elseif ($supportRx) {
+            "support_rx"
+        } elseif ($null -ne $firstFailedFlow -and
+            [string]$firstFailedFlow.send_result -ceq "success") {
+            "workload_send"
+        } else {
+            $null
+        }
+        $firstMissingStage = $null
+        $workloadCoversNonce = $null -ne $firstFailedFlow -and
+            $workloadLedgerSummary.Closed -and
+            $workloadLedgerSummary.DroppedEvents -eq 0 -and
+            $workloadLedgerSummary.WriteFailures -eq 0
+        $supportAbsenceProvable = $null -ne $firstFailedFlow -and
+            $supportLedgerSummary.Closed -and
+            $supportLedgerSummary.DroppedEvents -eq 0 -and
+            $supportLedgerSummary.WriteFailures -eq 0
+        $failureFingerprint = if ($supportTxSuccess) {
+            "udp/bootstrap/reply-missing-after-support-tx"
+        } elseif ($supportTxObserved) {
+            "udp/bootstrap/support-tx-not-success"
+        } elseif ($supportRx) {
+            if ($supportAbsenceProvable) {
+                "udp/bootstrap/reply-missing-at-support-tx"
+            } else {
+                "udp/bootstrap/support-tx-boundary-unknown"
+            }
+        } elseif ($supportAbsenceProvable) {
+            "udp/bootstrap/request-missing-before-support-rx"
+        } else {
+            "udp/bootstrap/support-boundary-unknown"
+        }
+        $workloadTuple = if ($null -eq $firstFailedFlow) { $null } else {
+            [ordered]@{
+                source_ip = [string]$firstFailedFlow.workload_local_ip
+                source_port = [int]$firstFailedFlow.workload_local_port
+                target_ip = [string]$firstFailedFlow.target_ip
+                target_port = [int]$firstFailedFlow.target_port
+            }
+        }
+        $physicalTuple = if ($null -eq $supportBoundary.Rx) { $null } else {
+            [ordered]@{
+                source_ip = [string]$supportBoundary.Rx.remote_ip
+                source_port = [int]$supportBoundary.Rx.remote_port
+                target_ip = [string]$supportBoundary.Rx.listen_ip
+                target_port = [int]$supportBoundary.Rx.listen_port
+            }
+        }
+        $workloadLedgerComplete = $workloadLedgerSummary.Closed -and
+            $workloadLedgerSummary.DroppedEvents -eq 0 -and
+            $workloadLedgerSummary.WriteFailures -eq 0
+        $supportLedgerComplete = $supportLedgerSummary.Closed -and
+            $supportLedgerSummary.DroppedEvents -eq 0 -and
+            $supportLedgerSummary.WriteFailures -eq 0
+        $observations = [ordered]@{}
+        foreach ($stage in @(
+            "workload_send", "direct_send", "guest_request", "host_request",
+            "support_rx", "support_tx", "host_reply", "guest_reply",
+            "ferrum_receive", "response_classified", "response_sink",
+            "wintun_injection", "workload_reply"
+        )) {
+            $observations[$stage] = "UNKNOWN"
+        }
+        if ($null -ne $firstFailedFlow) {
+            $observations.workload_send = if (
+                [string]$firstFailedFlow.send_result -ceq "success"
+            ) { "SEEN" } elseif ($workloadLedgerComplete) { "NOT_SEEN" } else { "UNKNOWN" }
+            $observations.workload_reply = if (
+                [string]$firstFailedFlow.reply_result -ceq "success"
+            ) {
+                "SEEN"
+            } elseif ([string]$firstFailedFlow.reply_result -ceq "not_observed") {
+                "UNKNOWN"
+            } elseif ($workloadLedgerComplete) {
+                "NOT_SEEN"
+            } else {
+                "UNKNOWN"
+            }
+        }
+        if ($supportRx) {
+            $observations.support_rx = "SEEN"
+        } elseif ($supportLedgerComplete -and $null -ne $firstFailedFlow) {
+            $observations.support_rx = "NOT_SEEN"
+        }
+        if ($supportTxObserved) {
+            $observations.support_tx = "SEEN"
+        } elseif ($supportLedgerComplete -and $null -ne $firstFailedFlow) {
+            $observations.support_tx = "NOT_SEEN"
+        }
+        $firstMissingStage = if ($observations.workload_send -ceq "NOT_SEEN") {
+            "workload_send"
+        } elseif ($observations.support_rx -ceq "SEEN" -and
+            $observations.support_tx -ceq "NOT_SEEN") {
+            "support_tx"
+        } else {
+            $null
+        }
+        $source = {
+            param([string]$State, [long]$Records, [long]$Dropped,
+                [long]$WriteFailures, [bool]$CoversNonce)
+            [ordered]@{
+                state = $State
+                records = $Records
+                dropped_events = $Dropped
+                write_failures = $WriteFailures
+                covers_packet_nonce = $CoversNonce
+            }
+        }
+        $failureSummary = [ordered]@{
+            schema = "ferrum2.windows-tun.hyperv-udp-failure-summary.v1"
+            qualification = $false
+            run_nonce = $SupportDiagnosticRunNonce
+            parent_sha = $ParentSha
+            candidate_sha = $CandidateSha
+            sha = $ParentSha
+            tree = $parentTree
+            client_sha256 = $parentBuild.ClientSha256
+            server_sha256 = $parentBuild.ServerSha256
+            harness_sha256 = $candidateBuild.HarnessSha256
+            runner_sha256 = $runnerSourceSha256
+            recipe_sha256 = [string]$plan.recipe_sha256
+            vm_id = $approvedVmId.ToString("D")
+            checkpoint_id = $approvedCheckpointId.ToString("D")
+            support_pid = $SupportPid
+            support_owner = $SupportOwner
+            support_sha256 = [string]$supportFinalContext.executable_sha256
+            trial_sequence = [int]$diagnosticTrial.sequence
+            scenario = [string]$diagnosticTrial.scenario
+            member = [string]$diagnosticTrial.member
+            pair = [int]$diagnosticTrial.pair
+            order = [int]$diagnosticTrial.order
+            failure_kind = if ($null -eq $firstFailedFlow) {
+                "other"
+            } elseif ([string]$firstFailedFlow.send_result -in @(
+                "error", "partial"
+            )) {
+                "send_error"
+            } elseif ([string]$firstFailedFlow.reply_result -ceq "timeout") {
+                "timeout"
+            } elseif ([string]$firstFailedFlow.reply_result -ceq "error") {
+                "receive_error"
+            } elseif ([string]$firstFailedFlow.reply_result -ceq
+                "payload_mismatch") {
+                "payload_mismatch"
+            } else {
+                "other"
+            }
+            phase = if ($null -ne $firstFailedFlow) {
+                [string]$firstFailedFlow.phase
+            } else {
+                "bootstrap"
+            }
+            association_index = if ($null -ne $firstFailedFlow) {
+                [int]$firstFailedFlow.association_index
+            } else {
+                $null
+            }
+            round = if ($null -ne $firstFailedFlow) {
+                [int]$firstFailedFlow.round
+            } else {
+                $null
+            }
+            packet_nonce = if ($null -ne $firstFailedFlow) {
+                [string]$firstFailedFlow.packet_nonce
+            } else {
+                $null
+            }
+            workload_tuple = $workloadTuple
+            physical_tuple = $physicalTuple
+            observation_sources = [ordered]@{
+                workload_ledger = & $source `
+                    $(if ($workloadLedgerComplete) { "COMPLETE" } else { "TRUNCATED" }) `
+                    $workloadLedgerSummary.Events `
+                    $workloadLedgerSummary.DroppedEvents `
+                    $workloadLedgerSummary.WriteFailures $workloadCoversNonce
+                support_ledger = & $source `
+                    $(if ($supportLedgerComplete) { "COMPLETE" } else { "TRUNCATED" }) `
+                    $supportLedgerSummary.Events `
+                    $supportLedgerSummary.DroppedEvents `
+                    $supportLedgerSummary.WriteFailures $supportAbsenceProvable
+                host_capture = & $source `
+                    $(if ($cleanupStatus -ceq "PASS") { "COMPLETE" } else { "ERROR" }) `
+                    0 0 0 $false
+                guest_capture = & $source "NOT_ENABLED" 0 0 0 $false
+                ferrum_boundary = & $source "NOT_ENABLED" 0 0 0 $false
+            }
+            observations = $observations
+            last_confirmed_stage = $lastConfirmedStage
+            first_missing_stage = $firstMissingStage
+            response_sink_outcome = $null
+            failure_fingerprint = $failureFingerprint
+            cleanup = $cleanup
+        }
+        Write-Utf8FileNew -Path $hostDiagnosticFailurePath `
+            -Text (($failureSummary | ConvertTo-Json -Depth 10) + "`n")
+        $failureSummaryReference = [ordered]@{
+            file = [IO.Path]::GetRelativePath(
+                $hostDiagnosticRoot,
+                $hostDiagnosticFailurePath
+            ).Replace('\', '/')
+            sha256 = (Get-FileHash -LiteralPath $hostDiagnosticFailurePath `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+
+    $artifacts = [Collections.Generic.List[object]]::new()
+    $artifacts.Add((New-UdpDiagnosticArtifactRecord `
+        -Role "workload_ledger" -Path $workloadLedgerPath `
+        -LedgerSummary $workloadLedgerSummary -MaxEvents $SupportDiagnosticMaxEvents))
+    $artifacts.Add((New-UdpDiagnosticArtifactRecord `
+        -Role "support_ledger" -Path $supportLedgerCopy `
+        -LedgerSummary $supportLedgerSummary -MaxEvents $SupportDiagnosticMaxEvents))
+    foreach ($artifactSpec in @(
+        @("host_capture", "host", "host-capture-manifest.json"),
+        @("endpoint_snapshot_before", "guest", "guest-endpoints-pre.json"),
+        @("endpoint_snapshot_after", "guest", "guest-endpoints-post.json"),
+        @("dynamic_port_snapshot_before", "host", "host-endpoints-pre.json"),
+        @("dynamic_port_snapshot_after", "host", "host-endpoints-post.json"),
+        @("host_network_path", "host", "host-network-path.json"),
+        @("runner_log", "guest", "guest-raw.json"),
+        @("guest_process_log", "guest", "guest-process-logs.txt")
+    )) {
+        $artifactRoot = if ($artifactSpec[1] -ceq "host") {
+            $hostDiagnosticHostRoot
+        } else {
+            $hostDiagnosticGuestRoot
+        }
+        $artifactState = if ($artifactSpec[0] -ceq "host_capture" -and
+            $cleanupStatus -cne "PASS") {
+            "PARTIAL"
+        } elseif ($artifactSpec[0] -in @(
+            "dynamic_port_snapshot_before", "dynamic_port_snapshot_after"
+        ) -and $hostEndpointSnapshotFailures.Count -ne 0) {
+            "PARTIAL"
+        } elseif ($artifactSpec[0] -in @(
+            "endpoint_snapshot_before", "endpoint_snapshot_after"
+        ) -and @($guestRaw.snapshot_errors).Count -ne 0) {
+            "PARTIAL"
+        } elseif ($artifactSpec[0] -ceq "runner_log" -and
+            [string]$guestRaw.evidence_status -cne "COMPLETE") {
+            "PARTIAL"
+        } else {
+            "COMPLETE"
+        }
+        $artifacts.Add((New-UdpDiagnosticArtifactRecord `
+            -Role $artifactSpec[0] `
+            -Path (Join-Path $artifactRoot $artifactSpec[2]) `
+            -StateOverride $artifactState))
+    }
+    if ($hostCaptureNativeAvailable) {
+        $nativeCaptureState = if ($cleanupStatus -ceq "PASS") {
+            "COMPLETE"
+        } else {
+            "PARTIAL"
+        }
+        $artifacts.Add((New-UdpDiagnosticArtifactRecord `
+            -Role "host_capture_native" `
+            -Path (Join-Path $hostDiagnosticHostRoot "PktMon.etl") `
+            -StateOverride $nativeCaptureState))
+    }
+    if ($trialStatus -ceq "FAIL") {
+        $artifacts.Add((New-UdpDiagnosticArtifactRecord `
+            -Role "failure_summary" -Path $hostDiagnosticFailurePath))
+    }
+    if ($artifacts.Count -gt 16) {
+        throw "UDP diagnostic artifact manifest exceeds its closed boundary"
+    }
+    $presentArtifactBytes = [long](
+        $artifacts | Measure-Object -Property bytes -Sum
+    ).Sum
+    if ($presentArtifactBytes -gt 268435456) {
+        throw "UDP diagnostic artifact manifest exceeds its total byte boundary"
+    }
+    $evidenceStatus = if (@($artifacts | Where-Object {
+        $_.state -ceq "PARTIAL"
+    }).Count -ne 0) { "PARTIAL" } else { "COMPLETE" }
+
+    $diagnosticDocument = [ordered]@{
+        schema = "ferrum2.windows-tun.hyperv-udp-diagnostic.v1"
+        qualification = $false
+        profile = $DiagnosticProfile
+        evidence_status = $evidenceStatus
+        trial_status = $trialStatus
+        run_nonce = $SupportDiagnosticRunNonce
+        started_utc = [string]$guestRaw.started_utc
+        finished_utc = [DateTime]::UtcNow.ToString("o")
+        identity = [ordered]@{
+            parent_sha = $ParentSha
+            candidate_sha = $CandidateSha
+            sha = $ParentSha
+            tree = $parentTree
+            client_sha256 = $parentBuild.ClientSha256
+            server_sha256 = $parentBuild.ServerSha256
+            harness_sha256 = $candidateBuild.HarnessSha256
+            runner_sha256 = $runnerSourceSha256
+            recipe_sha256 = [string]$plan.recipe_sha256
+            plan_sha256 = (Get-FileHash -LiteralPath $hostPlanPath `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        trial = [ordered]@{
+            selection = [string]$plan.selection
+            run_kind = $RunKind
+            sequence = [int]$diagnosticTrial.sequence
+            scenario = [string]$diagnosticTrial.scenario
+            member = [string]$diagnosticTrial.member
+            pair = [int]$diagnosticTrial.pair
+            order = [int]$diagnosticTrial.order
+        }
+        environment = [ordered]@{
+            runner_os = "Windows"
+            runner_arch = "X64"
+            runner_label = "ferrum2-hyperv-guest"
+            vm_name = $approvedVmName
+            vm_id = $approvedVmId.ToString("D")
+            checkpoint_name = $approvedCheckpointName
+            checkpoint_id = $approvedCheckpointId.ToString("D")
+            rust_toolchain = "1.97.1"
+            cargo_profile = "profiling"
+            pair_schedule = "alternating-parent-candidate"
+            guest_build = [string]$guestResult.guest_build
+            cpu_model = [string]$guestResult.cpu_model
+            cpu_count = [int]$guestResult.cpu_count
+            memory_bytes = [uint64]$guestResult.memory_bytes
+            power_plan_guid = [string]$guestResult.power_plan_guid
+        }
+        support = [ordered]@{
+            pid = $SupportPid
+            owner = $SupportOwner
+            binary_sha256 = [string]$supportFinalContext.executable_sha256
+            listen_endpoints = @(
+                [ordered]@{ protocol = "tcp"; ip = $SupportIpv4; port = $SupportTcpPort }
+                $SupportUdpPort..($SupportUdpPort + 3) | ForEach-Object {
+                    [ordered]@{ protocol = "udp"; ip = $SupportIpv4; port = [int]$_ }
+                }
+            )
+        }
+        topology = [ordered]@{
+            support_ipv4 = $SupportIpv4
+            guest_ipv4 = [string]$guestNetworkPath.guest_ipv4
+            host_network_path_file = "host/host-network-path.json"
+            host_network_path_sha256 = (Get-FileHash `
+                -LiteralPath $diagnosticNetworkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            host_tun_bypassed = $true
+            host_network_mutations = @()
+        }
+        bounds = [ordered]@{
+            max_artifacts = 16
+            max_total_bytes = 268435456
+            max_artifact_bytes = 134217728
+            max_ndjson_line_bytes = 4096
+            max_ledger_events = $SupportDiagnosticMaxEvents
+        }
+        artifacts = $artifacts.ToArray()
+        failure_summary = $failureSummaryReference
+        cleanup = $cleanup
+    }
+    Write-Utf8FileNew -Path $hostDiagnosticPath `
+        -Text (($diagnosticDocument | ConvertTo-Json -Depth 10) + "`n")
+    $diagnosticValidatorRows = @(& $python -B $controlPath `
+        "windows-tun-validate-udp-diagnostic" `
+        "--plan" $hostPlanPath `
+        "--evidence-root" $hostDiagnosticRoot `
+        "--parent-sha" $ParentSha `
+        "--candidate-sha" $CandidateSha `
+        "--policy" $policyPath 2>&1)
+    $diagnosticValidatorExit = $LASTEXITCODE
+    $diagnosticValidatorLines = @($diagnosticValidatorRows | ForEach-Object {
+        if ($_ -is [Management.Automation.ErrorRecord]) {
+            [string]$_.Exception.Message
+        } else {
+            [string]$_
+        }
+    })
+    $expectedDiagnosticValidatorLine = "{0}`t{1}`t{2}`t{3}`t{4}`tqualification=false" -f @(
+        [string]$diagnosticTrial.scenario,
+        [string]$diagnosticTrial.member,
+        [int]$diagnosticTrial.pair,
+        $trialStatus,
+        $evidenceStatus
+    )
+    if ($diagnosticValidatorExit -ne 0 -or
+        $diagnosticValidatorLines.Count -ne 1 -or
+        [string]$diagnosticValidatorLines[0] -cne $expectedDiagnosticValidatorLine) {
+        $validatorDetail = ($diagnosticValidatorLines -join " | ")
+        if ($validatorDetail.Length -gt 2048) {
+            $validatorDetail = $validatorDetail.Substring(0, 2048)
+        }
+        throw "UDP diagnostic validation failed: exit=$diagnosticValidatorExit detail=$validatorDetail"
+    }
+    [pscustomobject]@{
+        schema = "ferrum2.windows-tun.hyperv-udp-diagnostic-result.v1"
+        status = $trialStatus
+        evidence_status = $evidenceStatus
+        qualification = $false
+        diagnostic = $hostDiagnosticPath
+        failure_summary = if ($null -ne $failureSummary) {
+            $hostDiagnosticFailurePath
+        } else {
+            $null
+        }
+        final_vm_state = $finalVmState
+        checkpoint_restored = $true
+        host_tun_bypassed = $true
+        host_network_mutations = 0
+    } | ConvertTo-Json -Depth 4
+    if ($trialStatus -ceq "PASS" -and $evidenceStatus -ceq "COMPLETE") {
+        exit 0
+    }
+    exit 1
+}
 
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
 $rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"

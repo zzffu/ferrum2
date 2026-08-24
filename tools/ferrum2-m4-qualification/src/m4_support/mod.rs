@@ -3913,7 +3913,7 @@ fn validate_drain(sample: &PairSample, baseline: &PairSample) -> Result<(), Stri
 }
 
 fn run_self_check() -> Result<String, String> {
-    const MUTATION_COUNT: u64 = 49;
+    const MUTATION_COUNT: u64 = 50;
     windows_tun::self_check()?;
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let good = EnvironmentIdentity {
@@ -4499,7 +4499,15 @@ ferrum2_tcp_replay_entries 0\n\
     expect_rejected("non-distinguishing M14 terminal oracle", || {
         validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, false)
     })?;
-    let root = repository_root()?.join("target/m4");
+    let incomplete_root = tempfile::tempdir().map_err(clean_io)?;
+    fs::write(incomplete_root.path().join("Cargo.toml"), "[workspace]\n").map_err(clean_io)?;
+    fs::write(incomplete_root.path().join("Cargo.lock"), "").map_err(clean_io)?;
+    expect_rejected("incomplete repository identity", || {
+        is_repository_root(incomplete_root.path())
+            .then_some(())
+            .ok_or_else(|| "repository identity is incomplete".to_owned())
+    })?;
+    let root = profile.repository_root.join("target/m4");
     fs::create_dir_all(&root).map_err(clean_io)?;
     let path = root.join("self-check.jsonl");
     let mut file = BufWriter::new(File::create(&path).map_err(clean_io)?);
@@ -5745,11 +5753,28 @@ fn sample_slot_delay(now: Instant, slot: Instant, next_slot: Instant) -> Result<
 }
 
 fn repository_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    let executable = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(clean_io)?;
+    executable
         .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
+        .and_then(find_repository_root)
         .ok_or_else(|| "repository root is unavailable".to_owned())
+}
+
+fn find_repository_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| is_repository_root(candidate))
+        .map(Path::to_path_buf)
+}
+
+fn is_repository_root(candidate: &Path) -> bool {
+    candidate.join("Cargo.toml").is_file()
+        && candidate.join("Cargo.lock").is_file()
+        && candidate
+            .join("tools/ferrum2-m4-qualification/Cargo.toml")
+            .is_file()
 }
 
 fn env(name: &str) -> Result<String, String> {
