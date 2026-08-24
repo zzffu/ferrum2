@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -1456,12 +1457,59 @@ fn serve_tcp(mut stream: TcpStream) -> Result<(), String> {
     }
 }
 
+fn bind_support_tcp(address: SocketAddr) -> Result<TcpListener, String> {
+    let backlog =
+        i32::try_from(SUPPORT_MAX_TCP_CONNECTIONS).expect("Windows TUN support backlog fits i32");
+    // Winsock uses a negative backlog as SOMAXCONN_HINT(n); a positive value
+    // above its ordinary provider limit is silently capped below this burst.
+    #[cfg(windows)]
+    let backlog = -backlog;
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )
+    .map_err(|error| format!("create Windows TUN support TCP socket failed: {error}"))?;
+    socket
+        .bind(&address.into())
+        .map_err(|error| format!("bind Windows TUN support TCP failed: {error}"))?;
+    socket
+        .listen(backlog)
+        .map_err(|error| format!("listen Windows TUN support TCP failed: {error}"))?;
+    Ok(socket.into())
+}
+
+fn self_check_support_backlog() -> Result<(), String> {
+    let listener = bind_support_tcp(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("read Windows TUN self-check TCP address failed: {error}"))?;
+    if address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) || address.port() == 0 {
+        return Err("Windows TUN support listener did not preserve its bind address".to_owned());
+    }
+    let clients = (0..TCP_FAIRNESS_FLOWS)
+        .map(|index| {
+            TcpStream::connect_timeout(&address, IO_TIMEOUT).map_err(|error| {
+                format!("queue Windows TUN support TCP burst {index} failed: {error}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    listener.set_nonblocking(true).map_err(|error| {
+        format!("set Windows TUN self-check listener nonblocking failed: {error}")
+    })?;
+    for _ in 0..clients.len() {
+        listener
+            .accept()
+            .map_err(|error| format!("accept Windows TUN support TCP burst failed: {error}"))?;
+    }
+    Ok(())
+}
+
 pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
     let arguments = parse_support(arguments)?;
     let tcp_address = SocketAddr::new(arguments.listen_ip, arguments.tcp_port);
     let udp_addresses = route_target_addresses(arguments.listen_ip, arguments.udp_port)?;
-    let tcp = TcpListener::bind(tcp_address)
-        .map_err(|error| format!("bind Windows TUN support TCP failed: {error}"))?;
+    let tcp = bind_support_tcp(tcp_address)?;
     let udp_sockets = udp_addresses
         .iter()
         .map(|address| {
@@ -1735,5 +1783,6 @@ pub(super) fn self_check() -> Result<(), String> {
             return Err("Windows TUN scenario label did not round-trip".to_owned());
         }
     }
+    self_check_support_backlog()?;
     Ok(())
 }

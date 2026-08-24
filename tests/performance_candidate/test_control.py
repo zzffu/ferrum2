@@ -1218,10 +1218,11 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 fragment_recipe["fragments_per_datagram"],
                 fragment_recipe["batch_datagrams"],
                 fragment_recipe["payload_bytes"],
+                fragment_recipe["tun_ring_capacity_bytes"],
                 fragment_recipe["tun_tcp_buffer_bytes"],
                 fragment_recipe["client_runtime_idle_timeout_milliseconds"],
             ),
-            (1_420, 1_468, 2, 8, 1_440, 32_768, 60_000),
+            (1_420, 1_468, 2, 8, 1_440, 8_388_608, 32_768, 60_000),
         )
         self.assertEqual(
             fragment_recipe["runner_source_sha256"],

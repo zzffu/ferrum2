@@ -239,7 +239,7 @@ WINDOWS_TUN_RUNTIME_RECIPE = {
     },
     "tun_mtu_bytes": 1_420,
     "support_underlay_minimum_ipv4_packet_bytes": 1_468,
-    "tun_ring_capacity_bytes": 131_072,
+    "tun_ring_capacity_bytes": 8_388_608,
     "tun_max_tcp_flows": 4_096,
     "tun_tcp_buffer_bytes": 32_768,
     "tun_max_udp_mappings": 8_192,

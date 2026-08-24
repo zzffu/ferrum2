@@ -454,6 +454,13 @@ function New-CanonicalPlan {
         $plannedRuntimeIdleTimeouts[0] -ne 60000) {
         throw "canonical Windows TUN plan client runtime idle timeout is invalid"
     }
+    $plannedTunRingCapacities = @($plan.scenarios.PSObject.Properties | ForEach-Object {
+        [long]$_.Value.recipe.tun_ring_capacity_bytes
+    } | Sort-Object -Unique)
+    if ($plannedTunRingCapacities.Count -ne 1 -or
+        $plannedTunRingCapacities[0] -ne 8388608) {
+        throw "canonical Windows TUN plan ring capacity is invalid"
+    }
     return $plan
 }
 
@@ -815,6 +822,8 @@ try {
     $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $hostPlanPath
     $runtimeIdleTimeoutMilliseconds = [int]$plan.scenarios."tcp-single-flow".recipe.
         client_runtime_idle_timeout_milliseconds
+    $tunRingCapacityBytes = [long]$plan.scenarios."tcp-single-flow".recipe.
+        tun_ring_capacity_bytes
     [void](New-NetworkModelPlan -Python $python -Output $hostNetworkModelPlanPath `
         -ExpectedSha256 ([string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256))
     $scheduleLines = @($plan.trials | ForEach-Object {
@@ -874,7 +883,7 @@ ipv4_address = "198.18.0.2/30"
 mtu = 1420
 auto_route = true
 route_address = ["{{SUPPORT_IPV4}}/32"]
-ring_capacity = 131072
+ring_capacity = {{TUN_RING_CAPACITY_BYTES}}
 ready_timeout_ms = 30000
 max_tcp_flows = 4096
 tcp_buffer_bytes = 32768
@@ -913,6 +922,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $clientTemplate = $clientTemplate.Replace(
         "{{RUNTIME_IDLE_TIMEOUT_MS}}",
         [string]$runtimeIdleTimeoutMilliseconds
+    )
+    $clientTemplate = $clientTemplate.Replace(
+        "{{TUN_RING_CAPACITY_BYTES}}",
+        [string]$tunRingCapacityBytes
     )
     $serverTemplate = @'
 schema_version = 2
