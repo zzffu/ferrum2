@@ -193,6 +193,13 @@ struct CommitRequest {
 struct ControlNotice {
     id: GenerationId,
     session_generation: u64,
+    kind: ControlNoticeKind,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ControlNoticeKind {
+    Commit,
+    Close,
 }
 
 struct AssociationLease {
@@ -235,11 +242,12 @@ impl AssociationLease {
         self.session_epoch.load(Ordering::Acquire) != self.session_generation
     }
 
-    fn notify(&self) -> Result<(), ()> {
+    fn notify(&self, kind: ControlNoticeKind) -> Result<(), ()> {
         self.controls
             .send(ControlNotice {
                 id: self.id,
                 session_generation: self.session_generation,
+                kind,
             })
             .map_err(|_| ())?;
         self.wake.signal();
@@ -282,7 +290,7 @@ impl AssociationLease {
             let _ = lock_unpoisoned(&self.commit).take();
             return Err(UdpCommitError::Rejected);
         }
-        if self.notify().is_err() {
+        if self.notify(ControlNoticeKind::Commit).is_err() {
             self.owner_close();
             return Err(UdpCommitError::Unavailable);
         }
@@ -306,7 +314,7 @@ impl AssociationLease {
 
     fn close(&self) {
         if self.phase.swap(LeasePhase::Closed as u8, Ordering::AcqRel) != LeasePhase::Closed as u8
-            && self.notify().is_err()
+            && self.notify(ControlNoticeKind::Close).is_err()
             && let Some(commit) = self.take_commit()
         {
             let _ = commit.reply.send(Err(UdpCommitError::Unavailable));
@@ -1153,9 +1161,13 @@ impl UdpTable {
         if notice.session_generation != self.session_generation
             || self.generations.current(notice.id.slot) != Some(notice.id)
         {
-            self.events.emit(TunEvent::UdpStaleGeneration);
-            self.events
-                .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
+            // Close is only an idempotent owner-reclamation hint. Once that owner has already
+            // recycled the identity, it carries no commit, datagram, or response to reject.
+            if notice.kind == ControlNoticeKind::Commit {
+                self.events.emit(TunEvent::UdpStaleGeneration);
+                self.events
+                    .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
+            }
             return Some(false);
         }
         let Some(lease) = self
@@ -2188,6 +2200,83 @@ mod tests {
         );
         assert_eq!(table.deadline_entry_count(), 0);
         drop(association);
+    }
+
+    #[tokio::test]
+    async fn expired_close_notice_is_an_idempotent_lifecycle_noop() {
+        let (mut table, mut candidates, _) = table(1, 10, UdpFiltering::EndpointIndependent, 41);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        table.set_event_sink(TunEventSink::new(move |event| {
+            captured.lock().expect("UDP events").push(event);
+        }));
+        assert_eq!(
+            table.admit(tuple(10_005, "192.0.2.1:53"), b"request", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
+
+        drop(association);
+        assert_eq!(
+            table.expire(11),
+            ExpireOutcome {
+                candidates: 0,
+                associations: 1,
+            }
+        );
+        observed.lock().expect("UDP events").clear();
+
+        assert_eq!(table.process_one_control(12, true), Some(false));
+        assert!(
+            observed.lock().expect("UDP events").is_empty(),
+            "an already-expired close cannot reject work or a packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_commit_notice_remains_counted_and_fail_closed() {
+        let (mut table, mut candidates, _) =
+            table(1, 60_000, UdpFiltering::EndpointIndependent, 41);
+        let first = tuple(10_005, "192.0.2.1:53");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&observed);
+        table.set_event_sink(TunEventSink::new(move |event| {
+            captured.lock().expect("UDP events").push(event);
+        }));
+        assert_eq!(
+            table.admit(first, b"request", 1_392, 0, true),
+            Admission::Provisional
+        );
+        let commit = tokio::spawn(candidates.recv().await.unwrap().commit_association());
+        tokio::task::yield_now().await;
+        table.invalidate_session(42, UdpResponseDropReason::SessionReset);
+        assert_eq!(
+            table.admit(first, b"fresh", 1_392, 1, true),
+            Admission::Provisional
+        );
+        let fresh_candidate = candidates.recv().await.unwrap();
+        observed.lock().expect("UDP events").clear();
+
+        assert_eq!(table.process_one_control(2, true), Some(false));
+        assert_eq!(
+            *observed.lock().expect("UDP events"),
+            [
+                TunEvent::UdpStaleGeneration,
+                TunEvent::PacketRejected(TunRejectReason::StaleGeneration),
+            ]
+        );
+        assert!(matches!(
+            commit.await.expect("commit task"),
+            Err(UdpCommitError::Rejected)
+        ));
+        assert_eq!(
+            table.provisional_candidates(),
+            1,
+            "the old commit cannot mutate the reused slot"
+        );
+        drop(fresh_candidate);
+        assert_eq!(table.process_one_control(3, true), Some(false));
+        assert_eq!(table.active_entries(), 0);
     }
 
     #[tokio::test]
