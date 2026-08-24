@@ -294,6 +294,8 @@ WINDOWS_TUN_SCENARIOS = {
             "active_seconds": 30,
             "flows": 256,
             "payload_bytes": 16_384,
+            "connection_readiness": "sequential_exact_round_trip",
+            "readiness_payload_bytes": 1_024,
         },
         "metrics": {
             "fairness": {
@@ -304,6 +306,7 @@ WINDOWS_TUN_SCENARIOS = {
         "checked_unit": "completed_flows",
         "minimum_checked_units": 256,
         "correctness_checks": (
+            "all_256_flows_ready",
             "all_256_flows_nonzero",
             "payload_exact",
             "no_gso",

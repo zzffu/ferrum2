@@ -19,6 +19,7 @@ const TCP_FAIRNESS_WARMUP: Duration = Duration::from_secs(10);
 const TCP_FAIRNESS_ACTIVE: Duration = Duration::from_secs(30);
 const TCP_FAIRNESS_FLOWS: usize = 256;
 const TCP_FAIRNESS_PAYLOAD: usize = 16_384;
+const TCP_FAIRNESS_READINESS_PAYLOAD: usize = 1_024;
 const UDP_WARMUP: Duration = Duration::from_secs(5);
 const UDP_ACTIVE: Duration = Duration::from_secs(30);
 const UDP_PAYLOAD: usize = 1_200;
@@ -527,10 +528,14 @@ fn tcp_fairness(address: SocketAddr) -> Result<Value, String> {
     let start = Arc::new(OnceLock::new());
     let cancel = Arc::new(AtomicBool::new(false));
     let mut streams = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
-    for _ in 0..TCP_FAIRNESS_FLOWS {
-        let stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
+    for flow in 0..TCP_FAIRNESS_FLOWS {
+        let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
             .map_err(|error| format!("fairness connect failed: {error}"))?;
         configure_tcp(&stream)?;
+        let readiness = checked_payload(TCP_FAIRNESS_READINESS_PAYLOAD, flow as u64);
+        let mut reply = vec![0; readiness.len()];
+        tcp_round_trip(&mut stream, &readiness, &mut reply)
+            .map_err(|error| format!("fairness readiness flow {flow} failed: {error}"))?;
         streams.push(stream);
     }
     let mut workers = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
@@ -624,6 +629,7 @@ fn tcp_fairness(address: SocketAddr) -> Result<Value, String> {
         "measurements": {"fairness": jain_ppb},
         "checked_units": TCP_FAIRNESS_FLOWS,
         "checks": {
+            "all_256_flows_ready": true,
             "all_256_flows_nonzero": true,
             "payload_exact": true,
             "no_gso": true

@@ -1280,6 +1280,17 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             ],
             32,
         )
+        fairness = plan["scenarios"]["tcp-256-flow-fairness"]
+        self.assertEqual(
+            (
+                fairness["recipe"]["connection_readiness"],
+                fairness["recipe"]["readiness_payload_bytes"],
+            ),
+            ("sequential_exact_round_trip", 1_024),
+        )
+        self.assertIn(
+            "all_256_flows_ready", fairness["correctness_checks"]
+        )
         self.assertEqual(
             plan["scenarios"]["wintun-ring-full-drop-rate"]["recipe"]
             ["payload_bytes"],
