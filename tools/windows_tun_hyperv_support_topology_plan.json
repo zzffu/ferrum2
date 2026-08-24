@@ -2,7 +2,8 @@
   "schema": 1,
   "vm": {
     "name": "Windows 10 MSIX packaging environment",
-    "id": "82e20295-1d30-48e7-a751-e21d35d872d4"
+    "id": "82e20295-1d30-48e7-a751-e21d35d872d4",
+    "automatic_checkpoints_enabled": false
   },
   "source_checkpoint": {
     "name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",

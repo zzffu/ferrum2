@@ -13,8 +13,11 @@ plan as JSON. It never starts the VM, loads a guest credential, or changes any n
 state. The mutating provisioning transaction is intentionally a separate review and invocation.
 #>
 
-[CmdletBinding()]
-param()
+[CmdletBinding(DefaultParameterSetName = "Inspect")]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = "Library", DontShow = $true)]
+    [switch]$LibraryOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -157,7 +160,8 @@ function Read-TopologyPlan {
         "schema", "vm", "source_checkpoint", "management_adapter", "support",
         "qualification_checkpoint"
     ) -Label "topology plan"
-    Assert-PropertyOrder -Value $plan.vm -Expected @("name", "id") -Label "VM plan"
+    Assert-PropertyOrder -Value $plan.vm `
+        -Expected @("name", "id", "automatic_checkpoints_enabled") -Label "VM plan"
     Assert-PropertyOrder -Value $plan.source_checkpoint `
         -Expected @("name", "id", "type") -Label "source checkpoint plan"
     Assert-PropertyOrder -Value $plan.management_adapter -Expected @(
@@ -173,6 +177,7 @@ function Read-TopologyPlan {
 
     if ($plan.schema -isnot [long] -or
         $plan.management_adapter.dynamic_mac_address -isnot [bool] -or
+        $plan.vm.automatic_checkpoints_enabled -isnot [bool] -or
         $plan.support.prefix_length -isnot [long] -or
         $plan.support.dns_servers -isnot [object[]] -or
         $plan.vm.name -isnot [string] -or $plan.vm.id -isnot [string] -or
@@ -196,7 +201,7 @@ function Read-TopologyPlan {
         $plan.qualification_checkpoint.type -isnot [string]) {
         throw "topology plan JSON types are invalid"
     }
-    if ($plan.schema -ne 1 -or
+    if ($plan.schema -ne 1 -or $plan.vm.automatic_checkpoints_enabled -ne $false -or
         [string]$plan.vm.name -cne "Windows 10 MSIX packaging environment" -or
         (ConvertTo-CanonicalGuid -Value $plan.vm.id -Label "VM") -cne
             "82e20295-1d30-48e7-a751-e21d35d872d4" -or
@@ -265,7 +270,8 @@ function Get-ApprovedVmContext {
     $checkpoint = @(Get-VMSnapshot -Id $checkpointId -ErrorAction Stop)
     if ($checkpoint.Count -ne 1 -or $checkpoint[0].VMId -ne $vmId -or
         [string]$checkpoint[0].Name -cne [string]$Plan.source_checkpoint.name -or
-        [string]$checkpoint[0].SnapshotType -cne [string]$Plan.source_checkpoint.type) {
+        [string]$checkpoint[0].SnapshotType -cne [string]$Plan.source_checkpoint.type -or
+        $checkpoint[0].IsAutomaticCheckpoint -ne $false) {
         throw "source checkpoint identity mismatch"
     }
     $checkpointByName = @(
@@ -274,8 +280,10 @@ function Get-ApprovedVmContext {
     if ($checkpointByName.Count -ne 1 -or $checkpointByName[0].Id -ne $checkpointId) {
         throw "source checkpoint name does not resolve to the approved ID"
     }
-    if ([string]$vm.CheckpointType -cne "Standard") {
-        throw "approved VM checkpoint type must remain Standard"
+    if ([string]$vm.CheckpointType -cne "Standard" -or
+        [bool]$vm.AutomaticCheckpointsEnabled -ne
+            [bool]$Plan.vm.automatic_checkpoints_enabled) {
+        throw "approved VM checkpoint policy must remain Standard without automatic checkpoints"
     }
     return [pscustomobject][ordered]@{ Vm = $vm; SourceCheckpoint = $checkpoint[0] }
 }
@@ -390,8 +398,8 @@ function Get-PersistentIpv4AddressRow {
             -ErrorAction Stop)
     } catch {
         if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound -and
-            [string]$_.FullyQualifiedErrorId -ceq
-                "CmdletizationQuery_NotFound_AddressFamily,Get-NetIPAddress") {
+            [string]$_.FullyQualifiedErrorId -like
+                "CmdletizationQuery_NotFound*,Get-NetIPAddress") {
             return @()
         }
         throw
@@ -404,8 +412,8 @@ function Get-PersistentIpv4RouteRow {
             -ErrorAction Stop)
     } catch {
         if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound -and
-            [string]$_.FullyQualifiedErrorId -ceq
-                "CmdletizationQuery_NotFound_AddressFamily,Get-NetRoute") {
+            [string]$_.FullyQualifiedErrorId -like
+                "CmdletizationQuery_NotFound*,Get-NetRoute") {
             return @()
         }
         throw
@@ -440,6 +448,12 @@ function Get-ReadOnlyPreflight {
 
     if ([string]$Context.Vm.State -cne "Off") {
         throw "approved VM must be Off during the read-only topology preflight"
+    }
+    $checkpointInventory = @(Get-VMSnapshot -VM $Context.Vm -ErrorAction Stop)
+    if ($checkpointInventory.Count -ne 1 -or
+        $checkpointInventory[0].Id -ne $Context.SourceCheckpoint.Id -or
+        $checkpointInventory[0].IsAutomaticCheckpoint -ne $false) {
+        throw "source VM checkpoint inventory is not the unique approved Standard checkpoint"
     }
     Assert-DefaultSwitch -Plan $Plan
     $management = Get-ManagementAdapter -Vm $Context.Vm -Plan $Plan
@@ -523,9 +537,15 @@ function Get-ReadOnlyPreflight {
     if ($natCollisions.Count -ne 0) {
         throw "planned support /30 overlaps an existing NAT"
     }
+    $hostTun = Get-HostTunIdentity
+    if ($hostTun.present -ne $true -or [string]$hostTun.name -cne "tun0" -or
+        [string]$hostTun.status -cne "Up") {
+        throw "protected host tun0 must be uniquely present and Up"
+    }
 
     return [pscustomobject][ordered]@{
         vm_state = [string]$Context.Vm.State
+        automatic_checkpoints_enabled = [bool]$Context.Vm.AutomaticCheckpointsEnabled
         source_checkpoint_id = $Context.SourceCheckpoint.Id.ToString("D")
         source_checkpoint_management_instance_id = $snapshotManagement.InstanceGuid
         management_adapter_id = [string]$management.Id
@@ -538,8 +558,12 @@ function Get-ReadOnlyPreflight {
         support_mac_outside_dynamic_pool = $true
         support_network_unused = $true
         qualification_checkpoint_absent = $true
-        host_tun = Get-HostTunIdentity
+        host_tun = $hostTun
     }
+}
+
+if ($LibraryOnly) {
+    return
 }
 
 $planDocument = Read-TopologyPlan

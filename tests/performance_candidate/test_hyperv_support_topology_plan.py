@@ -49,11 +49,12 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
             {
                 "name": "Windows 10 MSIX packaging environment",
                 "id": "82e20295-1d30-48e7-a751-e21d35d872d4",
+                "automatic_checkpoints_enabled": False,
             },
         )
         self.assertEqual(
             list(plan["vm"]),
-            ["name", "id"],
+            ["name", "id", "automatic_checkpoints_enabled"],
         )
         self.assertEqual(
             list(plan["source_checkpoint"]),
@@ -147,6 +148,7 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
         self.assertNotEqual(support_mac, management_mac)
         self.assertTrue(plan["support"]["vm_mac_address"].startswith("00155D"))
         self.assertIs(plan["management_adapter"]["dynamic_mac_address"], True)
+        self.assertIs(plan["vm"]["automatic_checkpoints_enabled"], False)
 
     def test_plan_is_utf8_lf_terminated_without_a_bom(self):
         payload = PLAN_PATH.read_bytes()
