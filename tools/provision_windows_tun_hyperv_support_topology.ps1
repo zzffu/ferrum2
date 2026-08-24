@@ -602,40 +602,126 @@ try {
         [Guid]$createdCheckpointRows[0].Id -ne [Guid]::Empty) {
         $createdCheckpointId = [Guid]$createdCheckpointRows[0].Id
     }
-    $checkpointCandidates = @(Get-NewQualificationCheckpointCandidate -Plan $plan `
-        -InitialCheckpointIds $initialCheckpointIds `
-        -ProvisioningName $createdCheckpointProvisioningName)
+    $checkpointDeadline = [DateTime]::UtcNow.AddSeconds($ReadinessTimeoutSeconds)
+    do {
+        $checkpointInventory = @(Get-VMSnapshot -VM $vm -ErrorAction Stop)
+        $newCheckpointRows = @($checkpointInventory | Where-Object {
+            $initialCheckpointIds -cnotcontains $_.Id.ToString("D")
+        })
+        $initialCheckpointRows = @($checkpointInventory | Where-Object {
+            $initialCheckpointIds -ccontains $_.Id.ToString("D")
+        })
+        $checkpointCandidates = @($newCheckpointRows | Where-Object {
+            [string]$_.Name -ceq $createdCheckpointProvisioningName -and
+            [string]$_.SnapshotType -ceq "Standard" -and
+            $_.IsAutomaticCheckpoint -eq $false -and
+            $_.VMId -eq [Guid][string]$plan.vm.id -and
+            $null -ne $_.ParentCheckpointId -and
+            $_.ParentCheckpointId -ne [Guid]::Empty -and
+            [Guid]$_.ParentCheckpointId -eq [Guid][string]$plan.source_checkpoint.id
+        })
+        if (($newCheckpointRows.Count -eq 1 -and
+                $initialCheckpointRows.Count -eq $initialCheckpointIds.Count -and
+                $checkpointCandidates.Count -eq 1) -or
+            $newCheckpointRows.Count -gt 1 -or $checkpointCandidates.Count -gt 1) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $checkpointDeadline)
     if ($checkpointCandidates.Count -eq 1) {
         $createdCheckpointId = [Guid]$checkpointCandidates[0].Id
     }
     if ($null -ne $checkpointCreationFailure) {
         throw $checkpointCreationFailure
     }
-    if ($createdCheckpointRows.Count -ne 1 -or $checkpointCandidates.Count -ne 1 -or
-        $createdCheckpointId -eq [Guid]::Empty -or
-        $createdCheckpointRows[0].Id -ne $createdCheckpointId -or
+    $checkpointIdentityViolations = @(
+        if ($createdCheckpointRows.Count -gt 1) {
+            "passthru_count=$($createdCheckpointRows.Count)"
+        }
+        if ($newCheckpointRows.Count -ne 1) {
+            "new_inventory_count=$($newCheckpointRows.Count)"
+        }
+        if ($initialCheckpointRows.Count -ne $initialCheckpointIds.Count) {
+            "initial_inventory_count=$($initialCheckpointRows.Count)"
+        }
+        if ($checkpointCandidates.Count -ne 1) {
+            "candidate_count=$($checkpointCandidates.Count)"
+        }
+        if ($createdCheckpointId -eq [Guid]::Empty) {
+            "empty_checkpoint_id"
+        }
+        if ($createdCheckpointRows.Count -eq 1 -and
+            $createdCheckpointRows[0].Id -ne $createdCheckpointId) {
+            "passthru_id_mismatch"
+        }
+    )
+    if ($checkpointIdentityViolations.Count -ne 0 -or
         [string]$checkpointCandidates[0].Name -cne $createdCheckpointProvisioningName -or
         [string]$checkpointCandidates[0].SnapshotType -cne "Standard" -or
         $checkpointCandidates[0].IsAutomaticCheckpoint -ne $false) {
-        throw "new qualification checkpoint identity is invalid"
+        throw "new qualification checkpoint identity is invalid: " +
+            ($checkpointIdentityViolations -join ",")
     }
     $renamedCheckpointRows = @($checkpointCandidates[0] | Rename-VMSnapshot `
         -NewName ([string]$plan.qualification_checkpoint.name) -Passthru `
         -Confirm:$false -ErrorAction Stop)
-    $renamedCheckpoint = @(Get-VMSnapshot -Id $createdCheckpointId -ErrorAction Stop)
-    if ($renamedCheckpointRows.Count -ne 1 -or
-        $renamedCheckpointRows[0].Id -ne $createdCheckpointId -or
-        $renamedCheckpoint.Count -ne 1 -or
-        $renamedCheckpoint[0].VMId -ne [Guid][string]$plan.vm.id -or
-        [string]$renamedCheckpoint[0].Name -cne
-            [string]$plan.qualification_checkpoint.name -or
-        [string]$renamedCheckpoint[0].SnapshotType -cne "Standard" -or
-        $renamedCheckpoint[0].IsAutomaticCheckpoint -ne $false -or
-        (ConvertTo-CanonicalGuid -Value $renamedCheckpoint[0].ParentCheckpointId `
-            -Label "qualification checkpoint parent") -cne
-            (ConvertTo-CanonicalGuid -Value $plan.source_checkpoint.id `
-                -Label "source checkpoint")) {
-        throw "qualification checkpoint rename did not preserve the exact identity"
+    $renameDeadline = [DateTime]::UtcNow.AddSeconds($ReadinessTimeoutSeconds)
+    do {
+        $renamedCheckpoint = @(Get-VMSnapshot -VM $vm -ErrorAction Stop |
+            Where-Object { $_.Id -eq $createdCheckpointId })
+        if ($renamedCheckpoint.Count -eq 1 -and
+            [string]$renamedCheckpoint[0].Name -ceq
+                [string]$plan.qualification_checkpoint.name -and
+            $renamedCheckpoint[0].VMId -eq [Guid][string]$plan.vm.id -and
+            [string]$renamedCheckpoint[0].SnapshotType -ceq "Standard" -and
+            $renamedCheckpoint[0].IsAutomaticCheckpoint -eq $false -and
+            $null -ne $renamedCheckpoint[0].ParentCheckpointId -and
+            $renamedCheckpoint[0].ParentCheckpointId -ne [Guid]::Empty -and
+            [Guid]$renamedCheckpoint[0].ParentCheckpointId -eq
+                [Guid][string]$plan.source_checkpoint.id) {
+            break
+        }
+        if ($renamedCheckpoint.Count -gt 1) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $renameDeadline)
+    $renameIdentityViolations = @(
+        if ($renamedCheckpointRows.Count -gt 1) {
+            "passthru_count=$($renamedCheckpointRows.Count)"
+        }
+        if ($renamedCheckpointRows.Count -eq 1 -and
+            $renamedCheckpointRows[0].Id -ne $createdCheckpointId) {
+            "passthru_id_mismatch"
+        }
+        if ($renamedCheckpoint.Count -ne 1) {
+            "inventory_count=$($renamedCheckpoint.Count)"
+        }
+        if ($renamedCheckpoint.Count -eq 1) {
+            if ($renamedCheckpoint[0].VMId -ne [Guid][string]$plan.vm.id) {
+                "vm_id"
+            }
+            if ([string]$renamedCheckpoint[0].Name -cne
+                    [string]$plan.qualification_checkpoint.name) {
+                "name"
+            }
+            if ([string]$renamedCheckpoint[0].SnapshotType -cne "Standard") {
+                "snapshot_type"
+            }
+            if ($renamedCheckpoint[0].IsAutomaticCheckpoint -ne $false) {
+                "automatic_checkpoint"
+            }
+            if ($null -eq $renamedCheckpoint[0].ParentCheckpointId -or
+                $renamedCheckpoint[0].ParentCheckpointId -eq [Guid]::Empty -or
+                [Guid]$renamedCheckpoint[0].ParentCheckpointId -ne
+                    [Guid][string]$plan.source_checkpoint.id) {
+                "parent_checkpoint_id"
+            }
+        }
+    )
+    if ($renameIdentityViolations.Count -ne 0) {
+        throw "qualification checkpoint rename did not preserve the exact identity: " +
+            ($renameIdentityViolations -join ",")
     }
 
     Restore-ExactCheckpoint -Plan $plan -CheckpointId $createdCheckpointId `
