@@ -27,6 +27,8 @@ const UDP_BATCH: usize = 8;
 const UDP_MINIMUM_DATAGRAMS: u64 = 4_096;
 const ASSOCIATIONS: usize = 8_192;
 const ASSOCIATION_BOOTSTRAP_BATCH: usize = 1;
+const ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS: usize = 8;
+const ASSOCIATION_BOOTSTRAP_PACING_DELAY: Duration = Duration::from_millis(25);
 const ASSOCIATION_LOOKUP_BATCH: usize = 8;
 const ASSOCIATION_LOOKUP_ROUNDS: usize = 64;
 const ASSOCIATION_WARMUP: Duration = Duration::from_secs(5);
@@ -1035,9 +1037,18 @@ fn association_round(
     seed_prefix: u64,
     reply: &mut [u8; 32],
     batch_associations: usize,
+    phase: &str,
+    pacing: Option<(usize, Duration)>,
 ) -> Result<(), String> {
     if batch_associations == 0 || !sockets.len().is_multiple_of(batch_associations) {
         return Err("association batch bounds are invalid".to_owned());
+    }
+    if let Some((pacing_associations, _)) = pacing
+        && (pacing_associations == 0
+            || !pacing_associations.is_multiple_of(batch_associations)
+            || !sockets.len().is_multiple_of(pacing_associations))
+    {
+        return Err("association pacing bounds are invalid".to_owned());
     }
     for (batch_index, batch) in sockets.chunks(batch_associations).enumerate() {
         let base = batch_index * batch_associations;
@@ -1048,10 +1059,18 @@ fn association_round(
             let payload = checked_payload(32, seed);
             if socket
                 .send(&payload)
-                .map_err(|error| format!("association batch send failed: {error}"))?
+                .map_err(|error| {
+                    format!(
+                        "association batch send failed: phase={phase} association_index={} error={error}",
+                        base + offset
+                    )
+                })?
                 != payload.len()
             {
-                return Err("association batch sent a partial datagram".to_owned());
+                return Err(format!(
+                    "association batch sent a partial datagram: phase={phase} association_index={}",
+                    base + offset
+                ));
             }
         }
         for (offset, socket) in batch.iter().enumerate() {
@@ -1061,10 +1080,25 @@ fn association_round(
             let payload = checked_payload(32, seed);
             let received = socket
                 .recv(reply)
-                .map_err(|error| format!("association batch receive failed: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "association batch receive failed: phase={phase} association_index={} error={error}",
+                        base + offset
+                    )
+                })?;
             if received != payload.len() || reply[..received] != payload {
-                return Err("association batch payload mismatch".to_owned());
+                return Err(format!(
+                    "association batch payload mismatch: phase={phase} association_index={}",
+                    base + offset
+                ));
             }
+        }
+        let completed = base + batch.len();
+        if let Some((pacing_associations, delay)) = pacing
+            && completed < sockets.len()
+            && completed.is_multiple_of(pacing_associations)
+        {
+            thread::sleep(delay);
         }
     }
     Ok(())
@@ -1076,11 +1110,28 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     for _ in 0..ASSOCIATIONS {
         sockets.push(connected_udp(address)?);
     }
-    association_round(&sockets, 0, &mut reply, ASSOCIATION_BOOTSTRAP_BATCH)?;
+    association_round(
+        &sockets,
+        0,
+        &mut reply,
+        ASSOCIATION_BOOTSTRAP_BATCH,
+        "bootstrap",
+        Some((
+            ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS,
+            ASSOCIATION_BOOTSTRAP_PACING_DELAY,
+        )),
+    )?;
     let warmup_deadline = Instant::now() + ASSOCIATION_WARMUP;
     let mut warmup_round = 1_u64;
     while Instant::now() < warmup_deadline || warmup_round == 1 {
-        association_round(&sockets, warmup_round, &mut reply, ASSOCIATION_LOOKUP_BATCH)?;
+        association_round(
+            &sockets,
+            warmup_round,
+            &mut reply,
+            ASSOCIATION_LOOKUP_BATCH,
+            "warmup",
+            None,
+        )?;
         warmup_round = warmup_round
             .checked_add(1)
             .ok_or_else(|| "association warmup round overflow".to_owned())?;
@@ -1093,6 +1144,8 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
             warmup_round + round as u64,
             &mut reply,
             ASSOCIATION_LOOKUP_BATCH,
+            "lookup",
+            None,
         )?;
         lookups = lookups
             .checked_add(ASSOCIATIONS as u64)
@@ -1110,6 +1163,8 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
         u32::MAX as u64,
         &mut reply,
         ASSOCIATION_LOOKUP_BATCH,
+        "refresh",
+        None,
     )?;
     drop(sockets);
     Ok(json!({
@@ -1681,8 +1736,12 @@ pub(super) fn self_check() -> Result<(), String> {
     }
     if ASSOCIATIONS != 8_192
         || ASSOCIATION_BOOTSTRAP_BATCH != 1
+        || ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS != 8
+        || ASSOCIATION_BOOTSTRAP_PACING_DELAY != Duration::from_millis(25)
         || ASSOCIATION_LOOKUP_BATCH != 8
         || !ASSOCIATIONS.is_multiple_of(ASSOCIATION_BOOTSTRAP_BATCH)
+        || !ASSOCIATIONS.is_multiple_of(ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS)
+        || !ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS.is_multiple_of(ASSOCIATION_BOOTSTRAP_BATCH)
         || !ASSOCIATIONS.is_multiple_of(ASSOCIATION_LOOKUP_BATCH)
         || ASSOCIATION_LOOKUP_ROUNDS != 64
     {

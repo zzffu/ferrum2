@@ -350,6 +350,8 @@ WINDOWS_TUN_SCENARIOS = {
             "warmup_seconds": 5,
             "associations": 8_192,
             "bootstrap_batch_associations": 1,
+            "bootstrap_pacing_associations": 8,
+            "bootstrap_pacing_delay_ms": 25,
             "batch_associations": 8,
             "lookup_rounds": 64,
             "expiry_rounds": 1,

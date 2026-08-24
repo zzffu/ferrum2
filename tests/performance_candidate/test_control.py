@@ -1292,6 +1292,8 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             (
                 association_recipe["associations"],
                 association_recipe["bootstrap_batch_associations"],
+                association_recipe["bootstrap_pacing_associations"],
+                association_recipe["bootstrap_pacing_delay_ms"],
                 association_recipe["batch_associations"],
                 association_recipe["lookup_rounds"],
                 association_recipe["payload_bytes"],
@@ -1301,7 +1303,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     "tun_udp_response_queue_packets_per_association"
                 ],
             ),
-            (8_192, 1, 8, 64, 32, 8_192, 8, 8),
+            (8_192, 1, 8, 25, 8, 64, 32, 8_192, 8, 8),
         )
         fairness = plan["scenarios"]["tcp-256-flow-fairness"]
         self.assertEqual(
