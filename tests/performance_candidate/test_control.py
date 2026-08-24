@@ -733,12 +733,22 @@ class WindowsTunPerformanceTests(unittest.TestCase):
     PARENT_SHA = "2" * 40
     CANDIDATE_SHA = "3" * 40
 
+    @staticmethod
+    def topology_environment() -> dict[str, object]:
+        return {
+            "checkpoint_id": "81000000-0000-4000-8000-000000000001",
+            "topology_manifest_sha256": "8" * 64,
+            "topology_plan_sha256": "9" * 64,
+            "support_switch_id": "82000000-0000-4000-8000-000000000002",
+        }
+
     def policy(self, *, calibrated: bool = False) -> dict[str, object]:
         policy = CONTROL.load_windows_tun_policy(WINDOWS_TUN_POLICY_PATH)
         if not calibrated:
             return policy
         environment = {
             **CONTROL.WINDOWS_TUN_GUEST,
+            **self.topology_environment(),
             "recipe_sha256": CONTROL.windows_tun_recipe_sha256(),
             "guest_build": "19045.6216",
             "cpu_model": "Synthetic CPU",
@@ -768,6 +778,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
     def environment(self) -> dict[str, object]:
         return {
             **CONTROL.WINDOWS_TUN_GUEST,
+            **self.topology_environment(),
             "guest_build": "19045.6216",
             "cpu_model": "Synthetic CPU",
             "cpu_count": 8,
@@ -851,6 +862,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         plan_sha256 = "a" * 64
         run_nonce = "18446744073709551615"
         support_ip = "192.0.2.10"
+        environment = self.environment()
         endpoints = [
             {"protocol": "tcp", "ip": support_ip, "port": 44150},
             *[
@@ -1095,8 +1107,8 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "qualification": False,
             "run_nonce": run_nonce,
             **{field: identity[field] for field in identity if field != "plan_sha256"},
-            "vm_id": CONTROL.WINDOWS_TUN_GUEST["vm_id"],
-            "checkpoint_id": CONTROL.WINDOWS_TUN_GUEST["checkpoint_id"],
+            "vm_id": environment["vm_id"],
+            "checkpoint_id": environment["checkpoint_id"],
             "support_pid": support["pid"],
             "support_owner": support["owner"],
             "support_sha256": support["binary_sha256"],
@@ -1209,7 +1221,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "finished_utc": "2026-08-24T01:01:00.0000000Z",
             "identity": identity,
             "trial": trial,
-            "environment": self.environment(),
+            "environment": environment,
             "support": support,
             "topology": {
                 "support_ipv4": support_ip,
@@ -2155,6 +2167,38 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         for candidate, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(CONTROL.CandidateControlError, message):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+    def test_trial_rejects_invalid_dynamic_topology_identity(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="tcp-single-flow",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        cases = {
+            "checkpoint_id": "00000000-0000-0000-0000-000000000000",
+            "support_switch_id": "not-a-guid",
+            "topology_manifest_sha256": "A" * 64,
+            "topology_plan_sha256": True,
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(row)
+                candidate["environment"][field] = value
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError, rf"{field} is invalid"
+                ):
                     CONTROL.validate_windows_tun_trial(
                         candidate,
                         plan=plan,

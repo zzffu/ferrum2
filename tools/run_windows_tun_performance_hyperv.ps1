@@ -18,12 +18,12 @@ parameter and the credential must remain outside this repository.
 The portable guest controller defaults to the SHA-256-pinned PowerShell 7.4.19 win-x64 archive at
 %LOCALAPPDATA%\Ferrum2\PowerShell-7.4.19-win-x64.zip. The archive must remain outside the repository.
 
-Run mode requires an already provisioned candidate qualification support listener reachable from
-the guest. It provides TCP echo, ordinary UDP echo, bounded fragment acknowledgements, and four
-contiguous UDP ports. The listener must bind an existing, active physical host IPv4 address rather
-than a host TUN or Hyper-V switch address. Before any TUN session starts, the runner proves that the
-guest forward path uses its approved Default Switch underlay and that the host return path is the
-same switch's direct local route. The path and listener identities are retained as evidence.
+Run mode requires the SHA-256-pinned external manifest created by the reviewed support-topology
+provisioner and an already provisioned candidate qualification support listener. The listener
+provides TCP echo, ordinary UDP echo, bounded fragment acknowledgements, and four contiguous UDP
+ports, and must bind the manifest's dedicated host /30 address. Before any TUN session starts, the
+runner proves that both directions use the isolated Internal switch and the exact manifest-bound
+host and guest interfaces. The path and generated identities are retained as evidence.
 
 PlanOnly validates repository lineage and emits the closed 90-trial plan without building, starting
 the VM, loading a credential, staging files, or executing traffic.
@@ -68,19 +68,15 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [string]$WintunZip,
 
-    [Parameter(ParameterSetName = "Run")]
-    [string]$PowerShellZip,
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+    [string]$TopologyManifestPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
-    [ValidateScript({
-        $parsed = $null
-        [Net.IPAddress]::TryParse($_, [ref]$parsed) -and
-            $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
-            -not $parsed.Equals([Net.IPAddress]::Any) -and
-            -not [Net.IPAddress]::IsLoopback($parsed) -and
-            $parsed.GetAddressBytes()[0] -lt 224
-    })]
-    [string]$SupportIpv4,
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$TopologyManifestSha256,
+
+    [Parameter(ParameterSetName = "Run")]
+    [string]$PowerShellZip,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [ValidateRange(1, 65535)]
@@ -170,11 +166,17 @@ if ($instrumentedDiagnosticMode) {
     throw "support diagnostic ledger parameters require DiagnosticProfile UdpFlowBoundary"
 }
 
-$approvedVmName = "Windows 10 MSIX packaging environment"
-$approvedVmId = [Guid]"82e20295-1d30-48e7-a751-e21d35d872d4"
-$approvedCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
-$approvedCheckpointId = [Guid]"1e570209-faf7-4248-8167-aa0687cdb8cf"
-$approvedVmSwitchName = "Default Switch"
+$approvedVmName = ""
+$approvedVmId = [Guid]::Empty
+$approvedCheckpointName = ""
+$approvedCheckpointId = [Guid]::Empty
+$approvedVmSwitchName = ""
+$supportGuestIpv4 = ""
+$supportGuestInterfaceAlias = ""
+$supportNetwork = ""
+$supportPrefixLength = 0
+$supportVmMacAddress = ""
+$topologyManifestDocument = $null
 $expectedWintunZipSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
 $expectedPowerShellVersion = "7.4.19"
@@ -192,11 +194,15 @@ $guestNetworkPathProbePath = Join-Path $PSScriptRoot `
     "get_windows_tun_guest_network_path.ps1"
 $hostNetworkPathHelperPath = Join-Path $PSScriptRoot `
     "windows_tun_host_network_path.ps1"
+$topologyRuntimePath = Join-Path $PSScriptRoot `
+    "windows_tun_hyperv_support_topology_runtime.ps1"
 $networkModelControllerPath = Join-Path $repositoryRoot `
     "tests\performance_candidate\windows_tun_network_model.py"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 $runnerSourceSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).
     Hash.ToLowerInvariant()
+$topologyRuntimeSha256 = ""
+$guestNetworkPathProbeSourceSha256 = ""
 
 function Test-PathWithinRoot {
     param(
@@ -296,23 +302,38 @@ function Import-ApprovedGuestCredential {
     $resolved = Resolve-ExternalFile -Path $candidate -Label "guest credential" -MaximumBytes 1048576
     $credential = Import-Clixml -LiteralPath $resolved -ErrorAction Stop
     if ($credential -isnot [Management.Automation.PSCredential] -or
-        [string]::IsNullOrWhiteSpace($credential.UserName)) {
-        throw "guest credential file does not contain a PSCredential"
+        [string]$credential.UserName -cne "ferrum2-test") {
+        throw "guest credential file does not contain the approved local PSCredential"
     }
     return $credential
 }
 
 function Get-ApprovedVmContext {
+    if ($null -eq $script:topologyManifestDocument) {
+        throw "support topology manifest is unavailable in run mode"
+    }
+    Assert-Ferrum2SupportTopologyManifestUnchanged `
+        -Document $script:topologyManifestDocument
     $vm = Get-VM -Id $script:approvedVmId -ErrorAction Stop
-    if ($vm.Name -cne $script:approvedVmName) { throw "approved VM identity mismatch" }
+    if ($vm.Name -cne $script:approvedVmName -or
+        $vm.AutomaticCheckpointsEnabled -ne $false) {
+        throw "approved VM identity mismatch"
+    }
     $byName = @(Get-VM -Name $script:approvedVmName -ErrorAction Stop)
     if ($byName.Count -ne 1 -or $byName[0].Id -ne $script:approvedVmId) {
         throw "approved VM name does not resolve to the approved ID"
     }
-    $checkpoint = @(Get-VMSnapshot -VM $vm -ErrorAction Stop | Where-Object {
+    $checkpoints = @(Get-VMSnapshot -VM $vm -ErrorAction Stop)
+    $checkpoint = @($checkpoints | Where-Object {
         $_.Id -eq $script:approvedCheckpointId
     })
-    if ($checkpoint.Count -ne 1 -or $checkpoint[0].Name -cne $script:approvedCheckpointName) {
+    $sourceCheckpointId = [Guid][string]$script:topologyManifestDocument.Value.
+        source_checkpoint.id
+    $sourceCheckpoint = @($checkpoints | Where-Object { $_.Id -eq $sourceCheckpointId })
+    if ($checkpoints.Count -ne 2 -or $sourceCheckpoint.Count -ne 1 -or
+        $checkpoint.Count -ne 1 -or
+        $checkpoint[0].Name -cne $script:approvedCheckpointName -or
+        [Guid][string]$checkpoint[0].ParentCheckpointId -ne $sourceCheckpointId) {
         throw "approved checkpoint identity mismatch"
     }
     $checkpointByName = @(
@@ -514,6 +535,19 @@ function New-CanonicalPlan {
     if ($plannedRunnerHashes.Count -ne 1 -or
         $plannedRunnerHashes[0] -cne $script:runnerSourceSha256) {
         throw "canonical Windows TUN plan does not bind this runner source"
+    }
+    foreach ($binding in @(
+        @("topology_plan_source_sha256", [string]$script:topologyPlanDocument.Sha256),
+        @("topology_runtime_source_sha256", [string]$script:topologyRuntimeSha256),
+        @("host_network_path_source_sha256", [string]$script:hostNetworkPathHelperSha256),
+        @("guest_network_path_source_sha256", [string]$script:guestNetworkPathProbeSourceSha256)
+    )) {
+        $plannedHashes = @($plan.scenarios.PSObject.Properties | ForEach-Object {
+            [string]$_.Value.recipe.($binding[0])
+        } | Sort-Object -Unique)
+        if ($plannedHashes.Count -ne 1 -or $plannedHashes[0] -cne $binding[1]) {
+            throw "canonical Windows TUN plan does not bind $($binding[0])"
+        }
     }
     $plannedRuntimeIdleTimeouts = @($plan.scenarios.PSObject.Properties | ForEach-Object {
         [int]$_.Value.recipe.client_runtime_idle_timeout_milliseconds
@@ -1612,7 +1646,7 @@ $git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0].Source
 $python = @(Get-Command python -CommandType Application -ErrorAction Stop)[0].Source
 foreach ($required in @(
     $policyPath, $controlPath, $collectorPath, $guestNetworkPathProbePath,
-    $hostNetworkPathHelperPath, $networkModelControllerPath
+    $hostNetworkPathHelperPath, $topologyRuntimePath, $networkModelControllerPath
 )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "required performance controller file is missing: $required"
@@ -1621,6 +1655,37 @@ foreach ($required in @(
 if ($instrumentedDiagnosticMode -and
     -not (Test-Path -LiteralPath $udpBoundaryCollectorPath -PathType Leaf)) {
     throw "required UDP boundary collector file is missing: $udpBoundaryCollectorPath"
+}
+. $topologyRuntimePath -LibraryOnly
+$topologyRuntimeSha256 = (Get-FileHash -LiteralPath $topologyRuntimePath `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
+$guestNetworkPathProbeSourceSha256 = (Get-FileHash `
+    -LiteralPath $guestNetworkPathProbePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$topologyPlanDocument = Read-Ferrum2SupportTopologyPlanDocument
+$approvedVmName = [string]$topologyPlanDocument.Value.vm.name
+$approvedVmId = [Guid][string]$topologyPlanDocument.Value.vm.id
+$approvedCheckpointName = [string]$topologyPlanDocument.Value.
+    qualification_checkpoint.name
+$approvedVmSwitchName = [string]$topologyPlanDocument.Value.support.switch_name
+$SupportIpv4 = [string]$topologyPlanDocument.Value.support.host_ipv4
+$supportGuestIpv4 = [string]$topologyPlanDocument.Value.support.guest_ipv4
+$supportGuestInterfaceAlias = [string]$topologyPlanDocument.Value.support.guest_interface_alias
+$supportNetwork = [string]$topologyPlanDocument.Value.support.network
+$supportPrefixLength = [int]$topologyPlanDocument.Value.support.prefix_length
+$supportVmMacAddress = ConvertTo-Ferrum2CanonicalMacAddress `
+    -Value ([string]$topologyPlanDocument.Value.support.vm_mac_address) `
+    -Label "planned support VM adapter"
+$supportGuestInterfaceGuid = [Guid]::Empty
+$supportGuestMtuBytes = 0
+if (-not $PlanOnly) {
+    $topologyManifestDocument = Read-Ferrum2SupportTopologyManifest `
+        -Path $TopologyManifestPath -ExpectedSha256 $TopologyManifestSha256 `
+        -RepositoryRoot $repositoryRoot
+    $approvedCheckpointId = [Guid][string]$topologyManifestDocument.Value.
+        qualification_checkpoint.id
+    $supportGuestInterfaceGuid = [Guid][string]$topologyManifestDocument.Value.support.guest.
+        support_interface_guid
+    $supportGuestMtuBytes = [int]$topologyManifestDocument.Value.support.guest.mtu_bytes
 }
 . $hostNetworkPathHelperPath
 $hostNetworkPathHelperSha256 = (Get-FileHash -LiteralPath $hostNetworkPathHelperPath `
@@ -1671,15 +1736,17 @@ if ($PlanOnly) {
             vm_name = $approvedVmName
             vm_id = $approvedVmId.ToString("D")
             checkpoint_name = $approvedCheckpointName
-            checkpoint_id = $approvedCheckpointId.ToString("D")
+            checkpoint_id = $null
+            topology_plan_sha256 = [string]$topologyPlanDocument.Sha256
+            topology_manifest_required_at_run = $true
             host_actions = @(
-                "validate physical support binding", "archive exact commits",
+                "validate manifest-bound isolated support binding", "archive exact commits",
                 "build profiling binaries", "stage files",
-                "validate direct Default Switch return path", "reduce evidence"
+                "validate direct Internal-switch return path", "reduce evidence"
             )
             guest_actions = @(
                 "reject gateway and DNS support collisions", "probe support",
-                "validate Default Switch underlay", "run 90 collector trials",
+                "validate manifest-bound /30 underlay", "run 90 collector trials",
                 "collect 10 raw route-once and 10 raw lifecycle sidecars",
                 "clean each TUN session"
             )
@@ -1700,10 +1767,12 @@ if ($LASTEXITCODE -ne 0) { throw "run mode requires no unstaged tracked changes"
 & $git -C $repositoryRoot diff --cached --quiet --exit-code
 if ($LASTEXITCODE -ne 0) { throw "run mode requires no staged changes" }
 $supportHostBaseline = Get-HostSupportContext `
+    -TopologyDocument $topologyManifestDocument `
     -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
     -ProcessId $SupportPid -ProcessOwner $SupportOwner `
     -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
 $vmNetworkBaseline = Get-ApprovedVmNetworkContext `
+    -TopologyDocument $topologyManifestDocument `
     -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
 
 if ([string]::IsNullOrWhiteSpace($PowerShellZip)) {
@@ -1797,6 +1866,7 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 $artifactRoot = Join-Path $temporaryRoot "input\artifacts"
 $runtimeRoot = Join-Path $temporaryRoot "input\runtime"
 $hostPlanPath = Join-Path $hostEvidenceRoot "plan.json"
+$hostTopologyManifestPath = Join-Path $hostEvidenceRoot "topology-manifest.json"
 $hostNetworkModelPlanPath = Join-Path $hostEvidenceRoot "network-model-plan.json"
 $hostNetworkPathPath = Join-Path $hostEvidenceRoot "host-network-path.json"
 $hostSchedulePath = Join-Path $hostEvidenceRoot "trial-schedule.tsv"
@@ -1823,6 +1893,14 @@ $hostEndpointSnapshotFailures = [Collections.Generic.List[string]]::new()
 
 try {
     [IO.Directory]::CreateDirectory($hostEvidenceRoot) | Out-Null
+    Copy-Item -LiteralPath $topologyManifestDocument.Path `
+        -Destination $hostTopologyManifestPath -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $hostTopologyManifestPath -Algorithm SHA256).
+            Hash.ToLowerInvariant() -cne $topologyManifestDocument.Sha256 -or
+        (Get-Item -LiteralPath $hostTopologyManifestPath -Force).Length -ne
+            $topologyManifestDocument.Length) {
+        throw "evidence topology manifest copy changed"
+    }
     [IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
     [IO.Directory]::CreateDirectory($runtimeRoot) | Out-Null
     if ($instrumentedDiagnosticMode) {
@@ -1908,10 +1986,20 @@ try {
             -LiteralPath $udpBoundaryCollectorPath `
             -Algorithm SHA256).Hash.ToLowerInvariant()
     }
+    $guestNetworkPathProbeDestination = Join-Path $temporaryRoot `
+        "input\get_windows_tun_guest_network_path.ps1"
     Copy-Item -LiteralPath $guestNetworkPathProbePath `
-        -Destination (Join-Path $temporaryRoot "input") -ErrorAction Stop
+        -Destination $guestNetworkPathProbeDestination -ErrorAction Stop
     $guestNetworkPathProbeSha256 = (Get-FileHash -LiteralPath $guestNetworkPathProbePath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($guestNetworkPathProbeSha256 -cne $guestNetworkPathProbeSourceSha256) {
+        throw "guest network-path probe source changed after plan generation"
+    }
+    if ((Get-FileHash -LiteralPath $guestNetworkPathProbeDestination `
+            -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        $guestNetworkPathProbeSourceSha256) {
+        throw "staged guest network-path probe identity mismatch"
+    }
     Copy-Item -LiteralPath $networkModelControllerPath `
         -Destination (Join-Path $temporaryRoot "input\windows_tun_network_model.py") `
         -ErrorAction Stop
@@ -1945,11 +2033,16 @@ udp_filtering = "endpoint_independent"
 [[outbounds]]
 tag = "direct"
 type = "direct"
+bind_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
+inet4_bind_address = "{{GUEST_SUPPORT_IPV4}}"
 [[outbounds]]
 tag = "proxy"
 server = "{{SERVER_ADDRESS}}:{{SERVER_PORT}}"
+bind_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
+inet4_bind_address = "{{GUEST_SUPPORT_IPV4}}"
 [route]
-auto_detect_interface = true
+auto_detect_interface = false
+default_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
 final = "proxy"
 [[route.rules]]
 inbound = "tun-in"
@@ -1987,8 +2080,11 @@ tag = "server-in"
 listen = "{{SERVER_ADDRESS}}:{{SERVER_PORT}}"
 [[outbounds]]
 tag = "direct"
+bind_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
+inet4_bind_address = "{{GUEST_SUPPORT_IPV4}}"
 [route]
-auto_detect_interface = true
+auto_detect_interface = false
+default_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
 final = "direct"
 [udp]
 enabled = true
@@ -2009,6 +2105,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         -Text ($serverTemplate.TrimStart([char[]]"`r`n") + "`n")
 
     $supportHostReadback = Get-HostSupportContext `
+        -TopologyDocument $topologyManifestDocument `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
         -ProcessId $SupportPid -ProcessOwner $SupportOwner `
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
@@ -2020,6 +2117,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         throw "support diagnostic binary does not match the candidate harness"
     }
     $vmNetworkReadback = Get-ApprovedVmNetworkContext `
+        -TopologyDocument $topologyManifestDocument `
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-ApprovedVmNetworkContextUnchanged `
         -Expected $vmNetworkBaseline -Actual $vmNetworkReadback
@@ -2050,6 +2148,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $guestNetworkPathJsonRows = @(Invoke-Command -Session $session -ErrorAction Stop `
         -ArgumentList @(
             $guestRoot, $SupportIpv4, $SupportTcpPort, $SupportUdpPort,
+            $supportGuestIpv4, $supportGuestInterfaceAlias, $supportNetwork,
+            $supportPrefixLength, $supportVmMacAddress,
+            $supportGuestInterfaceGuid.ToString("D"), $supportGuestMtuBytes,
             $guestNetworkPathProbeSha256, $candidateBuild.HarnessSha256,
             $portableRuntime.PowerShellExecutableSha256,
             $minimumSupportIpv4PacketBytes
@@ -2059,6 +2160,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 [string]$SupportAddress,
                 [int]$SupportTcp,
                 [int]$SupportUdp,
+                [string]$ExpectedGuestAddress,
+                [string]$ExpectedGuestInterfaceAlias,
+                [string]$ExpectedSupportNetwork,
+                [int]$ExpectedSupportPrefixLength,
+                [string]$ExpectedSupportMacAddress,
+                [string]$ExpectedSupportInterfaceGuid,
+                [int]$ExpectedSupportMtuBytes,
                 [string]$ExpectedNetworkPathProbeSha256,
                 [string]$ExpectedHarnessSha256,
                 [string]$ExpectedPowerShellSha256,
@@ -2110,6 +2218,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             $pathOutput = @(& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
                 -File $networkPathProbe -SupportIpv4 $SupportAddress `
                 -SupportPort $SupportUdp -ManagedAdapterName "Ferrum2Perf" `
+                -ExpectedGuestIpv4 $ExpectedGuestAddress `
+                -ExpectedInterfaceAlias $ExpectedGuestInterfaceAlias `
+                -ExpectedNetwork $ExpectedSupportNetwork `
+                -ExpectedPrefixLength $ExpectedSupportPrefixLength `
+                -ExpectedMacAddress $ExpectedSupportMacAddress `
+                -ExpectedInterfaceGuid $ExpectedSupportInterfaceGuid `
+                -ExpectedMtuBytes $ExpectedSupportMtuBytes `
                 -MinimumUnderlayIpv4PacketBytes $MinimumSupportIpv4PacketBytes `
                 -AsJson 2>&1)
             if ($LASTEXITCODE -ne 0 -or $pathOutput.Count -ne 1) {
@@ -2141,12 +2256,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $guestNetworkPathJson = [string]$guestNetworkPathJsonRows[0]
     $guestNetworkPath = $guestNetworkPathJson | ConvertFrom-Json -Depth 5
     $supportHostAfterProbe = Get-HostSupportContext `
+        -TopologyDocument $topologyManifestDocument `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
         -ProcessId $SupportPid -ProcessOwner $SupportOwner `
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-HostSupportContextUnchanged `
         -Expected $supportHostBaseline -Actual $supportHostAfterProbe
     $vmNetworkAfterProbe = Get-ApprovedVmNetworkContext `
+        -TopologyDocument $topologyManifestDocument `
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
     Assert-ApprovedVmNetworkContextUnchanged `
         -Expected $vmNetworkBaseline -Actual $vmNetworkAfterProbe
@@ -2154,8 +2271,14 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         -GuestPath $guestNetworkPath -VmNetworkContext $vmNetworkAfterProbe `
         -ExpectedSupportIpv4 $SupportIpv4
     $networkPathEvidence = [ordered]@{
-        schema = 1
+        schema = 2
         kind = "windows_tun_host_network_path"
+        topology = [ordered]@{
+            manifest_sha256 = [string]$topologyManifestDocument.Sha256
+            plan_sha256 = [string]$topologyPlanDocument.Sha256
+            support_switch_id = [string]$topologyManifestDocument.Value.support.switch.switch_id
+            qualification_checkpoint_id = $approvedCheckpointId.ToString("D")
+        }
         support_listener = $supportHostAfterProbe
         approved_vm_network = $vmNetworkAfterProbe
         guest_forward_path = $guestNetworkPath
@@ -2200,6 +2323,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $approvedVmId.ToString("D"),
         $approvedCheckpointName,
         $approvedCheckpointId.ToString("D"),
+        [string]$topologyManifestDocument.Sha256,
+        [string]$topologyPlanDocument.Sha256,
+        $approvedVmSwitchName,
+        [string]$topologyManifestDocument.Value.support.switch.switch_id,
         $expectedWintunZipSha256,
         $expectedWintunDllSha256,
         $portableRuntime.PowerShellVersion,
@@ -2219,6 +2346,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $SupportIpv4,
         $SupportTcpPort,
         $SupportUdpPort,
+        $supportGuestIpv4,
+        $supportGuestInterfaceAlias,
+        $supportNetwork,
+        $supportPrefixLength,
+        $supportVmMacAddress,
+        $supportGuestInterfaceGuid.ToString("D"),
+        $supportGuestMtuBytes,
         $SupportPid,
         $SupportOwner,
         $minimumSupportIpv4PacketBytes,
@@ -2234,6 +2368,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [string]$VmId,
             [string]$CheckpointName,
             [string]$CheckpointId,
+            [string]$TopologyManifestSha256Value,
+            [string]$TopologyPlanSha256Value,
+            [string]$SupportSwitchName,
+            [string]$SupportSwitchId,
             [string]$WintunZipSha256,
             [string]$WintunDllSha256,
             [string]$PowerShellVersion,
@@ -2253,6 +2391,13 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [string]$SupportAddress,
             [int]$SupportTcp,
             [int]$SupportUdp,
+            [string]$ExpectedGuestAddress,
+            [string]$ExpectedGuestInterfaceAlias,
+            [string]$ExpectedSupportNetwork,
+            [int]$ExpectedSupportPrefixLength,
+            [string]$ExpectedSupportMacAddress,
+            [string]$ExpectedSupportInterfaceGuid,
+            [int]$ExpectedSupportMtuBytes,
             [int]$SupportProcessId,
             [string]$SupportProcessOwner,
             [int]$MinimumSupportIpv4PacketBytes,
@@ -2673,6 +2818,13 @@ public static class Ferrum2PerfProcessGroup {
                 "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                 "-File", $probe, "-SupportIpv4", $SupportAddress,
                 "-SupportPort", [string]$SupportUdp,
+                "-ExpectedGuestIpv4", $ExpectedGuestAddress,
+                "-ExpectedInterfaceAlias", $ExpectedGuestInterfaceAlias,
+                "-ExpectedNetwork", $ExpectedSupportNetwork,
+                "-ExpectedPrefixLength", [string]$ExpectedSupportPrefixLength,
+                "-ExpectedMacAddress", $ExpectedSupportMacAddress,
+                "-ExpectedInterfaceGuid", $ExpectedSupportInterfaceGuid,
+                "-ExpectedMtuBytes", [string]$ExpectedSupportMtuBytes,
                 "-ManagedAdapterName", $AdapterName,
                 "-MinimumUnderlayIpv4PacketBytes",
                 [string]$MinimumSupportIpv4PacketBytes, "-AsJson"
@@ -2683,19 +2835,21 @@ public static class Ferrum2PerfProcessGroup {
             $actual = [string]$probeResult.Output[0] | ConvertFrom-Json
             $fields = @(
                 "schema", "support_ipv4", "guest_ipv4", "guest_prefix_length",
-                "guest_interface_index", "guest_interface_alias", "guest_interface_mtu_bytes",
+                "guest_interface_index", "guest_interface_alias", "guest_interface_guid",
+                "guest_interface_mtu_bytes",
                 "guest_mac_address",
-                "guest_route_prefix", "guest_route_next_hop", "guest_dns_ipv4"
+                "guest_route_prefix", "guest_route_next_hop", "guest_dns_servers"
             )
             if ((@($actual.PSObject.Properties.Name) -join "|") -cne ($fields -join "|") -or
                 (@($ExpectedGuestNetworkPath.PSObject.Properties.Name) -join "|") -cne
                     ($fields -join "|") -or
-                [int]$actual.schema -ne 1 -or [int]$ExpectedGuestNetworkPath.schema -ne 1) {
+                [int]$actual.schema -ne 2 -or [int]$ExpectedGuestNetworkPath.schema -ne 2) {
                 throw "guest network-path evidence shape is invalid"
             }
             foreach ($field in @(
                 "support_ipv4", "guest_ipv4", "guest_prefix_length", "guest_interface_index",
-                "guest_interface_alias", "guest_interface_mtu_bytes", "guest_mac_address",
+                "guest_interface_alias", "guest_interface_guid", "guest_interface_mtu_bytes",
+                "guest_mac_address",
                 "guest_route_prefix",
                 "guest_route_next_hop"
             )) {
@@ -2703,9 +2857,9 @@ public static class Ferrum2PerfProcessGroup {
                     throw "guest network path changed: field=$field"
                 }
             }
-            if ((@($actual.guest_dns_ipv4) -join "|") -cne
-                (@($ExpectedGuestNetworkPath.guest_dns_ipv4) -join "|")) {
-                throw "guest network path changed: field=guest_dns_ipv4"
+            if ((@($actual.guest_dns_servers) -join "|") -cne
+                (@($ExpectedGuestNetworkPath.guest_dns_servers) -join "|")) {
+                throw "guest network path changed: field=guest_dns_servers"
             }
             return $actual
         }
@@ -2974,6 +3128,10 @@ public static class Ferrum2PerfProcessGroup {
                 vm_id = $VmId
                 checkpoint_name = $CheckpointName
                 checkpoint_id = $CheckpointId
+                topology_manifest_sha256 = $TopologyManifestSha256Value
+                topology_plan_sha256 = $TopologyPlanSha256Value
+                support_switch_name = $SupportSwitchName
+                support_switch_id = $SupportSwitchId
                 guest_product = [string]$version.ProductName
                 guest_edition = [string]$version.EditionID
                 guest_architecture = "AMD64"
@@ -3124,10 +3282,14 @@ public static class Ferrum2PerfProcessGroup {
             $clientText = $clientText.Replace("{{ADAPTER_NAME}}", $AdapterName).
                 Replace("{{SUPPORT_IPV4}}", $SupportAddress).
                 Replace("{{SUPPORT_UDP_PORT}}", [string]$SupportUdp).
+                Replace("{{SUPPORT_INTERFACE_ALIAS}}", $ExpectedGuestInterfaceAlias).
+                Replace("{{GUEST_SUPPORT_IPV4}}", $ExpectedGuestAddress).
                 Replace("{{SERVER_ADDRESS}}", $guestUnderlayAddress).
                 Replace("{{SERVER_PORT}}", [string]$serverPort).
                 Replace("{{METRICS_PORT}}", [string]$metricsPort)
             $serverText = (Get-Content -LiteralPath (Join-Path $InputRoot "server.toml.template") -Raw).
+                Replace("{{SUPPORT_INTERFACE_ALIAS}}", $ExpectedGuestInterfaceAlias).
+                Replace("{{GUEST_SUPPORT_IPV4}}", $ExpectedGuestAddress).
                 Replace("{{SERVER_ADDRESS}}", $guestUnderlayAddress).
                 Replace("{{SERVER_PORT}}", [string]$serverPort).
                 Replace("{{SERVER_METRICS_PORT}}", [string]$serverMetricsPort)
@@ -3273,6 +3435,10 @@ public static class Ferrum2PerfProcessGroup {
                     "-ServerBinary", $server,
                     "-HarnessBinary", $harness,
                     "-IdentityLedger", $ledger,
+                    "-ExpectedCheckpointId", $CheckpointId,
+                    "-ExpectedTopologyManifestSha256", $TopologyManifestSha256Value,
+                    "-ExpectedTopologyPlanSha256", $TopologyPlanSha256Value,
+                    "-ExpectedSupportSwitchId", $SupportSwitchId,
                     "-NetworkModelPlan", $networkModelPlan,
                     "-NetworkModelController", $networkModelController,
                     "-AdapterName", $AdapterName,
@@ -3714,6 +3880,11 @@ if ($null -ne $restoreFailure) {
 }
 if ($null -ne $runFailure) { throw $runFailure }
 if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complete" }
+$finalTopologyContext = Get-Ferrum2ApprovedHyperVTopologyContext `
+    -Document $topologyManifestDocument -ReadinessTimeoutSeconds 10
+if ([string]$finalTopologyContext.Vm.State -cne "Off") {
+    throw "approved topology final VM state is not Off"
+}
 
 if ($instrumentedDiagnosticMode) {
     $finalVmState = [string](Get-ApprovedVmContext).Vm.State
@@ -3725,6 +3896,7 @@ if ($instrumentedDiagnosticMode) {
         throw "exported UDP diagnostic evidence roots are incomplete"
     }
     $supportFinalContext = Get-HostSupportContext `
+        -TopologyDocument $topologyManifestDocument `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
         -ProcessId $SupportPid -ProcessOwner $SupportOwner `
         -MinimumIpv4PacketBytes $minimumSupportIpv4PacketBytes
@@ -4252,6 +4424,9 @@ if ($instrumentedDiagnosticMode) {
             vm_id = $approvedVmId.ToString("D")
             checkpoint_name = $approvedCheckpointName
             checkpoint_id = $approvedCheckpointId.ToString("D")
+            topology_manifest_sha256 = [string]$topologyManifestDocument.Sha256
+            topology_plan_sha256 = [string]$topologyPlanDocument.Sha256
+            support_switch_id = [string]$topologyManifestDocument.Value.support.switch.switch_id
             rust_toolchain = "1.97.1"
             cargo_profile = "profiling"
             pair_schedule = "alternating-parent-candidate"
@@ -4434,6 +4609,10 @@ if ($diagnosticMode) {
         host_network_path = $hostNetworkPathPath
         host_network_path_sha256 = (Get-FileHash -LiteralPath $hostNetworkPathPath `
             -Algorithm SHA256).Hash.ToLowerInvariant()
+        topology_manifest = $hostTopologyManifestPath
+        topology_manifest_sha256 = [string]$topologyManifestDocument.Sha256
+        topology_plan_sha256 = [string]$topologyPlanDocument.Sha256
+        support_switch_id = [string]$topologyManifestDocument.Value.support.switch.switch_id
         vm_name = $approvedVmName
         vm_id = $approvedVmId.ToString("D")
         checkpoint_name = $approvedCheckpointName
@@ -4475,6 +4654,14 @@ $summary = Get-Content -LiteralPath $hostSummaryPath -Raw -Encoding utf8 | Conve
     host_network_path = $hostNetworkPathPath
     host_network_path_sha256 = (Get-FileHash -LiteralPath $hostNetworkPathPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
+    topology_manifest = $hostTopologyManifestPath
+    topology_manifest_sha256 = [string]$topologyManifestDocument.Sha256
+    topology_plan_sha256 = [string]$topologyPlanDocument.Sha256
+    support_switch_id = [string]$topologyManifestDocument.Value.support.switch.switch_id
+    vm_name = $approvedVmName
+    vm_id = $approvedVmId.ToString("D")
+    checkpoint_name = $approvedCheckpointName
+    checkpoint_id = $approvedCheckpointId.ToString("D")
     final_vm_state = [string](Get-ApprovedVmContext).Vm.State
     checkpoint_restored = $true
     host_tun_bypassed = $true

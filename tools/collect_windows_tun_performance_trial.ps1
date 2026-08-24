@@ -41,6 +41,16 @@ param(
     [Parameter(Mandatory = $true)][string]$ServerBinary,
     [Parameter(Mandatory = $true)][string]$HarnessBinary,
     [Parameter(Mandatory = $true)][string]$IdentityLedger,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')]
+    [string]$ExpectedCheckpointId,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$ExpectedTopologyManifestSha256,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$ExpectedTopologyPlanSha256,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')]
+    [string]$ExpectedSupportSwitchId,
     [Parameter(Mandatory = $true)][string]$NetworkModelPlan,
     [Parameter(Mandatory = $true)][string]$NetworkModelController,
     [Parameter(Mandatory = $true)][string]$AdapterName,
@@ -61,8 +71,8 @@ if ($MetricsPort -eq $ServerMetricsPort) {
 
 $ExpectedVmName = "Windows 10 MSIX packaging environment"
 $ExpectedVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
-$ExpectedCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
-$ExpectedCheckpointId = "1e570209-faf7-4248-8167-aa0687cdb8cf"
+$ExpectedCheckpointName = "Ferrum2-WindowsTun-InternalSupport-v1"
+$ExpectedSupportSwitchName = "Ferrum2 TUN Support"
 $ExpectedRunnerLabel = "ferrum2-hyperv-guest"
 $Utf8NoBom = [Text.UTF8Encoding]::new($false)
 
@@ -864,6 +874,8 @@ if ($Scenario -in @("udp-route-once", "network-lifecycle")) {
 $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding utf8 | ConvertFrom-Json -Depth 6
 $requiredLedger = @(
     "schema", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id",
+    "topology_manifest_sha256", "topology_plan_sha256", "support_switch_name",
+    "support_switch_id",
     "guest_product", "guest_edition", "guest_architecture", "guest_version", "guest_build",
     "candidate_sha", "probe_sha256", "client_sha256", "server_sha256", "support_listener"
 )
@@ -879,12 +891,28 @@ Assert-Condition (
     $ledger.vm_id -ceq $ExpectedVmId -and
     $ledger.checkpoint_name -ceq $ExpectedCheckpointName -and
     $ledger.checkpoint_id -ceq $ExpectedCheckpointId -and
+    $ledger.topology_manifest_sha256 -ceq $ExpectedTopologyManifestSha256 -and
+    $ledger.topology_plan_sha256 -ceq $ExpectedTopologyPlanSha256 -and
+    $ledger.support_switch_name -ceq $ExpectedSupportSwitchName -and
+    $ledger.support_switch_id -ceq $ExpectedSupportSwitchId -and
     $ledger.guest_architecture -ceq "AMD64" -and
     $ledger.candidate_sha -ceq $memberSha -and
     $ledger.probe_sha256 -ceq $collectorHash -and
     $ledger.client_sha256 -ceq $clientHash -and
     $ledger.server_sha256 -ceq $serverHash
 ) "identity ledger does not bind this member and approved guest"
+Assert-Condition (
+    $ledger.topology_manifest_sha256 -is [string] -and
+    $ledger.topology_manifest_sha256 -cmatch '^[0-9a-f]{64}$' -and
+    $ledger.topology_plan_sha256 -is [string] -and
+    $ledger.topology_plan_sha256 -cmatch '^[0-9a-f]{64}$' -and
+    $ledger.support_switch_name -is [string] -and
+    -not [string]::IsNullOrWhiteSpace([string]$ledger.support_switch_name) -and
+    $ledger.support_switch_id -is [string] -and
+    $ledger.support_switch_id -cmatch `
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -and
+    $ledger.support_switch_id -cne "00000000-0000-0000-0000-000000000000"
+) "identity ledger topology binding is invalid"
 Assert-ExactProperties $ledger.support_listener @("ipv4", "tcp_port", "udp_port", "pid", "owner") "support listener"
 Assert-Condition (
     $ledger.support_listener.pid -is [long] -and
@@ -1971,6 +1999,9 @@ try {
         vm_id = $ExpectedVmId
         checkpoint_name = $ExpectedCheckpointName
         checkpoint_id = $ExpectedCheckpointId
+        topology_manifest_sha256 = [string]$ledger.topology_manifest_sha256
+        topology_plan_sha256 = [string]$ledger.topology_plan_sha256
+        support_switch_id = [string]$ledger.support_switch_id
         rust_toolchain = "1.97.1"
         cargo_profile = "profiling"
         pair_schedule = "alternating-parent-candidate"

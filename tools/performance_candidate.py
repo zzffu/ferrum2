@@ -54,6 +54,32 @@ WINDOWS_TUN_RUNNER_PATH = (
 WINDOWS_TUN_RUNNER_SOURCE_SHA256 = hashlib.sha256(
     WINDOWS_TUN_RUNNER_PATH.read_bytes()
 ).hexdigest()
+WINDOWS_TUN_TOPOLOGY_PLAN_SOURCE_SHA256 = hashlib.sha256(
+    (
+        WINDOWS_TUN_REPOSITORY_ROOT
+        / "tools"
+        / "windows_tun_hyperv_support_topology_plan.json"
+    ).read_bytes()
+).hexdigest()
+WINDOWS_TUN_TOPOLOGY_RUNTIME_SOURCE_SHA256 = hashlib.sha256(
+    (
+        WINDOWS_TUN_REPOSITORY_ROOT
+        / "tools"
+        / "windows_tun_hyperv_support_topology_runtime.ps1"
+    ).read_bytes()
+).hexdigest()
+WINDOWS_TUN_HOST_NETWORK_PATH_SOURCE_SHA256 = hashlib.sha256(
+    (
+        WINDOWS_TUN_REPOSITORY_ROOT / "tools" / "windows_tun_host_network_path.ps1"
+    ).read_bytes()
+).hexdigest()
+WINDOWS_TUN_GUEST_NETWORK_PATH_SOURCE_SHA256 = hashlib.sha256(
+    (
+        WINDOWS_TUN_REPOSITORY_ROOT
+        / "tools"
+        / "get_windows_tun_guest_network_path.ps1"
+    ).read_bytes()
+).hexdigest()
 WINDOWS_TUN_COLLECTOR_SOURCE_SHA256 = hashlib.sha256(
     (WINDOWS_TUN_REPOSITORY_ROOT / "tools" / "collect_windows_tun_performance_trial.ps1").read_bytes()
 ).hexdigest()
@@ -240,14 +266,25 @@ WINDOWS_TUN_GUEST = {
     "runner_label": "ferrum2-hyperv-guest",
     "vm_name": "Windows 10 MSIX packaging environment",
     "vm_id": "82e20295-1d30-48e7-a751-e21d35d872d4",
-    "checkpoint_name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
-    "checkpoint_id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
+    "checkpoint_name": "Ferrum2-WindowsTun-InternalSupport-v1",
     "rust_toolchain": "1.97.1",
     "cargo_profile": "profiling",
     "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
 }
+WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS = frozenset(
+    {
+        "checkpoint_id",
+        "topology_manifest_sha256",
+        "topology_plan_sha256",
+        "support_switch_id",
+    }
+)
 WINDOWS_TUN_RUNTIME_RECIPE = {
     "runner_source_sha256": WINDOWS_TUN_RUNNER_SOURCE_SHA256,
+    "topology_plan_source_sha256": WINDOWS_TUN_TOPOLOGY_PLAN_SOURCE_SHA256,
+    "topology_runtime_source_sha256": WINDOWS_TUN_TOPOLOGY_RUNTIME_SOURCE_SHA256,
+    "host_network_path_source_sha256": WINDOWS_TUN_HOST_NETWORK_PATH_SOURCE_SHA256,
+    "guest_network_path_source_sha256": WINDOWS_TUN_GUEST_NETWORK_PATH_SOURCE_SHA256,
     "collector_source_sha256": WINDOWS_TUN_COLLECTOR_SOURCE_SHA256,
     "harness_source_sha256": WINDOWS_TUN_HARNESS_SOURCE_SHA256,
     "preflight_probe": {
@@ -646,6 +683,7 @@ WINDOWS_TUN_POLICY_METRIC_FIELDS = frozenset(
 WINDOWS_TUN_CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
     {
         *WINDOWS_TUN_GUEST,
+        *WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS,
         "recipe_sha256",
         "guest_build",
         "cpu_model",
@@ -702,6 +740,7 @@ WINDOWS_TUN_TRIAL_FIELDS = frozenset(
 WINDOWS_TUN_ENVIRONMENT_FIELDS = frozenset(
     {
         *WINDOWS_TUN_GUEST,
+        *WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS,
         "guest_build",
         "cpu_model",
         "cpu_count",
@@ -3731,6 +3770,9 @@ def validate_windows_tun_policy(policy: dict[str, object]) -> None:
                     raise CandidateControlError(
                         f"Windows TUN calibration environment {field} is unsupported"
                     )
+            _validate_windows_tun_topology_environment(
+                environment, label="Windows TUN calibration environment"
+            )
             if environment["recipe_sha256"] != expected_recipe_sha256:
                 raise CandidateControlError(
                     "Windows TUN calibration recipe does not match this controller"
@@ -3782,6 +3824,26 @@ def windows_tun_policy_is_calibrated(policy: dict[str, object]) -> bool:
     first_metric = next(iter(WINDOWS_TUN_SCENARIOS[first_scenario]["metrics"]))
     entry = policy["scenarios"][first_scenario]["metrics"][first_metric]
     return entry["calibration_environment"] is not None
+
+
+def _validate_windows_tun_topology_environment(
+    environment: dict[str, object], *, label: str
+) -> None:
+    guid = re.compile(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    )
+    for field in ("checkpoint_id", "support_switch_id"):
+        value = environment[field]
+        if (
+            type(value) is not str
+            or guid.fullmatch(value) is None
+            or value == "00000000-0000-0000-0000-000000000000"
+        ):
+            raise CandidateControlError(f"{label} {field} is invalid")
+    for field in ("topology_manifest_sha256", "topology_plan_sha256"):
+        value = environment[field]
+        if type(value) is not str or SHA256.fullmatch(value) is None:
+            raise CandidateControlError(f"{label} {field} is invalid")
 
 
 def create_windows_tun_plan(
@@ -3875,6 +3937,9 @@ def _validate_windows_tun_environment(environment: object) -> dict[str, object]:
             raise CandidateControlError(
                 f"Windows TUN evidence environment {field} is unsupported"
             )
+    _validate_windows_tun_topology_environment(
+        environment, label="Windows TUN evidence environment"
+    )
     for field in ("guest_build", "cpu_model", "power_plan_guid"):
         if type(environment[field]) is not str or not environment[field].strip():
             raise CandidateControlError(
