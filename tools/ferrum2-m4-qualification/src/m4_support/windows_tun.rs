@@ -2,12 +2,12 @@ use serde_json::{Value, json};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,346 @@ const ROUTE_PAYLOAD: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const SUPPORT_TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const SUPPORT_MAX_TCP_CONNECTIONS: usize = 1_024;
+const UDP_DIAGNOSTIC_PAYLOAD_LEN: usize = 32;
+const UDP_DIAGNOSTIC_MAGIC: [u8; 4] = *b"F2U1";
+const UDP_DIAGNOSTIC_VERSION: u8 = 1;
+const UDP_DIAGNOSTIC_MAX_EVENTS: usize = 65_536;
+const UDP_DIAGNOSTIC_MAX_EVENT_BYTES: usize = 4 * 1024;
+const UDP_WORKLOAD_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-workload-flow-ledger.v1";
+const UDP_SUPPORT_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-support-ledger.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum UdpDiagnosticPhase {
+    Bootstrap = 1,
+    Warmup = 2,
+    Lookup = 3,
+    Refresh = 4,
+}
+
+impl UdpDiagnosticPhase {
+    fn parse(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Bootstrap),
+            2 => Some(Self::Warmup),
+            3 => Some(Self::Lookup),
+            4 => Some(Self::Refresh),
+            _ => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Bootstrap => "bootstrap",
+            Self::Warmup => "warmup",
+            Self::Lookup => "lookup",
+            Self::Refresh => "refresh",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UdpDiagnosticPayload {
+    phase: UdpDiagnosticPhase,
+    trial_sequence: u16,
+    association_index: u32,
+    round: u32,
+    run_nonce: u64,
+    packet_nonce: u64,
+}
+
+impl UdpDiagnosticPayload {
+    fn encode(self) -> [u8; UDP_DIAGNOSTIC_PAYLOAD_LEN] {
+        let mut payload = [0_u8; UDP_DIAGNOSTIC_PAYLOAD_LEN];
+        payload[..4].copy_from_slice(&UDP_DIAGNOSTIC_MAGIC);
+        payload[4] = UDP_DIAGNOSTIC_VERSION;
+        payload[5] = self.phase as u8;
+        payload[6..8].copy_from_slice(&self.trial_sequence.to_be_bytes());
+        payload[8..12].copy_from_slice(&self.association_index.to_be_bytes());
+        payload[12..16].copy_from_slice(&self.round.to_be_bytes());
+        payload[16..24].copy_from_slice(&self.run_nonce.to_be_bytes());
+        payload[24..32].copy_from_slice(&self.packet_nonce.to_be_bytes());
+        payload
+    }
+
+    fn parse(payload: &[u8]) -> Option<Self> {
+        if payload.len() != UDP_DIAGNOSTIC_PAYLOAD_LEN
+            || !payload.starts_with(&UDP_DIAGNOSTIC_MAGIC)
+            || payload[4] != UDP_DIAGNOSTIC_VERSION
+        {
+            return None;
+        }
+        let parsed = Self {
+            phase: UdpDiagnosticPhase::parse(payload[5])?,
+            trial_sequence: u16::from_be_bytes(payload[6..8].try_into().ok()?),
+            association_index: u32::from_be_bytes(payload[8..12].try_into().ok()?),
+            round: u32::from_be_bytes(payload[12..16].try_into().ok()?),
+            run_nonce: u64::from_be_bytes(payload[16..24].try_into().ok()?),
+            packet_nonce: u64::from_be_bytes(payload[24..32].try_into().ok()?),
+        };
+        (parsed.trial_sequence != 0 && parsed.run_nonce != 0).then_some(parsed)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct UdpDiagnosticLedgerArgs {
+    path: PathBuf,
+    run_nonce: u64,
+    max_events: usize,
+}
+
+#[derive(Clone, Debug)]
+struct UdpWorkloadDiagnosticArgs {
+    ledger: UdpDiagnosticLedgerArgs,
+    trial_sequence: u16,
+}
+
+struct BoundedUdpDiagnosticLedger {
+    schema: &'static str,
+    run_nonce: u64,
+    state: Mutex<UdpDiagnosticLedgerState>,
+    started: Instant,
+    max_events: usize,
+    reported_limit: AtomicBool,
+    reported_write_failure: AtomicBool,
+    report_degradation: bool,
+}
+
+struct UdpDiagnosticLedgerState {
+    writer: File,
+    attempted_events: usize,
+    events_written: usize,
+    dropped_events: usize,
+    write_failures: usize,
+    truncation_written: bool,
+    writer_failed: bool,
+}
+
+impl BoundedUdpDiagnosticLedger {
+    fn create(
+        arguments: &UdpDiagnosticLedgerArgs,
+        schema: &'static str,
+        metadata: Value,
+    ) -> Result<Self, String> {
+        Self::create_with_reporting(arguments, schema, metadata, true)
+    }
+
+    fn create_with_reporting(
+        arguments: &UdpDiagnosticLedgerArgs,
+        schema: &'static str,
+        metadata: Value,
+        report_degradation: bool,
+    ) -> Result<Self, String> {
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&arguments.path)
+            .map_err(|error| format!("create Windows TUN UDP diagnostic ledger failed: {error}"))?;
+        let mut header = json!({
+            "schema": schema,
+            "record_type": "header",
+            "run_nonce": arguments.run_nonce.to_string(),
+            "max_events": arguments.max_events,
+            "timestamp_clock": "std_instant_normalized_nanoseconds"
+        });
+        let header_object = header
+            .as_object_mut()
+            .expect("diagnostic ledger header is an object");
+        let metadata = metadata
+            .as_object()
+            .ok_or_else(|| "Windows TUN UDP ledger metadata must be an object".to_owned())?;
+        for (key, value) in metadata {
+            if header_object.insert(key.clone(), value.clone()).is_some() {
+                return Err(
+                    "Windows TUN UDP ledger metadata key conflicts with the header".to_owned(),
+                );
+            }
+        }
+        let mut encoded = serde_json::to_vec(&header)
+            .map_err(|error| format!("serialize Windows TUN UDP ledger header failed: {error}"))?;
+        encoded.push(b'\n');
+        writer
+            .write_all(&encoded)
+            .and_then(|()| writer.flush())
+            .map_err(|error| format!("write Windows TUN UDP ledger header failed: {error}"))?;
+        Ok(Self {
+            schema,
+            run_nonce: arguments.run_nonce,
+            state: Mutex::new(UdpDiagnosticLedgerState {
+                writer,
+                attempted_events: 0,
+                events_written: 0,
+                dropped_events: 0,
+                write_failures: 0,
+                truncation_written: false,
+                writer_failed: false,
+            }),
+            started: Instant::now(),
+            max_events: arguments.max_events,
+            reported_limit: AtomicBool::new(false),
+            reported_write_failure: AtomicBool::new(false),
+            report_degradation,
+        })
+    }
+
+    fn record(&self, mut event: Value) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let event_index = state.attempted_events;
+        state.attempted_events = state.attempted_events.saturating_add(1);
+        if event_index >= self.max_events {
+            state.dropped_events = state.dropped_events.saturating_add(1);
+            let mut truncation_write_failed = false;
+            if !state.truncation_written && !state.writer_failed {
+                state.truncation_written = true;
+                let truncation = json!({
+                    "schema": self.schema,
+                    "record_type": "truncation",
+                    "run_nonce": self.run_nonce.to_string(),
+                    "attempted_events": state.attempted_events,
+                    "events_written": state.events_written,
+                    "dropped_events_at_least": state.dropped_events,
+                    "write_failures": state.write_failures
+                });
+                let write_result = serde_json::to_vec(&truncation)
+                    .map(|mut encoded| {
+                        encoded.push(b'\n');
+                        encoded
+                    })
+                    .map_err(std::io::Error::other)
+                    .and_then(|encoded| state.writer.write_all(&encoded))
+                    .and_then(|()| state.writer.flush());
+                if write_result.is_err() {
+                    state.write_failures = state.write_failures.saturating_add(1);
+                    state.writer_failed = true;
+                    truncation_write_failed = true;
+                }
+            }
+            drop(state);
+            if truncation_write_failed {
+                self.report_write_failure("truncation_write");
+            }
+            if self.report_degradation && !self.reported_limit.swap(true, Ordering::AcqRel) {
+                eprintln!("windows_tun_udp_diagnostic_ledger status=TRUNCATED reason=max_events");
+            }
+            return;
+        }
+        if state.writer_failed {
+            state.dropped_events = state.dropped_events.saturating_add(1);
+            return;
+        }
+        let Some(object) = event.as_object_mut() else {
+            state.write_failures = state.write_failures.saturating_add(1);
+            drop(state);
+            self.report_write_failure("invalid_event");
+            return;
+        };
+        object.insert("schema".to_owned(), json!(self.schema));
+        object.insert("record_type".to_owned(), json!("event"));
+        object.insert("event_index".to_owned(), json!(event_index));
+        let timestamp_qpc = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        object.insert("timestamp_qpc".to_owned(), json!(timestamp_qpc));
+        object.insert(
+            "timestamp_qpc_frequency".to_owned(),
+            json!(1_000_000_000_u64),
+        );
+        object.insert(
+            "ledger_counters".to_owned(),
+            json!({
+                "attempted_events": state.attempted_events,
+                "events_written": state.events_written.saturating_add(1),
+                "dropped_events": state.dropped_events,
+                "write_failures": state.write_failures
+            }),
+        );
+        let mut encoded = match serde_json::to_vec(&event) {
+            Ok(encoded) if encoded.len() <= UDP_DIAGNOSTIC_MAX_EVENT_BYTES => encoded,
+            Ok(_) => {
+                state.write_failures = state.write_failures.saturating_add(1);
+                drop(state);
+                self.report_write_failure("event_too_large");
+                return;
+            }
+            Err(_) => {
+                state.write_failures = state.write_failures.saturating_add(1);
+                drop(state);
+                self.report_write_failure("serialize");
+                return;
+            }
+        };
+        encoded.push(b'\n');
+        if state
+            .writer
+            .write_all(&encoded)
+            .and_then(|()| state.writer.flush())
+            .is_ok()
+        {
+            state.events_written = state.events_written.saturating_add(1);
+        } else {
+            state.write_failures = state.write_failures.saturating_add(1);
+            state.writer_failed = true;
+            drop(state);
+            self.report_write_failure("write");
+        }
+    }
+
+    fn report_write_failure(&self, reason: &'static str) {
+        if self.report_degradation && !self.reported_write_failure.swap(true, Ordering::AcqRel) {
+            eprintln!("windows_tun_udp_diagnostic_ledger status=DEGRADED reason={reason}");
+        }
+    }
+
+    fn counters(&self) -> (usize, usize, usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.attempted_events,
+            state.events_written,
+            state.dropped_events,
+            state.write_failures,
+        )
+    }
+}
+
+impl Drop for BoundedUdpDiagnosticLedger {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.writer_failed {
+            return;
+        }
+        let footer = json!({
+            "schema": self.schema,
+            "record_type": "footer",
+            "run_nonce": self.run_nonce.to_string(),
+            "attempted_events": state.attempted_events,
+            "events_written": state.events_written,
+            "dropped_events": state.dropped_events,
+            "write_failures": state.write_failures,
+            "closed": true
+        });
+        let write_result = serde_json::to_vec(&footer)
+            .map(|mut encoded| {
+                encoded.push(b'\n');
+                encoded
+            })
+            .map_err(std::io::Error::other)
+            .and_then(|encoded| state.writer.write_all(&encoded))
+            .and_then(|()| state.writer.flush());
+        if write_result.is_err()
+            && self.report_degradation
+            && !self.reported_write_failure.swap(true, Ordering::AcqRel)
+        {
+            eprintln!("windows_tun_udp_diagnostic_ledger status=DEGRADED reason=footer_write");
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FragmentPhase {
@@ -291,6 +631,7 @@ struct WorkloadArgs {
     tcp_port: u16,
     udp_port: u16,
     output: PathBuf,
+    diagnostic: Option<UdpWorkloadDiagnosticArgs>,
 }
 
 struct ProbeArgs {
@@ -303,6 +644,7 @@ struct SupportArgs {
     listen_ip: IpAddr,
     tcp_port: u16,
     udp_port: u16,
+    diagnostic: Option<UdpDiagnosticLedgerArgs>,
 }
 
 fn parse_pairs(arguments: &[OsString]) -> Result<Vec<(String, String)>, String> {
@@ -341,12 +683,97 @@ fn parse_port(value: Option<String>, flag: &str) -> Result<u16, String> {
     Ok(port)
 }
 
+fn parse_canonical_nonzero_u64(value: String, flag: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("{flag} must be a canonical nonzero decimal integer"))?;
+    if parsed == 0 || parsed.to_string() != value {
+        return Err(format!(
+            "{flag} must be a canonical nonzero decimal integer"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_diagnostic_max_events(value: String) -> Result<usize, String> {
+    let parsed = parse_canonical_nonzero_u64(value, "--diagnostic-max-events")?;
+    let parsed = usize::try_from(parsed)
+        .map_err(|_| "--diagnostic-max-events is outside the supported range".to_owned())?;
+    if parsed > UDP_DIAGNOSTIC_MAX_EVENTS {
+        return Err(format!(
+            "--diagnostic-max-events cannot exceed {UDP_DIAGNOSTIC_MAX_EVENTS}"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_diagnostic_trial_sequence(value: String) -> Result<u16, String> {
+    let parsed = parse_canonical_nonzero_u64(value, "--diagnostic-trial-sequence")?;
+    u16::try_from(parsed)
+        .map_err(|_| "--diagnostic-trial-sequence is outside the supported range".to_owned())
+}
+
+fn validate_diagnostic_ledger_path(value: String) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute()
+        || path.file_name().is_none()
+        || path
+            .extension()
+            .is_none_or(|extension| extension != "ndjson")
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(
+            "--diagnostic-ledger must be an absolute normalized .ndjson file path".to_owned(),
+        );
+    }
+    if path.exists() {
+        return Err("Windows TUN UDP diagnostic ledger baseline must be absent".to_owned());
+    }
+    if path.parent().is_none_or(|parent| !parent.is_dir()) {
+        return Err("Windows TUN UDP diagnostic ledger parent must exist".to_owned());
+    }
+    Ok(path)
+}
+
+fn parse_diagnostic_ledger_args(
+    ledger: Option<String>,
+    run_nonce: Option<String>,
+    max_events: Option<String>,
+) -> Result<Option<UdpDiagnosticLedgerArgs>, String> {
+    let supplied = [ledger.is_some(), run_nonce.is_some(), max_events.is_some()];
+    if supplied.iter().all(|supplied| !supplied) {
+        return Ok(None);
+    }
+    if !supplied.iter().all(|supplied| *supplied) {
+        return Err(
+            "--diagnostic-ledger, --diagnostic-run-nonce, and --diagnostic-max-events must be supplied together"
+                .to_owned(),
+        );
+    }
+    Ok(Some(UdpDiagnosticLedgerArgs {
+        path: validate_diagnostic_ledger_path(ledger.expect("checked diagnostic ledger"))?,
+        run_nonce: parse_canonical_nonzero_u64(
+            run_nonce.expect("checked diagnostic run nonce"),
+            "--diagnostic-run-nonce",
+        )?,
+        max_events: parse_diagnostic_max_events(
+            max_events.expect("checked diagnostic max events"),
+        )?,
+    }))
+}
+
 fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
     let mut scenario = None;
     let mut target_ip = None;
     let mut tcp_port = None;
     let mut udp_port = None;
     let mut output = None;
+    let mut diagnostic_ledger = None;
+    let mut diagnostic_run_nonce = None;
+    let mut diagnostic_max_events = None;
+    let mut diagnostic_trial_sequence = None;
     for (flag, value) in parse_pairs(arguments)? {
         match flag.as_str() {
             "--scenario" => take_unique(&mut scenario, value, &flag)?,
@@ -354,6 +781,12 @@ fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
             "--tcp-port" => take_unique(&mut tcp_port, value, &flag)?,
             "--udp-port" => take_unique(&mut udp_port, value, &flag)?,
             "--output" => take_unique(&mut output, value, &flag)?,
+            "--diagnostic-ledger" => take_unique(&mut diagnostic_ledger, value, &flag)?,
+            "--diagnostic-run-nonce" => take_unique(&mut diagnostic_run_nonce, value, &flag)?,
+            "--diagnostic-max-events" => take_unique(&mut diagnostic_max_events, value, &flag)?,
+            "--diagnostic-trial-sequence" => {
+                take_unique(&mut diagnostic_trial_sequence, value, &flag)?
+            }
             _ => return Err(format!("unsupported Windows TUN option: {flag}")),
         }
     }
@@ -375,12 +808,43 @@ fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
     if output.parent().is_none_or(|parent| !parent.is_dir()) {
         return Err("Windows TUN workload output parent must exist".to_owned());
     }
+    let diagnostic_ledger = parse_diagnostic_ledger_args(
+        diagnostic_ledger,
+        diagnostic_run_nonce,
+        diagnostic_max_events,
+    )?;
+    let diagnostic = match (diagnostic_ledger, diagnostic_trial_sequence) {
+        (None, None) => None,
+        (Some(ledger), Some(trial_sequence)) => Some(UdpWorkloadDiagnosticArgs {
+            ledger,
+            trial_sequence: parse_diagnostic_trial_sequence(trial_sequence)?,
+        }),
+        _ => {
+            return Err(
+                "workload UDP diagnostics require all ledger options and --diagnostic-trial-sequence"
+                    .to_owned(),
+            );
+        }
+    };
+    if diagnostic.is_some() && scenario != Scenario::UdpAssociations {
+        return Err(
+            "workload UDP diagnostics are only supported for udp-8192-association-lookup-expiry"
+                .to_owned(),
+        );
+    }
+    if diagnostic
+        .as_ref()
+        .is_some_and(|diagnostic| diagnostic.ledger.path == output)
+    {
+        return Err("workload observation and diagnostic ledger paths must differ".to_owned());
+    }
     Ok(WorkloadArgs {
         scenario,
         target_ip,
         tcp_port: parse_port(tcp_port, "--tcp-port")?,
         udp_port: parse_port(udp_port, "--udp-port")?,
         output,
+        diagnostic,
     })
 }
 
@@ -414,11 +878,17 @@ fn parse_support(arguments: &[OsString]) -> Result<SupportArgs, String> {
     let mut listen_ip = None;
     let mut tcp_port = None;
     let mut udp_port = None;
+    let mut diagnostic_ledger = None;
+    let mut diagnostic_run_nonce = None;
+    let mut diagnostic_max_events = None;
     for (flag, value) in parse_pairs(arguments)? {
         match flag.as_str() {
             "--listen-ip" => take_unique(&mut listen_ip, value, &flag)?,
             "--tcp-port" => take_unique(&mut tcp_port, value, &flag)?,
             "--udp-port" => take_unique(&mut udp_port, value, &flag)?,
+            "--diagnostic-ledger" => take_unique(&mut diagnostic_ledger, value, &flag)?,
+            "--diagnostic-run-nonce" => take_unique(&mut diagnostic_run_nonce, value, &flag)?,
+            "--diagnostic-max-events" => take_unique(&mut diagnostic_max_events, value, &flag)?,
             _ => return Err(format!("unsupported Windows TUN support option: {flag}")),
         }
     }
@@ -433,6 +903,11 @@ fn parse_support(arguments: &[OsString]) -> Result<SupportArgs, String> {
         listen_ip,
         tcp_port: parse_port(tcp_port, "--tcp-port")?,
         udp_port: parse_port(udp_port, "--udp-port")?,
+        diagnostic: parse_diagnostic_ledger_args(
+            diagnostic_ledger,
+            diagnostic_run_nonce,
+            diagnostic_max_events,
+        )?,
     })
 }
 
@@ -1104,33 +1579,367 @@ fn association_round(
     Ok(())
 }
 
-fn udp_associations(address: SocketAddr) -> Result<Value, String> {
+struct UdpWorkloadDiagnosticSession {
+    arguments: UdpWorkloadDiagnosticArgs,
+    ledger: BoundedUdpDiagnosticLedger,
+    next_packet_nonce: u64,
+}
+
+struct UdpWorkloadFlowOutcome<'a> {
+    send_result: &'a str,
+    send_bytes: Option<usize>,
+    reply_result: &'a str,
+    reply_source: Option<SocketAddr>,
+    payload_match: bool,
+    error_kind: Option<&'a str>,
+}
+
+struct UdpWorkloadDiagnosticRequest {
+    identity: UdpDiagnosticPayload,
+    payload: [u8; UDP_DIAGNOSTIC_PAYLOAD_LEN],
+    local: Option<SocketAddr>,
+    target: Option<SocketAddr>,
+    sent: usize,
+}
+
+impl UdpWorkloadDiagnosticSession {
+    fn create(arguments: &UdpWorkloadDiagnosticArgs) -> Result<Self, String> {
+        Ok(Self {
+            ledger: BoundedUdpDiagnosticLedger::create(
+                &arguments.ledger,
+                UDP_WORKLOAD_LEDGER_SCHEMA,
+                json!({"trial_sequence": arguments.trial_sequence}),
+            )?,
+            arguments: arguments.clone(),
+            next_packet_nonce: 0,
+        })
+    }
+
+    fn payload(
+        &mut self,
+        phase: UdpDiagnosticPhase,
+        association_index: usize,
+        round: u32,
+    ) -> Result<UdpDiagnosticPayload, String> {
+        let association_index = u32::try_from(association_index)
+            .map_err(|_| "diagnostic association index overflow".to_owned())?;
+        let packet_nonce = self.next_packet_nonce;
+        self.next_packet_nonce = self
+            .next_packet_nonce
+            .checked_add(1)
+            .ok_or_else(|| "diagnostic packet nonce overflow".to_owned())?;
+        Ok(UdpDiagnosticPayload {
+            phase,
+            trial_sequence: self.arguments.trial_sequence,
+            association_index,
+            round,
+            run_nonce: self.arguments.ledger.run_nonce,
+            packet_nonce,
+        })
+    }
+
+    fn record_flow(
+        &self,
+        identity: UdpDiagnosticPayload,
+        local: Option<SocketAddr>,
+        target: Option<SocketAddr>,
+        outcome: UdpWorkloadFlowOutcome<'_>,
+    ) {
+        self.ledger.record(json!({
+            "run_nonce": identity.run_nonce.to_string(),
+            "trial_sequence": identity.trial_sequence,
+            "phase": identity.phase.label(),
+            "association_index": identity.association_index,
+            "round": identity.round,
+            "packet_nonce": identity.packet_nonce.to_string(),
+            "workload_local_ip": local.map(|address| address.ip().to_string()),
+            "workload_local_port": local.map(|address| address.port()),
+            "target_ip": target.map(|address| address.ip().to_string()),
+            "target_port": target.map(|address| address.port()),
+            "send_result": outcome.send_result,
+            "send_bytes": outcome.send_bytes,
+            "reply_result": outcome.reply_result,
+            "reply_source_ip": outcome.reply_source.map(|address| address.ip().to_string()),
+            "reply_source_port": outcome.reply_source.map(|address| address.port()),
+            "payload_match": outcome.payload_match,
+            "error_kind": outcome.error_kind
+        }));
+    }
+
+    fn record_not_observed(&self, request: &UdpWorkloadDiagnosticRequest) {
+        self.record_flow(
+            request.identity,
+            request.local,
+            request.target,
+            UdpWorkloadFlowOutcome {
+                send_result: "success",
+                send_bytes: Some(request.sent),
+                reply_result: "not_observed",
+                reply_source: None,
+                payload_match: false,
+                error_kind: Some("prior_batch_failure"),
+            },
+        );
+    }
+}
+
+fn bounded_io_error_kind(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::WouldBlock => "would_block",
+        ErrorKind::TimedOut => "timeout",
+        ErrorKind::ConnectionRefused => "connection_refused",
+        ErrorKind::ConnectionReset => "connection_reset",
+        ErrorKind::ConnectionAborted => "connection_aborted",
+        ErrorKind::NotConnected => "not_connected",
+        ErrorKind::AddrInUse => "address_in_use",
+        ErrorKind::AddrNotAvailable => "address_not_available",
+        ErrorKind::PermissionDenied => "permission_denied",
+        ErrorKind::Interrupted => "interrupted",
+        _ => "other",
+    }
+}
+
+fn diagnostic_association_round(
+    sockets: &[UdpSocket],
+    reply: &mut [u8; UDP_DIAGNOSTIC_PAYLOAD_LEN],
+    batch_associations: usize,
+    phase: UdpDiagnosticPhase,
+    round: u32,
+    pacing: Option<(usize, Duration)>,
+    diagnostic: &mut UdpWorkloadDiagnosticSession,
+) -> Result<(), String> {
+    if batch_associations == 0 || !sockets.len().is_multiple_of(batch_associations) {
+        return Err("diagnostic association batch bounds are invalid".to_owned());
+    }
+    if let Some((pacing_associations, _)) = pacing
+        && (pacing_associations == 0
+            || !pacing_associations.is_multiple_of(batch_associations)
+            || !sockets.len().is_multiple_of(pacing_associations))
+    {
+        return Err("diagnostic association pacing bounds are invalid".to_owned());
+    }
+    for (batch_index, batch) in sockets.chunks(batch_associations).enumerate() {
+        let base = batch_index * batch_associations;
+        let mut requests = Vec::with_capacity(batch.len());
+        for (offset, socket) in batch.iter().enumerate() {
+            let association_index = base + offset;
+            let identity = diagnostic.payload(phase, association_index, round)?;
+            let payload = identity.encode();
+            let local = socket.local_addr().ok();
+            let target = socket.peer_addr().ok();
+            let sent = match socket.send(&payload) {
+                Ok(sent) => sent,
+                Err(error) => {
+                    for request in &requests {
+                        diagnostic.record_not_observed(request);
+                    }
+                    diagnostic.record_flow(
+                        identity,
+                        local,
+                        target,
+                        UdpWorkloadFlowOutcome {
+                            send_result: "error",
+                            send_bytes: None,
+                            reply_result: "not_attempted",
+                            reply_source: None,
+                            payload_match: false,
+                            error_kind: Some(bounded_io_error_kind(error.kind())),
+                        },
+                    );
+                    return Err(format!(
+                        "association batch send failed: phase={} association_index={association_index} error={error}",
+                        phase.label()
+                    ));
+                }
+            };
+            if sent != payload.len() {
+                for request in &requests {
+                    diagnostic.record_not_observed(request);
+                }
+                diagnostic.record_flow(
+                    identity,
+                    local,
+                    target,
+                    UdpWorkloadFlowOutcome {
+                        send_result: "partial",
+                        send_bytes: Some(sent),
+                        reply_result: "not_attempted",
+                        reply_source: None,
+                        payload_match: false,
+                        error_kind: Some("partial"),
+                    },
+                );
+                return Err(format!(
+                    "association batch sent a partial datagram: phase={} association_index={association_index}",
+                    phase.label()
+                ));
+            }
+            requests.push(UdpWorkloadDiagnosticRequest {
+                identity,
+                payload,
+                local,
+                target,
+                sent,
+            });
+        }
+        for (offset, (socket, request)) in batch.iter().zip(&requests).enumerate() {
+            let (received, reply_source) = match socket.recv_from(reply) {
+                Ok(received) => received,
+                Err(error) => {
+                    diagnostic.record_flow(
+                        request.identity,
+                        request.local,
+                        request.target,
+                        UdpWorkloadFlowOutcome {
+                            send_result: "success",
+                            send_bytes: Some(request.sent),
+                            reply_result: if matches!(
+                                error.kind(),
+                                ErrorKind::WouldBlock | ErrorKind::TimedOut
+                            ) {
+                                "timeout"
+                            } else {
+                                "error"
+                            },
+                            reply_source: None,
+                            payload_match: false,
+                            error_kind: Some(bounded_io_error_kind(error.kind())),
+                        },
+                    );
+                    for pending in &requests[(offset + 1)..] {
+                        diagnostic.record_not_observed(pending);
+                    }
+                    return Err(format!(
+                        "association batch receive failed: phase={} association_index={} error={error}",
+                        phase.label(),
+                        base + offset
+                    ));
+                }
+            };
+            let payload_match =
+                received == request.payload.len() && reply[..received] == request.payload;
+            diagnostic.record_flow(
+                request.identity,
+                request.local,
+                request.target,
+                UdpWorkloadFlowOutcome {
+                    send_result: "success",
+                    send_bytes: Some(request.sent),
+                    reply_result: if payload_match {
+                        "success"
+                    } else {
+                        "payload_mismatch"
+                    },
+                    reply_source: Some(reply_source),
+                    payload_match,
+                    error_kind: (!payload_match).then_some("payload_mismatch"),
+                },
+            );
+            if !payload_match {
+                for pending in &requests[(offset + 1)..] {
+                    diagnostic.record_not_observed(pending);
+                }
+                return Err(format!(
+                    "association batch payload mismatch: phase={} association_index={}",
+                    phase.label(),
+                    base + offset
+                ));
+            }
+        }
+        let completed = base + batch.len();
+        if let Some((pacing_associations, delay)) = pacing
+            && completed < sockets.len()
+            && completed.is_multiple_of(pacing_associations)
+        {
+            thread::sleep(delay);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct AssociationRoundSpec<'a> {
+    seed_prefix: u64,
+    batch_associations: usize,
+    phase_label: &'a str,
+    phase: UdpDiagnosticPhase,
+    round: u32,
+    pacing: Option<(usize, Duration)>,
+}
+
+fn association_round_selected(
+    sockets: &[UdpSocket],
+    reply: &mut [u8; UDP_DIAGNOSTIC_PAYLOAD_LEN],
+    spec: AssociationRoundSpec<'_>,
+    diagnostic: &mut Option<UdpWorkloadDiagnosticSession>,
+) -> Result<(), String> {
+    if let Some(diagnostic) = diagnostic.as_mut() {
+        diagnostic_association_round(
+            sockets,
+            reply,
+            spec.batch_associations,
+            spec.phase,
+            spec.round,
+            spec.pacing,
+            diagnostic,
+        )
+    } else {
+        association_round(
+            sockets,
+            spec.seed_prefix,
+            reply,
+            spec.batch_associations,
+            spec.phase_label,
+            spec.pacing,
+        )
+    }
+}
+
+fn udp_associations(
+    address: SocketAddr,
+    diagnostic_arguments: Option<&UdpWorkloadDiagnosticArgs>,
+) -> Result<Value, String> {
+    let mut diagnostic = diagnostic_arguments
+        .map(UdpWorkloadDiagnosticSession::create)
+        .transpose()?;
     let mut sockets = Vec::with_capacity(ASSOCIATIONS);
-    let mut reply = [0_u8; 32];
+    let mut reply = [0_u8; UDP_DIAGNOSTIC_PAYLOAD_LEN];
     for _ in 0..ASSOCIATIONS {
         sockets.push(connected_udp(address)?);
     }
-    association_round(
+    association_round_selected(
         &sockets,
-        0,
         &mut reply,
-        ASSOCIATION_BOOTSTRAP_BATCH,
-        "bootstrap",
-        Some((
-            ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS,
-            ASSOCIATION_BOOTSTRAP_PACING_DELAY,
-        )),
+        AssociationRoundSpec {
+            seed_prefix: 0,
+            batch_associations: ASSOCIATION_BOOTSTRAP_BATCH,
+            phase_label: "bootstrap",
+            phase: UdpDiagnosticPhase::Bootstrap,
+            round: 0,
+            pacing: Some((
+                ASSOCIATION_BOOTSTRAP_PACING_ASSOCIATIONS,
+                ASSOCIATION_BOOTSTRAP_PACING_DELAY,
+            )),
+        },
+        &mut diagnostic,
     )?;
     let warmup_deadline = Instant::now() + ASSOCIATION_WARMUP;
     let mut warmup_round = 1_u64;
     while Instant::now() < warmup_deadline || warmup_round == 1 {
-        association_round(
+        let diagnostic_round = u32::try_from(warmup_round)
+            .map_err(|_| "association diagnostic warmup round overflow".to_owned())?;
+        association_round_selected(
             &sockets,
-            warmup_round,
             &mut reply,
-            ASSOCIATION_LOOKUP_BATCH,
-            "warmup",
-            None,
+            AssociationRoundSpec {
+                seed_prefix: warmup_round,
+                batch_associations: ASSOCIATION_LOOKUP_BATCH,
+                phase_label: "warmup",
+                phase: UdpDiagnosticPhase::Warmup,
+                round: diagnostic_round,
+                pacing: None,
+            },
+            &mut diagnostic,
         )?;
         warmup_round = warmup_round
             .checked_add(1)
@@ -1139,13 +1948,23 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     let start = Instant::now();
     let mut lookups = 0_u64;
     for round in 0..ASSOCIATION_LOOKUP_ROUNDS {
-        association_round(
+        let round_number = warmup_round
+            .checked_add(round as u64)
+            .ok_or_else(|| "association lookup round overflow".to_owned())?;
+        let diagnostic_round = u32::try_from(round_number)
+            .map_err(|_| "association diagnostic lookup round overflow".to_owned())?;
+        association_round_selected(
             &sockets,
-            warmup_round + round as u64,
             &mut reply,
-            ASSOCIATION_LOOKUP_BATCH,
-            "lookup",
-            None,
+            AssociationRoundSpec {
+                seed_prefix: round_number,
+                batch_associations: ASSOCIATION_LOOKUP_BATCH,
+                phase_label: "lookup",
+                phase: UdpDiagnosticPhase::Lookup,
+                round: diagnostic_round,
+                pacing: None,
+            },
+            &mut diagnostic,
         )?;
         lookups = lookups
             .checked_add(ASSOCIATIONS as u64)
@@ -1158,13 +1977,18 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     }
     // Refresh the whole key set in one complete round so the collector can
     // observe the exact 8192-entry peak before the fixed idle timeout expires it.
-    association_round(
+    association_round_selected(
         &sockets,
-        u32::MAX as u64,
         &mut reply,
-        ASSOCIATION_LOOKUP_BATCH,
-        "refresh",
-        None,
+        AssociationRoundSpec {
+            seed_prefix: u32::MAX as u64,
+            batch_associations: ASSOCIATION_LOOKUP_BATCH,
+            phase_label: "refresh",
+            phase: UdpDiagnosticPhase::Refresh,
+            round: u32::MAX,
+            pacing: None,
+        },
+        &mut diagnostic,
     )?;
     drop(sockets);
     Ok(json!({
@@ -1491,7 +2315,7 @@ pub(super) fn run_workload(arguments: &[OsString]) -> Result<String, String> {
         Scenario::TcpSingle => tcp_single(address)?,
         Scenario::TcpFairness => tcp_fairness(address)?,
         Scenario::UdpPackets => udp_packets(address)?,
-        Scenario::UdpAssociations => udp_associations(address)?,
+        Scenario::UdpAssociations => udp_associations(address, arguments.diagnostic.as_ref())?,
         Scenario::UdpRouteOnce => udp_route_once(arguments.target_ip, arguments.udp_port)?,
         Scenario::Fragments => fragments(address)?,
         Scenario::RingFull => ring_full(address)?,
@@ -1606,6 +2430,46 @@ fn self_check_support_backlog() -> Result<(), String> {
     Ok(())
 }
 
+struct SupportUdpLedgerEvent<'a> {
+    stage: &'a str,
+    listen: SocketAddr,
+    peer: SocketAddr,
+    request: &'a [u8],
+    send_attempted: Option<bool>,
+    send_result: &'a str,
+    sent: Option<usize>,
+    error_kind: Option<&'a str>,
+}
+
+fn record_support_udp_event(
+    ledger: Option<&BoundedUdpDiagnosticLedger>,
+    event: SupportUdpLedgerEvent<'_>,
+) {
+    let Some(ledger) = ledger else {
+        return;
+    };
+    let identity = UdpDiagnosticPayload::parse(event.request);
+    ledger.record(json!({
+        "stage": event.stage,
+        "listen_ip": event.listen.ip().to_string(),
+        "listen_port": event.listen.port(),
+        "remote_ip": event.peer.ip().to_string(),
+        "remote_port": event.peer.port(),
+        "payload_run_nonce": identity.map(|identity| identity.run_nonce.to_string()),
+        "payload_run_nonce_match": identity.map(|identity| identity.run_nonce == ledger.run_nonce),
+        "trial_sequence": identity.map(|identity| identity.trial_sequence),
+        "phase": identity.map(|identity| identity.phase.label()),
+        "association_index": identity.map(|identity| identity.association_index),
+        "round": identity.map(|identity| identity.round),
+        "packet_nonce": identity.map(|identity| identity.packet_nonce.to_string()),
+        "recv_bytes": event.request.len(),
+        "send_attempted": event.send_attempted,
+        "send_result": event.send_result,
+        "send_bytes": event.sent,
+        "error_kind": event.error_kind
+    }));
+}
+
 pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
     let arguments = parse_support(arguments)?;
     let tcp_address = SocketAddr::new(arguments.listen_ip, arguments.tcp_port);
@@ -1618,11 +2482,32 @@ pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
                 .map_err(|error| format!("bind Windows TUN support UDP failed: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let diagnostic = arguments
+        .diagnostic
+        .as_ref()
+        .map(|arguments| {
+            BoundedUdpDiagnosticLedger::create(
+                arguments,
+                UDP_SUPPORT_LEDGER_SCHEMA,
+                json!({
+                    "pid": std::process::id(),
+                    "listen_ip": tcp_address.ip().to_string(),
+                    "tcp_port": tcp_address.port(),
+                    "udp_ports": udp_addresses.iter().map(|address| address.port()).collect::<Vec<_>>()
+                }),
+            )
+            .map(Arc::new)
+        })
+        .transpose()?;
     let active = Arc::new(AtomicUsize::new(0));
     let udp_workers = udp_sockets
         .into_iter()
         .enumerate()
         .map(|(slot, udp)| {
+            let listen = udp
+                .local_addr()
+                .map_err(|error| format!("read Windows TUN support UDP address failed: {error}"))?;
+            let diagnostic = diagnostic.clone();
             thread::Builder::new()
                 .name(format!("tun-support-udp-{slot}"))
                 .spawn(move || -> Result<(), String> {
@@ -1632,14 +2517,80 @@ pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
                             .recv_from(&mut buffer)
                             .map_err(|error| format!("support UDP receive failed: {error}"))?;
                         let request = &buffer[..read];
-                        let (sent, response_len) = match fragment_ack_for_request(request) {
-                            Ok(Some(ack)) => udp.send_to(&ack, peer).map(|sent| (sent, ack.len())),
-                            Ok(None) => {
-                                udp.send_to(request, peer).map(|sent| (sent, request.len()))
+                        record_support_udp_event(
+                            diagnostic.as_deref(),
+                            SupportUdpLedgerEvent {
+                                stage: "rx",
+                                listen,
+                                peer,
+                                request,
+                                send_attempted: None,
+                                send_result: "pending",
+                                sent: None,
+                                error_kind: None,
+                            },
+                        );
+                        let ack;
+                        let response = match fragment_ack_for_request(request) {
+                            Ok(Some(value)) => {
+                                ack = value;
+                                &ack[..]
                             }
-                            Err(_) => continue,
-                        }
-                        .map_err(|error| format!("support UDP send failed: {error}"))?;
+                            Ok(None) => request,
+                            Err(_) => {
+                                record_support_udp_event(
+                                    diagnostic.as_deref(),
+                                    SupportUdpLedgerEvent {
+                                        stage: "tx",
+                                        listen,
+                                        peer,
+                                        request,
+                                        send_attempted: Some(false),
+                                        send_result: "not_attempted",
+                                        sent: None,
+                                        error_kind: Some("invalid_fragment_request"),
+                                    },
+                                );
+                                continue;
+                            }
+                        };
+                        let response_len = response.len();
+                        let sent = match udp.send_to(response, peer) {
+                            Ok(sent) => sent,
+                            Err(error) => {
+                                record_support_udp_event(
+                                    diagnostic.as_deref(),
+                                    SupportUdpLedgerEvent {
+                                        stage: "tx",
+                                        listen,
+                                        peer,
+                                        request,
+                                        send_attempted: Some(true),
+                                        send_result: "error",
+                                        sent: None,
+                                        error_kind: Some(bounded_io_error_kind(error.kind())),
+                                    },
+                                );
+                                return Err(format!("support UDP send failed: {error}"));
+                            }
+                        };
+                        record_support_udp_event(
+                            diagnostic.as_deref(),
+                            SupportUdpLedgerEvent {
+                                stage: "tx",
+                                listen,
+                                peer,
+                                request,
+                                send_attempted: Some(true),
+                                send_result: if sent == response_len {
+                                    "success"
+                                } else {
+                                    "partial"
+                                },
+                                sent: Some(sent),
+                                error_kind: (sent != response_len).then_some("partial"),
+                            },
+                        );
                         if sent != response_len {
                             return Err("support UDP sent a partial datagram".to_owned());
                         }
@@ -1706,6 +2657,7 @@ pub(super) fn self_check() -> Result<(), String> {
         || parsed.tcp_port != 443
         || parsed.udp_port != 53
         || parsed.output != output
+        || parsed.diagnostic.is_some()
     {
         return Err("Windows TUN workload arguments were not preserved".to_owned());
     }
@@ -1722,6 +2674,110 @@ pub(super) fn self_check() -> Result<(), String> {
     if parse_workload(&loopback).is_ok() {
         return Err("Windows TUN loopback target was accepted".to_owned());
     }
+    let workload_ledger_path = directory.path().join("workload-flow.ndjson");
+    let mut diagnostic_arguments = arguments.clone();
+    diagnostic_arguments[1] = OsString::from("udp-8192-association-lookup-expiry");
+    diagnostic_arguments.extend([
+        OsString::from("--diagnostic-ledger"),
+        workload_ledger_path.as_os_str().to_owned(),
+        OsString::from("--diagnostic-run-nonce"),
+        OsString::from("72623859790382856"),
+        OsString::from("--diagnostic-max-events"),
+        OsString::from("16384"),
+        OsString::from("--diagnostic-trial-sequence"),
+        OsString::from("31"),
+    ]);
+    let diagnostic_parsed = parse_workload(&diagnostic_arguments)?;
+    let diagnostic = diagnostic_parsed
+        .diagnostic
+        .as_ref()
+        .ok_or_else(|| "Windows TUN workload diagnostic options were discarded".to_owned())?;
+    if diagnostic_parsed.scenario != Scenario::UdpAssociations
+        || diagnostic.ledger.path != workload_ledger_path
+        || diagnostic.ledger.run_nonce != 0x0102_0304_0506_0708
+        || diagnostic.ledger.max_events != 16_384
+        || diagnostic.trial_sequence != 31
+    {
+        return Err("Windows TUN workload diagnostic arguments were not preserved".to_owned());
+    }
+    let mut partial_diagnostic = diagnostic_arguments.clone();
+    partial_diagnostic.truncate(partial_diagnostic.len() - 2);
+    if parse_workload(&partial_diagnostic).is_ok() {
+        return Err("incomplete Windows TUN workload diagnostic options were accepted".to_owned());
+    }
+    let mut wrong_scenario_diagnostic = diagnostic_arguments.clone();
+    wrong_scenario_diagnostic[1] = OsString::from("udp-packets-per-second");
+    if parse_workload(&wrong_scenario_diagnostic).is_ok() {
+        return Err("Windows TUN diagnostics were accepted for a canonical workload".to_owned());
+    }
+    let mut zero_nonce_diagnostic = diagnostic_arguments.clone();
+    zero_nonce_diagnostic[13] = OsString::from("0");
+    let mut noncanonical_nonce_diagnostic = diagnostic_arguments.clone();
+    noncanonical_nonce_diagnostic[13] = OsString::from("01");
+    let mut oversized_events_diagnostic = diagnostic_arguments.clone();
+    oversized_events_diagnostic[15] = OsString::from((UDP_DIAGNOSTIC_MAX_EVENTS + 1).to_string());
+    let mut zero_trial_diagnostic = diagnostic_arguments.clone();
+    zero_trial_diagnostic[17] = OsString::from("0");
+    if parse_workload(&zero_nonce_diagnostic).is_ok()
+        || parse_workload(&noncanonical_nonce_diagnostic).is_ok()
+        || parse_workload(&oversized_events_diagnostic).is_ok()
+        || parse_workload(&zero_trial_diagnostic).is_ok()
+    {
+        return Err("invalid Windows TUN workload diagnostic bounds were accepted".to_owned());
+    }
+    let mut relative_ledger_diagnostic = diagnostic_arguments.clone();
+    relative_ledger_diagnostic[11] = OsString::from("workload-flow.ndjson");
+    let mut wrong_extension_diagnostic = diagnostic_arguments.clone();
+    wrong_extension_diagnostic[11] = directory.path().join("workload-flow.json").into_os_string();
+    if parse_workload(&relative_ledger_diagnostic).is_ok()
+        || parse_workload(&wrong_extension_diagnostic).is_ok()
+    {
+        return Err("unsafe Windows TUN workload diagnostic ledger path was accepted".to_owned());
+    }
+    let existing_ledger_path = directory.path().join("existing.ndjson");
+    File::create(&existing_ledger_path)
+        .map_err(|error| format!("create self-check existing ledger failed: {error}"))?;
+    let mut existing_ledger_diagnostic = diagnostic_arguments.clone();
+    existing_ledger_diagnostic[11] = existing_ledger_path.into_os_string();
+    if parse_workload(&existing_ledger_diagnostic).is_ok() {
+        return Err("existing Windows TUN workload diagnostic ledger was accepted".to_owned());
+    }
+    let support_ledger_path = directory.path().join("support.ndjson");
+    let support_arguments: Vec<OsString> = [
+        OsString::from("--listen-ip"),
+        OsString::from("192.0.2.10"),
+        OsString::from("--tcp-port"),
+        OsString::from("443"),
+        OsString::from("--udp-port"),
+        OsString::from("53"),
+        OsString::from("--diagnostic-ledger"),
+        support_ledger_path.as_os_str().to_owned(),
+        OsString::from("--diagnostic-run-nonce"),
+        OsString::from("72623859790382856"),
+        OsString::from("--diagnostic-max-events"),
+        OsString::from("16384"),
+    ]
+    .into_iter()
+    .collect();
+    let support_parsed = parse_support(&support_arguments)?;
+    let support_diagnostic = support_parsed
+        .diagnostic
+        .as_ref()
+        .ok_or_else(|| "Windows TUN support diagnostic options were discarded".to_owned())?;
+    if support_parsed.listen_ip != "192.0.2.10".parse::<IpAddr>().expect("literal")
+        || support_parsed.tcp_port != 443
+        || support_parsed.udp_port != 53
+        || support_diagnostic.path != support_ledger_path
+        || support_diagnostic.run_nonce != 0x0102_0304_0506_0708
+        || support_diagnostic.max_events != 16_384
+    {
+        return Err("Windows TUN support diagnostic arguments were not preserved".to_owned());
+    }
+    let mut partial_support_diagnostic = support_arguments.clone();
+    partial_support_diagnostic.truncate(partial_support_diagnostic.len() - 2);
+    if parse_support(&partial_support_diagnostic).is_ok() {
+        return Err("incomplete Windows TUN support diagnostic options were accepted".to_owned());
+    }
     if elapsed_rate(10, Duration::from_secs(2), "self-check")? != 5 {
         return Err("Windows TUN integer rate calculation is invalid".to_owned());
     }
@@ -1730,6 +2786,266 @@ pub(super) fn self_check() -> Result<(), String> {
         || payload == sequenced_payload(32, 0x0102_0304_0506_0709)?
     {
         return Err("Windows TUN sequenced UDP payload is invalid".to_owned());
+    }
+    let diagnostic_identity = UdpDiagnosticPayload {
+        phase: UdpDiagnosticPhase::Bootstrap,
+        trial_sequence: 31,
+        association_index: 85,
+        round: 0,
+        run_nonce: 0x0102_0304_0506_0708,
+        packet_nonce: 0x1112_1314_1516_1718,
+    };
+    let diagnostic_payload = diagnostic_identity.encode();
+    if UdpDiagnosticPayload::parse(&diagnostic_payload) != Some(diagnostic_identity)
+        || fragment_ack_for_request(&diagnostic_payload)?.is_some()
+    {
+        return Err("Windows TUN tagged UDP diagnostic payload did not round-trip".to_owned());
+    }
+    let mut invalid_magic = diagnostic_payload;
+    invalid_magic[0] ^= 1;
+    let mut invalid_version = diagnostic_payload;
+    invalid_version[4] = UDP_DIAGNOSTIC_VERSION + 1;
+    let mut invalid_phase = diagnostic_payload;
+    invalid_phase[5] = 0;
+    let mut zero_trial = diagnostic_payload;
+    zero_trial[6..8].fill(0);
+    let mut zero_run_nonce = diagnostic_payload;
+    zero_run_nonce[16..24].fill(0);
+    let mut extended_diagnostic_payload = diagnostic_payload.to_vec();
+    extended_diagnostic_payload.push(0);
+    if UdpDiagnosticPayload::parse(&invalid_magic).is_some()
+        || UdpDiagnosticPayload::parse(&invalid_version).is_some()
+        || UdpDiagnosticPayload::parse(&invalid_phase).is_some()
+        || UdpDiagnosticPayload::parse(&zero_trial).is_some()
+        || UdpDiagnosticPayload::parse(&zero_run_nonce).is_some()
+        || UdpDiagnosticPayload::parse(&diagnostic_payload[..UDP_DIAGNOSTIC_PAYLOAD_LEN - 1])
+            .is_some()
+        || UdpDiagnosticPayload::parse(&extended_diagnostic_payload).is_some()
+    {
+        return Err("malformed Windows TUN tagged UDP diagnostic payload was accepted".to_owned());
+    }
+    let bounded_ledger_path = directory.path().join("bounded.ndjson");
+    let bounded_ledger_arguments = UdpDiagnosticLedgerArgs {
+        path: bounded_ledger_path.clone(),
+        run_nonce: diagnostic_identity.run_nonce,
+        max_events: 2,
+    };
+    let bounded_ledger = BoundedUdpDiagnosticLedger::create_with_reporting(
+        &bounded_ledger_arguments,
+        UDP_SUPPORT_LEDGER_SCHEMA,
+        json!({
+            "pid": 123,
+            "listen_ip": "192.0.2.10",
+            "tcp_port": 443,
+            "udp_ports": [53, 54, 55, 56]
+        }),
+        false,
+    )?;
+    bounded_ledger.record(json!({"stage": "rx"}));
+    bounded_ledger.record(json!({"stage": "tx"}));
+    bounded_ledger.record(json!({"stage": "rx"}));
+    if bounded_ledger.counters() != (3, 2, 1, 0) {
+        return Err("Windows TUN UDP diagnostic ledger event bound is invalid".to_owned());
+    }
+    drop(bounded_ledger);
+    let bounded_records = fs::read_to_string(&bounded_ledger_path)
+        .map_err(|error| format!("read bounded UDP diagnostic ledger failed: {error}"))?
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("parse bounded UDP diagnostic ledger failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if bounded_records.len() != 5
+        || bounded_records[0]["schema"] != UDP_SUPPORT_LEDGER_SCHEMA
+        || bounded_records[0]["record_type"] != "header"
+        || bounded_records[0]["pid"] != 123
+        || bounded_records[1]["stage"] != "rx"
+        || bounded_records[1]["ledger_counters"]["attempted_events"] != 1
+        || bounded_records[2]["stage"] != "tx"
+        || bounded_records[3]["record_type"] != "truncation"
+        || bounded_records[3]["attempted_events"] != 3
+        || bounded_records[3]["events_written"] != 2
+        || bounded_records[3]["dropped_events_at_least"] != 1
+        || bounded_records[3]["write_failures"] != 0
+        || bounded_records[4]["record_type"] != "footer"
+        || bounded_records[4]["attempted_events"] != 3
+        || bounded_records[4]["events_written"] != 2
+        || bounded_records[4]["dropped_events"] != 1
+        || bounded_records[4]["write_failures"] != 0
+    {
+        return Err("Windows TUN UDP diagnostic ledger records are invalid".to_owned());
+    }
+    let degraded_ledger_path = directory.path().join("degraded.ndjson");
+    let degraded_ledger_arguments = UdpDiagnosticLedgerArgs {
+        path: degraded_ledger_path.clone(),
+        run_nonce: diagnostic_identity.run_nonce,
+        max_events: 2,
+    };
+    let degraded_ledger = BoundedUdpDiagnosticLedger::create_with_reporting(
+        &degraded_ledger_arguments,
+        UDP_SUPPORT_LEDGER_SCHEMA,
+        json!({}),
+        false,
+    )?;
+    degraded_ledger.record(json!({
+        "oversized": "x".repeat(UDP_DIAGNOSTIC_MAX_EVENT_BYTES + 1)
+    }));
+    degraded_ledger.record(json!({"stage": "rx"}));
+    if degraded_ledger.counters() != (2, 1, 0, 1) {
+        return Err("Windows TUN UDP diagnostic write-failure accounting is invalid".to_owned());
+    }
+    drop(degraded_ledger);
+    let degraded_records = fs::read_to_string(&degraded_ledger_path)
+        .map_err(|error| format!("read degraded UDP diagnostic ledger failed: {error}"))?
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("parse degraded UDP diagnostic ledger failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if degraded_records.len() != 3
+        || degraded_records[1]["stage"] != "rx"
+        || degraded_records[1]["event_index"] != 1
+        || degraded_records[2]["attempted_events"] != 2
+        || degraded_records[2]["events_written"] != 1
+        || degraded_records[2]["write_failures"] != 1
+    {
+        return Err(
+            "Windows TUN UDP diagnostic logging failure altered later recording".to_owned(),
+        );
+    }
+    let failed_flow_path = directory.path().join("failed-flow.ndjson");
+    let failed_flow_arguments = UdpWorkloadDiagnosticArgs {
+        ledger: UdpDiagnosticLedgerArgs {
+            path: failed_flow_path.clone(),
+            run_nonce: diagnostic_identity.run_nonce,
+            max_events: 3,
+        },
+        trial_sequence: diagnostic_identity.trial_sequence,
+    };
+    let failed_flow = UdpWorkloadDiagnosticSession::create(&failed_flow_arguments)?;
+    failed_flow.record_flow(
+        diagnostic_identity,
+        Some("198.18.0.2:54321".parse().expect("literal")),
+        Some("192.0.2.10:53".parse().expect("literal")),
+        UdpWorkloadFlowOutcome {
+            send_result: "success",
+            send_bytes: Some(UDP_DIAGNOSTIC_PAYLOAD_LEN),
+            reply_result: "timeout",
+            reply_source: None,
+            payload_match: false,
+            error_kind: Some("timeout"),
+        },
+    );
+    let unobserved_identity = UdpDiagnosticPayload {
+        packet_nonce: diagnostic_identity.packet_nonce + 1,
+        ..diagnostic_identity
+    };
+    failed_flow.record_not_observed(&UdpWorkloadDiagnosticRequest {
+        identity: unobserved_identity,
+        payload: unobserved_identity.encode(),
+        local: Some("198.18.0.2:54322".parse().expect("literal")),
+        target: Some("192.0.2.10:53".parse().expect("literal")),
+        sent: UDP_DIAGNOSTIC_PAYLOAD_LEN,
+    });
+    drop(failed_flow);
+    let failed_flow_records = fs::read_to_string(&failed_flow_path)
+        .map_err(|error| format!("read failed UDP flow ledger failed: {error}"))?
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("parse failed UDP flow ledger failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let unobserved_packet_nonce = unobserved_identity.packet_nonce.to_string();
+    if failed_flow_records.len() != 4
+        || failed_flow_records[0]["schema"] != UDP_WORKLOAD_LEDGER_SCHEMA
+        || failed_flow_records[1]["phase"] != "bootstrap"
+        || failed_flow_records[1]["association_index"] != 85
+        || failed_flow_records[1]["workload_local_port"] != 54321
+        || failed_flow_records[1]["reply_result"] != "timeout"
+        || failed_flow_records[1]["payload_match"] != false
+        || failed_flow_records[2]["packet_nonce"].as_str() != Some(unobserved_packet_nonce.as_str())
+        || failed_flow_records[2]["workload_local_port"] != 54322
+        || failed_flow_records[2]["send_result"] != "success"
+        || failed_flow_records[2]["reply_result"] != "not_observed"
+        || failed_flow_records[2]["reply_source_ip"] != Value::Null
+        || failed_flow_records[2]["payload_match"] != false
+        || failed_flow_records[2]["error_kind"] != "prior_batch_failure"
+        || failed_flow_records[3]["record_type"] != "footer"
+    {
+        return Err("Windows TUN UDP failed-flow diagnostic record is invalid".to_owned());
+    }
+    let batch_failure_ledger_path = directory.path().join("batch-failure.ndjson");
+    let batch_failure_arguments = UdpWorkloadDiagnosticArgs {
+        ledger: UdpDiagnosticLedgerArgs {
+            path: batch_failure_ledger_path.clone(),
+            run_nonce: diagnostic_identity.run_nonce,
+            max_events: 2,
+        },
+        trial_sequence: diagnostic_identity.trial_sequence,
+    };
+    let server_a = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+        .map_err(|error| format!("bind first diagnostic batch server failed: {error}"))?;
+    let server_b = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+        .map_err(|error| format!("bind second diagnostic batch server failed: {error}"))?;
+    let client_a = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+        .map_err(|error| format!("bind first diagnostic batch client failed: {error}"))?;
+    let client_b = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+        .map_err(|error| format!("bind second diagnostic batch client failed: {error}"))?;
+    client_a
+        .connect(
+            server_a
+                .local_addr()
+                .map_err(|error| format!("read first diagnostic server address failed: {error}"))?,
+        )
+        .map_err(|error| format!("connect first diagnostic batch client failed: {error}"))?;
+    client_b
+        .connect(
+            server_b.local_addr().map_err(|error| {
+                format!("read second diagnostic server address failed: {error}")
+            })?,
+        )
+        .map_err(|error| format!("connect second diagnostic batch client failed: {error}"))?;
+    client_a
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .map_err(|error| format!("set diagnostic batch receive timeout failed: {error}"))?;
+    let mut batch_failure_session = UdpWorkloadDiagnosticSession::create(&batch_failure_arguments)?;
+    let mut batch_failure_reply = [0_u8; UDP_DIAGNOSTIC_PAYLOAD_LEN];
+    let batch_failure = diagnostic_association_round(
+        &[client_a, client_b],
+        &mut batch_failure_reply,
+        2,
+        UdpDiagnosticPhase::Warmup,
+        1,
+        None,
+        &mut batch_failure_session,
+    )
+    .expect_err("first diagnostic batch receive must time out");
+    if !batch_failure.contains("phase=warmup association_index=0") {
+        return Err("Windows TUN UDP batch failure identity is invalid".to_owned());
+    }
+    drop(batch_failure_session);
+    let batch_failure_records = fs::read_to_string(&batch_failure_ledger_path)
+        .map_err(|error| format!("read batch-failure UDP ledger failed: {error}"))?
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("parse batch-failure UDP ledger failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if batch_failure_records.len() != 4
+        || batch_failure_records[1]["association_index"] != 0
+        || batch_failure_records[1]["send_result"] != "success"
+        || batch_failure_records[1]["reply_result"] != "timeout"
+        || batch_failure_records[2]["association_index"] != 1
+        || batch_failure_records[2]["send_result"] != "success"
+        || batch_failure_records[2]["reply_result"] != "not_observed"
+        || batch_failure_records[2]["error_kind"] != "prior_batch_failure"
+        || batch_failure_records[3]["record_type"] != "footer"
+    {
+        return Err("Windows TUN UDP batch-failure ledger is incomplete".to_owned());
     }
     if UDP_BATCH != 8 {
         return Err("Windows TUN UDP packet-rate batch recipe is invalid".to_owned());
