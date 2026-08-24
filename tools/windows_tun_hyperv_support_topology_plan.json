@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "vm": {
+    "name": "Windows 10 MSIX packaging environment",
+    "id": "82e20295-1d30-48e7-a751-e21d35d872d4"
+  },
+  "source_checkpoint": {
+    "name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
+    "id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
+    "type": "Standard"
+  },
+  "management_adapter": {
+    "name": "网络适配器",
+    "id": "Microsoft:82E20295-1D30-48E7-A751-E21D35D872D4\\B2D7D8B9-2373-40EE-83C6-CFBBE747CE2A",
+    "switch_name": "Default Switch",
+    "switch_id": "c08cb7b8-9b3c-408e-8e30-5e16a3aeb444",
+    "mac_address": "00155D000101",
+    "dynamic_mac_address": true
+  },
+  "support": {
+    "switch_name": "Ferrum2 TUN Support",
+    "switch_type": "Internal",
+    "vm_adapter_name": "Ferrum2 Support",
+    "vm_mac_address": "00155DFA2502",
+    "guest_interface_alias": "Ferrum2Support",
+    "network": "192.168.250.0/30",
+    "host_ipv4": "192.168.250.1",
+    "guest_ipv4": "192.168.250.2",
+    "prefix_length": 30,
+    "gateway": null,
+    "dns_servers": []
+  },
+  "qualification_checkpoint": {
+    "name": "Ferrum2-WindowsTun-InternalSupport-v1",
+    "type": "Standard"
+  }
+}
