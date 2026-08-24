@@ -944,7 +944,52 @@ function Invoke-GuestSupportNetwork {
     if ($result.Count -ne 1 -or [int]$result[0].schema -ne 1) {
         throw "guest support topology probe returned an invalid result"
     }
-    return $result[0]
+    $guestFields = @(
+        "schema", "management_interface_alias", "management_interface_guid",
+        "management_interface_index", "management_mac_address", "support_interface_alias",
+        "support_interface_guid", "support_interface_index", "support_mac_address",
+        "guest_ipv4", "prefix_length", "network", "gateway", "dns_servers", "mtu_bytes",
+        "selected_source_ipv4", "selected_route_prefix", "selected_route_next_hop"
+    )
+    $remotingFields = @("PSComputerName", "RunspaceId", "PSShowComputerName")
+    $actualFields = @($result[0].PSObject.Properties.Name)
+    $isCleanShape = ($actualFields -join "|") -ceq ($guestFields -join "|")
+    $isRemotingShape = ($actualFields -join "|") -ceq
+        (@($guestFields + $remotingFields) -join "|")
+    if ((-not $isCleanShape -and -not $isRemotingShape) -or
+        $null -ne $result[0].gateway -or @($result[0].dns_servers).Count -ne 0) {
+        throw "guest support topology probe property set is invalid"
+    }
+    if ($isRemotingShape) {
+        $runspaceId = [Guid]::Empty
+        if ([string]$result[0].PSComputerName -cne [string]$Plan.vm.name -or
+            -not [Guid]::TryParse([string]$result[0].RunspaceId, [ref]$runspaceId) -or
+            $runspaceId -eq [Guid]::Empty -or
+            $result[0].PSShowComputerName -isnot [bool] -or
+            $result[0].PSShowComputerName -ne $true) {
+            throw "guest support topology probe remoting metadata is invalid"
+        }
+    }
+    return [pscustomobject][ordered]@{
+        schema = [int]$result[0].schema
+        management_interface_alias = [string]$result[0].management_interface_alias
+        management_interface_guid = [string]$result[0].management_interface_guid
+        management_interface_index = [int]$result[0].management_interface_index
+        management_mac_address = [string]$result[0].management_mac_address
+        support_interface_alias = [string]$result[0].support_interface_alias
+        support_interface_guid = [string]$result[0].support_interface_guid
+        support_interface_index = [int]$result[0].support_interface_index
+        support_mac_address = [string]$result[0].support_mac_address
+        guest_ipv4 = [string]$result[0].guest_ipv4
+        prefix_length = [int]$result[0].prefix_length
+        network = [string]$result[0].network
+        gateway = $null
+        dns_servers = @()
+        mtu_bytes = [int]$result[0].mtu_bytes
+        selected_source_ipv4 = [string]$result[0].selected_source_ipv4
+        selected_route_prefix = [string]$result[0].selected_route_prefix
+        selected_route_next_hop = [string]$result[0].selected_route_next_hop
+    }
 }
 
 function Assert-GuestIdentityUnchanged {
