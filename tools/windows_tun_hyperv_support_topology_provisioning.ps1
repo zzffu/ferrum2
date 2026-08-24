@@ -508,10 +508,28 @@ function Get-ValidatedSupportHostState {
     $gatewayRoutes = @($allRoutes | Where-Object {
         [string]$_.NextHop -cne "0.0.0.0"
     })
-    $dnsServers = @(Get-DnsClientServerAddress -InterfaceIndex $interfaceIndex `
-        -ErrorAction Stop | ForEach-Object { @($_.ServerAddresses) } | Where-Object {
-        -not [string]::IsNullOrWhiteSpace([string]$_)
-    })
+    $ipv4DnsServers = @(
+        Get-DnsClientServerAddress -InterfaceIndex $interfaceIndex `
+            -AddressFamily IPv4 -ErrorAction Stop |
+            ForEach-Object { @($_.ServerAddresses) } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            ForEach-Object { [string]$_ } |
+            Sort-Object
+    )
+    $ipv6DnsServers = @(
+        Get-DnsClientServerAddress -InterfaceIndex $interfaceIndex `
+            -AddressFamily IPv6 -ErrorAction Stop |
+            ForEach-Object { @($_.ServerAddresses) } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            ForEach-Object { [string]$_ } |
+            Sort-Object
+    )
+    $windowsIntrinsicIpv6Dns = @(
+        "fec0:0:0:ffff::1", "fec0:0:0:ffff::2", "fec0:0:0:ffff::3"
+    )
+    $dnsStateValid = $ipv4DnsServers.Count -eq 0 -and
+        ($ipv6DnsServers.Count -eq 0 -or
+            ($ipv6DnsServers -join "|") -ieq ($windowsIntrinsicIpv6Dns -join "|"))
     $selection = @(Find-NetRoute -RemoteIPAddress ([string]$Plan.support.guest_ipv4) `
         -ErrorAction Stop)
     $sourceRows = @($selection | Where-Object {
@@ -520,20 +538,34 @@ function Get-ValidatedSupportHostState {
     $routeRows = @($selection | Where-Object {
         $null -ne $_.PSObject.Properties["DestinationPrefix"]
     })
-    if ($ipInterfaces.Count -ne 1 -or $persistentIpInterfaces.Count -ne 1 -or
-        [string]$ipInterfaces[0].Dhcp -cne "Disabled" -or
-        [string]$ipInterfaces[0].IgnoreDefaultRoutes -cne "Enabled" -or
-        [string]$persistentIpInterfaces[0].IgnoreDefaultRoutes -cne "Enabled" -or
-        [int]$ipInterfaces[0].NlMtu -lt 1468 -or $directRoutes.Count -ne 1 -or
-        $defaultRoutes.Count -ne 0 -or $gatewayRoutes.Count -ne 0 -or
-        $dnsServers.Count -ne 0 -or
-        $sourceRows.Count -ne 1 -or $routeRows.Count -ne 1 -or
-        [string]$sourceRows[0].IPAddress -cne [string]$Plan.support.host_ipv4 -or
-        [int]$sourceRows[0].InterfaceIndex -ne $interfaceIndex -or
-        [string]$routeRows[0].DestinationPrefix -cne [string]$Plan.support.network -or
-        [string]$routeRows[0].NextHop -cne "0.0.0.0" -or
-        [int]$routeRows[0].InterfaceIndex -ne $interfaceIndex) {
-        throw "support host route, DNS, DHCP, MTU, or source-selection contract is invalid"
+    $activeInterfaceValid = $ipInterfaces.Count -eq 1 -and
+        [string]$ipInterfaces[0].Dhcp -ceq "Disabled" -and
+        [string]$ipInterfaces[0].IgnoreDefaultRoutes -ceq "Enabled" -and
+        [int]$ipInterfaces[0].NlMtu -ge 1468
+    $persistentInterfaceValid = $persistentIpInterfaces.Count -eq 1 -and
+        [string]$persistentIpInterfaces[0].IgnoreDefaultRoutes -ceq "Enabled"
+    $sourceSelectionValid = $sourceRows.Count -eq 1 -and
+        [string]$sourceRows[0].IPAddress -ceq [string]$Plan.support.host_ipv4 -and
+        [int]$sourceRows[0].InterfaceIndex -eq $interfaceIndex
+    $routeSelectionValid = $routeRows.Count -eq 1 -and
+        [string]$routeRows[0].DestinationPrefix -ceq [string]$Plan.support.network -and
+        [string]$routeRows[0].NextHop -ceq "0.0.0.0" -and
+        [int]$routeRows[0].InterfaceIndex -eq $interfaceIndex
+    $violations = @(
+        if (-not $activeInterfaceValid) { "active_interface" }
+        if (-not $persistentInterfaceValid) { "persistent_interface" }
+        if ($directRoutes.Count -ne 1) { "direct_route_count=$($directRoutes.Count)" }
+        if ($defaultRoutes.Count -ne 0) { "default_route_count=$($defaultRoutes.Count)" }
+        if ($gatewayRoutes.Count -ne 0) { "gateway_route_count=$($gatewayRoutes.Count)" }
+        if (-not $dnsStateValid) {
+            "dns_state=ipv4:$($ipv4DnsServers.Count),ipv6:$($ipv6DnsServers.Count)"
+        }
+        if (-not $sourceSelectionValid) { "source_selection" }
+        if (-not $routeSelectionValid) { "route_selection" }
+    )
+    if ($violations.Count -ne 0) {
+        throw "support host route, DNS, DHCP, MTU, or source-selection contract is invalid: " +
+            ($violations -join ",")
     }
     Assert-NoSupportNat -Plan $Plan
     Assert-IcsDisabledForHostAdapter -InterfaceGuid ([Guid]$context.HostAdapter.InterfaceGuid)
