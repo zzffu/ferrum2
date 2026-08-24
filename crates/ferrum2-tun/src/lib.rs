@@ -4170,14 +4170,19 @@ impl Stack {
     fn reap_tcp(&mut self) -> usize {
         let mut reaped = 0;
         let flow_visits = self.live_tcp_flow_count.min(TCP_REAP_QUANTUM);
+        let output_drained = !self.device.has_output();
         for _ in 0..flow_visits {
             let Some(index) = self.next_reap_cursor else {
                 break;
             };
             self.next_reap_cursor = self.active_flow_successor(index);
             let remove = self.flows[index].as_ref().is_some_and(|entry| {
-                let state = self.sockets.get::<TcpSocket>(entry.socket).state();
-                state == TcpState::Closed || (state == TcpState::TimeWait && entry.remote_closed)
+                let socket = self.sockets.get::<TcpSocket>(entry.socket);
+                match socket.state() {
+                    TcpState::Closed => output_drained && socket.remote_endpoint().is_none(),
+                    TcpState::TimeWait => output_drained && entry.remote_closed,
+                    _ => false,
+                }
             });
             if remove && let Some(entry) = self.take_tcp_flow(index) {
                 self.sockets.remove(entry.socket);
@@ -4330,6 +4335,7 @@ mod tests {
     use std::time::Duration;
 
     use smoltcp::phy::{Device, TxToken};
+    use smoltcp::socket::tcp::{Socket as TcpSocket, State as TcpState};
     use smoltcp::time::Instant;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -5822,6 +5828,11 @@ mod tests {
 
         drop(flow);
         stack.poll_quantum(Instant::from_millis(3));
+        assert_eq!(
+            stack.live_tcp_flows(),
+            1,
+            "the flow remains owned while its reset is queued"
+        );
         let mut reset = false;
         assert_eq!(
             stack.flush_output(|packet| {
@@ -5831,6 +5842,12 @@ mod tests {
             OutputFlushOutcome::Sent
         );
         assert!(reset, "terminal drop emits a local TCP reset");
+        assert_eq!(
+            stack.live_tcp_flows(),
+            1,
+            "adapter acceptance is resolved before the next reap pass"
+        );
+        stack.poll_quantum(Instant::from_millis(4));
         assert_eq!(stack.live_tcp_flows(), 0);
         assert_eq!(registry.snapshot().active_tun_tcp_flows, 0);
         assert!(stack.enqueue(&ipv4_tcp(), true));
@@ -5850,6 +5867,125 @@ mod tests {
             0,
             "dropping Stack releases the production flow guard"
         );
+    }
+
+    #[tokio::test]
+    async fn tcp_abort_waits_for_existing_wave_and_queued_reset_before_reap() {
+        const FLOW_TOTAL: usize = 2;
+        const BUFFER_BYTES: usize = 4_096;
+        const PAYLOAD_BYTES: usize = 512;
+        let flow_count = Arc::new(AtomicUsize::new(0));
+        let (mut stack, mut flows) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            FLOW_TOTAL,
+            BUFFER_BYTES,
+            Duration::from_secs(60),
+            Arc::clone(&flow_count),
+        )
+        .expect("two-flow abort stack");
+        let (mut retained, _) = establish_ipv4_tcp_flow(&mut stack, &mut flows, 10_000, 0);
+        let (mut aborted, _) = establish_ipv4_tcp_flow(&mut stack, &mut flows, 10_001, 2);
+
+        retained
+            .write_all(&vec![0x41; PAYLOAD_BYTES])
+            .await
+            .expect("fill retained flow bridge");
+        aborted
+            .write_all(&vec![0x42; PAYLOAD_BYTES])
+            .await
+            .expect("fill aborted flow bridge");
+        assert!(stack.drive_tcp(), "both bridges reach smoltcp");
+        assert!(stack.poll_stack_once(Instant::from_millis(100)).worked);
+        assert_eq!(
+            stack.device.output_count, FLOW_TOTAL,
+            "the existing data wave contains one packet per flow"
+        );
+
+        let aborted_slot = stack
+            .flows
+            .iter()
+            .position(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.tuple.source.port() == 10_001)
+            })
+            .expect("aborted flow slot");
+        drop(aborted);
+        assert!(stack.poll_stack_once(Instant::from_millis(101)).worked);
+        let aborted_socket = stack.flows[aborted_slot]
+            .as_ref()
+            .expect("aborted flow remains live during the old wave")
+            .socket;
+        assert_eq!(
+            stack.sockets.get::<TcpSocket>(aborted_socket).state(),
+            TcpState::Closed
+        );
+        assert!(
+            stack
+                .sockets
+                .get::<TcpSocket>(aborted_socket)
+                .remote_endpoint()
+                .is_some(),
+            "the undispatched reset retains its remote tuple"
+        );
+        assert_eq!(stack.live_tcp_flows(), FLOW_TOTAL);
+        assert_eq!(
+            stack.device.output_count, FLOW_TOTAL,
+            "an abort cannot grow a partially drained wave"
+        );
+
+        while stack.has_output() {
+            assert_eq!(
+                stack.flush_output(|packet| {
+                    assert_eq!(packet[33] & 0x04, 0, "the old wave contains data, not RST");
+                    OutputSendOutcome::Sent
+                }),
+                OutputFlushOutcome::Sent
+            );
+        }
+        assert!(stack.poll_stack_once(Instant::from_millis(102)).worked);
+        assert!(
+            stack
+                .sockets
+                .get::<TcpSocket>(aborted_socket)
+                .remote_endpoint()
+                .is_none(),
+            "RST dispatch clears the smoltcp tuple"
+        );
+        assert_eq!(
+            stack.live_tcp_flows(),
+            FLOW_TOTAL,
+            "the queued reset still owns its flow slot"
+        );
+
+        let mut reset_seen = false;
+        while stack.has_output() {
+            assert_eq!(
+                stack.flush_output(|packet| {
+                    let destination_port = u16::from_be_bytes([packet[22], packet[23]]);
+                    if destination_port == 10_001 {
+                        assert_ne!(packet[33] & 0x04, 0, "aborted flow emits RST");
+                        reset_seen = true;
+                    } else {
+                        assert_eq!(packet[33] & 0x04, 0, "retained flow is not reset");
+                    }
+                    OutputSendOutcome::Sent
+                }),
+                OutputFlushOutcome::Sent
+            );
+        }
+        assert!(reset_seen, "the next wave contains the abort RST");
+        assert_eq!(stack.live_tcp_flows(), FLOW_TOTAL);
+        stack.poll_quantum(Instant::from_millis(103));
+        assert_eq!(stack.live_tcp_flows(), 1);
+        assert_eq!(flow_count.load(Ordering::Acquire), 1);
+        drop(retained);
     }
 
     #[tokio::test]
@@ -6471,6 +6607,21 @@ mod tests {
             OutputFlushOutcome::Sent
         );
         stack.poll_quantum(Instant::from_millis(1_001));
+        assert_eq!(
+            stack.live_tcp_flows(),
+            1,
+            "the timed-out flow remains owned while its reset is queued"
+        );
+        let mut reset = false;
+        assert_eq!(
+            stack.flush_output(|packet| {
+                reset = packet[33] & 0x04 != 0;
+                OutputSendOutcome::Sent
+            }),
+            OutputFlushOutcome::Sent
+        );
+        assert!(reset, "the half-open timeout emits a reset");
+        stack.poll_quantum(Instant::from_millis(1_002));
         assert_eq!(stack.live_tcp_flows(), 0, "half-open flow timed out");
         assert_eq!(flow_count.load(Ordering::Acquire), 0);
     }
