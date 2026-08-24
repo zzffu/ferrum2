@@ -143,6 +143,7 @@ function Invoke-TopologyRollback {
     $failures = [Collections.Generic.List[string]]::new()
     $vmIsOffForRollback = $false
     $vmInventoryOwnedForRollback = $false
+    $sourceRestoreConverged = $false
     try {
         Stop-ExactVmHard -Plan $Plan -TimeoutSeconds $TimeoutSeconds
         $vmIsOffForRollback = $true
@@ -217,6 +218,22 @@ function Invoke-TopologyRollback {
             Restore-ExactCheckpoint -Plan $Plan `
                 -CheckpointId ([Guid][string]$Plan.source_checkpoint.id) `
                 -CheckpointName ([string]$Plan.source_checkpoint.name)
+            $restoreDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                $restoredVm = Get-VM -Id ([Guid][string]$Plan.vm.id) -ErrorAction Stop
+                $restoredAdapters = @(Get-VMNetworkAdapter -VM $restoredVm -ErrorAction Stop)
+                $restoredManagement = @($restoredAdapters | Where-Object {
+                    [string]$_.Id -ieq [string]$Plan.management_adapter.id
+                })
+                if ($restoredAdapters.Count -eq 1 -and $restoredManagement.Count -eq 1) {
+                    $sourceRestoreConverged = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 250
+            } while ([DateTime]::UtcNow -lt $restoreDeadline)
+            if (-not $sourceRestoreConverged) {
+                throw "source checkpoint restore did not converge to its single-adapter inventory"
+            }
         } catch {
             $failures.Add("source checkpoint restore: $($_.Exception.Message)")
         }
@@ -261,8 +278,8 @@ function Invoke-TopologyRollback {
         }
     }
 
-    if ($VmAdapterCreationAttempted -and $vmIsOffForRollback -and
-        $vmInventoryOwnedForRollback) {
+    if ($VmAdapterCreationAttempted -and -not $sourceRestoreConverged -and
+        $vmIsOffForRollback -and $vmInventoryOwnedForRollback) {
         try {
             $vm = Get-VM -Id ([Guid][string]$Plan.vm.id) -ErrorAction Stop
             $rows = @()
