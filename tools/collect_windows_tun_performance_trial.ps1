@@ -29,6 +29,10 @@ param(
     [ValidateRange(1, 2)]
     [int]$Order,
 
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 90)]
+    [int]$Sequence,
+
     [Parameter(Mandatory = $true)][string]$ParentSha,
     [Parameter(Mandatory = $true)][string]$CandidateSha,
     [Parameter(Mandatory = $true)][string]$Tree,
@@ -785,20 +789,6 @@ foreach ($digest in @($ParentSha, $CandidateSha, $Tree)) {
 Assert-Condition ($RecipeSha256 -cmatch '^[0-9a-f]{64}$') "recipe identity must be lowercase SHA-256"
 $expectedOrder = if (($Member -ceq "parent") -eq (($Pair % 2) -eq 1)) { 1 } else { 2 }
 Assert-Condition ($Order -eq $expectedOrder) "trial order does not follow the alternating schedule"
-$scenarioOrder = @(
-    "tcp-single-flow",
-    "tcp-256-flow-fairness",
-    "udp-packets-per-second",
-    "udp-8192-association-lookup-expiry",
-    "fragment-reassembly-throughput",
-    "idle-cpu-wakeup",
-    "wintun-ring-full-drop-rate",
-    "udp-route-once",
-    "network-lifecycle"
-)
-$scenarioIndex = [Array]::IndexOf($scenarioOrder, $Scenario)
-Assert-Condition ($scenarioIndex -ge 0) "scenario is outside the fixed schedule"
-$sequence = $scenarioIndex * 10 + ($Pair - 1) * 2 + $Order
 if ($RunKind -ceq "calibration-aa") {
     Assert-Condition ($ParentSha -ceq $CandidateSha) "A/A trial requires identical commit SHAs"
 } else {
@@ -863,7 +853,7 @@ if ($Scenario -in @("udp-route-once", "network-lifecycle")) {
             [IO.FileAttributes]::ReparsePoint) -and
         [IO.Path]::GetFileName($modelOutputPath) -ceq (
             "{0:D3}-{1}-{2}-pair-{3}.network-model.json" -f `
-                $sequence, $Scenario, $Member, $Pair
+                $Sequence, $Scenario, $Member, $Pair
         )
     ) "network-model output boundary or identity is invalid"
 } else {
@@ -1527,7 +1517,7 @@ try {
                 run_kind = $RunKind
                 member = $Member
                 pair = [uint64]$Pair
-                trial_sequence = [uint64]$sequence
+                trial_sequence = [uint64]$Sequence
                 client_pid = [uint64]$ClientPid
                 server_pid = [uint64]$ServerPid
                 vm_name = $ExpectedVmName
@@ -1859,7 +1849,7 @@ try {
                 run_kind = $RunKind
                 member = $Member
                 pair = [uint64]$Pair
-                trial_sequence = [uint64]$sequence
+                trial_sequence = [uint64]$Sequence
                 client_pid = [uint64]$ClientPid
                 server_pid = [uint64]$ServerPid
                 vm_name = $ExpectedVmName
@@ -1999,7 +1989,7 @@ try {
         member = $Member
         pair = $Pair
         order = $Order
-        sequence = $sequence
+        sequence = $Sequence
         started_utc = $startedUtc
         finished_utc = $finishedUtc
         parent_sha = $ParentSha
@@ -2040,7 +2030,7 @@ try {
         $script:Utf8NoBom
     )
     Move-Item -LiteralPath $temporary -Destination $outputPath -ErrorAction Stop
-    Write-Output "windows_tun_trial status=PASS scenario=$Scenario member=$Member pair=$Pair order=$Order output=$outputPath"
+    Write-Output "windows_tun_trial status=PASS scenario=$Scenario member=$Member pair=$Pair order=$Order sequence=$Sequence output=$outputPath"
 } finally {
     if (Test-Path -LiteralPath $script:WorkRoot -PathType Container) {
         $resolvedWorkRoot = (Resolve-Path -LiteralPath $script:WorkRoot).Path

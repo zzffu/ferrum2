@@ -967,14 +967,16 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         regression: bool = False,
     ) -> dict[str, object]:
         contract = CONTROL.WINDOWS_TUN_SCENARIOS[scenario]
-        order = 1 if (member == "parent") == (pair % 2 == 1) else 2
-        sequence = (
-            list(CONTROL.WINDOWS_TUN_SCENARIOS).index(scenario)
-            * CONTROL.WINDOWS_TUN_PAIR_COUNT
-            * 2
-            + (pair - 1) * 2
-            + order
-        )
+        planned = [
+            trial
+            for trial in plan["trials"]
+            if trial["scenario"] == scenario
+            and trial["pair"] == pair
+            and trial["member"] == member
+        ]
+        self.assertEqual(len(planned), 1)
+        order = planned[0]["order"]
+        sequence = planned[0]["sequence"]
         started = datetime(2026, 8, 22, tzinfo=timezone.utc) + timedelta(
             seconds=sequence * 2
         )
@@ -1318,6 +1320,57 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 (trial["member"] == "parent") == (trial["pair"] % 2 == 1)
             ) else 2
             self.assertEqual(trial["order"], expected)
+        scheduled_scenarios = [
+            plan["trials"][index * CONTROL.WINDOWS_TUN_PAIR_COUNT * 2]["scenario"]
+            for index in range(len(CONTROL.WINDOWS_TUN_SCENARIOS))
+        ]
+        self.assertEqual(
+            scheduled_scenarios,
+            list(CONTROL.WINDOWS_TUN_SCENARIOS),
+            "canonical JSON key sorting must not reorder trial execution",
+        )
+        self.assertEqual(
+            [
+                (
+                    trial["sequence"],
+                    trial["member"],
+                    trial["pair"],
+                    trial["order"],
+                )
+                for trial in plan["trials"]
+                if trial["scenario"] == "fragment-reassembly-throughput"
+            ][:2],
+            [(41, "parent", 1, 1), (42, "candidate", 1, 2)],
+        )
+
+    def test_serialized_windows_tun_plan_preserves_the_trial_schedule(self) -> None:
+        policy = self.policy()
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=policy
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "plan.json"
+            path.write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
+            loaded = CONTROL.load_windows_tun_plan(path, decision_policy=policy)
+            for sequence in (True, 1.0, "1"):
+                with self.subTest(sequence=sequence):
+                    tampered = copy.deepcopy(plan)
+                    tampered["trials"][0]["sequence"] = sequence
+                    path.write_text(
+                        json.dumps(tampered, sort_keys=True), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        CONTROL.CandidateControlError, "canonical recipe"
+                    ):
+                        CONTROL.load_windows_tun_plan(
+                            path, decision_policy=policy
+                        )
+        self.assertEqual(loaded["trials"], plan["trials"])
+        self.assertEqual(loaded["trials"][40]["sequence"], 41)
+        self.assertEqual(
+            loaded["trials"][40]["scenario"],
+            "fragment-reassembly-throughput",
+        )
 
     def test_policy_rejects_partial_or_unbound_calibration(self) -> None:
         policy = self.policy()
@@ -1585,12 +1638,97 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         wrong_order = copy.deepcopy(row)
         wrong_order["order"] = 2
         cases.append((wrong_order, "alternating"))
+        wrong_sequence = copy.deepcopy(row)
+        wrong_sequence["sequence"] = 2
+        cases.append((wrong_sequence, "planned sequence"))
         for candidate, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(CONTROL.CandidateControlError, message):
                     CONTROL.validate_windows_tun_trial(
                         candidate,
                         plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+    def test_trial_sequence_is_strictly_typed_and_uniquely_plan_bound(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="tcp-single-flow",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        for value in (True, 1.0, "1", 0, 91):
+            with self.subTest(sequence=value):
+                candidate = copy.deepcopy(row)
+                candidate["sequence"] = value
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError, "sequence"
+                ):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+        for name, mutate in (
+            (
+                "scenario",
+                lambda value: value.update(scenario="tcp-256-flow-fairness"),
+            ),
+            (
+                "pair-member-order",
+                lambda value: value.update(pair=2, member="candidate", order=1),
+            ),
+        ):
+            with self.subTest(identity=name):
+                candidate = copy.deepcopy(row)
+                mutate(candidate)
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError, "planned sequence"
+                ):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+        for name, index, replacement in (
+            ("duplicate", 1, 1),
+            ("missing", 0, 90),
+        ):
+            with self.subTest(plan_sequence=name):
+                tampered_plan = copy.deepcopy(plan)
+                tampered_plan["trials"][index]["sequence"] = replacement
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError,
+                    "sequence does not uniquely match the plan",
+                ):
+                    CONTROL.validate_windows_tun_trial(
+                        row,
+                        plan=tampered_plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+        for field, value in (("pair", True), ("order", 1.0)):
+            with self.subTest(plan_identity=field):
+                tampered_plan = copy.deepcopy(plan)
+                tampered_plan["trials"][0][field] = value
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError,
+                    "planned trial identity is invalid",
+                ):
+                    CONTROL.validate_windows_tun_trial(
+                        row,
+                        plan=tampered_plan,
                         parent_sha=self.PARENT_SHA,
                         candidate_sha=self.CANDIDATE_SHA,
                     )

@@ -1493,6 +1493,10 @@ public static class Ferrum2PerfProcessGroup {
             }
         }
 
+        function Test-JsonInteger([object]$Value) {
+            return $Value -is [int] -or $Value -is [long]
+        }
+
         function Get-FreeTcpPort([string]$LocalAddress = "127.0.0.1") {
             $address = [Net.IPAddress]::Parse($LocalAddress)
             $listener = New-Object Net.Sockets.TcpListener($address, 0)
@@ -2007,6 +2011,7 @@ public static class Ferrum2PerfProcessGroup {
                     "-Member", $member,
                     "-Pair", [string]$trial.pair,
                     "-Order", [string]$trial.order,
+                    "-Sequence", [string]$trial.sequence,
                     "-ParentSha", $ParentCommit,
                     "-CandidateSha", $CandidateCommit,
                     "-Tree", $memberTree,
@@ -2044,7 +2049,7 @@ public static class Ferrum2PerfProcessGroup {
                 })
                 $expectedCollectorOutput = "windows_tun_trial status=PASS " +
                     "scenario=$($trial.scenario) member=$member pair=$($trial.pair) " +
-                    "order=$($trial.order) output=$output"
+                    "order=$($trial.order) sequence=$($trial.sequence) output=$output"
                 if ($collectorExit -ne 0 -or $collectorLines.Count -ne 1 -or
                     [string]$collectorLines[0] -cne $expectedCollectorOutput -or
                     -not (Test-Path -LiteralPath $output -PathType Leaf) -or
@@ -2086,6 +2091,28 @@ public static class Ferrum2PerfProcessGroup {
                         $failureText
                     }
                     throw "Windows TUN collector trial failed: sequence=$($trial.sequence) detail=$failureDetail"
+                }
+                $trialEvidence = Get-Content -LiteralPath $output -Raw -Encoding utf8 |
+                    ConvertFrom-Json -ErrorAction Stop
+                if (-not (Test-JsonInteger -Value $trialEvidence.schema_version) -or
+                    $trialEvidence.schema_version -ne 3 -or
+                    $trialEvidence.kind -isnot [string] -or
+                    $trialEvidence.kind -cne "windows_tun_performance_trial" -or
+                    $trialEvidence.selection -isnot [string] -or
+                    $trialEvidence.selection -cne [string]$plan.selection -or
+                    $trialEvidence.run_kind -isnot [string] -or
+                    $trialEvidence.run_kind -cne $RunKindValue -or
+                    -not (Test-JsonInteger -Value $trialEvidence.sequence) -or
+                    $trialEvidence.sequence -ne $trial.sequence -or
+                    $trialEvidence.scenario -isnot [string] -or
+                    $trialEvidence.scenario -cne [string]$trial.scenario -or
+                    $trialEvidence.member -isnot [string] -or
+                    $trialEvidence.member -cne $member -or
+                    -not (Test-JsonInteger -Value $trialEvidence.pair) -or
+                    $trialEvidence.pair -ne $trial.pair -or
+                    -not (Test-JsonInteger -Value $trialEvidence.order) -or
+                    $trialEvidence.order -ne $trial.order) {
+                    throw "Windows TUN collector output identity does not match the planned trial"
                 }
             } catch {
                 $trialFailure = $_

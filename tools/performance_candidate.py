@@ -3668,7 +3668,10 @@ def create_windows_tun_plan(
     contracts = windows_tun_scenario_contracts()
     trials: list[dict[str, object]] = []
     sequence = 0
-    for scenario in contracts:
+    # The canonical JSON form sorts object keys for hashing, but trial execution
+    # follows the reviewed declaration order. Never derive an ordered schedule
+    # from canonical object keys.
+    for scenario in WINDOWS_TUN_SCENARIOS:
         for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1):
             members = ("parent", "candidate") if pair % 2 else ("candidate", "parent")
             for order, member in enumerate(members, start=1):
@@ -3716,7 +3719,7 @@ def load_windows_tun_plan(
         )
     except (OSError, KeyError, TypeError) as error:
         raise CandidateControlError("Windows TUN performance plan is invalid") from error
-    if plan != expected:
+    if _canonical_json_bytes(plan) != _canonical_json_bytes(expected):
         raise CandidateControlError(
             "Windows TUN performance plan does not match the canonical recipe or policy"
         )
@@ -4063,17 +4066,35 @@ def validate_windows_tun_trial(
         raise CandidateControlError(
             "Windows TUN trial does not follow alternating parent/candidate order"
         )
-    expected_sequence = (
-        list(WINDOWS_TUN_SCENARIOS).index(scenario) * WINDOWS_TUN_PAIR_COUNT * 2
-        + (pair - 1) * 2
-        + order
-    )
-    if type(row["sequence"]) is not int or row["sequence"] != expected_sequence:
-        raise CandidateControlError("Windows TUN trial sequence does not match the plan")
+    sequence = row["sequence"]
+    if type(sequence) is not int:
+        raise CandidateControlError("Windows TUN trial sequence is invalid")
+    planned_trials = [
+        trial
+        for trial in plan["trials"]
+        if type(trial["sequence"]) is int and trial["sequence"] == sequence
+    ]
+    if len(planned_trials) != 1:
+        raise CandidateControlError(
+            "Windows TUN trial sequence does not uniquely match the plan"
+        )
+    planned_trial = planned_trials[0]
+    if (
+        type(planned_trial["scenario"]) is not str
+        or type(planned_trial["member"]) is not str
+        or type(planned_trial["pair"]) is not int
+        or type(planned_trial["order"]) is not int
+    ):
+        raise CandidateControlError("Windows TUN planned trial identity is invalid")
+    identity_fields = ("sequence", "scenario", "member", "pair", "order")
+    if any(row[field] != planned_trial[field] for field in identity_fields):
+        raise CandidateControlError(
+            "Windows TUN trial identity does not match its planned sequence"
+        )
     _validate_windows_tun_network_model_reference(
         row["network_model_evidence"],
         scenario=scenario,
-        sequence=expected_sequence,
+        sequence=sequence,
         member=member,
         pair=pair,
     )
@@ -4339,7 +4360,19 @@ def _read_windows_tun_rows(
         paths = sorted(evidence_root.glob("*.json"))
     except OSError as error:
         raise CandidateControlError("unable to enumerate Windows TUN evidence") from error
-    expected_count = len(WINDOWS_TUN_SCENARIOS) * WINDOWS_TUN_PAIR_COUNT * 2
+    planned_trials = plan["trials"]
+    expected_count = len(planned_trials)
+    planned_sequences = [trial["sequence"] for trial in planned_trials]
+    planned_keys = [
+        (trial["scenario"], trial["pair"], trial["member"])
+        for trial in planned_trials
+    ]
+    if (
+        any(type(sequence) is not int for sequence in planned_sequences)
+        or planned_sequences != list(range(1, expected_count + 1))
+        or len(set(planned_keys)) != expected_count
+    ):
+        raise CandidateControlError("Windows TUN plan trial schedule is invalid")
     if len(paths) != expected_count:
         raise CandidateControlError(
             f"Windows TUN evidence requires exactly {expected_count} trial files"
@@ -4393,20 +4426,13 @@ def _read_windows_tun_rows(
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
         )
-    expected_keys = {
-        (scenario, pair, member)
-        for scenario in WINDOWS_TUN_SCENARIOS
-        for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1)
-        for member in ("parent", "candidate")
-    }
+    expected_keys = set(planned_keys)
     if set(rows) != expected_keys:
         raise CandidateControlError("Windows TUN evidence set is incomplete")
     if environment_identity is None:
         raise CandidateControlError("Windows TUN evidence environment is missing")
-    ordered_rows = sorted(rows.values(), key=lambda row: row["sequence"])
-    if [row["sequence"] for row in ordered_rows] != list(
-        range(1, expected_count + 1)
-    ):
+    ordered_rows = [rows[key] for key in planned_keys]
+    if [row["sequence"] for row in ordered_rows] != planned_sequences:
         raise CandidateControlError("Windows TUN evidence sequence is incomplete")
     for previous, current in zip(ordered_rows, ordered_rows[1:], strict=False):
         if _windows_tun_utc(
