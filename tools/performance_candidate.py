@@ -247,6 +247,7 @@ WINDOWS_TUN_RUNTIME_RECIPE = {
     "udp_max_sessions": 16_384,
     "udp_max_buffered_bytes": 268_435_456,
     "udp_idle_timeout_milliseconds": 60_000,
+    "client_runtime_idle_timeout_milliseconds": 60_000,
     "shadowsocks_method": "2022-blake3-aes-128-gcm",
     "gso": False,
 }

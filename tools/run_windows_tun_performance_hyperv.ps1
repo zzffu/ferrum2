@@ -447,6 +447,13 @@ function New-CanonicalPlan {
         $plannedRunnerHashes[0] -cne $script:runnerSourceSha256) {
         throw "canonical Windows TUN plan does not bind this runner source"
     }
+    $plannedRuntimeIdleTimeouts = @($plan.scenarios.PSObject.Properties | ForEach-Object {
+        [int]$_.Value.recipe.client_runtime_idle_timeout_milliseconds
+    } | Sort-Object -Unique)
+    if ($plannedRuntimeIdleTimeouts.Count -ne 1 -or
+        $plannedRuntimeIdleTimeouts[0] -ne 60000) {
+        throw "canonical Windows TUN plan client runtime idle timeout is invalid"
+    }
     return $plan
 }
 
@@ -806,6 +813,8 @@ try {
     [IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
     [IO.Directory]::CreateDirectory($runtimeRoot) | Out-Null
     $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $hostPlanPath
+    $runtimeIdleTimeoutMilliseconds = [int]$plan.scenarios."tcp-single-flow".recipe.
+        client_runtime_idle_timeout_milliseconds
     [void](New-NetworkModelPlan -Python $python -Output $hostNetworkModelPlanPath `
         -ExpectedSha256 ([string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256))
     $scheduleLines = @($plan.trials | ForEach-Object {
@@ -894,13 +903,17 @@ max_buffered_bytes = 268435456
 idle_timeout_ms = 60000
 [runtime]
 shutdown_grace_ms = 30000
-idle_timeout_ms = 2000
+idle_timeout_ms = {{RUNTIME_IDLE_TIMEOUT_MS}}
 [metrics]
 listen = "127.0.0.1:{{METRICS_PORT}}"
 [shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 '@
+    $clientTemplate = $clientTemplate.Replace(
+        "{{RUNTIME_IDLE_TIMEOUT_MS}}",
+        [string]$runtimeIdleTimeoutMilliseconds
+    )
     $serverTemplate = @'
 schema_version = 2
 [[inbounds]]
