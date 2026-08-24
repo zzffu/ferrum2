@@ -973,11 +973,17 @@ fn validate_transport(
         IP_PROTOCOL_UDP => [transport[6], transport[7]],
         _ => unreachable!("transport protocol was closed above"),
     };
-    if protocol == IP_PROTOCOL_UDP && source.is_ipv4() && checksum_field == [0, 0] {
-        return Ok(metadata);
+    // An all-zero field means "checksum omitted" only for IPv4 UDP. TCP still
+    // validates the complete sum because its computed checksum may legitimately be zero.
+    if protocol == IP_PROTOCOL_UDP && checksum_field == [0, 0] {
+        if source.is_ipv4() {
+            return Ok(metadata);
+        }
+        return Err(PacketReject::new(
+            PacketRejectReason::InvalidTransportChecksum,
+        ));
     }
-    if checksum_field == [0, 0] || transport_checksum(source, destination, protocol, transport) != 0
-    {
+    if transport_checksum(source, destination, protocol, transport) != 0 {
         return Err(PacketReject::new(
             PacketRejectReason::InvalidTransportChecksum,
         ));
@@ -1148,6 +1154,24 @@ pub(crate) mod test_support {
         packet
     }
 
+    pub(crate) fn ipv4_tcp_zero_checksum() -> Vec<u8> {
+        let mut packet = vec![0_u8; 42];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&42_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = IP_PROTOCOL_TCP;
+        packet[12..16].copy_from_slice(&[198, 18, 0, 1]);
+        packet[16..20].copy_from_slice(&[192, 0, 2, 1]);
+        packet[20..22].copy_from_slice(&10_000_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[32] = 5 << 4;
+        packet[33] = 0x18;
+        packet[34..36].copy_from_slice(&8_192_u16.to_be_bytes());
+        packet[40..42].copy_from_slice(&[0xde, 0xea]);
+        repair_ipv4_header(&mut packet);
+        packet
+    }
+
     pub(crate) fn repair_ipv4_header(packet: &mut [u8]) {
         let header_len = usize::from(packet[0] & 0x0f) * 4;
         packet[10..12].fill(0);
@@ -1178,8 +1202,12 @@ pub(crate) mod test_support {
             6 => internet_checksum(&[&packet[8..24], &packet[24..40], &length, &next, transport]),
             _ => unreachable!(),
         };
-        packet[checksum_offset..checksum_offset + 2]
-            .copy_from_slice(&if checksum == 0 { u16::MAX } else { checksum }.to_be_bytes());
+        let checksum = if protocol == IP_PROTOCOL_UDP && checksum == 0 {
+            u16::MAX
+        } else {
+            checksum
+        };
+        packet[checksum_offset..checksum_offset + 2].copy_from_slice(&checksum.to_be_bytes());
     }
 }
 
@@ -1188,7 +1216,8 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::test_support::{
-        ipv4_tcp_with_options, ipv4_udp, ipv6_udp, repair_ipv4_header, repair_transport_checksum,
+        ipv4_tcp_with_options, ipv4_tcp_zero_checksum, ipv4_udp, ipv6_udp, repair_ipv4_header,
+        repair_transport_checksum,
     };
     use super::{
         CONTROL_ERROR_INTERVAL_MILLIS, ControlRateLimiter, Families, IpFamily, LocalControlKind,
@@ -1312,6 +1341,43 @@ mod tests {
                 .expect_err("TCP option length one")
                 .reason,
             PacketRejectReason::InvalidTransport
+        );
+    }
+
+    #[test]
+    fn tcp_zero_checksum_field_is_valid_only_when_full_checksum_matches() {
+        let packet = ipv4_tcp_zero_checksum();
+        assert_eq!(&packet[36..38], &[0, 0]);
+        let transport = &packet[20..];
+        let length = u16::try_from(transport.len())
+            .expect("test TCP length")
+            .to_be_bytes();
+        assert_eq!(
+            internet_checksum(&[
+                &packet[12..16],
+                &packet[16..20],
+                &[0, 6],
+                &length,
+                transport,
+            ]),
+            0
+        );
+        let ParsedPacket::Complete(parsed) = PacketParser::new(Families::DUAL)
+            .parse(&packet)
+            .expect("a valid TCP checksum may be encoded as zero")
+        else {
+            panic!("complete TCP packet expected")
+        };
+        assert!(matches!(parsed.transport, TransportMetadata::Tcp(_)));
+
+        let mut corrupted = packet;
+        *corrupted.last_mut().expect("TCP payload") ^= 1;
+        assert_eq!(
+            PacketParser::new(Families::DUAL)
+                .parse(&corrupted)
+                .expect_err("zero does not bypass TCP checksum validation")
+                .reason,
+            PacketRejectReason::InvalidTransportChecksum
         );
     }
 

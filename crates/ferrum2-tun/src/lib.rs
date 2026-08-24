@@ -4838,6 +4838,14 @@ mod tests {
         .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
         assert_eq!(accepted, usize::from(expected), "egress accept {name}");
         assert_eq!(rejected, usize::from(!expected), "egress reject {name}");
+        assert_eq!(
+            output_len,
+            if expected { packet.len() } else { 0 },
+            "egress length {name}"
+        );
+        if expected {
+            assert_eq!(&output[..output_len], packet, "egress bytes {name}");
+        }
     }
 
     #[test]
@@ -4846,11 +4854,13 @@ mod tests {
         let valid_v6 = ipv6_udp();
         let valid_v4_tcp = ipv4_tcp();
         let valid_v6_tcp = ipv6_tcp();
+        let valid_zero_checksum_tcp = crate::packet::test_support::ipv4_tcp_zero_checksum();
         for (name, packet) in [
             ("IPv4 UDP", valid_v4.as_slice()),
             ("IPv4 TCP", valid_v4_tcp.as_slice()),
             ("IPv6 UDP", valid_v6.as_slice()),
             ("IPv6 TCP", valid_v6_tcp.as_slice()),
+            ("IPv4 TCP zero checksum", valid_zero_checksum_tcp.as_slice()),
         ] {
             assert_ingress_and_egress(name, packet, 1420, true);
         }
