@@ -27,6 +27,10 @@ same switch's direct local route. The path and listener identities are retained 
 
 PlanOnly validates repository lineage and emits the closed 90-trial plan without building, starting
 the VM, loading a credential, staging files, or executing traffic.
+
+DiagnosticTrialSequence runs exactly one canonical A/A trial while retaining the complete plan and
+the ordinary evidence-export and VM-restore boundaries. Diagnostic evidence is explicitly not a
+qualification result and cannot be used for comparison or calibration adoption.
 #>
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -94,6 +98,10 @@ param(
     [string]$CredentialPath,
 
     [Parameter(ParameterSetName = "Run")]
+    [ValidateRange(1, 90)]
+    [int]$DiagnosticTrialSequence,
+
+    [Parameter(ParameterSetName = "Run")]
     [ValidateRange(30, 900)]
     [int]$ReadinessTimeoutSeconds = 180,
 
@@ -105,6 +113,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$diagnosticMode = $PSBoundParameters.ContainsKey("DiagnosticTrialSequence")
+if ($diagnosticMode -and $RunKind -cne "calibration-aa") {
+    throw "DiagnosticTrialSequence is restricted to calibration-aa runs"
+}
 
 $approvedVmName = "Windows 10 MSIX packaging environment"
 $approvedVmId = [Guid]"82e20295-1d30-48e7-a751-e21d35d872d4"
@@ -826,6 +838,24 @@ try {
         tun_ring_capacity_bytes
     [void](New-NetworkModelPlan -Python $python -Output $hostNetworkModelPlanPath `
         -ExpectedSha256 ([string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256))
+    $executionTrials = @(if ($diagnosticMode) {
+        $plan.trials | Where-Object {
+            [int]$_.sequence -eq $DiagnosticTrialSequence
+        } | Sort-Object sequence
+    } else {
+        $plan.trials | Sort-Object sequence
+    })
+    if (($diagnosticMode -and $executionTrials.Count -ne 1) -or
+        (-not $diagnosticMode -and $executionTrials.Count -ne 90)) {
+        throw "canonical Windows TUN execution selection is invalid"
+    }
+    $expectedTrialCount = $executionTrials.Count
+    $expectedNetworkModelObservationCount = @($executionTrials | Where-Object {
+        [string]$_.scenario -in @("udp-route-once", "network-lifecycle")
+    }).Count
+    $expectedProcessLogCount = 4 * $expectedTrialCount
+    $diagnosticTrial = if ($diagnosticMode) { $executionTrials[0] } else { $null }
+    $diagnosticSequenceValue = if ($diagnosticMode) { $DiagnosticTrialSequence } else { 0 }
     $scheduleLines = @($plan.trials | ForEach-Object {
         "$($_.sequence)`t$($_.scenario)`t$($_.member)`t$($_.pair)`t$($_.order)"
     })
@@ -1145,7 +1175,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $SupportUdpPort,
         $SupportPid,
         $SupportOwner,
-        $minimumSupportIpv4PacketBytes
+        $minimumSupportIpv4PacketBytes,
+        $diagnosticSequenceValue
     ) -ScriptBlock {
         param(
             [string]$Root,
@@ -1174,7 +1205,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [int]$SupportUdp,
             [int]$SupportProcessId,
             [string]$SupportProcessOwner,
-            [int]$MinimumSupportIpv4PacketBytes
+            [int]$MinimumSupportIpv4PacketBytes,
+            [int]$DiagnosticTrialSequenceValue
         )
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -1898,6 +1930,27 @@ public static class Ferrum2PerfProcessGroup {
                 -cne $NetworkModelPlanSha256) {
             throw "guest trial plan changed during staging"
         }
+        if ($DiagnosticTrialSequenceValue -lt 0 -or
+            $DiagnosticTrialSequenceValue -gt 90 -or
+            ($DiagnosticTrialSequenceValue -gt 0 -and $RunKindValue -cne "calibration-aa")) {
+            throw "guest diagnostic trial selection is invalid"
+        }
+        $executionTrials = @(if ($DiagnosticTrialSequenceValue -gt 0) {
+            $plan.trials | Where-Object {
+                [int]$_.sequence -eq $DiagnosticTrialSequenceValue
+            } | Sort-Object sequence
+        } else {
+            $plan.trials | Sort-Object sequence
+        })
+        if (($DiagnosticTrialSequenceValue -gt 0 -and $executionTrials.Count -ne 1) -or
+            ($DiagnosticTrialSequenceValue -eq 0 -and $executionTrials.Count -ne 90)) {
+            throw "guest canonical trial execution selection is invalid"
+        }
+        $expectedTrialCount = $executionTrials.Count
+        $expectedNetworkModelObservationCount = @($executionTrials | Where-Object {
+            [string]$_.scenario -in @("udp-route-once", "network-lifecycle")
+        }).Count
+        $expectedProcessLogCount = 4 * $expectedTrialCount
         $guestNetworkPath = Get-GuestNetworkPath
         $guestUnderlayAddress = [string]$guestNetworkPath.guest_ipv4
         $supportProbeResult = Invoke-NativeCapture $harness @(
@@ -1910,7 +1963,7 @@ public static class Ferrum2PerfProcessGroup {
             throw "guest support listener preflight failed"
         }
 
-        foreach ($trial in @($plan.trials | Sort-Object sequence)) {
+        foreach ($trial in $executionTrials) {
             if (Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction SilentlyContinue) {
                 throw "managed performance adapter baseline is not absent"
             }
@@ -2177,8 +2230,9 @@ public static class Ferrum2PerfProcessGroup {
                 -Filter "*.network-model.json"
         )
         $processLogFiles = @(Get-ChildItem -LiteralPath $ProcessLogRoot -File -Filter "*.log")
-        if ($files.Count -ne 90 -or $networkModelFiles.Count -ne 20 -or
-            $processLogFiles.Count -ne 360) {
+        if ($files.Count -ne $expectedTrialCount -or
+            $networkModelFiles.Count -ne $expectedNetworkModelObservationCount -or
+            $processLogFiles.Count -ne $expectedProcessLogCount) {
             throw "guest evidence set is incomplete"
         }
         [pscustomobject]@{
@@ -2194,9 +2248,10 @@ public static class Ferrum2PerfProcessGroup {
     }
     # END GUEST_ONLY_NETWORK_EXECUTION
     if (@($guestResult).Count -ne 1 -or $guestResult.status -cne "PASS" -or
-        [int]$guestResult.trials -ne 90 -or
-        [int]$guestResult.network_model_observations -ne 20 -or
-        [int]$guestResult.process_logs -ne 360 -or
+        [int]$guestResult.trials -ne $expectedTrialCount -or
+        [int]$guestResult.network_model_observations -ne
+            $expectedNetworkModelObservationCount -or
+        [int]$guestResult.process_logs -ne $expectedProcessLogCount -or
         [string]$guestResult.powershell_version -cne $portableRuntime.PowerShellVersion -or
         [string]$guestResult.powershell_executable_sha256 -cne
             $portableRuntime.PowerShellExecutableSha256) {
@@ -2390,15 +2445,100 @@ if (-not $guestEvidenceAvailable) { throw "guest evidence was not marked complet
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
 $rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"
 $rawProcessLogs = Join-Path $rawEvidence "process-logs"
+$rawTrialFiles = @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json" `
+    -ErrorAction Stop)
+$rawNetworkModelFiles = @(if (
+    Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container
+) {
+    Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
+        -Filter "*.network-model.json" -ErrorAction Stop
+})
+$rawProcessLogFiles = @(Get-ChildItem -LiteralPath $rawProcessLogs -File -Filter "*.log" `
+    -ErrorAction Stop)
 if (-not (Test-Path -LiteralPath $hostNetworkPathPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $rawEvidence -PathType Container) -or
-    @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count -ne 90 -or
-    -not (Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container) -or
-    @(Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
-        -Filter "*.network-model.json").Count -ne 20 -or
+    $rawTrialFiles.Count -ne $expectedTrialCount -or
+    ($expectedNetworkModelObservationCount -ne 0 -and
+        -not (Test-Path -LiteralPath $rawNetworkModelEvidence -PathType Container)) -or
+    $rawNetworkModelFiles.Count -ne $expectedNetworkModelObservationCount -or
     -not (Test-Path -LiteralPath $rawProcessLogs -PathType Container) -or
-    @(Get-ChildItem -LiteralPath $rawProcessLogs -File -Filter "*.log").Count -ne 360) {
+    $rawProcessLogFiles.Count -ne $expectedProcessLogCount) {
     throw "exported raw evidence is incomplete"
+}
+if ($diagnosticMode) {
+    $diagnosticFileName = "{0:D3}-{1}-{2}-pair-{3}.json" -f @(
+        [int]$diagnosticTrial.sequence,
+        [string]$diagnosticTrial.scenario,
+        [string]$diagnosticTrial.member,
+        [int]$diagnosticTrial.pair
+    )
+    $diagnosticTrialPath = Join-Path $rawEvidence $diagnosticFileName
+    if ($rawTrialFiles.Count -ne 1 -or
+        -not (Test-Path -LiteralPath $diagnosticTrialPath -PathType Leaf) -or
+        $rawTrialFiles[0].FullName -cne (Get-Item -LiteralPath $diagnosticTrialPath).FullName) {
+        throw "diagnostic trial evidence identity is invalid"
+    }
+    $validatorRows = @(& $python -B $controlPath "windows-tun-validate-trial" `
+        "--plan" $hostPlanPath `
+        "--trial" $diagnosticTrialPath `
+        "--parent-sha" $ParentSha `
+        "--candidate-sha" $CandidateSha `
+        "--policy" $policyPath 2>&1)
+    $validatorExit = $LASTEXITCODE
+    $validatorLines = @($validatorRows | ForEach-Object {
+        if ($_ -is [Management.Automation.ErrorRecord]) {
+            [string]$_.Exception.Message
+        } else {
+            [string]$_
+        }
+    })
+    $expectedValidatorLine = "{0}`t{1}`t{2}`t{3}" -f @(
+        [string]$diagnosticTrial.scenario,
+        [string]$diagnosticTrial.member,
+        [int]$diagnosticTrial.pair,
+        [int]$diagnosticTrial.order
+    )
+    if ($validatorExit -ne 0 -or $validatorLines.Count -ne 1 -or
+        [string]$validatorLines[0] -cne $expectedValidatorLine) {
+        $validatorDetail = ($validatorLines -join " | ")
+        if ($validatorDetail.Length -gt 2048) {
+            $validatorDetail = $validatorDetail.Substring(0, 2048)
+        }
+        throw "diagnostic trial validation failed: exit=$validatorExit detail=$validatorDetail"
+    }
+    $diagnosticFinalVmState = [string](Get-ApprovedVmContext).Vm.State
+    if ($diagnosticFinalVmState -cne "Off") {
+        throw "approved VM final diagnostic state is not Off"
+    }
+    [pscustomobject]@{
+        schema = "ferrum2.windows-tun.hyperv-performance-diagnostic-result.v1"
+        status = "PASS"
+        qualification = $false
+        run_kind = $RunKind
+        diagnostic_trial_sequence = [int]$diagnosticTrial.sequence
+        scenario = [string]$diagnosticTrial.scenario
+        member = [string]$diagnosticTrial.member
+        pair = [int]$diagnosticTrial.pair
+        order = [int]$diagnosticTrial.order
+        validator_status = "PASS"
+        reducer_invoked = $false
+        evidence_directory = $hostEvidenceRoot
+        raw_trials = $rawTrialFiles.Count
+        raw_network_model_observations = $rawNetworkModelFiles.Count
+        process_logs = $rawProcessLogFiles.Count
+        host_network_path = $hostNetworkPathPath
+        host_network_path_sha256 = (Get-FileHash -LiteralPath $hostNetworkPathPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        vm_name = $approvedVmName
+        vm_id = $approvedVmId.ToString("D")
+        checkpoint_name = $approvedCheckpointName
+        checkpoint_id = $approvedCheckpointId.ToString("D")
+        final_vm_state = $diagnosticFinalVmState
+        checkpoint_restored = $true
+        host_tun_bypassed = $true
+        host_network_mutations = 0
+    } | ConvertTo-Json -Depth 4
+    exit 0
 }
 $summaryArguments = @(
     "-B", $controlPath, "windows-tun-summarize",
@@ -2424,12 +2564,9 @@ $summary = Get-Content -LiteralPath $hostSummaryPath -Raw -Encoding utf8 | Conve
     status = [string]$summary.status
     reducer_exit_code = $summaryExit
     evidence_directory = $hostEvidenceRoot
-    raw_trials = @(Get-ChildItem -LiteralPath $rawEvidence -File -Filter "*.json").Count
-    raw_network_model_observations = @(
-        Get-ChildItem -LiteralPath $rawNetworkModelEvidence -File `
-            -Filter "*.network-model.json"
-    ).Count
-    process_logs = @(Get-ChildItem -LiteralPath $rawProcessLogs -File -Filter "*.log").Count
+    raw_trials = $rawTrialFiles.Count
+    raw_network_model_observations = $rawNetworkModelFiles.Count
+    process_logs = $rawProcessLogFiles.Count
     host_network_path = $hostNetworkPathPath
     host_network_path_sha256 = (Get-FileHash -LiteralPath $hostNetworkPathPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
