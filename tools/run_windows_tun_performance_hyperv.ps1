@@ -812,6 +812,32 @@ function Invoke-BoundedNativeText {
     }
 }
 
+function Complete-UdpSupportDiagnosticLedger {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$TargetIpv4,
+        [ValidateRange(1, 65532)]
+        [Parameter(Mandatory = $true)][int]$FirstUdpPort,
+        [Parameter(Mandatory = $true)][string]$RunNonce
+    )
+    $result = Invoke-BoundedNativeText `
+        -Executable $Executable `
+        -Arguments @(
+            "windows-tun-udp-diagnostic-finalize",
+            "--target-ip", $TargetIpv4,
+            "--udp-port", [string]$FirstUdpPort,
+            "--diagnostic-run-nonce", $RunNonce
+        ) `
+        -Label "Windows TUN UDP diagnostic support ledger finalize" `
+        -MaximumLines 1 -MaximumBytes 4096 -TimeoutSeconds 60
+    $expected = "windows_tun_udp_diagnostic_finalize status=PASS " +
+        "target=$TargetIpv4 udp_ports=$FirstUdpPort..$($FirstUdpPort + 3)"
+    if ($result.ExitCode -ne 0 -or $result.Lines.Count -ne 1 -or
+        [string]$result.Lines[0] -cne $expected) {
+        throw "Windows TUN UDP diagnostic support ledger finalize result is invalid"
+    }
+}
+
 function Write-HostUdpEndpointSnapshot {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1468,6 +1494,27 @@ function New-UdpDiagnosticArtifactRecord {
     }
 }
 
+function Get-UdpDiagnosticArtifactTotalByteCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Collections.Generic.List[object]]$Artifacts
+    )
+    [long]$total = 0
+    foreach ($artifact in $Artifacts) {
+        if (-not ($artifact -is [Collections.IDictionary]) -or
+            -not $artifact.Contains("bytes")) {
+            throw "UDP diagnostic artifact record is missing its byte count"
+        }
+        [long]$artifactBytes = $artifact["bytes"]
+        if ($artifactBytes -le 0 -or
+            $total -gt ([long]::MaxValue - $artifactBytes)) {
+            throw "UDP diagnostic artifact byte count is invalid"
+        }
+        $total += $artifactBytes
+    }
+    return $total
+}
+
 function Get-FirstFailedUdpDiagnosticFlow {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1803,12 +1850,13 @@ if ($instrumentedDiagnosticMode) {
         -MaximumBytes 268451840
     $supportDiagnosticBaseline = Get-UdpDiagnosticLedgerSummary `
         -Path $resolvedSupportDiagnosticLedger `
-        -ExpectedSchema "ferrum2.windows-tun.udp-support-ledger.v1" `
+        -ExpectedSchema "ferrum2.windows-tun.udp-support-ledger.v2" `
         -ExpectedRunNonce $SupportDiagnosticRunNonce `
         -ExpectedMaxEvents $SupportDiagnosticMaxEvents
     $expectedSupportHeaderFields = @(
-        "listen_ip", "max_events", "pid", "record_type", "run_nonce",
-        "schema", "tcp_port", "timestamp_clock", "udp_ports"
+        "closure", "listen_ip", "max_events", "pid", "record_type",
+        "run_nonce", "schema", "scope", "tcp_port", "timestamp_clock",
+        "udp_ports"
     )
     $actualSupportHeaderFields = @(
         $supportDiagnosticBaseline.Header.PSObject.Properties.Name |
@@ -1830,6 +1878,9 @@ if ($instrumentedDiagnosticMode) {
         [int]$supportDiagnosticBaseline.Header.pid -ne $SupportPid -or
         [string]$supportDiagnosticBaseline.Header.listen_ip -cne $SupportIpv4 -or
         [int]$supportDiagnosticBaseline.Header.tcp_port -ne $SupportTcpPort -or
+        [string]$supportDiagnosticBaseline.Header.scope -cne "bootstrap" -or
+        [string]$supportDiagnosticBaseline.Header.closure -cne
+            "host_four_port_barrier_after_vm_off" -or
         -not $supportHeaderPortsMatch) {
         throw "support diagnostic ledger header does not match the pinned support process"
     }
@@ -3906,6 +3957,10 @@ if ($instrumentedDiagnosticMode) {
         $candidateBuild.HarnessSha256) {
         throw "support diagnostic binary does not match the candidate harness"
     }
+    Complete-UdpSupportDiagnosticLedger `
+        -Executable ([string]$supportFinalContext.executable) `
+        -TargetIpv4 $SupportIpv4 -FirstUdpPort $SupportUdpPort `
+        -RunNonce $SupportDiagnosticRunNonce
 
     $supportLedgerCopy = Join-Path $hostDiagnosticSupportRoot `
         "udp-support-ledger.ndjson"
@@ -3914,7 +3969,7 @@ if ($instrumentedDiagnosticMode) {
         -Destination $supportLedgerCopy)
     $supportLedgerSummary = Get-UdpDiagnosticLedgerSummary `
         -Path $supportLedgerCopy `
-        -ExpectedSchema "ferrum2.windows-tun.udp-support-ledger.v1" `
+        -ExpectedSchema "ferrum2.windows-tun.udp-support-ledger.v2" `
         -ExpectedRunNonce $SupportDiagnosticRunNonce `
         -ExpectedMaxEvents $SupportDiagnosticMaxEvents
     if ($supportLedgerSummary.Events -lt $supportDiagnosticBaseline.Events) {
@@ -3952,7 +4007,7 @@ if ($instrumentedDiagnosticMode) {
     }
     $workloadLedgerSummary = Get-UdpDiagnosticLedgerSummary `
         -Path $workloadLedgerPath `
-        -ExpectedSchema "ferrum2.windows-tun.udp-workload-flow-ledger.v1" `
+        -ExpectedSchema "ferrum2.windows-tun.udp-workload-flow-ledger.v2" `
         -ExpectedRunNonce $SupportDiagnosticRunNonce `
         -ExpectedMaxEvents $SupportDiagnosticMaxEvents
     $firstFailedFlow = Get-FirstFailedUdpDiagnosticFlow `
@@ -4375,9 +4430,7 @@ if ($instrumentedDiagnosticMode) {
     if ($artifacts.Count -gt 16) {
         throw "UDP diagnostic artifact manifest exceeds its closed boundary"
     }
-    $presentArtifactBytes = [long](
-        $artifacts | Measure-Object -Property bytes -Sum
-    ).Sum
+    $presentArtifactBytes = Get-UdpDiagnosticArtifactTotalByteCount -Artifacts $artifacts
     if ($presentArtifactBytes -gt 268435456) {
         throw "UDP diagnostic artifact manifest exceeds its total byte boundary"
     }

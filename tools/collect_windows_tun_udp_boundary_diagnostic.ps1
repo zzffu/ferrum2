@@ -511,7 +511,7 @@ try {
     $workloadResult = Invoke-BoundedNativeProcess -Executable $harness `
         -Arguments $workloadArguments -WorkingDirectory (Split-Path -Parent $harness) `
         -StdoutPath $stdoutPath -StderrPath $stderrPath `
-        -MaximumOutputBytes 131072 -TimeoutSeconds 180 `
+        -MaximumOutputBytes 131072 -TimeoutSeconds 1800 `
         -Label "diagnostic workload"
     $workloadPid = $workloadResult.Pid
     $workloadExitCode = $workloadResult.ExitCode
@@ -577,8 +577,10 @@ try {
     $headerLine = [IO.File]::ReadLines($ledgerPath) | Select-Object -First 1
     $header = $headerLine | ConvertFrom-Json -ErrorAction Stop
     $ledgerHeaderValid = [string]$header.schema -ceq `
-        "ferrum2.windows-tun.udp-workload-flow-ledger.v1" -and
+        "ferrum2.windows-tun.udp-workload-flow-ledger.v2" -and
         [string]$header.record_type -ceq "header" -and
+        [string]$header.scope -ceq "bootstrap" -and
+        [string]$header.closure -ceq "workload_process_exit" -and
         [string]$header.run_nonce -ceq $DiagnosticRunNonce -and
         [int]$header.max_events -eq $DiagnosticMaxEvents
     Assert-Condition $ledgerHeaderValid "workload flow ledger header identity mismatch"
@@ -602,7 +604,7 @@ try {
         "workload flow ledger exceeds its line boundary"
     if ($null -ne $footer) {
         $ledgerClosed = [string]$footer.schema -ceq
-            "ferrum2.windows-tun.udp-workload-flow-ledger.v1" -and
+            "ferrum2.windows-tun.udp-workload-flow-ledger.v2" -and
             [string]$footer.record_type -ceq "footer" -and
             [string]$footer.run_nonce -ceq $DiagnosticRunNonce -and
             $footer.closed -eq $true

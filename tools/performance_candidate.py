@@ -247,10 +247,10 @@ WINDOWS_TUN_UDP_FAILURE_SUMMARY_SCHEMA = (
     "ferrum2.windows-tun.hyperv-udp-failure-summary.v1"
 )
 WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA = (
-    "ferrum2.windows-tun.udp-workload-flow-ledger.v1"
+    "ferrum2.windows-tun.udp-workload-flow-ledger.v2"
 )
 WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA = (
-    "ferrum2.windows-tun.udp-support-ledger.v1"
+    "ferrum2.windows-tun.udp-support-ledger.v2"
 )
 WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS = {
     "max_artifacts": 32,
@@ -4198,7 +4198,7 @@ def _windows_tun_udp_ledger_event(
         if (
             type(row["trial_sequence"]) is not int
             or not 1 <= row["trial_sequence"] <= 65_535
-            or row["phase"] not in ("bootstrap", "warmup", "lookup", "refresh")
+            or row["phase"] != "bootstrap"
         ):
             raise CandidateControlError("Windows TUN UDP workload event identity is invalid")
         for field in ("association_index", "round"):
@@ -4311,7 +4311,7 @@ def _windows_tun_udp_ledger_event(
                 or row["payload_run_nonce_match"] != (payload_nonce == run_nonce)
                 or type(row["trial_sequence"]) is not int
                 or not 1 <= row["trial_sequence"] <= 65_535
-                or row["phase"] not in ("bootstrap", "warmup", "lookup", "refresh")
+                or row["phase"] != "bootstrap"
             ):
                 raise CandidateControlError("Windows TUN UDP support payload identity is invalid")
             for field in ("association_index", "round"):
@@ -4369,7 +4369,7 @@ def _read_windows_tun_udp_ledger(
     max_line_bytes: int,
 ) -> dict[str, object]:
     common_header_fields = set(
-        "schema record_type run_nonce max_events timestamp_clock".split()
+        "schema record_type scope closure run_nonce max_events timestamp_clock".split()
     )
     header_fields = frozenset(
         common_header_fields
@@ -4421,6 +4421,13 @@ def _read_windows_tun_udp_ledger(
     if (
         header["schema"] != schema
         or header["record_type"] != "header"
+        or header["scope"] != "bootstrap"
+        or header["closure"]
+        != (
+            "workload_process_exit"
+            if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
+            else "host_four_port_barrier_after_vm_off"
+        )
         or header["run_nonce"] != run_nonce
         or header["timestamp_clock"] != "std_instant_normalized_nanoseconds"
     ):

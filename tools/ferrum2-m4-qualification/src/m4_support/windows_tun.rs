@@ -61,8 +61,12 @@ const UDP_DIAGNOSTIC_MAGIC: [u8; 4] = *b"F2U1";
 const UDP_DIAGNOSTIC_VERSION: u8 = 1;
 const UDP_DIAGNOSTIC_MAX_EVENTS: usize = 65_536;
 const UDP_DIAGNOSTIC_MAX_EVENT_BYTES: usize = 4 * 1024;
-const UDP_WORKLOAD_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-workload-flow-ledger.v1";
-const UDP_SUPPORT_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-support-ledger.v1";
+const UDP_DIAGNOSTIC_SCOPE: &str = "bootstrap";
+const UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE: u16 = 31;
+const UDP_WORKLOAD_DIAGNOSTIC_CLOSURE: &str = "workload_process_exit";
+const UDP_SUPPORT_DIAGNOSTIC_CLOSURE: &str = "host_four_port_barrier_after_vm_off";
+const UDP_WORKLOAD_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-workload-flow-ledger.v2";
+const UDP_SUPPORT_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-support-ledger.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -71,6 +75,7 @@ enum UdpDiagnosticPhase {
     Warmup = 2,
     Lookup = 3,
     Refresh = 4,
+    Finalize = 5,
 }
 
 impl UdpDiagnosticPhase {
@@ -80,6 +85,7 @@ impl UdpDiagnosticPhase {
             2 => Some(Self::Warmup),
             3 => Some(Self::Lookup),
             4 => Some(Self::Refresh),
+            5 => Some(Self::Finalize),
             _ => None,
         }
     }
@@ -90,6 +96,7 @@ impl UdpDiagnosticPhase {
             Self::Warmup => "warmup",
             Self::Lookup => "lookup",
             Self::Refresh => "refresh",
+            Self::Finalize => "finalize",
         }
     }
 }
@@ -137,6 +144,21 @@ impl UdpDiagnosticPayload {
     }
 }
 
+fn udp_diagnostic_finalize_marker(run_nonce: u64) -> UdpDiagnosticPayload {
+    UdpDiagnosticPayload {
+        phase: UdpDiagnosticPhase::Finalize,
+        trial_sequence: UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE,
+        association_index: u32::MAX,
+        round: u32::MAX,
+        run_nonce,
+        packet_nonce: u64::MAX,
+    }
+}
+
+fn is_udp_diagnostic_finalize_marker(identity: UdpDiagnosticPayload, run_nonce: u64) -> bool {
+    identity == udp_diagnostic_finalize_marker(run_nonce)
+}
+
 #[derive(Clone, Debug)]
 struct UdpDiagnosticLedgerArgs {
     path: PathBuf,
@@ -148,6 +170,13 @@ struct UdpDiagnosticLedgerArgs {
 struct UdpWorkloadDiagnosticArgs {
     ledger: UdpDiagnosticLedgerArgs,
     trial_sequence: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UdpDiagnosticFinalizeArgs {
+    target_ip: IpAddr,
+    udp_port: u16,
+    run_nonce: u64,
 }
 
 struct BoundedUdpDiagnosticLedger {
@@ -169,6 +198,7 @@ struct UdpDiagnosticLedgerState {
     write_failures: usize,
     truncation_written: bool,
     writer_failed: bool,
+    closed: bool,
 }
 
 impl BoundedUdpDiagnosticLedger {
@@ -229,6 +259,7 @@ impl BoundedUdpDiagnosticLedger {
                 write_failures: 0,
                 truncation_written: false,
                 writer_failed: false,
+                closed: false,
             }),
             started: Instant::now(),
             max_events: arguments.max_events,
@@ -243,6 +274,9 @@ impl BoundedUdpDiagnosticLedger {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed {
+            return;
+        }
         let event_index = state.attempted_events;
         state.attempted_events = state.attempted_events.saturating_add(1);
         if event_index >= self.max_events {
@@ -359,6 +393,101 @@ impl BoundedUdpDiagnosticLedger {
             state.write_failures,
         )
     }
+
+    fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(reason) = Self::write_footer(self.schema, self.run_nonce, &mut state) {
+            drop(state);
+            self.report_write_failure(reason);
+        }
+    }
+
+    fn write_footer(
+        schema: &'static str,
+        run_nonce: u64,
+        state: &mut UdpDiagnosticLedgerState,
+    ) -> Result<(), &'static str> {
+        if state.closed {
+            return Ok(());
+        }
+        state.closed = true;
+        if state.writer_failed {
+            return Err("footer_after_write_failure");
+        }
+        let footer = json!({
+            "schema": schema,
+            "record_type": "footer",
+            "run_nonce": run_nonce.to_string(),
+            "attempted_events": state.attempted_events,
+            "events_written": state.events_written,
+            "dropped_events": state.dropped_events,
+            "write_failures": state.write_failures,
+            "closed": true
+        });
+        serde_json::to_vec(&footer)
+            .map(|mut encoded| {
+                encoded.push(b'\n');
+                encoded
+            })
+            .map_err(|_| "footer_serialize")
+            .and_then(|encoded| {
+                state
+                    .writer
+                    .write_all(&encoded)
+                    .and_then(|()| state.writer.flush())
+                    .map_err(|_| "footer_write")
+            })
+    }
+}
+
+struct SupportUdpDiagnostic {
+    ledger: BoundedUdpDiagnosticLedger,
+    finalize_slots: Mutex<[bool; ROUTE_TARGET_SLOTS]>,
+}
+
+impl SupportUdpDiagnostic {
+    fn new(ledger: BoundedUdpDiagnosticLedger) -> Self {
+        Self {
+            ledger,
+            finalize_slots: Mutex::new([false; ROUTE_TARGET_SLOTS]),
+        }
+    }
+
+    fn observe_finalize_marker(
+        &self,
+        slot: usize,
+        listen: SocketAddr,
+        peer: SocketAddr,
+        request: &[u8],
+    ) {
+        if slot >= ROUTE_TARGET_SLOTS || peer.ip() != listen.ip() {
+            return;
+        }
+        let Some(identity) = UdpDiagnosticPayload::parse(request) else {
+            return;
+        };
+        if !is_udp_diagnostic_finalize_marker(identity, self.ledger.run_nonce) {
+            return;
+        }
+        let mut finalize_slots = self
+            .finalize_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        finalize_slots[slot] = true;
+        if finalize_slots.iter().all(|observed| *observed) {
+            self.ledger.close();
+        }
+    }
 }
 
 impl Drop for BoundedUdpDiagnosticLedger {
@@ -367,28 +496,7 @@ impl Drop for BoundedUdpDiagnosticLedger {
             .state
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.writer_failed {
-            return;
-        }
-        let footer = json!({
-            "schema": self.schema,
-            "record_type": "footer",
-            "run_nonce": self.run_nonce.to_string(),
-            "attempted_events": state.attempted_events,
-            "events_written": state.events_written,
-            "dropped_events": state.dropped_events,
-            "write_failures": state.write_failures,
-            "closed": true
-        });
-        let write_result = serde_json::to_vec(&footer)
-            .map(|mut encoded| {
-                encoded.push(b'\n');
-                encoded
-            })
-            .map_err(std::io::Error::other)
-            .and_then(|encoded| state.writer.write_all(&encoded))
-            .and_then(|()| state.writer.flush());
-        if write_result.is_err()
+        if Self::write_footer(self.schema, self.run_nonce, state).is_err()
             && self.report_degradation
             && !self.reported_write_failure.swap(true, Ordering::AcqRel)
         {
@@ -907,6 +1015,46 @@ fn parse_support(arguments: &[OsString]) -> Result<SupportArgs, String> {
             diagnostic_ledger,
             diagnostic_run_nonce,
             diagnostic_max_events,
+        )?,
+    })
+}
+
+fn parse_udp_diagnostic_finalize(
+    arguments: &[OsString],
+) -> Result<UdpDiagnosticFinalizeArgs, String> {
+    let mut target_ip = None;
+    let mut udp_port = None;
+    let mut diagnostic_run_nonce = None;
+    for (flag, value) in parse_pairs(arguments)? {
+        match flag.as_str() {
+            "--target-ip" => take_unique(&mut target_ip, value, &flag)?,
+            "--udp-port" => take_unique(&mut udp_port, value, &flag)?,
+            "--diagnostic-run-nonce" => take_unique(&mut diagnostic_run_nonce, value, &flag)?,
+            _ => {
+                return Err(format!(
+                    "unsupported Windows TUN UDP diagnostic finalize option: {flag}"
+                ));
+            }
+        }
+    }
+    let target_ip = target_ip
+        .ok_or_else(|| "missing Windows TUN option: --target-ip".to_owned())?
+        .parse::<IpAddr>()
+        .map_err(|_| "--target-ip must be an IP literal".to_owned())?;
+    if target_ip.is_unspecified() || target_ip.is_loopback() || target_ip.is_multicast() {
+        return Err("--target-ip must be a non-loopback unicast address".to_owned());
+    }
+    let udp_port = parse_port(udp_port, "--udp-port")?;
+    udp_port
+        .checked_add((ROUTE_TARGET_SLOTS - 1) as u16)
+        .ok_or_else(|| "--udp-port cannot address four contiguous UDP listeners".to_owned())?;
+    Ok(UdpDiagnosticFinalizeArgs {
+        target_ip,
+        udp_port,
+        run_nonce: parse_canonical_nonzero_u64(
+            diagnostic_run_nonce
+                .ok_or_else(|| "missing Windows TUN option: --diagnostic-run-nonce".to_owned())?,
+            "--diagnostic-run-nonce",
         )?,
     })
 }
@@ -1608,7 +1756,11 @@ impl UdpWorkloadDiagnosticSession {
             ledger: BoundedUdpDiagnosticLedger::create(
                 &arguments.ledger,
                 UDP_WORKLOAD_LEDGER_SCHEMA,
-                json!({"trial_sequence": arguments.trial_sequence}),
+                json!({
+                    "trial_sequence": arguments.trial_sequence,
+                    "scope": UDP_DIAGNOSTIC_SCOPE,
+                    "closure": UDP_WORKLOAD_DIAGNOSTIC_CLOSURE
+                }),
             )?,
             arguments: arguments.clone(),
             next_packet_nonce: 0,
@@ -1645,6 +1797,9 @@ impl UdpWorkloadDiagnosticSession {
         target: Option<SocketAddr>,
         outcome: UdpWorkloadFlowOutcome<'_>,
     ) {
+        if identity.phase != UdpDiagnosticPhase::Bootstrap {
+            return;
+        }
         self.ledger.record(json!({
             "run_nonce": identity.run_nonce.to_string(),
             "trial_sequence": identity.trial_sequence,
@@ -2354,6 +2509,57 @@ pub(super) fn run_probe(arguments: &[OsString]) -> Result<String, String> {
     Ok("windows_tun_probe status=PASS protocols=tcp,udp".to_owned())
 }
 
+fn finalize_udp_diagnostic(arguments: UdpDiagnosticFinalizeArgs) -> Result<(), String> {
+    let targets = route_target_addresses(arguments.target_ip, arguments.udp_port)?;
+    let socket = UdpSocket::bind(SocketAddr::new(arguments.target_ip, 0)).map_err(|error| {
+        format!("bind Windows TUN UDP diagnostic finalize socket failed: {error}")
+    })?;
+    socket.set_read_timeout(Some(IO_TIMEOUT)).map_err(|error| {
+        format!("set Windows TUN UDP diagnostic finalize read timeout failed: {error}")
+    })?;
+    socket
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| {
+            format!("set Windows TUN UDP diagnostic finalize write timeout failed: {error}")
+        })?;
+    let local = socket.local_addr().map_err(|error| {
+        format!("read Windows TUN UDP diagnostic finalize local address failed: {error}")
+    })?;
+    if local.ip() != arguments.target_ip {
+        return Err("Windows TUN UDP diagnostic finalize socket IP mismatch".to_owned());
+    }
+    let marker = udp_diagnostic_finalize_marker(arguments.run_nonce).encode();
+    let mut reply = [0_u8; UDP_DIAGNOSTIC_PAYLOAD_LEN];
+    for target in targets {
+        let sent = socket.send_to(&marker, target).map_err(|error| {
+            format!("send Windows TUN UDP diagnostic finalize marker failed: {error}")
+        })?;
+        if sent != marker.len() {
+            return Err("Windows TUN UDP diagnostic finalize marker send was partial".to_owned());
+        }
+        let (received, peer) = socket.recv_from(&mut reply).map_err(|error| {
+            format!("receive Windows TUN UDP diagnostic finalize echo failed: {error}")
+        })?;
+        if peer != target || received != marker.len() || reply[..received] != marker {
+            return Err("Windows TUN UDP diagnostic finalize echo mismatch".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn run_udp_diagnostic_finalize(arguments: &[OsString]) -> Result<String, String> {
+    let arguments = parse_udp_diagnostic_finalize(arguments)?;
+    finalize_udp_diagnostic(arguments)?;
+    let last_port = arguments
+        .udp_port
+        .checked_add((ROUTE_TARGET_SLOTS - 1) as u16)
+        .expect("validated Windows TUN UDP diagnostic finalize port range");
+    Ok(format!(
+        "windows_tun_udp_diagnostic_finalize status=PASS target={} udp_ports={}..{}",
+        arguments.target_ip, arguments.udp_port, last_port
+    ))
+}
+
 fn serve_tcp(mut stream: TcpStream) -> Result<(), String> {
     configure_support_tcp(&stream)?;
     let mut buffer = vec![0_u8; 65_536];
@@ -2442,26 +2648,33 @@ struct SupportUdpLedgerEvent<'a> {
 }
 
 fn record_support_udp_event(
-    ledger: Option<&BoundedUdpDiagnosticLedger>,
+    diagnostic: Option<&SupportUdpDiagnostic>,
     event: SupportUdpLedgerEvent<'_>,
 ) {
-    let Some(ledger) = ledger else {
+    let Some(diagnostic) = diagnostic else {
         return;
     };
-    let identity = UdpDiagnosticPayload::parse(event.request);
-    ledger.record(json!({
+    let Some(identity) = UdpDiagnosticPayload::parse(event.request) else {
+        return;
+    };
+    if identity.run_nonce != diagnostic.ledger.run_nonce
+        || identity.phase != UdpDiagnosticPhase::Bootstrap
+    {
+        return;
+    }
+    diagnostic.ledger.record(json!({
         "stage": event.stage,
         "listen_ip": event.listen.ip().to_string(),
         "listen_port": event.listen.port(),
         "remote_ip": event.peer.ip().to_string(),
         "remote_port": event.peer.port(),
-        "payload_run_nonce": identity.map(|identity| identity.run_nonce.to_string()),
-        "payload_run_nonce_match": identity.map(|identity| identity.run_nonce == ledger.run_nonce),
-        "trial_sequence": identity.map(|identity| identity.trial_sequence),
-        "phase": identity.map(|identity| identity.phase.label()),
-        "association_index": identity.map(|identity| identity.association_index),
-        "round": identity.map(|identity| identity.round),
-        "packet_nonce": identity.map(|identity| identity.packet_nonce.to_string()),
+        "payload_run_nonce": identity.run_nonce.to_string(),
+        "payload_run_nonce_match": true,
+        "trial_sequence": identity.trial_sequence,
+        "phase": identity.phase.label(),
+        "association_index": identity.association_index,
+        "round": identity.round,
+        "packet_nonce": identity.packet_nonce.to_string(),
         "recv_bytes": event.request.len(),
         "send_attempted": event.send_attempted,
         "send_result": event.send_result,
@@ -2493,9 +2706,12 @@ pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
                     "pid": std::process::id(),
                     "listen_ip": tcp_address.ip().to_string(),
                     "tcp_port": tcp_address.port(),
-                    "udp_ports": udp_addresses.iter().map(|address| address.port()).collect::<Vec<_>>()
+                    "udp_ports": udp_addresses.iter().map(|address| address.port()).collect::<Vec<_>>(),
+                    "scope": UDP_DIAGNOSTIC_SCOPE,
+                    "closure": UDP_SUPPORT_DIAGNOSTIC_CLOSURE
                 }),
             )
+            .map(SupportUdpDiagnostic::new)
             .map(Arc::new)
         })
         .transpose()?;
@@ -2517,6 +2733,9 @@ pub(super) fn run_support(arguments: &[OsString]) -> Result<String, String> {
                             .recv_from(&mut buffer)
                             .map_err(|error| format!("support UDP receive failed: {error}"))?;
                         let request = &buffer[..read];
+                        if let Some(diagnostic) = diagnostic.as_deref() {
+                            diagnostic.observe_finalize_marker(slot, listen, peer, request);
+                        }
                         record_support_udp_event(
                             diagnostic.as_deref(),
                             SupportUdpLedgerEvent {
@@ -2778,6 +2997,48 @@ pub(super) fn self_check() -> Result<(), String> {
     if parse_support(&partial_support_diagnostic).is_ok() {
         return Err("incomplete Windows TUN support diagnostic options were accepted".to_owned());
     }
+    let finalize_arguments: Vec<OsString> = [
+        "--target-ip",
+        "192.0.2.10",
+        "--udp-port",
+        "53",
+        "--diagnostic-run-nonce",
+        "72623859790382856",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let finalize_parsed = parse_udp_diagnostic_finalize(&finalize_arguments)?;
+    if finalize_parsed
+        != (UdpDiagnosticFinalizeArgs {
+            target_ip: "192.0.2.10".parse().expect("literal"),
+            udp_port: 53,
+            run_nonce: 0x0102_0304_0506_0708,
+        })
+    {
+        return Err("Windows TUN UDP diagnostic finalize arguments were not preserved".to_owned());
+    }
+    let mut partial_finalize = finalize_arguments.clone();
+    partial_finalize.truncate(partial_finalize.len() - 2);
+    let mut duplicate_finalize = finalize_arguments.clone();
+    duplicate_finalize.extend([OsString::from("--udp-port"), OsString::from("54")]);
+    let mut extra_finalize = finalize_arguments.clone();
+    extra_finalize.extend([OsString::from("--tcp-port"), OsString::from("443")]);
+    let mut zero_nonce_finalize = finalize_arguments.clone();
+    zero_nonce_finalize[5] = OsString::from("0");
+    let mut noncanonical_nonce_finalize = finalize_arguments.clone();
+    noncanonical_nonce_finalize[5] = OsString::from("01");
+    let mut overflowing_port_finalize = finalize_arguments.clone();
+    overflowing_port_finalize[3] = OsString::from("65535");
+    if parse_udp_diagnostic_finalize(&partial_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&duplicate_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&extra_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&zero_nonce_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&noncanonical_nonce_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&overflowing_port_finalize).is_ok()
+    {
+        return Err("Windows TUN UDP diagnostic finalize argument boundary is open".to_owned());
+    }
     if elapsed_rate(10, Duration::from_secs(2), "self-check")? != 5 {
         return Err("Windows TUN integer rate calculation is invalid".to_owned());
     }
@@ -2800,6 +3061,22 @@ pub(super) fn self_check() -> Result<(), String> {
         || fragment_ack_for_request(&diagnostic_payload)?.is_some()
     {
         return Err("Windows TUN tagged UDP diagnostic payload did not round-trip".to_owned());
+    }
+    let finalize_identity = udp_diagnostic_finalize_marker(diagnostic_identity.run_nonce);
+    let finalize_payload = finalize_identity.encode();
+    if finalize_identity.phase != UdpDiagnosticPhase::Finalize
+        || finalize_identity.trial_sequence != UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE
+        || finalize_identity.association_index != u32::MAX
+        || finalize_identity.round != u32::MAX
+        || finalize_identity.packet_nonce != u64::MAX
+        || UdpDiagnosticPayload::parse(&finalize_payload) != Some(finalize_identity)
+        || !is_udp_diagnostic_finalize_marker(finalize_identity, diagnostic_identity.run_nonce)
+        || is_udp_diagnostic_finalize_marker(
+            finalize_identity,
+            diagnostic_identity.run_nonce.wrapping_add(1),
+        )
+    {
+        return Err("Windows TUN UDP diagnostic finalize marker identity is invalid".to_owned());
     }
     let mut invalid_magic = diagnostic_payload;
     invalid_magic[0] ^= 1;
@@ -2837,14 +3114,23 @@ pub(super) fn self_check() -> Result<(), String> {
             "pid": 123,
             "listen_ip": "192.0.2.10",
             "tcp_port": 443,
-            "udp_ports": [53, 54, 55, 56]
+            "udp_ports": [53, 54, 55, 56],
+            "scope": UDP_DIAGNOSTIC_SCOPE,
+            "closure": UDP_SUPPORT_DIAGNOSTIC_CLOSURE
         }),
         false,
     )?;
     bounded_ledger.record(json!({"stage": "rx"}));
     bounded_ledger.record(json!({"stage": "tx"}));
     bounded_ledger.record(json!({"stage": "rx"}));
-    if bounded_ledger.counters() != (3, 2, 1, 0) {
+    if bounded_ledger.is_closed() {
+        return Err(
+            "Windows TUN UDP diagnostic ledger closed without an explicit boundary".to_owned(),
+        );
+    }
+    bounded_ledger.close();
+    bounded_ledger.record(json!({"stage": "after_close"}));
+    if !bounded_ledger.is_closed() || bounded_ledger.counters() != (3, 2, 1, 0) {
         return Err("Windows TUN UDP diagnostic ledger event bound is invalid".to_owned());
     }
     drop(bounded_ledger);
@@ -2860,6 +3146,8 @@ pub(super) fn self_check() -> Result<(), String> {
         || bounded_records[0]["schema"] != UDP_SUPPORT_LEDGER_SCHEMA
         || bounded_records[0]["record_type"] != "header"
         || bounded_records[0]["pid"] != 123
+        || bounded_records[0]["scope"] != UDP_DIAGNOSTIC_SCOPE
+        || bounded_records[0]["closure"] != UDP_SUPPORT_DIAGNOSTIC_CLOSURE
         || bounded_records[1]["stage"] != "rx"
         || bounded_records[1]["ledger_counters"]["attempted_events"] != 1
         || bounded_records[2]["stage"] != "tx"
@@ -2876,6 +3164,146 @@ pub(super) fn self_check() -> Result<(), String> {
     {
         return Err("Windows TUN UDP diagnostic ledger records are invalid".to_owned());
     }
+    let barrier_ledger_path = directory.path().join("barrier.ndjson");
+    let barrier_ledger = BoundedUdpDiagnosticLedger::create_with_reporting(
+        &UdpDiagnosticLedgerArgs {
+            path: barrier_ledger_path.clone(),
+            run_nonce: diagnostic_identity.run_nonce,
+            max_events: 4,
+        },
+        UDP_SUPPORT_LEDGER_SCHEMA,
+        json!({
+            "pid": 123,
+            "listen_ip": "192.0.2.10",
+            "tcp_port": 443,
+            "udp_ports": [53, 54, 55, 56],
+            "scope": UDP_DIAGNOSTIC_SCOPE,
+            "closure": UDP_SUPPORT_DIAGNOSTIC_CLOSURE
+        }),
+        false,
+    )?;
+    let barrier_diagnostic = SupportUdpDiagnostic::new(barrier_ledger);
+    let barrier_listen: SocketAddr = "192.0.2.10:53".parse().expect("literal");
+    let barrier_peer: SocketAddr = "192.0.2.10:54321".parse().expect("literal");
+    record_support_udp_event(
+        Some(&barrier_diagnostic),
+        SupportUdpLedgerEvent {
+            stage: "rx",
+            listen: barrier_listen,
+            peer: barrier_peer,
+            request: &diagnostic_payload,
+            send_attempted: None,
+            send_result: "pending",
+            sent: None,
+            error_kind: None,
+        },
+    );
+    record_support_udp_event(
+        Some(&barrier_diagnostic),
+        SupportUdpLedgerEvent {
+            stage: "tx",
+            listen: barrier_listen,
+            peer: barrier_peer,
+            request: &diagnostic_payload,
+            send_attempted: Some(true),
+            send_result: "success",
+            sent: Some(diagnostic_payload.len()),
+            error_kind: None,
+        },
+    );
+    let warmup_payload = UdpDiagnosticPayload {
+        phase: UdpDiagnosticPhase::Warmup,
+        ..diagnostic_identity
+    }
+    .encode();
+    let foreign_payload = UdpDiagnosticPayload {
+        run_nonce: diagnostic_identity.run_nonce.wrapping_add(1),
+        ..diagnostic_identity
+    }
+    .encode();
+    for request in [
+        &warmup_payload[..],
+        &foreign_payload[..],
+        b"ordinary UDP payload",
+    ] {
+        record_support_udp_event(
+            Some(&barrier_diagnostic),
+            SupportUdpLedgerEvent {
+                stage: "rx",
+                listen: barrier_listen,
+                peer: barrier_peer,
+                request,
+                send_attempted: None,
+                send_result: "pending",
+                sent: None,
+                error_kind: None,
+            },
+        );
+    }
+    barrier_diagnostic.observe_finalize_marker(
+        0,
+        barrier_listen,
+        "198.51.100.10:54321".parse().expect("literal"),
+        &finalize_payload,
+    );
+    for slot in 0..(ROUTE_TARGET_SLOTS - 1) {
+        let listen = SocketAddr::new(
+            barrier_listen.ip(),
+            barrier_listen.port() + u16::try_from(slot).expect("slot fits u16"),
+        );
+        barrier_diagnostic.observe_finalize_marker(slot, listen, barrier_peer, &finalize_payload);
+    }
+    barrier_diagnostic.observe_finalize_marker(0, barrier_listen, barrier_peer, &finalize_payload);
+    if barrier_diagnostic.ledger.is_closed() || barrier_diagnostic.ledger.counters() != (2, 2, 0, 0)
+    {
+        return Err(
+            "Windows TUN UDP diagnostic finalize barrier closed before all slots".to_owned(),
+        );
+    }
+    let final_slot = ROUTE_TARGET_SLOTS - 1;
+    let final_listen = SocketAddr::new(
+        barrier_listen.ip(),
+        barrier_listen.port() + u16::try_from(final_slot).expect("slot fits u16"),
+    );
+    barrier_diagnostic.observe_finalize_marker(
+        final_slot,
+        final_listen,
+        barrier_peer,
+        &finalize_payload,
+    );
+    barrier_diagnostic.observe_finalize_marker(
+        final_slot,
+        final_listen,
+        barrier_peer,
+        &finalize_payload,
+    );
+    barrier_diagnostic
+        .ledger
+        .record(json!({"stage": "after_close"}));
+    if !barrier_diagnostic.ledger.is_closed()
+        || barrier_diagnostic.ledger.counters() != (2, 2, 0, 0)
+    {
+        return Err("Windows TUN UDP diagnostic finalize barrier is not idempotent".to_owned());
+    }
+    drop(barrier_diagnostic);
+    let barrier_records = fs::read_to_string(&barrier_ledger_path)
+        .map_err(|error| format!("read finalized UDP diagnostic ledger failed: {error}"))?
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .map_err(|error| format!("parse finalized UDP diagnostic ledger failed: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if barrier_records.len() != 4
+        || barrier_records[0]["closure"] != UDP_SUPPORT_DIAGNOSTIC_CLOSURE
+        || barrier_records[1]["stage"] != "rx"
+        || barrier_records[2]["stage"] != "tx"
+        || barrier_records[3]["record_type"] != "footer"
+        || barrier_records[3]["attempted_events"] != 2
+        || barrier_records[3]["events_written"] != 2
+    {
+        return Err("Windows TUN UDP diagnostic finalize barrier ledger is invalid".to_owned());
+    }
     let degraded_ledger_path = directory.path().join("degraded.ndjson");
     let degraded_ledger_arguments = UdpDiagnosticLedgerArgs {
         path: degraded_ledger_path.clone(),
@@ -2885,7 +3313,10 @@ pub(super) fn self_check() -> Result<(), String> {
     let degraded_ledger = BoundedUdpDiagnosticLedger::create_with_reporting(
         &degraded_ledger_arguments,
         UDP_SUPPORT_LEDGER_SCHEMA,
-        json!({}),
+        json!({
+            "scope": UDP_DIAGNOSTIC_SCOPE,
+            "closure": UDP_SUPPORT_DIAGNOSTIC_CLOSURE
+        }),
         false,
     )?;
     degraded_ledger.record(json!({
@@ -2926,6 +3357,22 @@ pub(super) fn self_check() -> Result<(), String> {
     };
     let failed_flow = UdpWorkloadDiagnosticSession::create(&failed_flow_arguments)?;
     failed_flow.record_flow(
+        UdpDiagnosticPayload {
+            phase: UdpDiagnosticPhase::Warmup,
+            ..diagnostic_identity
+        },
+        Some("198.18.0.2:54320".parse().expect("literal")),
+        Some("192.0.2.10:53".parse().expect("literal")),
+        UdpWorkloadFlowOutcome {
+            send_result: "success",
+            send_bytes: Some(UDP_DIAGNOSTIC_PAYLOAD_LEN),
+            reply_result: "success",
+            reply_source: Some("192.0.2.10:53".parse().expect("literal")),
+            payload_match: true,
+            error_kind: None,
+        },
+    );
+    failed_flow.record_flow(
         diagnostic_identity,
         Some("198.18.0.2:54321".parse().expect("literal")),
         Some("192.0.2.10:53".parse().expect("literal")),
@@ -2961,6 +3408,8 @@ pub(super) fn self_check() -> Result<(), String> {
     let unobserved_packet_nonce = unobserved_identity.packet_nonce.to_string();
     if failed_flow_records.len() != 4
         || failed_flow_records[0]["schema"] != UDP_WORKLOAD_LEDGER_SCHEMA
+        || failed_flow_records[0]["scope"] != UDP_DIAGNOSTIC_SCOPE
+        || failed_flow_records[0]["closure"] != UDP_WORKLOAD_DIAGNOSTIC_CLOSURE
         || failed_flow_records[1]["phase"] != "bootstrap"
         || failed_flow_records[1]["association_index"] != 85
         || failed_flow_records[1]["workload_local_port"] != 54321
@@ -3017,13 +3466,13 @@ pub(super) fn self_check() -> Result<(), String> {
         &[client_a, client_b],
         &mut batch_failure_reply,
         2,
-        UdpDiagnosticPhase::Warmup,
+        UdpDiagnosticPhase::Bootstrap,
         1,
         None,
         &mut batch_failure_session,
     )
     .expect_err("first diagnostic batch receive must time out");
-    if !batch_failure.contains("phase=warmup association_index=0") {
+    if !batch_failure.contains("phase=bootstrap association_index=0") {
         return Err("Windows TUN UDP batch failure identity is invalid".to_owned());
     }
     drop(batch_failure_session);

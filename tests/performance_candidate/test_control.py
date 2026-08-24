@@ -902,6 +902,12 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             return {
                 "schema": schema,
                 "record_type": "header",
+                "scope": "bootstrap",
+                "closure": (
+                    "workload_process_exit"
+                    if schema == CONTROL.WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
+                    else "host_four_port_barrier_after_vm_off"
+                ),
                 "run_nonce": run_nonce,
                 "max_events": max_events,
                 "timestamp_clock": "std_instant_normalized_nanoseconds",
@@ -2810,6 +2816,27 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 self.write_udp_diagnostic_document(root, row)
                 with self.assertRaises(CONTROL.CandidateControlError):
                     self.validate_udp_diagnostic(root, plan, plan_sha256)
+
+        for role in ("workload_ledger", "support_ledger"):
+            for field in ("scope", "closure"):
+                with self.subTest(role=role, field=field):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = pathlib.Path(directory)
+                        plan, row, plan_sha256 = self.udp_diagnostic_evidence(root)
+                        artifact = self.udp_artifact(row, role)
+                        records = [
+                            json.loads(line)
+                            for line in (root / artifact["file"])
+                            .read_text(encoding="utf-8")
+                            .splitlines()
+                        ]
+                        records[0][field] = "invalid"
+                        self.write_udp_ledger(root, row, role, records)
+                        self.write_udp_diagnostic_document(root, row)
+                        with self.assertRaisesRegex(
+                            CONTROL.CandidateControlError, "ledger header identity"
+                        ):
+                            self.validate_udp_diagnostic(root, plan, plan_sha256)
 
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
