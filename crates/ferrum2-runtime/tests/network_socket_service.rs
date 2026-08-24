@@ -105,6 +105,7 @@ struct FakeState {
     tcp_connect_failure: AtomicUsize,
     udp_connect_pending: AtomicUsize,
     connect_started: tokio::sync::Notify,
+    udp_read_started: tokio::sync::Notify,
     tcp_socket_drops: AtomicUsize,
     tcp_stream_drops: AtomicUsize,
     udp_socket_drops: AtomicUsize,
@@ -228,6 +229,7 @@ impl DirectUdpSocket for FakeUdpSocket {
     }
 
     async fn readable(&self) -> io::Result<()> {
+        self.state.udp_read_started.notify_one();
         std::future::pending().await
     }
 
@@ -338,19 +340,6 @@ fn route() -> RouteNetworkOptions {
     RouteNetworkOptions::new(true, None::<&str>)
 }
 
-async fn wait_for_owner_count(owners: &OwnerRegistry, expected: usize) {
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if owners.snapshot().network_runtime_owners == expected {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn unconnected_udp_uses_first_target_only_for_selection_and_allows_send_to() {
     let owners = OwnerRegistry::new();
@@ -377,7 +366,8 @@ async fn unconnected_udp_uses_first_target_only_for_selection_and_allows_send_to
     assert_eq!(calls.last().unwrap().destination, second);
     assert_eq!(owners.snapshot().network_runtime_owners, 1);
     drop(socket);
-    wait_for_owner_count(&owners, 0).await;
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
 }
 
 #[tokio::test]
@@ -451,7 +441,8 @@ async fn connected_udp_has_an_explicit_connect_path() {
         [CallKind::PrepareUdp, CallKind::ConnectUdp]
     );
     drop(socket);
-    wait_for_owner_count(&owners, 0).await;
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
 }
 
 #[tokio::test]
@@ -520,7 +511,8 @@ async fn one_generation_race_retries_the_whole_prepare_and_admits_the_new_source
     assert_eq!(state.tcp_socket_drops.load(Ordering::SeqCst), 2);
     assert_eq!(owners.snapshot().network_runtime_owners, 1);
     drop(stream);
-    wait_for_owner_count(&owners, 0).await;
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
 }
 
 #[tokio::test]
@@ -649,4 +641,34 @@ async fn idle_connected_resources_are_closed_before_reset_acknowledgement() {
         InterfaceSelectionSource::AutoDetected
     );
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+}
+
+#[tokio::test]
+async fn udp_reset_waits_for_an_inflight_operation_before_acknowledging_its_owner() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let socket = Arc::new(
+        service
+            .open_udp(&DialOptions::default(), &route(), destination(53))
+            .unwrap(),
+    );
+    let operation_socket = Arc::clone(&socket);
+    let operation = tokio::spawn(async move { operation_socket.readable().await });
+    state.udp_read_started.notified().await;
+
+    let report = coordinator
+        .reset_network(
+            snapshot(2),
+            NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.cancelled_runtime_owners(), 1);
+    assert!(operation.await.unwrap().is_err());
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    assert!(socket.is_closed().await);
+    assert!(socket.closed().is_some());
 }

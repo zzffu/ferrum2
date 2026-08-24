@@ -342,6 +342,69 @@ impl fmt::Display for ChildExit {
 }
 
 impl ChildExit {
+    pub fn shutdown_report_diagnostic(&self) -> String {
+        if self.stderr.truncated {
+            return "shutdown_report=truncated".to_owned();
+        }
+        let Some(report) = std::str::from_utf8(&self.stderr.bytes)
+            .ok()
+            .and_then(|stderr| {
+                stderr.lines().find_map(|line| {
+                    let report = serde_json::from_str::<serde_json::Value>(line).ok()?;
+                    (report["event"] == "process_shutdown_report").then_some(report)
+                })
+            })
+        else {
+            return "shutdown_report=missing".to_owned();
+        };
+        let cleanup_owner_delta = report["cleanup_failure"]["owner_delta"]
+            .as_object()
+            .into_iter()
+            .flat_map(|delta| delta.iter())
+            .filter_map(|(name, value)| {
+                let value = value.as_i64()?;
+                (value != 0).then(|| format!("{name}:{value}"))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let root_events = report["root_exit_events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|event| {
+                format!(
+                    "{}:{}:{}",
+                    event["root"]["name"].as_str().unwrap_or("null"),
+                    event["phase"].as_str().unwrap_or("null"),
+                    event["exit_category"].as_str().unwrap_or("null"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "termination_cause={} root_name={} root_id={} root_error_category={} root_exit_category={} cleanup_kind={} cleanup_root_name={} cleanup_root_id={} cleanup_root_error_category={} cleanup_owner_delta={} root_events={}",
+            report["termination_cause"].as_str().unwrap_or("null"),
+            report["root"]["name"].as_str().unwrap_or("null"),
+            report["root"]["id"]
+                .as_u64()
+                .map_or_else(|| "null".to_owned(), |id| id.to_string(),),
+            report["root_error_category"].as_str().unwrap_or("null"),
+            report["root_exit_category"].as_str().unwrap_or("null"),
+            report["cleanup_failure"]["kind"].as_str().unwrap_or("null"),
+            report["cleanup_failure"]["root"]["name"]
+                .as_str()
+                .unwrap_or("null"),
+            report["cleanup_failure"]["root"]["id"]
+                .as_u64()
+                .map_or_else(|| "null".to_owned(), |id| id.to_string()),
+            report["cleanup_failure"]["root_error_category"]
+                .as_str()
+                .unwrap_or("null"),
+            cleanup_owner_delta,
+            root_events,
+        )
+    }
+
     pub fn assert_stderr_excludes(&self, sentinels: &[&str]) {
         assert!(
             !self.stderr.truncated,

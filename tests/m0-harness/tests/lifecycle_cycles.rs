@@ -806,7 +806,12 @@ fn signal_cycle(
         let started = Instant::now();
         child.request_graceful_shutdown();
         let exit = child.wait_for_exit(CHILD_DEADLINE);
-        assert_eq!(exit.status.code(), Some(0), "{context}: {exit}");
+        assert_eq!(
+            exit.status.code(),
+            Some(0),
+            "{context}: {exit}; {}",
+            exit.shutdown_report_diagnostic(),
+        );
         if force {
             assert!(started.elapsed() >= GRACE, "{context}: forced before grace");
         }
