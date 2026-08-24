@@ -7,6 +7,7 @@ import argparse
 import copy
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import pathlib
@@ -212,6 +213,26 @@ WINDOWS_TUN_SUMMARY_SCHEMA_VERSION = 2
 WINDOWS_TUN_CALIBRATION_SCHEMA_VERSION = 2
 WINDOWS_TUN_POLICY_SCHEMA_VERSION = 2
 WINDOWS_TUN_TRIAL_MAX_BYTES = 64 * 1024
+WINDOWS_TUN_UDP_DIAGNOSTIC_MAX_BYTES = 256 * 1024
+WINDOWS_TUN_UDP_DIAGNOSTIC_SCHEMA = (
+    "ferrum2.windows-tun.hyperv-udp-diagnostic.v1"
+)
+WINDOWS_TUN_UDP_FAILURE_SUMMARY_SCHEMA = (
+    "ferrum2.windows-tun.hyperv-udp-failure-summary.v1"
+)
+WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA = (
+    "ferrum2.windows-tun.udp-workload-flow-ledger.v1"
+)
+WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA = (
+    "ferrum2.windows-tun.udp-support-ledger.v1"
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS = {
+    "max_artifacts": 32,
+    "max_total_bytes": 256 * 1024 * 1024,
+    "max_artifact_bytes": 128 * 1024 * 1024,
+    "max_ndjson_line_bytes": 4 * 1024,
+    "max_ledger_events": 65_536,
+}
 WINDOWS_TUN_PAIR_SCHEDULE = "alternating-parent-candidate"
 WINDOWS_TUN_GUEST = {
     "runner_os": "Windows",
@@ -756,6 +777,103 @@ WINDOWS_TUN_NETWORK_MODEL_EVIDENCE_FIELDS = frozenset(
         "observation_file",
         "observation_sha256",
     }
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_FIELDS = frozenset(
+    "schema qualification profile evidence_status trial_status run_nonce "
+    "started_utc finished_utc identity trial environment support topology "
+    "bounds artifacts failure_summary cleanup".split()
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_IDENTITY_FIELDS = frozenset(
+    "parent_sha candidate_sha sha tree client_sha256 server_sha256 harness_sha256 "
+    "runner_sha256 recipe_sha256 plan_sha256".split()
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_FIELDS = frozenset(
+    "selection run_kind sequence scenario member pair order".split()
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_SUPPORT_FIELDS = frozenset(
+    "pid owner binary_sha256 listen_endpoints".split()
+)
+WINDOWS_TUN_UDP_SUPPORT_ENDPOINT_FIELDS = frozenset("protocol ip port".split())
+WINDOWS_TUN_UDP_DIAGNOSTIC_TOPOLOGY_FIELDS = frozenset(
+    "support_ipv4 guest_ipv4 host_network_path_file host_network_path_sha256 "
+    "host_tun_bypassed host_network_mutations".split()
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_BOUND_FIELDS = frozenset(
+    WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_FIELDS = frozenset(
+    "role state file sha256 bytes records max_events dropped_events write_failures".split()
+)
+WINDOWS_TUN_UDP_FAILURE_REFERENCE_FIELDS = frozenset("file sha256".split())
+WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_ROLES = frozenset(
+    "workload_ledger support_ledger host_capture host_capture_native "
+    "endpoint_snapshot_before endpoint_snapshot_after dynamic_port_snapshot_before "
+    "dynamic_port_snapshot_after host_network_path failure_summary runner_log "
+    "guest_process_log host_process_log".split()
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_CLEANUP_FIELDS = frozenset(
+    "status checkpoint_restored final_vm_state capture_stop_status "
+    "guest_owned_processes".split()
+)
+WINDOWS_TUN_UDP_FAILURE_SUMMARY_FIELDS = frozenset(
+    "schema qualification run_nonce parent_sha candidate_sha sha tree client_sha256 "
+    "server_sha256 harness_sha256 runner_sha256 recipe_sha256 vm_id checkpoint_id "
+    "support_pid support_owner support_sha256 trial_sequence scenario member pair order "
+    "failure_kind phase association_index round packet_nonce workload_tuple physical_tuple "
+    "observation_sources observations last_confirmed_stage first_missing_stage "
+    "response_sink_outcome failure_fingerprint cleanup".split()
+)
+WINDOWS_TUN_UDP_FAILURE_TUPLE_FIELDS = frozenset(
+    "source_ip source_port target_ip target_port".split()
+)
+WINDOWS_TUN_UDP_OBSERVATION_STAGES = tuple(
+    "workload_send direct_send guest_request host_request support_rx support_tx "
+    "host_reply guest_reply ferrum_receive response_classified response_sink "
+    "wintun_injection workload_reply".split()
+)
+WINDOWS_TUN_UDP_OBSERVATION_SOURCES = frozenset(
+    "workload_ledger support_ledger host_capture guest_capture ferrum_boundary".split()
+)
+WINDOWS_TUN_UDP_OBSERVATION_SOURCE_FIELDS = frozenset(
+    "state records dropped_events write_failures covers_packet_nonce".split()
+)
+WINDOWS_TUN_UDP_LEDGER_COUNTER_FIELDS = frozenset(
+    "attempted_events events_written dropped_events write_failures".split()
+)
+WINDOWS_TUN_UDP_LEDGER_EVENT_COMMON_FIELDS = frozenset(
+    "schema record_type event_index timestamp_qpc timestamp_qpc_frequency "
+    "ledger_counters".split()
+)
+WINDOWS_TUN_UDP_WORKLOAD_EVENT_FIELDS = frozenset(
+    WINDOWS_TUN_UDP_LEDGER_EVENT_COMMON_FIELDS
+    | set(
+        "run_nonce trial_sequence phase association_index round packet_nonce "
+        "workload_local_ip workload_local_port target_ip target_port send_result "
+        "send_bytes reply_result reply_source_ip reply_source_port payload_match "
+        "error_kind".split()
+    )
+)
+WINDOWS_TUN_UDP_SUPPORT_EVENT_FIELDS = frozenset(
+    WINDOWS_TUN_UDP_LEDGER_EVENT_COMMON_FIELDS
+    | set(
+        "stage listen_ip listen_port remote_ip remote_port payload_run_nonce "
+        "payload_run_nonce_match trial_sequence phase association_index round "
+        "packet_nonce recv_bytes send_attempted send_result send_bytes error_kind".split()
+    )
+)
+WINDOWS_TUN_UDP_CAPTURE_MANIFEST_FIELDS = frozenset(
+    "schema state filters started_utc stop_status expected_files files failures".split()
+)
+WINDOWS_TUN_UDP_CAPTURE_FILE_FIELDS = frozenset("file bytes sha256".split())
+WINDOWS_TUN_UDP_CAPTURE_FILTER_FIELDS = frozenset(
+    "name support_ipv4 protocol port command_exit_code".split()
+)
+WINDOWS_TUN_UDP_CAPTURE_FILES = (
+    "PktMon.etl",
+    "PktMon.txt",
+    "PktMon.pcapng",
+    "pktmon-counters.json",
+    "pktmon-stop.txt",
 )
 PROFILE_FIELDS = frozenset(
     {
@@ -3789,6 +3907,1457 @@ def _windows_tun_utc(value: object, field: str) -> datetime:
     return parsed
 
 
+def _windows_tun_udp_u64(
+    value: object, field: str, *, positive: bool = False
+) -> int:
+    if (
+        type(value) is not int
+        or value < (1 if positive else 0)
+        or value > U64_MAX
+    ):
+        requirement = "positive" if positive else "non-negative"
+        raise CandidateControlError(
+            f"Windows TUN UDP diagnostic {field} must be a {requirement} u64"
+        )
+    return value
+
+
+def _windows_tun_udp_decimal_u64(
+    value: object, field: str, *, positive: bool = False
+) -> int:
+    if type(value) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is None:
+        raise CandidateControlError(
+            f"Windows TUN UDP diagnostic {field} must be a canonical decimal u64"
+        )
+    parsed = int(value, 10)
+    _windows_tun_udp_u64(parsed, field, positive=positive)
+    return parsed
+
+
+def _windows_tun_udp_ipv4(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise CandidateControlError(f"Windows TUN UDP diagnostic {field} must be IPv4")
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise CandidateControlError(
+            f"Windows TUN UDP diagnostic {field} must be IPv4"
+        ) from error
+    if parsed.version != 4 or str(parsed) != value:
+        raise CandidateControlError(
+            f"Windows TUN UDP diagnostic {field} must be canonical IPv4"
+        )
+    return value
+
+
+def _windows_tun_udp_port(value: object, field: str) -> int:
+    if type(value) is not int or not 1 <= value <= 65_535:
+        raise CandidateControlError(
+            f"Windows TUN UDP diagnostic {field} must be a valid port"
+        )
+    return value
+
+
+def _windows_tun_udp_endpoint(
+    value: dict[str, object], ip_field: str, port_field: str, field: str
+) -> tuple[str, int] | None:
+    ip_value = value[ip_field]
+    port_value = value[port_field]
+    if ip_value is None and port_value is None:
+        return None
+    if ip_value is None or port_value is None:
+        raise CandidateControlError(
+            f"Windows TUN UDP diagnostic {field} endpoint is incomplete"
+        )
+    return (
+        _windows_tun_udp_ipv4(ip_value, f"{field}.{ip_field}"),
+        _windows_tun_udp_port(port_value, f"{field}.{port_field}"),
+    )
+
+
+def _validate_windows_tun_udp_support_endpoints(
+    value: object,
+) -> list[dict[str, object]]:
+    if type(value) is not list or len(value) != 5:
+        raise CandidateControlError(
+            "Windows TUN UDP support listen_endpoints must contain five endpoints"
+        )
+    identities = set()
+    for endpoint in value:
+        if type(endpoint) is not dict:
+            raise CandidateControlError(
+                "Windows TUN UDP support listen endpoint must be an object"
+            )
+        _exact_fields(
+            endpoint,
+            WINDOWS_TUN_UDP_SUPPORT_ENDPOINT_FIELDS,
+            "Windows TUN UDP support listen endpoint",
+        )
+        if endpoint["protocol"] not in ("tcp", "udp"):
+            raise CandidateControlError(
+                "Windows TUN UDP support listen endpoint protocol is invalid"
+            )
+        identity = (
+            endpoint["protocol"],
+            _windows_tun_udp_ipv4(endpoint["ip"], "support listen endpoint ip"),
+            _windows_tun_udp_port(endpoint["port"], "support listen endpoint port"),
+        )
+        if identity in identities:
+            raise CandidateControlError(
+                "Windows TUN UDP support listen endpoint is duplicated"
+            )
+        identities.add(identity)
+    return value
+
+
+def _validate_windows_tun_udp_failure_tuple_shape(
+    value: object, *, field: str
+) -> None:
+    if value is None:
+        return
+    if type(value) is not dict:
+        raise CandidateControlError(f"Windows TUN UDP {field} must be an object")
+    _exact_fields(value, WINDOWS_TUN_UDP_FAILURE_TUPLE_FIELDS, f"Windows TUN UDP {field}")
+    _windows_tun_udp_ipv4(value["source_ip"], f"{field}.source_ip")
+    _windows_tun_udp_port(value["source_port"], f"{field}.source_port")
+    _windows_tun_udp_ipv4(value["target_ip"], f"{field}.target_ip")
+    _windows_tun_udp_port(value["target_port"], f"{field}.target_port")
+
+
+def _windows_tun_udp_artifact_path(
+    evidence_root: pathlib.Path, relative: object, field: str
+) -> tuple[pathlib.Path, str, int]:
+    if type(relative) is not str or not relative or ":" in relative:
+        raise CandidateControlError(f"Windows TUN UDP {field} path is invalid")
+    relative_path = pathlib.Path(relative)
+    if (
+        relative_path.is_absolute()
+        or relative_path.drive
+        or relative_path.as_posix() != relative
+        or any(part in {"", ".", ".."} for part in relative_path.parts)
+    ):
+        raise CandidateControlError(
+            f"Windows TUN UDP {field} path must be normalized and relative"
+        )
+    path = evidence_root / relative_path
+    try:
+        root_resolved = evidence_root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+        stat = resolved.stat()
+        if path.is_symlink() or not resolved.is_file():
+            raise OSError("not a regular non-symlink file")
+    except (OSError, ValueError) as error:
+        raise CandidateControlError(
+            f"Windows TUN UDP {field} path is missing, unsafe, or outside evidence root"
+        ) from error
+    return resolved, os.path.normcase(str(resolved)), stat.st_size
+
+
+def _read_windows_tun_udp_document(path: pathlib.Path) -> dict[str, object]:
+    if not path.is_file() or path.is_symlink():
+        raise CandidateControlError("Windows TUN UDP diagnostic is missing or not a regular file")
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise CandidateControlError("unable to read Windows TUN UDP diagnostic") from error
+    if len(raw) > WINDOWS_TUN_UDP_DIAGNOSTIC_MAX_BYTES:
+        raise CandidateControlError("Windows TUN UDP diagnostic exceeds the size bound")
+    try:
+        row = _strict_json(raw.decode("utf-8"), source="Windows TUN UDP diagnostic")
+    except UnicodeError as error:
+        raise CandidateControlError("Windows TUN UDP diagnostic must be UTF-8") from error
+    if type(row) is not dict:
+        raise CandidateControlError("Windows TUN UDP diagnostic must be an object")
+    return row
+
+
+def _windows_tun_udp_ledger_event(
+    row: object,
+    *,
+    schema: str,
+    run_nonce: str,
+    trial_sequence: int,
+    header: dict[str, object],
+    previous: dict[str, object] | None,
+    position: int,
+) -> dict[str, object]:
+    if type(row) is not dict:
+        raise CandidateControlError("Windows TUN UDP ledger event must be an object")
+    expected_fields = (
+        WINDOWS_TUN_UDP_WORKLOAD_EVENT_FIELDS
+        if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
+        else WINDOWS_TUN_UDP_SUPPORT_EVENT_FIELDS
+    )
+    _exact_fields(row, expected_fields, "Windows TUN UDP ledger event")
+    if row["schema"] != schema or row["record_type"] != "event":
+        raise CandidateControlError("Windows TUN UDP ledger event schema is invalid")
+    event_index = _windows_tun_udp_u64(row["event_index"], "event_index")
+    timestamp = _windows_tun_udp_u64(row["timestamp_qpc"], "timestamp_qpc")
+    if row["timestamp_qpc_frequency"] != 1_000_000_000:
+        raise CandidateControlError("Windows TUN UDP ledger clock frequency is invalid")
+    counters = row["ledger_counters"]
+    if type(counters) is not dict:
+        raise CandidateControlError("Windows TUN UDP ledger counters must be an object")
+    _exact_fields(
+        counters,
+        WINDOWS_TUN_UDP_LEDGER_COUNTER_FIELDS,
+        "Windows TUN UDP ledger counters",
+    )
+    for field in counters:
+        _windows_tun_udp_u64(counters[field], f"ledger_counters.{field}")
+    if (
+        counters["events_written"] != position
+        or counters["attempted_events"]
+        != counters["events_written"]
+        + counters["dropped_events"]
+        + counters["write_failures"]
+        or event_index + 1 != counters["attempted_events"]
+    ):
+        raise CandidateControlError("Windows TUN UDP ledger event count is inconsistent")
+    if previous is not None:
+        previous_counters = previous["ledger_counters"]
+        if (
+            event_index <= previous["event_index"]
+            or timestamp < previous["timestamp_qpc"]
+            or counters["attempted_events"] <= previous_counters["attempted_events"]
+            or counters["dropped_events"] < previous_counters["dropped_events"]
+            or counters["write_failures"] < previous_counters["write_failures"]
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP ledger event counters are not monotonic"
+            )
+    if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA:
+        if row["run_nonce"] != run_nonce or row["trial_sequence"] != trial_sequence:
+            raise CandidateControlError("Windows TUN UDP workload ledger identity mismatch")
+        if (
+            type(row["trial_sequence"]) is not int
+            or not 1 <= row["trial_sequence"] <= 65_535
+            or row["phase"] not in ("bootstrap", "warmup", "lookup", "refresh")
+        ):
+            raise CandidateControlError("Windows TUN UDP workload event identity is invalid")
+        for field in ("association_index", "round"):
+            if _windows_tun_udp_u64(row[field], field) > 0xFFFF_FFFF:
+                raise CandidateControlError(f"Windows TUN UDP {field} exceeds u32")
+        _windows_tun_udp_decimal_u64(row["packet_nonce"], "packet_nonce")
+        workload_endpoint = _windows_tun_udp_endpoint(
+            row, "workload_local_ip", "workload_local_port", "workload_local"
+        )
+        target_endpoint = _windows_tun_udp_endpoint(row, "target_ip", "target_port", "target")
+        if workload_endpoint is None or target_endpoint is None:
+            raise CandidateControlError("Windows TUN UDP workload endpoint identity is missing")
+        reply_endpoint = _windows_tun_udp_endpoint(
+            row, "reply_source_ip", "reply_source_port", "reply_source"
+        )
+        send_result = row["send_result"]
+        reply_result = row["reply_result"]
+        if (
+            send_result not in ("success", "partial", "error")
+            or reply_result
+            not in (
+                "success",
+                "timeout",
+                "error",
+                "payload_mismatch",
+                "not_attempted",
+                "not_observed",
+            )
+            or type(row["payload_match"]) is not bool
+        ):
+            raise CandidateControlError("Windows TUN UDP workload outcome is invalid")
+        error_kind = row["error_kind"]
+        if error_kind is not None and (
+            type(error_kind) is not str
+            or re.fullmatch(r"[a-z0-9_]{1,64}", error_kind) is None
+        ):
+            raise CandidateControlError("Windows TUN UDP workload error_kind is invalid")
+        send_bytes = row["send_bytes"]
+        if send_result == "success":
+            if send_bytes != 32 or reply_result == "not_attempted":
+                raise CandidateControlError("Windows TUN UDP successful send is inconsistent")
+        elif send_result == "partial":
+            if type(send_bytes) is not int or not 0 <= send_bytes < 32:
+                raise CandidateControlError("Windows TUN UDP partial send is inconsistent")
+        elif send_bytes is not None:
+            raise CandidateControlError("Windows TUN UDP failed send has bytes")
+        if reply_result == "success":
+            valid_reply = (
+                reply_endpoint == target_endpoint
+                and row["payload_match"]
+                and error_kind is None
+            )
+        elif reply_result == "payload_mismatch":
+            valid_reply = (
+                reply_endpoint == target_endpoint
+                and not row["payload_match"]
+                and error_kind == "payload_mismatch"
+            )
+        elif reply_result == "not_observed":
+            valid_reply = (
+                send_result == "success"
+                and reply_endpoint is None
+                and not row["payload_match"]
+                and error_kind == "prior_batch_failure"
+            )
+        elif reply_result == "not_attempted":
+            valid_reply = (
+                send_result != "success"
+                and reply_endpoint is None
+                and not row["payload_match"]
+                and error_kind is not None
+            )
+        else:
+            valid_reply = (
+                send_result == "success"
+                and reply_endpoint is None
+                and not row["payload_match"]
+                and error_kind is not None
+            )
+        if not valid_reply:
+            raise CandidateControlError("Windows TUN UDP workload reply is inconsistent")
+    else:
+        listen = (
+            _windows_tun_udp_ipv4(row["listen_ip"], "support.listen_ip"),
+            _windows_tun_udp_port(row["listen_port"], "support.listen_port"),
+        )
+        if listen[0] != header["listen_ip"] or listen[1] not in header["udp_ports"]:
+            raise CandidateControlError("Windows TUN UDP support listen endpoint mismatch")
+        _windows_tun_udp_ipv4(row["remote_ip"], "support.remote_ip")
+        _windows_tun_udp_port(row["remote_port"], "support.remote_port")
+        if _windows_tun_udp_u64(row["recv_bytes"], "recv_bytes") > 65_507:
+            raise CandidateControlError("Windows TUN UDP support recv_bytes is invalid")
+        identity_fields = (
+            "payload_run_nonce",
+            "payload_run_nonce_match",
+            "trial_sequence",
+            "phase",
+            "association_index",
+            "round",
+            "packet_nonce",
+        )
+        identity_nulls = [row[field] is None for field in identity_fields]
+        if any(identity_nulls) and not all(identity_nulls):
+            raise CandidateControlError("Windows TUN UDP support payload identity is partial")
+        payload_nonce = row["payload_run_nonce"]
+        if payload_nonce is not None:
+            _windows_tun_udp_decimal_u64(payload_nonce, "payload_run_nonce")
+            if (
+                type(row["payload_run_nonce_match"]) is not bool
+                or row["payload_run_nonce_match"] != (payload_nonce == run_nonce)
+                or type(row["trial_sequence"]) is not int
+                or not 1 <= row["trial_sequence"] <= 65_535
+                or row["phase"] not in ("bootstrap", "warmup", "lookup", "refresh")
+            ):
+                raise CandidateControlError("Windows TUN UDP support payload identity is invalid")
+            for field in ("association_index", "round"):
+                if _windows_tun_udp_u64(row[field], field) > 0xFFFF_FFFF:
+                    raise CandidateControlError(f"Windows TUN UDP {field} exceeds u32")
+            _windows_tun_udp_decimal_u64(row["packet_nonce"], "packet_nonce")
+            if payload_nonce == run_nonce and row["trial_sequence"] != trial_sequence:
+                raise CandidateControlError("Windows TUN UDP support payload identity mismatch")
+        error_kind = row["error_kind"]
+        if error_kind is not None and (
+            type(error_kind) is not str
+            or re.fullmatch(r"[a-z0-9_]{1,64}", error_kind) is None
+        ):
+            raise CandidateControlError("Windows TUN UDP support error_kind is invalid")
+        if row["stage"] == "rx":
+            valid_stage = (
+                row["send_attempted"] is None
+                and row["send_result"] == "pending"
+                and row["send_bytes"] is None
+                and error_kind is None
+            )
+        elif row["stage"] == "tx" and type(row["send_attempted"]) is bool:
+            if row["send_attempted"]:
+                if row["send_result"] in ("success", "partial"):
+                    valid_stage = (
+                        type(row["send_bytes"]) is int
+                        and 0 <= row["send_bytes"] <= 65_507
+                        and (error_kind is None) == (row["send_result"] == "success")
+                    )
+                else:
+                    valid_stage = (
+                        row["send_result"] == "error"
+                        and row["send_bytes"] is None
+                        and error_kind is not None
+                    )
+            else:
+                valid_stage = (
+                    row["send_result"] == "not_attempted"
+                    and row["send_bytes"] is None
+                    and error_kind is not None
+                )
+        else:
+            valid_stage = False
+        if not valid_stage:
+            raise CandidateControlError("Windows TUN UDP support stage outcome is invalid")
+    return row
+
+
+def _read_windows_tun_udp_ledger(
+    path: pathlib.Path,
+    *,
+    schema: str,
+    run_nonce: str,
+    trial_sequence: int,
+    max_line_bytes: int,
+) -> dict[str, object]:
+    common_header_fields = set(
+        "schema record_type run_nonce max_events timestamp_clock".split()
+    )
+    header_fields = frozenset(
+        common_header_fields
+        | (
+            {"trial_sequence"}
+            if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
+            else {"pid", "listen_ip", "tcp_port", "udp_ports"}
+        )
+    )
+    footer_fields = frozenset(
+        "schema record_type run_nonce attempted_events events_written dropped_events "
+        "write_failures closed".split()
+    )
+    truncation_fields = frozenset(
+        "schema record_type run_nonce attempted_events events_written "
+        "dropped_events_at_least write_failures".split()
+    )
+    rows: list[object] = []
+    try:
+        with path.open("rb") as source:
+            while True:
+                raw = source.readline(max_line_bytes + 2)
+                if not raw:
+                    break
+                if (
+                    not raw.endswith(b"\n")
+                    or raw.endswith(b"\r\n")
+                    or len(raw) - 1 > max_line_bytes
+                ):
+                    raise CandidateControlError(
+                        "Windows TUN UDP ledger line exceeds the bound or is unterminated"
+                    )
+                try:
+                    rows.append(
+                        _strict_json(
+                            raw[:-1].decode("utf-8"), source="Windows TUN UDP ledger line"
+                        )
+                    )
+                except UnicodeError as error:
+                    raise CandidateControlError(
+                        "Windows TUN UDP ledger must be UTF-8"
+                    ) from error
+    except OSError as error:
+        raise CandidateControlError("unable to read Windows TUN UDP ledger") from error
+    if not rows or type(rows[0]) is not dict:
+        raise CandidateControlError("Windows TUN UDP ledger header is missing")
+    header = rows[0]
+    _exact_fields(header, header_fields, "Windows TUN UDP ledger header")
+    if (
+        header["schema"] != schema
+        or header["record_type"] != "header"
+        or header["run_nonce"] != run_nonce
+        or header["timestamp_clock"] != "std_instant_normalized_nanoseconds"
+    ):
+        raise CandidateControlError("Windows TUN UDP ledger header identity is invalid")
+    _windows_tun_udp_decimal_u64(header["run_nonce"], "ledger header run_nonce", positive=True)
+    if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA:
+        if (
+            type(header["trial_sequence"]) is not int
+            or not 1 <= header["trial_sequence"] <= 65_535
+            or header["trial_sequence"] != trial_sequence
+        ):
+            raise CandidateControlError("Windows TUN UDP workload ledger header trial mismatch")
+    else:
+        _windows_tun_udp_u64(header["pid"], "support header pid", positive=True)
+        _windows_tun_udp_ipv4(header["listen_ip"], "support header listen_ip")
+        _windows_tun_udp_port(header["tcp_port"], "support header tcp_port")
+        if (
+            type(header["udp_ports"]) is not list
+            or len(header["udp_ports"]) != 4
+            or any(
+                type(port) is not int or not 1 <= port <= 65_535
+                for port in header["udp_ports"]
+            )
+            or len(set(header["udp_ports"])) != 4
+            or header["udp_ports"]
+            != list(range(header["udp_ports"][0], header["udp_ports"][0] + 4))
+        ):
+            raise CandidateControlError("Windows TUN UDP support ledger endpoint is invalid")
+    max_events = _windows_tun_udp_u64(header["max_events"], "max_events", positive=True)
+    footer = None
+    if len(rows) > 1 and type(rows[-1]) is dict and rows[-1].get("record_type") == "footer":
+        footer = rows.pop()
+        _exact_fields(footer, footer_fields, "Windows TUN UDP ledger footer")
+        if (
+            footer["schema"] != schema
+            or footer["run_nonce"] != run_nonce
+            or footer["closed"] is not True
+        ):
+            raise CandidateControlError("Windows TUN UDP ledger footer identity is invalid")
+    truncation = None
+    if len(rows) > 1 and type(rows[-1]) is dict and rows[-1].get("record_type") == "truncation":
+        truncation = rows.pop()
+        _exact_fields(truncation, truncation_fields, "Windows TUN UDP ledger truncation")
+        if truncation["schema"] != schema or truncation["run_nonce"] != run_nonce:
+            raise CandidateControlError("Windows TUN UDP ledger truncation identity is invalid")
+    previous = None
+    events = rows[1:]
+    for position, event in enumerate(events, start=1):
+        previous = _windows_tun_udp_ledger_event(
+            event,
+            schema=schema,
+            run_nonce=run_nonce,
+            trial_sequence=trial_sequence,
+            header=header,
+            previous=previous,
+            position=position,
+        )
+        if previous["event_index"] >= max_events:
+            raise CandidateControlError("Windows TUN UDP ledger exceeded max_events")
+    workload_nonces = (
+        [int(event["packet_nonce"], 10) for event in events]
+        if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
+        else []
+    )
+    if any(current <= previous for previous, current in zip(workload_nonces, workload_nonces[1:])):
+        raise CandidateControlError(
+            "Windows TUN UDP workload packet nonces are not increasing"
+        )
+    last_counters = events[-1]["ledger_counters"] if events else {
+        "attempted_events": 0,
+        "events_written": 0,
+        "dropped_events": 0,
+        "write_failures": 0,
+    }
+    result = {
+        "records": len(events),
+        "max_events": max_events,
+        "dropped_events": last_counters["dropped_events"],
+        "write_failures": last_counters["write_failures"],
+        "complete": False,
+        "header": header,
+        "events": events,
+        "footer": footer,
+        "truncation": truncation,
+    }
+    if truncation is not None:
+        for field in ("attempted_events", "events_written", "dropped_events_at_least", "write_failures"):
+            _windows_tun_udp_u64(truncation[field], field)
+        if (
+            truncation["events_written"] != len(events)
+            or truncation["dropped_events_at_least"] < 1
+            or truncation["attempted_events"]
+            != truncation["events_written"]
+            + truncation["dropped_events_at_least"]
+            + truncation["write_failures"]
+            or truncation["attempted_events"] != max_events + 1
+            or truncation["attempted_events"] < last_counters["attempted_events"]
+            or truncation["dropped_events_at_least"]
+            < last_counters["dropped_events"]
+            or truncation["write_failures"] < last_counters["write_failures"]
+        ):
+            raise CandidateControlError("Windows TUN UDP ledger truncation counters are inconsistent")
+        result["dropped_events"] = truncation["dropped_events_at_least"]
+        result["write_failures"] = truncation["write_failures"]
+    if footer is not None:
+        for field in (
+            "attempted_events",
+            "events_written",
+            "dropped_events",
+            "write_failures",
+        ):
+            _windows_tun_udp_u64(footer[field], field)
+        if (
+            footer["events_written"] != len(events)
+            or footer["attempted_events"]
+            != footer["events_written"]
+            + footer["dropped_events"]
+            + footer["write_failures"]
+            or footer["attempted_events"] < last_counters["attempted_events"]
+            or footer["dropped_events"] < last_counters["dropped_events"]
+            or footer["write_failures"] < last_counters["write_failures"]
+        ):
+            raise CandidateControlError("Windows TUN UDP ledger footer counters are inconsistent")
+        result.update(
+            {
+                "dropped_events": footer["dropped_events"],
+                "write_failures": footer["write_failures"],
+                "complete": footer["dropped_events"] == 0
+                and footer["write_failures"] == 0
+                and truncation is None,
+            }
+        )
+        if truncation is not None and (
+            footer["attempted_events"] < truncation["attempted_events"]
+            or footer["dropped_events"] < truncation["dropped_events_at_least"]
+            or footer["write_failures"] < truncation["write_failures"]
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP ledger truncation exceeds footer accounting"
+            )
+        if footer["dropped_events"] == footer["write_failures"] == 0 and any(
+            event["event_index"] != index
+            or event["ledger_counters"]["attempted_events"] != index + 1
+            for index, event in enumerate(events)
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP complete ledger event sequence is not contiguous"
+            )
+        if (
+            schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
+            and footer["dropped_events"] == footer["write_failures"] == 0
+            and workload_nonces != list(range(len(events)))
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP complete workload nonce sequence is not contiguous"
+            )
+    return result
+
+
+def _windows_tun_udp_first_failed_flow(
+    events: list[dict[str, object]],
+) -> dict[str, object] | None:
+    first_not_observed = None
+    for event in events:
+        if (
+            event["send_result"] != "success"
+            or event["reply_result"] not in ("success", "not_observed")
+            or (
+                event["reply_result"] == "success"
+                and event["payload_match"] is not True
+            )
+        ):
+            return event
+        if event["reply_result"] == "not_observed" and first_not_observed is None:
+            first_not_observed = event
+    return first_not_observed
+
+
+def _windows_tun_udp_support_boundary(
+    events: list[dict[str, object]],
+    *,
+    run_nonce: str,
+    flow: dict[str, object] | None,
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    if flow is None:
+        return None, None
+    matched = [
+        event
+        for event in events
+        if event["payload_run_nonce"] == run_nonce
+        and event["trial_sequence"] == flow["trial_sequence"]
+        and event["phase"] == flow["phase"]
+        and event["association_index"] == flow["association_index"]
+        and event["round"] == flow["round"]
+        and event["packet_nonce"] == flow["packet_nonce"]
+    ]
+    rx_events = [event for event in matched if event["stage"] == "rx"]
+    tx_events = [event for event in matched if event["stage"] == "tx"]
+    if len(rx_events) > 1 or len(tx_events) > 1:
+        raise CandidateControlError(
+            "Windows TUN UDP support ledger duplicates a packet boundary"
+        )
+    rx = rx_events[0] if rx_events else None
+    tx = tx_events[0] if tx_events else None
+    if tx is not None and (
+        rx is None
+        or rx["event_index"] >= tx["event_index"]
+        or rx["listen_ip"] != tx["listen_ip"]
+        or rx["listen_port"] != tx["listen_port"]
+        or rx["remote_ip"] != tx["remote_ip"]
+        or rx["remote_port"] != tx["remote_port"]
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP support TX is not ordered after its matching RX"
+        )
+    if rx is not None and rx["recv_bytes"] != 32:
+        raise CandidateControlError("Windows TUN UDP tagged support RX length is invalid")
+    if tx is not None and (
+        tx["recv_bytes"] != 32
+        or tx["send_attempted"] is not True
+        or tx["send_result"] not in ("success", "partial", "error")
+        or (tx["send_result"] == "success" and tx["send_bytes"] != 32)
+        or (
+            tx["send_result"] == "partial"
+            and (type(tx["send_bytes"]) is not int or not 0 <= tx["send_bytes"] < 32)
+        )
+    ):
+        raise CandidateControlError("Windows TUN UDP tagged support TX outcome is invalid")
+    return rx, tx
+
+
+def _windows_tun_udp_failure_tuple(
+    source: dict[str, object] | None,
+    *,
+    source_ip: str,
+    source_port: str,
+    target_ip: str,
+    target_port: str,
+) -> dict[str, object] | None:
+    if source is None:
+        return None
+    if (
+        source[source_ip] is None
+        or source[source_port] is None
+        or source[target_ip] is None
+        or source[target_port] is None
+    ):
+        return None
+    return {
+        "source_ip": source[source_ip],
+        "source_port": source[source_port],
+        "target_ip": source[target_ip],
+        "target_port": source[target_port],
+    }
+
+
+def _validate_windows_tun_udp_cleanup(
+    value: object, *, name: str
+) -> dict[str, object]:
+    if type(value) is not dict:
+        raise CandidateControlError(f"{name} must be an object")
+    _exact_fields(value, WINDOWS_TUN_UDP_DIAGNOSTIC_CLEANUP_FIELDS, name)
+    if (
+        value["status"] not in ("PASS", "FAIL")
+        or type(value["checkpoint_restored"]) is not bool
+        or value["final_vm_state"] not in ("Off", "Running", "Paused", "Saved", "Unknown")
+        or value["capture_stop_status"] not in ("PASS", "FAIL", "NOT_STARTED")
+    ):
+        raise CandidateControlError(f"{name} status is invalid")
+    _windows_tun_udp_u64(value["guest_owned_processes"], f"{name}.guest_owned_processes")
+    if (
+        not value["checkpoint_restored"]
+        or value["final_vm_state"] != "Off"
+        or value["guest_owned_processes"] != 0
+        or (value["status"] == "PASS" and value["capture_stop_status"] != "PASS")
+    ):
+        raise CandidateControlError(f"{name} is inconsistent")
+    return value
+
+
+def _validate_windows_tun_udp_failure_summary(
+    value: object,
+    *,
+    row: dict[str, object],
+    artifacts: dict[str, dict[str, object]],
+    ledgers: dict[str, dict[str, object]],
+) -> None:
+    if type(value) is not dict:
+        raise CandidateControlError("Windows TUN UDP failure summary must be an object")
+    _exact_fields(value, WINDOWS_TUN_UDP_FAILURE_SUMMARY_FIELDS, "Windows TUN UDP failure summary")
+    if value["qualification"] is not False:
+        raise CandidateControlError(
+            "Windows TUN UDP failure summary qualification must be false"
+        )
+    _windows_tun_udp_u64(value["support_pid"], "failure.support_pid", positive=True)
+    trial_sequence = _windows_tun_udp_u64(
+        value["trial_sequence"], "failure.trial_sequence", positive=True
+    )
+    if trial_sequence > 65_535:
+        raise CandidateControlError("Windows TUN UDP failure trial_sequence exceeds u16")
+    for field in ("pair", "order"):
+        _windows_tun_udp_u64(value[field], f"failure.{field}", positive=True)
+    for field in ("association_index", "round"):
+        if value[field] is not None and _windows_tun_udp_u64(
+            value[field], f"failure.{field}"
+        ) > 0xFFFF_FFFF:
+            raise CandidateControlError(f"Windows TUN UDP failure {field} exceeds u32")
+    _validate_windows_tun_udp_cleanup(
+        value["cleanup"], name="Windows TUN UDP failure cleanup"
+    )
+    for field in ("workload_tuple", "physical_tuple"):
+        _validate_windows_tun_udp_failure_tuple_shape(value[field], field=field)
+    identity = row["identity"]
+    trial = row["trial"]
+    support = row["support"]
+    expected = {field: item for field, item in identity.items() if field != "plan_sha256"}
+    expected.update(
+        schema=WINDOWS_TUN_UDP_FAILURE_SUMMARY_SCHEMA,
+        qualification=False,
+        run_nonce=row["run_nonce"],
+        vm_id=row["environment"]["vm_id"],
+        checkpoint_id=row["environment"]["checkpoint_id"],
+        support_pid=support["pid"],
+        support_owner=support["owner"],
+        support_sha256=support["binary_sha256"],
+        trial_sequence=trial["sequence"],
+        cleanup=row["cleanup"],
+    )
+    expected.update({field: trial[field] for field in "scenario member pair order".split()})
+    if any(value[field] != item for field, item in expected.items()):
+        raise CandidateControlError("Windows TUN UDP failure summary identity mismatch")
+    flow = _windows_tun_udp_first_failed_flow(ledgers["workload_ledger"]["events"])
+    support_rx, support_tx = _windows_tun_udp_support_boundary(
+        ledgers["support_ledger"]["events"], run_nonce=row["run_nonce"], flow=flow
+    )
+    if any(
+        event is not None and event["remote_ip"] != row["topology"]["guest_ipv4"]
+        for event in (support_rx, support_tx)
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP support packet source is not guest-bound"
+        )
+    if flow is None:
+        flow_identity = {
+            "phase": "bootstrap",
+            "association_index": None,
+            "round": None,
+            "packet_nonce": None,
+        }
+        failure_kind = "other"
+    else:
+        flow_identity = {
+            field: flow[field]
+            for field in ("phase", "association_index", "round", "packet_nonce")
+        }
+        if flow["send_result"] in ("error", "partial"):
+            failure_kind = "send_error"
+        elif flow["reply_result"] == "timeout":
+            failure_kind = "timeout"
+        elif flow["reply_result"] == "error":
+            failure_kind = "receive_error"
+        elif flow["reply_result"] == "payload_mismatch":
+            failure_kind = "payload_mismatch"
+        else:
+            failure_kind = "other"
+    workload_tuple = _windows_tun_udp_failure_tuple(
+        flow,
+        source_ip="workload_local_ip",
+        source_port="workload_local_port",
+        target_ip="target_ip",
+        target_port="target_port",
+    )
+    physical_tuple = _windows_tun_udp_failure_tuple(
+        support_rx,
+        source_ip="remote_ip",
+        source_port="remote_port",
+        target_ip="listen_ip",
+        target_port="listen_port",
+    )
+    derived_failure = {
+        **flow_identity,
+        "failure_kind": failure_kind,
+        "workload_tuple": workload_tuple,
+        "physical_tuple": physical_tuple,
+    }
+    if any(value[field] != item for field, item in derived_failure.items()):
+        raise CandidateControlError(
+            "Windows TUN UDP failure classification is not ledger-bound"
+        )
+    if value["response_sink_outcome"] is not None:
+        raise CandidateControlError(
+            "Windows TUN UDP response sink cannot be claimed without boundary evidence"
+        )
+    observations = value["observations"]
+    if type(observations) is not dict:
+        raise CandidateControlError("Windows TUN UDP observations must be an object")
+    _exact_fields(
+        observations,
+        frozenset(WINDOWS_TUN_UDP_OBSERVATION_STAGES),
+        "Windows TUN UDP observations",
+    )
+    if any(state not in ("SEEN", "NOT_SEEN", "UNKNOWN") for state in observations.values()):
+        raise CandidateControlError("Windows TUN UDP observation state is invalid")
+    sources = value["observation_sources"]
+    if type(sources) is not dict:
+        raise CandidateControlError("Windows TUN UDP observation sources must be an object")
+    _exact_fields(sources, WINDOWS_TUN_UDP_OBSERVATION_SOURCES, "Windows TUN UDP observation sources")
+    for name, source in sources.items():
+        if type(source) is not dict:
+            raise CandidateControlError(f"Windows TUN UDP observation source {name} must be an object")
+        _exact_fields(
+            source,
+            WINDOWS_TUN_UDP_OBSERVATION_SOURCE_FIELDS,
+            f"Windows TUN UDP observation source {name}",
+        )
+        if source["state"] not in ("COMPLETE", "TRUNCATED", "MISSING", "ERROR", "NOT_ENABLED"):
+            raise CandidateControlError("Windows TUN UDP observation source state is invalid")
+        for field in ("records", "dropped_events", "write_failures"):
+            _windows_tun_udp_u64(source[field], f"{name}.{field}")
+        if type(source["covers_packet_nonce"]) is not bool:
+            raise CandidateControlError("Windows TUN UDP source nonce coverage is invalid")
+    for name in ("workload_ledger", "support_ledger"):
+        source = sources[name]
+        artifact = artifacts[name]
+        ledger = ledgers[name]
+        expected_state = "COMPLETE" if ledger["complete"] else "TRUNCATED"
+        expected_coverage = ledger["complete"] and flow is not None
+        if (
+            source["state"] != expected_state
+            or source["records"] != artifact["records"]
+            or source["dropped_events"] != artifact["dropped_events"]
+            or source["write_failures"] != artifact["write_failures"]
+            or source["covers_packet_nonce"] is not expected_coverage
+        ):
+            raise CandidateControlError(f"Windows TUN UDP {name} source accounting mismatch")
+    host_source = sources["host_capture"]
+    expected_host_state = (
+        "COMPLETE" if artifacts["host_capture"]["state"] == "COMPLETE" else "ERROR"
+    )
+    if host_source != {
+        "state": expected_host_state,
+        "records": 0,
+        "dropped_events": 0,
+        "write_failures": 0,
+        "covers_packet_nonce": False,
+    }:
+        raise CandidateControlError("Windows TUN UDP host capture completeness mismatch")
+    disabled_source = {
+        "state": "NOT_ENABLED",
+        "records": 0,
+        "dropped_events": 0,
+        "write_failures": 0,
+        "covers_packet_nonce": False,
+    }
+    if any(sources[name] != disabled_source for name in ("guest_capture", "ferrum_boundary")):
+        raise CandidateControlError("Windows TUN UDP observation source is not artifact-bound")
+    workload_complete = ledgers["workload_ledger"]["complete"]
+    support_complete = ledgers["support_ledger"]["complete"]
+    if flow is None:
+        expected_workload_send = expected_workload_reply = "UNKNOWN"
+    else:
+        expected_workload_send = (
+            "SEEN"
+            if flow["send_result"] == "success"
+            else "NOT_SEEN" if workload_complete else "UNKNOWN"
+        )
+        expected_workload_reply = (
+            "SEEN"
+            if flow["reply_result"] == "success"
+            else "UNKNOWN"
+            if flow["reply_result"] == "not_observed"
+            else "NOT_SEEN"
+            if workload_complete
+            else "UNKNOWN"
+        )
+    if (
+        observations["workload_send"] != expected_workload_send
+        or observations["workload_reply"] != expected_workload_reply
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP workload observations are not ledger-derived"
+        )
+    for stage, event in (("support_rx", support_rx), ("support_tx", support_tx)):
+        if event is not None:
+            expected_observation = "SEEN"
+        elif support_complete and flow is not None:
+            expected_observation = "NOT_SEEN"
+        else:
+            expected_observation = "UNKNOWN"
+        if observations[stage] != expected_observation:
+            raise CandidateControlError(
+                f"Windows TUN UDP {stage} observation is not ledger-derived"
+            )
+    uninstrumented = set(WINDOWS_TUN_UDP_OBSERVATION_STAGES) - {
+        "workload_send",
+        "workload_reply",
+        "support_rx",
+        "support_tx",
+    }
+    if any(observations[stage] != "UNKNOWN" for stage in uninstrumented):
+        raise CandidateControlError(
+            "Windows TUN UDP uninstrumented stage claims evidence"
+        )
+    last_confirmed = (
+        "support_tx"
+        if support_tx is not None
+        else "support_rx"
+        if support_rx is not None
+        else "workload_send"
+        if flow is not None and flow["send_result"] == "success"
+        else None
+    )
+    first_missing = (
+        "workload_send"
+        if observations["workload_send"] == "NOT_SEEN"
+        else "support_tx"
+        if observations["support_rx"] == "SEEN"
+        and observations["support_tx"] == "NOT_SEEN"
+        else None
+    )
+    if (
+        value["last_confirmed_stage"] != last_confirmed
+        or value["first_missing_stage"] != first_missing
+    ):
+        raise CandidateControlError("Windows TUN UDP failure stages are not ledger-derived")
+    support_tx_success = support_tx is not None and support_tx["send_result"] == "success"
+    if support_tx_success:
+        failure_fingerprint = "udp/bootstrap/reply-missing-after-support-tx"
+    elif support_tx is not None:
+        failure_fingerprint = "udp/bootstrap/support-tx-not-success"
+    elif support_rx is not None:
+        failure_fingerprint = (
+            "udp/bootstrap/reply-missing-at-support-tx"
+            if support_complete
+            else "udp/bootstrap/support-tx-boundary-unknown"
+        )
+    else:
+        failure_fingerprint = (
+            "udp/bootstrap/request-missing-before-support-rx"
+            if support_complete
+            else "udp/bootstrap/support-boundary-unknown"
+        )
+    if value["failure_fingerprint"] != failure_fingerprint:
+        raise CandidateControlError(
+            "Windows TUN UDP failure fingerprint is not ledger-derived"
+        )
+
+
+def _validate_windows_tun_udp_capture_manifest(
+    *,
+    evidence_root: pathlib.Path,
+    manifest_path: pathlib.Path,
+    manifest_relative: str,
+    artifact: dict[str, object],
+    artifacts: dict[str, dict[str, object]],
+    top_files: dict[str, tuple[int, str]],
+    top_file_roles: dict[str, str],
+    max_artifact_bytes: int,
+    support_ipv4: str,
+    support_udp_ports: list[int],
+) -> int:
+    if artifact["bytes"] > WINDOWS_TUN_UDP_DIAGNOSTIC_MAX_BYTES:
+        raise CandidateControlError("Windows TUN UDP capture manifest exceeds its bound")
+    try:
+        manifest = _strict_json(
+            manifest_path.read_text(encoding="utf-8"),
+            source="Windows TUN UDP capture manifest",
+        )
+    except (OSError, UnicodeError) as error:
+        raise CandidateControlError("unable to read Windows TUN UDP capture manifest") from error
+    if type(manifest) is not dict:
+        raise CandidateControlError("Windows TUN UDP capture manifest must be an object")
+    _exact_fields(
+        manifest,
+        WINDOWS_TUN_UDP_CAPTURE_MANIFEST_FIELDS,
+        "Windows TUN UDP capture manifest",
+    )
+    if (
+        manifest["schema"] != "ferrum2.windows-tun.host-capture-manifest.v1"
+        or manifest["state"] != artifact["state"]
+        or manifest["expected_files"] != list(WINDOWS_TUN_UDP_CAPTURE_FILES)
+        or manifest["stop_status"] not in ("PASS", "FAIL", "NOT_STARTED")
+    ):
+        raise CandidateControlError("Windows TUN UDP capture manifest identity is invalid")
+    if manifest["started_utc"] is not None:
+        _windows_tun_utc(manifest["started_utc"], "capture.started_utc")
+    if (
+        type(manifest["filters"]) is not list
+        or len(manifest["filters"]) not in (0, 4)
+        or type(manifest["failures"]) is not list
+        or len(manifest["failures"]) > 32
+        or any(type(item) is not str or not item or len(item) > 2_048 for item in manifest["failures"])
+        or type(manifest["files"]) is not list
+        or len(manifest["files"]) > len(WINDOWS_TUN_UDP_CAPTURE_FILES)
+    ):
+        raise CandidateControlError("Windows TUN UDP capture manifest bounds are invalid")
+    observed_filter_ports = []
+    for item in manifest["filters"]:
+        if type(item) is not dict:
+            raise CandidateControlError("Windows TUN UDP capture filter must be an object")
+        _exact_fields(
+            item,
+            WINDOWS_TUN_UDP_CAPTURE_FILTER_FIELDS,
+            "Windows TUN UDP capture filter",
+        )
+        port = _windows_tun_udp_port(item["port"], "capture filter port")
+        if (
+            item["name"] != f"Ferrum2UdpDiagnostic-{port}"
+            or item["support_ipv4"] != support_ipv4
+            or item["protocol"] != "UDP"
+            or type(item["command_exit_code"]) is not int
+            or item["command_exit_code"] != 0
+        ):
+            raise CandidateControlError("Windows TUN UDP capture filter identity is invalid")
+        observed_filter_ports.append(port)
+    if observed_filter_ports not in ([], support_udp_ports):
+        raise CandidateControlError("Windows TUN UDP capture filter port set is invalid")
+    seen_names = set()
+    seen_identities = set()
+    nested_identities: dict[str, str] = {}
+    nested_bytes = 0
+    manifest_parent = pathlib.Path(manifest_relative).parent
+    for item in manifest["files"]:
+        if type(item) is not dict:
+            raise CandidateControlError("Windows TUN UDP capture file must be an object")
+        _exact_fields(item, WINDOWS_TUN_UDP_CAPTURE_FILE_FIELDS, "Windows TUN UDP capture file")
+        name = item["file"]
+        if type(name) is not str or name not in WINDOWS_TUN_UDP_CAPTURE_FILES or name in seen_names:
+            raise CandidateControlError("Windows TUN UDP capture file identity is invalid")
+        nested_relative = (manifest_parent / name).as_posix()
+        path, path_identity, size = _windows_tun_udp_artifact_path(
+            evidence_root, nested_relative, f"capture file {name}"
+        )
+        declared_size = _windows_tun_udp_u64(item["bytes"], f"capture file {name} bytes", positive=True)
+        _windows_tun_required_digest(item, "sha256", length=64)
+        if (
+            size != declared_size
+            or size > max_artifact_bytes
+            or _file_sha256(path, f"Windows TUN UDP capture file {name}") != item["sha256"]
+            or path_identity in seen_identities
+        ):
+            raise CandidateControlError("Windows TUN UDP capture file binding is invalid")
+        if path_identity in top_files:
+            if (
+                name != "PktMon.etl"
+                or top_file_roles[path_identity] != "host_capture_native"
+                or top_files[path_identity] != (size, item["sha256"])
+            ):
+                raise CandidateControlError("Windows TUN UDP capture file alias is inconsistent")
+        else:
+            top_files[path_identity] = (size, item["sha256"])
+            nested_bytes += size
+        seen_names.add(name)
+        seen_identities.add(path_identity)
+        nested_identities[name] = path_identity
+    if artifact["state"] == "COMPLETE":
+        if (
+            seen_names != set(WINDOWS_TUN_UDP_CAPTURE_FILES)
+            or manifest["failures"] != []
+            or manifest["stop_status"] != "PASS"
+            or manifest["started_utc"] is None
+            or observed_filter_ports != support_udp_ports
+        ):
+            raise CandidateControlError("Windows TUN UDP complete capture manifest is incomplete")
+    elif manifest["failures"] == [] and manifest["stop_status"] == "PASS":
+        raise CandidateControlError("Windows TUN UDP partial capture lacks a failure reason")
+    native = artifacts.get("host_capture_native")
+    if "PktMon.etl" in seen_names:
+        if native is None:
+            raise CandidateControlError("Windows TUN UDP native capture artifact is missing")
+        _native_path, native_identity, _native_size = _windows_tun_udp_artifact_path(
+            evidence_root, native["file"], "native capture artifact"
+        )
+        etl = next(item for item in manifest["files"] if item["file"] == "PktMon.etl")
+        if (
+            native_identity != nested_identities["PktMon.etl"]
+            or native["bytes"] != etl["bytes"]
+            or native["sha256"] != etl["sha256"]
+            or native["state"] != artifact["state"]
+        ):
+            raise CandidateControlError("Windows TUN UDP native capture binding mismatch")
+    return nested_bytes
+
+
+def validate_windows_tun_udp_diagnostic(
+    *,
+    plan: dict[str, object],
+    plan_sha256: str,
+    evidence_root: pathlib.Path,
+    parent_sha: str,
+    candidate_sha: str,
+) -> dict[str, object]:
+    """Validate one bounded, explicitly non-qualification UDP diagnostic run."""
+
+    if plan["run_kind"] != "calibration-aa" or parent_sha != candidate_sha:
+        raise CandidateControlError(
+            "Windows TUN UDP diagnostic requires a calibration-aa A/A plan"
+        )
+    row = _read_windows_tun_udp_document(evidence_root / "udp-diagnostic.json")
+    _exact_fields(row, WINDOWS_TUN_UDP_DIAGNOSTIC_FIELDS, "Windows TUN UDP diagnostic")
+    if (
+        row["schema"] != WINDOWS_TUN_UDP_DIAGNOSTIC_SCHEMA
+        or row["qualification"] is not False
+        or row["profile"] != "UdpFlowBoundary"
+        or row["evidence_status"] not in ("COMPLETE", "PARTIAL")
+        or row["trial_status"] not in ("PASS", "FAIL")
+    ):
+        raise CandidateControlError("Windows TUN UDP diagnostic schema or status is invalid")
+    _windows_tun_udp_decimal_u64(row["run_nonce"], "run_nonce", positive=True)
+    started = _windows_tun_utc(row["started_utc"], "started_utc")
+    finished = _windows_tun_utc(row["finished_utc"], "finished_utc")
+    if finished <= started:
+        raise CandidateControlError("Windows TUN UDP diagnostic finish must follow its start")
+    identity = row["identity"]
+    if type(identity) is not dict:
+        raise CandidateControlError("Windows TUN UDP diagnostic identity must be an object")
+    _exact_fields(identity, WINDOWS_TUN_UDP_DIAGNOSTIC_IDENTITY_FIELDS, "Windows TUN UDP identity")
+    for field in ("parent_sha", "candidate_sha", "sha", "tree"):
+        _windows_tun_required_digest(identity, field, length=40)
+    for field in (
+        "client_sha256",
+        "server_sha256",
+        "harness_sha256",
+        "runner_sha256",
+        "recipe_sha256",
+        "plan_sha256",
+    ):
+        _windows_tun_required_digest(identity, field, length=64)
+    if (
+        identity["parent_sha"] != parent_sha
+        or identity["candidate_sha"] != candidate_sha
+        or identity["plan_sha256"] != plan_sha256
+        or identity["recipe_sha256"] != plan["recipe_sha256"]
+        or identity["runner_sha256"] != WINDOWS_TUN_RUNNER_SOURCE_SHA256
+    ):
+        raise CandidateControlError("Windows TUN UDP diagnostic build or plan identity mismatch")
+    trial = row["trial"]
+    if type(trial) is not dict:
+        raise CandidateControlError("Windows TUN UDP diagnostic trial must be an object")
+    _exact_fields(trial, WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_FIELDS, "Windows TUN UDP trial")
+    for field in ("sequence", "pair", "order"):
+        _windows_tun_udp_u64(trial[field], f"trial.{field}", positive=True)
+    planned = [candidate for candidate in plan["trials"] if candidate["sequence"] == trial["sequence"]]
+    planned_identity_fields = {"sequence", "scenario", "member", "pair", "order"}
+    if (
+        len(planned) != 1
+        or trial["selection"] != plan["selection"]
+        or trial["run_kind"] != plan["run_kind"]
+        or any(trial[field] != planned[0][field] for field in planned_identity_fields)
+    ):
+        raise CandidateControlError("Windows TUN UDP diagnostic trial is not plan-bound")
+    if (
+        trial["sequence"] != 31
+        or trial["scenario"] != "udp-8192-association-lookup-expiry"
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP diagnostic must be the reviewed sequence 31 scenario"
+        )
+    expected_sha = parent_sha if trial["member"] == "parent" else candidate_sha
+    if identity["sha"] != expected_sha:
+        raise CandidateControlError("Windows TUN UDP diagnostic member SHA mismatch")
+    _validate_windows_tun_environment(row["environment"])
+    support = row["support"]
+    if type(support) is not dict:
+        raise CandidateControlError("Windows TUN UDP diagnostic support must be an object")
+    _exact_fields(support, WINDOWS_TUN_UDP_DIAGNOSTIC_SUPPORT_FIELDS, "Windows TUN UDP support")
+    _windows_tun_udp_u64(support["pid"], "support.pid", positive=True)
+    if (
+        type(support["owner"]) is not str
+        or not support["owner"]
+        or support["owner"].strip() != support["owner"]
+        or len(support["owner"]) > 256
+    ):
+        raise CandidateControlError("Windows TUN UDP diagnostic support owner is invalid")
+    _windows_tun_required_digest(support, "binary_sha256", length=64)
+    _validate_windows_tun_udp_support_endpoints(support["listen_endpoints"])
+    if support["binary_sha256"] != identity["harness_sha256"]:
+        raise CandidateControlError("Windows TUN UDP diagnostic support identity mismatch")
+    topology = row["topology"]
+    if type(topology) is not dict:
+        raise CandidateControlError("Windows TUN UDP topology must be an object")
+    _exact_fields(topology, WINDOWS_TUN_UDP_DIAGNOSTIC_TOPOLOGY_FIELDS, "Windows TUN UDP topology")
+    if topology["host_tun_bypassed"] is not True or topology["host_network_mutations"] != []:
+        raise CandidateControlError("Windows TUN UDP diagnostic changed or traversed host TUN state")
+    support_ipv4 = _windows_tun_udp_ipv4(topology["support_ipv4"], "topology.support_ipv4")
+    _windows_tun_udp_ipv4(topology["guest_ipv4"], "topology.guest_ipv4")
+    _windows_tun_required_digest(topology, "host_network_path_sha256", length=64)
+    bounds = row["bounds"]
+    if type(bounds) is not dict:
+        raise CandidateControlError("Windows TUN UDP diagnostic bounds must be an object")
+    _exact_fields(bounds, WINDOWS_TUN_UDP_DIAGNOSTIC_BOUND_FIELDS, "Windows TUN UDP bounds")
+    for field, ceiling in WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS.items():
+        observed = _windows_tun_udp_u64(bounds[field], f"bounds.{field}", positive=True)
+        if observed > ceiling:
+            raise CandidateControlError(f"Windows TUN UDP diagnostic {field} exceeds the controller bound")
+    if bounds["max_artifact_bytes"] > bounds["max_total_bytes"]:
+        raise CandidateControlError("Windows TUN UDP artifact bounds are inconsistent")
+    artifacts_value = row["artifacts"]
+    if type(artifacts_value) is not list or not artifacts_value or len(artifacts_value) > bounds["max_artifacts"]:
+        raise CandidateControlError("Windows TUN UDP artifact count is invalid")
+    artifacts: dict[str, dict[str, object]] = {}
+    files = set()
+    file_identities = set()
+    artifact_paths: dict[str, pathlib.Path] = {}
+    top_files: dict[str, tuple[int, str]] = {}
+    top_file_roles: dict[str, str] = {}
+    total_bytes = 0
+    for artifact in artifacts_value:
+        if type(artifact) is not dict:
+            raise CandidateControlError("Windows TUN UDP artifact must be an object")
+        _exact_fields(artifact, WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_FIELDS, "Windows TUN UDP artifact")
+        role = artifact["role"]
+        if (
+            type(role) is not str
+            or role not in WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_ROLES
+            or role in artifacts
+        ):
+            raise CandidateControlError("Windows TUN UDP artifact role is invalid or duplicated")
+        if artifact["state"] not in ("COMPLETE", "PARTIAL"):
+            raise CandidateControlError("Windows TUN UDP artifact state is invalid")
+        relative = artifact["file"]
+        if type(relative) is not str or not relative or relative in files:
+            raise CandidateControlError("Windows TUN UDP artifact path is invalid or duplicated")
+        path, path_identity, observed_size = _windows_tun_udp_artifact_path(
+            evidence_root, relative, f"artifact {role}"
+        )
+        if path_identity in file_identities:
+            raise CandidateControlError("Windows TUN UDP artifact aliases another role")
+        size = _windows_tun_udp_u64(
+            artifact["bytes"], f"artifact {role} bytes", positive=True
+        )
+        if size > bounds["max_artifact_bytes"] or observed_size != size:
+            raise CandidateControlError("Windows TUN UDP artifact size binding is invalid")
+        _windows_tun_required_digest(artifact, "sha256", length=64)
+        if _file_sha256(path, "Windows TUN UDP artifact") != artifact["sha256"]:
+            raise CandidateControlError("Windows TUN UDP artifact SHA-256 binding is invalid")
+        for field in ("dropped_events", "write_failures"):
+            _windows_tun_udp_u64(artifact[field], f"artifact {role} {field}")
+        if role in {"workload_ledger", "support_ledger"}:
+            _windows_tun_udp_u64(artifact["records"], f"artifact {role} records")
+            _windows_tun_udp_u64(artifact["max_events"], f"artifact {role} max_events", positive=True)
+        elif (
+            artifact["records"] is not None
+            or artifact["max_events"] is not None
+            or artifact["dropped_events"] != 0
+            or artifact["write_failures"] != 0
+        ):
+            raise CandidateControlError("Windows TUN UDP non-ledger artifact has ledger counters")
+        total_bytes += size
+        artifacts[role] = artifact
+        artifact_paths[role] = path
+        files.add(relative)
+        file_identities.add(path_identity)
+        top_files[path_identity] = (size, artifact["sha256"])
+        top_file_roles[path_identity] = role
+    if total_bytes > bounds["max_total_bytes"]:
+        raise CandidateControlError("Windows TUN UDP artifacts exceed the total size bound")
+    required = {
+        "workload_ledger",
+        "support_ledger",
+        "host_capture",
+        "endpoint_snapshot_before",
+        "endpoint_snapshot_after",
+        "dynamic_port_snapshot_before",
+        "dynamic_port_snapshot_after",
+        "host_network_path",
+    }
+    if row["trial_status"] == "FAIL":
+        required.add("failure_summary")
+    if not required.issubset(artifacts):
+        raise CandidateControlError("Windows TUN UDP required artifact set is incomplete")
+    network_path_artifact = artifacts["host_network_path"]
+    if (
+        topology["host_network_path_file"] != network_path_artifact["file"]
+        or topology["host_network_path_sha256"] != network_path_artifact["sha256"]
+    ):
+        raise CandidateControlError("Windows TUN UDP host network path binding mismatch")
+    ledgers = {}
+    for role, schema in (
+        ("workload_ledger", WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA),
+        ("support_ledger", WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA),
+    ):
+        artifact = artifacts[role]
+        ledger = _read_windows_tun_udp_ledger(
+            evidence_root / artifact["file"],
+            schema=schema,
+            run_nonce=row["run_nonce"],
+            trial_sequence=trial["sequence"],
+            max_line_bytes=bounds["max_ndjson_line_bytes"],
+        )
+        if (
+            ledger["records"] != artifact["records"]
+            or ledger["max_events"] != artifact["max_events"]
+            or ledger["max_events"] > bounds["max_ledger_events"]
+            or artifact["dropped_events"] != ledger["dropped_events"]
+            or artifact["write_failures"] != ledger["write_failures"]
+            or artifact["state"] != ("COMPLETE" if ledger["complete"] else "PARTIAL")
+        ):
+            raise CandidateControlError(f"Windows TUN UDP {role} manifest accounting mismatch")
+        ledgers[role] = ledger
+    support_header = ledgers["support_ledger"]["header"]
+    header_support_endpoints = [
+        {"protocol": "tcp", "ip": support_header["listen_ip"], "port": support_header["tcp_port"]},
+        *[
+            {"protocol": "udp", "ip": support_header["listen_ip"], "port": port}
+            for port in support_header["udp_ports"]
+        ],
+    ]
+    if (
+        support_header["pid"] != support["pid"]
+        or support_header["listen_ip"] != support_ipv4
+        or header_support_endpoints != support["listen_endpoints"]
+    ):
+        raise CandidateControlError("Windows TUN UDP support ledger header binding mismatch")
+    if any(
+        event["target_ip"] != support_ipv4
+        or event["target_port"] not in support_header["udp_ports"]
+        for event in ledgers["workload_ledger"]["events"]
+    ):
+        raise CandidateControlError("Windows TUN UDP workload target is not support-bound")
+    if row["trial_status"] == "PASS" and (
+        not ledgers["workload_ledger"]["events"]
+        or _windows_tun_udp_first_failed_flow(
+            ledgers["workload_ledger"]["events"]
+        )
+        is not None
+    ):
+        raise CandidateControlError(
+            "passing Windows TUN UDP diagnostic contains a failed workload flow"
+        )
+    total_bytes += _validate_windows_tun_udp_capture_manifest(
+        evidence_root=evidence_root,
+        manifest_path=artifact_paths["host_capture"],
+        manifest_relative=artifacts["host_capture"]["file"],
+        artifact=artifacts["host_capture"],
+        artifacts=artifacts,
+        top_files=top_files,
+        top_file_roles=top_file_roles,
+        max_artifact_bytes=bounds["max_artifact_bytes"],
+        support_ipv4=support_ipv4,
+        support_udp_ports=support_header["udp_ports"],
+    )
+    if total_bytes > bounds["max_total_bytes"]:
+        raise CandidateControlError(
+            "Windows TUN UDP artifacts and nested capture files exceed the total size bound"
+        )
+    expected_evidence_status = (
+        "PARTIAL"
+        if any(artifact["state"] == "PARTIAL" for artifact in artifacts.values())
+        else "COMPLETE"
+    )
+    if row["evidence_status"] != expected_evidence_status:
+        raise CandidateControlError("Windows TUN UDP evidence completeness is inconsistent")
+    cleanup = _validate_windows_tun_udp_cleanup(
+        row["cleanup"], name="Windows TUN UDP cleanup"
+    )
+    if cleanup["status"] == "FAIL" and (
+        row["evidence_status"] != "PARTIAL"
+        or artifacts["host_capture"]["state"] != "PARTIAL"
+        or (
+            "host_capture_native" in artifacts
+            and artifacts["host_capture_native"]["state"] != "PARTIAL"
+        )
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP failed cleanup must degrade capture evidence"
+        )
+    if row["trial_status"] == "FAIL":
+        failure_artifact = artifacts["failure_summary"]
+        reference = row["failure_summary"]
+        if type(reference) is not dict:
+            raise CandidateControlError(
+                "Windows TUN UDP failure summary reference must be an object"
+            )
+        _exact_fields(
+            reference,
+            WINDOWS_TUN_UDP_FAILURE_REFERENCE_FIELDS,
+            "Windows TUN UDP failure summary reference",
+        )
+        if (
+            failure_artifact["state"] != "COMPLETE"
+            or reference["file"] != failure_artifact["file"]
+            or reference["sha256"] != failure_artifact["sha256"]
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP failure summary reference binding mismatch"
+            )
+        if failure_artifact["bytes"] > WINDOWS_TUN_UDP_DIAGNOSTIC_MAX_BYTES:
+            raise CandidateControlError("Windows TUN UDP failure summary exceeds the size bound")
+        try:
+            failure_raw = artifact_paths["failure_summary"].read_bytes()
+            failure = _strict_json(failure_raw.decode("utf-8"), source="Windows TUN UDP failure summary")
+        except (OSError, UnicodeError) as error:
+            raise CandidateControlError("unable to read Windows TUN UDP failure summary") from error
+        _validate_windows_tun_udp_failure_summary(
+            failure, row=row, artifacts=artifacts, ledgers=ledgers
+        )
+    elif row["failure_summary"] is not None or "failure_summary" in artifacts:
+        raise CandidateControlError("passing Windows TUN UDP diagnostic cannot have a failure summary")
+    return row
+
+
 def _validate_windows_tun_network_model_reference(
     value: object, *, scenario: str, sequence: int, member: str, pair: int
 ) -> None:
@@ -4045,6 +5614,10 @@ def validate_windows_tun_trial(
 ) -> tuple[str, int, str]:
     if type(row) is not dict:
         raise CandidateControlError("Windows TUN trial must be a JSON object")
+    if row.get("schema") == WINDOWS_TUN_UDP_DIAGNOSTIC_SCHEMA:
+        raise CandidateControlError(
+            "instrumented UDP diagnostic evidence cannot be validated as a formal Windows TUN trial"
+        )
     _exact_fields(row, WINDOWS_TUN_TRIAL_FIELDS, "Windows TUN trial")
     if (
         type(row["schema_version"]) is not int
@@ -4366,6 +5939,13 @@ def _read_windows_tun_rows(
     dict[str, tuple[object, ...]],
     dict[str, object],
 ]:
+    diagnostic_path = evidence_root / "udp-diagnostic.json"
+    if diagnostic_path.exists():
+        diagnostic = _read_windows_tun_udp_document(diagnostic_path)
+        if diagnostic.get("schema") == WINDOWS_TUN_UDP_DIAGNOSTIC_SCHEMA:
+            raise CandidateControlError(
+                "instrumented UDP diagnostic evidence cannot enter the formal Windows TUN reducer"
+            )
     try:
         paths = sorted(evidence_root.glob("*.json"))
     except OSError as error:
@@ -4998,6 +6578,21 @@ def _parser() -> argparse.ArgumentParser:
     windows_tun_validate_trial.add_argument(
         "--policy", required=True, type=pathlib.Path
     )
+    windows_tun_validate_udp_diagnostic = commands.add_parser(
+        "windows-tun-validate-udp-diagnostic",
+        help="validate one bounded non-qualification Windows TUN UDP diagnostic",
+    )
+    windows_tun_validate_udp_diagnostic.add_argument(
+        "--plan", required=True, type=pathlib.Path
+    )
+    windows_tun_validate_udp_diagnostic.add_argument(
+        "--evidence-root", required=True, type=pathlib.Path
+    )
+    windows_tun_validate_udp_diagnostic.add_argument("--parent-sha", required=True)
+    windows_tun_validate_udp_diagnostic.add_argument("--candidate-sha", required=True)
+    windows_tun_validate_udp_diagnostic.add_argument(
+        "--policy", required=True, type=pathlib.Path
+    )
     windows_tun_summary = commands.add_parser(
         "windows-tun-summarize",
         help="validate and summarize paired Windows TUN evidence",
@@ -5151,6 +6746,26 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 candidate_sha=parsed.candidate_sha,
             )
             print(f"{scenario}\t{member}\t{pair}\t{row['order']}")
+            return 0
+        if parsed.command == "windows-tun-validate-udp-diagnostic":
+            policy = load_windows_tun_policy(parsed.policy)
+            plan = load_windows_tun_plan(parsed.plan, decision_policy=policy)
+            try:
+                plan_sha256 = hashlib.sha256(parsed.plan.read_bytes()).hexdigest()
+            except OSError as error:
+                raise CandidateControlError("unable to hash Windows TUN plan") from error
+            row = validate_windows_tun_udp_diagnostic(
+                plan=plan,
+                plan_sha256=plan_sha256,
+                evidence_root=parsed.evidence_root,
+                parent_sha=parsed.parent_sha,
+                candidate_sha=parsed.candidate_sha,
+            )
+            trial = row["trial"]
+            print(
+                f"{trial['scenario']}\t{trial['member']}\t{trial['pair']}\t"
+                f"{row['trial_status']}\t{row['evidence_status']}\tqualification=false"
+            )
             return 0
         raise AssertionError(f"unhandled command: {parsed.command}")
     except CandidateControlError as error:
