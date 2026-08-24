@@ -23,10 +23,11 @@ const TCP_FAIRNESS_READINESS_PAYLOAD: usize = 1_024;
 const UDP_WARMUP: Duration = Duration::from_secs(5);
 const UDP_ACTIVE: Duration = Duration::from_secs(30);
 const UDP_PAYLOAD: usize = 1_200;
-const UDP_BATCH: usize = 64;
+const UDP_BATCH: usize = 8;
 const UDP_MINIMUM_DATAGRAMS: u64 = 4_096;
 const ASSOCIATIONS: usize = 8_192;
-const ASSOCIATION_BATCH: usize = 256;
+const ASSOCIATION_BOOTSTRAP_BATCH: usize = 1;
+const ASSOCIATION_LOOKUP_BATCH: usize = 8;
 const ASSOCIATION_LOOKUP_ROUNDS: usize = 64;
 const ASSOCIATION_WARMUP: Duration = Duration::from_secs(5);
 const FRAGMENT_WARMUP: Duration = Duration::from_secs(5);
@@ -51,6 +52,7 @@ const ROUTE_TARGET_SLOTS: usize = 4;
 const ROUTE_DATAGRAMS_PER_TARGET: usize = 32;
 const ROUTE_PAYLOAD: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const SUPPORT_TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const SUPPORT_MAX_TCP_CONNECTIONS: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -442,17 +444,28 @@ fn checked_payload(length: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
-fn configure_tcp(stream: &TcpStream) -> Result<(), String> {
+fn configure_tcp_with_read_timeout(
+    stream: &TcpStream,
+    read_timeout: Duration,
+) -> Result<(), String> {
     stream
         .set_nodelay(true)
         .map_err(|error| format!("set TCP_NODELAY failed: {error}"))?;
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|error| format!("set TCP read timeout failed: {error}"))?;
     stream
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|error| format!("set TCP write timeout failed: {error}"))?;
     Ok(())
+}
+
+fn configure_tcp(stream: &TcpStream) -> Result<(), String> {
+    configure_tcp_with_read_timeout(stream, IO_TIMEOUT)
+}
+
+fn configure_support_tcp(stream: &TcpStream) -> Result<(), String> {
+    configure_tcp_with_read_timeout(stream, SUPPORT_TCP_IDLE_TIMEOUT)
 }
 
 fn tcp_round_trip(stream: &mut TcpStream, payload: &[u8], reply: &mut [u8]) -> Result<(), String> {
@@ -1021,9 +1034,13 @@ fn association_round(
     sockets: &[UdpSocket],
     seed_prefix: u64,
     reply: &mut [u8; 32],
+    batch_associations: usize,
 ) -> Result<(), String> {
-    for (batch_index, batch) in sockets.chunks(ASSOCIATION_BATCH).enumerate() {
-        let base = batch_index * ASSOCIATION_BATCH;
+    if batch_associations == 0 || !sockets.len().is_multiple_of(batch_associations) {
+        return Err("association batch bounds are invalid".to_owned());
+    }
+    for (batch_index, batch) in sockets.chunks(batch_associations).enumerate() {
+        let base = batch_index * batch_associations;
         for (offset, socket) in batch.iter().enumerate() {
             let seed = seed_prefix
                 .wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -1059,10 +1076,11 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     for _ in 0..ASSOCIATIONS {
         sockets.push(connected_udp(address)?);
     }
+    association_round(&sockets, 0, &mut reply, ASSOCIATION_BOOTSTRAP_BATCH)?;
     let warmup_deadline = Instant::now() + ASSOCIATION_WARMUP;
-    let mut warmup_round = 0_u64;
-    while Instant::now() < warmup_deadline || warmup_round == 0 {
-        association_round(&sockets, warmup_round, &mut reply)?;
+    let mut warmup_round = 1_u64;
+    while Instant::now() < warmup_deadline || warmup_round == 1 {
+        association_round(&sockets, warmup_round, &mut reply, ASSOCIATION_LOOKUP_BATCH)?;
         warmup_round = warmup_round
             .checked_add(1)
             .ok_or_else(|| "association warmup round overflow".to_owned())?;
@@ -1070,7 +1088,12 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     let start = Instant::now();
     let mut lookups = 0_u64;
     for round in 0..ASSOCIATION_LOOKUP_ROUNDS {
-        association_round(&sockets, warmup_round + round as u64, &mut reply)?;
+        association_round(
+            &sockets,
+            warmup_round + round as u64,
+            &mut reply,
+            ASSOCIATION_LOOKUP_BATCH,
+        )?;
         lookups = lookups
             .checked_add(ASSOCIATIONS as u64)
             .ok_or_else(|| "association lookup count overflow".to_owned())?;
@@ -1080,9 +1103,14 @@ fn udp_associations(address: SocketAddr) -> Result<Value, String> {
     if lookups != expected {
         return Err("association workload lookup count mismatch".to_owned());
     }
-    // Refresh the whole key set as one burst so the collector can observe the
-    // exact 8192-entry peak before the fixed idle timeout starts expiring it.
-    association_round(&sockets, u32::MAX as u64, &mut reply)?;
+    // Refresh the whole key set in one complete round so the collector can
+    // observe the exact 8192-entry peak before the fixed idle timeout expires it.
+    association_round(
+        &sockets,
+        u32::MAX as u64,
+        &mut reply,
+        ASSOCIATION_LOOKUP_BATCH,
+    )?;
     drop(sockets);
     Ok(json!({
         "measurements": {
@@ -1448,7 +1476,7 @@ pub(super) fn run_probe(arguments: &[OsString]) -> Result<String, String> {
 }
 
 fn serve_tcp(mut stream: TcpStream) -> Result<(), String> {
-    configure_tcp(&stream)?;
+    configure_support_tcp(&stream)?;
     let mut buffer = vec![0_u8; 65_536];
     loop {
         let read = stream
@@ -1503,10 +1531,22 @@ fn self_check_support_backlog() -> Result<(), String> {
     listener.set_nonblocking(true).map_err(|error| {
         format!("set Windows TUN self-check listener nonblocking failed: {error}")
     })?;
-    for _ in 0..clients.len() {
-        listener
+    for index in 0..clients.len() {
+        let (stream, _) = listener
             .accept()
             .map_err(|error| format!("accept Windows TUN support TCP burst failed: {error}"))?;
+        if index == 0 {
+            configure_support_tcp(&stream)?;
+            let read_timeout = stream
+                .read_timeout()
+                .map_err(|error| format!("read support TCP read timeout failed: {error}"))?;
+            let write_timeout = stream
+                .write_timeout()
+                .map_err(|error| format!("read support TCP write timeout failed: {error}"))?;
+            if read_timeout != Some(SUPPORT_TCP_IDLE_TIMEOUT) || write_timeout != Some(IO_TIMEOUT) {
+                return Err("Windows TUN support TCP timeouts are invalid".to_owned());
+            }
+        }
     }
     Ok(())
 }
@@ -1635,6 +1675,18 @@ pub(super) fn self_check() -> Result<(), String> {
         || payload == sequenced_payload(32, 0x0102_0304_0506_0709)?
     {
         return Err("Windows TUN sequenced UDP payload is invalid".to_owned());
+    }
+    if UDP_BATCH != 8 {
+        return Err("Windows TUN UDP packet-rate batch recipe is invalid".to_owned());
+    }
+    if ASSOCIATIONS != 8_192
+        || ASSOCIATION_BOOTSTRAP_BATCH != 1
+        || ASSOCIATION_LOOKUP_BATCH != 8
+        || !ASSOCIATIONS.is_multiple_of(ASSOCIATION_BOOTSTRAP_BATCH)
+        || !ASSOCIATIONS.is_multiple_of(ASSOCIATION_LOOKUP_BATCH)
+        || ASSOCIATION_LOOKUP_ROUNDS != 64
+    {
+        return Err("Windows TUN UDP association recipe is invalid".to_owned());
     }
     let fragment_sequence = 0x1112_1314_1516_1718_u64;
     let fragment_request = fragment_request(fragment_sequence);

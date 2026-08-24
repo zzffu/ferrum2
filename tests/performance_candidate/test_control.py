@@ -1208,6 +1208,17 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 "network-lifecycle": "tun-mixed-direct-shadowsocks-external-echo",
             },
         )
+        udp_packet_recipe = plan["scenarios"]["udp-packets-per-second"]["recipe"]
+        self.assertEqual(
+            (
+                udp_packet_recipe["batch_datagrams"],
+                udp_packet_recipe["tun_udp_datagram_queue_packets"],
+                udp_packet_recipe[
+                    "tun_udp_response_queue_packets_per_association"
+                ],
+            ),
+            (8, 8, 8),
+        )
         fragment_recipe = plan["scenarios"]["fragment-reassembly-throughput"][
             "recipe"
         ]
@@ -1274,19 +1285,32 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 ]
             )
         )
+        association_recipe = plan["scenarios"][
+            "udp-8192-association-lookup-expiry"
+        ]["recipe"]
         self.assertEqual(
-            plan["scenarios"]["udp-8192-association-lookup-expiry"]["recipe"][
-                "payload_bytes"
-            ],
-            32,
+            (
+                association_recipe["associations"],
+                association_recipe["bootstrap_batch_associations"],
+                association_recipe["batch_associations"],
+                association_recipe["lookup_rounds"],
+                association_recipe["payload_bytes"],
+                association_recipe["tun_max_udp_mappings"],
+                association_recipe["tun_udp_datagram_queue_packets"],
+                association_recipe[
+                    "tun_udp_response_queue_packets_per_association"
+                ],
+            ),
+            (8_192, 1, 8, 64, 32, 8_192, 8, 8),
         )
         fairness = plan["scenarios"]["tcp-256-flow-fairness"]
         self.assertEqual(
             (
                 fairness["recipe"]["connection_readiness"],
                 fairness["recipe"]["readiness_payload_bytes"],
+                fairness["recipe"]["support_tcp_idle_timeout_milliseconds"],
             ),
-            ("sequential_exact_round_trip", 1_024),
+            ("sequential_exact_round_trip", 1_024, 120_000),
         )
         self.assertIn(
             "all_256_flows_ready", fairness["correctness_checks"]
