@@ -497,6 +497,41 @@ function Invoke-NativeChecked {
     }
 }
 
+function ConvertTo-CanonicalUtcText {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $text = if ($Value -is [DateTime]) {
+        $timestamp = [DateTime]$Value
+        if ($timestamp.Kind -ne [DateTimeKind]::Utc) {
+            throw "$Label DateTime value must be UTC"
+        }
+        $timestamp.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    } elseif ($Value -is [string]) {
+        [string]$Value
+    } else {
+        throw "$Label must be a canonical UTC string or UTC DateTime"
+    }
+    if ($text -cnotmatch
+        '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{7}Z$') {
+        throw "$Label is not canonical UTC"
+    }
+    $parsed = [DateTime]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal
+    if (-not [DateTime]::TryParseExact(
+            $text,
+            "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+            [Globalization.CultureInfo]::InvariantCulture,
+            $styles,
+            [ref]$parsed
+        ) -or $parsed.Kind -ne [DateTimeKind]::Utc) {
+        throw "$Label is not a real UTC timestamp"
+    }
+    return $text
+}
+
 function Resolve-Commit {
     param([string]$Git, [string]$Sha, [string]$Label)
     $resolved = [string](& $Git -C $script:repositoryRoot rev-parse --verify "$Sha^{commit}" 2>$null)
@@ -4556,6 +4591,11 @@ if ($instrumentedDiagnosticMode) {
         $_.state -ceq "PARTIAL"
     }).Count -ne 0) { "PARTIAL" } else { "COMPLETE" }
 
+    # PowerShell 7.6 materializes JSON ISO timestamps as DateTime; 7.4 retains strings.
+    $guestRawStartedUtc = ConvertTo-CanonicalUtcText `
+        -Value $guestRaw.started_utc -Label "guest raw started_utc"
+    [void](ConvertTo-CanonicalUtcText `
+        -Value $guestRaw.finished_utc -Label "guest raw finished_utc")
     $diagnosticDocument = [ordered]@{
         schema = "ferrum2.windows-tun.hyperv-udp-diagnostic.v1"
         qualification = $false
@@ -4563,7 +4603,7 @@ if ($instrumentedDiagnosticMode) {
         evidence_status = $evidenceStatus
         trial_status = $trialStatus
         run_nonce = $SupportDiagnosticRunNonce
-        started_utc = [string]$guestRaw.started_utc
+        started_utc = $guestRawStartedUtc
         finished_utc = [DateTime]::UtcNow.ToString("o")
         identity = [ordered]@{
             parent_sha = $ParentSha
