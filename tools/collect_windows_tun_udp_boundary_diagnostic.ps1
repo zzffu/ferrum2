@@ -51,6 +51,10 @@ param(
     [string]$HarnessBinary,
 
     [Parameter(Mandatory = $true)]
+    [ValidateSet("Ferrum2Perf")]
+    [string]$TunAdapterName,
+
+    [Parameter(Mandatory = $true)]
     [ValidateScript({
         $parsed = $null
         [Net.IPAddress]::TryParse($_, [ref]$parsed) -and
@@ -98,6 +102,11 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 $startedUtc = [DateTime]::UtcNow.ToString("o")
+$diagnosticSourceIpv4 = "198.18.0.2"
+$diagnosticSourcePortFirst = 20000
+$diagnosticSourcePortLast = 28191
+$diagnosticSourcePortCount = 8192
+$workloadLedgerSchema = "ferrum2.windows-tun.udp-workload-flow-ledger.v3"
 
 function Assert-Condition {
     param([bool]$Condition, [string]$Message)
@@ -245,12 +254,249 @@ function Invoke-NetshBounded {
     }
 }
 
+function Test-PortRangeIntersection {
+    param(
+        [int]$FirstA,
+        [int]$LastA,
+        [int]$FirstB,
+        [int]$LastB
+    )
+    return $FirstA -le $LastB -and $FirstB -le $LastA
+}
+
+function ConvertFrom-NetshUdpDynamicPortRange {
+    param([object]$Snapshot)
+    $values = [Collections.Generic.List[int]]::new()
+    foreach ($line in @($Snapshot.lines)) {
+        $match = [regex]::Match([string]$line, ':\s*([0-9]{1,5})\s*$')
+        if ($match.Success) {
+            $values.Add([int]::Parse(
+                $match.Groups[1].Value,
+                [Globalization.CultureInfo]::InvariantCulture
+            ))
+        }
+    }
+    Assert-Condition ($values.Count -eq 2) `
+        "UDP dynamic-port output did not contain exactly one start/count pair"
+    $first = $values[0]
+    $count = $values[1]
+    Assert-Condition ($first -ge 1 -and $first -le 65535 -and $count -ge 1) `
+        "UDP dynamic-port range is invalid"
+    [long]$last = [long]$first + [long]$count - 1L
+    Assert-Condition ($last -le 65535) "UDP dynamic-port range exceeds port 65535"
+    return [ordered]@{
+        first_port = $first
+        last_port = [int]$last
+        port_count = $count
+    }
+}
+
+function ConvertFrom-NetshUdpExcludedPortRangeOutput {
+    param([object]$Snapshot)
+    $ranges = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($Snapshot.lines)) {
+        $match = [regex]::Match(
+            [string]$line,
+            '^\s*([0-9]{1,5})\s+([0-9]{1,5})(?:\s+\*)?\s*$'
+        )
+        if (-not $match.Success) { continue }
+        $first = [int]::Parse(
+            $match.Groups[1].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $last = [int]::Parse(
+            $match.Groups[2].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Assert-Condition ($first -ge 1 -and $first -le $last -and $last -le 65535) `
+            "UDP excluded-port range is invalid"
+        $ranges.Add([ordered]@{
+            first_port = $first
+            last_port = $last
+        })
+    }
+    return $ranges.ToArray()
+}
+
+function Get-DiagnosticSourcePreflight {
+    param([string]$AdapterName)
+    $violations = [Collections.Generic.List[string]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    $adapterRows = @()
+    try {
+        $adapterRows = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+            [string]$_.Name -ceq $AdapterName
+        })
+        if ($adapterRows.Count -ne 1) {
+            $violations.Add("adapter_identity")
+        } elseif ([string]$adapterRows[0].Status -cne "Up") {
+            $violations.Add("adapter_not_up")
+        }
+    } catch {
+        $violations.Add("adapter_query")
+        $errors.Add("adapter query: $($_.Exception.Message)")
+    }
+    $adapterEvidence = @($adapterRows | Select-Object -First 16 | ForEach-Object {
+        [ordered]@{
+            name = [string]$_.Name
+            interface_description = [string]$_.InterfaceDescription
+            interface_index = [int]$_.ifIndex
+            status = [string]$_.Status
+            mac_address = [string]$_.MacAddress
+        }
+    })
+    $adapterInterfaceIndex = if ($adapterRows.Count -eq 1) {
+        [int]$adapterRows[0].ifIndex
+    } else {
+        $null
+    }
+
+    $ipRows = @()
+    try {
+        $ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+            [string]$_.IPAddress -ceq $script:diagnosticSourceIpv4
+        })
+        if ($ipRows.Count -ne 1) {
+            $violations.Add("source_ip_identity")
+        } else {
+            if ([int]$ipRows[0].PrefixLength -ne 30) {
+                $violations.Add("source_ip_prefix")
+            }
+            if ($null -eq $adapterInterfaceIndex -or
+                [int]$ipRows[0].InterfaceIndex -ne $adapterInterfaceIndex) {
+                $violations.Add("source_ip_owner")
+            }
+        }
+    } catch {
+        $violations.Add("source_ip_query")
+        $errors.Add("source IP query: $($_.Exception.Message)")
+    }
+    $ipEvidence = @($ipRows | Select-Object -First 16 | ForEach-Object {
+        [ordered]@{
+            ip_address = [string]$_.IPAddress
+            prefix_length = [int]$_.PrefixLength
+            interface_index = [int]$_.InterfaceIndex
+            interface_alias = [string]$_.InterfaceAlias
+            address_state = [string]$_.AddressState
+            prefix_origin = [string]$_.PrefixOrigin
+            suffix_origin = [string]$_.SuffixOrigin
+        }
+    })
+
+    $conflictRows = @()
+    try {
+        $conflictRows = @(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object {
+            [int]$_.LocalPort -ge $script:diagnosticSourcePortFirst -and
+            [int]$_.LocalPort -le $script:diagnosticSourcePortLast
+        } | Sort-Object LocalPort, LocalAddress, OwningProcess)
+        if ($conflictRows.Count -ne 0) {
+            $violations.Add("source_port_conflict")
+        }
+    } catch {
+        $violations.Add("udp_endpoint_query")
+        $errors.Add("UDP endpoint query: $($_.Exception.Message)")
+    }
+    $conflictEvidence = @($conflictRows | Select-Object -First 256 | ForEach-Object {
+        [ordered]@{
+            local_address = [string]$_.LocalAddress
+            local_port = [int]$_.LocalPort
+            owning_process = [int]$_.OwningProcess
+        }
+    })
+
+    $dynamicSnapshot = $null
+    $dynamicRange = $null
+    $dynamicIntersects = $null
+    try {
+        $dynamicSnapshot = Invoke-NetshBounded @(
+            "interface", "ipv4", "show", "dynamicport", "udp"
+        )
+        $dynamicRange = ConvertFrom-NetshUdpDynamicPortRange -Snapshot $dynamicSnapshot
+        $dynamicIntersects = Test-PortRangeIntersection `
+            -FirstA $script:diagnosticSourcePortFirst `
+            -LastA $script:diagnosticSourcePortLast `
+            -FirstB ([int]$dynamicRange.first_port) `
+            -LastB ([int]$dynamicRange.last_port)
+        if ($dynamicIntersects) {
+            $violations.Add("dynamic_port_intersection")
+        }
+    } catch {
+        $violations.Add("dynamic_port_query_or_parse")
+        $errors.Add("UDP dynamic-port query: $($_.Exception.Message)")
+    }
+
+    $excludedSnapshot = $null
+    $excludedRanges = @()
+    $excludedIntersections = [Collections.Generic.List[object]]::new()
+    try {
+        $excludedSnapshot = Invoke-NetshBounded @(
+            "interface", "ipv4", "show", "excludedportrange", "protocol=udp"
+        )
+        $excludedRanges = @(ConvertFrom-NetshUdpExcludedPortRangeOutput `
+            -Snapshot $excludedSnapshot)
+        foreach ($range in $excludedRanges) {
+            if (Test-PortRangeIntersection `
+                    -FirstA $script:diagnosticSourcePortFirst `
+                    -LastA $script:diagnosticSourcePortLast `
+                    -FirstB ([int]$range.first_port) `
+                    -LastB ([int]$range.last_port)) {
+                $excludedIntersections.Add($range)
+            }
+        }
+        if ($excludedIntersections.Count -ne 0) {
+            $violations.Add("excluded_port_intersection")
+        }
+    } catch {
+        $violations.Add("excluded_port_query_or_parse")
+        $errors.Add("UDP excluded-port query: $($_.Exception.Message)")
+    }
+
+    return [ordered]@{
+        schema = "ferrum2.windows-tun.udp-fixed-source-preflight.v1"
+        captured_utc = [DateTime]::UtcNow.ToString("o")
+        source_contract = [ordered]@{
+            adapter_name = $AdapterName
+            source_ip = $script:diagnosticSourceIpv4
+            source_prefix_length = 30
+            source_port_first = $script:diagnosticSourcePortFirst
+            source_port_last = $script:diagnosticSourcePortLast
+            source_port_count = $script:diagnosticSourcePortCount
+        }
+        adapter = [ordered]@{
+            match_count = $adapterRows.Count
+            retained_count = $adapterEvidence.Count
+            matches = $adapterEvidence
+        }
+        ip_owner = [ordered]@{
+            match_count = $ipRows.Count
+            retained_count = $ipEvidence.Count
+            matches = $ipEvidence
+        }
+        udp_endpoint_conflicts = [ordered]@{
+            count = $conflictRows.Count
+            retained_count = $conflictEvidence.Count
+            truncated = $conflictRows.Count -gt $conflictEvidence.Count
+            endpoints = $conflictEvidence
+        }
+        dynamic_port_udp = $dynamicSnapshot
+        dynamic_port_range = $dynamicRange
+        dynamic_port_intersects_source = $dynamicIntersects
+        excluded_port_ranges_udp = $excludedSnapshot
+        excluded_port_ranges = $excludedRanges
+        excluded_port_intersections = $excludedIntersections.ToArray()
+        valid = $violations.Count -eq 0
+        violations = $violations.ToArray()
+        errors = $errors.ToArray()
+    }
+}
+
 function Write-UdpEndpointSnapshot {
     param(
         [string]$Path,
         [string]$Stage,
         [int]$ClientProcessId,
-        [int]$ServerProcessId
+        [int]$ServerProcessId,
+        [object]$SourcePreflight
     )
     $allEndpoints = @(Get-NetUDPEndpoint -ErrorAction Stop | Sort-Object `
         OwningProcess, LocalAddress, LocalPort)
@@ -288,16 +534,26 @@ function Write-UdpEndpointSnapshot {
                 endpoint_count = $_.Count
             }
         })
+    if ($PSBoundParameters.ContainsKey("SourcePreflight")) {
+        $dynamicPortUdp = $SourcePreflight.dynamic_port_udp
+        $excludedPortRangesUdp = $SourcePreflight.excluded_port_ranges_udp
+    } else {
+        $dynamicPortUdp = Invoke-NetshBounded @(
+            "interface", "ipv4", "show", "dynamicport", "udp"
+        )
+        $excludedPortRangesUdp = Invoke-NetshBounded @(
+            "interface", "ipv4", "show", "excludedportrange", "protocol=udp"
+        )
+    }
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.udp-endpoint-snapshot.v1"
+        schema = "ferrum2.windows-tun.udp-endpoint-snapshot.v2"
         stage = $Stage
         captured_utc = [DateTime]::UtcNow.ToString("o")
         scope = "ferrum2-product-endpoints-with-bounded-system-context"
         workload_tuple_source = "udp-workload-flow-ledger.ndjson"
-        dynamic_port_udp = Invoke-NetshBounded @("interface", "ipv4", "show", "dynamicport", "udp")
-        excluded_port_ranges_udp = Invoke-NetshBounded @(
-            "interface", "ipv4", "show", "excludedportrange", "protocol=udp"
-        )
+        diagnostic_source_preflight = $SourcePreflight
+        dynamic_port_udp = $dynamicPortUdp
+        excluded_port_ranges_udp = $excludedPortRangesUdp
         endpoint_count = $allEndpoints.Count
         retained_endpoint_count = $selected.Count
         endpoints_truncated = $allEndpoints.Count -gt $selected.Count
@@ -314,7 +570,8 @@ function Write-UdpEndpointErrorSnapshot {
         [string]$Stage,
         [int]$ClientProcessId,
         [int]$ServerProcessId,
-        [string]$Failure
+        [string]$Failure,
+        [object]$SourcePreflight
     )
     if (Test-Path -LiteralPath $Path) {
         $existing = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -328,11 +585,12 @@ function Write-UdpEndpointErrorSnapshot {
         $boundedFailure = $boundedFailure.Substring(0, 2048)
     }
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.udp-endpoint-snapshot.v1"
+        schema = "ferrum2.windows-tun.udp-endpoint-snapshot.v2"
         stage = $Stage
         captured_utc = [DateTime]::UtcNow.ToString("o")
         scope = "ferrum2-product-endpoints-with-bounded-system-context"
         workload_tuple_source = "udp-workload-flow-ledger.ndjson"
+        diagnostic_source_preflight = $SourcePreflight
         client_pid = $ClientProcessId
         server_pid = $ServerProcessId
         state = "PARTIAL"
@@ -430,6 +688,10 @@ function Get-FileEvidence {
 
 Assert-Condition ($ParentSha -ceq $CandidateSha) `
     "UdpFlowBoundary requires identical parent and candidate SHAs"
+Assert-Condition ($diagnosticSourcePortLast - $diagnosticSourcePortFirst + 1 -eq
+        $diagnosticSourcePortCount) "diagnostic source port contract is inconsistent"
+Assert-Condition ($DiagnosticMaxEvents -ge $diagnosticSourcePortCount) `
+    "diagnostic max-events cannot retain the fixed source-port coverage"
 $nonceValue = [uint64]0
 Assert-Condition ([uint64]::TryParse(
         $DiagnosticRunNonce,
@@ -473,18 +735,23 @@ $workloadExitCode = $null
 $workloadTimedOut = $false
 $infrastructureError = $null
 $snapshotErrors = [Collections.Generic.List[string]]::new()
+$sourcePreflight = $null
 
 try {
+    $sourcePreflight = Get-DiagnosticSourcePreflight -AdapterName $TunAdapterName
     try {
         Write-UdpEndpointSnapshot -Path $preSnapshot -Stage "pre_workload" `
-            -ClientProcessId $ClientPid -ServerProcessId $ServerPid
+            -ClientProcessId $ClientPid -ServerProcessId $ServerPid `
+            -SourcePreflight $sourcePreflight
     }
     catch {
         $snapshotErrors.Add("pre endpoint snapshot: $($_.Exception.Message)")
         Write-UdpEndpointErrorSnapshot -Path $preSnapshot -Stage "pre_workload" `
             -ClientProcessId $ClientPid -ServerProcessId $ServerPid `
-            -Failure $_.Exception.Message
+            -Failure $_.Exception.Message -SourcePreflight $sourcePreflight
     }
+    Assert-Condition ($sourcePreflight.valid -eq $true) `
+        "fixed diagnostic source preflight failed: $($sourcePreflight.violations -join ',')"
     try {
         $metrics = Get-BoundedMetricsText -Port $ClientMetricsPort
         Assert-Condition (-not [string]::IsNullOrWhiteSpace($metrics)) `
@@ -506,7 +773,10 @@ try {
         "--diagnostic-ledger", $ledgerPath,
         "--diagnostic-run-nonce", $DiagnosticRunNonce,
         "--diagnostic-max-events", [string]$DiagnosticMaxEvents,
-        "--diagnostic-trial-sequence", [string]$TrialSequence
+        "--diagnostic-trial-sequence", [string]$TrialSequence,
+        "--diagnostic-source-ip", $diagnosticSourceIpv4,
+        "--diagnostic-source-port-first", [string]$diagnosticSourcePortFirst,
+        "--diagnostic-source-port-last", [string]$diagnosticSourcePortLast
     )
     $workloadResult = Invoke-BoundedNativeProcess -Executable $harness `
         -Arguments $workloadArguments -WorkingDirectory (Split-Path -Parent $harness) `
@@ -566,6 +836,9 @@ $ledgerClosed = $false
 $ledgerTruncated = $false
 $ledgerDroppedEvents = $null
 $ledgerWriteFailures = $null
+$ledgerBootstrapEventCount = 0
+$ledgerSourcePrefixValid = $false
+$ledgerSourceComplete = $false
 try {
     if (-not (Test-Path -LiteralPath $ledgerPath -PathType Leaf)) {
         throw "workload flow ledger was not created"
@@ -576,15 +849,33 @@ try {
         "workload flow ledger exceeds its byte boundary"
     $headerLine = [IO.File]::ReadLines($ledgerPath) | Select-Object -First 1
     $header = $headerLine | ConvertFrom-Json -ErrorAction Stop
-    $ledgerHeaderValid = [string]$header.schema -ceq `
-        "ferrum2.windows-tun.udp-workload-flow-ledger.v2" -and
+    $expectedHeaderFields = @(
+        "closure", "max_events", "record_type", "run_nonce", "schema", "scope",
+        "source_ip", "source_port_first", "source_port_last", "timestamp_clock",
+        "trial_sequence"
+    )
+    $actualHeaderFields = @($header.PSObject.Properties.Name | Sort-Object)
+    $ledgerHeaderValid = ($actualHeaderFields -join "`n") -ceq
+        ($expectedHeaderFields -join "`n") -and
+        [string]$header.schema -ceq `
+        $workloadLedgerSchema -and
         [string]$header.record_type -ceq "header" -and
         [string]$header.scope -ceq "bootstrap" -and
         [string]$header.closure -ceq "workload_process_exit" -and
         [string]$header.run_nonce -ceq $DiagnosticRunNonce -and
-        [int]$header.max_events -eq $DiagnosticMaxEvents
+        [string]$header.timestamp_clock -ceq
+            "std_instant_normalized_nanoseconds" -and
+        [int]$header.max_events -eq $DiagnosticMaxEvents -and
+        [int]$header.trial_sequence -eq $TrialSequence -and
+        [string]$header.source_ip -ceq $diagnosticSourceIpv4 -and
+        [int]$header.source_port_first -eq $diagnosticSourcePortFirst -and
+        [int]$header.source_port_last -eq $diagnosticSourcePortLast -and
+        [int]$header.source_port_last - [int]$header.source_port_first + 1 -eq
+            $diagnosticSourcePortCount
     Assert-Condition $ledgerHeaderValid "workload flow ledger header identity mismatch"
     $footer = $null
+    $seenFooter = $false
+    $seenTruncation = $false
     foreach ($line in [IO.File]::ReadLines($ledgerPath)) {
         $ledgerLines++
         Assert-Condition ($ledgerLines -le ($DiagnosticMaxEvents + 3)) `
@@ -592,22 +883,79 @@ try {
         Assert-Condition ($script:utf8NoBom.GetByteCount($line) -le 4096) `
             "workload flow ledger line exceeds 4096 bytes"
         $record = $line | ConvertFrom-Json -ErrorAction Stop
+        Assert-Condition ([string]$record.schema -ceq $workloadLedgerSchema) `
+            "workload flow ledger record schema mismatch"
+        if ($ledgerLines -eq 1) {
+            Assert-Condition ([string]$record.record_type -ceq "header") `
+                "workload flow ledger first record is not its header"
+            continue
+        }
+        Assert-Condition (-not $seenFooter) `
+            "workload flow ledger contains a record after its footer"
         if ([string]$record.record_type -ceq "truncation") {
+            Assert-Condition (-not $seenTruncation) `
+                "workload flow ledger contains duplicate truncation records"
+            $seenTruncation = $true
             $ledgerTruncated = $true
             $ledgerDroppedEvents = [long]$record.dropped_events_at_least
             $ledgerWriteFailures = [long]$record.write_failures
+        } elseif ([string]$record.record_type -ceq "event") {
+            Assert-Condition (-not $seenTruncation) `
+                "workload flow ledger contains an event after truncation"
+            $requiredEventFields = @(
+                "schema", "record_type", "event_index", "run_nonce",
+                "trial_sequence", "phase", "association_index", "round",
+                "workload_local_ip", "workload_local_port"
+            )
+            $actualEventFields = @($record.PSObject.Properties.Name)
+            Assert-Condition (@($requiredEventFields | Where-Object {
+                $actualEventFields -cnotcontains $_
+            }).Count -eq 0) "workload flow ledger event source identity is incomplete"
+            $expectedAssociationIndex = $ledgerBootstrapEventCount
+            Assert-Condition ([string]$record.schema -ceq $workloadLedgerSchema -and
+                [string]$record.run_nonce -ceq $DiagnosticRunNonce -and
+                [int]$record.trial_sequence -eq $TrialSequence -and
+                [string]$record.phase -ceq "bootstrap" -and
+                [long]$record.event_index -eq $expectedAssociationIndex -and
+                [long]$record.association_index -eq $expectedAssociationIndex -and
+                [long]$record.round -eq 0 -and
+                [string]$record.workload_local_ip -ceq $diagnosticSourceIpv4 -and
+                [int]$record.workload_local_port -eq
+                    ($diagnosticSourcePortFirst + $expectedAssociationIndex)) `
+                "workload flow ledger fixed source-port prefix is invalid"
+            $ledgerBootstrapEventCount++
+            Assert-Condition ($ledgerBootstrapEventCount -le $diagnosticSourcePortCount) `
+                "workload flow ledger exceeds fixed source-port coverage"
         } elseif ([string]$record.record_type -ceq "footer") {
+            $seenFooter = $true
             $footer = $record
+        } elseif ([string]$record.record_type -ceq "header") {
+            throw "workload flow ledger contains a duplicate header"
+        } else {
+            throw "workload flow ledger contains an unknown record type"
         }
     }
     Assert-Condition ($ledgerLines -le ($DiagnosticMaxEvents + 3)) `
         "workload flow ledger exceeds its line boundary"
+    $ledgerSourcePrefixValid = $true
+    $ledgerSourceComplete = $ledgerBootstrapEventCount -eq $diagnosticSourcePortCount
     if ($null -ne $footer) {
-        $ledgerClosed = [string]$footer.schema -ceq
-            "ferrum2.windows-tun.udp-workload-flow-ledger.v2" -and
+        $expectedFooterFields = @(
+            "attempted_events", "closed", "dropped_events", "events_written",
+            "record_type", "run_nonce", "schema", "write_failures"
+        )
+        $actualFooterFields = @($footer.PSObject.Properties.Name | Sort-Object)
+        $ledgerClosed = ($actualFooterFields -join "`n") -ceq
+            ($expectedFooterFields -join "`n") -and
+            [string]$footer.schema -ceq
+            $workloadLedgerSchema -and
             [string]$footer.record_type -ceq "footer" -and
             [string]$footer.run_nonce -ceq $DiagnosticRunNonce -and
-            $footer.closed -eq $true
+            $footer.closed -eq $true -and
+            [long]$footer.events_written -eq $ledgerBootstrapEventCount -and
+            [long]$footer.attempted_events -eq
+                ([long]$footer.events_written + [long]$footer.dropped_events +
+                    [long]$footer.write_failures)
         $ledgerDroppedEvents = [long]$footer.dropped_events
         $ledgerWriteFailures = [long]$footer.write_failures
     }
@@ -637,10 +985,20 @@ $requiredArtifactPaths = @(
 $requiredArtifactsPresent = @($requiredArtifactPaths | Where-Object {
     -not (Test-Path -LiteralPath $_ -PathType Leaf)
 }).Count -eq 0
+$workloadReportedPass = -not $workloadTimedOut -and $workloadExitCode -eq 0 -and
+    $observationValid
+$ledgerSourceCoverageValid = $ledgerSourcePrefixValid -and (
+    -not $workloadReportedPass -or $ledgerSourceComplete
+)
+if ($workloadReportedPass -and -not $ledgerSourceComplete -and
+    $null -eq $ledgerError) {
+    $ledgerError = "passing workload did not cover all 8192 fixed source ports"
+}
 $evidenceStatus = if (
     $null -eq $infrastructureError -and
     $null -eq $ledgerError -and
     $ledgerHeaderValid -and $ledgerClosed -and -not $ledgerTruncated -and
+    $ledgerSourceCoverageValid -and
     $ledgerDroppedEvents -eq 0 -and $ledgerWriteFailures -eq 0 -and
     $snapshotErrors.Count -eq 0 -and $requiredArtifactsPresent -and
     -not $workloadTimedOut
@@ -649,8 +1007,11 @@ $evidenceStatus = if (
 } else {
     "PARTIAL"
 }
-$trialStatus = if (-not $workloadTimedOut -and $workloadExitCode -eq 0 -and
-    $observationValid) { "PASS" } else { "FAIL" }
+$trialStatus = if ($workloadReportedPass -and $ledgerSourceCoverageValid) {
+    "PASS"
+} else {
+    "FAIL"
+}
 $rawDocument = [ordered]@{
     schema = "ferrum2.windows-tun.hyperv-udp-diagnostic-guest-raw.v1"
     qualification = $false
@@ -677,6 +1038,10 @@ $rawDocument = [ordered]@{
         exit_code = $workloadExitCode
         global_timeout = $workloadTimedOut
         observation_valid = $observationValid
+        source_ip = $diagnosticSourceIpv4
+        source_port_first = $diagnosticSourcePortFirst
+        source_port_last = $diagnosticSourcePortLast
+        source_preflight = $sourcePreflight
         infrastructure_error = $infrastructureError
         flow_ledger_header_valid = $ledgerHeaderValid
         flow_ledger_lines = $ledgerLines
@@ -684,6 +1049,9 @@ $rawDocument = [ordered]@{
         flow_ledger_truncated = $ledgerTruncated
         flow_ledger_dropped_events = $ledgerDroppedEvents
         flow_ledger_write_failures = $ledgerWriteFailures
+        flow_ledger_bootstrap_event_count = $ledgerBootstrapEventCount
+        flow_ledger_source_prefix_valid = $ledgerSourcePrefixValid
+        flow_ledger_source_complete = $ledgerSourceComplete
         flow_ledger_error = $ledgerError
     }
     artifacts = [ordered]@{

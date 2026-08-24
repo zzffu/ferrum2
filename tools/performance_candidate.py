@@ -83,6 +83,14 @@ WINDOWS_TUN_GUEST_NETWORK_PATH_SOURCE_SHA256 = hashlib.sha256(
 WINDOWS_TUN_COLLECTOR_SOURCE_SHA256 = hashlib.sha256(
     (WINDOWS_TUN_REPOSITORY_ROOT / "tools" / "collect_windows_tun_performance_trial.ps1").read_bytes()
 ).hexdigest()
+WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_PATH = (
+    WINDOWS_TUN_REPOSITORY_ROOT
+    / "tools"
+    / "collect_windows_tun_udp_boundary_diagnostic.ps1"
+)
+WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_SOURCE_SHA256 = hashlib.sha256(
+    WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_PATH.read_bytes()
+).hexdigest()
 WINDOWS_TUN_HARNESS_SOURCE_SHA256 = hashlib.sha256(
     (
         WINDOWS_TUN_REPOSITORY_ROOT
@@ -247,11 +255,14 @@ WINDOWS_TUN_UDP_FAILURE_SUMMARY_SCHEMA = (
     "ferrum2.windows-tun.hyperv-udp-failure-summary.v1"
 )
 WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA = (
-    "ferrum2.windows-tun.udp-workload-flow-ledger.v2"
+    "ferrum2.windows-tun.udp-workload-flow-ledger.v3"
 )
 WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA = (
     "ferrum2.windows-tun.udp-support-ledger.v2"
 )
+WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4 = "198.18.0.2"
+WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST = 20_000
+WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_LAST = 28_191
 WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS = {
     "max_artifacts": 32,
     "max_total_bytes": 256 * 1024 * 1024,
@@ -414,6 +425,17 @@ WINDOWS_TUN_SCENARIOS = {
             "lookup_rounds": 64,
             "expiry_rounds": 1,
             "payload_bytes": 32,
+            "canonical_source_port_strategy": "wildcard_ephemeral",
+            "diagnostic_source_ipv4": WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+            "diagnostic_source_port_first": (
+                WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+            ),
+            "diagnostic_source_port_last": (
+                WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_LAST
+            ),
+            "diagnostic_collector_source_sha256": (
+                WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_SOURCE_SHA256
+            ),
         },
         "metrics": {
             "lookup_rate": {
@@ -4211,6 +4233,17 @@ def _windows_tun_udp_ledger_event(
         target_endpoint = _windows_tun_udp_endpoint(row, "target_ip", "target_port", "target")
         if workload_endpoint is None or target_endpoint is None:
             raise CandidateControlError("Windows TUN UDP workload endpoint identity is missing")
+        expected_source_endpoint = (
+            header["source_ip"],
+            header["source_port_first"] + row["association_index"],
+        )
+        if (
+            expected_source_endpoint[1] > header["source_port_last"]
+            or workload_endpoint != expected_source_endpoint
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP workload source endpoint is invalid"
+            )
         reply_endpoint = _windows_tun_udp_endpoint(
             row, "reply_source_ip", "reply_source_port", "reply_source"
         )
@@ -4374,7 +4407,12 @@ def _read_windows_tun_udp_ledger(
     header_fields = frozenset(
         common_header_fields
         | (
-            {"trial_sequence"}
+            {
+                "trial_sequence",
+                "source_ip",
+                "source_port_first",
+                "source_port_last",
+            }
             if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
             else {"pid", "listen_ip", "tcp_port", "udp_ports"}
         )
@@ -4434,12 +4472,30 @@ def _read_windows_tun_udp_ledger(
         raise CandidateControlError("Windows TUN UDP ledger header identity is invalid")
     _windows_tun_udp_decimal_u64(header["run_nonce"], "ledger header run_nonce", positive=True)
     if schema == WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA:
+        source_ip = _windows_tun_udp_ipv4(
+            header["source_ip"], "workload header source_ip"
+        )
+        source_port_first = _windows_tun_udp_port(
+            header["source_port_first"], "workload header source_port_first"
+        )
+        source_port_last = _windows_tun_udp_port(
+            header["source_port_last"], "workload header source_port_last"
+        )
         if (
             type(header["trial_sequence"]) is not int
             or not 1 <= header["trial_sequence"] <= 65_535
             or header["trial_sequence"] != trial_sequence
         ):
             raise CandidateControlError("Windows TUN UDP workload ledger header trial mismatch")
+        if (
+            source_ip != WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4
+            or source_port_first != WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+            or source_port_last != WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_LAST
+            or source_port_last - source_port_first + 1 != 8_192
+        ):
+            raise CandidateControlError(
+                "Windows TUN UDP workload ledger source range is invalid"
+            )
     else:
         _windows_tun_udp_u64(header["pid"], "support header pid", positive=True)
         _windows_tun_udp_ipv4(header["listen_ip"], "support header listen_ip")
@@ -4604,6 +4660,22 @@ def _windows_tun_udp_first_failed_flow(
         if event["reply_result"] == "not_observed" and first_not_observed is None:
             first_not_observed = event
     return first_not_observed
+
+
+def _validate_windows_tun_udp_workload_source_coverage(
+    events: list[dict[str, object]], *, expected_associations: int, passing: bool
+) -> None:
+    if len(events) > expected_associations or any(
+        event["association_index"] != association_index
+        for association_index, event in enumerate(events)
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP workload source coverage is not a consecutive prefix"
+        )
+    if passing and len(events) != expected_associations:
+        raise CandidateControlError(
+            "passing Windows TUN UDP diagnostic lacks complete source coverage"
+        )
 
 
 def _windows_tun_udp_support_boundary(
@@ -5348,9 +5420,36 @@ def validate_windows_tun_udp_diagnostic(
         for event in ledgers["workload_ledger"]["events"]
     ):
         raise CandidateControlError("Windows TUN UDP workload target is not support-bound")
+    association_recipe = plan["scenarios"][
+        "udp-8192-association-lookup-expiry"
+    ]["recipe"]
+    workload_header = ledgers["workload_ledger"]["header"]
+    if (
+        association_recipe.get("canonical_source_port_strategy")
+        != "wildcard_ephemeral"
+        or workload_header["source_ip"]
+        != association_recipe.get("diagnostic_source_ipv4")
+        or workload_header["source_port_first"]
+        != association_recipe.get("diagnostic_source_port_first")
+        or workload_header["source_port_last"]
+        != association_recipe.get("diagnostic_source_port_last")
+        or association_recipe.get("diagnostic_collector_source_sha256")
+        != WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_SOURCE_SHA256
+        or workload_header["source_port_last"]
+        - workload_header["source_port_first"]
+        + 1
+        != association_recipe.get("associations")
+    ):
+        raise CandidateControlError(
+            "Windows TUN UDP workload source header is not plan-bound"
+        )
+    _validate_windows_tun_udp_workload_source_coverage(
+        ledgers["workload_ledger"]["events"],
+        expected_associations=association_recipe["associations"],
+        passing=row["trial_status"] == "PASS",
+    )
     if row["trial_status"] == "PASS" and (
-        not ledgers["workload_ledger"]["events"]
-        or _windows_tun_udp_first_failed_flow(
+        _windows_tun_udp_first_failed_flow(
             ledgers["workload_ledger"]["events"]
         )
         is not None

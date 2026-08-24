@@ -182,6 +182,10 @@ $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643c
 $expectedPowerShellVersion = "7.4.19"
 $expectedPowerShellZipSha256 = "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9"
 $minimumSupportIpv4PacketBytes = 1468
+$diagnosticSourceIpv4 = "198.18.0.2"
+$diagnosticSourcePortFirst = 20000
+$diagnosticSourcePortLast = 28191
+$diagnosticAssociationCount = 8192
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -ErrorAction Stop).Path
 $approvedRustTarget = "x86_64-pc-windows-msvc"
 $reproducibleRustSourceRoot = "C:\ferrum2-reproducible-source"
@@ -203,6 +207,7 @@ $runnerSourceSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA25
     Hash.ToLowerInvariant()
 $topologyRuntimeSha256 = ""
 $guestNetworkPathProbeSourceSha256 = ""
+$udpBoundaryCollectorSourceSha256 = ""
 
 function Test-PathWithinRoot {
     param(
@@ -526,6 +531,7 @@ function New-CanonicalPlan {
         $plan.run_kind -cne $RunKindValue -or
         @($plan.trials).Count -ne 90 -or
         $null -eq $plan.scenarios."udp-route-once" -or
+        $null -eq $plan.scenarios."udp-8192-association-lookup-expiry" -or
         $null -eq $plan.scenarios."network-lifecycle") {
         throw "canonical Windows TUN plan shape is invalid"
     }
@@ -562,6 +568,25 @@ function New-CanonicalPlan {
     if ($plannedTunRingCapacities.Count -ne 1 -or
         $plannedTunRingCapacities[0] -ne 8388608) {
         throw "canonical Windows TUN plan ring capacity is invalid"
+    }
+    $udpBoundaryRecipe = $plan.scenarios.
+        "udp-8192-association-lookup-expiry".recipe
+    if ([string]$udpBoundaryRecipe.canonical_source_port_strategy -cne
+            "wildcard_ephemeral" -or
+        [string]$udpBoundaryRecipe.diagnostic_source_ipv4 -cne
+            $script:diagnosticSourceIpv4 -or
+        [int]$udpBoundaryRecipe.diagnostic_source_port_first -ne
+            $script:diagnosticSourcePortFirst -or
+        [int]$udpBoundaryRecipe.diagnostic_source_port_last -ne
+            $script:diagnosticSourcePortLast -or
+        [int]$udpBoundaryRecipe.associations -ne
+            $script:diagnosticAssociationCount -or
+        ([int]$udpBoundaryRecipe.diagnostic_source_port_last -
+            [int]$udpBoundaryRecipe.diagnostic_source_port_first + 1) -ne
+            [int]$udpBoundaryRecipe.associations -or
+        [string]$udpBoundaryRecipe.diagnostic_collector_source_sha256 -cne
+            $script:udpBoundaryCollectorSourceSha256) {
+        throw "canonical Windows TUN UDP diagnostic source-port contract is invalid"
     }
     return $plan
 }
@@ -1699,10 +1724,11 @@ foreach ($required in @(
         throw "required performance controller file is missing: $required"
     }
 }
-if ($instrumentedDiagnosticMode -and
-    -not (Test-Path -LiteralPath $udpBoundaryCollectorPath -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath $udpBoundaryCollectorPath -PathType Leaf)) {
     throw "required UDP boundary collector file is missing: $udpBoundaryCollectorPath"
 }
+$udpBoundaryCollectorSourceSha256 = (Get-FileHash `
+    -LiteralPath $udpBoundaryCollectorPath -Algorithm SHA256).Hash.ToLowerInvariant()
 . $topologyRuntimePath -LibraryOnly
 $topologyRuntimeSha256 = (Get-FileHash -LiteralPath $topologyRuntimePath `
     -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -1941,6 +1967,7 @@ $hostCaptureState = $null
 $hostCaptureResult = $null
 $hostCaptureFailure = $null
 $hostEndpointSnapshotFailures = [Collections.Generic.List[string]]::new()
+$diagnosticSourcePlan = $null
 
 try {
     [IO.Directory]::CreateDirectory($hostEvidenceRoot) | Out-Null
@@ -1960,6 +1987,15 @@ try {
         [IO.Directory]::CreateDirectory($hostDiagnosticSupportRoot) | Out-Null
     }
     $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $hostPlanPath
+    $udpBoundaryRecipe = $plan.scenarios.
+        "udp-8192-association-lookup-expiry".recipe
+    $diagnosticSourcePlan = [pscustomobject]@{
+        Ipv4 = [string]$udpBoundaryRecipe.diagnostic_source_ipv4
+        PortFirst = [int]$udpBoundaryRecipe.diagnostic_source_port_first
+        PortLast = [int]$udpBoundaryRecipe.diagnostic_source_port_last
+        CollectorSha256 = [string]$udpBoundaryRecipe.
+            diagnostic_collector_source_sha256
+    }
     $runtimeIdleTimeoutMilliseconds = [int]$plan.scenarios."tcp-single-flow".recipe.
         client_runtime_idle_timeout_milliseconds
     $tunRingCapacityBytes = [long]$plan.scenarios."tcp-single-flow".recipe.
@@ -2036,6 +2072,12 @@ try {
         $udpBoundaryCollectorSha256 = (Get-FileHash `
             -LiteralPath $udpBoundaryCollectorPath `
             -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($udpBoundaryCollectorSha256 -cne
+                $udpBoundaryCollectorSourceSha256 -or
+            $udpBoundaryCollectorSha256 -cne
+                [string]$diagnosticSourcePlan.CollectorSha256) {
+            throw "UDP boundary collector source changed after plan generation"
+        }
     }
     $guestNetworkPathProbeDestination = Join-Path $temporaryRoot `
         "input\get_windows_tun_guest_network_path.ps1"
@@ -2411,7 +2453,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $(if ($instrumentedDiagnosticMode) { $DiagnosticProfile } else { "" }),
         $(if ($instrumentedDiagnosticMode) { $SupportDiagnosticRunNonce } else { "" }),
         $(if ($instrumentedDiagnosticMode) { $SupportDiagnosticMaxEvents } else { 0 }),
-        $udpBoundaryCollectorSha256
+        $udpBoundaryCollectorSha256,
+        $(if ($instrumentedDiagnosticMode) {
+            [string]$diagnosticSourcePlan.Ipv4
+        } else { "" }),
+        $(if ($instrumentedDiagnosticMode) {
+            [int]$diagnosticSourcePlan.PortFirst
+        } else { 0 }),
+        $(if ($instrumentedDiagnosticMode) {
+            [int]$diagnosticSourcePlan.PortLast
+        } else { 0 })
     ) -ScriptBlock {
         param(
             [string]$Root,
@@ -2456,7 +2507,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [string]$DiagnosticProfileValue,
             [string]$DiagnosticRunNonce,
             [int]$DiagnosticMaxEvents,
-            [string]$UdpBoundaryCollectorSha256
+            [string]$UdpBoundaryCollectorSha256,
+            [string]$DiagnosticSourceIpv4,
+            [int]$DiagnosticSourcePortFirst,
+            [int]$DiagnosticSourcePortLast
         )
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -2496,11 +2550,19 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 $ParentCommit -cne $CandidateCommit -or
                 $DiagnosticRunNonce -cnotmatch '^[1-9][0-9]{0,19}$' -or
                 $DiagnosticMaxEvents -lt 1 -or $DiagnosticMaxEvents -gt 65536 -or
-                $UdpBoundaryCollectorSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                $UdpBoundaryCollectorSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $DiagnosticSourceIpv4 -cne "198.18.0.2" -or
+                $DiagnosticSourcePortFirst -ne 20000 -or
+                $DiagnosticSourcePortLast -ne 28191 -or
+                ($DiagnosticSourcePortLast - $DiagnosticSourcePortFirst + 1) -ne
+                    8192) {
                 throw "guest UdpFlowBoundary diagnostic identity is invalid"
             }
         } elseif (-not [string]::IsNullOrWhiteSpace($DiagnosticRunNonce) -or
-            $DiagnosticMaxEvents -ne 0) {
+            $DiagnosticMaxEvents -ne 0 -or
+            -not [string]::IsNullOrWhiteSpace($DiagnosticSourceIpv4) -or
+            $DiagnosticSourcePortFirst -ne 0 -or
+            $DiagnosticSourcePortLast -ne 0) {
             throw "guest support diagnostic arguments require UdpFlowBoundary"
         }
         $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
@@ -3224,11 +3286,28 @@ public static class Ferrum2PerfProcessGroup {
         if ($plan.schema_version -ne 2 -or
             @($plan.trials).Count -ne 90 -or
             $plan.recipe_sha256 -cne $RecipeSha256 -or
+            $null -eq $plan.scenarios."udp-8192-association-lookup-expiry" -or
             $plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256 `
                 -cne $NetworkModelControllerSha256 -or
             $plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256 `
                 -cne $NetworkModelPlanSha256) {
             throw "guest trial plan changed during staging"
+        }
+        $udpBoundaryRecipe = $plan.scenarios.
+            "udp-8192-association-lookup-expiry".recipe
+        if ($InstrumentedDiagnostic -and (
+            [string]$udpBoundaryRecipe.canonical_source_port_strategy -cne
+                "wildcard_ephemeral" -or
+            [string]$udpBoundaryRecipe.diagnostic_source_ipv4 -cne
+                $DiagnosticSourceIpv4 -or
+            [int]$udpBoundaryRecipe.diagnostic_source_port_first -ne
+                $DiagnosticSourcePortFirst -or
+            [int]$udpBoundaryRecipe.diagnostic_source_port_last -ne
+                $DiagnosticSourcePortLast -or
+            [int]$udpBoundaryRecipe.associations -ne 8192 -or
+            [string]$udpBoundaryRecipe.diagnostic_collector_source_sha256 -cne
+                $UdpBoundaryCollectorSha256)) {
+            throw "guest UDP diagnostic source-port plan changed during staging"
         }
         if ($DiagnosticTrialSequenceValue -lt 0 -or
             $DiagnosticTrialSequenceValue -gt 90 -or
@@ -3415,6 +3494,7 @@ public static class Ferrum2PerfProcessGroup {
                         "-TargetIpv4", $SupportAddress,
                         "-TargetTcpPort", [string]$SupportTcp,
                         "-TargetUdpPort", [string]$SupportUdp,
+                        "-TunAdapterName", $AdapterName,
                         "-ClientPid", [string]$clientPid,
                         "-ServerPid", [string]$serverPid,
                         "-ClientMetricsPort", [string]$metricsPort,
@@ -3458,6 +3538,12 @@ public static class Ferrum2PerfProcessGroup {
                             $DiagnosticRunNonce -or
                         [int]$diagnosticRaw.identity.diagnostic_max_events -ne
                             $DiagnosticMaxEvents -or
+                        [string]$diagnosticRaw.workload.source_ip -cne
+                            $DiagnosticSourceIpv4 -or
+                        [int]$diagnosticRaw.workload.source_port_first -ne
+                            $DiagnosticSourcePortFirst -or
+                        [int]$diagnosticRaw.workload.source_port_last -ne
+                            $DiagnosticSourcePortLast -or
                         [string]$diagnosticRaw.evidence_status -cnotin
                             @("COMPLETE", "PARTIAL") -or
                         [string]$diagnosticRaw.trial_status -cnotin @("PASS", "FAIL")) {
@@ -4002,14 +4088,46 @@ if ($instrumentedDiagnosticMode) {
         [string]$guestRaw.identity.diagnostic_run_nonce -cne
             $SupportDiagnosticRunNonce -or
         [int]$guestRaw.identity.diagnostic_max_events -ne
-            $SupportDiagnosticMaxEvents) {
+            $SupportDiagnosticMaxEvents -or
+        [string]$guestRaw.workload.source_ip -cne
+            [string]$diagnosticSourcePlan.Ipv4 -or
+        [int]$guestRaw.workload.source_port_first -ne
+            [int]$diagnosticSourcePlan.PortFirst -or
+        [int]$guestRaw.workload.source_port_last -ne
+            [int]$diagnosticSourcePlan.PortLast) {
         throw "exported guest UDP diagnostic raw identity mismatch"
     }
     $workloadLedgerSummary = Get-UdpDiagnosticLedgerSummary `
         -Path $workloadLedgerPath `
-        -ExpectedSchema "ferrum2.windows-tun.udp-workload-flow-ledger.v2" `
+        -ExpectedSchema "ferrum2.windows-tun.udp-workload-flow-ledger.v3" `
         -ExpectedRunNonce $SupportDiagnosticRunNonce `
         -ExpectedMaxEvents $SupportDiagnosticMaxEvents
+    $expectedWorkloadHeaderFields = @(
+        "closure", "max_events", "record_type", "run_nonce", "schema", "scope",
+        "source_ip", "source_port_first", "source_port_last", "timestamp_clock",
+        "trial_sequence"
+    )
+    $actualWorkloadHeaderFields = @(
+        $workloadLedgerSummary.Header.PSObject.Properties.Name | Sort-Object
+    )
+    if (($actualWorkloadHeaderFields -join "`n") -cne
+            ($expectedWorkloadHeaderFields -join "`n") -or
+        [string]$workloadLedgerSummary.Header.scope -cne "bootstrap" -or
+        [string]$workloadLedgerSummary.Header.closure -cne
+            "workload_process_exit" -or
+        [int]$workloadLedgerSummary.Header.trial_sequence -ne
+            $DiagnosticTrialSequence -or
+        [string]$workloadLedgerSummary.Header.source_ip -cne
+            [string]$diagnosticSourcePlan.Ipv4 -or
+        [int]$workloadLedgerSummary.Header.source_port_first -ne
+            [int]$diagnosticSourcePlan.PortFirst -or
+        [int]$workloadLedgerSummary.Header.source_port_last -ne
+            [int]$diagnosticSourcePlan.PortLast -or
+        ([int]$workloadLedgerSummary.Header.source_port_last -
+            [int]$workloadLedgerSummary.Header.source_port_first + 1) -ne
+            $diagnosticAssociationCount) {
+        throw "exported workload ledger source-port contract mismatch"
+    }
     $firstFailedFlow = Get-FirstFailedUdpDiagnosticFlow `
         -Path $workloadLedgerPath -MaximumEvents $SupportDiagnosticMaxEvents
     $supportBoundary = if ($null -ne $firstFailedFlow) {

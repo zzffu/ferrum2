@@ -948,8 +948,10 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "association_index": 0,
             "round": 0,
             "packet_nonce": "0",
-            "workload_local_ip": "198.18.0.2",
-            "workload_local_port": 55_000,
+            "workload_local_ip": CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+            "workload_local_port": (
+                CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+            ),
             "target_ip": support_ip,
             "target_port": 44_160,
             "send_result": "success",
@@ -961,7 +963,17 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "error_kind": "timeout",
         }
         workload_records = [
-            ledger_header(workload_schema, trial_sequence=31),
+            ledger_header(
+                workload_schema,
+                trial_sequence=31,
+                source_ip=CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+                source_port_first=(
+                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+                ),
+                source_port_last=(
+                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_LAST
+                ),
+            ),
             workload_event,
             *(
                 [ledger_footer(workload_schema, attempted=1, written=1)]
@@ -1126,8 +1138,10 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "round": 0,
             "packet_nonce": "0",
             "workload_tuple": {
-                "source_ip": "198.18.0.2",
-                "source_port": 55_000,
+                "source_ip": CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+                "source_port": (
+                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+                ),
                 "target_ip": support_ip,
                 "target_port": 44_160,
             },
@@ -1795,6 +1809,45 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             ),
             (8_192, 1, 8, 25, 8, 64, 32, 8_192, 8, 8),
         )
+        self.assertEqual(
+            {
+                field: association_recipe[field]
+                for field in (
+                    "canonical_source_port_strategy",
+                    "diagnostic_source_ipv4",
+                    "diagnostic_source_port_first",
+                    "diagnostic_source_port_last",
+                    "diagnostic_collector_source_sha256",
+                )
+            },
+            {
+                "canonical_source_port_strategy": "wildcard_ephemeral",
+                "diagnostic_source_ipv4": "198.18.0.2",
+                "diagnostic_source_port_first": 20_000,
+                "diagnostic_source_port_last": 28_191,
+                "diagnostic_collector_source_sha256": (
+                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_SOURCE_SHA256
+                ),
+            },
+        )
+        self.assertRegex(
+            CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_COLLECTOR_SOURCE_SHA256,
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(
+            association_recipe["diagnostic_source_port_last"]
+            - association_recipe["diagnostic_source_port_first"]
+            + 1,
+            association_recipe["associations"],
+        )
+        self.assertEqual(
+            CONTROL.WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA,
+            "ferrum2.windows-tun.udp-workload-flow-ledger.v3",
+        )
+        self.assertEqual(
+            CONTROL.WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA,
+            "ferrum2.windows-tun.udp-support-ledger.v2",
+        )
         fairness = plan["scenarios"]["tcp-256-flow-fairness"]
         self.assertEqual(
             (
@@ -1885,6 +1938,31 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 with self.subTest(sequence=sequence):
                     tampered = copy.deepcopy(plan)
                     tampered["trials"][0]["sequence"] = sequence
+                    path.write_text(
+                        json.dumps(tampered, sort_keys=True), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        CONTROL.CandidateControlError, "canonical recipe"
+                    ):
+                        CONTROL.load_windows_tun_plan(
+                            path, decision_policy=policy
+                        )
+            for field, value in (
+                ("diagnostic_source_ipv4", "198.18.0.3"),
+                ("diagnostic_source_port_first", 20_001),
+                ("diagnostic_source_port_last", 28_192),
+                ("diagnostic_collector_source_sha256", "0" * 64),
+                ("canonical_source_port_strategy", "fixed"),
+            ):
+                with self.subTest(recipe_field=field):
+                    tampered = copy.deepcopy(plan)
+                    recipe = tampered["scenarios"][
+                        "udp-8192-association-lookup-expiry"
+                    ]["recipe"]
+                    recipe[field] = value
+                    tampered["recipe_sha256"] = hashlib.sha256(
+                        CONTROL._canonical_json_bytes(tampered["scenarios"])
+                    ).hexdigest()
                     path.write_text(
                         json.dumps(tampered, sort_keys=True), encoding="utf-8"
                     )
@@ -2858,6 +2936,80 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 CONTROL.CandidateControlError, "not ledger-derived"
             ):
                 self.validate_udp_diagnostic(root, plan, plan_sha256)
+
+    def test_udp_diagnostic_fixed_source_header_and_events_are_closed(self) -> None:
+        mutations = (
+            ("missing header field", lambda header, event: header.pop("source_ip")),
+            ("extra header field", lambda header, event: header.update(source_ports=8_192)),
+            ("header IP", lambda header, event: header.update(source_ip="198.18.0.3")),
+            ("header first port", lambda header, event: header.update(source_port_first=20_001)),
+            ("header last port", lambda header, event: header.update(source_port_last=28_192)),
+            (
+                "event IP",
+                lambda header, event: event.update(workload_local_ip="198.18.0.3"),
+            ),
+            (
+                "event port",
+                lambda header, event: event.update(workload_local_port=20_001),
+            ),
+            (
+                "association prefix",
+                lambda header, event: event.update(
+                    association_index=1, workload_local_port=20_001
+                ),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                plan, row, plan_sha256 = self.udp_diagnostic_evidence(root)
+                artifact = self.udp_artifact(row, "workload_ledger")
+                records = [
+                    json.loads(line)
+                    for line in (root / artifact["file"])
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ]
+                mutate(records[0], records[1])
+                self.write_udp_ledger(root, row, "workload_ledger", records)
+                self.write_udp_diagnostic_document(root, row)
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    self.validate_udp_diagnostic(root, plan, plan_sha256)
+
+    def test_udp_diagnostic_source_header_is_cross_bound_to_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            plan, row, plan_sha256 = self.udp_diagnostic_evidence(root)
+            plan["scenarios"]["udp-8192-association-lookup-expiry"]["recipe"][
+                "diagnostic_source_ipv4"
+            ] = "198.18.0.3"
+            with self.assertRaisesRegex(
+                CONTROL.CandidateControlError, "source header is not plan-bound"
+            ):
+                self.validate_udp_diagnostic(root, plan, plan_sha256)
+
+    def test_udp_diagnostic_source_coverage_is_exact_or_a_prefix(self) -> None:
+        complete = [{"association_index": index} for index in range(8_192)]
+        CONTROL._validate_windows_tun_udp_workload_source_coverage(
+            complete, expected_associations=8_192, passing=True
+        )
+        CONTROL._validate_windows_tun_udp_workload_source_coverage(
+            complete[:8_177], expected_associations=8_192, passing=False
+        )
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "lacks complete source coverage"
+        ):
+            CONTROL._validate_windows_tun_udp_workload_source_coverage(
+                complete[:8_191], expected_associations=8_192, passing=True
+            )
+        non_prefix = copy.deepcopy(complete[:8_177])
+        non_prefix[-1]["association_index"] -= 1
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "not a consecutive prefix"
+        ):
+            CONTROL._validate_windows_tun_udp_workload_source_coverage(
+                non_prefix, expected_associations=8_192, passing=False
+            )
 
     def test_udp_diagnostic_rejects_contradictory_ledger_snapshots(self) -> None:
         for name in ("footer regression", "event extra field", "truncation snapshot"):

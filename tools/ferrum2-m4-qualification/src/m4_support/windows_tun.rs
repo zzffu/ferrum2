@@ -63,9 +63,12 @@ const UDP_DIAGNOSTIC_MAX_EVENTS: usize = 65_536;
 const UDP_DIAGNOSTIC_MAX_EVENT_BYTES: usize = 4 * 1024;
 const UDP_DIAGNOSTIC_SCOPE: &str = "bootstrap";
 const UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE: u16 = 31;
+const UDP_DIAGNOSTIC_SOURCE_IPV4: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
+const UDP_DIAGNOSTIC_SOURCE_PORT_FIRST: u16 = 20_000;
+const UDP_DIAGNOSTIC_SOURCE_PORT_LAST: u16 = 28_191;
 const UDP_WORKLOAD_DIAGNOSTIC_CLOSURE: &str = "workload_process_exit";
 const UDP_SUPPORT_DIAGNOSTIC_CLOSURE: &str = "host_four_port_barrier_after_vm_off";
-const UDP_WORKLOAD_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-workload-flow-ledger.v2";
+const UDP_WORKLOAD_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-workload-flow-ledger.v3";
 const UDP_SUPPORT_LEDGER_SCHEMA: &str = "ferrum2.windows-tun.udp-support-ledger.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,6 +173,9 @@ struct UdpDiagnosticLedgerArgs {
 struct UdpWorkloadDiagnosticArgs {
     ledger: UdpDiagnosticLedgerArgs,
     trial_sequence: u16,
+    source_ip: IpAddr,
+    source_port_first: u16,
+    source_port_last: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -821,6 +827,22 @@ fn parse_diagnostic_trial_sequence(value: String) -> Result<u16, String> {
         .map_err(|_| "--diagnostic-trial-sequence is outside the supported range".to_owned())
 }
 
+fn parse_diagnostic_source_ip(value: String) -> Result<IpAddr, String> {
+    let expected = UDP_DIAGNOSTIC_SOURCE_IPV4.to_string();
+    if value != expected {
+        return Err(format!("--diagnostic-source-ip must be exactly {expected}"));
+    }
+    Ok(IpAddr::V4(UDP_DIAGNOSTIC_SOURCE_IPV4))
+}
+
+fn parse_diagnostic_source_port(value: String, flag: &str, expected: u16) -> Result<u16, String> {
+    let parsed = parse_port(Some(value), flag)?;
+    if parsed != expected {
+        return Err(format!("{flag} must be exactly {expected}"));
+    }
+    Ok(parsed)
+}
+
 fn validate_diagnostic_ledger_path(value: String) -> Result<PathBuf, String> {
     let path = PathBuf::from(value);
     if !path.is_absolute()
@@ -882,6 +904,9 @@ fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
     let mut diagnostic_run_nonce = None;
     let mut diagnostic_max_events = None;
     let mut diagnostic_trial_sequence = None;
+    let mut diagnostic_source_ip = None;
+    let mut diagnostic_source_port_first = None;
+    let mut diagnostic_source_port_last = None;
     for (flag, value) in parse_pairs(arguments)? {
         match flag.as_str() {
             "--scenario" => take_unique(&mut scenario, value, &flag)?,
@@ -894,6 +919,13 @@ fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
             "--diagnostic-max-events" => take_unique(&mut diagnostic_max_events, value, &flag)?,
             "--diagnostic-trial-sequence" => {
                 take_unique(&mut diagnostic_trial_sequence, value, &flag)?
+            }
+            "--diagnostic-source-ip" => take_unique(&mut diagnostic_source_ip, value, &flag)?,
+            "--diagnostic-source-port-first" => {
+                take_unique(&mut diagnostic_source_port_first, value, &flag)?
+            }
+            "--diagnostic-source-port-last" => {
+                take_unique(&mut diagnostic_source_port_last, value, &flag)?
             }
             _ => return Err(format!("unsupported Windows TUN option: {flag}")),
         }
@@ -921,15 +953,46 @@ fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
         diagnostic_run_nonce,
         diagnostic_max_events,
     )?;
-    let diagnostic = match (diagnostic_ledger, diagnostic_trial_sequence) {
-        (None, None) => None,
-        (Some(ledger), Some(trial_sequence)) => Some(UdpWorkloadDiagnosticArgs {
-            ledger,
-            trial_sequence: parse_diagnostic_trial_sequence(trial_sequence)?,
-        }),
+    let diagnostic = match (
+        diagnostic_ledger,
+        diagnostic_trial_sequence,
+        diagnostic_source_ip,
+        diagnostic_source_port_first,
+        diagnostic_source_port_last,
+    ) {
+        (None, None, None, None, None) => None,
+        (
+            Some(ledger),
+            Some(trial_sequence),
+            Some(source_ip),
+            Some(source_port_first),
+            Some(source_port_last),
+        ) => {
+            let trial_sequence = parse_diagnostic_trial_sequence(trial_sequence)?;
+            if trial_sequence != UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE {
+                return Err(format!(
+                    "--diagnostic-trial-sequence must be exactly {UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE}"
+                ));
+            }
+            Some(UdpWorkloadDiagnosticArgs {
+                ledger,
+                trial_sequence,
+                source_ip: parse_diagnostic_source_ip(source_ip)?,
+                source_port_first: parse_diagnostic_source_port(
+                    source_port_first,
+                    "--diagnostic-source-port-first",
+                    UDP_DIAGNOSTIC_SOURCE_PORT_FIRST,
+                )?,
+                source_port_last: parse_diagnostic_source_port(
+                    source_port_last,
+                    "--diagnostic-source-port-last",
+                    UDP_DIAGNOSTIC_SOURCE_PORT_LAST,
+                )?,
+            })
+        }
         _ => {
             return Err(
-                "workload UDP diagnostics require all ledger options and --diagnostic-trial-sequence"
+                "workload UDP diagnostics require all ledger, trial-sequence, and fixed source endpoint options"
                     .to_owned(),
             );
         }
@@ -939,6 +1002,9 @@ fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, String> {
             "workload UDP diagnostics are only supported for udp-8192-association-lookup-expiry"
                 .to_owned(),
         );
+    }
+    if diagnostic.is_some() && !target_ip.is_ipv4() {
+        return Err("workload UDP diagnostics require an IPv4 target".to_owned());
     }
     if diagnostic
         .as_ref()
@@ -1293,6 +1359,76 @@ fn connected_udp(address: SocketAddr) -> Result<UdpSocket, String> {
     socket
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|error| format!("set UDP write timeout failed: {error}"))?;
+    Ok(socket)
+}
+
+fn udp_diagnostic_source_endpoint(
+    arguments: &UdpWorkloadDiagnosticArgs,
+    association_index: usize,
+) -> Result<SocketAddr, String> {
+    if association_index >= ASSOCIATIONS {
+        return Err(format!(
+            "diagnostic UDP association index is outside the source range: index={association_index}"
+        ));
+    }
+    let offset = u16::try_from(association_index).map_err(|_| {
+        format!("diagnostic UDP association source offset overflow: index={association_index}")
+    })?;
+    let port = arguments
+        .source_port_first
+        .checked_add(offset)
+        .ok_or_else(|| {
+            format!("diagnostic UDP association source port overflow: index={association_index}")
+        })?;
+    let endpoint = SocketAddr::new(arguments.source_ip, port);
+    if port > arguments.source_port_last {
+        return Err(format!(
+            "diagnostic UDP association source endpoint is outside the fixed range: index={association_index} endpoint={endpoint}"
+        ));
+    }
+    Ok(endpoint)
+}
+
+fn connected_diagnostic_udp(
+    address: SocketAddr,
+    arguments: &UdpWorkloadDiagnosticArgs,
+    association_index: usize,
+) -> Result<UdpSocket, String> {
+    let endpoint = udp_diagnostic_source_endpoint(arguments, association_index)?;
+    let socket = UdpSocket::bind(endpoint).map_err(|error| {
+        format!(
+            "diagnostic UDP association bind failed: index={association_index} endpoint={endpoint} error={error}"
+        )
+    })?;
+    socket.connect(address).map_err(|error| {
+        format!(
+            "diagnostic UDP association connect failed: index={association_index} endpoint={endpoint} target={address} error={error}"
+        )
+    })?;
+    socket
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| {
+            format!(
+                "set diagnostic UDP association read timeout failed: index={association_index} endpoint={endpoint} error={error}"
+            )
+        })?;
+    socket
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| {
+            format!(
+                "set diagnostic UDP association write timeout failed: index={association_index} endpoint={endpoint} error={error}"
+            )
+        })?;
+    let local = socket.local_addr().map_err(|error| {
+        format!(
+            "read diagnostic UDP association local address failed: index={association_index} endpoint={endpoint} error={error}"
+        )
+    })?;
+    if local != endpoint {
+        return Err(format!(
+            "diagnostic UDP association local address mismatch: index={association_index} endpoint={endpoint} actual={local}"
+        ));
+    }
     Ok(socket)
 }
 
@@ -1759,7 +1895,10 @@ impl UdpWorkloadDiagnosticSession {
                 json!({
                     "trial_sequence": arguments.trial_sequence,
                     "scope": UDP_DIAGNOSTIC_SCOPE,
-                    "closure": UDP_WORKLOAD_DIAGNOSTIC_CLOSURE
+                    "closure": UDP_WORKLOAD_DIAGNOSTIC_CLOSURE,
+                    "source_ip": arguments.source_ip.to_string(),
+                    "source_port_first": arguments.source_port_first,
+                    "source_port_last": arguments.source_port_last
                 }),
             )?,
             arguments: arguments.clone(),
@@ -2059,8 +2198,12 @@ fn udp_associations(
         .transpose()?;
     let mut sockets = Vec::with_capacity(ASSOCIATIONS);
     let mut reply = [0_u8; UDP_DIAGNOSTIC_PAYLOAD_LEN];
-    for _ in 0..ASSOCIATIONS {
-        sockets.push(connected_udp(address)?);
+    for association_index in 0..ASSOCIATIONS {
+        sockets.push(if let Some(arguments) = diagnostic_arguments {
+            connected_diagnostic_udp(address, arguments, association_index)?
+        } else {
+            connected_udp(address)?
+        });
     }
     association_round_selected(
         &sockets,
@@ -2905,6 +3048,12 @@ pub(super) fn self_check() -> Result<(), String> {
         OsString::from("16384"),
         OsString::from("--diagnostic-trial-sequence"),
         OsString::from("31"),
+        OsString::from("--diagnostic-source-ip"),
+        OsString::from("198.18.0.2"),
+        OsString::from("--diagnostic-source-port-first"),
+        OsString::from("20000"),
+        OsString::from("--diagnostic-source-port-last"),
+        OsString::from("28191"),
     ]);
     let diagnostic_parsed = parse_workload(&diagnostic_arguments)?;
     let diagnostic = diagnostic_parsed
@@ -2916,6 +3065,9 @@ pub(super) fn self_check() -> Result<(), String> {
         || diagnostic.ledger.run_nonce != 0x0102_0304_0506_0708
         || diagnostic.ledger.max_events != 16_384
         || diagnostic.trial_sequence != 31
+        || diagnostic.source_ip != IpAddr::V4(UDP_DIAGNOSTIC_SOURCE_IPV4)
+        || diagnostic.source_port_first != UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+        || diagnostic.source_port_last != UDP_DIAGNOSTIC_SOURCE_PORT_LAST
     {
         return Err("Windows TUN workload diagnostic arguments were not preserved".to_owned());
     }
@@ -2937,12 +3089,58 @@ pub(super) fn self_check() -> Result<(), String> {
     oversized_events_diagnostic[15] = OsString::from((UDP_DIAGNOSTIC_MAX_EVENTS + 1).to_string());
     let mut zero_trial_diagnostic = diagnostic_arguments.clone();
     zero_trial_diagnostic[17] = OsString::from("0");
+    let mut wrong_trial_diagnostic = diagnostic_arguments.clone();
+    wrong_trial_diagnostic[17] = OsString::from("30");
+    let mut wrong_source_ip_diagnostic = diagnostic_arguments.clone();
+    wrong_source_ip_diagnostic[19] = OsString::from("198.18.0.3");
+    let mut wrong_source_port_first_diagnostic = diagnostic_arguments.clone();
+    wrong_source_port_first_diagnostic[21] = OsString::from("20001");
+    let mut wrong_source_port_last_diagnostic = diagnostic_arguments.clone();
+    wrong_source_port_last_diagnostic[23] = OsString::from("28190");
     if parse_workload(&zero_nonce_diagnostic).is_ok()
         || parse_workload(&noncanonical_nonce_diagnostic).is_ok()
         || parse_workload(&oversized_events_diagnostic).is_ok()
         || parse_workload(&zero_trial_diagnostic).is_ok()
+        || parse_workload(&wrong_trial_diagnostic).is_ok()
+        || parse_workload(&wrong_source_ip_diagnostic).is_ok()
+        || parse_workload(&wrong_source_port_first_diagnostic).is_ok()
+        || parse_workload(&wrong_source_port_last_diagnostic).is_ok()
     {
         return Err("invalid Windows TUN workload diagnostic bounds were accepted".to_owned());
+    }
+    for option_index in [18_usize, 20, 22] {
+        let mut missing_source_option = diagnostic_arguments.clone();
+        missing_source_option.drain(option_index..(option_index + 2));
+        if parse_workload(&missing_source_option).is_ok() {
+            return Err(
+                "incomplete Windows TUN workload diagnostic source options were accepted"
+                    .to_owned(),
+            );
+        }
+    }
+    let mut canonical_with_diagnostic_source = arguments.clone();
+    canonical_with_diagnostic_source.extend([
+        OsString::from("--diagnostic-source-ip"),
+        OsString::from("198.18.0.2"),
+        OsString::from("--diagnostic-source-port-first"),
+        OsString::from("20000"),
+        OsString::from("--diagnostic-source-port-last"),
+        OsString::from("28191"),
+    ]);
+    if parse_workload(&canonical_with_diagnostic_source).is_ok() {
+        return Err("canonical Windows TUN workload accepted diagnostic source options".to_owned());
+    }
+    if usize::from(UDP_DIAGNOSTIC_SOURCE_PORT_LAST - UDP_DIAGNOSTIC_SOURCE_PORT_FIRST + 1)
+        != ASSOCIATIONS
+        || udp_diagnostic_source_endpoint(diagnostic, 0)?
+            != "198.18.0.2:20000".parse().expect("literal")
+        || udp_diagnostic_source_endpoint(diagnostic, 85)?
+            != "198.18.0.2:20085".parse().expect("literal")
+        || udp_diagnostic_source_endpoint(diagnostic, ASSOCIATIONS - 1)?
+            != "198.18.0.2:28191".parse().expect("literal")
+        || udp_diagnostic_source_endpoint(diagnostic, ASSOCIATIONS).is_ok()
+    {
+        return Err("Windows TUN UDP diagnostic source endpoint mapping is invalid".to_owned());
     }
     let mut relative_ledger_diagnostic = diagnostic_arguments.clone();
     relative_ledger_diagnostic[11] = OsString::from("workload-flow.ndjson");
@@ -3354,6 +3552,9 @@ pub(super) fn self_check() -> Result<(), String> {
             max_events: 3,
         },
         trial_sequence: diagnostic_identity.trial_sequence,
+        source_ip: IpAddr::V4(UDP_DIAGNOSTIC_SOURCE_IPV4),
+        source_port_first: UDP_DIAGNOSTIC_SOURCE_PORT_FIRST,
+        source_port_last: UDP_DIAGNOSTIC_SOURCE_PORT_LAST,
     };
     let failed_flow = UdpWorkloadDiagnosticSession::create(&failed_flow_arguments)?;
     failed_flow.record_flow(
@@ -3374,7 +3575,7 @@ pub(super) fn self_check() -> Result<(), String> {
     );
     failed_flow.record_flow(
         diagnostic_identity,
-        Some("198.18.0.2:54321".parse().expect("literal")),
+        Some("198.18.0.2:20085".parse().expect("literal")),
         Some("192.0.2.10:53".parse().expect("literal")),
         UdpWorkloadFlowOutcome {
             send_result: "success",
@@ -3386,13 +3587,14 @@ pub(super) fn self_check() -> Result<(), String> {
         },
     );
     let unobserved_identity = UdpDiagnosticPayload {
+        association_index: diagnostic_identity.association_index + 1,
         packet_nonce: diagnostic_identity.packet_nonce + 1,
         ..diagnostic_identity
     };
     failed_flow.record_not_observed(&UdpWorkloadDiagnosticRequest {
         identity: unobserved_identity,
         payload: unobserved_identity.encode(),
-        local: Some("198.18.0.2:54322".parse().expect("literal")),
+        local: Some("198.18.0.2:20086".parse().expect("literal")),
         target: Some("192.0.2.10:53".parse().expect("literal")),
         sent: UDP_DIAGNOSTIC_PAYLOAD_LEN,
     });
@@ -3410,13 +3612,17 @@ pub(super) fn self_check() -> Result<(), String> {
         || failed_flow_records[0]["schema"] != UDP_WORKLOAD_LEDGER_SCHEMA
         || failed_flow_records[0]["scope"] != UDP_DIAGNOSTIC_SCOPE
         || failed_flow_records[0]["closure"] != UDP_WORKLOAD_DIAGNOSTIC_CLOSURE
+        || failed_flow_records[0]["source_ip"] != UDP_DIAGNOSTIC_SOURCE_IPV4.to_string()
+        || failed_flow_records[0]["source_port_first"] != UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+        || failed_flow_records[0]["source_port_last"] != UDP_DIAGNOSTIC_SOURCE_PORT_LAST
         || failed_flow_records[1]["phase"] != "bootstrap"
         || failed_flow_records[1]["association_index"] != 85
-        || failed_flow_records[1]["workload_local_port"] != 54321
+        || failed_flow_records[1]["workload_local_port"] != 20085
         || failed_flow_records[1]["reply_result"] != "timeout"
         || failed_flow_records[1]["payload_match"] != false
         || failed_flow_records[2]["packet_nonce"].as_str() != Some(unobserved_packet_nonce.as_str())
-        || failed_flow_records[2]["workload_local_port"] != 54322
+        || failed_flow_records[2]["association_index"] != 86
+        || failed_flow_records[2]["workload_local_port"] != 20086
         || failed_flow_records[2]["send_result"] != "success"
         || failed_flow_records[2]["reply_result"] != "not_observed"
         || failed_flow_records[2]["reply_source_ip"] != Value::Null
@@ -3434,6 +3640,9 @@ pub(super) fn self_check() -> Result<(), String> {
             max_events: 2,
         },
         trial_sequence: diagnostic_identity.trial_sequence,
+        source_ip: IpAddr::V4(UDP_DIAGNOSTIC_SOURCE_IPV4),
+        source_port_first: UDP_DIAGNOSTIC_SOURCE_PORT_FIRST,
+        source_port_last: UDP_DIAGNOSTIC_SOURCE_PORT_LAST,
     };
     let server_a = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
         .map_err(|error| format!("bind first diagnostic batch server failed: {error}"))?;
