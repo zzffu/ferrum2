@@ -238,6 +238,7 @@ fn usage_errors_exit_two_without_starting_run_mode() {
 fn valid_run_mode_bind_failure_exits_one() {
     let directory = tempfile::tempdir().expect("temporary directory");
     for binary in ["ferrum2-client", "ferrum2-server"] {
+        let network_root_offset = u64::from(binary == "ferrum2-client" && cfg!(windows));
         let (_occupied, listen) = reserve_loopback();
         let (config, configured_endpoints) = match binary {
             "ferrum2-client" => {
@@ -261,12 +262,13 @@ fn valid_run_mode_bind_failure_exits_one() {
             binary,
             &output.stderr,
             &config,
-            ("socks", 0),
-            0,
+            ("socks", network_root_offset),
+            network_root_offset as i64,
             &configured_endpoints,
         );
     }
     for binary in ["ferrum2-client", "ferrum2-server"] {
+        let network_root_offset = u64::from(binary == "ferrum2-client" && cfg!(windows));
         let proxy = unused_loopback();
         let (_occupied_metrics, metrics) = reserve_loopback();
         let (config, configured_endpoints) = if binary == "ferrum2-client" {
@@ -289,8 +291,8 @@ fn valid_run_mode_bind_failure_exits_one() {
             binary,
             &output.stderr,
             &config,
-            ("metrics", 1),
-            1,
+            ("metrics", network_root_offset + 1),
+            network_root_offset as i64 + 1,
             &configured_endpoints,
         );
         std::net::TcpListener::bind(proxy).expect("prepared proxy rolled back");

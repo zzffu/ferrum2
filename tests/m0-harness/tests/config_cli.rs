@@ -213,7 +213,10 @@ fn parse_client_startup_bind_report(
     );
     assert_eq!(
         report["root"],
-        serde_json::json!({"name": "socks", "id": 0}),
+        serde_json::json!({
+            "name": "socks",
+            "id": u64::from(cfg!(windows)),
+        }),
         "{context} failed root"
     );
     assert!(report["root_exit_category"].is_null(), "{context}");

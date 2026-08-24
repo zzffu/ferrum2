@@ -91,9 +91,9 @@ impl GenerationTable {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UdpFiltering {
     /// Accept responses only from an IP address explicitly authorized after send.
-    #[default]
     AddressDependent,
     /// Accept responses from any valid same-family unicast endpoint.
+    #[default]
     EndpointIndependent,
 }
 
@@ -1654,6 +1654,11 @@ mod tests {
             }),
         );
         (table, candidates, wakes)
+    }
+
+    #[test]
+    fn udp_filtering_defaults_to_endpoint_independent() {
+        assert_eq!(UdpFiltering::default(), UdpFiltering::EndpointIndependent);
     }
 
     async fn commit(
