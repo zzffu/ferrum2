@@ -2915,12 +2915,19 @@ fn udp_datagram_from_parsed(
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+struct OutputSlot {
+    len: usize,
+    bytes: Vec<u8>,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct MemoryDevice {
     ingress: [PacketSlot; INGRESS_SLOTS],
     ingress_head: usize,
     ingress_len: usize,
-    output: Box<[u8]>,
-    output_len: usize,
+    output: Box<[OutputSlot]>,
+    output_head: usize,
+    output_count: usize,
     validator: PacketValidator,
     validated_output: usize,
     rejected_output: usize,
@@ -2929,7 +2936,13 @@ struct MemoryDevice {
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl MemoryDevice {
+    #[cfg(test)]
     fn new(mtu: usize, families: Families) -> Self {
+        Self::with_output_slots(mtu, families, 1)
+    }
+
+    fn with_output_slots(mtu: usize, families: Families, output_slots: usize) -> Self {
+        assert!(output_slots != 0, "memory device needs an output slot");
         Self {
             ingress: std::array::from_fn(|_| PacketSlot {
                 len: 0,
@@ -2939,8 +2952,15 @@ impl MemoryDevice {
             }),
             ingress_head: 0,
             ingress_len: 0,
-            output: vec![0_u8; mtu].into_boxed_slice(),
-            output_len: 0,
+            output: std::iter::repeat_with(|| OutputSlot {
+                len: 0,
+                bytes: Vec::new(),
+            })
+            .take(output_slots)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+            output_head: 0,
+            output_count: 0,
             validator: PacketValidator::with_families(mtu, families),
             validated_output: 0,
             rejected_output: 0,
@@ -2967,7 +2987,35 @@ impl MemoryDevice {
     }
 
     fn has_output(&self) -> bool {
-        self.output_len != 0
+        self.output_count != 0
+    }
+
+    fn output_tail_index(&self) -> Option<usize> {
+        (self.output_count != self.output.len())
+            .then(|| (self.output_head + self.output_count) % self.output.len())
+    }
+
+    fn prepare_output_slot(&mut self, index: usize) {
+        let slot = &mut self.output[index];
+        slot.len = 0;
+        if slot.bytes.len() != self.validator.mtu {
+            slot.bytes.resize(self.validator.mtu, 0);
+        }
+    }
+
+    fn front_output(&self) -> Option<&[u8]> {
+        let slot = self.output.get(self.output_head)?;
+        (self.output_count != 0).then_some(&slot.bytes[..slot.len])
+    }
+
+    fn pop_output(&mut self) {
+        assert!(self.output_count != 0, "output queue is not empty");
+        self.output[self.output_head].len = 0;
+        self.output_head = (self.output_head + 1) % self.output.len();
+        self.output_count -= 1;
+        if self.output_count == 0 {
+            self.output_head = 0;
+        }
     }
 
     fn clear_session_buffers(&mut self) {
@@ -2979,11 +3027,15 @@ impl MemoryDevice {
         }
         self.ingress_head = 0;
         self.ingress_len = 0;
-        self.output_len = 0;
+        for slot in &mut self.output {
+            slot.len = 0;
+        }
+        self.output_head = 0;
+        self.output_count = 0;
     }
 
     fn dequeue_index(&mut self) -> Option<usize> {
-        if self.ingress_len == 0 || self.output_len != 0 {
+        if self.ingress_len == 0 || self.output_count != 0 {
             return None;
         }
         let index = self.ingress_head;
@@ -2997,16 +3049,16 @@ impl MemoryDevice {
         &mut self,
         send: impl FnOnce(&[u8]) -> OutputSendOutcome,
     ) -> OutputFlushOutcome {
-        if self.output_len == 0 {
+        let Some(packet) = self.front_output() else {
             return OutputFlushOutcome::Empty;
-        }
-        match send(&self.output[..self.output_len]) {
+        };
+        match send(packet) {
             OutputSendOutcome::Sent => {
-                self.output_len = 0;
+                self.pop_output();
                 OutputFlushOutcome::Sent
             }
             OutputSendOutcome::DroppedRingFull => {
-                self.output_len = 0;
+                self.pop_output();
                 OutputFlushOutcome::DroppedRingFull
             }
             OutputSendOutcome::Fatal => OutputFlushOutcome::Fatal,
@@ -3014,17 +3066,24 @@ impl MemoryDevice {
     }
 
     fn inject_udp_response(&mut self, tuple: UdpTuple, payload: &[u8]) -> UdpInjectOutcome {
-        if self.output_len != 0 {
+        if self.output_count != 0 {
             return UdpInjectOutcome::Backpressured;
         }
-        let length = match write_udp_response(&mut self.output, tuple, payload) {
+        let index = self
+            .output_tail_index()
+            .expect("empty output queue has a writable slot");
+        self.prepare_output_slot(index);
+        let length = match write_udp_response(&mut self.output[index].bytes, tuple, payload) {
             Ok(length) => length,
             Err(reason) => {
                 self.rejected_output += 1;
                 return UdpInjectOutcome::Rejected(map_packet_reject(reason));
             }
         };
-        match self.validator.parse_ingress(&self.output[..length]) {
+        match self
+            .validator
+            .parse_ingress(&self.output[index].bytes[..length])
+        {
             Ok(ParsedPacket::Complete(_)) => {}
             Ok(ParsedPacket::Fragment(_)) => {
                 self.rejected_output += 1;
@@ -3036,7 +3095,8 @@ impl MemoryDevice {
             }
         }
         self.validated_output += 1;
-        self.output_len = length;
+        self.output[index].len = length;
+        self.output_count = 1;
         UdpInjectOutcome::Injected
     }
 
@@ -3048,11 +3108,15 @@ impl MemoryDevice {
         now_millis: i64,
         limiter: &mut ControlRateLimiter,
     ) -> bool {
-        if self.output_len != 0 {
+        if self.output_count != 0 {
             return false;
         }
+        let index = self
+            .output_tail_index()
+            .expect("empty output queue has a writable slot");
+        self.prepare_output_slot(index);
         let Some(length) = write_local_control_error(
-            &mut self.output,
+            &mut self.output[index].bytes,
             original,
             context,
             kind,
@@ -3063,7 +3127,8 @@ impl MemoryDevice {
         if !limiter.allow(now_millis) {
             return false;
         }
-        self.output_len = length;
+        self.output[index].len = length;
+        self.output_count = 1;
         true
     }
 }
@@ -3209,8 +3274,8 @@ struct MemoryTx<'a> {
     validator: PacketValidator,
     validated_output: &'a mut usize,
     rejected_output: &'a mut usize,
-    output: &'a mut [u8],
-    output_len: &'a mut usize,
+    output: &'a mut OutputSlot,
+    output_count: &'a mut usize,
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
@@ -3219,14 +3284,19 @@ impl TxToken for MemoryTx<'_> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        assert!(len <= self.output.len(), "stack exceeded validated MTU");
-        self.output[..len].fill(0);
-        let result = f(&mut self.output[..len]);
-        if self.validator.accepts(&self.output[..len]) {
+        assert!(
+            len <= self.output.bytes.len(),
+            "stack exceeded validated MTU"
+        );
+        self.output.bytes[..len].fill(0);
+        let result = f(&mut self.output.bytes[..len]);
+        if self.validator.accepts(&self.output.bytes[..len]) {
             *self.validated_output += 1;
-            *self.output_len = len;
+            self.output.len = len;
+            *self.output_count += 1;
         } else {
             *self.rejected_output += 1;
+            self.output.len = 0;
         }
         result
     }
@@ -3239,25 +3309,31 @@ impl Device for MemoryDevice {
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let index = self.dequeue_index()?;
+        let output_index = self
+            .output_tail_index()
+            .expect("ingress starts with an empty output queue");
+        self.prepare_output_slot(output_index);
         Some((
             MemoryRx(&self.ingress[index]),
             MemoryTx {
                 validator: self.validator,
                 validated_output: &mut self.validated_output,
                 rejected_output: &mut self.rejected_output,
-                output: &mut self.output,
-                output_len: &mut self.output_len,
+                output: &mut self.output[output_index],
+                output_count: &mut self.output_count,
             },
         ))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        (self.output_len == 0).then_some(MemoryTx {
+        let output_index = self.output_tail_index()?;
+        self.prepare_output_slot(output_index);
+        Some(MemoryTx {
             validator: self.validator,
             validated_output: &mut self.validated_output,
             rejected_output: &mut self.rejected_output,
-            output: &mut self.output,
-            output_len: &mut self.output_len,
+            output: &mut self.output[output_index],
+            output_count: &mut self.output_count,
         })
     }
 
@@ -3364,7 +3440,8 @@ impl Stack {
         if !families.ipv4 && !families.ipv6 {
             return Err(());
         }
-        let mut device = MemoryDevice::new(mtu, families);
+        let output_slots = max_tcp_flows.checked_add(1).ok_or(())?;
+        let mut device = MemoryDevice::with_output_slots(mtu, families, output_slots);
         let mut interface = Interface::new(
             InterfaceConfig::new(HardwareAddress::Ip),
             &mut device,
@@ -3953,15 +4030,18 @@ impl Stack {
 
     fn poll_stack_once(&mut self, now: Instant) -> StackPollOutcome {
         let foundation_before = self.device.foundation_input;
+        let output_was_empty = !self.device.has_output();
         let ingress = self
             .interface
             .poll_ingress_single(now, &mut self.device, &mut self.sockets);
         let mut worked = ingress != PollIngressSingleResult::None;
         worked |= self.drive_tcp();
-        worked |= self
-            .interface
-            .poll_egress(now, &mut self.device, &mut self.sockets)
-            != PollResult::None;
+        if output_was_empty {
+            worked |= self
+                .interface
+                .poll_egress(now, &mut self.device, &mut self.sockets)
+                != PollResult::None;
+        }
         worked |= self.reap_tcp() != 0;
         let foundation_dropped = self.device.foundation_input - foundation_before;
         self.foundation_dropped += foundation_dropped;
@@ -4112,7 +4192,7 @@ impl Stack {
     }
 
     fn pending_tcp_fin_generation(&self) -> Option<GenerationId> {
-        let packet = &self.device.output[..self.device.output_len];
+        let packet = self.device.front_output()?;
         let Ok(ParsedPacket::Complete(parsed)) = self.device.validator.parse_ingress(packet) else {
             return None;
         };
@@ -4260,12 +4340,13 @@ mod tests {
     use super::{
         Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NetworkChangeTransition,
         NetworkResetBridgeOutcome, NetworkResetHealthDisposition, NetworkResetRequest,
-        OutputFlushOutcome, OutputSendOutcome, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread,
-        OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent,
-        TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering,
-        UdpPeerAuthorization, UdpResponseDropReason, UdpTuple, classify_network_change,
-        classify_network_reset_health, classify_network_reset_refresh_error, finish_stack_setup,
-        map_managed_state_damage, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
+        OutputFlushOutcome, OutputSendOutcome, OutputSlot, OwnerControl, OwnerExit, OwnerRegistry,
+        OwnerThread, OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack,
+        TunEvent, TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering,
+        UdpInjectOutcome, UdpPeerAuthorization, UdpResponseDropReason, UdpTuple,
+        classify_network_change, classify_network_reset_health,
+        classify_network_reset_refresh_error, finish_stack_setup, map_managed_state_damage,
+        map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
 
     #[tokio::test]
@@ -4527,6 +4608,78 @@ mod tests {
         assert!(
             device.has_output(),
             "fatal send preserves evidence for cleanup"
+        );
+    }
+
+    #[test]
+    fn output_wave_is_packet_bounded_and_preserves_fifo_send_outcomes() {
+        const OUTPUT_SLOTS: usize = 3;
+        let mut device = MemoryDevice::with_output_slots(1_420, Families::DUAL, OUTPUT_SLOTS);
+        let packets = (0..OUTPUT_SLOTS)
+            .map(|offset| {
+                ipv4_tcp_from_source_port(10_000 + u16::try_from(offset).expect("test port offset"))
+            })
+            .collect::<Vec<_>>();
+
+        for packet in &packets {
+            device
+                .transmit(Instant::ZERO)
+                .expect("bounded output slot")
+                .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
+        }
+        assert!(
+            device.transmit(Instant::ZERO).is_none(),
+            "the packet-count bound is exact"
+        );
+        assert_eq!(device.output_count, OUTPUT_SLOTS);
+        assert_eq!(device.front_output(), Some(packets[0].as_slice()));
+
+        let tuple = UdpTuple::new(
+            "198.18.0.1:10000".parse().expect("local"),
+            "192.0.2.1:53".parse().expect("remote"),
+        );
+        assert_eq!(
+            device.inject_udp_response(tuple, b"deferred"),
+            UdpInjectOutcome::Backpressured,
+            "UDP keeps its response while a TCP wave is queued"
+        );
+        assert_eq!(
+            device.flush_output(|packet| {
+                assert_eq!(packet, packets[0]);
+                OutputSendOutcome::DroppedRingFull
+            }),
+            OutputFlushOutcome::DroppedRingFull
+        );
+        assert_eq!(device.output_count, 2);
+        assert_eq!(device.front_output(), Some(packets[1].as_slice()));
+        assert_eq!(
+            device.flush_output(|packet| {
+                assert_eq!(packet, packets[1]);
+                OutputSendOutcome::Sent
+            }),
+            OutputFlushOutcome::Sent
+        );
+        assert_eq!(device.output_count, 1);
+        assert_eq!(
+            device.flush_output(|packet| {
+                assert_eq!(packet, packets[2]);
+                OutputSendOutcome::Fatal
+            }),
+            OutputFlushOutcome::Fatal
+        );
+        assert_eq!(
+            device.front_output(),
+            Some(packets[2].as_slice()),
+            "fatal send retains the exact head packet"
+        );
+        assert_eq!(
+            device.flush_output(|_| OutputSendOutcome::Sent),
+            OutputFlushOutcome::Sent
+        );
+        assert_eq!(
+            device.inject_udp_response(tuple, b"released"),
+            UdpInjectOutcome::Injected,
+            "the same UDP path resumes only after the TCP wave drains"
         );
     }
 
@@ -4826,25 +4979,28 @@ mod tests {
 
         let mut accepted = 0;
         let mut rejected = 0;
-        let mut output_len = 0;
-        let mut output = vec![0_u8; packet.len().max(1)];
+        let mut output_count = 0;
+        let mut output = OutputSlot {
+            len: 0,
+            bytes: vec![0_u8; packet.len().max(1)],
+        };
         MemoryTx {
             validator,
             validated_output: &mut accepted,
             rejected_output: &mut rejected,
             output: &mut output,
-            output_len: &mut output_len,
+            output_count: &mut output_count,
         }
         .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
         assert_eq!(accepted, usize::from(expected), "egress accept {name}");
         assert_eq!(rejected, usize::from(!expected), "egress reject {name}");
         assert_eq!(
-            output_len,
-            if expected { packet.len() } else { 0 },
-            "egress length {name}"
+            output_count,
+            usize::from(expected),
+            "egress packet count {name}"
         );
         if expected {
-            assert_eq!(&output[..output_len], packet, "egress bytes {name}");
+            assert_eq!(&output.bytes[..output.len], packet, "egress bytes {name}");
         }
     }
 
@@ -5834,6 +5990,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tcp_egress_wave_reaches_every_ready_flow_before_starting_another_wave() {
+        const FLOW_TOTAL: usize = 20;
+        const BUFFER_BYTES: usize = 16 * 1024;
+        let (mut stack, mut flows) = Stack::new(
+            (
+                Ipv4Addr::new(198, 18, 0, 2),
+                30,
+                Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+                126,
+            ),
+            1420,
+            FLOW_TOTAL,
+            BUFFER_BYTES,
+            Duration::from_secs(60),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .expect("multi-flow egress stack");
+        let mut application_flows = Vec::with_capacity(FLOW_TOTAL);
+        for offset in 0..FLOW_TOTAL {
+            let (flow, _) = establish_ipv4_tcp_flow(
+                &mut stack,
+                &mut flows,
+                10_000 + u16::try_from(offset).expect("test port offset"),
+                i64::try_from(offset * 2).expect("test time"),
+            );
+            application_flows.push(flow);
+        }
+
+        let outbound = vec![0x5a; BUFFER_BYTES];
+        for flow in &mut application_flows {
+            flow.write_all(&outbound)
+                .await
+                .expect("fill every application bridge");
+        }
+        stack.next_flow_cursor = Some(0);
+        assert!(stack.drive_tcp(), "first bridge quantum reaches 16 flows");
+        assert!(
+            stack.drive_tcp(),
+            "second bridge quantum reaches tail flows"
+        );
+        assert!(
+            stack
+                .flows
+                .iter()
+                .flatten()
+                .all(|entry| entry.owner.stack_buffered() == 0),
+            "every application bridge reaches its smoltcp socket"
+        );
+        assert!(!stack.has_output());
+
+        let validated_before = stack.validated_egress_packets();
+        assert!(
+            stack.poll_stack_once(Instant::from_millis(100)).worked,
+            "one empty-queue poll builds an egress wave"
+        );
+        assert_eq!(
+            stack.device.output_count, FLOW_TOTAL,
+            "one smoltcp pass emits at most one packet for every ready socket"
+        );
+        assert_eq!(
+            stack.validated_egress_packets() - validated_before,
+            FLOW_TOTAL
+        );
+
+        let mut destination_ports = Vec::with_capacity(FLOW_TOTAL);
+        assert_eq!(
+            stack.flush_output(|packet| {
+                destination_ports.push(u16::from_be_bytes([packet[22], packet[23]]));
+                OutputSendOutcome::Sent
+            }),
+            OutputFlushOutcome::Sent
+        );
+        let validated_during_wave = stack.validated_egress_packets();
+        let _ = stack.poll_stack_once(Instant::from_millis(101));
+        assert_eq!(
+            stack.validated_egress_packets(),
+            validated_during_wave,
+            "a partially drained wave cannot grow from the fixed socket scan origin"
+        );
+        assert_eq!(stack.device.output_count, FLOW_TOTAL - 1);
+
+        while stack.has_output() {
+            assert_eq!(
+                stack.flush_output(|packet| {
+                    destination_ports.push(u16::from_be_bytes([packet[22], packet[23]]));
+                    OutputSendOutcome::Sent
+                }),
+                OutputFlushOutcome::Sent
+            );
+        }
+        destination_ports.sort_unstable();
+        assert_eq!(
+            destination_ports,
+            (10_000..10_000 + u16::try_from(FLOW_TOTAL).expect("flow total")).collect::<Vec<_>>(),
+            "the first bounded wave reaches every flow exactly once"
+        );
+    }
+
+    #[tokio::test]
     async fn tcp_drive_alternates_rx_and_tx_at_the_262144_byte_buffer_limit() {
         const BUFFER_BYTES: usize = 262_144;
         const PAYLOAD_BYTES: usize = 1300;
@@ -6588,7 +6843,10 @@ mod tests {
             super::UdpAdmission::Dropped
         );
         let candidate = candidates.try_recv().expect("old-generation candidate");
-        stack.device.output_len = 1;
+        assert_eq!(
+            stack.device.inject_udp_response(tuple, b"response"),
+            UdpInjectOutcome::Injected
+        );
         assert!(stack.pending() != 0 && stack.has_output());
 
         assert_eq!(stack.quiesce(8, UdpResponseDropReason::SessionReset), 1);
