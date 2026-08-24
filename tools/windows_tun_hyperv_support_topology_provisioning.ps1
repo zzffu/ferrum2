@@ -579,11 +579,11 @@ function Get-ValidatedSupportVmAdapter {
     $support = @($adapters | Where-Object { [string]$_.Id -ieq $SupportAdapterId })
     $expectedVirtualSystemIdentifiers = @($VirtualSystemIdentifiers | ForEach-Object {
         $_.ToString("D")
-    })
+    } | Sort-Object)
     $actualVirtualSystemIdentifiers = if ($support.Count -eq 1) {
         @($support[0].VirtualSystemIdentifiers | ForEach-Object {
             (ConvertTo-CanonicalGuid -Value $_ -Label "support VM adapter identifier")
-        })
+        } | Sort-Object)
     } else {
         @()
     }
