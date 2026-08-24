@@ -1039,6 +1039,7 @@ pub trait DirectUdpPacketHandler: Send + Sync + 'static {
 pub struct DirectUdpSessionAdmission<S> {
     session: PendingUdpSession,
     first_datagram: PendingUdpDatagram,
+    initial_candidates: Option<Vec<SocketAddr>>,
     socket: S,
     socket_guard: OwnerGuard,
     owner_slot: OwnedSemaphorePermit,
@@ -1048,6 +1049,12 @@ impl<S> fmt::Debug for DirectUdpSessionAdmission<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DirectUdpSessionAdmission([redacted])")
     }
+}
+
+struct DirectUdpSessionRoot<S> {
+    socket: S,
+    handle: UdpSessionHandle,
+    initial_candidates: Option<Vec<SocketAddr>>,
 }
 
 struct DirectOwnerLifetime {
@@ -1184,6 +1191,54 @@ where
         open_context: F::OpenContext,
         selection_destination: SocketAddr,
     ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
+        self.reserve_session_inner(
+            now,
+            first_allocated_capacity,
+            open_context,
+            selection_destination,
+            None,
+        )
+        .await
+    }
+
+    /// Reserves a session whose first domain target was already resolved for socket selection.
+    ///
+    /// The bounded candidate set is retained through commit and used for the first datagram,
+    /// keeping the socket's selected interface and its first transmission on one resolution
+    /// snapshot. Later domain datagrams continue to resolve normally.
+    pub async fn reserve_session_with_initial_candidates(
+        &mut self,
+        now: Instant,
+        first_allocated_capacity: usize,
+        open_context: F::OpenContext,
+        initial_candidates: Vec<SocketAddr>,
+    ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
+        let initial_candidates: Vec<_> = initial_candidates
+            .into_iter()
+            .take(MAX_UDP_RESOLVED_CANDIDATES)
+            .collect();
+        let selection_destination = initial_candidates
+            .first()
+            .copied()
+            .ok_or(UdpRuntimeError::Resolve)?;
+        self.reserve_session_inner(
+            now,
+            first_allocated_capacity,
+            open_context,
+            selection_destination,
+            Some(initial_candidates),
+        )
+        .await
+    }
+
+    async fn reserve_session_inner(
+        &mut self,
+        now: Instant,
+        first_allocated_capacity: usize,
+        open_context: F::OpenContext,
+        selection_destination: SocketAddr,
+        initial_candidates: Option<Vec<SocketAddr>>,
+    ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
         while self.tasks.try_join_next().is_some() {}
         let session = self.manager.reserve_session(now)?;
         let owner_slot = Arc::clone(&self.owner_slots)
@@ -1200,6 +1255,7 @@ where
         Ok(DirectUdpSessionAdmission {
             session,
             first_datagram,
+            initial_candidates,
             socket,
             socket_guard,
             owner_slot,
@@ -1279,6 +1335,7 @@ where
         let DirectUdpSessionAdmission {
             session,
             first_datagram,
+            initial_candidates,
             socket,
             socket_guard,
             owner_slot,
@@ -1300,8 +1357,11 @@ where
                 manager.clone(),
                 resolver,
                 handler,
-                socket,
-                handle,
+                DirectUdpSessionRoot {
+                    socket,
+                    handle,
+                    initial_candidates,
+                },
                 connect_timeout,
                 registry,
             )
@@ -1418,8 +1478,7 @@ async fn run_direct_session<R, H, S>(
     manager: UdpSessionManager,
     resolver: Arc<R>,
     handler: Arc<H>,
-    socket: S,
-    handle: UdpSessionHandle,
+    session: DirectUdpSessionRoot<S>,
     connect_timeout: Duration,
     registry: OwnerRegistry,
 ) -> Result<(), UdpRuntimeError>
@@ -1429,6 +1488,11 @@ where
     H: DirectUdpPacketHandler,
     S: DirectUdpSocket,
 {
+    let DirectUdpSessionRoot {
+        socket,
+        handle,
+        mut initial_candidates,
+    } = session;
     let mut cancellation = manager.cancellation(handle)?;
     let notify = manager.notify(handle)?;
     let mut candidate_hints = UdpAssociationCandidateHints::default();
@@ -1440,6 +1504,7 @@ where
                 &mut candidate_hints,
                 request.datagram(),
                 connect_timeout,
+                initial_candidates.take(),
             )
             .await?;
         }
@@ -1458,6 +1523,7 @@ where
                         &mut candidate_hints,
                         request.datagram(),
                         connect_timeout,
+                        initial_candidates.take(),
                     )
                     .await?;
                 }
@@ -1533,6 +1599,7 @@ async fn send_direct<R, S>(
     candidate_hints: &mut UdpAssociationCandidateHints,
     datagram: &Datagram,
     timeout: Duration,
+    initial_candidates: Option<Vec<SocketAddr>>,
 ) -> Result<(), UdpRuntimeError>
 where
     R: UdpResolver,
@@ -1548,7 +1615,11 @@ where
         return Err(UdpRuntimeError::Resolve);
     };
     let port = datagram.target().port().get();
-    let candidates = resolve_candidates(resolver, host, port, deadline).await?;
+    let candidates = match initial_candidates {
+        Some(candidates) if !candidates.is_empty() => candidates,
+        Some(_) => return Err(UdpRuntimeError::Resolve),
+        None => resolve_candidates(resolver, host, port, deadline).await?,
+    };
     let start_index = candidate_hints.start_index(host, port);
     match send_candidates(
         socket,

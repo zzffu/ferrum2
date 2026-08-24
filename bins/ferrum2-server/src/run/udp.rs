@@ -1119,17 +1119,17 @@ where
                 continue;
             };
             let selection_target = pending.datagram().target().clone();
-            let selection_destination = tokio::select! {
+            let initial_candidates = tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
-                selection = resolve_udp_selection_destination(
+                selection = resolve_udp_selection_candidates(
                     &session_resolver,
                     &selection_target,
                     connect_timeout,
                 ) => selection,
             };
-            let selection_destination = match selection_destination {
-                Ok(destination) => destination,
+            let initial_candidates = match initial_candidates {
+                Ok(candidates) => candidates,
                 Err(error) => {
                     record_udp_runtime_failure(&metrics, error);
                     continue;
@@ -1156,11 +1156,11 @@ where
             let provisional = tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
-                provisional = runtime.reserve_session(
+                provisional = runtime.reserve_session_with_initial_candidates(
                     tokio::time::Instant::now(),
                     pending.datagram().allocated_capacity(),
                     open_context,
-                    selection_destination,
+                    initial_candidates,
                 ) => provisional,
             };
             let provisional = match provisional {
@@ -1372,17 +1372,17 @@ where
     mappings.reconcile_runtime(runtime.sessions());
 }
 
-async fn resolve_udp_selection_destination<R>(
+async fn resolve_udp_selection_candidates<R>(
     resolver: &R,
     target: &TargetAddr,
     timeout: std::time::Duration,
-) -> Result<SocketAddr, UdpRuntimeError>
+) -> Result<Vec<SocketAddr>, UdpRuntimeError>
 where
     R: UdpResolver,
     <R::Candidates as IntoIterator>::IntoIter: Send,
 {
     if let Some(destination) = target.as_socket_addr() {
-        return Ok(destination);
+        return Ok(vec![destination]);
     }
     let TargetHostRef::Domain(host) = target.host() else {
         return Err(UdpRuntimeError::Resolve);
@@ -1391,11 +1391,15 @@ where
         .await
         .map_err(|_| UdpRuntimeError::Resolve)?
         .map_err(|_| UdpRuntimeError::Resolve)?;
-    candidates
+    let candidates: Vec<_> = candidates
         .into_iter()
         .take(MAX_UDP_RESOLVED_CANDIDATES)
-        .next()
-        .ok_or(UdpRuntimeError::Resolve)
+        .collect();
+    if candidates.is_empty() {
+        Err(UdpRuntimeError::Resolve)
+    } else {
+        Ok(candidates)
+    }
 }
 
 fn select_udp_route(

@@ -938,6 +938,86 @@ async fn direct_socket_factory_receives_explicit_context_and_first_concrete_dest
 }
 
 #[tokio::test]
+async fn initial_candidates_select_socket_and_send_first_domain_datagram_without_reresolving() {
+    let registry = OwnerRegistry::new();
+    let first = SocketAddr::from(([192, 0, 2, 41], 53));
+    let second = SocketAddr::from(([192, 0, 2, 42], 53));
+    let later = SocketAddr::from(([192, 0, 2, 43], 53));
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver = ScriptedResolver {
+        delay: Duration::ZERO,
+        candidates: vec![later],
+        calls: Arc::clone(&resolver_calls),
+    };
+    let (socket, sends) = socket_fixture(Duration::ZERO, [true, false, false]);
+    let factory = scripted_factory(socket);
+    let selections = Arc::clone(&factory.selections);
+    let mut runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        Duration::from_secs(1),
+        resolver,
+        factory,
+        RecordingHandler::default(),
+        registry.clone(),
+    );
+    let now = Instant::now();
+
+    let admission = runtime
+        .reserve_session_with_initial_candidates(now, 7, (), vec![first, second])
+        .await
+        .expect("pre-resolved direct session");
+    let handle = runtime
+        .commit_session(admission, domain_datagram(b"first__"), now)
+        .expect("commit first domain datagram");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if sends.lock().expect("send lock").len() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial candidate sends");
+
+    assert_eq!(
+        selections.lock().expect("selection lock").as_slice(),
+        &[first]
+    );
+    assert_eq!(
+        sends.lock().expect("send lock").as_slice(),
+        &[first, second]
+    );
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+
+    runtime
+        .reserve_datagram(handle, 7)
+        .expect("later datagram capacity")
+        .commit(domain_datagram(b"second_"), Instant::now())
+        .expect("commit later domain datagram");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if sends.lock().expect("send lock").len() >= 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("later resolved send");
+
+    assert_eq!(
+        sends.lock().expect("send lock").as_slice(),
+        &[first, second, later]
+    );
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+
+    assert!(runtime.remove_session(handle));
+    wait_for_zero_udp_owners(&registry).await;
+    runtime.shutdown(Duration::ZERO).await;
+}
+
+#[tokio::test]
 async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());

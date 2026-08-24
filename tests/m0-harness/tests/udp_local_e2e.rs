@@ -352,22 +352,6 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
         SocketAddr::V4(address) => address,
         SocketAddr::V6(_) => unreachable!("IPv4 failed target"),
     };
-    let selected_echo = thread::spawn(move || {
-        let mut packet = [0_u8; 64];
-        let (length, peer) = selected_target
-            .recv_from(&mut packet)
-            .expect("selected receive");
-        selected_target
-            .send_to(&packet[..length], peer)
-            .expect("selected echo");
-    });
-    let final_echo = thread::spawn(move || {
-        let mut packet = [0_u8; 64];
-        let (length, peer) = final_target.recv_from(&mut packet).expect("final receive");
-        final_target
-            .send_to(&packet[..length], peer)
-            .expect("final echo");
-    });
     let selected_dns = start_dns_answer(Ipv4Addr::new(127, 0, 0, 1), 2);
     let final_dns = start_dns_script(vec![
         DnsStep {
@@ -409,6 +393,15 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
     wait_for_listener(&mut client, client_address);
     let (selected_control, selected_application, selected_relay) = udp_associate(client_address);
 
+    let selected_echo = thread::spawn(move || {
+        let mut packet = [0_u8; 64];
+        let (length, peer) = selected_target
+            .recv_from(&mut packet)
+            .expect("selected receive");
+        selected_target
+            .send_to(&packet[..length], peer)
+            .expect("selected echo");
+    });
     dns_udp_round_trip(
         &selected_application,
         selected_relay,
@@ -416,9 +409,18 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
         selected_address,
         b"selected",
     );
+    selected_echo.join().expect("selected echo join");
     drop((selected_application, selected_control));
     let (control, application, relay) = udp_associate(client_address);
+    let final_echo = thread::spawn(move || {
+        let mut packet = [0_u8; 64];
+        let (length, peer) = final_target.recv_from(&mut packet).expect("final receive");
+        final_target
+            .send_to(&packet[..length], peer)
+            .expect("final echo");
+    });
     dns_udp_round_trip(&application, relay, final_name, final_address, b"final");
+    final_echo.join().expect("final echo join");
     let failed = {
         let mut request = vec![0, 0, 0];
         request.extend_from_slice(&domain_target(
@@ -456,8 +458,6 @@ fn tagged_dns_udp_resolution_uses_detour_and_reaps() {
             "{message}"
         );
     }
-    selected_echo.join().expect("selected echo join");
-    final_echo.join().expect("final echo join");
     assert_eq!(selected_dns.join(), [RecordType::A, RecordType::AAAA]);
     assert_eq!(
         final_dns.join(),
