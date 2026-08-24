@@ -59,7 +59,10 @@ param(
     [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ServerPid,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$MetricsPort,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ServerMetricsPort,
-    [Parameter(Mandatory = $true)][string]$Output
+    [Parameter(Mandatory = $true)][string]$Output,
+    [string]$UdpAssociationSourceIpv4,
+    [int]$UdpAssociationSourcePortFirst,
+    [int]$UdpAssociationSourcePortLast
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +77,10 @@ $ExpectedVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
 $ExpectedCheckpointName = "Ferrum2-WindowsTun-InternalSupport-v1"
 $ExpectedSupportSwitchName = "Ferrum2 TUN Support"
 $ExpectedRunnerLabel = "ferrum2-hyperv-guest"
+$ExpectedUdpAssociationSourceIpv4 = "198.18.0.2"
+$ExpectedUdpAssociationSourcePortFirst = 20000
+$ExpectedUdpAssociationSourcePortLast = 28191
+$ExpectedUdpAssociationSourcePortCount = 8192
 $Utf8NoBom = [Text.UTF8Encoding]::new($false)
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
@@ -356,6 +363,319 @@ function Invoke-BoundedHarness(
     }
 }
 
+function Invoke-NetshBounded([string[]]$Arguments) {
+    foreach ($argument in $Arguments) {
+        Assert-Condition ($argument -cnotmatch '["\r\n]') `
+            "netsh snapshot contains an unsupported native argument"
+    }
+    $temporaryToken = [Guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) `
+        "ferrum2-netsh-$temporaryToken.stdout"
+    $stderrPath = Join-Path ([IO.Path]::GetTempPath()) `
+        "ferrum2-netsh-$temporaryToken.stderr"
+    Assert-Condition (-not (Test-Path -LiteralPath $stdoutPath)) `
+        "netsh stdout baseline is not absent"
+    Assert-Condition (-not (Test-Path -LiteralPath $stderrPath)) `
+        "netsh stderr baseline is not absent"
+    $process = $null
+    try {
+        $process = Start-Process -FilePath "netsh.exe" -ArgumentList $Arguments `
+            -WindowStyle Hidden -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -PassThru -ErrorAction Stop
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        $timedOut = $false
+        $outputBoundaryExceeded = $false
+        do {
+            $stdoutBytes = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                [long](Get-Item -LiteralPath $stdoutPath -Force).Length
+            } else { [long]0 }
+            $stderrBytes = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                [long](Get-Item -LiteralPath $stderrPath -Force).Length
+            } else { [long]0 }
+            if ($stdoutBytes + $stderrBytes -gt 16384) {
+                $outputBoundaryExceeded = $true
+                break
+            }
+            if ($process.HasExited) { break }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $process.HasExited) {
+            $timedOut = -not $outputBoundaryExceeded
+            try { $process.Kill($true) }
+            catch {
+                try { $process.Kill() }
+                catch { throw "netsh snapshot termination request failed: $($_.Exception.Message)" }
+            }
+        }
+        Assert-Condition ($process.WaitForExit(10000)) `
+            "netsh snapshot process could not be reaped"
+        Assert-Condition (-not $outputBoundaryExceeded) `
+            "netsh snapshot exceeded 16 KiB"
+        Assert-Condition (-not $timedOut) "netsh snapshot timed out"
+        Assert-Condition ($process.ExitCode -eq 0) `
+            "netsh snapshot failed: $($Arguments -join ' ')"
+        $lines = [Collections.Generic.List[string]]::new()
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            foreach ($line in [IO.File]::ReadLines($path)) {
+                Assert-Condition ($lines.Count -lt 128) `
+                    "netsh snapshot exceeded 128 lines"
+                $lines.Add(([string]$line -replace "[\r\n]+", " ").TrimEnd())
+            }
+        }
+        $lineArray = $lines.ToArray()
+        Assert-Condition (
+            $script:Utf8NoBom.GetByteCount($lineArray -join "`n") -le 16384
+        ) "netsh snapshot exceeded 16 KiB"
+        return [ordered]@{
+            command = "netsh.exe $($Arguments -join ' ')"
+            exit_code = $process.ExitCode
+            total_lines = $lineArray.Count
+            truncated = $false
+            lines = $lineArray
+        }
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                [IO.File]::Delete($path)
+            }
+        }
+    }
+}
+
+function Test-PortRangeIntersection(
+    [int]$FirstA,
+    [int]$LastA,
+    [int]$FirstB,
+    [int]$LastB
+) {
+    return $FirstA -le $LastB -and $FirstB -le $LastA
+}
+
+function ConvertFrom-NetshUdpDynamicPortRange([object]$Snapshot) {
+    $values = [Collections.Generic.List[int]]::new()
+    foreach ($line in @($Snapshot.lines)) {
+        $match = [regex]::Match([string]$line, ':\s*([0-9]{1,5})\s*$')
+        if ($match.Success) {
+            $values.Add([int]::Parse(
+                $match.Groups[1].Value,
+                [Globalization.CultureInfo]::InvariantCulture
+            ))
+        }
+    }
+    Assert-Condition ($values.Count -eq 2) `
+        "UDP dynamic-port output did not contain exactly one start/count pair"
+    $first = $values[0]
+    $count = $values[1]
+    Assert-Condition ($first -ge 1 -and $first -le 65535 -and $count -ge 1) `
+        "UDP dynamic-port range is invalid"
+    [long]$last = [long]$first + [long]$count - 1L
+    Assert-Condition ($last -le 65535) "UDP dynamic-port range exceeds port 65535"
+    return [ordered]@{
+        first_port = $first
+        last_port = [int]$last
+        port_count = $count
+    }
+}
+
+function ConvertFrom-NetshUdpExcludedPortRangeOutput([object]$Snapshot) {
+    $ranges = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($Snapshot.lines)) {
+        $match = [regex]::Match(
+            [string]$line,
+            '^\s*([0-9]{1,5})\s+([0-9]{1,5})(?:\s+\*)?\s*$'
+        )
+        if (-not $match.Success) { continue }
+        $first = [int]::Parse(
+            $match.Groups[1].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $last = [int]::Parse(
+            $match.Groups[2].Value,
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Assert-Condition ($first -ge 1 -and $first -le $last -and $last -le 65535) `
+            "UDP excluded-port range is invalid"
+        $ranges.Add([ordered]@{
+            first_port = $first
+            last_port = $last
+        })
+    }
+    return $ranges.ToArray()
+}
+
+function Get-UdpAssociationSourcePreflight([string]$TunAdapterName) {
+    $violations = [Collections.Generic.List[string]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    $adapterRows = @()
+    try {
+        $adapterRows = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+            [string]$_.Name -ceq $TunAdapterName
+        })
+        if ($adapterRows.Count -ne 1) {
+            $violations.Add("adapter_identity")
+        } elseif ([string]$adapterRows[0].Status -cne "Up") {
+            $violations.Add("adapter_not_up")
+        }
+    } catch {
+        $violations.Add("adapter_query")
+        $errors.Add("adapter query: $($_.Exception.Message)")
+    }
+    $adapterEvidence = @($adapterRows | Select-Object -First 16 | ForEach-Object {
+        [ordered]@{
+            name = [string]$_.Name
+            interface_description = [string]$_.InterfaceDescription
+            interface_index = [int]$_.ifIndex
+            status = [string]$_.Status
+            mac_address = [string]$_.MacAddress
+        }
+    })
+    $adapterInterfaceIndex = if ($adapterRows.Count -eq 1) {
+        [int]$adapterRows[0].ifIndex
+    } else {
+        $null
+    }
+
+    $ipRows = @()
+    try {
+        $ipRows = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+            [string]$_.IPAddress -ceq $script:UdpAssociationSourceIpv4
+        })
+        if ($ipRows.Count -ne 1) {
+            $violations.Add("source_ip_identity")
+        } else {
+            if ([int]$ipRows[0].PrefixLength -ne 30) {
+                $violations.Add("source_ip_prefix")
+            }
+            if ($null -eq $adapterInterfaceIndex -or
+                [int]$ipRows[0].InterfaceIndex -ne $adapterInterfaceIndex) {
+                $violations.Add("source_ip_owner")
+            }
+        }
+    } catch {
+        $violations.Add("source_ip_query")
+        $errors.Add("source IP query: $($_.Exception.Message)")
+    }
+    $ipEvidence = @($ipRows | Select-Object -First 16 | ForEach-Object {
+        [ordered]@{
+            ip_address = [string]$_.IPAddress
+            prefix_length = [int]$_.PrefixLength
+            interface_index = [int]$_.InterfaceIndex
+            interface_alias = [string]$_.InterfaceAlias
+            address_state = [string]$_.AddressState
+            prefix_origin = [string]$_.PrefixOrigin
+            suffix_origin = [string]$_.SuffixOrigin
+        }
+    })
+
+    $conflictRows = @()
+    try {
+        $conflictRows = @(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object {
+            [int]$_.LocalPort -ge $script:UdpAssociationSourcePortFirst -and
+            [int]$_.LocalPort -le $script:UdpAssociationSourcePortLast
+        } | Sort-Object LocalPort, LocalAddress, OwningProcess)
+        if ($conflictRows.Count -ne 0) {
+            $violations.Add("source_port_conflict")
+        }
+    } catch {
+        $violations.Add("udp_endpoint_query")
+        $errors.Add("UDP endpoint query: $($_.Exception.Message)")
+    }
+    $conflictEvidence = @($conflictRows | Select-Object -First 256 | ForEach-Object {
+        [ordered]@{
+            local_address = [string]$_.LocalAddress
+            local_port = [int]$_.LocalPort
+            owning_process = [int]$_.OwningProcess
+        }
+    })
+
+    $dynamicSnapshot = $null
+    $dynamicRange = $null
+    $dynamicIntersects = $null
+    try {
+        $dynamicSnapshot = Invoke-NetshBounded @(
+            "interface", "ipv4", "show", "dynamicport", "udp"
+        )
+        $dynamicRange = ConvertFrom-NetshUdpDynamicPortRange -Snapshot $dynamicSnapshot
+        $dynamicIntersects = Test-PortRangeIntersection `
+            -FirstA $script:UdpAssociationSourcePortFirst `
+            -LastA $script:UdpAssociationSourcePortLast `
+            -FirstB ([int]$dynamicRange.first_port) `
+            -LastB ([int]$dynamicRange.last_port)
+        if ($dynamicIntersects) {
+            $violations.Add("dynamic_port_intersection")
+        }
+    } catch {
+        $violations.Add("dynamic_port_query_or_parse")
+        $errors.Add("UDP dynamic-port query: $($_.Exception.Message)")
+    }
+
+    $excludedSnapshot = $null
+    $excludedRanges = @()
+    $excludedIntersections = [Collections.Generic.List[object]]::new()
+    try {
+        $excludedSnapshot = Invoke-NetshBounded @(
+            "interface", "ipv4", "show", "excludedportrange", "protocol=udp"
+        )
+        $excludedRanges = @(ConvertFrom-NetshUdpExcludedPortRangeOutput `
+            -Snapshot $excludedSnapshot)
+        foreach ($range in $excludedRanges) {
+            if (Test-PortRangeIntersection `
+                    -FirstA $script:UdpAssociationSourcePortFirst `
+                    -LastA $script:UdpAssociationSourcePortLast `
+                    -FirstB ([int]$range.first_port) `
+                    -LastB ([int]$range.last_port)) {
+                $excludedIntersections.Add($range)
+            }
+        }
+        if ($excludedIntersections.Count -ne 0) {
+            $violations.Add("excluded_port_intersection")
+        }
+    } catch {
+        $violations.Add("excluded_port_query_or_parse")
+        $errors.Add("UDP excluded-port query: $($_.Exception.Message)")
+    }
+
+    return [ordered]@{
+        schema = "ferrum2.windows-tun.udp-fixed-source-preflight.v1"
+        captured_utc = [DateTime]::UtcNow.ToString("o")
+        source_contract = [ordered]@{
+            adapter_name = $TunAdapterName
+            source_ip = $script:UdpAssociationSourceIpv4
+            source_prefix_length = 30
+            source_port_first = $script:UdpAssociationSourcePortFirst
+            source_port_last = $script:UdpAssociationSourcePortLast
+            source_port_count = $ExpectedUdpAssociationSourcePortCount
+        }
+        adapter = [ordered]@{
+            match_count = $adapterRows.Count
+            retained_count = $adapterEvidence.Count
+            matches = $adapterEvidence
+        }
+        ip_owner = [ordered]@{
+            match_count = $ipRows.Count
+            retained_count = $ipEvidence.Count
+            matches = $ipEvidence
+        }
+        udp_endpoint_conflicts = [ordered]@{
+            count = $conflictRows.Count
+            retained_count = $conflictEvidence.Count
+            truncated = $conflictRows.Count -gt $conflictEvidence.Count
+            endpoints = $conflictEvidence
+        }
+        dynamic_port_udp = $dynamicSnapshot
+        dynamic_port_range = $dynamicRange
+        dynamic_port_intersects_source = $dynamicIntersects
+        excluded_port_ranges_udp = $excludedSnapshot
+        excluded_port_ranges = $excludedRanges
+        excluded_port_intersections = $excludedIntersections.ToArray()
+        valid = $violations.Count -eq 0
+        violations = $violations.ToArray()
+        errors = $errors.ToArray()
+    }
+}
+
 function Invoke-Workload(
     [string]$SelectedScenario,
     [int]$TimeoutSeconds,
@@ -371,6 +691,13 @@ function Invoke-Workload(
             "--udp-port", [string]$script:TargetUdpPort,
             "--output", $path
         )
+    if ($SelectedScenario -ceq "udp-8192-association-lookup-expiry") {
+        $arguments += @(
+            "--source-ip", $script:UdpAssociationSourceIpv4,
+            "--source-port-first", [string]$script:UdpAssociationSourcePortFirst,
+            "--source-port-last", [string]$script:UdpAssociationSourcePortLast
+        )
+    }
     $peakMetric = if ([string]::IsNullOrWhiteSpace($PeakMetricName)) {
         [void](Invoke-BoundedHarness $arguments $TimeoutSeconds)
         $null
@@ -797,6 +1124,36 @@ foreach ($digest in @($ParentSha, $CandidateSha, $Tree)) {
     Assert-Condition ($digest -cmatch '^[0-9a-f]{40}$') "commit/tree identity must be lowercase 40-hex"
 }
 Assert-Condition ($RecipeSha256 -cmatch '^[0-9a-f]{64}$') "recipe identity must be lowercase SHA-256"
+$udpAssociationSourceParameterCount = 0
+foreach ($parameterName in @(
+    "UdpAssociationSourceIpv4",
+    "UdpAssociationSourcePortFirst",
+    "UdpAssociationSourcePortLast"
+)) {
+    if ($PSBoundParameters.ContainsKey($parameterName)) {
+        $udpAssociationSourceParameterCount++
+    }
+}
+Assert-Condition (
+    $ExpectedUdpAssociationSourcePortLast -
+        $ExpectedUdpAssociationSourcePortFirst + 1 -eq
+        $ExpectedUdpAssociationSourcePortCount
+) "canonical UDP association source-port contract is inconsistent"
+if ($Scenario -ceq "udp-8192-association-lookup-expiry") {
+    Assert-Condition ($udpAssociationSourceParameterCount -eq 3) `
+        "UDP association source parameters must be supplied together"
+    Assert-Condition (
+        $UdpAssociationSourceIpv4 -ceq $ExpectedUdpAssociationSourceIpv4 -and
+        $UdpAssociationSourcePortFirst -eq $ExpectedUdpAssociationSourcePortFirst -and
+        $UdpAssociationSourcePortLast -eq $ExpectedUdpAssociationSourcePortLast
+    ) "UDP association source parameters do not match the canonical plan"
+} else {
+    Assert-Condition ($udpAssociationSourceParameterCount -eq 0) `
+        "non-association workload cannot receive UDP association source parameters"
+}
+$script:UdpAssociationSourceIpv4 = $UdpAssociationSourceIpv4
+$script:UdpAssociationSourcePortFirst = $UdpAssociationSourcePortFirst
+$script:UdpAssociationSourcePortLast = $UdpAssociationSourcePortLast
 $expectedOrder = if (($Member -ceq "parent") -eq (($Pair % 2) -eq 1)) { 1 } else { 2 }
 Assert-Condition ($Order -eq $expectedOrder) "trial order does not follow the alternating schedule"
 if ($RunKind -ceq "calibration-aa") {
@@ -1039,6 +1396,15 @@ try {
             $checks.clean_drain = $true
         }
         "udp-8192-association-lookup-expiry" {
+            $sourcePreflight = Get-UdpAssociationSourcePreflight `
+                -TunAdapterName $AdapterName
+            $diagnostics = [ordered]@{
+                udp_association_source_preflight = $sourcePreflight
+            }
+            Assert-Condition ($sourcePreflight.valid -eq $true) (
+                "fixed UDP association source preflight failed: " +
+                ($sourcePreflight.violations -join ",")
+            )
             $observation = Invoke-Workload $Scenario 1800
             $checkedUnits = [uint64]$observation.checked_units
             $peakMetrics = Get-Metrics $MetricsPort 5

@@ -787,6 +787,110 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         }
 
     @staticmethod
+    def udp_association_source_preflight() -> dict[str, object]:
+        dynamic_lines = [
+            "Protocol udp Dynamic Port Range",
+            "---------------------------------",
+            "Start Port      : 49152",
+            "Number of Ports : 16384",
+        ]
+        excluded_lines = [
+            "Protocol udp Port Exclusion Ranges",
+            "Start Port    End Port",
+            "----------    --------",
+            "      5357        5357",
+            "     50000       50059     *",
+        ]
+        return {
+            "schema": CONTROL.WINDOWS_TUN_UDP_SOURCE_PREFLIGHT_SCHEMA,
+            "captured_utc": "2026-08-22T00:00:00.0000000Z",
+            "source_contract": {
+                "adapter_name": "Ferrum2Perf",
+                "source_ip": CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4,
+                "source_prefix_length": (
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PREFIX_LENGTH
+                ),
+                "source_port_first": (
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_FIRST
+                ),
+                "source_port_last": (
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_LAST
+                ),
+                "source_port_count": (
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_COUNT
+                ),
+            },
+            "adapter": {
+                "match_count": 1,
+                "retained_count": 1,
+                "matches": [
+                    {
+                        "name": "Ferrum2Perf",
+                        "interface_description": "Wintun Userspace Tunnel",
+                        "interface_index": 17,
+                        "status": "Up",
+                        "mac_address": "",
+                    }
+                ],
+            },
+            "ip_owner": {
+                "match_count": 1,
+                "retained_count": 1,
+                "matches": [
+                    {
+                        "ip_address": (
+                            CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4
+                        ),
+                        "prefix_length": (
+                            CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PREFIX_LENGTH
+                        ),
+                        "interface_index": 17,
+                        "interface_alias": "Ferrum2Perf",
+                        "address_state": "Preferred",
+                        "prefix_origin": "Manual",
+                        "suffix_origin": "Manual",
+                    }
+                ],
+            },
+            "udp_endpoint_conflicts": {
+                "count": 0,
+                "retained_count": 0,
+                "truncated": False,
+                "endpoints": [],
+            },
+            "dynamic_port_udp": {
+                "command": "netsh.exe interface ipv4 show dynamicport udp",
+                "exit_code": 0,
+                "total_lines": len(dynamic_lines),
+                "truncated": False,
+                "lines": dynamic_lines,
+            },
+            "dynamic_port_range": {
+                "first_port": 49_152,
+                "last_port": 65_535,
+                "port_count": 16_384,
+            },
+            "dynamic_port_intersects_source": False,
+            "excluded_port_ranges_udp": {
+                "command": (
+                    "netsh.exe interface ipv4 show excludedportrange protocol=udp"
+                ),
+                "exit_code": 0,
+                "total_lines": len(excluded_lines),
+                "truncated": False,
+                "lines": excluded_lines,
+            },
+            "excluded_port_ranges": [
+                {"first_port": 5_357, "last_port": 5_357},
+                {"first_port": 50_000, "last_port": 50_059},
+            ],
+            "excluded_port_intersections": [],
+            "valid": True,
+            "violations": [],
+            "errors": [],
+        }
+
+    @staticmethod
     def write_udp_diagnostic_document(
         root: pathlib.Path, row: dict[str, object]
     ) -> None:
@@ -948,9 +1052,9 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "association_index": 0,
             "round": 0,
             "packet_nonce": "0",
-            "workload_local_ip": CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+            "workload_local_ip": CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4,
             "workload_local_port": (
-                CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+                CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_FIRST
             ),
             "target_ip": support_ip,
             "target_port": 44_160,
@@ -966,12 +1070,12 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             ledger_header(
                 workload_schema,
                 trial_sequence=31,
-                source_ip=CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+                source_ip=CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4,
                 source_port_first=(
-                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_FIRST
                 ),
                 source_port_last=(
-                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_LAST
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_LAST
                 ),
             ),
             workload_event,
@@ -1138,9 +1242,9 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "round": 0,
             "packet_nonce": "0",
             "workload_tuple": {
-                "source_ip": CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_IPV4,
+                "source_ip": CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4,
                 "source_port": (
-                    CONTROL.WINDOWS_TUN_UDP_DIAGNOSTIC_SOURCE_PORT_FIRST
+                    CONTROL.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_FIRST
                 ),
                 "target_ip": support_ip,
                 "target_port": 44_160,
@@ -1536,6 +1640,12 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "network_model_evidence": None,
             "status": "PASS",
         }
+        if scenario == "udp-8192-association-lookup-expiry":
+            row["diagnostics"] = {
+                "udp_association_source_preflight": (
+                    self.udp_association_source_preflight()
+                )
+            }
         if scenario == "fragment-reassembly-throughput":
             active_unique = row["correctness"]["checked_units"]
             warmup_unique = 8
@@ -1796,8 +1906,6 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             (
                 association_recipe["associations"],
                 association_recipe["bootstrap_batch_associations"],
-                association_recipe["bootstrap_pacing_associations"],
-                association_recipe["bootstrap_pacing_delay_ms"],
                 association_recipe["batch_associations"],
                 association_recipe["lookup_rounds"],
                 association_recipe["payload_bytes"],
@@ -1807,13 +1915,22 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     "tun_udp_response_queue_packets_per_association"
                 ],
             ),
-            (8_192, 1, 8, 25, 8, 64, 32, 8_192, 8, 8),
+            (8_192, 1, 8, 64, 32, 8_192, 8, 8),
+        )
+        self.assertTrue(
+            {
+                "bootstrap_pacing_associations",
+                "bootstrap_pacing_delay_ms",
+            }.isdisjoint(association_recipe)
         )
         self.assertEqual(
             {
                 field: association_recipe[field]
                 for field in (
                     "canonical_source_port_strategy",
+                    "canonical_source_ipv4",
+                    "canonical_source_port_first",
+                    "canonical_source_port_last",
                     "diagnostic_source_ipv4",
                     "diagnostic_source_port_first",
                     "diagnostic_source_port_last",
@@ -1821,7 +1938,10 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 )
             },
             {
-                "canonical_source_port_strategy": "wildcard_ephemeral",
+                "canonical_source_port_strategy": "explicit_tun_ipv4_contiguous",
+                "canonical_source_ipv4": "198.18.0.2",
+                "canonical_source_port_first": 20_000,
+                "canonical_source_port_last": 28_191,
                 "diagnostic_source_ipv4": "198.18.0.2",
                 "diagnostic_source_port_first": 20_000,
                 "diagnostic_source_port_last": 28_191,
@@ -1835,10 +1955,22 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             r"^[0-9a-f]{64}$",
         )
         self.assertEqual(
-            association_recipe["diagnostic_source_port_last"]
-            - association_recipe["diagnostic_source_port_first"]
+            association_recipe["canonical_source_port_last"]
+            - association_recipe["canonical_source_port_first"]
             + 1,
             association_recipe["associations"],
+        )
+        self.assertEqual(
+            (
+                association_recipe["diagnostic_source_ipv4"],
+                association_recipe["diagnostic_source_port_first"],
+                association_recipe["diagnostic_source_port_last"],
+            ),
+            (
+                association_recipe["canonical_source_ipv4"],
+                association_recipe["canonical_source_port_first"],
+                association_recipe["canonical_source_port_last"],
+            ),
         )
         self.assertEqual(
             CONTROL.WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA,
@@ -1948,11 +2080,16 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                             path, decision_policy=policy
                         )
             for field, value in (
+                ("bootstrap_pacing_associations", 8),
+                ("bootstrap_pacing_delay_ms", 25),
+                ("canonical_source_ipv4", "198.18.0.3"),
+                ("canonical_source_port_first", 20_001),
+                ("canonical_source_port_last", 28_192),
                 ("diagnostic_source_ipv4", "198.18.0.3"),
                 ("diagnostic_source_port_first", 20_001),
                 ("diagnostic_source_port_last", 28_192),
                 ("diagnostic_collector_source_sha256", "0" * 64),
-                ("canonical_source_port_strategy", "fixed"),
+                ("canonical_source_port_strategy", "wildcard_ephemeral"),
             ):
                 with self.subTest(recipe_field=field):
                     tampered = copy.deepcopy(plan)
@@ -2368,6 +2505,204 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     CONTROL.validate_windows_tun_trial(
                         row,
                         plan=tampered_plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+    def test_udp_association_source_preflight_is_required_and_scenario_scoped(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        association = self.row(
+            plan=plan,
+            scenario="udp-8192-association-lookup-expiry",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        CONTROL.validate_windows_tun_trial(
+            association,
+            plan=plan,
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+
+        missing = copy.deepcopy(association)
+        missing["diagnostics"] = None
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError,
+            "UDP association.*diagnostics must be an object",
+        ):
+            CONTROL.validate_windows_tun_trial(
+                missing,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+
+        tcp = self.row(
+            plan=plan,
+            scenario="tcp-single-flow",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        tcp["diagnostics"] = copy.deepcopy(association["diagnostics"])
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "non-fragment.*must be null"
+        ):
+            CONTROL.validate_windows_tun_trial(
+                tcp,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+
+    def test_udp_association_source_preflight_rejects_contract_tampering(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="udp-8192-association-lookup-expiry",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+
+        def dynamic_intersection(diagnostics: dict[str, object]) -> None:
+            preflight = diagnostics["udp_association_source_preflight"]
+            dynamic_range = preflight["dynamic_port_range"]
+            dynamic_range.update(
+                first_port=20_000,
+                last_port=28_191,
+                port_count=8_192,
+            )
+            lines = preflight["dynamic_port_udp"]["lines"]
+            lines[-2:] = [
+                "Start Port      : 20000",
+                "Number of Ports : 8192",
+            ]
+
+        def excluded_intersection(diagnostics: dict[str, object]) -> None:
+            preflight = diagnostics["udp_association_source_preflight"]
+            preflight["excluded_port_ranges"].append(
+                {"first_port": 20_000, "last_port": 20_010}
+            )
+            snapshot = preflight["excluded_port_ranges_udp"]
+            snapshot["lines"].append("     20000       20010")
+            snapshot["total_lines"] += 1
+
+        mutations = (
+            ("diagnostics field", lambda d: d.update(unexpected=None)),
+            (
+                "preflight field",
+                lambda d: d["udp_association_source_preflight"].update(
+                    unexpected=None
+                ),
+            ),
+            (
+                "schema",
+                lambda d: d["udp_association_source_preflight"].update(
+                    schema="ferrum2.windows-tun.udp-fixed-source-preflight.v2"
+                ),
+            ),
+            (
+                "captured timestamp",
+                lambda d: d["udp_association_source_preflight"].update(
+                    captured_utc="2026-08-22T00:00:00Z"
+                ),
+            ),
+            (
+                "source IP",
+                lambda d: d["udp_association_source_preflight"][
+                    "source_contract"
+                ].update(source_ip="198.18.0.3"),
+            ),
+            (
+                "source port",
+                lambda d: d["udp_association_source_preflight"][
+                    "source_contract"
+                ].update(source_port_first=20_001),
+            ),
+            (
+                "source count",
+                lambda d: d["udp_association_source_preflight"][
+                    "source_contract"
+                ].update(source_port_count=8_191),
+            ),
+            (
+                "adapter count type",
+                lambda d: d["udp_association_source_preflight"]["adapter"].update(
+                    match_count=True
+                ),
+            ),
+            (
+                "adapter state",
+                lambda d: d["udp_association_source_preflight"]["adapter"][
+                    "matches"
+                ][0].update(status="Down"),
+            ),
+            (
+                "IP owner index",
+                lambda d: d["udp_association_source_preflight"]["ip_owner"][
+                    "matches"
+                ][0].update(interface_index=18),
+            ),
+            (
+                "endpoint conflict",
+                lambda d: d["udp_association_source_preflight"][
+                    "udp_endpoint_conflicts"
+                ].update(count=1),
+            ),
+            (
+                "dynamic snapshot command",
+                lambda d: d["udp_association_source_preflight"][
+                    "dynamic_port_udp"
+                ].update(command="netsh.exe interface ipv6 show dynamicport udp"),
+            ),
+            ("dynamic intersection", dynamic_intersection),
+            ("excluded intersection", excluded_intersection),
+            (
+                "unexpected excluded intersection report",
+                lambda d: d["udp_association_source_preflight"].update(
+                    excluded_port_intersections=[
+                        {"first_port": 20_000, "last_port": 20_010}
+                    ]
+                ),
+            ),
+            (
+                "invalid result",
+                lambda d: d["udp_association_source_preflight"].update(valid=False),
+            ),
+            (
+                "violation",
+                lambda d: d["udp_association_source_preflight"].update(
+                    violations=["source_port_conflict"]
+                ),
+            ),
+            (
+                "error",
+                lambda d: d["udp_association_source_preflight"].update(
+                    errors=["query failed"]
+                ),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                candidate = copy.deepcopy(row)
+                mutate(candidate["diagnostics"])
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
                         parent_sha=self.PARENT_SHA,
                         candidate_sha=self.CANDIDATE_SHA,
                     )
@@ -2977,16 +3312,25 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     self.validate_udp_diagnostic(root, plan, plan_sha256)
 
     def test_udp_diagnostic_source_header_is_cross_bound_to_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            plan, row, plan_sha256 = self.udp_diagnostic_evidence(root)
-            plan["scenarios"]["udp-8192-association-lookup-expiry"]["recipe"][
-                "diagnostic_source_ipv4"
-            ] = "198.18.0.3"
-            with self.assertRaisesRegex(
-                CONTROL.CandidateControlError, "source header is not plan-bound"
-            ):
-                self.validate_udp_diagnostic(root, plan, plan_sha256)
+        for field, value in (
+            ("canonical_source_ipv4", "198.18.0.3"),
+            ("canonical_source_port_first", 20_001),
+            ("canonical_source_port_last", 28_192),
+            ("diagnostic_source_ipv4", "198.18.0.3"),
+            ("diagnostic_source_port_first", 20_001),
+            ("diagnostic_source_port_last", 28_192),
+            ("canonical_source_port_strategy", "wildcard_ephemeral"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                plan, row, plan_sha256 = self.udp_diagnostic_evidence(root)
+                plan["scenarios"]["udp-8192-association-lookup-expiry"][
+                    "recipe"
+                ][field] = value
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError, "source header is not plan-bound"
+                ):
+                    self.validate_udp_diagnostic(root, plan, plan_sha256)
 
     def test_udp_diagnostic_source_coverage_is_exact_or_a_prefix(self) -> None:
         complete = [{"association_index": index} for index in range(8_192)]

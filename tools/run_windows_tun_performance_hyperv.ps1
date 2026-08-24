@@ -182,10 +182,10 @@ $expectedWintunDllSha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643c
 $expectedPowerShellVersion = "7.4.19"
 $expectedPowerShellZipSha256 = "cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9"
 $minimumSupportIpv4PacketBytes = 1468
-$diagnosticSourceIpv4 = "198.18.0.2"
-$diagnosticSourcePortFirst = 20000
-$diagnosticSourcePortLast = 28191
-$diagnosticAssociationCount = 8192
+$udpAssociationSourceIpv4 = "198.18.0.2"
+$udpAssociationSourcePortFirst = 20000
+$udpAssociationSourcePortLast = 28191
+$udpAssociationCount = 8192
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") -ErrorAction Stop).Path
 $approvedRustTarget = "x86_64-pc-windows-msvc"
 $reproducibleRustSourceRoot = "C:\ferrum2-reproducible-source"
@@ -607,21 +607,36 @@ function New-CanonicalPlan {
     $udpBoundaryRecipe = $plan.scenarios.
         "udp-8192-association-lookup-expiry".recipe
     if ([string]$udpBoundaryRecipe.canonical_source_port_strategy -cne
-            "wildcard_ephemeral" -or
+            "explicit_tun_ipv4_contiguous" -or
+        [string]$udpBoundaryRecipe.canonical_source_ipv4 -cne
+            $script:udpAssociationSourceIpv4 -or
+        [int]$udpBoundaryRecipe.canonical_source_port_first -ne
+            $script:udpAssociationSourcePortFirst -or
+        [int]$udpBoundaryRecipe.canonical_source_port_last -ne
+            $script:udpAssociationSourcePortLast -or
         [string]$udpBoundaryRecipe.diagnostic_source_ipv4 -cne
-            $script:diagnosticSourceIpv4 -or
+            $script:udpAssociationSourceIpv4 -or
         [int]$udpBoundaryRecipe.diagnostic_source_port_first -ne
-            $script:diagnosticSourcePortFirst -or
+            $script:udpAssociationSourcePortFirst -or
         [int]$udpBoundaryRecipe.diagnostic_source_port_last -ne
-            $script:diagnosticSourcePortLast -or
+            $script:udpAssociationSourcePortLast -or
         [int]$udpBoundaryRecipe.associations -ne
-            $script:diagnosticAssociationCount -or
+            $script:udpAssociationCount -or
+        ([int]$udpBoundaryRecipe.canonical_source_port_last -
+            [int]$udpBoundaryRecipe.canonical_source_port_first + 1) -ne
+            [int]$udpBoundaryRecipe.associations -or
         ([int]$udpBoundaryRecipe.diagnostic_source_port_last -
             [int]$udpBoundaryRecipe.diagnostic_source_port_first + 1) -ne
             [int]$udpBoundaryRecipe.associations -or
+        [string]$udpBoundaryRecipe.canonical_source_ipv4 -cne
+            [string]$udpBoundaryRecipe.diagnostic_source_ipv4 -or
+        [int]$udpBoundaryRecipe.canonical_source_port_first -ne
+            [int]$udpBoundaryRecipe.diagnostic_source_port_first -or
+        [int]$udpBoundaryRecipe.canonical_source_port_last -ne
+            [int]$udpBoundaryRecipe.diagnostic_source_port_last -or
         [string]$udpBoundaryRecipe.diagnostic_collector_source_sha256 -cne
             $script:udpBoundaryCollectorSourceSha256) {
-        throw "canonical Windows TUN UDP diagnostic source-port contract is invalid"
+        throw "canonical Windows TUN UDP source-port contract is invalid"
     }
     return $plan
 }
@@ -2024,6 +2039,11 @@ try {
     $plan = New-CanonicalPlan -Python $python -RunKindValue $RunKind -Output $hostPlanPath
     $udpBoundaryRecipe = $plan.scenarios.
         "udp-8192-association-lookup-expiry".recipe
+    $canonicalSourcePlan = [pscustomobject]@{
+        Ipv4 = [string]$udpBoundaryRecipe.canonical_source_ipv4
+        PortFirst = [int]$udpBoundaryRecipe.canonical_source_port_first
+        PortLast = [int]$udpBoundaryRecipe.canonical_source_port_last
+    }
     $diagnosticSourcePlan = [pscustomobject]@{
         Ipv4 = [string]$udpBoundaryRecipe.diagnostic_source_ipv4
         PortFirst = [int]$udpBoundaryRecipe.diagnostic_source_port_first
@@ -2484,6 +2504,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         $SupportPid,
         $SupportOwner,
         $minimumSupportIpv4PacketBytes,
+        [string]$canonicalSourcePlan.Ipv4,
+        [int]$canonicalSourcePlan.PortFirst,
+        [int]$canonicalSourcePlan.PortLast,
         $diagnosticSequenceValue,
         $(if ($instrumentedDiagnosticMode) { $DiagnosticProfile } else { "" }),
         $(if ($instrumentedDiagnosticMode) { $SupportDiagnosticRunNonce } else { "" }),
@@ -2538,6 +2561,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             [int]$SupportProcessId,
             [string]$SupportProcessOwner,
             [int]$MinimumSupportIpv4PacketBytes,
+            [string]$CanonicalSourceIpv4,
+            [int]$CanonicalSourcePortFirst,
+            [int]$CanonicalSourcePortLast,
             [int]$DiagnosticTrialSequenceValue,
             [string]$DiagnosticProfileValue,
             [string]$DiagnosticRunNonce,
@@ -2577,6 +2603,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             ($InstrumentedDiagnostic -and
                 (Test-Path -LiteralPath $DiagnosticEvidenceRoot))) {
             throw "guest performance boundary is invalid"
+        }
+        if ($CanonicalSourceIpv4 -cne "198.18.0.2" -or
+            $CanonicalSourcePortFirst -ne 20000 -or
+            $CanonicalSourcePortLast -ne 28191 -or
+            ($CanonicalSourcePortLast - $CanonicalSourcePortFirst + 1) -ne 8192) {
+            throw "guest canonical UDP association source identity is invalid"
         }
         if ($InstrumentedDiagnostic) {
             if ($DiagnosticProfileValue -cne "UdpFlowBoundary" -or
@@ -3330,16 +3362,32 @@ public static class Ferrum2PerfProcessGroup {
         }
         $udpBoundaryRecipe = $plan.scenarios.
             "udp-8192-association-lookup-expiry".recipe
+        if ([string]$udpBoundaryRecipe.canonical_source_port_strategy -cne
+                "explicit_tun_ipv4_contiguous" -or
+            [string]$udpBoundaryRecipe.canonical_source_ipv4 -cne
+                $CanonicalSourceIpv4 -or
+            [int]$udpBoundaryRecipe.canonical_source_port_first -ne
+                $CanonicalSourcePortFirst -or
+            [int]$udpBoundaryRecipe.canonical_source_port_last -ne
+                $CanonicalSourcePortLast -or
+            [int]$udpBoundaryRecipe.associations -ne 8192 -or
+            ($CanonicalSourcePortLast - $CanonicalSourcePortFirst + 1) -ne
+                [int]$udpBoundaryRecipe.associations) {
+            throw "guest canonical UDP source-port plan changed during staging"
+        }
         if ($InstrumentedDiagnostic -and (
-            [string]$udpBoundaryRecipe.canonical_source_port_strategy -cne
-                "wildcard_ephemeral" -or
             [string]$udpBoundaryRecipe.diagnostic_source_ipv4 -cne
                 $DiagnosticSourceIpv4 -or
             [int]$udpBoundaryRecipe.diagnostic_source_port_first -ne
                 $DiagnosticSourcePortFirst -or
             [int]$udpBoundaryRecipe.diagnostic_source_port_last -ne
                 $DiagnosticSourcePortLast -or
-            [int]$udpBoundaryRecipe.associations -ne 8192 -or
+            [string]$udpBoundaryRecipe.diagnostic_source_ipv4 -cne
+                [string]$udpBoundaryRecipe.canonical_source_ipv4 -or
+            [int]$udpBoundaryRecipe.diagnostic_source_port_first -ne
+                [int]$udpBoundaryRecipe.canonical_source_port_first -or
+            [int]$udpBoundaryRecipe.diagnostic_source_port_last -ne
+                [int]$udpBoundaryRecipe.canonical_source_port_last -or
             [string]$udpBoundaryRecipe.diagnostic_collector_source_sha256 -cne
                 $UdpBoundaryCollectorSha256)) {
             throw "guest UDP diagnostic source-port plan changed during staging"
@@ -3620,6 +3668,14 @@ public static class Ferrum2PerfProcessGroup {
                     "-ServerMetricsPort", [string]$serverMetricsPort,
                     "-Output", $output
                 )
+                if ([string]$trial.scenario -ceq
+                        "udp-8192-association-lookup-expiry") {
+                    $collectorArguments += @(
+                        "-UdpAssociationSourceIpv4", $CanonicalSourceIpv4,
+                        "-UdpAssociationSourcePortFirst", [string]$CanonicalSourcePortFirst,
+                        "-UdpAssociationSourcePortLast", [string]$CanonicalSourcePortLast
+                    )
+                }
                 if ([string]$trial.scenario -in @("udp-route-once", "network-lifecycle")) {
                     $networkModelOutput = Join-Path $NetworkModelEvidenceRoot (
                         "{0:D3}-{1}-{2}-pair-{3}.network-model.json" -f `
@@ -4160,7 +4216,7 @@ if ($instrumentedDiagnosticMode) {
             [int]$diagnosticSourcePlan.PortLast -or
         ([int]$workloadLedgerSummary.Header.source_port_last -
             [int]$workloadLedgerSummary.Header.source_port_first + 1) -ne
-            $diagnosticAssociationCount) {
+            $udpAssociationCount) {
         throw "exported workload ledger source-port contract mismatch"
     }
     $firstFailedFlow = Get-FirstFailedUdpDiagnosticFlow `
@@ -4764,9 +4820,14 @@ if ($diagnosticMode) {
         [int]$diagnosticTrial.pair
     )
     $diagnosticTrialPath = Join-Path $rawEvidence $diagnosticFileName
+    $diagnosticTrialItem = Get-Item -LiteralPath $diagnosticTrialPath `
+        -ErrorAction SilentlyContinue
     if ($rawTrialFiles.Count -ne 1 -or
-        -not (Test-Path -LiteralPath $diagnosticTrialPath -PathType Leaf) -or
-        $rawTrialFiles[0].FullName -cne (Get-Item -LiteralPath $diagnosticTrialPath).FullName) {
+        $null -eq $diagnosticTrialItem -or $diagnosticTrialItem.PSIsContainer -or
+        -not $rawTrialFiles[0].FullName.Equals(
+            $diagnosticTrialItem.FullName,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
         throw "diagnostic trial evidence identity is invalid"
     }
     $validatorRows = @(& $python -B $controlPath "windows-tun-validate-trial" `

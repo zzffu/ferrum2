@@ -774,9 +774,9 @@ try {
         "--diagnostic-run-nonce", $DiagnosticRunNonce,
         "--diagnostic-max-events", [string]$DiagnosticMaxEvents,
         "--diagnostic-trial-sequence", [string]$TrialSequence,
-        "--diagnostic-source-ip", $diagnosticSourceIpv4,
-        "--diagnostic-source-port-first", [string]$diagnosticSourcePortFirst,
-        "--diagnostic-source-port-last", [string]$diagnosticSourcePortLast
+        "--source-ip", $diagnosticSourceIpv4,
+        "--source-port-first", [string]$diagnosticSourcePortFirst,
+        "--source-port-last", [string]$diagnosticSourcePortLast
     )
     $workloadResult = Invoke-BoundedNativeProcess -Executable $harness `
         -Arguments $workloadArguments -WorkingDirectory (Split-Path -Parent $harness) `
