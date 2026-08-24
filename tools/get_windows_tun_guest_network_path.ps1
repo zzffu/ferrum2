@@ -184,17 +184,34 @@ $allDnsServers = @(
 if ($allDnsServers -ccontains $supportAddress) {
     throw "support address collides with a guest DNS server"
 }
-$supportDnsServers = @(
+$supportIpv4DnsServers = @(
     Get-DnsClientServerAddress `
-        -InterfaceIndex ([int]$expectedGuestRows[0].InterfaceIndex) -ErrorAction Stop |
+        -InterfaceIndex ([int]$expectedGuestRows[0].InterfaceIndex) `
+        -AddressFamily IPv4 -ErrorAction Stop |
         ForEach-Object { @($_.ServerAddresses) } |
         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
         ForEach-Object { [string]$_ } |
-        Sort-Object -Unique
+        Sort-Object
 )
-if ($supportDnsServers.Count -ne 0) {
+$supportIpv6DnsServers = @(
+    Get-DnsClientServerAddress `
+        -InterfaceIndex ([int]$expectedGuestRows[0].InterfaceIndex) `
+        -AddressFamily IPv6 -ErrorAction Stop |
+        ForEach-Object { @($_.ServerAddresses) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        ForEach-Object { [string]$_ } |
+        Sort-Object
+)
+$windowsIntrinsicIpv6Dns = @(
+    "fec0:0:0:ffff::1", "fec0:0:0:ffff::2", "fec0:0:0:ffff::3"
+)
+$supportDnsStateValid = $supportIpv4DnsServers.Count -eq 0 -and
+    ($supportIpv6DnsServers.Count -eq 0 -or
+        ($supportIpv6DnsServers -join "|") -ieq ($windowsIntrinsicIpv6Dns -join "|"))
+if (-not $supportDnsStateValid) {
     throw "guest support interface must not have DNS servers"
 }
+$supportDnsServers = @()
 
 $selection = @(Find-NetRoute -RemoteIPAddress $supportAddress -ErrorAction Stop)
 $sourceRows = @($selection | Where-Object {

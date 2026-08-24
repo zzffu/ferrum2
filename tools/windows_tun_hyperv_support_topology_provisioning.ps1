@@ -829,10 +829,28 @@ function Invoke-GuestSupportNetwork {
         $gatewayRoutes = @($allRoutes | Where-Object {
             [string]$_.NextHop -cne "0.0.0.0"
         })
-        $dnsServers = @(Get-DnsClientServerAddress -InterfaceIndex $supportIndex `
-            -ErrorAction Stop | ForEach-Object { @($_.ServerAddresses) } | Where-Object {
-            -not [string]::IsNullOrWhiteSpace([string]$_)
-        })
+        $ipv4DnsServers = @(
+            Get-DnsClientServerAddress -InterfaceIndex $supportIndex `
+                -AddressFamily IPv4 -ErrorAction Stop |
+                ForEach-Object { @($_.ServerAddresses) } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                ForEach-Object { [string]$_ } |
+                Sort-Object
+        )
+        $ipv6DnsServers = @(
+            Get-DnsClientServerAddress -InterfaceIndex $supportIndex `
+                -AddressFamily IPv6 -ErrorAction Stop |
+                ForEach-Object { @($_.ServerAddresses) } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                ForEach-Object { [string]$_ } |
+                Sort-Object
+        )
+        $windowsIntrinsicIpv6Dns = @(
+            "fec0:0:0:ffff::1", "fec0:0:0:ffff::2", "fec0:0:0:ffff::3"
+        )
+        $dnsStateValid = $ipv4DnsServers.Count -eq 0 -and
+            ($ipv6DnsServers.Count -eq 0 -or
+                ($ipv6DnsServers -join "|") -ieq ($windowsIntrinsicIpv6Dns -join "|"))
         $selection = @(Find-NetRoute -RemoteIPAddress $HostIpv4 -ErrorAction Stop)
         $sourceRows = @($selection | Where-Object {
             $null -ne $_.PSObject.Properties["IPAddress"]
@@ -859,7 +877,9 @@ function Invoke-GuestSupportNetwork {
             if ($directRoutes.Count -ne 1) { "direct_route_count=$($directRoutes.Count)" }
             if ($defaultRoutes.Count -ne 0) { "default_route_count=$($defaultRoutes.Count)" }
             if ($gatewayRoutes.Count -ne 0) { "gateway_route_count=$($gatewayRoutes.Count)" }
-            if ($dnsServers.Count -ne 0) { "dns_server_count=$($dnsServers.Count)" }
+            if (-not $dnsStateValid) {
+                "dns_state=ipv4:$($ipv4DnsServers.Count),ipv6:$($ipv6DnsServers.Count)"
+            }
             if (-not $sourceSelectionValid) { "source_selection" }
             if (-not $routeSelectionValid) { "route_selection" }
         )
