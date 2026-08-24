@@ -218,7 +218,7 @@ function Invoke-TopologyRollback {
             Restore-ExactCheckpoint -Plan $Plan `
                 -CheckpointId ([Guid][string]$Plan.source_checkpoint.id) `
                 -CheckpointName ([string]$Plan.source_checkpoint.name)
-            $restoreDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            $restoreDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
             do {
                 $restoredVm = Get-VM -Id ([Guid][string]$Plan.vm.id) -ErrorAction Stop
                 $restoredAdapters = @(Get-VMNetworkAdapter -VM $restoredVm -ErrorAction Stop)
@@ -345,24 +345,48 @@ function Invoke-TopologyRollback {
                 }
                 $switchContext = Get-SupportSwitchContext -Plan $Plan `
                     -SwitchId $CreatedSwitchId -TimeoutSeconds 5
-                $foreignVmAttachments = @(Get-VMNetworkAdapter -All -ErrorAction Stop |
-                    Where-Object {
-                        $_.SwitchId -eq $CreatedSwitchId -and $_.IsManagementOs -ne $true
-                    })
+                $attachmentDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+                do {
+                    $foreignVmAttachments = @(Get-VMNetworkAdapter -All -ErrorAction Stop |
+                        Where-Object {
+                            $_.SwitchId -eq $CreatedSwitchId -and
+                            $_.IsManagementOs -ne $true
+                        })
+                    $snapshotAttachments = @(
+                        foreach ($snapshotVm in @(Get-VM -ErrorAction Stop)) {
+                            foreach ($snapshot in @(Get-VMSnapshot -VM $snapshotVm `
+                                    -ErrorAction Stop)) {
+                                Get-VMNetworkAdapter -VMSnapshot $snapshot -ErrorAction Stop |
+                                    Where-Object { $_.SwitchId -eq $CreatedSwitchId }
+                            }
+                        }
+                    )
+                    $targetVm = Get-VM -Id ([Guid][string]$Plan.vm.id) -ErrorAction Stop
+                    $targetCheckpoints = @(Get-VMSnapshot -VM $targetVm -ErrorAction Stop)
+                    if ($CreatedCheckpointId -ne [Guid]::Empty) {
+                        $ownedCheckpointRows = @($targetCheckpoints | Where-Object {
+                            $_.Id -eq $CreatedCheckpointId
+                        })
+                    } else {
+                        $ownedCheckpointRows = @(Get-NewQualificationCheckpointCandidate `
+                            -Plan $Plan -InitialCheckpointIds $InitialCheckpointIds `
+                            -ProvisioningName $CreatedCheckpointProvisioningName)
+                    }
+                    if ($foreignVmAttachments.Count -eq 0 -and
+                        $snapshotAttachments.Count -eq 0 -and
+                        $ownedCheckpointRows.Count -eq 0) {
+                        break
+                    }
+                    Start-Sleep -Milliseconds 250
+                } while ([DateTime]::UtcNow -lt $attachmentDeadline)
                 if ($foreignVmAttachments.Count -ne 0) {
                     throw "created vSwitch still has VM attachments"
                 }
-                $snapshotAttachments = @(
-                    foreach ($snapshotVm in @(Get-VM -ErrorAction Stop)) {
-                        foreach ($snapshot in @(Get-VMSnapshot -VM $snapshotVm `
-                                -ErrorAction Stop)) {
-                            Get-VMNetworkAdapter -VMSnapshot $snapshot -ErrorAction Stop |
-                                Where-Object { $_.SwitchId -eq $CreatedSwitchId }
-                        }
-                    }
-                )
                 if ($snapshotAttachments.Count -ne 0) {
                     throw "created vSwitch still has checkpoint VM adapter references"
+                }
+                if ($ownedCheckpointRows.Count -ne 0) {
+                    throw "created checkpoint still references the vSwitch"
                 }
                 $managementAttachments = @(Get-VMNetworkAdapter -All -ErrorAction Stop |
                     Where-Object {
@@ -395,7 +419,8 @@ function Invoke-TopologyRollback {
                         $address | Remove-NetIPAddress -Confirm:$false -ErrorAction Stop
                     }
                 }
-                $rows[0] | Remove-VMSwitch -Confirm:$false -ErrorAction Stop | Out-Null
+                $rows[0] | Remove-VMSwitch -Force -Confirm:$false `
+                    -ErrorAction Stop | Out-Null
                 $remaining = @(Get-VMSwitch -ErrorAction Stop | Where-Object {
                     $_.Id -eq $CreatedSwitchId
                 })
@@ -558,7 +583,7 @@ try {
         -TimeoutSeconds $ReadinessTimeoutSeconds
     $session = $connection.Session
     $configuredGuestState = Invoke-GuestSupportNetwork `
-        -Session $session -Plan $plan -Configure
+        -Session $session -Plan $plan -Phase "initial_configure" -Configure
     Stop-GuestCleanly -Plan $plan -Session $session -TimeoutSeconds $ShutdownTimeoutSeconds
     $session = $null
 
@@ -622,7 +647,8 @@ try {
     $verificationConnection = Connect-ApprovedGuest -Plan $plan -Credential $credential `
         -TimeoutSeconds $ReadinessTimeoutSeconds
     $session = $verificationConnection.Session
-    $verifiedGuestState = Invoke-GuestSupportNetwork -Session $session -Plan $plan
+    $verifiedGuestState = Invoke-GuestSupportNetwork -Session $session -Plan $plan `
+        -Phase "post_checkpoint_restore"
     Assert-GuestIdentityUnchanged -Before $configuredGuestState -After $verifiedGuestState
     $runningHostState = Get-ValidatedSupportHostState -Plan $plan -SwitchId $createdSwitchId `
         -TimeoutSeconds $ReadinessTimeoutSeconds

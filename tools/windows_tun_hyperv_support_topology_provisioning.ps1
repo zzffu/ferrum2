@@ -428,11 +428,12 @@ function Set-SupportHostAdapter {
     )
 
     $interfaceIndex = [int]$SwitchContext.HostAdapter.ifIndex
-    foreach ($store in @("ActiveStore", "PersistentStore")) {
-        Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 `
-            -PolicyStore $store -Dhcp Disabled -IgnoreDefaultRoutes Enabled `
-            -ErrorAction Stop | Out-Null
-    }
+    Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 `
+        -PolicyStore ActiveStore -Dhcp Disabled -IgnoreDefaultRoutes Enabled `
+        -ErrorAction Stop | Out-Null
+    Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 `
+        -PolicyStore PersistentStore -IgnoreDefaultRoutes Enabled `
+        -ErrorAction Stop | Out-Null
     foreach ($store in @("ActiveStore", "PersistentStore")) {
         foreach ($route in @(Get-Ipv4RouteRow -InterfaceIndex $interfaceIndex `
                 -PolicyStore $store -DestinationPrefix "0.0.0.0/0")) {
@@ -522,7 +523,6 @@ function Get-ValidatedSupportHostState {
     if ($ipInterfaces.Count -ne 1 -or $persistentIpInterfaces.Count -ne 1 -or
         [string]$ipInterfaces[0].Dhcp -cne "Disabled" -or
         [string]$ipInterfaces[0].IgnoreDefaultRoutes -cne "Enabled" -or
-        [string]$persistentIpInterfaces[0].Dhcp -cne "Disabled" -or
         [string]$persistentIpInterfaces[0].IgnoreDefaultRoutes -cne "Enabled" -or
         [int]$ipInterfaces[0].NlMtu -lt 1468 -or $directRoutes.Count -ne 1 -or
         $defaultRoutes.Count -ne 0 -or $gatewayRoutes.Count -ne 0 -or
@@ -615,6 +615,9 @@ function Invoke-GuestSupportNetwork {
     param(
         [Parameter(Mandatory = $true)][object]$Session,
         [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("initial_configure", "post_checkpoint_restore")]
+        [string]$Phase,
         [switch]$Configure
     )
 
@@ -626,6 +629,7 @@ function Invoke-GuestSupportNetwork {
         [int]$Plan.support.prefix_length,
         [string]$Plan.support.network,
         [string]$Plan.support.host_ipv4,
+        $Phase,
         [bool]$Configure
     ) -ScriptBlock {
         param(
@@ -636,6 +640,7 @@ function Invoke-GuestSupportNetwork {
             [int]$PrefixLength,
             [string]$Network,
             [string]$HostIpv4,
+            [string]$ValidationPhase,
             [bool]$ShouldConfigure
         )
 
@@ -726,11 +731,12 @@ function Invoke-GuestSupportNetwork {
                 throw "guest support interface rename lost the pinned MAC identity"
             }
             $supportIndex = [int]$support[0].ifIndex
-            foreach ($store in @("ActiveStore", "PersistentStore")) {
-                Set-NetIPInterface -InterfaceIndex $supportIndex -AddressFamily IPv4 `
-                    -PolicyStore $store -Dhcp Disabled -IgnoreDefaultRoutes Enabled `
-                    -ErrorAction Stop | Out-Null
-            }
+            Set-NetIPInterface -InterfaceIndex $supportIndex -AddressFamily IPv4 `
+                -PolicyStore ActiveStore -Dhcp Disabled -IgnoreDefaultRoutes Enabled `
+                -ErrorAction Stop | Out-Null
+            Set-NetIPInterface -InterfaceIndex $supportIndex -AddressFamily IPv4 `
+                -PolicyStore PersistentStore -IgnoreDefaultRoutes Enabled `
+                -ErrorAction Stop | Out-Null
             foreach ($store in @("ActiveStore", "PersistentStore")) {
                 foreach ($route in @(Get-GuestIpv4RouteRow `
                         -InterfaceIndex $supportIndex -PolicyStore $store `
@@ -746,6 +752,19 @@ function Invoke-GuestSupportNetwork {
             }
             Set-DnsClientServerAddress -InterfaceIndex $supportIndex -ResetServerAddresses `
                 -ErrorAction Stop | Out-Null
+            $netshPath = Join-Path $env:SystemRoot "System32\netsh.exe"
+            if (-not (Test-Path -LiteralPath $netshPath -PathType Leaf)) {
+                throw "netsh.exe is unavailable for guest support DNS cleanup"
+            }
+            foreach ($addressFamily in @("ipv4", "ipv6")) {
+                $dnsClearOutput = @(& $netshPath interface $addressFamily set dnsservers `
+                    "name=$supportIndex" "source=static" "address=none" `
+                    "register=none" "validate=no" 2>&1)
+                if ($LASTEXITCODE -ne 0) {
+                    throw "guest support $addressFamily DNS cleanup failed with exit " +
+                        "$LASTEXITCODE`: $($dnsClearOutput -join ' ')"
+                }
+            }
             Set-DnsClient -InterfaceIndex $supportIndex `
                 -RegisterThisConnectionsAddress:$false -UseSuffixWhenRegistering:$false `
                 -ErrorAction Stop | Out-Null
@@ -826,7 +845,6 @@ function Invoke-GuestSupportNetwork {
             [string]$ipInterfaces[0].IgnoreDefaultRoutes -ceq "Enabled" -and
             [int]$ipInterfaces[0].NlMtu -ge 1468
         $persistentInterfaceValid = $persistentIpInterfaces.Count -eq 1 -and
-            [string]$persistentIpInterfaces[0].Dhcp -ceq "Disabled" -and
             [string]$persistentIpInterfaces[0].IgnoreDefaultRoutes -ceq "Enabled"
         $sourceSelectionValid = $sourceRows.Count -eq 1 -and
             [string]$sourceRows[0].IPAddress -ceq $GuestIpv4 -and
@@ -846,7 +864,8 @@ function Invoke-GuestSupportNetwork {
             if (-not $routeSelectionValid) { "route_selection" }
         )
         if ($violations.Count -ne 0) {
-            throw "guest support route, DNS, DHCP, MTU, or source-selection contract is invalid: $($violations -join ',')"
+            throw "guest support route, DNS, DHCP, MTU, or source-selection contract is invalid " +
+                "($ValidationPhase): $($violations -join ',')"
         }
 
         [pscustomobject][ordered]@{
