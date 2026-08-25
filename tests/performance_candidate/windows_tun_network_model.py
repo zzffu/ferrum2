@@ -17,7 +17,7 @@ import re
 import sys
 from typing import NoReturn
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 MAX_ELAPSED_NANOSECONDS = 120 * 1_000_000_000
 MAX_ROUTE_ELAPSED_NANOSECONDS = 240 * 1_000_000_000
@@ -42,9 +42,22 @@ FULL_REBUILD_REASONS = (
 )
 RESET_CYCLES = 1_000
 INTERFACE_SWITCH_SEQUENCE = 500
+INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS = 30
+INTERFACE_SWITCH_PROBE_RETRY_MILLISECONDS = 250
+MAX_INTERFACE_SWITCH_PROBE_ATTEMPTS = (
+    INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS * 1_000
+    // INTERFACE_SWITCH_PROBE_RETRY_MILLISECONDS
+)
 FULL_REBUILD_CYCLES = 10
 FULL_REBUILD_DAMAGE_REASON = "route_damage"
 INTERFACE_RESOLVER_PROBES = 32
+RESOURCE_WARMUP_RESET_CYCLES = 12
+RESOURCE_WARMUP_ROUTE_METRIC_STATES = 3
+RESOURCE_QUIESCENCE_SECONDS = 30
+TOTAL_RESET_CYCLES = RESOURCE_WARMUP_RESET_CYCLES + RESET_CYCLES
+INTERFACE_SWITCH_TRIAL_RESET_ORDINAL = (
+    RESOURCE_WARMUP_RESET_CYCLES + INTERFACE_SWITCH_SEQUENCE
+)
 
 RESOURCE_FIELDS = (
     "process_handles",
@@ -118,18 +131,36 @@ def create_local_hyperv_plan() -> dict[str, object]:
                 "required_outbounds": ["direct", "proxy"],
             },
             LIFECYCLE_WORKLOAD: {
+                "resource_warmup_reset_cycles": RESOURCE_WARMUP_RESET_CYCLES,
+                "resource_warmup_route_metric_states": (
+                    RESOURCE_WARMUP_ROUTE_METRIC_STATES
+                ),
+                "resource_quiescence_seconds": RESOURCE_QUIESCENCE_SECONDS,
                 "reset_network_cycles": RESET_CYCLES,
+                "total_reset_network_cycles": TOTAL_RESET_CYCLES,
                 "full_rebuild_cycles": FULL_REBUILD_CYCLES,
                 "ordinary_reset_reasons": list(ORDINARY_RESET_REASONS),
                 "full_rebuild_reasons": list(FULL_REBUILD_REASONS),
                 "full_rebuild_damage_reason": FULL_REBUILD_DAMAGE_REASON,
                 "interface_switch_kind": "approved_underlay_disable_enable",
                 "interface_switch_sequence": INTERFACE_SWITCH_SEQUENCE,
+                "interface_switch_recovery_timeout_seconds": (
+                    INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS
+                ),
+                "interface_switch_probe_retry_milliseconds": (
+                    INTERFACE_SWITCH_PROBE_RETRY_MILLISECONDS
+                ),
+                "interface_switch_trial_reset_ordinal": (
+                    INTERFACE_SWITCH_TRIAL_RESET_ORDINAL
+                ),
                 "interface_resolver_probes": INTERFACE_RESOLVER_PROBES,
+                "terminal_resource_convergence_excluded_from_elapsed": True,
                 "latency_percentiles": [50, 95, 99],
                 "maximum_retained_resource_growth": {
                     field: 0 for field in RESOURCE_FIELDS
                 },
+                "retained_resource_growth_enforced_operations": ["reset_network"],
+                "diagnostic_resource_growth_operations": ["full_rebuild"],
             },
         },
         "observation_identity_fields": sorted(OBSERVATION_IDENTITY_FIELDS),
@@ -455,7 +486,11 @@ def _latency_summary(values: list[int]) -> dict[str, int]:
 
 
 def _resource_accounting(
-    baseline: dict[str, int], samples: list[dict[str, int]], *, label: str
+    baseline: dict[str, int],
+    samples: list[dict[str, int]],
+    *,
+    label: str,
+    retained_growth_enforced: bool,
 ) -> dict[str, object]:
     final = samples[-1]
     growth = {field: final[field] - baseline[field] for field in RESOURCE_FIELDS}
@@ -465,7 +500,7 @@ def _resource_accounting(
     }
     peak_growth = {field: peak[field] - baseline[field] for field in RESOURCE_FIELDS}
     positive = {field: value for field, value in growth.items() if value > 0}
-    if positive:
+    if retained_growth_enforced and positive:
         _fail(f"{label} retained resource growth is not zero: {positive}")
     return {
         "baseline": dict(baseline),
@@ -473,7 +508,228 @@ def _resource_accounting(
         "growth": growth,
         "peak": peak,
         "peak_growth": peak_growth,
+        "retained_growth_enforced": retained_growth_enforced,
     }
+
+
+def _validate_resource_warmup(
+    value: object, *, baseline: dict[str, int]
+) -> tuple[dict[str, object], dict[str, int], str]:
+    warmup = _exact_fields(
+        value,
+        {
+            "reset_network_cycles",
+            "route_metric_baseline",
+            "quiescence_seconds",
+            "cold_start_resources",
+            "cycles",
+            "baseline_resource_samples",
+        },
+        "resource_warmup",
+    )
+    cycle_count = _integer(
+        warmup["reset_network_cycles"],
+        label="resource_warmup.reset_network_cycles",
+        minimum=RESOURCE_WARMUP_RESET_CYCLES,
+        maximum=RESOURCE_WARMUP_RESET_CYCLES,
+    )
+    route_metric_baseline = _integer(
+        warmup["route_metric_baseline"],
+        label="resource_warmup.route_metric_baseline",
+        maximum=65_535,
+    )
+    quiescence_seconds = _integer(
+        warmup["quiescence_seconds"],
+        label="resource_warmup.quiescence_seconds",
+        minimum=RESOURCE_QUIESCENCE_SECONDS,
+        maximum=RESOURCE_QUIESCENCE_SECONDS,
+    )
+    cold_start = _resource_snapshot(
+        warmup["cold_start_resources"],
+        label="resource_warmup.cold_start_resources",
+    )
+    if cold_start["process_handles"] == 0 or cold_start["process_threads"] == 0:
+        _fail("resource warmup cold-start process resources must be nonzero")
+    if cold_start["udp_associations_active"] != 0:
+        _fail("resource warmup cold-start state must not contain a UDP association")
+    if cold_start["managed_adapters_active"] != 1:
+        _fail("resource warmup cold-start state must contain exactly one managed adapter")
+
+    if route_metric_baseline <= 65_533:
+        route_metric_states = (
+            route_metric_baseline + 1,
+            route_metric_baseline + 2,
+            route_metric_baseline,
+        )
+    elif route_metric_baseline >= 2:
+        route_metric_states = (
+            route_metric_baseline - 1,
+            route_metric_baseline - 2,
+            route_metric_baseline,
+        )
+    else:  # pragma: no cover - the uint16 range makes this unreachable
+        _fail("resource warmup route metric has no bounded three-state mutation")
+
+    cycles = warmup["cycles"]
+    if type(cycles) is not list or len(cycles) != cycle_count:
+        _fail(f"resource warmup requires exactly {cycle_count} cycles")
+    previous_metrics: dict[str, int] | None = None
+    previous_identity: str | None = None
+    previous_route_metric = route_metric_baseline
+    resource_samples: list[dict[str, int]] = []
+    for index, cycle_value in enumerate(cycles):
+        label = f"resource_warmup.cycle[{index}]"
+        cycle = _exact_fields(
+            cycle_value,
+            {
+                "sequence",
+                "operation",
+                "reason",
+                "route_metric_before",
+                "route_metric_after",
+                "lifecycle_metrics_before",
+                "lifecycle_metrics_after",
+                "managed_identity_before",
+                "managed_identity_after",
+                "tcp_flows_before",
+                "udp_associations_before",
+                "tcp_flows_closed",
+                "udp_associations_closed",
+                "tcp_probe_succeeded",
+                "udp_probe_succeeded",
+                "resources_after",
+            },
+            label,
+        )
+        sequence = _integer(
+            cycle["sequence"],
+            label=f"{label}.sequence",
+            minimum=1,
+            maximum=cycle_count,
+        )
+        if sequence != index + 1:
+            _fail(f"{label}.sequence is not contiguous")
+        if cycle["operation"] != "reset_network" or cycle["reason"] != "route_change":
+            _fail(f"{label} must be a route-change ResetNetwork")
+
+        route_before = _integer(
+            cycle["route_metric_before"],
+            label=f"{label}.route_metric_before",
+            maximum=65_535,
+        )
+        route_after = _integer(
+            cycle["route_metric_after"],
+            label=f"{label}.route_metric_after",
+            maximum=65_535,
+        )
+        expected_route_after = route_metric_states[index % len(route_metric_states)]
+        if route_before != previous_route_metric or route_after != expected_route_after:
+            _fail(f"{label} does not follow the bounded three-state route schedule")
+        previous_route_metric = route_after
+
+        metrics_before = _lifecycle_metric_snapshot(
+            cycle["lifecycle_metrics_before"],
+            label=f"{label}.lifecycle_metrics_before",
+        )
+        metrics_after = _lifecycle_metric_snapshot(
+            cycle["lifecycle_metrics_after"],
+            label=f"{label}.lifecycle_metrics_after",
+        )
+        if previous_metrics is not None and metrics_before != previous_metrics:
+            _fail(f"{label} lifecycle metrics do not continue the prior warmup cycle")
+        _validate_lifecycle_metric_transition(
+            metrics_before,
+            metrics_after,
+            operation="reset_network",
+            label=label,
+        )
+        previous_metrics = metrics_after
+
+        identity_before = _identity(
+            cycle["managed_identity_before"],
+            label=f"{label}.managed_identity_before",
+        )
+        identity_after = _identity(
+            cycle["managed_identity_after"],
+            label=f"{label}.managed_identity_after",
+        )
+        if previous_identity is not None and identity_before != previous_identity:
+            _fail(f"{label} managed identity does not continue the prior warmup cycle")
+        if identity_before != identity_after:
+            _fail(f"{label} changed managed identity during warmup ResetNetwork")
+        previous_identity = identity_after
+
+        tcp_before = _integer(
+            cycle["tcp_flows_before"],
+            label=f"{label}.tcp_flows_before",
+            maximum=65_536,
+        )
+        udp_before = _integer(
+            cycle["udp_associations_before"],
+            label=f"{label}.udp_associations_before",
+            minimum=1,
+            maximum=65_536,
+        )
+        if cycle["tcp_flows_closed"] != tcp_before:
+            _fail(f"{label} did not close every TCP flow")
+        if cycle["udp_associations_closed"] != udp_before:
+            _fail(f"{label} did not close every UDP association")
+        if (
+            cycle["tcp_probe_succeeded"] is not True
+            or cycle["udp_probe_succeeded"] is not True
+        ):
+            _fail(f"{label} did not recover both TCP and UDP probes")
+
+        resources = _resource_snapshot(
+            cycle["resources_after"], label=f"{label}.resources_after"
+        )
+        if resources["process_handles"] == 0 or resources["process_threads"] == 0:
+            _fail(f"{label} process resources must be nonzero")
+        if resources["udp_associations_active"] != 0:
+            _fail(f"{label} retained a UDP association after warmup ResetNetwork")
+        if resources["managed_adapters_active"] != 1:
+            _fail(f"{label} changed the managed adapter count")
+        resource_samples.append(resources)
+
+    if previous_route_metric != route_metric_baseline:
+        _fail("resource warmup route schedule did not restore its baseline")
+    baseline_samples_value = warmup["baseline_resource_samples"]
+    if type(baseline_samples_value) is not list or len(baseline_samples_value) != 3:
+        _fail("resource warmup requires exactly three stable baseline resource samples")
+    baseline_samples = [
+        _resource_snapshot(sample, label=f"resource_warmup.baseline_resource_samples[{index}]")
+        for index, sample in enumerate(baseline_samples_value)
+    ]
+    if any(sample != baseline for sample in baseline_samples):
+        _fail("resource warmup baseline resource samples are not stable and exact")
+    resource_samples.extend(baseline_samples)
+    initialization_growth = {
+        field: baseline[field] - cold_start[field] for field in RESOURCE_FIELDS
+    }
+    peak = {
+        field: max([cold_start[field], *(sample[field] for sample in resource_samples)])
+        for field in RESOURCE_FIELDS
+    }
+    return (
+        {
+            "reset_network_cycles": cycle_count,
+            "measured_reset_network_cycles": RESET_CYCLES,
+            "total_reset_network_cycles": TOTAL_RESET_CYCLES,
+            "interface_switch_trial_reset_ordinal": (
+                INTERFACE_SWITCH_TRIAL_RESET_ORDINAL
+            ),
+            "route_metric_baseline": route_metric_baseline,
+            "route_metric_restored": True,
+            "quiescence_seconds": quiescence_seconds,
+            "terminal_resource_convergence_excluded_from_elapsed": True,
+            "cold_start_resources": cold_start,
+            "baseline_resources": dict(baseline),
+            "initialization_growth": initialization_growth,
+            "peak": peak,
+        },
+        previous_metrics,
+        previous_identity,
+    )
 
 
 def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
@@ -485,6 +741,7 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             "schema_version",
             "workload",
             "identity",
+            "resource_warmup",
             "baseline_resources",
             "cycles",
             "interface_resolver",
@@ -501,6 +758,9 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
         _fail("lifecycle baseline must not contain a UDP association")
     if baseline["managed_adapters_active"] != 1:
         _fail("lifecycle baseline must contain exactly one managed adapter")
+    warmup_summary, previous_lifecycle_metrics, previous_identity = (
+        _validate_resource_warmup(row["resource_warmup"], baseline=baseline)
+    )
     cycles = row["cycles"]
     expected_count = RESET_CYCLES + FULL_REBUILD_CYCLES
     if type(cycles) is not list or len(cycles) != expected_count:
@@ -510,8 +770,6 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
     rebuild_latencies: list[int] = []
     reset_resources: list[dict[str, int]] = []
     rebuild_resources: list[dict[str, int]] = []
-    previous_identity: str | None = None
-    previous_lifecycle_metrics: dict[str, int] | None = None
     for index, cycle_value in enumerate(cycles):
         label = f"lifecycle cycle[{index}]"
         cycle = _exact_fields(
@@ -630,9 +888,20 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             rebuild_resources.append(resources)
 
     switch_cycle = cycles[INTERFACE_SWITCH_SEQUENCE - 1]
+    if (
+        switch_cycle["elapsed_nanoseconds"]
+        > INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS * 1_000_000_000
+    ):
+        _fail("interface switch did not recover within its bounded timeout")
     resolver = _exact_fields(
         row["interface_resolver"],
-        {"probes", "resolutions", "cache_hits"},
+        {
+            "probes",
+            "resolutions",
+            "cache_hits",
+            "interface_switch_probe_attempts",
+            "interface_switch_resolution_failures",
+        },
         "interface_resolver",
     )
     probes = _integer(
@@ -653,12 +922,31 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
         minimum=1,
         maximum=resolutions,
     )
+    interface_switch_probe_attempts = _integer(
+        resolver["interface_switch_probe_attempts"],
+        label="interface_resolver.interface_switch_probe_attempts",
+        minimum=1,
+        maximum=MAX_INTERFACE_SWITCH_PROBE_ATTEMPTS,
+    )
+    interface_switch_resolution_failures = _integer(
+        resolver["interface_switch_resolution_failures"],
+        label="interface_resolver.interface_switch_resolution_failures",
+        maximum=MAX_INTERFACE_SWITCH_PROBE_ATTEMPTS - 1,
+    )
+    if interface_switch_resolution_failures != interface_switch_probe_attempts - 1:
+        _fail("interface switch probe attempt accounting is inconsistent")
 
     reset_accounting = _resource_accounting(
-        baseline, reset_resources, label="ResetNetwork"
+        baseline,
+        reset_resources,
+        label="ResetNetwork",
+        retained_growth_enforced=True,
     )
     rebuild_accounting = _resource_accounting(
-        reset_resources[-1], rebuild_resources, label="full rebuild"
+        reset_resources[-1],
+        rebuild_resources,
+        label="full rebuild",
+        retained_growth_enforced=False,
     )
     reset_latency = _latency_summary(reset_latencies)
     rebuild_latency = _latency_summary(rebuild_latencies)
@@ -666,6 +954,7 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
         "schema_version": SCHEMA_VERSION,
         "workload": LIFECYCLE_WORKLOAD,
         "identity": identity,
+        "resource_warmup": warmup_summary,
         "cycles": {
             "reset_network": RESET_CYCLES,
             "full_rebuild": FULL_REBUILD_CYCLES,
@@ -693,6 +982,8 @@ def summarize_lifecycle_observation(observation: object) -> dict[str, object]:
             "resolutions": resolutions,
             "cache_hits": cache_hits,
             "cache_hits_per_million_resolutions": cache_hits * 1_000_000 // resolutions,
+            "interface_switch_probe_attempts": interface_switch_probe_attempts,
+            "interface_switch_resolution_failures": interface_switch_resolution_failures,
         },
     }
 

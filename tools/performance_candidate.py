@@ -242,7 +242,7 @@ WINDOWS_TUN_SELECTION = "windows-tun-m17"
 WINDOWS_TUN_RUN_KINDS = frozenset({"comparison", "calibration-aa"})
 WINDOWS_TUN_PAIR_COUNT = 5
 WINDOWS_TUN_PLAN_SCHEMA_VERSION = 2
-WINDOWS_TUN_TRIAL_SCHEMA_VERSION = 3
+WINDOWS_TUN_TRIAL_SCHEMA_VERSION = 4
 WINDOWS_TUN_SUMMARY_SCHEMA_VERSION = 2
 WINDOWS_TUN_CALIBRATION_SCHEMA_VERSION = 2
 WINDOWS_TUN_POLICY_SCHEMA_VERSION = 2
@@ -279,6 +279,9 @@ WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS = {
     "max_ndjson_line_bytes": 4 * 1024,
     "max_ledger_events": 65_536,
 }
+# A zero-drop sample at this floor has an approximate 95% rule-of-three
+# upper bound below 100 drops per million responses.
+WINDOWS_TUN_RING_PRESSURE_MINIMUM_RESPONSE_ATTEMPTS = 32_768
 WINDOWS_TUN_PAIR_SCHEDULE = "alternating-parent-candidate"
 WINDOWS_TUN_GUEST = {
     "runner_os": "Windows",
@@ -518,6 +521,11 @@ WINDOWS_TUN_SCENARIOS = {
             "active_seconds": 60,
             "sample_interval_milliseconds": 1_000,
             "expected_traffic_packets": 0,
+            "allowed_idle_background_rejection_reasons": (
+                "family_disabled",
+                "invalid_destination",
+            ),
+            "minimum_reported_integer_rate": 1,
         },
         "metrics": {
             "cpu_idle_cost": {
@@ -534,6 +542,7 @@ WINDOWS_TUN_SCENARIOS = {
         "correctness_checks": (
             "session_active_throughout",
             "zero_test_traffic",
+            "known_background_ingress_exactly_accounted",
             "no_busy_poll_fallback",
             "clean_drain",
         ),
@@ -544,28 +553,45 @@ WINDOWS_TUN_SCENARIOS = {
             "topology": "tun-direct-external-echo",
             "warmup_seconds": 5,
             "burst_attempts": 1_000_000,
+            "minimum_response_attempts": (
+                WINDOWS_TUN_RING_PRESSURE_MINIMUM_RESPONSE_ATTEMPTS
+            ),
             "packets_per_event": 1,
             "payload_bytes": 1_200,
             "post_burst_settle_seconds": 5,
             "drop_rate_denominator": "tun_response_attempts",
+            "pending_response_peak_maximum": 1,
+            "ring_full_branch_proof": "separate_m17_correctness_gate",
         },
         "metrics": {
             "drop_rate": {
                 "unit": "dropped_packets_per_million_responses",
                 "direction": "lower_is_better",
+                "allow_zero": True,
+                "zero_baseline_comparison": (
+                    "zero_zero_tie_zero_to_positive_signed_100_percent"
+                ),
             },
             "pending_response_peak": {
                 "unit": "pending_udp_responses",
                 "direction": "lower_is_better",
+                "allow_zero": True,
+                "zero_baseline_comparison": (
+                    "zero_zero_tie_zero_to_positive_signed_100_percent"
+                ),
             },
         },
-        "checked_unit": "ring_full_events",
-        "minimum_checked_units": 1,
+        "checked_unit": "tun_response_attempts",
+        "minimum_checked_units": (
+            WINDOWS_TUN_RING_PRESSURE_MINIMUM_RESPONSE_ATTEMPTS
+        ),
         "correctness_checks": (
-            "ring_full_counter_increased",
+            "minimum_response_attempts_met",
+            "response_attempt_denominator_derived",
+            "drop_rate_recomputed_from_raw_counts",
             "drop_rate_denominator_bound",
-            "no_ring_full_retry",
-            "pending_response_peak_observed",
+            "ring_full_counter_sampled",
+            "pending_response_peak_bounded",
             "pending_response_baseline_and_drain",
             "no_network_reset_or_full_rebuild",
             "tun_path_observed",
@@ -627,13 +653,37 @@ WINDOWS_TUN_SCENARIOS = {
             "network_model_schema_version": WINDOWS_TUN_NETWORK_MODEL.SCHEMA_VERSION,
             "network_model_controller_sha256": WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
             "network_model_plan_sha256": WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
+            "resource_warmup_reset_cycles": (
+                WINDOWS_TUN_NETWORK_MODEL.RESOURCE_WARMUP_RESET_CYCLES
+            ),
+            "resource_warmup_route_metric_states": (
+                WINDOWS_TUN_NETWORK_MODEL.RESOURCE_WARMUP_ROUTE_METRIC_STATES
+            ),
+            "resource_quiescence_seconds": (
+                WINDOWS_TUN_NETWORK_MODEL.RESOURCE_QUIESCENCE_SECONDS
+            ),
             "reset_network_cycles": WINDOWS_TUN_NETWORK_MODEL.RESET_CYCLES,
+            "total_reset_network_cycles": WINDOWS_TUN_NETWORK_MODEL.TOTAL_RESET_CYCLES,
             "full_rebuild_cycles": WINDOWS_TUN_NETWORK_MODEL.FULL_REBUILD_CYCLES,
             "full_rebuild_damage_reason": WINDOWS_TUN_NETWORK_MODEL.FULL_REBUILD_DAMAGE_REASON,
             "interface_switch_kind": "approved_underlay_disable_enable",
             "interface_switch_sequence": WINDOWS_TUN_NETWORK_MODEL.INTERFACE_SWITCH_SEQUENCE,
+            "interface_switch_trial_reset_ordinal": (
+                WINDOWS_TUN_NETWORK_MODEL.INTERFACE_SWITCH_TRIAL_RESET_ORDINAL
+            ),
             "interface_resolver_probes": WINDOWS_TUN_NETWORK_MODEL.INTERFACE_RESOLVER_PROBES,
-            "recovery_timeout_seconds": 30,
+            "terminal_resource_convergence_excluded_from_elapsed": True,
+            "retained_resource_growth_enforced_operations": ("reset_network",),
+            "diagnostic_resource_growth_operations": ("full_rebuild",),
+            "recovery_timeout_seconds": (
+                WINDOWS_TUN_NETWORK_MODEL.INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS
+            ),
+            "interface_switch_probe_retry_milliseconds": (
+                WINDOWS_TUN_NETWORK_MODEL.INTERFACE_SWITCH_PROBE_RETRY_MILLISECONDS
+            ),
+            "interface_switch_retryable_failure": (
+                "outbound_explicit_resolution_failure"
+            ),
             "settle_seconds": 5,
             "recovery_probe": {
                 "protocols": 2,
@@ -683,6 +733,7 @@ WINDOWS_TUN_SCENARIOS = {
         "minimum_checked_units": WINDOWS_TUN_NETWORK_MODEL.RESET_CYCLES,
         "correctness_checks": (
             "same_process_all_cycles",
+            "resource_warmup_exact",
             "generation_advanced_once_per_cycle",
             "managed_identity_preserved_across_resets",
             "damage_only_full_rebuild",
@@ -792,6 +843,20 @@ WINDOWS_TUN_CORRECTNESS_FIELDS = frozenset(
 )
 WINDOWS_TUN_UDP_ASSOCIATION_DIAGNOSTIC_FIELDS = frozenset(
     {"udp_association_source_preflight"}
+)
+WINDOWS_TUN_RING_PRESSURE_DIAGNOSTIC_SCHEMA_VERSION = 1
+WINDOWS_TUN_RING_PRESSURE_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "workload_attempted_datagrams",
+        "tun_packets_egress",
+        "wintun_ring_full_dropped",
+        "tun_response_attempts",
+        "pending_response_before",
+        "pending_response_peak",
+        "pending_response_after",
+    }
 )
 WINDOWS_TUN_UDP_SOURCE_PREFLIGHT_SCHEMA = (
     "ferrum2.windows-tun.udp-fixed-source-preflight.v1"
@@ -2599,8 +2664,20 @@ def _median(values: Sequence[Decimal]) -> Decimal:
     return (ordered[middle - 1] + ordered[middle]) / Decimal(2)
 
 
-def _improvement(parent: int, candidate: int, direction: str) -> Decimal:
-    if parent <= 0:
+def _improvement(
+    parent: int,
+    candidate: int,
+    direction: str,
+    *,
+    allow_zero: bool = False,
+) -> Decimal:
+    if parent < 0 or candidate < 0:
+        raise CandidateControlError("metric values must be non-negative")
+    if parent == 0:
+        if allow_zero and candidate == 0:
+            return Decimal(0)
+        if allow_zero:
+            return Decimal(100 if direction == "higher_is_better" else -100)
         raise CandidateControlError("parent metric baseline must be positive")
     difference = (
         candidate - parent if direction == "higher_is_better" else parent - candidate
@@ -3840,6 +3917,13 @@ def validate_windows_tun_policy(policy: dict[str, object]) -> None:
                 raise CandidateControlError(
                     f"Windows TUN policy metric {scenario}/{metric} thresholds "
                     "must lie outside the noise band"
+                )
+            if metric_contract.get("allow_zero", False) and (
+                regression < Decimal(-100) or adoption > Decimal(100)
+            ):
+                raise CandidateControlError(
+                    f"Windows TUN policy metric {scenario}/{metric} zero-capable "
+                    "thresholds must include the signed 100 percent sentinel"
                 )
             if (
                 type(entry["minimum_pairs"]) is not int
@@ -5656,9 +5740,8 @@ def _validate_windows_tun_network_model_reference(
         raise CandidateControlError("Windows TUN network-model reference is unsupported")
     if value["controller_sha256"] != WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256:
         raise CandidateControlError("Windows TUN network-model controller identity mismatch")
-    collector_digest = value["collector_sha256"]
-    if type(collector_digest) is not str or SHA256.fullmatch(collector_digest) is None:
-        raise CandidateControlError("Windows TUN network-model collector SHA-256 is invalid")
+    if value["collector_sha256"] != WINDOWS_TUN_COLLECTOR_SOURCE_SHA256:
+        raise CandidateControlError("Windows TUN network-model collector identity mismatch")
     if value["plan_sha256"] != WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256:
         raise CandidateControlError("Windows TUN network-model plan identity mismatch")
     expected_file = f"{sequence:03d}-{scenario}-{member}-pair-{pair}.network-model.json"
@@ -6097,6 +6180,7 @@ def _validate_windows_tun_diagnostics(
     scenario: str,
     contract: dict[str, object],
     checked_units: int,
+    measurements: dict[str, object],
 ) -> None:
     if scenario == "udp-8192-association-lookup-expiry":
         if type(value) is not dict:
@@ -6112,6 +6196,90 @@ def _validate_windows_tun_diagnostics(
             value["udp_association_source_preflight"],
             recipe=contract["recipe"],
         )
+        return
+    if scenario == "wintun-ring-full-drop-rate":
+        if type(value) is not dict:
+            raise CandidateControlError(
+                "Wintun egress pressure diagnostics must be an object"
+            )
+        _exact_fields(
+            value,
+            WINDOWS_TUN_RING_PRESSURE_DIAGNOSTIC_FIELDS,
+            "Wintun egress pressure diagnostics",
+        )
+        if (
+            type(value["schema_version"]) is not int
+            or value["schema_version"]
+            != WINDOWS_TUN_RING_PRESSURE_DIAGNOSTIC_SCHEMA_VERSION
+        ):
+            raise CandidateControlError(
+                "Wintun egress pressure diagnostics schema_version is unsupported"
+            )
+        if value["kind"] != "wintun_egress_pressure_accounting":
+            raise CandidateControlError(
+                "Wintun egress pressure diagnostics kind is invalid"
+            )
+        count_fields = WINDOWS_TUN_RING_PRESSURE_DIAGNOSTIC_FIELDS - {
+            "schema_version",
+            "kind",
+        }
+        counts = {
+            field: _windows_tun_diagnostic_u64(value[field], field)
+            for field in count_fields
+        }
+        recipe = contract["recipe"]
+        if counts["workload_attempted_datagrams"] != recipe["burst_attempts"]:
+            raise CandidateControlError(
+                "Wintun egress pressure workload attempts do not match the recipe"
+            )
+        if counts["tun_response_attempts"] != (
+            counts["tun_packets_egress"] + counts["wintun_ring_full_dropped"]
+        ):
+            raise CandidateControlError(
+                "Wintun egress pressure response accounting is inconsistent"
+            )
+        if counts["tun_response_attempts"] != checked_units:
+            raise CandidateControlError(
+                "Wintun egress pressure response attempts do not match correctness"
+            )
+        if (
+            counts["tun_response_attempts"] < recipe["minimum_response_attempts"]
+            or counts["tun_response_attempts"]
+            > counts["workload_attempted_datagrams"]
+        ):
+            raise CandidateControlError(
+                "Wintun egress pressure response denominator is out of bounds"
+            )
+        if (
+            counts["pending_response_before"] != 0
+            or counts["pending_response_after"] != 0
+        ):
+            raise CandidateControlError(
+                "Wintun egress pressure pending responses did not start and end drained"
+            )
+        if (
+            counts["pending_response_peak"]
+            > recipe["pending_response_peak_maximum"]
+        ):
+            raise CandidateControlError(
+                "Wintun egress pressure pending response peak exceeded its bound"
+            )
+        expected_drop_rate = (
+            counts["wintun_ring_full_dropped"] * 1_000_000
+            + counts["tun_response_attempts"]
+            - 1
+        ) // counts["tun_response_attempts"]
+        if measurements["drop_rate"]["value"] != expected_drop_rate:
+            raise CandidateControlError(
+                "Wintun egress pressure drop rate was not recomputed from raw counts"
+            )
+        if (
+            measurements["pending_response_peak"]["value"]
+            != counts["pending_response_peak"]
+        ):
+            raise CandidateControlError(
+                "Wintun egress pressure pending peak was not recomputed from raw counts"
+            )
         return
     if scenario != "fragment-reassembly-throughput":
         if value is not None:
@@ -6424,13 +6592,15 @@ def validate_windows_tun_trial(
             raise CandidateControlError(
                 f"Windows TUN measurement {scenario}/{metric} unit mismatch"
             )
+        allow_zero = metric_contract.get("allow_zero", False)
         if (
             type(measurement["value"]) is not int
-            or measurement["value"] <= 0
+            or measurement["value"] < (0 if allow_zero else 1)
             or measurement["value"] > U64_MAX
         ):
+            value_contract = "non-negative" if allow_zero else "positive"
             raise CandidateControlError(
-                f"Windows TUN measurement {scenario}/{metric} must be a positive u64"
+                f"Windows TUN measurement {scenario}/{metric} must be a {value_contract} u64"
             )
     correctness = row["correctness"]
     if type(correctness) is not dict:
@@ -6446,6 +6616,13 @@ def validate_windows_tun_trial(
         or correctness["checked_units"] > U64_MAX
     ):
         raise CandidateControlError("Windows TUN correctness coverage is insufficient")
+    if (
+        scenario == "network-lifecycle"
+        and correctness["checked_units"] != WINDOWS_TUN_NETWORK_MODEL.RESET_CYCLES
+    ):
+        raise CandidateControlError(
+            "Windows TUN lifecycle correctness coverage must be exactly 1000 measured resets"
+        )
     checks = correctness["checks"]
     expected_checks = set(contract["correctness_checks"])
     if type(checks) is not dict or set(checks) != expected_checks:
@@ -6457,6 +6634,7 @@ def validate_windows_tun_trial(
         scenario=scenario,
         contract=contract,
         checked_units=correctness["checked_units"],
+        measurements=measurements,
     )
     if row["status"] != "PASS":
         raise CandidateControlError("Windows TUN trial status did not pass")
@@ -6602,6 +6780,10 @@ def _validate_windows_tun_network_model_sidecars(
                     reset_growth = summary["resources"]["reset_network"]["growth"]
                     expected_checks = {
                         "same_process_all_cycles": True,
+                        "resource_warmup_exact": summary["resource_warmup"][
+                            "reset_network_cycles"
+                        ]
+                        == WINDOWS_TUN_NETWORK_MODEL.RESOURCE_WARMUP_RESET_CYCLES,
                         "generation_advanced_once_per_cycle": True,
                         "managed_identity_preserved_across_resets": summary[
                             "managed_identity_preserved_across_resets"
@@ -6862,7 +7044,10 @@ def summarize_windows_tun_evidence(
                 parent_value = parent["measurements"][metric]["value"]
                 candidate_value = candidate["measurements"][metric]["value"]
                 improvement = _improvement(
-                    parent_value, candidate_value, metric_contract["direction"]
+                    parent_value,
+                    candidate_value,
+                    metric_contract["direction"],
+                    allow_zero=metric_contract.get("allow_zero", False),
                 )
                 improvements.append(improvement)
                 pair_summaries.append(

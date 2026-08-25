@@ -10,6 +10,8 @@ param(
     [string]$WintunZip,
     [string]$RunToken,
     [string]$IdentityLedger,
+    [string]$TopologyManifest,
+    [string]$GuestNetworkPath,
     [string]$ClientBinary,
     [string]$ServerBinary,
     [string]$ProductRoot,
@@ -29,10 +31,12 @@ $m17Modes = @(
     "network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy",
     "scheduler-ring-full"
 )
-$expectedHyperVVmName = "Windows 10 MSIX packaging environment"
-$expectedHyperVVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
-$expectedHyperVCheckpointName = "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9"
-$expectedHyperVCheckpointId = "1e570209-faf7-4248-8167-aa0687cdb8cf"
+$topologyBoundModes = @("network-feasibility", "managed-product", "full", "hard-kill") +
+    $m17Modes
+$expectedHyperVVmName = $null
+$expectedHyperVVmId = $null
+$expectedHyperVCheckpointName = $null
+$expectedHyperVCheckpointId = $null
 
 if ($Mode -in $m17Modes -and [string]::IsNullOrWhiteSpace($CandidateTestDirectory)) {
     throw "M17 qualification requires host-built CandidateTestDirectory artifacts"
@@ -68,13 +72,21 @@ function Assert-M17GuestIdentityMarker([string]$Path) {
         throw "M17 identity ledger file boundary is invalid"
     }
     $ledger = Get-Content -LiteralPath $resolved -Raw -Encoding utf8 | ConvertFrom-Json -Depth 4 -ErrorAction Stop
-    if ($ledger.schema -ne 1 -or
-        $ledger.vm_name -cne $script:expectedHyperVVmName -or
-        $ledger.vm_id -cne $script:expectedHyperVVmId -or
-        $ledger.checkpoint_name -cne $script:expectedHyperVCheckpointName -or
-        $ledger.checkpoint_id -cne $script:expectedHyperVCheckpointId) {
-        throw "M17 identity ledger does not name the approved Hyper-V guest"
+    $vmId = [Guid]::Empty
+    $checkpointId = [Guid]::Empty
+    if ($ledger.schema -ne 2 -or
+        [string]$ledger.vm_name -cnotmatch '^[^\r\n]{1,128}$' -or
+        -not [Guid]::TryParseExact([string]$ledger.vm_id, "D", [ref]$vmId) -or
+        $vmId -eq [Guid]::Empty -or
+        [string]$ledger.checkpoint_name -cnotmatch '^[^\r\n]{1,128}$' -or
+        -not [Guid]::TryParseExact([string]$ledger.checkpoint_id, "D", [ref]$checkpointId) -or
+        $checkpointId -eq [Guid]::Empty) {
+        throw "M17 identity ledger does not name one bounded Hyper-V guest checkpoint"
     }
+    $script:expectedHyperVVmName = [string]$ledger.vm_name
+    $script:expectedHyperVVmId = $vmId.ToString("D")
+    $script:expectedHyperVCheckpointName = [string]$ledger.checkpoint_name
+    $script:expectedHyperVCheckpointId = $checkpointId.ToString("D")
     return $resolved
 }
 
@@ -186,6 +198,12 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 function Test-UtcRoundTripTimestamp([object]$Value) {
+    if ($Value -is [DateTime]) {
+        return ([DateTime]$Value).Kind -eq [DateTimeKind]::Utc
+    }
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).Offset -eq [TimeSpan]::Zero
+    }
     if ($Value -isnot [string]) { return $false }
     [DateTimeOffset]$parsed = [DateTimeOffset]::MinValue
     return [DateTimeOffset]::TryParseExact(
@@ -570,7 +588,7 @@ function Read-M17NetworkResetRouteMutationIntent(
     [string]$ExpectedWorkPath = $script:work,
     [string]$JournalPath = $script:m17NetworkMutationJournal
 ) {
-    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-network-reset-route-intent.v1" @(
+    $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-network-reset-route-intent.v2" @(
         "schema", "run_token", "source_mode", "work_path", "interface_index",
         "destination_prefix", "next_hop", "route_metrics"
     ) $ExpectedWorkPath @("network-reset")
@@ -585,7 +603,7 @@ function Read-M17NetworkResetRouteMutationIntent(
     $nextHop = $null
     Assert-True ([Net.IPAddress]::TryParse([string]$document.next_hop, [ref]$nextHop) -and
         $nextHop.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
-        -not $nextHop.Equals([Net.IPAddress]::Any)) "M17 network-reset route next hop is invalid"
+        $nextHop.Equals([Net.IPAddress]::Any)) "M17 network-reset route next hop is invalid"
     return $document
 }
 
@@ -850,7 +868,8 @@ if ($Mode -eq "cleanup") {
         "schema", "status", "mode", "run_token", "network_reset_cycles", "restart_cycles", "approved_vm_name",
         "approved_vm_id", "approved_checkpoint_name", "approved_checkpoint_id", "guest_build",
         "identity_sha256", "candidate_sha", "client_sha256", "server_sha256", "controller_sha256",
-        "wintun_zip_sha256", "wintun_dll_sha256", "test_binaries", "started_utc", "finished_utc",
+        "wintun_zip_sha256", "wintun_dll_sha256", "test_binaries", "topology",
+        "guest_network_path", "started_utc", "finished_utc",
         "fixtures", "processes", "live_checks", "deterministic_tests", "witnesses", "counters_before",
         "counters_after", "cleanup", "failure"
     ) "M17 result artifact"
@@ -860,7 +879,7 @@ if ($Mode -eq "cleanup") {
         $artifactResult.approved_vm_id -is [string] -and $artifactResult.approved_checkpoint_name -is [string] -and
         $artifactResult.approved_checkpoint_id -is [string] -and $artifactResult.identity_sha256 -is [string] -and
         $artifactResult.controller_sha256 -is [string] -and
-        $artifactResult.schema -ceq "ferrum2.windows-tun.m17-result.v1" -and
+        $artifactResult.schema -ceq "ferrum2.windows-tun.m17-result.v2" -and
         @("pass", "fail") -ccontains $artifactResult.status -and $m17Modes -ccontains $artifactResult.mode -and
         $artifactResult.run_token -ceq $script:runIdentity -and
         $artifactResult.approved_vm_name -ceq $script:expectedHyperVVmName -and
@@ -1134,6 +1153,7 @@ $capabilityFilteredPackets = [ordered]@{
 }
 $m17ArtifactRoot = $null
 $m17ArtifactInitialized = $false
+$m17GuestNetworkPathDocument = $null
 $m17Contract = $null
 $m17FixtureRows = @()
 $m17WitnessRows = [ordered]@{}
@@ -2183,6 +2203,174 @@ function Complete-Tcp08Artifacts([bool]$CleanupSucceeded, [object]$PrimaryFailur
     }
 }
 
+function Read-M17TopologyManifest([string]$Path, [object]$Ledger) {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($Path)) "network qualification requires TopologyManifest"
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    Assert-NotReparsePoint $resolved "support topology manifest"
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    Assert-True (-not $item.PSIsContainer -and $item.Length -ge 2 -and $item.Length -le 131072) "support topology manifest file boundary is invalid"
+    [byte[]]$bytes = [IO.File]::ReadAllBytes($resolved)
+    Assert-True ($bytes[-1] -eq 10 -and @($bytes | Where-Object { $_ -eq 10 }).Count -eq 1 -and
+        @($bytes | Where-Object { $_ -eq 13 }).Count -eq 0 -and
+        -not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and
+            $bytes[2] -eq 0xbf)) "support topology manifest must be one BOM-free LF-terminated UTF-8 document"
+    $actualHash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($actualHash -ceq [string]$Ledger.topology.manifest_sha256) "support topology manifest hash mismatch"
+    $manifest = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) |
+        ConvertFrom-Json -Depth 12 -ErrorAction Stop
+    Assert-ClosedJsonProperties -Object $manifest -Expected @(
+        "schema", "created_utc", "topology_plan_sha256", "inspector_sha256",
+        "provisioning_library_sha256", "provisioning_script_sha256", "vm",
+        "source_checkpoint", "qualification_checkpoint", "management_adapter", "support",
+        "protected_host_tun", "constraints"
+    ) -Label "support topology manifest"
+    Assert-ClosedJsonProperties -Object $manifest.vm -Expected @(
+        "name", "id", "terminal_state", "automatic_checkpoints_enabled"
+    ) -Label "support topology manifest VM"
+    Assert-ClosedJsonProperties -Object $manifest.qualification_checkpoint -Expected @(
+        "name", "id", "type", "parent_id", "support_vm_adapter_snapshot_id",
+        "restore_verified"
+    ) -Label "support topology manifest qualification checkpoint"
+    Assert-ClosedJsonProperties -Object $manifest.support -Expected @(
+        "switch", "vm_adapter", "guest"
+    ) -Label "support topology manifest support"
+    Assert-ClosedJsonProperties -Object $manifest.support.switch -Expected @(
+        "switch_name", "switch_id", "switch_type", "management_os_adapter_id",
+        "management_os_device_id", "host_interface_alias", "host_interface_guid",
+        "host_interface_index", "host_mac_address", "host_ipv4", "prefix_length", "network",
+        "gateway", "dns_servers", "mtu_bytes", "nat_enabled", "ics_enabled",
+        "selected_source_ipv4", "selected_route_prefix", "selected_route_next_hop"
+    ) -Label "support topology manifest switch"
+    Assert-ClosedJsonProperties -Object $manifest.support.vm_adapter -Expected @(
+        "name", "id", "switch_id", "mac_address", "dynamic_mac_address",
+        "virtual_system_identifiers"
+    ) -Label "support topology manifest VM adapter"
+    Assert-ClosedJsonProperties -Object $manifest.support.guest -Expected @(
+        "schema", "management_interface_alias", "management_interface_guid",
+        "management_interface_index", "management_mac_address", "support_interface_alias",
+        "support_interface_guid", "support_interface_index", "support_mac_address", "guest_ipv4",
+        "prefix_length", "network", "gateway", "dns_servers", "mtu_bytes",
+        "selected_source_ipv4", "selected_route_prefix", "selected_route_next_hop"
+    ) -Label "support topology manifest guest"
+    Assert-ClosedJsonProperties -Object $manifest.protected_host_tun -Expected @(
+        "present", "name", "interface_guid", "interface_index", "status"
+    ) -Label "support topology manifest protected host TUN"
+    Assert-ClosedJsonProperties -Object $manifest.constraints -Expected @(
+        "nat", "ics", "gateway", "dns", "firewall_mutation", "default_switch_mutation",
+        "host_tun_mutation"
+    ) -Label "support topology manifest constraints"
+    $topology = $Ledger.topology
+    Assert-True ($manifest.schema -is [long] -and [long]$manifest.schema -eq 1 -and
+        [string]$manifest.topology_plan_sha256 -ceq [string]$topology.plan_sha256 -and
+        [string]$manifest.vm.name -ceq [string]$Ledger.vm_name -and
+        [string]$manifest.vm.id -ceq [string]$Ledger.vm_id -and
+        [string]$manifest.vm.terminal_state -ceq "Off" -and
+        $manifest.vm.automatic_checkpoints_enabled -is [bool] -and
+        $manifest.vm.automatic_checkpoints_enabled -eq $false -and
+        [string]$manifest.qualification_checkpoint.name -ceq [string]$Ledger.checkpoint_name -and
+        [string]$manifest.qualification_checkpoint.id -ceq [string]$Ledger.checkpoint_id -and
+        [string]$manifest.qualification_checkpoint.type -ceq "Standard" -and
+        $manifest.qualification_checkpoint.restore_verified -is [bool] -and
+        $manifest.qualification_checkpoint.restore_verified -eq $true) "support topology manifest VM or checkpoint identity mismatch"
+    $switch = $manifest.support.switch
+    $guest = $manifest.support.guest
+    Assert-True ([string]$switch.switch_id -ceq [string]$topology.support_switch_id -and
+        [string]$switch.switch_type -ceq "Internal" -and
+        [string]$switch.host_ipv4 -ceq [string]$topology.support_host_ipv4 -and
+        [string]$switch.network -ceq [string]$topology.support_network -and
+        [long]$switch.prefix_length -eq [long]$topology.support_prefix_length -and
+        $null -eq $switch.gateway -and @($switch.dns_servers).Count -eq 0 -and
+        $switch.nat_enabled -is [bool] -and $switch.nat_enabled -eq $false -and
+        $switch.ics_enabled -is [bool] -and $switch.ics_enabled -eq $false -and
+        [string]$switch.selected_source_ipv4 -ceq [string]$topology.support_host_ipv4 -and
+        [string]$switch.selected_route_prefix -ceq [string]$topology.support_network -and
+        [string]$switch.selected_route_next_hop -ceq "0.0.0.0") "support topology manifest host isolation mismatch"
+    Assert-True ([string]$guest.support_interface_alias -ceq [string]$topology.guest_interface_alias -and
+        [string]$guest.support_interface_guid -ceq [string]$topology.guest_interface_guid -and
+        [long]$guest.support_interface_index -eq [long]$topology.guest_interface_index -and
+        [string]$guest.support_mac_address -ceq [string]$topology.guest_mac_address -and
+        [string]$guest.guest_ipv4 -ceq [string]$topology.guest_ipv4 -and
+        [long]$guest.prefix_length -eq [long]$topology.support_prefix_length -and
+        [string]$guest.network -ceq [string]$topology.support_network -and
+        [long]$guest.mtu_bytes -eq [long]$topology.guest_mtu_bytes -and
+        $null -eq $guest.gateway -and @($guest.dns_servers).Count -eq 0 -and
+        [string]$guest.selected_source_ipv4 -ceq [string]$topology.guest_ipv4 -and
+        [string]$guest.selected_route_prefix -ceq [string]$topology.support_network -and
+        [string]$guest.selected_route_next_hop -ceq "0.0.0.0") "support topology manifest guest isolation mismatch"
+    Assert-True ($manifest.protected_host_tun.present -is [bool] -and
+        $manifest.protected_host_tun.present -eq $true -and
+        [string]$manifest.protected_host_tun.name -ceq [string]$topology.protected_host_tun_name -and
+        [string]$manifest.protected_host_tun.interface_guid -ceq [string]$topology.protected_host_tun_guid -and
+        [long]$manifest.protected_host_tun.interface_index -eq [long]$topology.protected_host_tun_index -and
+        [string]$manifest.protected_host_tun.status -ceq [string]$topology.protected_host_tun_status -and
+        [string]$manifest.constraints.nat -ceq "absent" -and
+        [string]$manifest.constraints.ics -ceq "absent" -and
+        [string]$manifest.constraints.gateway -ceq "absent" -and
+        [string]$manifest.constraints.dns -ceq "absent_on_support_interfaces" -and
+        [string]$manifest.constraints.firewall_mutation -ceq "none" -and
+        [string]$manifest.constraints.default_switch_mutation -ceq "none" -and
+        [string]$manifest.constraints.host_tun_mutation -ceq "none") "support topology manifest isolation constraints mismatch"
+    return [pscustomobject]@{ Path = $resolved; Sha256 = $actualHash; Value = $manifest }
+}
+
+function Read-M17GuestNetworkPath([string]$Path, [object]$Ledger) {
+    Assert-True (-not [string]::IsNullOrWhiteSpace($Path)) "M17 qualification requires GuestNetworkPath"
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    Assert-NotReparsePoint $resolved "guest support network path"
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    Assert-True (-not $item.PSIsContainer -and $item.Length -ge 2 -and $item.Length -le 65536) "guest support network path file boundary is invalid"
+    [byte[]]$bytes = [IO.File]::ReadAllBytes($resolved)
+    Assert-True ($bytes[-1] -eq 10 -and @($bytes | Where-Object { $_ -eq 10 }).Count -eq 1 -and
+        @($bytes | Where-Object { $_ -eq 13 }).Count -eq 0 -and
+        -not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and
+            $bytes[2] -eq 0xbf)) "guest support network path must be one BOM-free LF-terminated UTF-8 document"
+    $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) |
+        ConvertFrom-Json -Depth 5 -ErrorAction Stop
+    $fields = @(
+        "schema", "support_ipv4", "guest_ipv4", "guest_prefix_length",
+        "guest_interface_index", "guest_interface_alias", "guest_interface_guid",
+        "guest_interface_mtu_bytes", "guest_mac_address", "guest_route_prefix",
+        "guest_route_next_hop", "guest_dns_servers"
+    )
+    Assert-True ((@($value.PSObject.Properties.Name) -join "|") -ceq ($fields -join "|")) "guest support network path property order is invalid"
+    $topology = $Ledger.topology
+    Assert-True ($value.schema -is [long] -and [long]$value.schema -eq 2 -and
+        [string]$value.support_ipv4 -ceq [string]$topology.support_host_ipv4 -and
+        [string]$value.support_ipv4 -ceq [string]$Ledger.support_listener.ipv4 -and
+        [string]$value.guest_ipv4 -ceq [string]$topology.guest_ipv4 -and
+        [long]$value.guest_prefix_length -eq [long]$topology.support_prefix_length -and
+        [long]$value.guest_interface_index -eq [long]$topology.guest_interface_index -and
+        [string]$value.guest_interface_alias -ceq [string]$topology.guest_interface_alias -and
+        [string]$value.guest_interface_guid -ceq [string]$topology.guest_interface_guid -and
+        [long]$value.guest_interface_mtu_bytes -eq [long]$topology.guest_mtu_bytes -and
+        [string]$value.guest_mac_address -ceq [string]$topology.guest_mac_address -and
+        [string]$value.guest_route_prefix -ceq [string]$topology.support_network -and
+        [string]$value.guest_route_next_hop -ceq "0.0.0.0" -and
+        @($value.guest_dns_servers).Count -eq 0) "guest support network path does not match the identity ledger"
+    return [pscustomobject]@{
+        Path = $resolved
+        Sha256 = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash.ToLowerInvariant()
+        Length = [long]$bytes.Length
+        Value = $value
+    }
+}
+
+function Assert-M17ExternalIdentityInputsUnchanged {
+    Assert-True ($null -ne $script:capabilityIdentity.TopologyManifest -and
+        $null -ne $script:m17GuestNetworkPathDocument) "M17 external identity inputs are unavailable"
+    $manifestItem = Get-Item -LiteralPath $script:capabilityIdentity.TopologyManifest.Path `
+        -Force -ErrorAction Stop
+    $pathItem = Get-Item -LiteralPath $script:m17GuestNetworkPathDocument.Path `
+        -Force -ErrorAction Stop
+    Assert-True (-not $manifestItem.PSIsContainer -and
+        (Get-FileHash -LiteralPath $manifestItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+            [string]$script:capabilityIdentity.TopologyManifest.Sha256 -and
+        -not $pathItem.PSIsContainer -and
+        [long]$pathItem.Length -eq [long]$script:m17GuestNetworkPathDocument.Length -and
+        (Get-FileHash -LiteralPath $pathItem.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+            [string]$script:m17GuestNetworkPathDocument.Sha256) "M17 external identity input changed during the run"
+}
+
 function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     Assert-True (-not [string]::IsNullOrWhiteSpace($Path)) "network feasibility requires IdentityLedger"
     $resolved = (Resolve-Path -LiteralPath $Path).Path
@@ -2193,40 +2381,68 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     $utf8 = [Text.UTF8Encoding]::new($false, $true)
     $text = $utf8.GetString($bytes)
     $json = $text.Substring(0, $text.Length - 1)
-    $ledger = $json | ConvertFrom-Json -Depth 4
+    $jsonDocument = [Text.Json.JsonDocument]::Parse($json)
+    try {
+        $supportCreationUtcText = $jsonDocument.RootElement.GetProperty(
+            "support_listener"
+        ).GetProperty("creation_utc").GetString()
+    } finally {
+        $jsonDocument.Dispose()
+    }
+    $ledger = $json | ConvertFrom-Json -Depth 6
+    $supportCreationUtcRuntime = $ledger.support_listener.creation_utc
+    $canonicalSupportCreationUtc = if ($supportCreationUtcRuntime -is [DateTime]) {
+        ([DateTime]$supportCreationUtcRuntime).ToUniversalTime().ToString(
+            "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'",
+            [Globalization.CultureInfo]::InvariantCulture)
+    } else { $null }
+    Assert-True ($supportCreationUtcRuntime -is [DateTime] -and
+        ([DateTime]$supportCreationUtcRuntime).Kind -eq [DateTimeKind]::Utc -and
+        $supportCreationUtcText -cmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$' -and
+        $supportCreationUtcText -ceq $canonicalSupportCreationUtc -and
+        [DateTime]$supportCreationUtcRuntime -le [DateTime]::UtcNow.AddMinutes(5)) "support listener creation time is invalid"
+    $ledger.support_listener.creation_utc = $canonicalSupportCreationUtc
     $keys = @(
         "schema", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id", "guest_product",
         "guest_edition", "guest_architecture", "guest_version", "guest_build", "candidate_sha",
-        "probe_sha256", "client_sha256", "server_sha256", "support_listener"
+        "probe_sha256", "client_sha256", "server_sha256", "support_listener", "topology",
+        "test_binaries"
     )
-    $hasTestBinaries = $ledger.PSObject.Properties.Name -ccontains "test_binaries"
-    if ($hasTestBinaries) { $keys += "test_binaries" }
     Assert-True ((@($ledger.PSObject.Properties.Name) -join "|") -ceq ($keys -join "|")) "identity ledger keys are invalid"
-    $listenerKeys = @("ipv4", "tcp_port", "udp_port", "pid", "owner")
+    $listenerKeys = @(
+        "ipv4", "tcp_port", "udp_port", "pid", "owner", "executable_sha256", "creation_utc"
+    )
     Assert-True ((@($ledger.support_listener.PSObject.Properties.Name) -join "|") -ceq ($listenerKeys -join "|")) "support listener keys are invalid"
-    Assert-True (($ledger | ConvertTo-Json -Compress -Depth 4) -ceq $json) "identity ledger is not canonical JSON"
-    Assert-True ($ledger.schema -is [long] -and $ledger.schema -eq 1) "identity ledger schema is invalid"
-    Assert-True ($ledger.vm_name -ceq $script:expectedHyperVVmName) "identity ledger VM name is invalid"
-    Assert-True ($ledger.vm_id -ceq $script:expectedHyperVVmId) "identity ledger VM ID is invalid"
-    Assert-True ($ledger.checkpoint_name -ceq $script:expectedHyperVCheckpointName) "identity ledger checkpoint name is invalid"
-    Assert-True ($ledger.checkpoint_id -ceq $script:expectedHyperVCheckpointId) "identity ledger checkpoint ID is invalid"
+    $topologyKeys = @(
+        "manifest_sha256", "plan_sha256", "support_switch_id", "support_host_ipv4",
+        "support_network", "support_prefix_length", "guest_interface_alias",
+        "guest_interface_guid", "guest_interface_index", "guest_mac_address", "guest_ipv4",
+        "guest_mtu_bytes", "protected_host_tun_name", "protected_host_tun_guid",
+        "protected_host_tun_index", "protected_host_tun_status"
+    )
+    Assert-True ((@($ledger.topology.PSObject.Properties.Name) -join "|") -ceq ($topologyKeys -join "|")) "identity ledger topology keys are invalid"
+    Assert-True (($ledger | ConvertTo-Json -Compress -Depth 6) -ceq $json) "identity ledger is not canonical JSON"
+    Assert-True ($ledger.schema -is [long] -and $ledger.schema -eq 2) "identity ledger schema is invalid"
+    Assert-True ([string]$ledger.vm_name -cmatch '^[^\r\n]{1,128}$') "identity ledger VM name is invalid"
+    Assert-True ([string]$ledger.checkpoint_name -cmatch '^[^\r\n]{1,128}$') "identity ledger checkpoint name is invalid"
     $parsedGuid = [Guid]::Empty
     Assert-True ([Guid]::TryParseExact([string]$ledger.vm_id, "D", [ref]$parsedGuid) -and $parsedGuid -ne [Guid]::Empty) "identity ledger VM ID is invalid"
+    $script:expectedHyperVVmName = [string]$ledger.vm_name
+    $script:expectedHyperVVmId = $parsedGuid.ToString("D")
     $parsedGuid = [Guid]::Empty
     Assert-True ([Guid]::TryParseExact([string]$ledger.checkpoint_id, "D", [ref]$parsedGuid) -and $parsedGuid -ne [Guid]::Empty) "identity ledger checkpoint ID is invalid"
+    $script:expectedHyperVCheckpointName = [string]$ledger.checkpoint_name
+    $script:expectedHyperVCheckpointId = $parsedGuid.ToString("D")
     Assert-True ([string]$ledger.candidate_sha -cmatch '^[0-9a-f]{40}$') "identity ledger candidate SHA is invalid"
     Assert-True ([string]$ledger.probe_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger probe hash is invalid"
     Assert-True ([string]$ledger.client_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger client hash is invalid"
     Assert-True ([string]$ledger.server_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger server hash is invalid"
-    if ($hasTestBinaries) {
-        $testKeys = @("client", "tun", "wintun")
-        Assert-True ((@($ledger.test_binaries.PSObject.Properties.Name) -join "|") -ceq ($testKeys -join "|")) "identity ledger test binary keys are invalid"
-        foreach ($name in $testKeys) {
-            Assert-True ([string]$ledger.test_binaries.$name -cmatch '^[0-9a-f]{64}$') "identity ledger test binary hash is invalid"
-        }
+    $testKeys = @("client", "tun", "wintun")
+    Assert-True ((@($ledger.test_binaries.PSObject.Properties.Name) -join "|") -ceq ($testKeys -join "|")) "identity ledger test binary keys are invalid"
+    foreach ($name in $testKeys) {
+        Assert-True ([string]$ledger.test_binaries.$name -cmatch '^[0-9a-f]{64}$') "identity ledger test binary hash is invalid"
     }
     if ($script:candidateTestDirectoryExplicit) {
-        Assert-True $hasTestBinaries "prebuilt candidate tests require identity ledger hashes"
         $testFiles = [ordered]@{
             client = "ferrum2-client-tests.exe"
             tun = "ferrum2-tun-tests.exe"
@@ -2266,11 +2482,41 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     $octets = $address.GetAddressBytes()
     Assert-True (-not [Net.IPAddress]::IsLoopback($address) -and $octets[0] -ne 0 -and $octets[0] -lt 224 -and -not ($octets[0] -eq 169 -and $octets[1] -eq 254)) "support listener address is not eligible"
     Assert-True (@(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address.IPAddressToString -ErrorAction SilentlyContinue).Count -eq 0) "support listener address is guest-local"
-    foreach ($name in @("tcp_port", "udp_port")) {
-        Assert-True ($ledger.support_listener.$name -is [long] -and $ledger.support_listener.$name -ge 1 -and $ledger.support_listener.$name -le 65535) "support listener port is invalid"
+    Assert-True ($ledger.support_listener.tcp_port -is [long] -and
+        [long]$ledger.support_listener.tcp_port -ge 1 -and
+        [long]$ledger.support_listener.tcp_port -le 65535) "support listener TCP port is invalid"
+    Assert-True ($ledger.support_listener.udp_port -is [long] -and
+        [long]$ledger.support_listener.udp_port -ge 1 -and
+        [long]$ledger.support_listener.udp_port -le 65532) "support listener UDP port is invalid"
+    Assert-True ($ledger.support_listener.pid -is [long] -and
+        [long]$ledger.support_listener.pid -ge 1 -and
+        [long]$ledger.support_listener.pid -le [int]::MaxValue) "support listener PID is invalid"
+    Assert-True ([string]$ledger.support_listener.owner -cmatch
+        '^[A-Za-z0-9][A-Za-z0-9_.:@/ -]{0,127}$') "support listener owner is invalid"
+    Assert-True ([string]$ledger.support_listener.executable_sha256 -cmatch '^[0-9a-f]{64}$') "support listener executable hash is invalid"
+
+    $topology = $ledger.topology
+    foreach ($name in @("manifest_sha256", "plan_sha256")) {
+        Assert-True ([string]$topology.$name -cmatch '^[0-9a-f]{64}$') "identity ledger topology hash is invalid: $name"
     }
-    Assert-True ($ledger.support_listener.pid -is [long] -and $ledger.support_listener.pid -ge 1 -and $ledger.support_listener.pid -le [uint32]::MaxValue) "support listener PID is invalid"
-    Assert-True ([string]$ledger.support_listener.owner -cmatch '^[^\r\n]{1,256}$') "support listener owner is invalid"
+    foreach ($name in @("support_switch_id", "guest_interface_guid", "protected_host_tun_guid")) {
+        $topologyGuid = [Guid]::Empty
+        Assert-True ([Guid]::TryParseExact([string]$topology.$name, "D", [ref]$topologyGuid) -and
+            $topologyGuid -ne [Guid]::Empty) "identity ledger topology GUID is invalid: $name"
+    }
+    Assert-True ([string]$topology.support_host_ipv4 -ceq "192.168.250.1" -and
+        [string]$topology.support_network -ceq "192.168.250.0/30" -and
+        $topology.support_prefix_length -is [long] -and [long]$topology.support_prefix_length -eq 30 -and
+        [string]$topology.guest_interface_alias -ceq "Ferrum2Support" -and
+        $topology.guest_interface_index -is [long] -and [long]$topology.guest_interface_index -gt 0 -and
+        [string]$topology.guest_mac_address -cmatch '^[0-9A-F]{12}$' -and
+        [string]$topology.guest_ipv4 -ceq "192.168.250.2" -and
+        $topology.guest_mtu_bytes -is [long] -and [long]$topology.guest_mtu_bytes -eq 1500 -and
+        [string]$topology.protected_host_tun_name -ceq "tun0" -and
+        $topology.protected_host_tun_index -is [long] -and [long]$topology.protected_host_tun_index -gt 0 -and
+        [string]$topology.protected_host_tun_status -ceq "Up" -and
+        [string]$ledger.support_listener.ipv4 -ceq [string]$topology.support_host_ipv4) "identity ledger isolated support topology is invalid"
+    $topologyManifestDocument = Read-M17TopologyManifest $TopologyManifest $ledger
 
     return [pscustomobject]@{
         Ledger = $ledger
@@ -2280,14 +2526,16 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
         SupportAddress = $address.IPAddressToString
         TcpPort = [int]$ledger.support_listener.tcp_port
         UdpPort = [int]$ledger.support_listener.udp_port
+        TopologyManifest = $topologyManifestDocument
     }
 }
 
-if ($Mode -in (@("network-feasibility", "managed-product", "full", "hard-kill") + $m17Modes)) {
+if ($Mode -in $topologyBoundModes) {
     $capabilityIdentity = Get-NetworkFeasibilityIdentity $IdentityLedger ($Mode -eq "full" -or $Mode -in $m17Modes)
     $capabilityIdentityHash = $capabilityIdentity.IdentitySha256
     $capabilityEvidence = "$($capabilityIdentity.Path).evidence-$runIdentity.jsonl"
     Assert-True (-not (Test-Path -LiteralPath $capabilityEvidence)) "network feasibility evidence baseline not absent"
+    $m17GuestNetworkPathDocument = Read-M17GuestNetworkPath $GuestNetworkPath $capabilityIdentity.Ledger
 }
 
 function Get-Tcp01Boundary([hashtable]$State) {
@@ -2841,6 +3089,44 @@ public sealed class Ferrum2CtrlBreakResult {
     public double InternalWaitMilliseconds { get; internal set; }
     public double TotalDurationMilliseconds { get; internal set; }
     public bool Succeeded { get; internal set; }
+}
+
+public static class Ferrum2WfpIdentity {
+    private const uint ERROR_SUCCESS = 0;
+    private const int MAX_APP_ID_BYTES = 131072;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FWP_BYTE_BLOB {
+        public uint size;
+        public IntPtr data;
+    }
+
+    [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode)]
+    private static extern uint FwpmGetAppIdFromFileName0(string fileName, out IntPtr appId);
+
+    [DllImport("fwpuclnt.dll")]
+    private static extern void FwpmFreeMemory0(ref IntPtr memory);
+
+    public static byte[] GetAppId(string executablePath) {
+        if (String.IsNullOrWhiteSpace(executablePath) || !Path.IsPathRooted(executablePath))
+            throw new ArgumentException("an absolute executable path is required", "executablePath");
+        IntPtr allocation = IntPtr.Zero;
+        var status = FwpmGetAppIdFromFileName0(executablePath, out allocation);
+        try {
+            if (status != ERROR_SUCCESS)
+                throw new Win32Exception(unchecked((int)status), "FwpmGetAppIdFromFileName0");
+            if (allocation == IntPtr.Zero)
+                throw new InvalidOperationException("FwpmGetAppIdFromFileName0 returned no allocation");
+            var blob = (FWP_BYTE_BLOB)Marshal.PtrToStructure(allocation, typeof(FWP_BYTE_BLOB));
+            if (blob.size == 0 || blob.size > MAX_APP_ID_BYTES || blob.data == IntPtr.Zero)
+                throw new InvalidOperationException("FwpmGetAppIdFromFileName0 returned an invalid blob");
+            var bytes = new byte[checked((int)blob.size)];
+            Marshal.Copy(blob.data, bytes, 0, bytes.Length);
+            return bytes;
+        } finally {
+            if (allocation != IntPtr.Zero) FwpmFreeMemory0(ref allocation);
+        }
+    }
 }
 
 public static class Ferrum2ProcessGroup {
@@ -4291,9 +4577,13 @@ function Get-Tcp08LiveEvidence(
     }
 }
 
-function Write-CapabilityEvidence([string]$Phase, [hashtable]$Data) {
+function Write-CapabilityEvidence(
+    [string]$Phase,
+    [Collections.IDictionary]$Data,
+    [ValidateRange(1, 2)][int]$Schema = 1
+) {
     $row = [ordered]@{
-        schema = 1
+        schema = $Schema
         phase = $Phase
         timestamp_utc = [DateTime]::UtcNow.ToString("O")
         data = $Data
@@ -4328,6 +4618,18 @@ function Get-Ipv4DefaultUnderlay {
         Where-Object { $_.IPAddress -ne "0.0.0.0" -and $_.IPAddress -notlike "169.254.*" })
     Assert-True ($sources.Count -ge 1) "eligible IPv4 default source is missing"
     return [pscustomobject]@{ InterfaceIndex = $indices[0]; Row = $best[0]; Sources = $sources }
+}
+
+function Assert-SupportUnderlayProbe([object]$Probe, [string]$Label) {
+    Assert-True ($null -ne $Probe -and $null -ne $script:m17GuestNetworkPathDocument) "$Label support underlay probe is unavailable"
+    $path = $script:m17GuestNetworkPathDocument.Value
+    $networkAddress = ([string]$path.guest_route_prefix).Split('/')[0]
+    Assert-True ([uint64]$Probe.InterfaceLuid -ne 0 -and
+        [uint32]$Probe.InterfaceIndex -eq [uint32]$path.guest_interface_index -and
+        [string]$Probe.SourceAddress -ceq [string]$path.guest_ipv4 -and
+        [string]$Probe.DestinationPrefix -ceq $networkAddress -and
+        [byte]$Probe.PrefixLength -eq [byte]$path.guest_prefix_length -and
+        [string]$Probe.NextHop -ceq "0.0.0.0") "$Label did not use the manifest-bound isolated support /30"
 }
 
 function Get-PhysicalDnsSnapshot([int]$TunInterfaceIndex) {
@@ -5728,6 +6030,7 @@ udp_filtering = "address_dependent"
 }
 
 function Invoke-M17ContractPreflight {
+    Assert-M17ExternalIdentityInputsUnchanged
     $contract = Get-M17ModeContract
     $artifactRoot = if ([string]::IsNullOrWhiteSpace($script:ArtifactDirectory)) {
         Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-artifacts\$script:runIdentity"
@@ -5778,7 +6081,7 @@ function Invoke-M17ContractPreflight {
         })
     }
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.m17-contract.v1"
+        schema = "ferrum2.windows-tun.m17-contract.v2"
         status = "preflight_pass"
         mode = $script:Mode
         network_reset_cycles = if ($script:Mode -eq "network-reset") { $script:NetworkResetCycles } else { $null }
@@ -5795,9 +6098,9 @@ function Invoke-M17ContractPreflight {
         controller_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
         wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
         wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
-        test_binaries = if ($script:capabilityIdentity.Ledger.PSObject.Properties.Name -ccontains "test_binaries") {
-            $script:capabilityIdentity.Ledger.test_binaries
-        } else { $null }
+        test_binaries = $script:capabilityIdentity.Ledger.test_binaries
+        topology = $script:capabilityIdentity.Ledger.topology
+        guest_network_path = $script:m17GuestNetworkPathDocument.Value
         fixtures = $fixtureRows
         witnesses = $contract.witnesses
         counters = $contract.counters
@@ -5836,11 +6139,21 @@ function Invoke-M17BoundedCommand(
     [string]$Executable,
     [string[]]$Arguments,
     [string]$WorkingDirectory,
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 300,
+    [AllowNull()][string]$LogDirectory = $null
 ) {
     Assert-True ($Name -cmatch '^[a-z0-9][a-z0-9-]{0,95}$') "M17 command name is invalid"
-    $stdoutPath = Join-Path $script:m17ArtifactRoot "$Name.stdout.log"
-    $stderrPath = Join-Path $script:m17ArtifactRoot "$Name.stderr.log"
+    $resolvedLogDirectory = if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        $script:m17ArtifactRoot
+    } else {
+        [IO.Path]::GetFullPath($LogDirectory)
+    }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($resolvedLogDirectory) -and
+        (Test-Path -LiteralPath $resolvedLogDirectory -PathType Container)) `
+        "M17 command log directory is unavailable"
+    Assert-NotReparsePoint $resolvedLogDirectory "M17 command log directory"
+    $stdoutPath = Join-Path $resolvedLogDirectory "$Name.stdout.log"
+    $stderrPath = Join-Path $resolvedLogDirectory "$Name.stderr.log"
     Assert-True (-not (Test-Path -LiteralPath $stdoutPath) -and -not (Test-Path -LiteralPath $stderrPath)) "M17 command log baseline is not absent"
     $start = [Diagnostics.Stopwatch]::StartNew()
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -6112,7 +6425,8 @@ function Write-M17ClientConfig(
     [string]$TunFields,
     [ValidateSet("direct", "proxy")][string]$Outbound,
     [int]$MetricsPort,
-    [string]$Additional = ""
+    [string]$Additional = "",
+    [bool]$BindDirectToSupport = $false
 ) {
     $tunOutbound = if ([regex]::IsMatch($Additional, '(?m)^\[route\]\r?$')) {
         ""
@@ -6120,10 +6434,17 @@ function Write-M17ClientConfig(
         "outbound = `"$Outbound`""
     }
     $outboundText = if ($Outbound -eq "direct") {
+        $supportBinding = if ($BindDirectToSupport) {
+@"
+bind_interface = "$($script:capabilityIdentity.Ledger.topology.guest_interface_alias)"
+inet4_bind_address = "$($script:capabilityIdentity.Ledger.topology.guest_ipv4)"
+"@
+        } else { "" }
 @"
 [[outbounds]]
 tag = "direct"
 type = "direct"
+$supportBinding
 "@
     } else {
 @"
@@ -6183,32 +6504,41 @@ function Stop-M17Candidate([System.Diagnostics.Process]$Process, [string]$Label)
 
 function Start-M17NetworkResetRouteMutation {
     Assert-True ($script:Mode -ceq "network-reset") "M17 network-reset route mutation is mode restricted"
-    $underlay = Get-Ipv4DefaultUnderlay
+    $supportPath = $script:m17GuestNetworkPathDocument.Value
+    $supportAdapter = @(Get-NetAdapter -InterfaceIndex ([int]$supportPath.guest_interface_index) `
+        -IncludeHidden -ErrorAction Stop)
+    Assert-True ($supportAdapter.Count -eq 1 -and
+        [string]$supportAdapter[0].Name -ceq [string]$supportPath.guest_interface_alias -and
+        ([Guid][string]$supportAdapter[0].InterfaceGuid).ToString("D") -ceq
+            [string]$supportPath.guest_interface_guid -and
+        [string]$supportAdapter[0].Status -ceq "Up") "M17 support route mutation adapter identity changed"
     $prefix = $script:m17NetworkResetProbePrefix
     Assert-True (@(Get-NetRoute -DestinationPrefix $prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "M17 network-reset notification route baseline is not absent"
     $intentPath = Get-M17NetworkResetRouteIntentPath
     Write-M17DurableMutationIntent $intentPath ([ordered]@{
-        schema = "ferrum2.windows-tun.m17-network-reset-route-intent.v1"
+        schema = "ferrum2.windows-tun.m17-network-reset-route-intent.v2"
         run_token = $script:runIdentity
         source_mode = "network-reset"
         work_path = [IO.Path]::GetFullPath($script:work)
-        interface_index = [uint32]$underlay.InterfaceIndex
+        interface_index = [uint32]$supportPath.guest_interface_index
         destination_prefix = $prefix
-        next_hop = [string]$underlay.Row.Route.NextHop
+        next_hop = "0.0.0.0"
         route_metrics = @([uint32]4094, [uint32]4095)
     })
-    [void](New-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $prefix `
-        -NextHop $underlay.Row.Route.NextHop -RouteMetric 4094 -PolicyStore ActiveStore -ErrorAction Stop)
-    $readback = @(Get-NetRoute -InterfaceIndex $underlay.InterfaceIndex -DestinationPrefix $prefix `
+    [void](New-NetRoute -InterfaceIndex ([int]$supportPath.guest_interface_index) `
+        -DestinationPrefix $prefix -NextHop "0.0.0.0" -RouteMetric 4094 `
+        -PolicyStore ActiveStore -ErrorAction Stop)
+    $readback = @(Get-NetRoute -InterfaceIndex ([int]$supportPath.guest_interface_index) `
+        -DestinationPrefix $prefix `
         -PolicyStore ActiveStore -ErrorAction Stop | Where-Object {
-            $_.NextHop -ceq [string]$underlay.Row.Route.NextHop -and [uint32]$_.RouteMetric -eq 4094
+            $_.NextHop -ceq "0.0.0.0" -and [uint32]$_.RouteMetric -eq 4094
         })
     Assert-True ($readback.Count -eq 1) "M17 network-reset notification route create readback failed"
     return [pscustomobject]@{
         IntentPath = $intentPath
-        InterfaceIndex = [uint32]$underlay.InterfaceIndex
+        InterfaceIndex = [uint32]$supportPath.guest_interface_index
         DestinationPrefix = $prefix
-        NextHop = [string]$underlay.Row.Route.NextHop
+        NextHop = "0.0.0.0"
         RouteMetric = [uint32]4094
     }
 }
@@ -6399,6 +6729,16 @@ function Get-M17TextSha256([string]$Value) {
     } finally { $algorithm.Dispose() }
 }
 
+function Get-M17BytesSha256([byte[]]$Value) {
+    Assert-True ($null -ne $Value -and $Value.Length -gt 0) `
+        "M17 byte identity is empty"
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $algorithm.ComputeHash($Value)
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally { $algorithm.Dispose() }
+}
+
 function Get-M17ManagedPlaneIdentity([string]$Name) {
     $adapters = @(Get-NetAdapter -Name $Name -IncludeHidden -ErrorAction Stop)
     Assert-True ($adapters.Count -eq 1) "M17 managed adapter identity is not exact"
@@ -6456,25 +6796,13 @@ function Get-M17ManagedPlaneIdentity([string]$Name) {
     }
 }
 
-function Get-M17StrictRouteWfpIdentity(
-    [string]$Label,
-    [uint64]$InterfaceLuid,
-    [uint32]$ProcessId
-) {
-    Assert-True ($Label -cmatch '^[a-z0-9][a-z0-9-]{0,63}$' -and
-        $InterfaceLuid -ne 0 -and $ProcessId -ne 0) "M17 strict-route WFP snapshot identity is invalid"
-    $path = Join-Path $script:work "m17-wfp-$Label.xml"
-    Assert-True (-not (Test-Path -LiteralPath $path)) "M17 strict-route WFP snapshot baseline is not absent"
-    $netsh = Join-Path ([Environment]::SystemDirectory) "netsh.exe"
-    try {
-        $result = Invoke-M17BoundedCommand "wfp-$Label" $netsh @("wfp", "show", "state", "file=$path") $script:work 60
-        Assert-True ($result.ExitCode -eq 0 -and (Test-Path -LiteralPath $path -PathType Leaf)) "M17 strict-route WFP state capture failed"
-        Assert-NotReparsePoint $path "M17 strict-route WFP snapshot"
-        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        Assert-True ($item.Length -gt 0 -and $item.Length -le 67108864) "M17 strict-route WFP snapshot exceeded its 64 MiB boundary"
-        [xml]$document = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
-        $sublayer = "{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}"
-        $expected = @(
+function Get-M17StrictRouteWfpDefinition {
+    return [pscustomobject]@{
+        SessionKey = "{8ea35b4e-6629-4e26-9776-95c5bf9c6b01}"
+        SessionName = "Ferrum2 strict route dynamic session"
+        SublayerKey = "{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}"
+        SublayerName = "Ferrum2 strict route"
+        Filters = @(
             [pscustomobject]@{ Name = "Ferrum2 app permit IPv4"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701001}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_PERMIT"; Condition = "app"; Protocol = 0 },
             [pscustomobject]@{ Name = "Ferrum2 app permit IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701002}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_PERMIT"; Condition = "app"; Protocol = 0 },
             [pscustomobject]@{ Name = "Ferrum2 TUN permit IPv4"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701003}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_PERMIT"; Condition = "tun"; Protocol = 0 },
@@ -6484,6 +6812,49 @@ function Get-M17StrictRouteWfpIdentity(
             [pscustomobject]@{ Name = "Ferrum2 DNS TCP block IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e8701009}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_BLOCK"; Condition = "dns"; Protocol = 6 },
             [pscustomobject]@{ Name = "Ferrum2 DNS UDP block IPv6"; Key = "{a158b31d-7a59-40bc-9339-38b5e870100a}"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V6"; Action = "FWP_ACTION_BLOCK"; Condition = "dns"; Protocol = 17 }
         )
+    }
+}
+
+function Get-M17StrictRouteWfpIdentity(
+    [string]$Label,
+    [uint64]$InterfaceLuid,
+    [uint32]$ProcessId,
+    [AllowNull()][string]$LogDirectory = $null
+) {
+    Assert-True ($Label -cmatch '^[a-z0-9][a-z0-9-]{0,63}$' -and
+        $InterfaceLuid -ne 0 -and $ProcessId -ne 0) "M17 strict-route WFP snapshot identity is invalid"
+    $ownerProcesses = @(Get-Process -Id ([int]$ProcessId) -ErrorAction Stop)
+    Assert-True ($ownerProcesses.Count -eq 1 -and
+        -not [string]::IsNullOrWhiteSpace([string]$ownerProcesses[0].Path)) `
+        "M17 strict-route WFP owner executable is not exact"
+    $ownerExecutable = [IO.Path]::GetFullPath([string]$ownerProcesses[0].Path)
+    Assert-True (
+        $ownerExecutable.Equals(
+            [IO.Path]::GetFullPath($script:binary),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and
+        (Test-Path -LiteralPath $ownerExecutable -PathType Leaf)
+    ) "M17 strict-route WFP owner is not the current ferrum2 executable"
+    Assert-NotReparsePoint $ownerExecutable "M17 strict-route WFP owner executable"
+    $expectedAppId = [Ferrum2WfpIdentity]::GetAppId($ownerExecutable)
+    Assert-True ($expectedAppId.Length -gt 0 -and $expectedAppId.Length -le 131072) `
+        "M17 strict-route WFP owner AppId byte boundary is invalid"
+    $expectedAppIdHex = ([BitConverter]::ToString($expectedAppId)).Replace("-", "").ToLowerInvariant()
+    $appIdSha256 = Get-M17BytesSha256 $expectedAppId
+    $path = Join-Path $script:work "m17-wfp-$Label.xml"
+    Assert-True (-not (Test-Path -LiteralPath $path)) "M17 strict-route WFP snapshot baseline is not absent"
+    $netsh = Join-Path ([Environment]::SystemDirectory) "netsh.exe"
+    try {
+        $result = Invoke-M17BoundedCommand "wfp-$Label" $netsh `
+            @("wfp", "show", "state", "file=$path") $script:work 60 $LogDirectory
+        Assert-True ($result.ExitCode -eq 0 -and (Test-Path -LiteralPath $path -PathType Leaf)) "M17 strict-route WFP state capture failed"
+        Assert-NotReparsePoint $path "M17 strict-route WFP snapshot"
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        Assert-True ($item.Length -gt 0 -and $item.Length -le 67108864) "M17 strict-route WFP snapshot exceeded its 64 MiB boundary"
+        [xml]$document = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $definition = Get-M17StrictRouteWfpDefinition
+        $sublayer = [string]$definition.SublayerKey
+        $expected = @($definition.Filters)
         $filters = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
             $subLayerNode = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
             $filterIdNode = $_.SelectSingleNode("./*[local-name()='filterId']")
@@ -6492,6 +6863,7 @@ function Get-M17StrictRouteWfpIdentity(
         })
         Assert-True ($filters.Count -eq $expected.Count) "M17 strict-route WFP filter count is not exact"
         $rows = [System.Collections.Generic.List[string]]::new()
+        $filterEvidence = [System.Collections.Generic.List[object]]::new()
         foreach ($spec in $expected) {
             $matches = @($filters | Where-Object {
                 $nameNode = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
@@ -6509,23 +6881,123 @@ function Get-M17StrictRouteWfpIdentity(
                 $null -ne $actionNode -and $actionNode.InnerText -ceq $spec.Action -and
                 $null -ne $filterIdNode -and [uint64]::TryParse($filterIdNode.InnerText, [ref]$filterId) -and
                 $filterId -ne 0) "M17 strict-route WFP filter identity changed: $($spec.Name)"
-            $fieldKeys = @($filter.SelectNodes(".//*[local-name()='fieldKey']") | ForEach-Object { $_.InnerText } | Sort-Object)
+            $conditions = @($filter.SelectNodes(
+                "./*[local-name()='filterCondition']/*[local-name()='item']"
+            ))
+            $fieldKeys = @($conditions | ForEach-Object {
+                $fieldKeyNode = $_.SelectSingleNode("./*[local-name()='fieldKey']")
+                if ($null -ne $fieldKeyNode) { $fieldKeyNode.InnerText }
+            })
             if ($spec.Condition -ceq "app") {
-                Assert-True (($fieldKeys -join "|") -ceq "FWPM_CONDITION_ALE_APP_ID") "M17 strict-route app permit condition changed"
+                $matchNode = if ($conditions.Count -eq 1) {
+                    $conditions[0].SelectSingleNode("./*[local-name()='matchType']")
+                } else { $null }
+                $typeNode = if ($conditions.Count -eq 1) {
+                    $conditions[0].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='type']"
+                    )
+                } else { $null }
+                $appIdNode = if ($conditions.Count -eq 1) {
+                    $conditions[0].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='byteBlob']/*[local-name()='data']"
+                    )
+                } else { $null }
+                $appIdHex = if ($null -ne $appIdNode) {
+                    $appIdNode.InnerText.Trim().ToLowerInvariant()
+                } else { "" }
+                Assert-True (
+                    ($fieldKeys -join "|") -ceq "FWPM_CONDITION_ALE_APP_ID" -and
+                    $null -ne $matchNode -and $matchNode.InnerText -ceq "FWP_MATCH_EQUAL" -and
+                    $null -ne $typeNode -and $typeNode.InnerText -ceq "FWP_BYTE_BLOB_TYPE" -and
+                    $appIdHex -cmatch '^(?:[0-9a-f]{2})+$' -and
+                    $appIdHex -ceq $expectedAppIdHex
+                ) "M17 strict-route app permit AppId condition changed"
             } elseif ($spec.Condition -ceq "tun") {
-                $luidValues = @($filter.SelectNodes(".//*[local-name()='uint64']") | ForEach-Object { $_.InnerText })
-                Assert-True (($fieldKeys -join "|") -ceq "FWPM_CONDITION_IP_LOCAL_INTERFACE" -and
-                    $luidValues -contains $InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)) "M17 strict-route TUN LUID condition changed"
+                $matchNode = if ($conditions.Count -eq 1) {
+                    $conditions[0].SelectSingleNode("./*[local-name()='matchType']")
+                } else { $null }
+                $typeNode = if ($conditions.Count -eq 1) {
+                    $conditions[0].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='type']"
+                    )
+                } else { $null }
+                $luidNode = if ($conditions.Count -eq 1) {
+                    $conditions[0].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='uint64']"
+                    )
+                } else { $null }
+                Assert-True (
+                    ($fieldKeys -join "|") -ceq "FWPM_CONDITION_IP_LOCAL_INTERFACE" -and
+                    $null -ne $matchNode -and $matchNode.InnerText -ceq "FWP_MATCH_EQUAL" -and
+                    $null -ne $typeNode -and $typeNode.InnerText -ceq "FWP_UINT64" -and
+                    $null -ne $luidNode -and $luidNode.InnerText -ceq
+                        $InterfaceLuid.ToString([Globalization.CultureInfo]::InvariantCulture)
+                ) "M17 strict-route TUN LUID condition changed"
             } else {
-                $protocolValues = @($filter.SelectNodes(".//*[local-name()='uint8']") | ForEach-Object { $_.InnerText })
-                $portValues = @($filter.SelectNodes(".//*[local-name()='uint16']") | ForEach-Object { $_.InnerText })
-                Assert-True (($fieldKeys -join "|") -ceq "FWPM_CONDITION_IP_PROTOCOL|FWPM_CONDITION_IP_REMOTE_PORT" -and
-                    $protocolValues -contains ([string]$spec.Protocol) -and $portValues -contains "53") "M17 strict-route DNS condition changed"
+                $protocolMatchNode = if ($conditions.Count -eq 2) {
+                    $conditions[0].SelectSingleNode("./*[local-name()='matchType']")
+                } else { $null }
+                $protocolTypeNode = if ($conditions.Count -eq 2) {
+                    $conditions[0].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='type']"
+                    )
+                } else { $null }
+                $protocolNode = if ($conditions.Count -eq 2) {
+                    $conditions[0].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='uint8']"
+                    )
+                } else { $null }
+                $portMatchNode = if ($conditions.Count -eq 2) {
+                    $conditions[1].SelectSingleNode("./*[local-name()='matchType']")
+                } else { $null }
+                $portTypeNode = if ($conditions.Count -eq 2) {
+                    $conditions[1].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='type']"
+                    )
+                } else { $null }
+                $portNode = if ($conditions.Count -eq 2) {
+                    $conditions[1].SelectSingleNode(
+                        "./*[local-name()='conditionValue']/*[local-name()='uint16']"
+                    )
+                } else { $null }
+                Assert-True (
+                    ($fieldKeys -join "|") -ceq
+                        "FWPM_CONDITION_IP_PROTOCOL|FWPM_CONDITION_IP_REMOTE_PORT" -and
+                    $null -ne $protocolMatchNode -and
+                    $protocolMatchNode.InnerText -ceq "FWP_MATCH_EQUAL" -and
+                    $null -ne $protocolTypeNode -and
+                    $protocolTypeNode.InnerText -ceq "FWP_UINT8" -and
+                    $null -ne $protocolNode -and
+                    $protocolNode.InnerText -ceq ([string]$spec.Protocol) -and
+                    $null -ne $portMatchNode -and
+                    $portMatchNode.InnerText -ceq "FWP_MATCH_EQUAL" -and
+                    $null -ne $portTypeNode -and
+                    $portTypeNode.InnerText -ceq "FWP_UINT16" -and
+                    $null -ne $portNode -and $portNode.InnerText -ceq "53"
+                ) "M17 strict-route DNS condition changed"
             }
             $rows.Add("$($spec.Name)|$($spec.Key)|$filterId|$($spec.Layer)|$($spec.Action)|$sublayer")
+            $filterEvidence.Add([pscustomobject][ordered]@{
+                Key = ([string]$spec.Key).Trim('{', '}')
+                Id = $filterId.ToString([Globalization.CultureInfo]::InvariantCulture)
+            })
         }
-        $sessionKey = "{8ea35b4e-6629-4e26-9776-95c5bf9c6b01}"
-        $sessionName = "Ferrum2 strict route dynamic session"
+        $sublayers = @($document.SelectNodes("//*[local-name()='item']") |
+            Where-Object {
+                $keyNode = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
+                $filterIdNode = $_.SelectSingleNode("./*[local-name()='filterId']")
+                $nameNode = $_.SelectSingleNode(
+                    "./*[local-name()='displayData']/*[local-name()='name']"
+                )
+                $null -ne $keyNode -and $null -eq $filterIdNode -and
+                    $keyNode.InnerText.ToLowerInvariant() -ceq $sublayer -and
+                    $null -ne $nameNode -and
+                    $nameNode.InnerText -ceq [string]$definition.SublayerName
+            })
+        Assert-True ($sublayers.Count -eq 1) `
+            "M17 strict-route dynamic WFP sublayer identity is not exact"
+        $sessionKey = [string]$definition.SessionKey
+        $sessionName = [string]$definition.SessionName
         $sessions = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
             $keyNode = $_.SelectSingleNode("./*[local-name()='sessionKey']")
             $nameNode = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
@@ -6539,11 +7011,23 @@ function Get-M17StrictRouteWfpIdentity(
             [uint32]::TryParse($processNode.InnerText, [ref]$sessionProcessId) -and
             $sessionProcessId -eq $ProcessId) "M17 strict-route dynamic WFP session process identity changed"
         $sessionCanonical = "session|$sessionKey|$sessionName|$sessionProcessId"
-        $canonical = (@($sessionCanonical) + @($rows | Sort-Object)) -join "`n"
+        $interfaceLuidText = $InterfaceLuid.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $interfaceCanonical = "interface_luid|$interfaceLuidText"
+        $appIdCanonical = "app_id_sha256|$appIdSha256"
+        $canonical = (@(
+            $sessionCanonical,
+            $interfaceCanonical,
+            $appIdCanonical
+        ) + @($rows)) -join "`n"
         return [pscustomobject]@{
             Canonical = $canonical
             Sha256 = Get-M17TextSha256 $canonical
-            FilterIds = @($rows | Sort-Object | ForEach-Object { ($_ -split '\|')[2] })
+            InterfaceLuid = $interfaceLuidText
+            AppIdSha256 = $appIdSha256
+            FilterIds = @($rows | ForEach-Object { ($_ -split '\|')[2] })
+            Filters = @($filterEvidence)
             FilterCount = $rows.Count
             ProcessId = $sessionProcessId
             SessionKey = "8ea35b4e-6629-4e26-9776-95c5bf9c6b01"
@@ -6552,6 +7036,104 @@ function Get-M17StrictRouteWfpIdentity(
     } finally {
         if (Test-Path -LiteralPath $path) {
             Assert-NotReparsePoint $path "M17 strict-route WFP snapshot cleanup"
+            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        }
+    }
+}
+
+function Assert-M17StrictRouteWfpIdentityAbsent(
+    [string]$Label,
+    [object]$Identity,
+    [AllowNull()][string]$LogDirectory = $null
+) {
+    $identityFilterIds = if ($null -ne $Identity) {
+        @($Identity.FilterIds | ForEach-Object { [string]$_ })
+    } else { @() }
+    $uniqueFilterIds = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $filterIdsAreUnique = $true
+    foreach ($identityFilterId in $identityFilterIds) {
+        if (-not $uniqueFilterIds.Add($identityFilterId)) {
+            $filterIdsAreUnique = $false
+        }
+    }
+    $identityInterfaceLuidText = if ($null -ne $Identity -and
+        $null -ne $Identity.PSObject.Properties["InterfaceLuid"]) {
+        [string]$Identity.InterfaceLuid
+    } else { "" }
+    [uint64]$identityInterfaceLuid = 0
+    Assert-True ($Label -cmatch '^[a-z0-9][a-z0-9-]{0,63}$' -and
+        $null -ne $Identity -and [long]$Identity.FilterCount -eq 8 -and
+        [uint32]$Identity.ProcessId -ne 0 -and
+        $identityInterfaceLuidText -cmatch '^[1-9][0-9]{0,19}$' -and
+        [uint64]::TryParse(
+            $identityInterfaceLuidText,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$identityInterfaceLuid
+        ) -and $identityInterfaceLuid -ne 0 -and
+        $identityFilterIds.Count -eq 8 -and $filterIdsAreUnique) `
+        "M17 strict-route WFP absence identity is invalid"
+    $definition = Get-M17StrictRouteWfpDefinition
+    Assert-True (
+        [string]$Identity.SessionKey -ceq
+            ([string]$definition.SessionKey).Trim('{', '}') -and
+        [string]$Identity.SublayerKey -ceq
+            ([string]$definition.SublayerKey).Trim('{', '}')
+    ) "M17 strict-route WFP absence identity changed"
+    $path = Join-Path $script:work "m17-wfp-$Label.xml"
+    Assert-True (-not (Test-Path -LiteralPath $path)) `
+        "M17 strict-route WFP absence snapshot baseline is not absent"
+    $netsh = Join-Path ([Environment]::SystemDirectory) "netsh.exe"
+    try {
+        $result = Invoke-M17BoundedCommand "wfp-$Label" $netsh `
+            @("wfp", "show", "state", "file=$path") $script:work 60 $LogDirectory
+        Assert-True ($result.ExitCode -eq 0 -and
+            (Test-Path -LiteralPath $path -PathType Leaf)) `
+            "M17 strict-route WFP absence state capture failed"
+        Assert-NotReparsePoint $path "M17 strict-route WFP absence snapshot"
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        Assert-True ($item.Length -gt 0 -and $item.Length -le 67108864) `
+            "M17 strict-route WFP absence snapshot exceeded its 64 MiB boundary"
+        [xml]$document = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $filterKeys = @($definition.Filters | ForEach-Object {
+            ([string]$_.Key).ToLowerInvariant()
+        })
+        $filterNames = @($definition.Filters | ForEach-Object { [string]$_.Name })
+        $filterIds = $identityFilterIds
+        $sessionKey = ([string]$definition.SessionKey).ToLowerInvariant()
+        $sessionName = [string]$definition.SessionName
+        $sublayerKey = ([string]$definition.SublayerKey).ToLowerInvariant()
+        $matchingItems = @($document.SelectNodes("//*[local-name()='item']") |
+            Where-Object {
+                $filterKeyNode = $_.SelectSingleNode("./*[local-name()='filterKey']")
+                $filterIdNode = $_.SelectSingleNode("./*[local-name()='filterId']")
+                $sessionKeyNode = $_.SelectSingleNode("./*[local-name()='sessionKey']")
+                $sublayerKeyNode = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
+                $nameNode = $_.SelectSingleNode(
+                    "./*[local-name()='displayData']/*[local-name()='name']"
+                )
+                ($null -ne $filterKeyNode -and
+                    $filterKeys -ccontains $filterKeyNode.InnerText.ToLowerInvariant()) -or
+                ($null -ne $filterIdNode -and
+                    $filterIds -ccontains $filterIdNode.InnerText) -or
+                ($null -ne $sessionKeyNode -and
+                    $sessionKeyNode.InnerText.ToLowerInvariant() -ceq $sessionKey) -or
+                ($null -ne $sublayerKeyNode -and
+                    $sublayerKeyNode.InnerText.ToLowerInvariant() -ceq $sublayerKey) -or
+                ($null -ne $nameNode -and
+                    ($nameNode.InnerText -ceq $sessionName -or
+                        $nameNode.InnerText -ceq [string]$definition.SublayerName -or
+                        $filterNames -ccontains $nameNode.InnerText))
+            })
+        Assert-True ($matchingItems.Count -eq 0) (
+            "M17 strict-route dynamic WFP identity survived abrupt process exit: " +
+                "matches=$($matchingItems.Count)"
+        )
+    } finally {
+        if (Test-Path -LiteralPath $path) {
+            Assert-NotReparsePoint $path "M17 strict-route WFP absence snapshot cleanup"
             Remove-Item -LiteralPath $path -Force -ErrorAction Stop
         }
     }
@@ -6671,8 +7253,7 @@ function Invoke-M17NetworkReset {
     $udpAssociationLimit = 32
     $script:m17MetricsPort = Get-UniqueTcpPort
     $path = Join-Path $script:work "m17-network-reset.toml"
-    $physical = Get-Ipv4DefaultUnderlay
-    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverAddress = "127.0.0.1"
     $resolverPort = Get-UniqueTcpPort
     $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
     $script:tcpResources.Add($dnsResponder)
@@ -6693,6 +7274,9 @@ ready_timeout_ms = 15000
 [[outbounds]]
 tag = "network-probe"
 server = "$($script:m17NetworkResetProbeAddress):8388"
+[[outbounds]]
+tag = "dns-direct"
+type = "direct"
 [[selectors]]
 tag = "network-egress"
 outbounds = ["direct", "network-probe"]
@@ -6712,10 +7296,10 @@ listen = "127.0.0.1:$(Get-UniqueTcpPort)"
 tag = "resolver"
 transport = "udp"
 address = "${resolverAddress}:$resolverPort"
-detour = "direct"
+detour = "dns-direct"
 [dns.route]
 final = "resolver"
-"@
+"@ $true
     Assert-M17Config $path "network-reset"
     $script:activeProcess = Start-M17Candidate $path "network-reset"
     $candidatePid = [uint32]$script:activeProcess.Id
@@ -6937,8 +7521,7 @@ function Invoke-M17RestartStress {
     $udpAssociationLimit = 32
     $script:m17MetricsPort = Get-UniqueTcpPort
     $path = Join-Path $script:work "m17-restart-stress.toml"
-    $physical = Get-Ipv4DefaultUnderlay
-    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverAddress = "127.0.0.1"
     $resolverPort = Get-UniqueTcpPort
     $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
     $script:tcpResources.Add($dnsResponder)
@@ -6956,6 +7539,9 @@ max_udp_mappings = $udpAssociationLimit
 udp_filtering = "address_dependent"
 ready_timeout_ms = 15000
 "@ "direct" $script:m17MetricsPort @"
+[[outbounds]]
+tag = "dns-direct"
+type = "direct"
 [dns]
 timeout_ms = 1000
 max_inflight = 8
@@ -6966,10 +7552,10 @@ listen = "127.0.0.1:$(Get-UniqueTcpPort)"
 tag = "resolver"
 transport = "udp"
 address = "${resolverAddress}:$resolverPort"
-detour = "direct"
+detour = "dns-direct"
 [dns.route]
 final = "resolver"
-"@
+"@ $true
     Assert-M17Config $path "restart-stress"
     $script:activeProcess = Start-M17Candidate $path "restart-stress"
     $candidatePid = [uint32]$script:activeProcess.Id
@@ -7484,8 +8070,7 @@ ready_timeout_ms = 15000
     })
     Stop-M17Candidate $script:activeProcess "fragments"
 
-    $physical = Get-Ipv4DefaultUnderlay
-    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverAddress = "127.0.0.1"
     $resolverPort = Get-UniqueTcpPort
     $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
     $script:tcpResources.Add($dnsResponder)
@@ -7537,8 +8122,7 @@ final = "resolver"
 }
 
 function Invoke-M17DualStackDns {
-    $physical = Get-Ipv4DefaultUnderlay
-    $resolverAddress = [string]$physical.Sources[0].IPAddress
+    $resolverAddress = "127.0.0.1"
     $resolverPort = Get-UniqueTcpPort
     $dnsResponder = [Ferrum2DnsResponder]::new($resolverAddress, $resolverPort)
     $script:tcpResources.Add($dnsResponder)
@@ -7674,6 +8258,8 @@ ready_timeout_ms = 15000
 [[outbounds]]
 tag = "direct"
 type = "direct"
+bind_interface = "$($script:capabilityIdentity.Ledger.topology.guest_interface_alias)"
+inet4_bind_address = "$($script:capabilityIdentity.Ledger.topology.guest_ipv4)"
 [route]
 final = "proxy"
 [[route.rules]]
@@ -8232,6 +8818,7 @@ function Invoke-M17Qualification([string]$SourceDll) {
 
 function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object]$CleanupFailure) {
     if (-not $script:m17ArtifactInitialized) { return }
+    Assert-M17ExternalIdentityInputsUnchanged
     $script:m17FinishedUtc = [DateTime]::UtcNow.ToString("o")
     $failure = if ($PrimaryFailure) { $PrimaryFailure } else { $CleanupFailure }
     $failureRecord = if ($failure) {
@@ -8257,7 +8844,7 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         Assert-True $cleanupPassed "M17 cleanup evidence is not absent"
     }
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.m17-result.v1"
+        schema = "ferrum2.windows-tun.m17-result.v2"
         status = if ($Succeeded) { "pass" } else { "fail" }
         mode = $script:Mode
         run_token = $script:runIdentity
@@ -8275,9 +8862,9 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         controller_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
         wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
         wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
-        test_binaries = if ($script:capabilityIdentity.Ledger.PSObject.Properties.Name -ccontains "test_binaries") {
-            $script:capabilityIdentity.Ledger.test_binaries
-        } else { $null }
+        test_binaries = $script:capabilityIdentity.Ledger.test_binaries
+        topology = $script:capabilityIdentity.Ledger.topology
+        guest_network_path = $script:m17GuestNetworkPathDocument.Value
         started_utc = $script:m17StartedUtc
         finished_utc = $script:m17FinishedUtc
         fixtures = $script:m17FixtureRows
@@ -8359,13 +8946,14 @@ try {
         $supportUdpPort = $capabilityIdentity.UdpPort
         $physicalDnsBaseline = @(Get-PhysicalDnsSnapshot 0)
         $systemRouteBaseline = @(Get-Ipv4SystemRouteSnapshot)
-        $physicalDefault = Get-Ipv4DefaultUnderlay
+        $supportUnderlay = [Ferrum2NetworkFeasibility]::GetFixedRoute($supportAddress)
+        Assert-SupportUnderlayProbe $supportUnderlay "managed product support endpoint"
         Write-CapabilityEvidence "before" ([ordered]@{
             candidate_sha = $capabilityIdentity.Ledger.candidate_sha
             probe_sha256 = $capabilityIdentity.Ledger.probe_sha256
             identity_sha256 = $capabilityIdentityHash
             guest_build = $capabilityIdentity.GuestBuild
-            physical_defaults = 1
+            support_underlay = $supportUnderlay | Select-Object InterfaceIndex, SourceAddress, DestinationPrefix, NextHop, PrefixLength, RouteMetric
             physical_dns_rows = $physicalDnsBaseline.Count
             ferrum2_processes = @(Get-ExactRunProcesses -WorkPath $work).Count
             ferrum2_adapters = 0
@@ -8688,7 +9276,10 @@ listen = "127.0.0.1:$manualMetricsPort"
             [uint32]$physicalInterfaceBaseline.InterfaceOperationalStatus -eq 1 -and
             [uint32]$physicalInterfaceBaseline.MediaConnectState -eq 1 -and
             [bool]$physicalInterfaceBaseline.HardwareInterface) "eligible physical interface baseline mismatch"
-        $physicalFixedRouteDestinations = @(@($supportAddress, $managedDnsAddress) | Sort-Object -Unique)
+        $supportFixedRoute = [Ferrum2NetworkFeasibility]::GetFixedRoute($supportAddress)
+        Assert-SupportUnderlayProbe $supportFixedRoute "managed lifecycle support endpoint"
+        $supportFixedRouteBaseline = "$supportAddress|$($supportFixedRoute.InterfaceLuid)|$($supportFixedRoute.InterfaceIndex)|$($supportFixedRoute.DestinationPrefix)|$($supportFixedRoute.PrefixLength)|$($supportFixedRoute.NextHop)|$($supportFixedRoute.RouteMetric)|$($supportFixedRoute.SourceAddress)"
+        $physicalFixedRouteDestinations = @(@($managedDnsAddress) | Sort-Object -Unique)
         $physicalFixedRouteBaseline = @(
             $physicalFixedRouteDestinations | ForEach-Object {
                 $route = [Ferrum2NetworkFeasibility]::GetFixedRoute($_)
@@ -8963,6 +9554,9 @@ listen = "127.0.0.1:$managedMetricsPort"
                                         "$_|$($route.InterfaceLuid)|$($route.InterfaceIndex)|$($route.DestinationPrefix)|$($route.PrefixLength)|$($route.NextHop)|$($route.RouteMetric)|$($route.SourceAddress)"
                                     }
                                 )
+                                $currentSupportRoute = [Ferrum2NetworkFeasibility]::GetFixedRoute($supportAddress)
+                                Assert-SupportUnderlayProbe $currentSupportRoute "managed lifecycle restored support endpoint"
+                                $currentSupportRouteRow = "$supportAddress|$($currentSupportRoute.InterfaceLuid)|$($currentSupportRoute.InterfaceIndex)|$($currentSupportRoute.DestinationPrefix)|$($currentSupportRoute.PrefixLength)|$($currentSupportRoute.NextHop)|$($currentSupportRoute.RouteMetric)|$($currentSupportRoute.SourceAddress)"
                                 $currentPreferredSource = @($currentUnderlay.Sources | Where-Object {
                                     $_.IPAddress -ceq $physicalUnderlayBaseline.SourceAddress
                                 })
@@ -8973,6 +9567,7 @@ listen = "127.0.0.1:$managedMetricsPort"
                                     @(Compare-Object -ReferenceObject @($systemRouteBaseline) -DifferenceObject $currentSystemRoutes).Count -eq 0 -and
                                     @(Compare-Object -ReferenceObject @($physicalDnsBaseline) -DifferenceObject $currentPhysicalDns).Count -eq 0 -and
                                     @(Compare-Object -ReferenceObject @($physicalFixedRouteBaseline) -DifferenceObject $currentFixedRoutes).Count -eq 0 -and
+                                    $currentSupportRouteRow -ceq $supportFixedRouteBaseline -and
                                     $currentUnderlay.InterfaceIndex -eq $physicalUnderlayBaseline.InterfaceIndex -and
                                     $currentPhysicalAdapter.NetLuid -eq $physicalInterfaceBaseline.NetLuid -and
                                     [uint32]$currentPhysicalAdapter.InterfaceAdminStatus -eq [uint32]$physicalInterfaceBaseline.InterfaceAdminStatus -and
@@ -9017,6 +9612,7 @@ listen = "127.0.0.1:$managedMetricsPort"
         )) {
             $heldHardKillTcp = $null
             $heldHardKillUdp = $null
+            $hardKillWfpIdentity = $null
             $hardKillConfiguration = Join-Path $work "client-managed-hard-kill-$($hardKill.Name).toml"
             $hardKillDirectSocksPort = Get-UniqueTcpPort
             $hardKillMetricsPort = Get-UniqueTcpPort
@@ -9027,6 +9623,18 @@ listen = "127.0.0.1:$managedMetricsPort"
                 $hardKillConfigText = $hardKillConfigText.Replace("127.0.0.1:$proxySocksPort", "127.0.0.1:$hardKillProxySocksPort")
                 $hardKillConfigText = $hardKillConfigText.Replace("127.0.0.1:$managedDnsInboundPort", "127.0.0.1:$hardKillDnsInboundPort")
                 $hardKillConfigText = $hardKillConfigText.Replace("127.0.0.1:$managedMetricsPort", "127.0.0.1:$hardKillMetricsPort")
+                Assert-True (
+                    @($hardKillConfigText -split '\r?\n' | Where-Object {
+                        $_ -ceq "auto_dns = true"
+                    }).Count -eq 1 -and
+                    @($hardKillConfigText -split '\r?\n' | Where-Object {
+                        $_.StartsWith("strict_route =", [StringComparison]::Ordinal)
+                    }).Count -eq 0
+                ) "managed hard-kill DNS template is ambiguous"
+                $hardKillConfigText = $hardKillConfigText.Replace(
+                    "auto_dns = true",
+                    "strict_route = true`nauto_dns = true"
+                )
             } else {
                 $hardKillConfigText = $managedRouteOnlyTemplate.Replace("127.0.0.1:$directSocksPort", "127.0.0.1:$hardKillDirectSocksPort")
                 $hardKillConfigText = $hardKillConfigText.Replace("127.0.0.1:$managedMetricsPort", "127.0.0.1:$hardKillMetricsPort")
@@ -9052,6 +9660,11 @@ listen = "127.0.0.1:$managedMetricsPort"
                 if ($hardKill.Dns) {
                     Assert-True (-not $hardKillConfigText.Contains("127.0.0.1:$proxySocksPort") -and
                         -not $hardKillConfigText.Contains("127.0.0.1:$managedDnsInboundPort")) "managed hard-kill DNS listener generation mismatch"
+                    Assert-True (
+                        @($hardKillConfigText -split '\r?\n' | Where-Object {
+                            $_ -ceq "strict_route = true"
+                        }).Count -eq 1
+                    ) "managed hard-kill strict-route generation mismatch"
                 }
                 Set-Content -LiteralPath $hardKillConfiguration -Value $hardKillConfigText -Encoding utf8NoBOM -NoNewline
                 $offlineOutput = @(& $binary --config $hardKillConfiguration --check-config 2>&1)
@@ -9077,6 +9690,17 @@ listen = "127.0.0.1:$managedMetricsPort"
                         }).Count -eq 0) "managed hard-kill target capture readback mismatch"
                 if ($hardKill.Dns) {
                     Assert-SnapshotEqual @("198.18.0.1") @(Get-TunIpv4Dns $ownedInterfaceIndex) "hard-kill DNS active"
+                    $strictRouteMetrics = Get-Metrics $hardKillMetricsPort
+                    Assert-True (
+                        (Get-M17MetricValue $strictRouteMetrics `
+                            "ferrum2_tun_strict_route_requested") -eq 1 -and
+                        (Get-M17MetricValue $strictRouteMetrics `
+                            "ferrum2_tun_strict_route_effective") -eq 1 -and
+                        (Get-M17LabeledMetricValue $strictRouteMetrics `
+                            "ferrum2_tun_strict_route_filter_install" "result" "success") -eq 1 -and
+                        (Get-M17LabeledMetricValue $strictRouteMetrics `
+                            "ferrum2_tun_strict_route_filter_install" "result" "failure" $true) -eq 0
+                    ) "hard-kill strict-route DNS guard is not effective"
                 }
                 if ($hardKill.Traffic) {
                     $heldHardKillTcp = (Open-TunTcp $supportAddress $supportTcpPort $ownedInterfaceIndex).Client
@@ -9092,7 +9716,36 @@ listen = "127.0.0.1:$managedMetricsPort"
                     $udpEcho = Receive-TunUdp $heldHardKillUdp
                     Assert-True (($udpEcho -join ",") -eq ($udpPayload -join ",")) "hard-kill direct UDP echo mismatch"
                     Invoke-ProductSocksTcp $hardKillProxySocksPort $supportAddress $supportTcpPort ([Text.Encoding]::ASCII.GetBytes("m16-hard-kill-proxy")) $false
+
+                    # Keep this unpinned so it remains a system auto-DNS witness. The effective
+                    # strict-route WFP guard permits the candidate/TUN path and blocks ordinary
+                    # TCP/UDP DNS fan-out through a physical or management interface.
+                    $dnsRequestsBefore = [int]$dnsResponder.Requests
                     [void](Invoke-SystemDnsWitness "m16-$runIdentity-hard-kill.tun.test" $false)
+                    $dnsRequestDeadline = [DateTime]::UtcNow.AddSeconds(2)
+                    while ($dnsResponder.Requests -lt $dnsRequestsBefore + 1 -and
+                        [DateTime]::UtcNow -lt $dnsRequestDeadline) {
+                        Start-Sleep -Milliseconds 25
+                    }
+                    Assert-True (
+                        $dnsResponder.Requests -eq $dnsRequestsBefore + 1
+                    ) "hard-kill system DNS did not reach the guest-local responder exactly once"
+                    Start-Sleep -Milliseconds 500
+                    Assert-True (
+                        $dnsResponder.Requests -eq $dnsRequestsBefore + 1
+                    ) "hard-kill system DNS retried after the guest-local response"
+                }
+                if ($hardKill.Dns) {
+                    $hardKillManagedPlane = Get-M17ManagedPlaneSnapshot `
+                        $managedAutoAdapterName
+                    Assert-True (
+                        $hardKillManagedPlane.InterfaceIndex -eq $ownedInterfaceIndex
+                    ) "hard-kill strict-route managed plane identity changed"
+                    $hardKillWfpIdentity = Get-M17StrictRouteWfpIdentity `
+                        "hard-kill-$($hardKill.Name)-active" `
+                        $hardKillManagedPlane.InterfaceLuid `
+                        ([uint32]$activeProcess.Id) `
+                        $work
                 }
                 Assert-True ([Ferrum2ProcessGroup]::Terminate([uint32]$activeProcess.Id)) "hard-kill TerminateProcess failed"
                 Assert-True (Wait-ProcessExit $activeProcess 20) "hard-kill candidate did not exit"
@@ -9113,6 +9766,12 @@ listen = "127.0.0.1:$managedMetricsPort"
                 Assert-True (@(Get-NetIPAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill address residue"
                 Assert-True (@(Get-NetRoute -InterfaceIndex $ownedInterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill route residue"
                 Assert-True (@(Get-DnsClientServerAddress -InterfaceIndex $ownedInterfaceIndex -ErrorAction SilentlyContinue).Count -eq 0) "hard-kill DNS residue"
+                if ($hardKill.Dns) {
+                    Assert-M17StrictRouteWfpIdentityAbsent `
+                        "hard-kill-$($hardKill.Name)-absent" `
+                        $hardKillWfpIdentity `
+                        $work
+                }
                 $managedHardKillRows++
                 Write-CapabilityEvidence "hard-kill-$($hardKill.Name)" ([ordered]@{
                     process = "absent"
@@ -9120,7 +9779,34 @@ listen = "127.0.0.1:$managedMetricsPort"
                     addresses = "absent"
                     routes = "absent"
                     dns = "absent"
-                })
+                    strict_route_wfp = if ($hardKill.Dns) {
+                        [ordered]@{
+                            applicable = $true
+                            before_kill = [ordered]@{
+                                session_key = [string]$hardKillWfpIdentity.SessionKey
+                                sublayer_key = [string]$hardKillWfpIdentity.SublayerKey
+                                owner_pid = [long]$hardKillWfpIdentity.ProcessId
+                                interface_luid = [string]$hardKillWfpIdentity.InterfaceLuid
+                                app_id_sha256 = [string]$hardKillWfpIdentity.AppIdSha256
+                                filters = @($hardKillWfpIdentity.Filters |
+                                    ForEach-Object {
+                                        [ordered]@{
+                                            key = [string]$_.Key
+                                            id = [string]$_.Id
+                                        }
+                                    })
+                                identity_sha256 = [string]$hardKillWfpIdentity.Sha256
+                            }
+                            after_kill = [ordered]@{
+                                session = "absent"
+                                sublayer = "absent"
+                                filters = "absent"
+                            }
+                        }
+                    } else {
+                        [ordered]@{ applicable = $false }
+                    }
+                }) 2
             } finally {
                 if (Test-Path -LiteralPath $hardKillConfiguration) { Remove-Item -LiteralPath $hardKillConfiguration -Force }
                 Assert-True (-not (Test-Path -LiteralPath $hardKillConfiguration)) "managed hard-kill generated config leaked"
@@ -9141,12 +9827,11 @@ listen = "127.0.0.1:$managedMetricsPort"
         $supportTcpPort = $capabilityIdentity.TcpPort
         $supportUdpPort = $capabilityIdentity.UdpPort
         $fixedUnderlay = [Ferrum2NetworkFeasibility]::GetFixedRoute($supportAddress)
-        $defaultUnderlay = Get-Ipv4DefaultUnderlay
-        Assert-True ($fixedUnderlay.InterfaceIndex -eq $defaultUnderlay.InterfaceIndex -and $fixedUnderlay.PrefixLength -eq 0) "fixed endpoint did not use the eligible IPv4 physical default"
-        Assert-True (@($defaultUnderlay.Sources | Where-Object { $_.IPAddress -eq $fixedUnderlay.SourceAddress }).Count -eq 1) "fixed endpoint best source mismatch"
-        $dynamicUnderlay = [Ferrum2NetworkFeasibility]::GetConstrainedRoute($supportAddress, $defaultUnderlay.InterfaceIndex)
-        Assert-True ($dynamicUnderlay.InterfaceIndex -eq $defaultUnderlay.InterfaceIndex -and $dynamicUnderlay.PrefixLength -eq 0) "dynamic default constrained route mismatch"
-        Assert-True (@($defaultUnderlay.Sources | Where-Object { $_.IPAddress -eq $dynamicUnderlay.SourceAddress }).Count -eq 1) "dynamic default source mismatch"
+        Assert-SupportUnderlayProbe $fixedUnderlay "network-feasibility fixed support endpoint"
+        $dynamicUnderlay = [Ferrum2NetworkFeasibility]::GetConstrainedRoute(
+            $supportAddress,
+            [uint32]$capabilityIdentity.Ledger.topology.guest_interface_index)
+        Assert-SupportUnderlayProbe $dynamicUnderlay "network-feasibility constrained support endpoint"
 
         $preflightTcp = [Text.Encoding]::ASCII.GetBytes("m16-$($capabilityIdentityHash.Substring(0, 16))-tcp-live")
         $preflightUdp = [Text.Encoding]::ASCII.GetBytes("m16-$($capabilityIdentityHash.Substring(0, 16))-udp-live")
@@ -9159,7 +9844,7 @@ listen = "127.0.0.1:$managedMetricsPort"
             probe_sha256 = $capabilityIdentity.Ledger.probe_sha256
             identity_sha256 = $capabilityIdentityHash
             guest_build = $capabilityIdentity.GuestBuild
-            physical_default = @($defaultUnderlay.Row.Route | Select-Object InterfaceIndex, DestinationPrefix, NextHop, RouteMetric)
+            guest_network_path = $m17GuestNetworkPathDocument.Value
             fixed_underlay = $fixedUnderlay | Select-Object InterfaceIndex, SourceAddress, NextHop, PrefixLength, RouteMetric
             dynamic_underlay = $dynamicUnderlay | Select-Object InterfaceIndex, SourceAddress, NextHop, PrefixLength, RouteMetric
             physical_dns = $physicalDnsBaseline
@@ -10416,6 +11101,9 @@ finally {
     }
     if ($createdSiblingDll) { Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "owned sibling DLL leaked" }
     Assert-True (-not (Test-Path -LiteralPath $work)) "controller work directory leaked"
+    if ($Mode -in $topologyBoundModes) {
+        Assert-M17ExternalIdentityInputsUnchanged
+    }
     $tcp08CleanupSucceeded = $true
     } catch { if (-not $outerCleanupError) { $outerCleanupError = $_ } }
     Add-Tcp08Event "cleanup_completed" ([ordered]@{
@@ -10494,7 +11182,7 @@ if ($completed) {
     } elseif ($Mode -eq "hard-kill") {
         Assert-True ($managedHardKillRows -eq 3) "hard-kill marker prerequisites mismatch"
         Assert-True (Test-Path -LiteralPath $capabilityEvidence) "hard-kill evidence is missing"
-        Write-Output "m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
+        Write-Output "m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT strict_route_wfp=ABSENT cleanup=PASS guest_build=$($capabilityIdentity.GuestBuild) run_token=$runIdentity candidate_sha=$($capabilityIdentity.Ledger.candidate_sha) probe_sha256=$($capabilityIdentity.Ledger.probe_sha256) identity_sha256=$capabilityIdentityHash"
     } elseif ($Mode -eq "full") {
         Assert-True ($foundation -eq 4 -and $tcpRows -eq 8 -and $udpRows -eq 8 -and $cycleRows -eq 100 -and
             $managedDirectTcpRows -eq 1 -and $managedDirectUdpRows -eq 1 -and $managedSystemDnsRows -eq 2 -and

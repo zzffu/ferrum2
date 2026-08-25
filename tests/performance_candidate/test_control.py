@@ -1404,20 +1404,83 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self, *, row: dict[str, object]
     ) -> dict[str, object]:
         model = CONTROL.WINDOWS_TUN_NETWORK_MODEL
+        cold_start_resources = {
+            "process_handles": 115,
+            "process_threads": 10,
+            "udp_associations_active": 0,
+            "managed_adapters_active": 1,
+        }
         resources = {
             "process_handles": 120,
             "process_threads": 12,
             "udp_associations_active": 0,
             "managed_adapters_active": 1,
         }
-        cycles = []
         identity = "a" * 64
-        for sequence in range(1, model.RESET_CYCLES + model.FULL_REBUILD_CYCLES + 1):
-            reset = sequence <= model.RESET_CYCLES
-            completed_resets = min(sequence - 1, model.RESET_CYCLES)
-            completed_rebuilds = max(0, sequence - model.RESET_CYCLES - 1)
+        route_metric_baseline = 25
+        route_metric_states = (26, 27, route_metric_baseline)
+        resource_warmup_cycles = []
+        route_metric_before = route_metric_baseline
+        for sequence in range(1, model.RESOURCE_WARMUP_RESET_CYCLES + 1):
             metrics_before = self.network_lifecycle_metrics(
                 generation=sequence,
+                reset_cycles=sequence - 1,
+                rebuild_cycles=0,
+            )
+            metrics_after = self.network_lifecycle_metrics(
+                generation=sequence + 1,
+                reset_cycles=sequence,
+                rebuild_cycles=0,
+            )
+            route_metric_after = route_metric_states[
+                (sequence - 1) % len(route_metric_states)
+            ]
+            udp_before = sequence % 8 + 1
+            tcp_before = sequence % 4
+            warmup_resources = {
+                **resources,
+                "process_handles": min(
+                    resources["process_handles"],
+                    cold_start_resources["process_handles"] + sequence,
+                ),
+                "process_threads": min(
+                    resources["process_threads"],
+                    cold_start_resources["process_threads"] + sequence,
+                ),
+            }
+            if sequence == model.RESOURCE_WARMUP_RESET_CYCLES:
+                warmup_resources["process_handles"] += 1
+            resource_warmup_cycles.append(
+                {
+                    "sequence": sequence,
+                    "operation": "reset_network",
+                    "reason": "route_change",
+                    "route_metric_before": route_metric_before,
+                    "route_metric_after": route_metric_after,
+                    "lifecycle_metrics_before": metrics_before,
+                    "lifecycle_metrics_after": metrics_after,
+                    "managed_identity_before": identity,
+                    "managed_identity_after": identity,
+                    "tcp_flows_before": tcp_before,
+                    "udp_associations_before": udp_before,
+                    "tcp_flows_closed": tcp_before,
+                    "udp_associations_closed": udp_before,
+                    "tcp_probe_succeeded": True,
+                    "udp_probe_succeeded": True,
+                    "resources_after": warmup_resources,
+                }
+            )
+            route_metric_before = route_metric_after
+
+        cycles = []
+        for sequence in range(1, model.RESET_CYCLES + model.FULL_REBUILD_CYCLES + 1):
+            reset = sequence <= model.RESET_CYCLES
+            completed_resets = model.RESOURCE_WARMUP_RESET_CYCLES + min(
+                sequence - 1, model.RESET_CYCLES
+            )
+            completed_rebuilds = max(0, sequence - model.RESET_CYCLES - 1)
+            metrics_before = self.network_lifecycle_metrics(
+                generation=model.RESOURCE_WARMUP_RESET_CYCLES + sequence,
                 reset_cycles=completed_resets,
                 rebuild_cycles=completed_rebuilds,
             )
@@ -1439,7 +1502,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 elapsed = (10 + rebuild) * 1_000_000
                 completed_rebuilds += 1
             metrics_after = self.network_lifecycle_metrics(
-                generation=sequence + 1,
+                generation=model.RESOURCE_WARMUP_RESET_CYCLES + sequence + 1,
                 reset_cycles=completed_resets,
                 rebuild_cycles=completed_rebuilds,
             )
@@ -1491,12 +1554,22 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 "model_controller_sha256": reference["controller_sha256"],
                 "model_plan_sha256": reference["plan_sha256"],
             },
+            "resource_warmup": {
+                "reset_network_cycles": model.RESOURCE_WARMUP_RESET_CYCLES,
+                "route_metric_baseline": route_metric_baseline,
+                "quiescence_seconds": model.RESOURCE_QUIESCENCE_SECONDS,
+                "cold_start_resources": cold_start_resources,
+                "cycles": resource_warmup_cycles,
+                "baseline_resource_samples": [dict(resources) for _ in range(3)],
+            },
             "baseline_resources": dict(resources),
             "cycles": cycles,
             "interface_resolver": {
                 "probes": model.INTERFACE_RESOLVER_PROBES,
                 "resolutions": model.INTERFACE_RESOLVER_PROBES * 2,
                 "cache_hits": model.INTERFACE_RESOLVER_PROBES * 2 - 2,
+                "interface_switch_probe_attempts": 1,
+                "interface_switch_resolution_failures": 0,
             },
         }
 
@@ -1640,6 +1713,33 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             "network_model_evidence": None,
             "status": "PASS",
         }
+        if scenario == "wintun-ring-full-drop-rate":
+            positive_drop = regression and member == "candidate"
+            response_attempts = (
+                100_000
+                if positive_drop
+                else contract["minimum_checked_units"]
+            )
+            ring_full_drops = 110 if positive_drop else 0
+            pending_response_peak = 1 if positive_drop else 0
+            row["measurements"]["drop_rate"]["value"] = (
+                ring_full_drops * 1_000_000 + response_attempts - 1
+            ) // response_attempts
+            row["measurements"]["pending_response_peak"][
+                "value"
+            ] = pending_response_peak
+            row["correctness"]["checked_units"] = response_attempts
+            row["diagnostics"] = {
+                "schema_version": 1,
+                "kind": "wintun_egress_pressure_accounting",
+                "workload_attempted_datagrams": 1_000_000,
+                "tun_packets_egress": response_attempts - ring_full_drops,
+                "wintun_ring_full_dropped": ring_full_drops,
+                "tun_response_attempts": response_attempts,
+                "pending_response_before": 0,
+                "pending_response_peak": pending_response_peak,
+                "pending_response_after": 0,
+            }
         if scenario == "udp-8192-association-lookup-expiry":
             row["diagnostics"] = {
                 "udp_association_source_preflight": (
@@ -1704,7 +1804,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             row["network_model_evidence"] = {
                 "schema_version": 1,
                 "controller_sha256": CONTROL.WINDOWS_TUN_NETWORK_MODEL_CONTROLLER_SHA256,
-                "collector_sha256": "8" * 64,
+                "collector_sha256": CONTROL.WINDOWS_TUN_COLLECTOR_SOURCE_SHA256,
                 "plan_sha256": CONTROL.WINDOWS_TUN_NETWORK_MODEL_PLAN_SHA256,
                 "observation_file": (
                     f"{sequence:03d}-{scenario}-{member}-pair-{pair}.network-model.json"
@@ -1738,6 +1838,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             if scenario == "network-lifecycle":
                 row["correctness"]["checks"] = {
                     "same_process_all_cycles": True,
+                    "resource_warmup_exact": True,
                     "generation_advanced_once_per_cycle": True,
                     "managed_identity_preserved_across_resets": True,
                     "damage_only_full_rebuild": True,
@@ -1793,7 +1894,7 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         plan = CONTROL.create_windows_tun_plan(
             run_kind="comparison", decision_policy=policy
         )
-        self.assertEqual(CONTROL.WINDOWS_TUN_TRIAL_SCHEMA_VERSION, 3)
+        self.assertEqual(CONTROL.WINDOWS_TUN_TRIAL_SCHEMA_VERSION, 4)
         self.assertEqual(set(plan["scenarios"]), set(CONTROL.WINDOWS_TUN_SCENARIOS))
         self.assertEqual(len(plan["scenarios"]), 9)
         self.assertEqual(
@@ -1862,6 +1963,30 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                 "fragment_payload_bytes": 1_440,
                 "fragment_datagrams": 1,
                 "fragment_ack_bytes": 24,
+            },
+        )
+        lifecycle_recipe = plan["scenarios"]["network-lifecycle"]["recipe"]
+        self.assertEqual(
+            (
+                lifecycle_recipe["recovery_timeout_seconds"],
+                lifecycle_recipe["interface_switch_probe_retry_milliseconds"],
+                lifecycle_recipe["interface_switch_retryable_failure"],
+            ),
+            (30, 250, "outbound_explicit_resolution_failure"),
+        )
+        idle_contract = plan["scenarios"]["idle-cpu-wakeup"]
+        self.assertEqual(
+            idle_contract["recipe"]["allowed_idle_background_rejection_reasons"],
+            ["family_disabled", "invalid_destination"],
+        )
+        self.assertEqual(
+            set(idle_contract["correctness_checks"]),
+            {
+                "session_active_throughout",
+                "zero_test_traffic",
+                "known_background_ingress_exactly_accounted",
+                "no_busy_poll_fallback",
+                "clean_drain",
             },
         )
         self.assertEqual(
@@ -1992,10 +2117,24 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self.assertIn(
             "all_256_flows_ready", fairness["correctness_checks"]
         )
+        ring_pressure = plan["scenarios"]["wintun-ring-full-drop-rate"]
         self.assertEqual(
-            plan["scenarios"]["wintun-ring-full-drop-rate"]["recipe"]
-            ["payload_bytes"],
-            1_200,
+            (
+                ring_pressure["recipe"]["payload_bytes"],
+                ring_pressure["recipe"]["minimum_response_attempts"],
+                ring_pressure["recipe"]["pending_response_peak_maximum"],
+                ring_pressure["recipe"]["ring_full_branch_proof"],
+                ring_pressure["checked_unit"],
+                ring_pressure["minimum_checked_units"],
+            ),
+            (
+                1_200,
+                32_768,
+                1,
+                "separate_m17_correctness_gate",
+                "tun_response_attempts",
+                32_768,
+            ),
         )
         route_once = plan["scenarios"]["udp-route-once"]
         self.assertEqual(
@@ -2018,7 +2157,29 @@ class WindowsTunPerformanceTests(unittest.TestCase):
         self.assertEqual(
             plan["scenarios"]["wintun-ring-full-drop-rate"]["metrics"]
             ["pending_response_peak"],
-            {"unit": "pending_udp_responses", "direction": "lower_is_better"},
+            {
+                "unit": "pending_udp_responses",
+                "direction": "lower_is_better",
+                "allow_zero": True,
+                "zero_baseline_comparison": (
+                    "zero_zero_tie_zero_to_positive_signed_100_percent"
+                ),
+            },
+        )
+        self.assertTrue(ring_pressure["metrics"]["drop_rate"]["allow_zero"])
+        self.assertEqual(
+            set(ring_pressure["correctness_checks"]),
+            {
+                "minimum_response_attempts_met",
+                "response_attempt_denominator_derived",
+                "drop_rate_recomputed_from_raw_counts",
+                "drop_rate_denominator_bound",
+                "ring_full_counter_sampled",
+                "pending_response_peak_bounded",
+                "pending_response_baseline_and_drain",
+                "no_network_reset_or_full_rebuild",
+                "tun_path_observed",
+            },
         )
         for scenario, contract in plan["scenarios"].items():
             with self.subTest(scenario=scenario):
@@ -2133,6 +2294,19 @@ class WindowsTunPerformanceTests(unittest.TestCase):
             CONTROL.CandidateControlError, "bind one SHA-256"
         ):
             CONTROL.validate_windows_tun_policy(calibrated)
+        for field, value in (
+            ("regression_threshold_percent", -100.001),
+            ("adoption_threshold_percent", 100.001),
+        ):
+            with self.subTest(zero_capable_threshold=field):
+                out_of_range = self.policy(calibrated=True)
+                out_of_range["scenarios"]["wintun-ring-full-drop-rate"][
+                    "metrics"
+                ]["drop_rate"][field] = value
+                with self.assertRaisesRegex(
+                    CONTROL.CandidateControlError, "zero-capable.*sentinel"
+                ):
+                    CONTROL.validate_windows_tun_policy(out_of_range)
 
     def test_aa_evidence_produces_separate_non_adoptable_calibration_artifact(
         self,
@@ -2294,6 +2468,43 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                     parent_sha=self.PARENT_SHA,
                     candidate_sha=self.CANDIDATE_SHA,
                 )
+
+    def test_lifecycle_pins_collector_and_exact_measured_reset_coverage(self) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="network-lifecycle",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        CONTROL.validate_windows_tun_trial(
+            row,
+            plan=plan,
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        cases = []
+        wrong_collector = copy.deepcopy(row)
+        wrong_collector["network_model_evidence"]["collector_sha256"] = "0" * 64
+        cases.append((wrong_collector, "collector identity mismatch"))
+        warmup_counted_as_measured = copy.deepcopy(row)
+        warmup_counted_as_measured["correctness"]["checked_units"] = (
+            CONTROL.WINDOWS_TUN_NETWORK_MODEL.TOTAL_RESET_CYCLES
+        )
+        cases.append((warmup_counted_as_measured, "exactly 1000 measured resets"))
+        for invalid, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(CONTROL.CandidateControlError, message):
+                    CONTROL.validate_windows_tun_trial(
+                        invalid,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
 
     def test_route_once_sidecar_is_hash_bound_and_reduced_from_raw_counters(self) -> None:
         plan = CONTROL.create_windows_tun_plan(
@@ -2706,6 +2917,201 @@ class WindowsTunPerformanceTests(unittest.TestCase):
                         parent_sha=self.PARENT_SHA,
                         candidate_sha=self.CANDIDATE_SHA,
                     )
+
+    def test_ring_pressure_diagnostics_accept_zero_and_positive_drop_accounting(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        for member, regression, expected_drop_rate in (
+            ("parent", False, 0),
+            ("candidate", True, 1_100),
+        ):
+            with self.subTest(member=member, regression=regression):
+                row = self.row(
+                    plan=plan,
+                    scenario="wintun-ring-full-drop-rate",
+                    pair=1,
+                    member=member,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                    regression=regression,
+                )
+                CONTROL.validate_windows_tun_trial(
+                    row,
+                    plan=plan,
+                    parent_sha=self.PARENT_SHA,
+                    candidate_sha=self.CANDIDATE_SHA,
+                )
+                self.assertEqual(
+                    row["measurements"]["drop_rate"]["value"],
+                    expected_drop_rate,
+                )
+                self.assertEqual(
+                    row["correctness"]["checked_units"],
+                    row["diagnostics"]["tun_response_attempts"],
+                )
+
+    def test_ring_pressure_diagnostics_enforce_minimum_response_sample(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="wintun-ring-full-drop-rate",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+        minimum = plan["scenarios"]["wintun-ring-full-drop-rate"][
+            "minimum_checked_units"
+        ]
+        self.assertEqual(minimum, 32_768)
+        CONTROL.validate_windows_tun_trial(
+            row,
+            plan=plan,
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+
+        below_minimum = copy.deepcopy(row)
+        below_minimum["correctness"]["checked_units"] = minimum - 1
+        below_minimum["diagnostics"]["tun_packets_egress"] = minimum - 1
+        below_minimum["diagnostics"]["tun_response_attempts"] = minimum - 1
+        with self.assertRaises(CONTROL.CandidateControlError):
+            CONTROL.validate_windows_tun_trial(
+                below_minimum,
+                plan=plan,
+                parent_sha=self.PARENT_SHA,
+                candidate_sha=self.CANDIDATE_SHA,
+            )
+
+    def test_ring_pressure_diagnostics_reject_closed_accounting_tampering(
+        self,
+    ) -> None:
+        plan = CONTROL.create_windows_tun_plan(
+            run_kind="comparison", decision_policy=self.policy()
+        )
+        row = self.row(
+            plan=plan,
+            scenario="wintun-ring-full-drop-rate",
+            pair=1,
+            member="parent",
+            parent_sha=self.PARENT_SHA,
+            candidate_sha=self.CANDIDATE_SHA,
+        )
+
+        mutations = (
+            ("missing diagnostics", lambda r: r.update(diagnostics=None)),
+            (
+                "extra diagnostics field",
+                lambda r: r["diagnostics"].update(unexpected=0),
+            ),
+            (
+                "schema",
+                lambda r: r["diagnostics"].update(schema_version=2),
+            ),
+            (
+                "kind",
+                lambda r: r["diagnostics"].update(kind="ring_full_events"),
+            ),
+            (
+                "workload attempts",
+                lambda r: r["diagnostics"].update(
+                    workload_attempted_datagrams=999_999
+                ),
+            ),
+            (
+                "egress accounting",
+                lambda r: r["diagnostics"].update(tun_packets_egress=32_767),
+            ),
+            (
+                "ring drop accounting",
+                lambda r: r["diagnostics"].update(wintun_ring_full_dropped=1),
+            ),
+            (
+                "response accounting",
+                lambda r: r["diagnostics"].update(tun_response_attempts=32_769),
+            ),
+            (
+                "correctness denominator",
+                lambda r: r["correctness"].update(checked_units=32_769),
+            ),
+            (
+                "drop rate",
+                lambda r: r["measurements"]["drop_rate"].update(value=1),
+            ),
+            (
+                "pending measurement",
+                lambda r: r["measurements"]["pending_response_peak"].update(
+                    value=1
+                ),
+            ),
+            (
+                "pending baseline",
+                lambda r: r["diagnostics"].update(pending_response_before=1),
+            ),
+            (
+                "pending bound",
+                lambda r: (
+                    r["diagnostics"].update(pending_response_peak=2),
+                    r["measurements"]["pending_response_peak"].update(value=2),
+                ),
+            ),
+            (
+                "pending drain",
+                lambda r: r["diagnostics"].update(pending_response_after=1),
+            ),
+            (
+                "boolean raw count",
+                lambda r: r["diagnostics"].update(tun_packets_egress=True),
+            ),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                candidate = copy.deepcopy(row)
+                mutate(candidate)
+                with self.assertRaises(CONTROL.CandidateControlError):
+                    CONTROL.validate_windows_tun_trial(
+                        candidate,
+                        plan=plan,
+                        parent_sha=self.PARENT_SHA,
+                        candidate_sha=self.CANDIDATE_SHA,
+                    )
+
+    def test_zero_baseline_comparison_is_explicit_and_directional(self) -> None:
+        self.assertEqual(
+            CONTROL._improvement(
+                0, 0, "lower_is_better", allow_zero=True
+            ),
+            Decimal(0),
+        )
+        self.assertEqual(
+            CONTROL._improvement(
+                0, 1, "lower_is_better", allow_zero=True
+            ),
+            Decimal(-100),
+        )
+        self.assertEqual(
+            CONTROL._improvement(
+                0, 1, "higher_is_better", allow_zero=True
+            ),
+            Decimal(100),
+        )
+        self.assertEqual(
+            CONTROL._improvement(
+                1, 0, "lower_is_better", allow_zero=True
+            ),
+            Decimal(100),
+        )
+        with self.assertRaisesRegex(
+            CONTROL.CandidateControlError, "baseline must be positive"
+        ):
+            CONTROL._improvement(0, 0, "lower_is_better")
 
     def test_fragment_diagnostics_are_required_and_scenario_scoped(self) -> None:
         plan = CONTROL.create_windows_tun_plan(

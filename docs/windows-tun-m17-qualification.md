@@ -21,25 +21,37 @@ exact-ID VM lifecycle control, staging or exporting files, and recording read-on
 not create, remove, or alter a host adapter, address, route, DNS setting, firewall rule, or TUN
 session.
 
-The only approved VM and checkpoint are:
+The approved VM and qualification checkpoint are selected only through the external, hash-pinned
+support-topology manifest. The currently provisioned topology is:
 
 | Object | Required name | Required ID |
 |---|---|---|
 | VM | `Windows 10 MSIX packaging environment` | `82e20295-1d30-48e7-a751-e21d35d872d4` |
-| Checkpoint | `Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9` | `1e570209-faf7-4248-8167-aa0687cdb8cf` |
+| Qualification checkpoint | `Ferrum2-WindowsTun-InternalSupport-v1` | `fecf1eaa-7e8f-457d-b193-8b451859ac13` |
+| Internal support switch | `Ferrum2 TUN Support` | `05cbc0b1-66ab-45bc-b537-8fcb4b897708` |
+
+The manifest normally lives at
+`%LOCALAPPDATA%\Ferrum2\windows-tun-support-topology.json`; pass its exact lowercase SHA-256 with
+every invocation. The currently provisioned manifest SHA-256 is
+`61cd6a446d11ab54459f7c59027d6dc2c446ca86c5358eb57e56754f4dd10ea8`. Its isolated support path is
+`192.168.250.1/30` on the host and `192.168.250.2/30` on guest interface `Ferrum2Support`, with MTU
+1500 and no gateway, DNS, NAT, or ICS. The retained management adapter may remain connected to
+`Default Switch`, but qualification support traffic must not select it.
 
 Do not substitute a VM selected only by name, a checkpoint selected as "latest", or a newly created
 checkpoint. Keep the approved VM `Off` outside the bounded qualification window. Credentials belong
 in the external orchestration secret store; never place them in the repository, identity ledger,
 command line, logs, or artifacts.
 
-On the authorized Hyper-V host, resolve and cross-check both identities before any mutating command:
+On the authorized Hyper-V host, the orchestrator reads the exact manifest, validates its provenance,
+and resolves and cross-checks the approved topology before any mutating command. The essential
+identity portion is equivalent to:
 
 ```powershell
 $approvedVmId = [guid]'82e20295-1d30-48e7-a751-e21d35d872d4'
 $approvedVmName = 'Windows 10 MSIX packaging environment'
-$approvedCheckpointId = [guid]'1e570209-faf7-4248-8167-aa0687cdb8cf'
-$approvedCheckpointName = 'Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9'
+$approvedCheckpointId = [guid]'fecf1eaa-7e8f-457d-b193-8b451859ac13'
+$approvedCheckpointName = 'Ferrum2-WindowsTun-InternalSupport-v1'
 
 $vm = Get-VM -Id $approvedVmId -ErrorAction Stop
 if ($vm.Name -cne $approvedVmName) { throw 'approved VM identity mismatch' }
@@ -50,23 +62,36 @@ if ($checkpoint.Count -ne 1 -or $checkpoint[0].Name -cne $approvedCheckpointName
 }
 ```
 
-Before staging every supported M17 or fuzz-smoke profile, require the VM to be `Off`, restore that
-exact checkpoint, verify it is still `Off`, and then start that exact VM object. Run the ten M17
-invocations and the separate fuzz-smoke invocation serially. Each invocation must complete its
-closed evidence export, turn the VM off, restore the same checkpoint again, and verify `Off` before
-the next invocation. The hard-kill gate uses its separate orchestrator under the same isolation
-boundary. Do not retry or
-continue after any identity, execution, cleanup, export, restore, or final-state failure.
+Before staging every supported M17, fuzz-smoke, or hard-kill profile, the user-facing process
+requires the VM to be `Off` and captures immutable cleanup authority for the exact VM ID/name,
+checkpoint ID/name, and source-parent ID. It also revalidates the manifest, support listener,
+Internal switch, host and guest support adapters, return path, and protected host TUN identity. It
+then launches one hidden, capability-bound worker for the complete VM-active phase. The worker must
+match the supervisor PID, process start time, executable, and one-use 64-hex token before it can do
+any work. The worker blocks on a unique named start gate; the supervisor releases it only after
+assigning the process to a Windows kill-on-close Job Object and reading back exact job membership.
+It streams stdout and stderr under separate 16 MiB caps, requires the Job's active-process count to
+return to zero, and applies monotonic outer timeouts: 30
+minutes for probe-only, two hours for ordinary qualification and hard-kill, and three hours for a
+`*-1000` profile.
+The bounded Hyper-V Read/Start/Stop/Restore helpers use the same membership-before-release gate and
+kill-on-close Job rule, so a helper cannot begin a VM operation before its supervisor owns it.
 
-```powershell
-if ($vm.State -ne 'Off') { throw 'approved VM was not Off at qualification baseline' }
-$checkpoint[0] | Restore-VMSnapshot -Confirm:$false -ErrorAction Stop
-$vm = Get-VM -Id $approvedVmId -ErrorAction Stop
-if ($vm.Name -cne $approvedVmName -or $vm.State -ne 'Off') {
-    throw 'restored VM identity or state mismatch'
-}
-$vm | Start-VM -ErrorAction Stop
-```
+Run the ten M17 invocations and the separate fuzz-smoke and hard-kill invocations serially. A full
+worker must export its closed evidence, stop the exact VM, restore the exact checkpoint, stop again,
+and prove final `Off`. The supervisor accepts exactly one terminal record and independently reads
+back the exact VM ID/name/state. On timeout, malformed output, nonzero exit, or failed readback, it
+first terminates the complete worker Job, then performs bounded exact-GUID recovery. It never selects
+a VM or checkpoint by a similar name or by “latest” snapshot. Do not retry or continue after any
+identity, execution, cleanup, export, restore, topology, support-listener, or final-state failure.
+The runner never starts, stops, or reconfigures the externally provisioned support listener.
+
+This recovery guarantee covers failures detected while the user-facing supervisor is alive. If that
+supervisor is forcibly terminated, its kill-on-close Job stops the worker and descendants, but no
+remaining process can restore the checkpoint or prove the VM `Off`; host power loss has the same
+boundary. Treat either event as an abandoned run: do not rerun qualification, first re-resolve the
+exact approved VM/checkpoint IDs and complete the bounded recovery sequence below. Never infer
+cleanup from worker disappearance alone.
 
 Restoring the checkpoint destroys unexported guest changes. Export artifacts before the final
 restore.
@@ -104,22 +129,40 @@ Its properties must appear in this order:
 schema, vm_name, vm_id, checkpoint_name, checkpoint_id,
 guest_product, guest_edition, guest_architecture, guest_version, guest_build,
 candidate_sha, probe_sha256, client_sha256, server_sha256, support_listener,
-test_binaries
+topology, test_binaries
 ```
 
-`schema` is integer `1`; VM and checkpoint values must exactly match the table above;
+`schema` is integer `2`; VM and checkpoint values must exactly match the manifest and table above;
 `guest_architecture` is `AMD64`. `probe_sha256` is the lowercase SHA-256 of the exact staged
 `qualify_windows_tun.ps1`; the client and server fields are the lowercase SHA-256 values of the exact
 staged executables. Guest product, edition, version, and build must match live OS readback. The
-`support_listener` object has exactly `ipv4`, `tcp_port`, `udp_port`, `pid`, and `owner`, in that
-order. Its address is an eligible non-loopback IPv4 address not assigned inside the guest, and its
-ports and owning process must identify the externally provisioned qualification listener.
+`topology` object has exactly these properties in order:
+
+```text
+manifest_sha256, plan_sha256, support_switch_id, support_host_ipv4,
+support_network, support_prefix_length, guest_interface_alias,
+guest_interface_guid, guest_interface_index, guest_mac_address, guest_ipv4,
+guest_mtu_bytes, protected_host_tun_name, protected_host_tun_guid,
+protected_host_tun_index, protected_host_tun_status
+```
+
+Every topology value is copied from the exact external manifest and is cross-checked against live
+host and guest state before and after execution. The protected-host-TUN fields prove that the host's
+existing sing-box `tun0` was neither used nor changed.
+
+The `support_listener` object has exactly `ipv4`, `tcp_port`, `udp_port`, `pid`, `owner`,
+`executable_sha256`, and `creation_utc`, in that order. `ipv4` must equal the manifest's support host
+address. The same PID and owner must own the exact TCP port and four consecutive UDP ports beginning
+at `udp_port`; its executable hash and process creation time must match live host readback. This
+listener is an externally provisioned, read-only dependency of the gate. `creation_utc` uses the
+canonical six-fractional-digit UTC form `yyyy-MM-ddTHH:mm:ss.ffffffZ`; this preserves an exact
+PowerShell 7.4 JSON round trip.
 
 `test_binaries` is a required final property containing exactly `client`, `tun`, and `wintun`
 lowercase SHA-256 values in that order. The host runner repeats the locked `--no-run` builds, stages
 the three harnesses under fixed names, and compares every hash with the ledger before starting the
 VM. The smoke executable is not added to this already-issued ledger schema: its exact SHA-256 and
-size are instead bound to the clean `candidate_sha` by staged-input schema v2, read back by the guest,
+size are instead bound to the clean `candidate_sha` by staged-input schema v3, read back by the guest,
 and copied into guest/host result evidence. The host only compiles and stages this executable; it
 never runs it. The approved guest runs the prebuilt executable without Git, Cargo, rustup, or a Rust
 compiler.
@@ -156,7 +199,7 @@ twelve local release-evidence invocations in total.
 | M17 | `udp-policy` | `-Mode udp-policy` | Source-keyed EIM and route-once association policy; ADF/EIF; parsed DNS, QUIC Initial, STUN/WebRTC, and game-style payloads; multi-target and v4/v6 source coverage; capacity, queue-pressure, and restart-stale-state contracts; directed-broadcast isolation; journaled firewall masking control | 18 | 9 |
 | M17 | `scheduler-ring-full` | `-Mode scheduler-ring-full` | Exact TCP 8/16/64 capacity-aware rotation, live UDP sequences totaling 8/16/64 in bounded eight-packet batches, a 256-packet 1,200-byte live egress pressure stage with closed sent/drop accounting, fair work rotation, lossless response backpressure, explicit nonfatal ring-full drop, and closed Wintun owner error dispositions | 8 | 8 |
 | TUN fuzz smoke | `fuzz-smoke` | guest executes staged `ferrum2-tun-fuzz-smoke.exe` | Four packet-reassembly, three UDP-reset race, eight removed-config, and eight strict-route rule-plan seeds plus bounded empty/malformed/oversized inputs and exact terminal/hash evidence | 23 | 0 |
-| M16 hard-kill | `hard-kill` | `-Mode hard-kill` | Managed auto-route, auto-DNS, and mixed live-traffic processes are forcibly terminated, followed by exact process, adapter, address, route, and DNS absence readback | 3 | 0 |
+| M16 hard-kill | `hard-kill` | `-Mode hard-kill` | Managed auto-route, auto-DNS, and mixed live-traffic processes are forcibly terminated; the two DNS cases bind the live strict-route WFP session, sublayer, owner PID, and eight filters before termination and prove their absence afterward, in addition to exact process, adapter, address, route, and DNS absence | 3 | 0 |
 
 Each network-reset profile creates one journaled guest-underlay `/32` notification route and then
 alternates its metric. This is an ordinary route/interface notification, not damage to Ferrum2-owned
@@ -183,6 +226,20 @@ CONNECT attempt, and exercises system DNS. The controller reads back the exact m
 hop, and route metric before termination. This is owned-route evidence, not external route-conflict
 or kill-switch evidence.
 
+For `auto-dns` and `mixed`, strict-route requested/effective metrics must each equal exactly `1`,
+filter-install success must equal exactly `1`, and filter-install failure must equal `0`. Immediately
+before `TerminateProcess`, a bounded WFP state snapshot must bind the candidate owner PID, fixed
+dynamic-session key/name, independent fixed sublayer key/name, managed adapter LUID, and all eight
+fixed filter keys with unique nonzero dynamic IDs. After process exit, a second bounded snapshot
+must contain no match for the captured session, sublayer, fixed filter keys/names, or dynamic IDs.
+The mixed system-DNS witness must reach the guest-local responder exactly once and remain quiet for
+500 ms after the response.
+
+This strict-route guard covers ordinary TCP and UDP DNS on port 53. It is not a global zero-leak
+kill switch and does not claim to block or observe DoH, DoT, or other encrypted DNS transports. The
+guest-local responder count proves the intended resolver path and absence of a retry; it is not by
+itself packet-capture proof that no physical interface saw any packet.
+
 All three network-reset counts, all three restart counts, fuzz smoke, and the separate hard-kill
 gate are required. A lower cycle count does not stand in for a higher count. Run all profiles
 serially against this single approved guest; do not run concurrent jobs. Neither fuzz smoke nor
@@ -198,8 +255,23 @@ correctness evidence cannot be used as performance acceptance. Its distinct entr
 policy's calibration and threshold fields are all `null`. The closed plan has nine scenarios and
 90 alternating trials. Ten `udp-route-once` raw sidecars bind the real two-generation, 64-source,
 four-target guest traffic and product association/router counter deltas; ten lifecycle sidecars
-remain separate. The ring-full trial samples `ferrum2_tun_pending_udp_responses` while the guest
-workload is running and records the observed peak, not a configured or fabricated constant.
+remain separate. The Wintun egress-pressure trial samples
+`ferrum2_tun_pending_udp_responses` while the guest workload is running and records the observed
+peak, not a configured or fabricated constant. It also records the raw workload-attempt,
+successful-egress, ring-full-drop, derived response-attempt, and pending-response counts. The
+validator derives `response attempts = successful egress + ring-full drops`, requires a bounded
+minimum sample of 32,768 responses, recomputes the drop rate from those raw counters, and accepts a
+natural zero-drop observation. That floor keeps the approximate 95% rule-of-three upper bound below
+100 drops per million when zero drops are observed. A zero parent and zero candidate are a tie; a
+zero parent followed by a positive candidate uses a signed 100 percent sentinel in the metric's
+declared direction, not a claimed
+percentage ratio. Calibrated thresholds for these zero-capable metrics must include that sentinel.
+This performance trial therefore measures the real
+Wintun egress pressure window; it does not claim that the live driver must reach ring-full on
+every scheduler run. Ring-full classification, drop-without-retry, and absence of reset/rebuild
+remain separate M17 correctness obligations. The M17 live pressure stage closes
+successful-egress plus ring-full-drop accounting but likewise does not require a nonzero drop
+count.
 The performance runner uses the same `-PowerShellZip` parameter, external default path, exact
 PowerShell version, and SHA-256 boundary documented under Local Hyper-V execution below.
 
@@ -288,6 +360,12 @@ select another absolute location containing those exact bytes:
 pwsh -NoProfile -File tests/platform/run_windows_tun_hyperv.ps1 `
     -Profile fragments `
     -RunToken '<unique-token>' `
+    -TopologyManifestPath "$env:LOCALAPPDATA\Ferrum2\windows-tun-support-topology.json" `
+    -TopologyManifestSha256 '<exact-lowercase-manifest-sha256>' `
+    -SupportTcpPort 44150 `
+    -SupportUdpPort 44160 `
+    -SupportPid '<exact-live-pid>' `
+    -SupportOwner '<exact-live-owner>' `
     -IdentityLedger '<absolute-host-ledger-path>' `
     -WintunZip '<absolute-wintun-0.14.1-zip-path>' `
     -PowerShellZip '<absolute-PowerShell-7.4.19-win-x64-zip-path>' `
@@ -300,6 +378,12 @@ must not be added to the M17 runner's profile set:
 ```powershell
 pwsh -NoProfile -File tests/platform/run_windows_tun_hard_kill_hyperv.ps1 `
     -RunToken '<unique-token>' `
+    -TopologyManifestPath "$env:LOCALAPPDATA\Ferrum2\windows-tun-support-topology.json" `
+    -TopologyManifestSha256 '<exact-lowercase-manifest-sha256>' `
+    -SupportTcpPort 44150 `
+    -SupportUdpPort 44160 `
+    -SupportPid '<exact-live-pid>' `
+    -SupportOwner '<exact-live-owner>' `
     -IdentityLedger '<absolute-host-ledger-path>' `
     -WintunZip '<absolute-wintun-0.14.1-zip-path>' `
     -PowerShellZip '<absolute-PowerShell-7.4.19-win-x64-zip-path>' `
@@ -318,8 +402,11 @@ host builds, compares the client/server/test hashes with the ledger, compiles bu
 Windows fuzz-smoke binary, verifies and stages the pinned PowerShell 7.4.19 archive, and stages
 bounded Visual C++ runtime libraries. It then restores the exact approved checkpoint, starts the
 exact VM, and copies
-only the controller, identity ledger, Wintun archive, precompiled executables, portable PowerShell
-archive, runtime libraries, and a hash-bound staging manifest. For M17, the guest expands portable
+only the controller, identity ledger, exact topology manifest, guest path probe, Wintun archive,
+precompiled executables, portable PowerShell archive, runtime libraries, and a hash-bound staging
+manifest. Before the first guest TUN is created, the probe proves that the support address selects
+the exact direct `/30` route, source address, support interface identity, MAC, and MTU, with no
+gateway or DNS configuration. For M17, the guest expands portable
 PowerShell and invokes the controller with explicit
 `ClientBinary`, `ServerBinary`, `CandidateTestDirectory`, `RuntimeLibraryDirectory`, and `WintunZip`
 paths. For `fuzz-smoke`, it directly runs only the manifest-verified smoke executable. No guest
@@ -366,20 +453,31 @@ candidate SHA, manual run token, mode, cycle count, and UTC collection
 time. Network-reset runs must additionally preserve `network-reset-cycles.jsonl`.
 
 The local wrapper also preserves staged-input schema
-`ferrum2.windows-tun.hyperv-staged-input.v2`, guest-run schema
-`ferrum2.windows-tun.hyperv-guest-run.v3`, and
-`host-orchestration.json` schema `ferrum2.windows-tun.hyperv-host-run.v3`. Together they bind every
+`ferrum2.windows-tun.hyperv-staged-input.v3`, guest-run schema
+`ferrum2.windows-tun.hyperv-guest-run.v4`, and
+`host-orchestration.json` schema `ferrum2.windows-tun.hyperv-host-run.v4`. Together they bind every
 staged executable/runtime archive—including fuzz smoke—the exact profile/mode and both nullable cycle
-fields, the staging-manifest hash, exported file hashes, exact VM/checkpoint identities, and final
-`Off` state.
+fields, the staging-manifest hash, exported file hashes, exact topology manifest, live support
+listener and guest support path, VM/checkpoint identities, unchanged host TUN, zero host-network
+mutations, and final `Off` state.
+
+The host manifest is published only from the fixed sibling
+`host-orchestration.pending.json` in the same evidence directory. The writer uses create-new bytes
+and `Flush(true)`, validates the closed document and a fresh `evidence_files` hash set, performs a
+same-volume atomic move to `host-orchestration.json`, then rereads the final bytes and recomputes the
+fresh evidence hashes. Both manifest names are excluded from `evidence_files`, and success requires
+the pending name to be absent. If the outer supervisor rejects the worker, it deletes the exact
+pending file and any PASS or invalid final manifest; a schema/token/VM-bound `status: fail` final may
+remain for diagnosis. Other token-scoped failure evidence is retained.
 
 Accept a run only when all of the following are true:
 
-1. `m17-contract.json` has schema `ferrum2.windows-tun.m17-contract.v1`, status
+1. `m17-contract.json` has schema `ferrum2.windows-tun.m17-contract.v2`, status
    `preflight_pass`, the requested mode/cycle count, exact approved VM/checkpoint names and IDs,
-   guest build, pinned Wintun hashes, and hashes matching the embedded identity ledger. Its
+   guest build, exact topology and guest support-path preflight, pinned Wintun hashes, and hashes
+   matching the embedded identity ledger. Its
    `controller_sha256` equals the ledger `probe_sha256`; optional test-binary hashes match it too.
-2. `m17-result.json` has schema `ferrum2.windows-tun.m17-result.v1`, status `pass`, the requested
+2. `m17-result.json` has schema `ferrum2.windows-tun.m17-result.v2`, status `pass`, the requested
    mode, unique run token, expected `network_reset_cycles` or `restart_cycles` value with the other
    cycle field `null` (both are `null` for non-cycle modes), exact approved
    VM/checkpoint identity and guest build, and the same identity, candidate, client, server,
@@ -423,40 +521,61 @@ The separate hard-kill run must preserve `identity-ledger.json`, `controller.std
 the following are true:
 
 The eight guest files are exported under `<EvidenceDirectory>\guest\export`. The host evidence root
-also contains the byte-identical input ledger, the staged-input manifest, and
-`host-orchestration.json`; the latter is published only after the exact checkpoint is restored and
-the approved VM is confirmed `Off`.
+also contains the byte-identical input ledger and topology manifest, the staged-input manifest, and
+`host-orchestration.json`. A failed run may publish it with `status: fail` for diagnosis; `status:
+pass` is valid only after the exact checkpoint is restored and the approved VM is confirmed `Off`.
+`-DescribeContract` reports
+`ferrum2.windows-tun.hard-kill-static-contract.v2`; the staged input, guest bootstrap, and host-run
+schemas are respectively `ferrum2.windows-tun.hard-kill-staged-input.v2`,
+`ferrum2.windows-tun.hard-kill-guest-bootstrap.v2`, and
+`ferrum2.windows-tun.hard-kill-hyperv-host-run.v2`; it also reports evidence-row schema `2` and
+exactly two strict-route cases.
 
 1. Controller exit is zero and stdout contains exactly one full
-   `m16_windows_hard_kill status=PASS cases=3/3 ... cleanup=PASS ...` terminal line. Its guest build,
+   `m16_windows_hard_kill status=PASS cases=3/3 ... strict_route_wfp=ABSENT cleanup=PASS ...`
+   terminal line. Its guest build,
    run token, candidate SHA, controller/probe SHA, and identity SHA must exactly match the ledger and
    current candidate.
 2. `hard-kill-evidence.jsonl` is the exact controller sidecar and has exactly three ordered rows:
    `hard-kill-auto-route`, `hard-kill-auto-dns`, and `hard-kill-mixed`. Every row has schema integer
-   `1`, a round-trip UTC timestamp, and only `process`, `adapter`, `addresses`, `routes`, and `dns`,
-   each with string value `absent`.
-3. `hard-kill-result.json` has schema `ferrum2.windows-tun.hard-kill-result.v1`, status `pass`, mode
+   `2`, a round-trip UTC timestamp, and the closed data fields `process`, `adapter`, `addresses`,
+   `routes`, `dns`, and `strict_route_wfp`; the first five are string `absent`. The route-only WFP
+    object is exactly `{ applicable: false }`. Each DNS WFP object contains only `applicable: true`,
+    a `before_kill` identity, and an `after_kill` absence object. `before_kill` binds the fixed session
+    and sublayer keys, nonzero UInt32 owner PID, the exact managed-adapter nonzero UInt64 interface
+    LUID, the AppId SHA-256 independently derived from the exact staged client executable, eight
+    fixed-key/nonzero-UInt64-ID pairs, and a recomputable lowercase SHA-256. `after_kill` records
+    session, sublayer, and filters as `absent`.
+3. `hard-kill-result.json` has schema `ferrum2.windows-tun.hard-kill-result.v2`, status `pass`, mode
    `hard-kill`, the exact token plus identity, candidate, client, server, and controller hashes,
-   integer `cases: 3`,
-   five true absence booleans, `inner_cleanup: pass`, and hashes matching the three captured
-   controller files.
+   exact topology manifest/switch/listener identities, exact guest support path, integer `cases: 3`,
+   five true residue-absence booleans, `strict_route_cases: 2`, true
+   `strict_route_wfp_identity_verified` and `strict_route_wfp_absent`, `inner_cleanup: pass`, and
+   hashes matching the three captured controller files.
 4. The artifact-less outer cleanup exits zero. `hard-kill-cleanup.json` has schema
-   `ferrum2.windows-tun.hard-kill-cleanup.v1`, status `pass`, source mode `hard-kill`, the exact run
+   `ferrum2.windows-tun.hard-kill-cleanup.v2`, status `pass`, source mode `hard-kill`, the exact run
    token and available identity hash, and the recorded qualification outcome. Its process, adapter,
    target-address, target-route, DNS, sibling-DLL, work-directory, mutation-journal, firewall-rule,
    and identity-journal counts are integer zero.
 5. Both wrapper JSON files pass their immediate closed-property, JSON-type, timestamp, hash, and
    exact-file readback, and the artifact upload succeeds even when qualification or cleanup fails.
+6. The host-run result repeats the exact topology and support-listener bindings, reports
+   `checkpoint_restored`, `host_tun_unchanged`, and `host_support_unchanged` as true,
+   `host_network_mutations` as integer zero, and `final_vm_state` as `Off`.
 
 ## Failure handling and cleanup
 
-On any failure, retain the primary exit code and cleanup exit code separately. Do not reuse the
+On any failure, retain the primary worker failure and every supervisor-recovery failure separately;
+the combined exception must not let cleanup mask the original cause. Do not reuse the
 guest state or run token, and do not rerun merely to replace failed evidence. Run the token-scoped
 cleanup once through the repository controller. Export the persistent artifact directory and hash
 its contract, result, and logs before restoring the checkpoint. For M17, `m17-result.json` should report
 `status: fail` and a bounded failure record when preflight reached artifact initialization; if it is
 absent, record that as an additional failure. For hard-kill, retain the captured controller and
-cleanup logs plus any copied ledger, sidecar, or wrapper result. A passing `hard-kill-cleanup.json`
+cleanup logs plus any copied ledger, sidecar, or wrapper result. The supervisor removes its exact
+deterministic pending manifest and invalidates any PASS or malformed final manifest before returning
+failure; a closed schema/token/VM-bound `status: fail` manifest may remain. A passing
+`hard-kill-cleanup.json`
 proves only that the failed run was reaped; its `qualification_outcome` cannot promote the run to a
 qualification pass.
 
@@ -467,38 +586,28 @@ restore the approved checkpoint. A cleanup failure can never be waived into a pa
 ## Mandatory final checkpoint restore
 
 This sequence is mandatory after every local M17, fuzz-smoke, or hard-kill invocation and after every
-failed or abandoned run:
+failed or abandoned run. The supervisor performs it automatically for an observed worker outcome;
+after supervisor termination or host restart, the operator must perform it before starting another
+qualification:
 
 1. Export all guest artifacts and the identity ledger to the evidence store; compute and record
    their hashes outside the guest.
-2. Remove the PowerShell Direct session and use only the already identity-checked VM object with
-   `Stop-VM -TurnOff -Force`; wait for the exact VM to become `Off` under a bounded timeout.
-3. Re-resolve the VM and checkpoint by the exact IDs above, cross-check both names again, and restore
-   that checkpoint.
-4. Verify the VM is `Off` after restore and leave it `Off`. Do not restart it for post-run
+2. Reap the hidden worker Job first. Use a bounded child process to resolve only the captured VM GUID,
+   turn it off with `Stop-VM -TurnOff -Force`, and prove `Off`. A name mismatch is reported after the
+   exact GUID has been made safe; it never causes selection of a substitute VM.
+3. Only while the VM is proven `Off`, re-resolve the captured checkpoint GUID and cross-check the VM
+   name, checkpoint name, and captured source-parent GUID. Restore only that checkpoint. Any mismatch
+   leaves the exact VM `Off` and fails recovery.
+4. Run the bounded exact-GUID stop once more, read back the exact VM ID/name/state, and leave it
+   `Off`. Do not restart it for post-run
    inspection.
 
-The host-side final restore therefore has this exact shape after the identity checks from the first
-section:
-
-```powershell
-$vm = Get-VM -Id $approvedVmId -ErrorAction Stop
-if ($vm.Name -cne $approvedVmName) { throw 'approved VM identity changed' }
-if ($vm.State -ne 'Off') { $vm | Stop-VM -TurnOff -Force -ErrorAction Stop }
-$vm = Get-VM -Id $approvedVmId -ErrorAction Stop
-if ($vm.State -ne 'Off') { throw 'approved VM did not turn off' }
-
-$checkpoint = @(Get-VMSnapshot -VM $vm -ErrorAction Stop |
-    Where-Object { $_.Id -eq $approvedCheckpointId })
-if ($checkpoint.Count -ne 1 -or $checkpoint[0].Name -cne $approvedCheckpointName) {
-    throw 'approved checkpoint identity changed'
-}
-$checkpoint[0] | Restore-VMSnapshot -Confirm:$false -ErrorAction Stop
-$restored = Get-VM -Id $approvedVmId -ErrorAction Stop
-if ($restored.Name -cne $approvedVmName -or $restored.State -ne 'Off') {
-    throw 'final checkpoint restore did not leave the approved VM Off'
-}
-```
+The user-facing process never performs an unbounded in-process `Remove-PSSession`, `Stop-VM`, or
+`Restore-VMSnapshot` sequence after entering the VM-active phase. Synchronous PowerShell Direct is
+confined to the worker; the supervisor's independently captured authority and bounded child helpers
+remain available if that worker hangs. They are not available after the supervisor itself has exited,
+so unexpected supervisor termination requires a fresh, exact-ID-bounded recovery process rather than
+a qualification retry.
 
 Record the restore completion time, exact VM/checkpoint IDs, final `Off` state, candidate SHA,
 identity-ledger SHA-256, and exported artifact hashes in the external qualification record. Only a

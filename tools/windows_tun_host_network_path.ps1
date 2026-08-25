@@ -149,7 +149,10 @@ function Get-HostSupportContext {
         owner = $ownerIdentity
         executable = $executable
         executable_sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-        creation_utc = $processRows[0].CreationDate.ToUniversalTime().ToString("o")
+        creation_utc = $processRows[0].CreationDate.ToUniversalTime().ToString(
+            "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
         topology_manifest_sha256 = [string]$TopologyDocument.Sha256
     }
 }

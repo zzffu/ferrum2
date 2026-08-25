@@ -1265,11 +1265,14 @@ fn packet_ip_family(packet: &[u8]) -> Option<TunIpFamily> {
 #[cfg(all(windows, target_arch = "x86_64"))]
 const MANAGED_DNS_AUDIT_MILLIS: i64 = 5_000;
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+const TRANSIENT_UNDERLAY_SETTLE: Duration = Duration::from_secs(5);
+
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NetworkChangeTransition {
     Unchanged,
-    ResetNetwork,
+    ResetNetwork { settle_underlay: bool },
     FullRebuild(TunNetworkFullRebuildReason),
 }
 
@@ -1279,6 +1282,14 @@ enum NetworkResetHealthDisposition {
     Healthy,
     Retry,
     FullRebuild(TunNetworkFullRebuildReason),
+    RuntimeFailed,
+    CleanupFailed,
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkChangeErrorDisposition {
+    ResetNetwork { settle_underlay: bool },
     RuntimeFailed,
     CleanupFailed,
 }
@@ -1318,12 +1329,32 @@ const fn classify_network_reset_refresh_error(
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+const fn classify_network_change_error(
+    error: ferrum2_wintun::Error,
+) -> NetworkChangeErrorDisposition {
+    match error.kind() {
+        ferrum2_wintun::ErrorKind::RecoverableSession => {
+            NetworkChangeErrorDisposition::ResetNetwork {
+                settle_underlay: true,
+            }
+        }
+        ferrum2_wintun::ErrorKind::InvalidInput
+        | ferrum2_wintun::ErrorKind::UnrecoverableCorruption => {
+            NetworkChangeErrorDisposition::RuntimeFailed
+        }
+        ferrum2_wintun::ErrorKind::Cleanup => NetworkChangeErrorDisposition::CleanupFailed,
+    }
+}
+
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 const fn classify_network_change(
     outcome: ferrum2_wintun::NetworkChangeOutcome,
 ) -> NetworkChangeTransition {
     match outcome {
         ferrum2_wintun::NetworkChangeOutcome::Unchanged => NetworkChangeTransition::Unchanged,
-        ferrum2_wintun::NetworkChangeOutcome::Changed => NetworkChangeTransition::ResetNetwork,
+        ferrum2_wintun::NetworkChangeOutcome::Changed => NetworkChangeTransition::ResetNetwork {
+            settle_underlay: false,
+        },
         ferrum2_wintun::NetworkChangeOutcome::ManagedStateDamaged(damage) => {
             NetworkChangeTransition::FullRebuild(map_managed_state_damage(damage))
         }
@@ -1391,11 +1422,16 @@ fn semantic_network_change_transition(
         }
         Err(error) => {
             events.emit(TunEvent::NetworkChange);
-            match classify_adapter_error(error) {
-                AdapterErrorDisposition::FullRebuild(damage) => {
-                    Ok(NetworkChangeTransition::FullRebuild(damage))
+            match classify_network_change_error(error) {
+                NetworkChangeErrorDisposition::ResetNetwork { settle_underlay } => {
+                    Ok(NetworkChangeTransition::ResetNetwork { settle_underlay })
                 }
-                disposition => Err(disposition),
+                NetworkChangeErrorDisposition::RuntimeFailed => {
+                    Err(AdapterErrorDisposition::RuntimeFailed)
+                }
+                NetworkChangeErrorDisposition::CleanupFailed => {
+                    Err(AdapterErrorDisposition::CleanupFailed)
+                }
             }
         }
     }
@@ -1417,8 +1453,10 @@ fn refresh_network_runtime(
     control: &OwnerControl,
     backoff: &mut RestartBackoff,
     events: &TunEventSink,
-    mut reason: TunNetworkResetReason,
+    reason: TunNetworkResetReason,
+    settle_underlay: bool,
 ) -> NetworkResetRefreshOutcome {
+    let mut settle_pending = settle_underlay;
     loop {
         if control.stop.load(Ordering::Acquire) || control.shutdown.load(Ordering::Acquire) {
             events.emit(TunEvent::NetworkResetFailed(reason));
@@ -1439,16 +1477,30 @@ fn refresh_network_runtime(
                 return NetworkResetRefreshOutcome::CleanupFailed;
             }
             NetworkResetHealthDisposition::Retry => {
-                events.emit(TunEvent::NetworkResetFailed(reason));
+                // A transient managed-state readback belongs to the same logical reset. Keep its
+                // metric attempt and initiating reason open while the platform state settles.
+                settle_pending = true;
                 if !wait_owner_delay(control, backoff.next_delay()) {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
                     return NetworkResetRefreshOutcome::Stopped;
                 }
-                reason = TunNetworkResetReason::Retry;
-                events.emit(TunEvent::NetworkResetStarted(reason));
                 continue;
             }
         }
         match adapter.refresh_underlay() {
+            Ok(_) if !adapter_underlay_is_current(adapter) => {
+                settle_pending = true;
+            }
+            Ok(_) if settle_pending => {
+                // Windows can publish the remaining address and route notifications after the
+                // interface first becomes readable. Keep them inside this logical reset, then
+                // capture the final generation before reopening admission.
+                if !wait_owner_delay(control, TRANSIENT_UNDERLAY_SETTLE) {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    return NetworkResetRefreshOutcome::Stopped;
+                }
+                settle_pending = false;
+            }
             Ok(_) => return NetworkResetRefreshOutcome::Refreshed(reason),
             Err(error) => match classify_network_reset_refresh_error(error) {
                 NetworkResetHealthDisposition::RuntimeFailed => {
@@ -1460,12 +1512,14 @@ fn refresh_network_runtime(
                     return NetworkResetRefreshOutcome::CleanupFailed;
                 }
                 NetworkResetHealthDisposition::Retry => {
-                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    // A temporarily unavailable underlay is still the same ordinary network
+                    // change. Keep admission closed and the logical reset attempt open while the
+                    // interface settles; only a terminal abort records a failed reset.
+                    settle_pending = true;
                     if !wait_owner_delay(control, backoff.next_delay()) {
+                        events.emit(TunEvent::NetworkResetFailed(reason));
                         return NetworkResetRefreshOutcome::Stopped;
                     }
-                    reason = TunNetworkResetReason::Retry;
-                    events.emit(TunEvent::NetworkResetStarted(reason));
                 }
                 NetworkResetHealthDisposition::Healthy
                 | NetworkResetHealthDisposition::FullRebuild(_) => {
@@ -1841,7 +1895,14 @@ fn owner_main(
         if let Some(reason) = reset_reason
             && !adapter_underlay_is_current(&adapter)
         {
-            match refresh_network_runtime(&mut adapter, &control, &mut backoff, &events, reason) {
+            match refresh_network_runtime(
+                &mut adapter,
+                &control,
+                &mut backoff,
+                &events,
+                reason,
+                false,
+            ) {
                 NetworkResetRefreshOutcome::Refreshed(reason) => {
                     retained_adapter = Some((adapter, reason, false));
                     continue;
@@ -2364,6 +2425,7 @@ fn owner_main(
         let mut raw_notification_generation = 0_u64;
         debounce.clear();
         let mut reset_network = false;
+        let mut settle_underlay = false;
         let mut full_rebuild = None;
         let mut terminal_exit = None;
         'session: while !control.stop.load(Ordering::Acquire) {
@@ -2381,11 +2443,14 @@ fn owner_main(
                 }
                 match semantic_network_change_transition(&mut adapter, &events) {
                     Ok(NetworkChangeTransition::Unchanged) => {}
-                    Ok(NetworkChangeTransition::ResetNetwork) => {
+                    Ok(NetworkChangeTransition::ResetNetwork {
+                        settle_underlay: requires_settle,
+                    }) => {
                         events.emit(TunEvent::NetworkResetStarted(
                             TunNetworkResetReason::NetworkChange,
                         ));
                         reset_network = true;
+                        settle_underlay = requires_settle;
                         break;
                     }
                     Ok(NetworkChangeTransition::FullRebuild(damage))
@@ -2656,6 +2721,7 @@ fn owner_main(
                 &mut backoff,
                 &events,
                 TunNetworkResetReason::NetworkChange,
+                settle_underlay,
             ) {
                 NetworkResetRefreshOutcome::Refreshed(reason) => {
                     if session_started.elapsed() >= Duration::from_secs(5) {
@@ -4344,13 +4410,14 @@ mod tests {
     #[cfg(all(windows, target_arch = "x86_64"))]
     use super::{AdapterErrorDisposition, classify_adapter_error};
     use super::{
-        Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NetworkChangeTransition,
-        NetworkResetBridgeOutcome, NetworkResetHealthDisposition, NetworkResetRequest,
-        OutputFlushOutcome, OutputSendOutcome, OutputSlot, OwnerControl, OwnerExit, OwnerRegistry,
-        OwnerThread, OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack,
-        TunEvent, TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering,
-        UdpInjectOutcome, UdpPeerAuthorization, UdpResponseDropReason, UdpTuple,
-        classify_network_change, classify_network_reset_health,
+        Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx,
+        NetworkChangeErrorDisposition, NetworkChangeTransition, NetworkResetBridgeOutcome,
+        NetworkResetHealthDisposition, NetworkResetRequest, OutputFlushOutcome, OutputSendOutcome,
+        OutputSlot, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread, OwnerWake, PacketParser,
+        PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink,
+        TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering, UdpInjectOutcome,
+        UdpPeerAuthorization, UdpResponseDropReason, UdpTuple, classify_network_change,
+        classify_network_change_error, classify_network_reset_health,
         classify_network_reset_refresh_error, finish_stack_setup, map_managed_state_damage,
         map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
     };
@@ -7117,7 +7184,9 @@ mod tests {
         );
         assert_eq!(
             classify_network_change(ferrum2_wintun::NetworkChangeOutcome::Changed),
-            NetworkChangeTransition::ResetNetwork
+            NetworkChangeTransition::ResetNetwork {
+                settle_underlay: false,
+            }
         );
         for damage in [
             ferrum2_wintun::ManagedStateDamage::Adapter,
@@ -7136,6 +7205,33 @@ mod tests {
                 "managed damage {damage:?}"
             );
         }
+    }
+
+    #[test]
+    fn transient_underlay_revalidation_failure_resets_without_rebuilding_managed_state() {
+        let recoverable = ferrum2_wintun::Error::new(ferrum2_wintun::ErrorKind::RecoverableSession);
+        assert_eq!(
+            classify_network_change_error(recoverable),
+            NetworkChangeErrorDisposition::ResetNetwork {
+                settle_underlay: true,
+            }
+        );
+        for kind in [
+            ferrum2_wintun::ErrorKind::InvalidInput,
+            ferrum2_wintun::ErrorKind::UnrecoverableCorruption,
+        ] {
+            assert_eq!(
+                classify_network_change_error(ferrum2_wintun::Error::new(kind)),
+                NetworkChangeErrorDisposition::RuntimeFailed,
+                "revalidation error {kind:?}"
+            );
+        }
+        assert_eq!(
+            classify_network_change_error(ferrum2_wintun::Error::new(
+                ferrum2_wintun::ErrorKind::Cleanup,
+            )),
+            NetworkChangeErrorDisposition::CleanupFailed
+        );
     }
 
     #[test]

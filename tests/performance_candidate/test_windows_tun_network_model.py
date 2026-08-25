@@ -108,20 +108,81 @@ def lifecycle_metrics(
 
 
 def lifecycle_observation() -> dict[str, object]:
+    cold_start_resources = {
+        "process_handles": 115,
+        "process_threads": 10,
+        "udp_associations_active": 0,
+        "managed_adapters_active": 1,
+    }
     resources = {
         "process_handles": 120,
         "process_threads": 12,
         "udp_associations_active": 0,
         "managed_adapters_active": 1,
     }
-    cycles = []
     identity = "a" * 64
-    total_cycles = MODEL.RESET_CYCLES + MODEL.FULL_REBUILD_CYCLES
-    for sequence in range(1, total_cycles + 1):
-        completed_resets = min(sequence - 1, MODEL.RESET_CYCLES)
-        completed_rebuilds = max(0, sequence - MODEL.RESET_CYCLES - 1)
+    route_metric_baseline = 25
+    route_metric_states = (26, 27, route_metric_baseline)
+    resource_warmup_cycles = []
+    route_metric_before = route_metric_baseline
+    for sequence in range(1, MODEL.RESOURCE_WARMUP_RESET_CYCLES + 1):
         metrics_before = lifecycle_metrics(
             generation=sequence,
+            reset_cycles=sequence - 1,
+            rebuild_cycles=0,
+        )
+        metrics_after = lifecycle_metrics(
+            generation=sequence + 1,
+            reset_cycles=sequence,
+            rebuild_cycles=0,
+        )
+        route_metric_after = route_metric_states[(sequence - 1) % len(route_metric_states)]
+        tcp_before = sequence % 4
+        udp_before = sequence % 8 + 1
+        warmup_resources = {
+            **resources,
+            "process_handles": min(
+                resources["process_handles"],
+                cold_start_resources["process_handles"] + sequence,
+            ),
+            "process_threads": min(
+                resources["process_threads"],
+                cold_start_resources["process_threads"] + sequence,
+            ),
+        }
+        if sequence == MODEL.RESOURCE_WARMUP_RESET_CYCLES:
+            warmup_resources["process_handles"] += 1
+        resource_warmup_cycles.append(
+            {
+                "sequence": sequence,
+                "operation": "reset_network",
+                "reason": "route_change",
+                "route_metric_before": route_metric_before,
+                "route_metric_after": route_metric_after,
+                "lifecycle_metrics_before": metrics_before,
+                "lifecycle_metrics_after": metrics_after,
+                "managed_identity_before": identity,
+                "managed_identity_after": identity,
+                "tcp_flows_before": tcp_before,
+                "udp_associations_before": udp_before,
+                "tcp_flows_closed": tcp_before,
+                "udp_associations_closed": udp_before,
+                "tcp_probe_succeeded": True,
+                "udp_probe_succeeded": True,
+                "resources_after": warmup_resources,
+            }
+        )
+        route_metric_before = route_metric_after
+
+    cycles = []
+    total_cycles = MODEL.RESET_CYCLES + MODEL.FULL_REBUILD_CYCLES
+    for sequence in range(1, total_cycles + 1):
+        completed_resets = MODEL.RESOURCE_WARMUP_RESET_CYCLES + min(
+            sequence - 1, MODEL.RESET_CYCLES
+        )
+        completed_rebuilds = max(0, sequence - MODEL.RESET_CYCLES - 1)
+        metrics_before = lifecycle_metrics(
+            generation=MODEL.RESOURCE_WARMUP_RESET_CYCLES + sequence,
             reset_cycles=completed_resets,
             rebuild_cycles=completed_rebuilds,
         )
@@ -143,7 +204,7 @@ def lifecycle_observation() -> dict[str, object]:
             identity_after = f"{rebuild_index + 1:064x}"
             completed_rebuilds += 1
         metrics_after = lifecycle_metrics(
-            generation=sequence + 1,
+            generation=MODEL.RESOURCE_WARMUP_RESET_CYCLES + sequence + 1,
             reset_cycles=completed_resets,
             rebuild_cycles=completed_rebuilds,
         )
@@ -173,12 +234,22 @@ def lifecycle_observation() -> dict[str, object]:
         "schema_version": MODEL.SCHEMA_VERSION,
         "workload": MODEL.LIFECYCLE_WORKLOAD,
         "identity": observation_identity(trial_sequence=80),
+        "resource_warmup": {
+            "reset_network_cycles": MODEL.RESOURCE_WARMUP_RESET_CYCLES,
+            "route_metric_baseline": route_metric_baseline,
+            "quiescence_seconds": MODEL.RESOURCE_QUIESCENCE_SECONDS,
+            "cold_start_resources": cold_start_resources,
+            "cycles": resource_warmup_cycles,
+            "baseline_resource_samples": [dict(resources) for _ in range(3)],
+        },
         "baseline_resources": dict(resources),
         "cycles": cycles,
         "interface_resolver": {
             "probes": MODEL.INTERFACE_RESOLVER_PROBES,
             "resolutions": MODEL.INTERFACE_RESOLVER_PROBES * 2,
             "cache_hits": MODEL.INTERFACE_RESOLVER_PROBES * 2 - 2,
+            "interface_switch_probe_attempts": 1,
+            "interface_switch_resolution_failures": 0,
         },
     }
 
@@ -186,7 +257,7 @@ def lifecycle_observation() -> dict[str, object]:
 class LocalHypervPerformancePlanTests(unittest.TestCase):
     def test_plan_is_closed_bounded_and_guest_only(self) -> None:
         plan = MODEL.create_local_hyperv_plan()
-        self.assertEqual(plan["schema_version"], 3)
+        self.assertEqual(plan["schema_version"], 6)
         self.assertEqual(plan["execution"], "local_hyperv_guest")
         self.assertEqual(plan["host_network_mutation"], "forbidden")
         self.assertEqual(
@@ -204,11 +275,19 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
             (2, 64, 4, 32),
         )
         lifecycle = plan["workloads"][MODEL.LIFECYCLE_WORKLOAD]
+        self.assertEqual(lifecycle["resource_warmup_reset_cycles"], 12)
+        self.assertEqual(lifecycle["resource_warmup_route_metric_states"], 3)
+        self.assertEqual(lifecycle["resource_quiescence_seconds"], 30)
         self.assertEqual(lifecycle["reset_network_cycles"], 1_000)
+        self.assertEqual(lifecycle["total_reset_network_cycles"], 1_012)
+        self.assertEqual(lifecycle["interface_switch_trial_reset_ordinal"], 512)
+        self.assertTrue(lifecycle["terminal_resource_convergence_excluded_from_elapsed"])
         self.assertEqual(
             lifecycle["interface_switch_kind"],
             "approved_underlay_disable_enable",
         )
+        self.assertEqual(lifecycle["interface_switch_recovery_timeout_seconds"], 30)
+        self.assertEqual(lifecycle["interface_switch_probe_retry_milliseconds"], 250)
         self.assertEqual(
             lifecycle["full_rebuild_cycles"], MODEL.FULL_REBUILD_CYCLES
         )
@@ -220,6 +299,14 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
                     "maximum_retained_resource_growth"
                 ].values()
             )
+        )
+        self.assertEqual(
+            lifecycle["retained_resource_growth_enforced_operations"],
+            ["reset_network"],
+        )
+        self.assertEqual(
+            lifecycle["diagnostic_resource_growth_operations"],
+            ["full_rebuild"],
         )
 
     def test_plan_cli_writes_a_local_hyperv_consumable_json_document(self) -> None:
@@ -312,6 +399,26 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
                 "full_rebuild": MODEL.FULL_REBUILD_CYCLES,
             },
         )
+        self.assertEqual(summary["resource_warmup"]["reset_network_cycles"], 12)
+        self.assertEqual(
+            summary["resource_warmup"]["measured_reset_network_cycles"], 1_000
+        )
+        self.assertEqual(
+            summary["resource_warmup"]["total_reset_network_cycles"], 1_012
+        )
+        self.assertTrue(summary["resource_warmup"]["route_metric_restored"])
+        self.assertEqual(
+            summary["resource_warmup"]["initialization_growth"],
+            {
+                "process_handles": 5,
+                "process_threads": 2,
+                "udp_associations_active": 0,
+                "managed_adapters_active": 0,
+            },
+        )
+        self.assertEqual(
+            summary["resource_warmup"]["peak"]["process_handles"], 121
+        )
         reset = summary["latency_nanoseconds"]["reset_network"]
         self.assertEqual(
             reset,
@@ -352,6 +459,10 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
                     resources["peak_growth"],
                     {field: 0 for field in MODEL.RESOURCE_FIELDS},
                 )
+                self.assertEqual(
+                    resources["retained_growth_enforced"],
+                    operation == "reset_network",
+                )
         self.assertTrue(summary["managed_identity_preserved_across_resets"])
         self.assertTrue(summary["connections_closed"])
         self.assertTrue(summary["damage_only_full_rebuild"])
@@ -363,6 +474,10 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         self.assertEqual(
             summary["interface_resolver"]["cache_hits_per_million_resolutions"],
             968_750,
+        )
+        self.assertEqual(summary["interface_resolver"]["interface_switch_probe_attempts"], 1)
+        self.assertEqual(
+            summary["interface_resolver"]["interface_switch_resolution_failures"], 0
         )
 
     def test_lifecycle_contract_rejects_metric_identity_leak_and_reason_errors(
@@ -412,17 +527,55 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         ordinary_rebuild = lifecycle_observation()
         ordinary_rebuild["cycles"][MODEL.RESET_CYCLES]["reason"] = "route_change"
         cases.append((ordinary_rebuild, "managed-damage rebuild schedule"))
-        resource_growth = lifecycle_observation()
-        resource_growth["cycles"][MODEL.RESET_CYCLES - 1]["resources_after"][
-            "process_handles"
-        ] += 1
-        cases.append((resource_growth, "retained resource growth"))
         bad_identity = lifecycle_observation()
         bad_identity["identity"]["recipe_sha256"] = "not-a-digest"
         cases.append((bad_identity, "recipe_sha256"))
         no_cache_hit = lifecycle_observation()
         no_cache_hit["interface_resolver"]["cache_hits"] = 0
         cases.append((no_cache_hit, "cache_hits"))
+        inconsistent_probe_attempts = lifecycle_observation()
+        inconsistent_probe_attempts["interface_resolver"][
+            "interface_switch_probe_attempts"
+        ] = 2
+        cases.append((inconsistent_probe_attempts, "probe attempt accounting"))
+        late_interface_recovery = lifecycle_observation()
+        late_interface_recovery["cycles"][MODEL.INTERFACE_SWITCH_SEQUENCE - 1][
+            "elapsed_nanoseconds"
+        ] = MODEL.INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS * 1_000_000_000 + 1
+        cases.append((late_interface_recovery, "bounded timeout"))
+        missing_warmup_cycle = lifecycle_observation()
+        missing_warmup_cycle["resource_warmup"]["cycles"].pop()
+        cases.append((missing_warmup_cycle, "requires exactly 12 cycles"))
+        wrong_warmup_operation = lifecycle_observation()
+        wrong_warmup_operation["resource_warmup"]["cycles"][0][
+            "operation"
+        ] = "full_rebuild"
+        cases.append((wrong_warmup_operation, "route-change ResetNetwork"))
+        wrong_warmup_route = lifecycle_observation()
+        wrong_warmup_route["resource_warmup"]["cycles"][1][
+            "route_metric_after"
+        ] += 1
+        cases.append((wrong_warmup_route, "three-state route schedule"))
+        warmup_identity_changed = lifecycle_observation()
+        warmup_identity_changed["resource_warmup"]["cycles"][0][
+            "managed_identity_after"
+        ] = "b" * 64
+        cases.append((warmup_identity_changed, "changed managed identity"))
+        warmup_probe_failed = lifecycle_observation()
+        warmup_probe_failed["resource_warmup"]["cycles"][0][
+            "udp_probe_succeeded"
+        ] = False
+        cases.append((warmup_probe_failed, "did not recover both TCP and UDP probes"))
+        warmup_baseline_mismatch = lifecycle_observation()
+        warmup_baseline_mismatch["resource_warmup"]["baseline_resource_samples"][
+            1
+        ]["process_handles"] -= 1
+        cases.append((warmup_baseline_mismatch, "not stable and exact"))
+        warmup_formal_discontinuity = lifecycle_observation()
+        warmup_formal_discontinuity["cycles"][0]["lifecycle_metrics_before"][
+            "full_rebuild_total"
+        ] += 1
+        cases.append((warmup_formal_discontinuity, "do not continue the prior cycle"))
         for observation, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(MODEL.NetworkModelError, message):
@@ -446,6 +599,43 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
             summary["resources"]["reset_network"]["growth"]["process_handles"],
             0,
         )
+
+    def test_full_rebuild_final_resource_growth_is_diagnostic_and_reported(self) -> None:
+        observation = lifecycle_observation()
+        final_resources = observation["cycles"][-1]["resources_after"]
+        final_resources["process_handles"] += 2
+        final_resources["process_threads"] += 1
+
+        summary = MODEL.summarize_lifecycle_observation(observation)
+        resources = summary["resources"]["full_rebuild"]
+        self.assertFalse(resources["retained_growth_enforced"])
+        self.assertEqual(
+            resources["final"],
+            {
+                "process_handles": 122,
+                "process_threads": 13,
+                "udp_associations_active": 0,
+                "managed_adapters_active": 1,
+            },
+        )
+        self.assertEqual(
+            resources["growth"],
+            {
+                "process_handles": 2,
+                "process_threads": 1,
+                "udp_associations_active": 0,
+                "managed_adapters_active": 0,
+            },
+        )
+
+    def test_reset_final_resource_growth_remains_rejected(self) -> None:
+        observation = lifecycle_observation()
+        observation["cycles"][MODEL.RESET_CYCLES - 1]["resources_after"][
+            "process_handles"
+        ] += 1
+
+        with self.assertRaisesRegex(MODEL.NetworkModelError, "retained resource growth"):
+            MODEL.summarize_lifecycle_observation(observation)
 
 
 class ObservationInputTests(unittest.TestCase):

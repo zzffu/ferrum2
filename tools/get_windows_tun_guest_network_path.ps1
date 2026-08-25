@@ -104,6 +104,59 @@ function Test-Ipv4CidrMembership {
     return $true
 }
 
+function Get-GuestIpv4RouteRows {
+    param(
+        [Parameter(Mandatory = $true)][int]$InterfaceIndex,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("ActiveStore", "PersistentStore")]
+        [string]$PolicyStore,
+        [string]$DestinationPrefix
+    )
+
+    $parameters = @{
+        InterfaceIndex = $InterfaceIndex
+        AddressFamily = "IPv4"
+        PolicyStore = $PolicyStore
+        ErrorAction = "Stop"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPrefix)) {
+        $parameters.DestinationPrefix = $DestinationPrefix
+    }
+    try {
+        return @(Get-NetRoute @parameters)
+    } catch {
+        if ($_.CategoryInfo.Category -eq
+                [Management.Automation.ErrorCategory]::ObjectNotFound -and
+            [string]$_.FullyQualifiedErrorId -like
+                "CmdletizationQuery_NotFound*,Get-NetRoute") {
+            return @()
+        }
+        throw
+    }
+}
+
+function Get-GuestIpv6RouteRows {
+    param(
+        [Parameter(Mandatory = $true)][int]$InterfaceIndex,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("ActiveStore", "PersistentStore")]
+        [string]$PolicyStore
+    )
+
+    try {
+        return @(Get-NetRoute -InterfaceIndex $InterfaceIndex -AddressFamily IPv6 `
+            -PolicyStore $PolicyStore -ErrorAction Stop)
+    } catch {
+        if ($_.CategoryInfo.Category -eq
+                [Management.Automation.ErrorCategory]::ObjectNotFound -and
+            [string]$_.FullyQualifiedErrorId -like
+                "CmdletizationQuery_NotFound*,Get-NetRoute") {
+            return @()
+        }
+        throw
+    }
+}
+
 $supportAddress = ConvertTo-CanonicalIpv4 -Value $SupportIpv4 -Label "support address"
 $supportIp = [Net.IPAddress]::Parse($supportAddress)
 $expectedGuestAddress = ConvertTo-CanonicalIpv4 -Value $ExpectedGuestIpv4 `
@@ -257,11 +310,56 @@ if ($adapters.Count -ne 1 -or
 }
 $ipInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 `
     -InterfaceIndex ([int]$source.InterfaceIndex) -PolicyStore ActiveStore -ErrorAction Stop)
+$persistentIpInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 `
+    -InterfaceIndex ([int]$source.InterfaceIndex) -PolicyStore PersistentStore `
+    -ErrorAction Stop)
 if ($ipInterfaces.Count -ne 1 -or
     [string]$ipInterfaces[0].ConnectionState -cne "Connected" -or
+    [string]$ipInterfaces[0].Dhcp -cne "Disabled" -or
+    [string]$ipInterfaces[0].IgnoreDefaultRoutes -cne "Enabled" -or
     [int]$ipInterfaces[0].NlMtu -ne $ExpectedMtuBytes -or
     [int]$ipInterfaces[0].NlMtu -lt $MinimumUnderlayIpv4PacketBytes) {
-    throw "guest underlay IPv4 MTU cannot carry the support probe without fragmentation"
+    throw "guest underlay IPv4 interface state or MTU is invalid"
+}
+if ($persistentIpInterfaces.Count -ne 1 -or
+    [string]$persistentIpInterfaces[0].IgnoreDefaultRoutes -cne "Enabled") {
+    throw "guest support interface persistent default-route policy is invalid"
+}
+$directRoutes = @(Get-GuestIpv4RouteRows `
+    -InterfaceIndex ([int]$source.InterfaceIndex) `
+    -PolicyStore ActiveStore -DestinationPrefix $ExpectedNetwork | Where-Object {
+        [string]$_.NextHop -ceq "0.0.0.0"
+    })
+$allSupportRoutes = @(
+    Get-GuestIpv4RouteRows -InterfaceIndex ([int]$source.InterfaceIndex) `
+        -PolicyStore ActiveStore
+    Get-GuestIpv4RouteRows -InterfaceIndex ([int]$source.InterfaceIndex) `
+        -PolicyStore PersistentStore
+)
+$defaultSupportRoutes = @($allSupportRoutes | Where-Object {
+    [string]$_.DestinationPrefix -ceq "0.0.0.0/0"
+})
+$gatewaySupportRoutes = @($allSupportRoutes | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([string]$_.NextHop) -and
+    [string]$_.NextHop -cne "0.0.0.0"
+})
+$allSupportIpv6Routes = @(
+    Get-GuestIpv6RouteRows -InterfaceIndex ([int]$source.InterfaceIndex) `
+        -PolicyStore ActiveStore
+    Get-GuestIpv6RouteRows -InterfaceIndex ([int]$source.InterfaceIndex) `
+        -PolicyStore PersistentStore
+)
+$defaultSupportIpv6Routes = @($allSupportIpv6Routes | Where-Object {
+    [string]$_.DestinationPrefix -ceq "::/0"
+})
+$gatewaySupportIpv6Routes = @($allSupportIpv6Routes | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([string]$_.NextHop) -and
+    [string]$_.NextHop -cne "::"
+})
+if ($directRoutes.Count -ne 1 -or $defaultSupportRoutes.Count -ne 0 -or
+    $gatewaySupportRoutes.Count -ne 0 -or $defaultSupportIpv6Routes.Count -ne 0 -or
+    $gatewaySupportIpv6Routes.Count -ne 0) {
+    throw "guest support interface must have one direct route and no IPv4 or IPv6 gateway/default routes"
 }
 $macAddress = ([string]$adapters[0].MacAddress -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
 if ($macAddress -cnotmatch '^[0-9A-F]{12}$') {

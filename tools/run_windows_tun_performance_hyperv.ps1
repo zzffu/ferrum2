@@ -581,7 +581,8 @@ function New-CanonicalPlan {
         @("topology_plan_source_sha256", [string]$script:topologyPlanDocument.Sha256),
         @("topology_runtime_source_sha256", [string]$script:topologyRuntimeSha256),
         @("host_network_path_source_sha256", [string]$script:hostNetworkPathHelperSha256),
-        @("guest_network_path_source_sha256", [string]$script:guestNetworkPathProbeSourceSha256)
+        @("guest_network_path_source_sha256", [string]$script:guestNetworkPathProbeSourceSha256),
+        @("collector_source_sha256", [string]$script:collectorSourceSha256)
     )) {
         $plannedHashes = @($plan.scenarios.PSObject.Properties | ForEach-Object {
             [string]$_.Value.recipe.($binding[0])
@@ -653,10 +654,24 @@ function New-NetworkModelPlan {
     }
     $model = Get-Content -LiteralPath $Output -Raw -Encoding utf8 |
         ConvertFrom-Json -Depth 12
-    if ($model.schema_version -ne 3 -or
+    $lifecycleModel = $model.workloads."network-lifecycle"
+    if ($model.schema_version -ne 6 -or
         $model.execution -cne "local_hyperv_guest" -or
         $model.host_network_mutation -cne "forbidden" -or
+        [int]$model.workloads."network-lifecycle".resource_warmup_reset_cycles -ne 12 -or
+        [int]$model.workloads."network-lifecycle".resource_warmup_route_metric_states -ne 3 -or
+        [int]$model.workloads."network-lifecycle".resource_quiescence_seconds -ne 30 -or
         [int]$model.workloads."network-lifecycle".reset_network_cycles -ne 1000 -or
+        [int]$model.workloads."network-lifecycle".total_reset_network_cycles -ne 1012 -or
+        [int]$model.workloads."network-lifecycle".interface_switch_trial_reset_ordinal -ne 512 -or
+        [int]$lifecycleModel.interface_switch_recovery_timeout_seconds -ne 30 -or
+        [int]$lifecycleModel.interface_switch_probe_retry_milliseconds -ne 250 -or
+        $model.workloads."network-lifecycle".terminal_resource_convergence_excluded_from_elapsed `
+            -ne $true -or
+        (@($lifecycleModel.retained_resource_growth_enforced_operations) -join "|") -cne
+            "reset_network" -or
+        (@($lifecycleModel.diagnostic_resource_growth_operations) -join "|") -cne
+            "full_rebuild" -or
         [int]$model.workloads."udp-route-once".generations -ne 2 -or
         [int]$model.workloads."udp-route-once".source_slots -ne 64 -or
         [int]$model.workloads."udp-route-once".target_slots -ne 4) {
@@ -1779,6 +1794,8 @@ if (-not (Test-Path -LiteralPath $udpBoundaryCollectorPath -PathType Leaf)) {
 }
 $udpBoundaryCollectorSourceSha256 = (Get-FileHash `
     -LiteralPath $udpBoundaryCollectorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$collectorSourceSha256 = (Get-FileHash -LiteralPath $collectorPath `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
 . $topologyRuntimePath -LibraryOnly
 $topologyRuntimeSha256 = (Get-FileHash -LiteralPath $topologyRuntimePath `
     -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -3354,6 +3371,8 @@ public static class Ferrum2PerfProcessGroup {
             @($plan.trials).Count -ne 90 -or
             $plan.recipe_sha256 -cne $RecipeSha256 -or
             $null -eq $plan.scenarios."udp-8192-association-lookup-expiry" -or
+            $plan.scenarios."network-lifecycle".recipe.collector_source_sha256 `
+                -cne $collectorHash -or
             $plan.scenarios."network-lifecycle".recipe.network_model_controller_sha256 `
                 -cne $NetworkModelControllerSha256 -or
             $plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256 `
@@ -3666,6 +3685,11 @@ public static class Ferrum2PerfProcessGroup {
                     "-ServerPid", [string]$serverPid,
                     "-MetricsPort", [string]$metricsPort,
                     "-ServerMetricsPort", [string]$serverMetricsPort,
+                    "-ExpectedFixedEndpointIpv4", $ExpectedGuestAddress,
+                    "-ExpectedUnderlayInterfaceIndex",
+                        [string]$ExpectedGuestNetworkPath.guest_interface_index,
+                    "-ExpectedUnderlayInterfaceAlias", $ExpectedGuestInterfaceAlias,
+                    "-ExpectedUnderlayInterfaceGuid", $ExpectedSupportInterfaceGuid,
                     "-Output", $output
                 )
                 if ([string]$trial.scenario -ceq
@@ -3742,7 +3766,7 @@ public static class Ferrum2PerfProcessGroup {
                 $trialEvidence = Get-Content -LiteralPath $output -Raw -Encoding utf8 |
                     ConvertFrom-Json -ErrorAction Stop
                 if (-not (Test-JsonInteger -Value $trialEvidence.schema_version) -or
-                    $trialEvidence.schema_version -ne 3 -or
+                    $trialEvidence.schema_version -ne 4 -or
                     $trialEvidence.kind -isnot [string] -or
                     $trialEvidence.kind -cne "windows_tun_performance_trial" -or
                     $trialEvidence.selection -isnot [string] -or

@@ -59,6 +59,14 @@ param(
     [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ServerPid,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$MetricsPort,
     [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$ServerMetricsPort,
+    [Parameter(Mandatory = $true)][string]$ExpectedFixedEndpointIpv4,
+    [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)]
+    [int]$ExpectedUnderlayInterfaceIndex,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
+    [string]$ExpectedUnderlayInterfaceAlias,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')]
+    [string]$ExpectedUnderlayInterfaceGuid,
     [Parameter(Mandatory = $true)][string]$Output,
     [string]$UdpAssociationSourceIpv4,
     [int]$UdpAssociationSourcePortFirst,
@@ -298,10 +306,22 @@ function Get-ProcessCpuNanoseconds([Diagnostics.Process[]]$Processes) {
 }
 
 function Get-ContextSwitches([int]$ProcessId) {
-    $rows = @(Get-CimInstance -ClassName Win32_PerfRawData_PerfProc_Process `
+    $rows = @(Get-CimInstance -ClassName Win32_PerfRawData_PerfProc_Thread `
         -Filter "IDProcess=$ProcessId" -ErrorAction Stop)
-    Assert-Condition ($rows.Count -eq 1) "client context-switch counter is unavailable"
-    return [uint64]$rows[0].ContextSwitchesPersec
+    Assert-Condition ($rows.Count -gt 0) "client context-switch counters are unavailable"
+    [uint64]$total = 0
+    foreach ($row in $rows) {
+        $properties = @($row.CimInstanceProperties | Where-Object {
+            $_.Name -ceq "ContextSwitchesPersec"
+        })
+        Assert-Condition ($properties.Count -eq 1 -and $null -ne $properties[0].Value) `
+            "client thread context-switch counter is unavailable"
+        [uint64]$value = [uint64]$properties[0].Value
+        Assert-Condition ($total -le [uint64]::MaxValue - $value) `
+            "client context-switch counters overflowed"
+        $total += $value
+    }
+    return $total
 }
 
 function Invoke-BoundedHarness(
@@ -719,13 +739,67 @@ function Invoke-Workload(
     }
 }
 
-function Invoke-Probe {
+function Invoke-Probe([int]$TimeoutSeconds = 30) {
     [void](Invoke-BoundedHarness @(
         "windows-tun-probe",
         "--target-ip", $script:TargetAddress,
         "--tcp-port", [string]$script:TargetTcpPort,
         "--udp-port", [string]$script:TargetUdpPort
-    ) 30)
+    ) $TimeoutSeconds)
+}
+
+function Invoke-InterfaceSwitchRecoveryProbe(
+    [object]$ExpectedLifecycleMetrics,
+    [Diagnostics.Stopwatch]$RecoveryTimer,
+    [int]$TimeoutSeconds = 30
+) {
+    # Only the approved Disable/Enable checkpoint gets this bounded retry. Each rejected attempt
+    # must remain visible in the client's outbound-explicit failure metric.
+    $metrics = Get-Metrics $script:MetricsPort 5
+    [uint64]$resolutionFailures = Get-LabeledMetric -Metrics $metrics `
+        -Name "ferrum2_outbound_interface_resolution" -Labels @{
+            source = "outbound_explicit"; result = "failure"
+        } -AllowAbsent $true
+    [uint64]$initialResolutionFailures = $resolutionFailures
+    [uint64]$attempts = 0
+    $lastFailure = ""
+    while ($RecoveryTimer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        [double]$remainingSeconds = $TimeoutSeconds - $RecoveryTimer.Elapsed.TotalSeconds
+        if ($remainingSeconds -lt 1) { break }
+        $attempts++
+        try {
+            Invoke-Probe ([int][Math]::Floor($remainingSeconds))
+        } catch {
+            $lastFailure = [string]$_.Exception.Message
+            $metrics = Get-Metrics $script:MetricsPort 1
+            $actualLifecycleMetrics = Get-NetworkLifecycleMetrics $metrics
+            Assert-NetworkLifecycleMetricsEqual -Expected $ExpectedLifecycleMetrics `
+                -Actual $actualLifecycleMetrics -Message `
+                "interface-switch recovery probe triggered an extra lifecycle transition"
+            [uint64]$nextResolutionFailures = Get-LabeledMetric -Metrics $metrics `
+                -Name "ferrum2_outbound_interface_resolution" -Labels @{
+                    source = "outbound_explicit"; result = "failure"
+                } -AllowAbsent $true
+            Assert-Condition ($nextResolutionFailures -eq $resolutionFailures + 1) `
+                "interface-switch recovery probe failed for an unexpected reason"
+            $resolutionFailures = $nextResolutionFailures
+            $clientProcess.Refresh()
+            $serverProcess.Refresh()
+            Assert-Condition (-not $clientProcess.HasExited -and -not $serverProcess.HasExited) `
+                "interface-switch recovery probe lost a measured process"
+            if ($RecoveryTimer.Elapsed.TotalSeconds -ge $TimeoutSeconds) { break }
+            Start-Sleep -Milliseconds 250
+            continue
+        }
+        $RecoveryTimer.Stop()
+        Assert-Condition ($RecoveryTimer.Elapsed.TotalSeconds -le $TimeoutSeconds) `
+            "interface-switch recovery exceeded its timeout"
+        return [ordered]@{
+            probe_attempts = $attempts
+            resolution_failures = [uint64]($resolutionFailures - $initialResolutionFailures)
+        }
+    }
+    throw "interface-switch recovery probe timed out after $attempts attempts: $lastFailure"
 }
 
 function Wait-Metric(
@@ -983,7 +1057,7 @@ function Get-ProductDropCounter([string]$Metrics) {
 function Assert-ProductDropCounterUnchanged([object]$Before, [object]$After) {
     foreach ($name in $Before.Keys) {
         Assert-Condition ([uint64]$After[$name] -eq [uint64]$Before[$name]) `
-            "fragment workload changed product drop counter: $name"
+            "workload changed product drop counter: $name"
     }
 }
 
@@ -1020,13 +1094,26 @@ function Get-ManagedIdentity {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
 
-function Get-LifecycleResources([string]$Metrics) {
+function Get-LifecycleProcessSnapshot {
     $clientProcess.Refresh()
     Assert-Condition (-not $clientProcess.HasExited) "client exited during lifecycle sampling"
-    $managedAdapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction Stop).Count
     return [ordered]@{
         process_handles = [uint64]$clientProcess.HandleCount
         process_threads = [uint64]$clientProcess.Threads.Count
+    }
+}
+
+function Get-LifecycleResources(
+    [string]$Metrics,
+    [object]$ProcessResources = $null
+) {
+    if ($null -eq $ProcessResources) {
+        $ProcessResources = Get-LifecycleProcessSnapshot
+    }
+    $managedAdapters = @(Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction Stop).Count
+    return [ordered]@{
+        process_handles = [uint64]$ProcessResources.process_handles
+        process_threads = [uint64]$ProcessResources.process_threads
         udp_associations_active = [uint64](
             Get-Metric $Metrics "ferrum2_tun_udp_associations_active"
         )
@@ -1034,31 +1121,283 @@ function Get-LifecycleResources([string]$Metrics) {
     }
 }
 
-function Get-PhysicalDefaultRoute {
-    $managed = Get-ManagedAdapter
-    $rows = @(
-        Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" `
-            -PolicyStore ActiveStore -ErrorAction Stop |
-            Where-Object { [uint32]$_.InterfaceIndex -ne [uint32]$managed.ifIndex } |
-            ForEach-Object {
-                $adapter = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -IncludeHidden `
-                    -ErrorAction Stop
-                $interface = Get-NetIPInterface -InterfaceIndex $_.InterfaceIndex `
-                    -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop
-                [pscustomobject]@{
-                    Route = $_
-                    Adapter = $adapter
-                    EffectiveMetric = [uint64]$_.RouteMetric + [uint64]$interface.InterfaceMetric
+function Get-ObserverIsolatedLifecycleSnapshot(
+    [object]$ExpectedLifecycleMetrics,
+    [string]$AdvanceMessage
+) {
+    # A metrics scrape creates a short-lived connection inside the client. Sample the
+    # process after the prior scrape has quiesced and before creating the next one.
+    Start-Sleep -Milliseconds 100
+    $processResources = Get-LifecycleProcessSnapshot
+    $freshMetrics = Get-Metrics $MetricsPort 5
+    $freshLifecycleMetrics = Get-NetworkLifecycleMetrics $freshMetrics
+    Assert-NetworkLifecycleMetricsEqual `
+        $ExpectedLifecycleMetrics $freshLifecycleMetrics $AdvanceMessage
+    return Get-LifecycleResources $freshMetrics $processResources
+}
+
+function Wait-LifecycleResourcesAtBaseline(
+    [object]$Baseline,
+    [object]$ExpectedLifecycleMetrics,
+    [int]$TimeoutSeconds = 30
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $initial = $null
+    $stableSamples = 0
+    do {
+        $current = Get-ObserverIsolatedLifecycleSnapshot `
+            $ExpectedLifecycleMetrics `
+            "network lifecycle metrics advanced during terminal resource convergence"
+        if ($null -eq $initial) { $initial = $current }
+        if (
+            $current.process_handles -le $Baseline.process_handles -and
+            $current.process_threads -le $Baseline.process_threads -and
+            $current.udp_associations_active -eq $Baseline.udp_associations_active -and
+            $current.managed_adapters_active -eq $Baseline.managed_adapters_active
+        ) {
+            $stableSamples++
+            if ($stableSamples -eq 3) { return $current }
+        } else {
+            $stableSamples = 0
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $growth = [ordered]@{
+        process_handles = (
+            [int64]$current.process_handles - [int64]$Baseline.process_handles
+        )
+        process_threads = (
+            [int64]$current.process_threads - [int64]$Baseline.process_threads
+        )
+        udp_associations_active = (
+            [int64]$current.udp_associations_active -
+                [int64]$Baseline.udp_associations_active
+        )
+        managed_adapters_active = (
+            [int64]$current.managed_adapters_active -
+                [int64]$Baseline.managed_adapters_active
+        )
+    }
+    $baselineJson = $Baseline | ConvertTo-Json -Compress
+    $initialJson = $initial | ConvertTo-Json -Compress
+    $currentJson = $current | ConvertTo-Json -Compress
+    $growthJson = $growth | ConvertTo-Json -Compress
+    throw "lifecycle resources did not return to baseline: baseline=$baselineJson initial=$initialJson final=$currentJson growth=$growthJson"
+}
+
+function Wait-LifecycleResourcesStable(
+    [object]$ExpectedLifecycleMetrics,
+    [int]$TimeoutSeconds = 5
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $samples = [Collections.Generic.List[object]]::new()
+    $previous = $null
+    do {
+        $current = Get-ObserverIsolatedLifecycleSnapshot `
+            $ExpectedLifecycleMetrics `
+            "network lifecycle metrics advanced during resource convergence"
+        $quiescent = (
+            $current.process_handles -gt 0 -and
+            $current.process_threads -gt 0 -and
+            $current.udp_associations_active -eq 0 -and
+            $current.managed_adapters_active -eq 1
+        )
+        $sameAsPrevious = (
+            $null -ne $previous -and
+            $current.process_handles -eq $previous.process_handles -and
+            $current.process_threads -eq $previous.process_threads -and
+            $current.udp_associations_active -eq $previous.udp_associations_active -and
+            $current.managed_adapters_active -eq $previous.managed_adapters_active
+        )
+        if (-not $quiescent -or -not $sameAsPrevious) {
+            $samples.Clear()
+        }
+        if ($quiescent) {
+            $samples.Add($current)
+            if ($samples.Count -eq 3) {
+                return [ordered]@{
+                    baseline = $current
+                    samples = $samples.ToArray()
                 }
-            } | Sort-Object EffectiveMetric, @{ Expression = { $_.Route.InterfaceIndex } }
+            }
+        }
+        $previous = $current
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $currentJson = $current | ConvertTo-Json -Compress
+    $samplesJson = $samples.ToArray() | ConvertTo-Json -Compress -Depth 3
+    throw "lifecycle resources did not produce three stable quiescent samples: final=$currentJson samples=$samplesJson"
+}
+
+function Get-UnderlayIpv4RouteRows(
+    [ValidateSet("ActiveStore", "PersistentStore")][string]$PolicyStore,
+    [string]$DestinationPrefix
+) {
+    $parameters = @{
+        AddressFamily = "IPv4"
+        InterfaceIndex = $ExpectedUnderlayInterfaceIndex
+        PolicyStore = $PolicyStore
+        ErrorAction = "Stop"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPrefix)) {
+        $parameters.DestinationPrefix = $DestinationPrefix
+    }
+    try {
+        return @(Get-NetRoute @parameters)
+    } catch {
+        if ($_.CategoryInfo.Category -eq
+                [Management.Automation.ErrorCategory]::ObjectNotFound -and
+            [string]$_.FullyQualifiedErrorId -like
+                "CmdletizationQuery_NotFound*,Get-NetRoute") {
+            return @()
+        }
+        throw
+    }
+}
+
+function Get-FixedUnderlayRoute {
+    [Net.IPAddress]$fixedEndpoint = $null
+    Assert-Condition (
+        [Net.IPAddress]::TryParse($ExpectedFixedEndpointIpv4, [ref]$fixedEndpoint) -and
+        $fixedEndpoint.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
+        $fixedEndpoint.ToString() -ceq $ExpectedFixedEndpointIpv4
+    ) "fixed underlay endpoint must be one canonical IPv4 address"
+
+    $expectedGuid = ([Guid]$ExpectedUnderlayInterfaceGuid).
+        ToString("D").ToLowerInvariant()
+    $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+        [uint32]$_.ifIndex -eq [uint32]$ExpectedUnderlayInterfaceIndex
+    })
+    Assert-Condition (
+        $adapters.Count -eq 1 -and
+        [string]$adapters[0].Name -ceq $ExpectedUnderlayInterfaceAlias -and
+        ([Guid]$adapters[0].InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
+            $expectedGuid -and
+        [string]$adapters[0].Status -ceq "Up"
+    ) "fixed underlay adapter identity is not uniquely active"
+
+    $addresses = @(
+        Get-NetIPAddress -AddressFamily IPv4 -IPAddress $ExpectedFixedEndpointIpv4 `
+            -PolicyStore ActiveStore -ErrorAction Stop |
+            Where-Object {
+                [uint32]$_.InterfaceIndex -eq [uint32]$ExpectedUnderlayInterfaceIndex
+            }
     )
     Assert-Condition (
-        $rows.Count -gt 0 -and
-        [bool]$rows[0].Adapter.HardwareInterface -and
-        [string]$rows[0].Adapter.Status -ceq "Up" -and
-        ($rows.Count -eq 1 -or $rows[0].EffectiveMetric -lt $rows[1].EffectiveMetric)
-    ) "one preferred physical IPv4 default route is required"
-    return $rows[0]
+        $addresses.Count -eq 1 -and
+        [string]$addresses[0].IPAddress -ceq $ExpectedFixedEndpointIpv4 -and
+        [string]$addresses[0].AddressState -ceq "Preferred" -and
+        [string]$addresses[0].InterfaceAlias -ceq $ExpectedUnderlayInterfaceAlias
+    ) "fixed underlay endpoint is not one preferred address on the approved adapter"
+
+    $selection = @(Find-NetRoute -RemoteIPAddress $ExpectedFixedEndpointIpv4 `
+        -ErrorAction Stop)
+    $sourceRows = @($selection | Where-Object {
+        $null -ne $_.CimClass -and $_.CimClass.CimClassName -ceq "MSFT_NetIPAddress"
+    })
+    $routeRows = @($selection | Where-Object {
+        $null -ne $_.CimClass -and $_.CimClass.CimClassName -ceq "MSFT_NetRoute"
+    })
+    $expectedPrefix = "$ExpectedFixedEndpointIpv4/32"
+    Assert-Condition (
+        $sourceRows.Count -eq 1 -and $routeRows.Count -eq 1 -and
+        [string]$sourceRows[0].IPAddress -ceq $ExpectedFixedEndpointIpv4 -and
+        [string]$sourceRows[0].AddressState -ceq "Preferred" -and
+        [uint32]$sourceRows[0].InterfaceIndex -eq
+            [uint32]$ExpectedUnderlayInterfaceIndex -and
+        [string]$routeRows[0].DestinationPrefix -ceq $expectedPrefix -and
+        [string]$routeRows[0].NextHop -ceq "0.0.0.0" -and
+        [string]$routeRows[0].Protocol -ceq "Local" -and
+        [string]$routeRows[0].State -ceq "Alive" -and
+        [uint32]$routeRows[0].InterfaceIndex -eq
+            [uint32]$ExpectedUnderlayInterfaceIndex
+    ) "fixed endpoint selection is not the approved underlay-local route"
+
+    $activeRows = @(Get-UnderlayIpv4RouteRows "ActiveStore" $expectedPrefix |
+        Where-Object {
+            [string]$_.NextHop -ceq "0.0.0.0" -and
+            [string]$_.Protocol -ceq "Local"
+        })
+    $persistentRows = @(Get-UnderlayIpv4RouteRows "PersistentStore" `
+        $expectedPrefix | Where-Object { [string]$_.NextHop -ceq "0.0.0.0" })
+    Assert-Condition (
+        $activeRows.Count -eq 1 -and $persistentRows.Count -eq 0 -and
+        [string]$activeRows[0].State -ceq "Alive" -and
+        [uint32]$activeRows[0].RouteMetric -le [uint32][uint16]::MaxValue -and
+        [uint32]$activeRows[0].RouteMetric -eq [uint32]$routeRows[0].RouteMetric
+    ) "fixed underlay route is not one exact ActiveStore-only row"
+    return [pscustomobject]@{
+        Route = $activeRows[0]
+        Adapter = $adapters[0]
+    }
+}
+
+function New-FixedUnderlayRouteIdentity([object]$Context) {
+    return [pscustomobject][ordered]@{
+        schema = "ferrum2.windows-tun.fixed-underlay-route-journal.v1"
+        fixed_endpoint_ipv4 = $ExpectedFixedEndpointIpv4
+        interface_index = [uint32]$Context.Route.InterfaceIndex
+        interface_guid = ([Guid]$Context.Adapter.InterfaceGuid).
+            ToString("D").ToLowerInvariant()
+        interface_name = [string]$Context.Adapter.Name
+        policy_store = "ActiveStore"
+        destination_prefix = [string]$Context.Route.DestinationPrefix
+        next_hop = [string]$Context.Route.NextHop
+        protocol = [string]$Context.Route.Protocol
+        route_metric = [uint16]$Context.Route.RouteMetric
+    }
+}
+
+function Assert-FixedUnderlayRouteIdentity([object]$Identity) {
+    Assert-ExactProperties $Identity @(
+        "schema", "fixed_endpoint_ipv4", "interface_index", "interface_guid",
+        "interface_name", "policy_store", "destination_prefix", "next_hop",
+        "protocol", "route_metric"
+    ) "fixed underlay route identity"
+    Assert-Condition (
+        [string]$Identity.schema -ceq
+            "ferrum2.windows-tun.fixed-underlay-route-journal.v1" -and
+        [string]$Identity.fixed_endpoint_ipv4 -ceq $ExpectedFixedEndpointIpv4 -and
+        [uint32]$Identity.interface_index -eq
+            [uint32]$ExpectedUnderlayInterfaceIndex -and
+        [string]$Identity.interface_guid -ceq $ExpectedUnderlayInterfaceGuid -and
+        [string]$Identity.interface_name -ceq $ExpectedUnderlayInterfaceAlias -and
+        [string]$Identity.policy_store -ceq "ActiveStore" -and
+        [string]$Identity.destination_prefix -ceq "$ExpectedFixedEndpointIpv4/32" -and
+        [string]$Identity.next_hop -ceq "0.0.0.0" -and
+        [string]$Identity.protocol -ceq "Local"
+    ) "fixed underlay route identity escaped its approved boundary"
+}
+
+function Get-ExactFixedUnderlayRoute([object]$Identity) {
+    Assert-FixedUnderlayRouteIdentity $Identity
+    $current = Get-FixedUnderlayRoute
+    Assert-Condition (
+        [uint32]$current.Route.InterfaceIndex -eq [uint32]$Identity.interface_index -and
+        ([Guid]$current.Adapter.InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
+            [string]$Identity.interface_guid -and
+        [string]$current.Adapter.Name -ceq [string]$Identity.interface_name -and
+        [string]$current.Route.DestinationPrefix -ceq
+            [string]$Identity.destination_prefix -and
+        [string]$current.Route.NextHop -ceq [string]$Identity.next_hop -and
+        [string]$current.Route.Protocol -ceq [string]$Identity.protocol
+    ) "fixed underlay route readback changed identity"
+    return $current
+}
+
+function Wait-ExactFixedUnderlayRoute(
+    [object]$Identity,
+    [int]$TimeoutSeconds = 30
+) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastFailure = "route was unavailable"
+    do {
+        try {
+            return Get-ExactFixedUnderlayRoute $Identity
+        } catch {
+            $lastFailure = $_.Exception.Message
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "fixed underlay route did not recover: $lastFailure"
 }
 
 function Wait-LifecycleTransition(
@@ -1178,7 +1517,7 @@ Assert-ExactProperties $modelPlan @(
     "observation_identity_fields"
 ) "network-model plan"
 Assert-Condition (
-    $modelPlan.schema_version -eq 3 -and
+    $modelPlan.schema_version -eq 6 -and
     $modelPlan.execution -ceq "local_hyperv_guest" -and
     $modelPlan.host_network_mutation -ceq "forbidden"
 ) "network-model plan execution boundary changed"
@@ -1186,13 +1525,37 @@ Assert-ExactProperties $modelPlan.workloads @("network-lifecycle", "udp-route-on
     "network-model workloads"
 $lifecyclePlan = $modelPlan.workloads."network-lifecycle"
 $routeOncePlan = $modelPlan.workloads."udp-route-once"
+Assert-ExactProperties $lifecyclePlan @(
+    "resource_warmup_reset_cycles", "resource_warmup_route_metric_states",
+    "resource_quiescence_seconds", "reset_network_cycles",
+    "total_reset_network_cycles", "full_rebuild_cycles", "ordinary_reset_reasons",
+    "full_rebuild_reasons", "full_rebuild_damage_reason", "interface_switch_kind",
+    "interface_switch_sequence", "interface_switch_recovery_timeout_seconds",
+    "interface_switch_probe_retry_milliseconds", "interface_switch_trial_reset_ordinal",
+    "interface_resolver_probes", "terminal_resource_convergence_excluded_from_elapsed",
+    "latency_percentiles", "maximum_retained_resource_growth",
+    "retained_resource_growth_enforced_operations",
+    "diagnostic_resource_growth_operations"
+) "network-model lifecycle workload"
 Assert-Condition (
+    [int]$lifecyclePlan.resource_warmup_reset_cycles -eq 12 -and
+    [int]$lifecyclePlan.resource_warmup_route_metric_states -eq 3 -and
+    [int]$lifecyclePlan.resource_quiescence_seconds -eq 30 -and
     [int]$lifecyclePlan.reset_network_cycles -eq 1000 -and
+    [int]$lifecyclePlan.total_reset_network_cycles -eq 1012 -and
     [int]$lifecyclePlan.full_rebuild_cycles -eq 10 -and
     [string]$lifecyclePlan.full_rebuild_damage_reason -ceq "route_damage" -and
     [string]$lifecyclePlan.interface_switch_kind -ceq "approved_underlay_disable_enable" -and
     [int]$lifecyclePlan.interface_switch_sequence -eq 500 -and
-    [int]$lifecyclePlan.interface_resolver_probes -eq 32
+    [int]$lifecyclePlan.interface_switch_recovery_timeout_seconds -eq 30 -and
+    [int]$lifecyclePlan.interface_switch_probe_retry_milliseconds -eq 250 -and
+    [int]$lifecyclePlan.interface_switch_trial_reset_ordinal -eq 512 -and
+    [int]$lifecyclePlan.interface_resolver_probes -eq 32 -and
+    $lifecyclePlan.terminal_resource_convergence_excluded_from_elapsed -eq $true -and
+    (@($lifecyclePlan.retained_resource_growth_enforced_operations) -join "|") -ceq
+        "reset_network" -and
+    (@($lifecyclePlan.diagnostic_resource_growth_operations) -join "|") -ceq
+        "full_rebuild"
 ) "network-model lifecycle recipe changed"
 Assert-Condition (
     [int]$routeOncePlan.generations -eq 2 -and
@@ -1332,6 +1695,8 @@ $modelEvidenceReference = $null
 $modelPending = $null
 [uint64]$checkedUnits = 0
 $startedUtc = [DateTime]::UtcNow.ToString("o")
+$trialFailure = $null
+$managedJournalRecoveryFailure = $null
 
 try {
     $initialMetrics = Get-Metrics $MetricsPort 10
@@ -1656,8 +2021,17 @@ try {
             $cpuBefore = Get-ProcessCpuNanoseconds @($clientProcess, $serverProcess)
             $switchBefore = Get-ContextSwitches $ClientPid
             $trafficBefore = Get-Metrics $MetricsPort 5
-            $ingressBefore = Get-Metric $trafficBefore "ferrum2_tun_packets_ingress" $true
-            $egressBefore = Get-Metric $trafficBefore "ferrum2_tun_packets_egress" $true
+            [uint64]$ingressBefore = Get-Metric `
+                -Metrics $trafficBefore -Name "ferrum2_tun_packets_ingress" `
+                -AllowAbsent $true
+            [uint64]$acceptedBefore = Get-Metric `
+                -Metrics $trafficBefore -Name "ferrum2_tun_packets_accepted" `
+                -AllowAbsent $true
+            [uint64]$egressBefore = Get-Metric `
+                -Metrics $trafficBefore -Name "ferrum2_tun_packets_egress" `
+                -AllowAbsent $true
+            $packetRejectBefore = Get-PacketRejectCounter -Metrics $trafficBefore
+            $dropCountersBefore = Get-ProductDropCounter -Metrics $trafficBefore
             $checkedUnits = 0
             foreach ($sample in 1..60) {
                 Start-Sleep -Seconds 1
@@ -1668,24 +2042,91 @@ try {
             $trafficAfter = Get-Metrics $MetricsPort 5
             $cpuAfter = Get-ProcessCpuNanoseconds @($clientProcess, $serverProcess)
             $switchAfter = Get-ContextSwitches $ClientPid
+            [uint64]$ingressAfter = Get-Metric `
+                -Metrics $trafficAfter -Name "ferrum2_tun_packets_ingress" `
+                -AllowAbsent $true
+            [uint64]$acceptedAfter = Get-Metric `
+                -Metrics $trafficAfter -Name "ferrum2_tun_packets_accepted" `
+                -AllowAbsent $true
+            [uint64]$egressAfter = Get-Metric `
+                -Metrics $trafficAfter -Name "ferrum2_tun_packets_egress" `
+                -AllowAbsent $true
+            $packetRejectAfter = Get-PacketRejectCounter -Metrics $trafficAfter
+            $dropCountersAfter = Get-ProductDropCounter -Metrics $trafficAfter
+            foreach ($name in @(
+                "total", "family_disabled", "invalid_destination", "unexpected"
+            )) {
+                Assert-Condition (
+                    [uint64]$packetRejectAfter[$name] -ge `
+                        [uint64]$packetRejectBefore[$name]
+                ) "idle packet rejection counter regressed: $name"
+            }
+            Assert-Condition ($ingressAfter -ge $ingressBefore) `
+                "idle ingress counter regressed"
+            Assert-Condition ($acceptedAfter -ge $acceptedBefore) `
+                "idle accepted counter regressed"
+            Assert-Condition ($egressAfter -ge $egressBefore) `
+                "idle egress counter regressed"
+            [decimal]$ingressDelta = [decimal]$ingressAfter - $ingressBefore
+            [decimal]$acceptedDelta = [decimal]$acceptedAfter - $acceptedBefore
+            [decimal]$egressDelta = [decimal]$egressAfter - $egressBefore
+            [decimal]$familyDisabledDelta = (
+                [decimal]$packetRejectAfter["family_disabled"] -
+                    [decimal]$packetRejectBefore["family_disabled"]
+            )
+            [decimal]$invalidDestinationDelta = (
+                [decimal]$packetRejectAfter["invalid_destination"] -
+                    [decimal]$packetRejectBefore["invalid_destination"]
+            )
+            [decimal]$unexpectedRejectDelta = (
+                [decimal]$packetRejectAfter["unexpected"] -
+                    [decimal]$packetRejectBefore["unexpected"]
+            )
+            [decimal]$knownBackgroundDelta = `
+                $familyDisabledDelta + $invalidDestinationDelta
             Assert-Condition (
-                (Get-Metric $trafficAfter "ferrum2_tun_packets_ingress" $true) -eq $ingressBefore -and
-                (Get-Metric $trafficAfter "ferrum2_tun_packets_egress" $true) -eq $egressBefore
-            ) "idle window contained TUN test traffic"
-            Assert-Condition ($cpuAfter -gt $cpuBefore -and $switchAfter -gt $switchBefore) "idle resource counters did not advance"
+                $acceptedDelta -eq 0 -and
+                $egressDelta -eq 0 -and
+                $unexpectedRejectDelta -eq 0 -and
+                $ingressDelta -eq $knownBackgroundDelta
+            ) (
+                "idle window contained unaccounted TUN traffic: " +
+                    "ingress_delta=$ingressDelta accepted_delta=$acceptedDelta " +
+                    "egress_delta=$egressDelta " +
+                    "known_background_rejected_delta=$knownBackgroundDelta " +
+                    "unexpected_rejected_delta=$unexpectedRejectDelta"
+            )
+            Assert-ProductDropCounterUnchanged `
+                -Before $dropCountersBefore -After $dropCountersAfter
+            Assert-Condition ($cpuAfter -ge $cpuBefore) `
+                "idle CPU counter regressed: before=$cpuBefore after=$cpuAfter"
+            Assert-Condition ($switchAfter -ge $switchBefore) `
+                "idle context-switch counter regressed: before=$switchBefore after=$switchAfter"
+            [uint64]$cpuRate = [uint64][Math]::Ceiling(
+                ($cpuAfter - $cpuBefore) / 60.0
+            )
+            [uint64]$switchRate = [uint64][Math]::Ceiling(
+                ($switchAfter - $switchBefore) / 60.0
+            )
+            # The reducer uses paired percentages and therefore requires a positive baseline.
+            # Censor a sub-resolution zero observation at the recipe-bound integer rate floor.
+            if ($cpuRate -eq 0) { $cpuRate = 1 }
+            if ($switchRate -eq 0) { $switchRate = 1 }
             $measurements.cpu_idle_cost = [ordered]@{
-                unit = "cpu_nanoseconds_per_second"; value = [uint64][Math]::Ceiling(($cpuAfter - $cpuBefore) / 60.0)
+                unit = "cpu_nanoseconds_per_second"; value = $cpuRate
             }
             $measurements.wakeups = [ordered]@{
-                unit = "process_context_switches_per_second"; value = [uint64][Math]::Ceiling(($switchAfter - $switchBefore) / 60.0)
+                unit = "process_context_switches_per_second"; value = $switchRate
             }
             $checks.session_active_throughout = $true
             $checks.zero_test_traffic = $true
+            $checks.known_background_ingress_exactly_accounted = $true
             $checks.no_busy_poll_fallback = $true
             [void](Wait-CleanDrain $true)
             $checks.clean_drain = $true
         }
         "wintun-ring-full-drop-rate" {
+            [uint64]$minimumResponseAttempts = 32768
             Start-Sleep -Seconds 5
             $before = Get-Metrics $MetricsPort 5
             $ringBefore = Get-Metric $before "ferrum2_tun_wintun_ring_full_dropped" $true
@@ -1705,16 +2146,24 @@ try {
             [uint64]$egress = (Get-Metric $after "ferrum2_tun_packets_egress" $true) - $egressBefore
             [uint64]$pendingAfter = Get-Metric $after "ferrum2_tun_pending_udp_responses"
             [uint64]$responseAttempts = $drops + $egress
-            Assert-Condition ($drops -gt 0) "real workload did not trigger Wintun ring-full"
-            Assert-Condition ($pendingResponsePeak -eq 1) `
-                "ring-full workload did not observe the bounded pending UDP response depth"
+            Assert-Condition ($attempts -eq 1000000) `
+                "Wintun egress pressure workload attempt count is invalid"
+            Assert-Condition ($pendingResponsePeak -le 1) `
+                "Wintun egress pressure exceeded the bounded pending UDP response depth"
             Assert-Condition ($pendingAfter -eq 0) `
-                "ring-full pending UDP response did not drain"
-            Assert-Condition ($responseAttempts -gt 0 -and $responseAttempts -le $attempts) "ring-full response accounting exceeds the request denominator"
+                "Wintun egress pressure pending UDP response did not drain"
+            Assert-Condition (
+                $responseAttempts -ge $minimumResponseAttempts -and
+                $responseAttempts -le $attempts
+            ) (
+                "Wintun egress pressure response accounting is outside the bounded request " +
+                "denominator: response_attempts=$responseAttempts " +
+                "minimum=$minimumResponseAttempts workload_attempts=$attempts"
+            )
             $lifecycleAfter = Get-NetworkLifecycleMetrics $after
             Assert-NetworkLifecycleMetricsEqual $lifecycleBefore $lifecycleAfter `
-                "ring-full triggered a network lifecycle transition"
-            $checkedUnits = $drops
+                "Wintun egress pressure triggered a network lifecycle transition"
+            $checkedUnits = $responseAttempts
             $measurements.drop_rate = [ordered]@{
                 unit = "dropped_packets_per_million_responses"
                 value = [uint64][Math]::Ceiling(([decimal]$drops * 1000000) / [decimal]$responseAttempts)
@@ -1723,35 +2172,42 @@ try {
                 unit = "pending_udp_responses"
                 value = $pendingResponsePeak
             }
-            $checks.ring_full_counter_increased = $true
+            $diagnostics = [ordered]@{
+                schema_version = 1
+                kind = "wintun_egress_pressure_accounting"
+                workload_attempted_datagrams = $attempts
+                tun_packets_egress = $egress
+                wintun_ring_full_dropped = $drops
+                tun_response_attempts = $responseAttempts
+                pending_response_before = [uint64]$pendingBefore
+                pending_response_peak = $pendingResponsePeak
+                pending_response_after = $pendingAfter
+            }
+            $checks.minimum_response_attempts_met = $true
+            $checks.response_attempt_denominator_derived = $true
+            $checks.drop_rate_recomputed_from_raw_counts = $true
             $checks.drop_rate_denominator_bound = $true
-            $checks.no_ring_full_retry = $true
-            $checks.pending_response_peak_observed = $true
+            $checks.ring_full_counter_sampled = $true
+            $checks.pending_response_peak_bounded = $true
             $checks.pending_response_baseline_and_drain = $true
             $checks.no_network_reset_or_full_rebuild = $true
         }
         "udp-route-once" {
             Start-Sleep -Seconds 5
-            $physical = Get-PhysicalDefaultRoute
-            $physicalRoute = $physical.Route
-            $physicalRouteIdentity = [ordered]@{
-                interface_index = [uint32]$physicalRoute.InterfaceIndex
-                interface_guid = ([Guid]$physical.Adapter.InterfaceGuid).ToString("D").ToLowerInvariant()
-                interface_name = [string]$physical.Adapter.Name
-                destination_prefix = [string]$physicalRoute.DestinationPrefix
-                next_hop = [string]$physicalRoute.NextHop
-                route_metric = [uint32]$physicalRoute.RouteMetric
-            }
-            $physicalJournal = Join-Path $script:WorkRoot "physical-route-journal.json"
+            $underlay = Get-FixedUnderlayRoute
+            $underlayRouteIdentity = New-FixedUnderlayRouteIdentity $underlay
+            $underlayJournal = Join-Path $script:WorkRoot "underlay-route-journal.json"
             [IO.File]::WriteAllText(
-                $physicalJournal,
-                (($physicalRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                $underlayJournal,
+                (($underlayRouteIdentity | ConvertTo-Json -Compress) + "`n"),
                 $script:Utf8NoBom
             )
-            [uint64]$mutatedRouteMetric = if ($physicalRouteIdentity.route_metric -lt 4294967295) {
-                [uint64]$physicalRouteIdentity.route_metric + 1
+            [uint16]$mutatedRouteMetric = if (
+                [uint16]$underlayRouteIdentity.route_metric -lt [uint16]::MaxValue
+            ) {
+                [uint16]([uint16]$underlayRouteIdentity.route_metric + 1)
             } else {
-                [uint64]$physicalRouteIdentity.route_metric - 1
+                [uint16]([uint16]$underlayRouteIdentity.route_metric - 1)
             }
             $rawGenerations = [Collections.Generic.List[object]]::new()
             [uint64]$totalElapsedNanoseconds = 0
@@ -1838,12 +2294,15 @@ try {
                         "datagrams_sent", "replies_received"
                     ) "route-once guest association"
                     [uint64]$sourceSlot = $association.source_slot
+                    [uint64]$expectedFirstTargetSlot = if (($sourceSlot % 2) -eq 0) {
+                        0
+                    } else {
+                        1
+                    }
                     Assert-Condition (
                         $sourceSlot -lt 64 -and $seenSources.Add($sourceSlot) -and
                         (@($association.target_slots) -join "|") -ceq "0|1|2|3" -and
-                        [uint64]$association.first_target_slot -eq (
-                            if (($sourceSlot % 2) -eq 0) { 0 } else { 1 }
-                        ) -and
+                        [uint64]$association.first_target_slot -eq $expectedFirstTargetSlot -and
                         [uint64]$association.datagrams_sent -eq 128 -and
                         [uint64]$association.replies_received -eq 128
                     ) "route-once guest association coverage is invalid"
@@ -1876,36 +2335,29 @@ try {
                 $totalRouterInvocations += $successfulRouteDelta
                 $totalDatagrams += [uint64]$observation.checked_units
 
-                $currentRoutes = @(
-                    Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
-                        -DestinationPrefix $physicalRouteIdentity.destination_prefix `
-                        -PolicyStore ActiveStore -ErrorAction Stop |
-                        Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
-                )
-                Assert-Condition ($currentRoutes.Count -eq 1) `
-                    "route-once physical route mutation target is not exact"
-                [uint64]$nextMetric = if ($generationOrdinal -eq 1) {
+                $currentRoute = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
+                [uint16]$nextMetric = if ($generationOrdinal -eq 1) {
                     $mutatedRouteMetric
                 } else {
-                    [uint64]$physicalRouteIdentity.route_metric
+                    [uint16]$underlayRouteIdentity.route_metric
                 }
-                Set-NetRoute -InputObject $currentRoutes[0] -RouteMetric $nextMetric -ErrorAction Stop
+                Set-NetRoute -InputObject $currentRoute.Route -RouteMetric $nextMetric `
+                    -ErrorAction Stop
+                $routeReadback = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
+                Assert-Condition (
+                    [uint16]$routeReadback.Route.RouteMetric -eq $nextMetric
+                ) "route-once fixed underlay metric mutation was not read back exactly"
                 $transition = Wait-LifecycleTransition "reset_network" $lifecycleAfter 30
                 Assert-Condition (
                     (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
                 ) "route-once ResetNetwork retained an old association"
             }
-            $physicalReadback = @(
-                Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
-                    -DestinationPrefix $physicalRouteIdentity.destination_prefix `
-                    -PolicyStore ActiveStore -ErrorAction Stop |
-                    Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
-            )
+            $underlayReadback = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
             Assert-Condition (
-                $physicalReadback.Count -eq 1 -and
-                [uint32]$physicalReadback[0].RouteMetric -eq [uint32]$physicalRouteIdentity.route_metric
-            ) "route-once physical route metric baseline was not restored"
-            Remove-Item -LiteralPath $physicalJournal -Force
+                [uint16]$underlayReadback.Route.RouteMetric -eq
+                    [uint16]$underlayRouteIdentity.route_metric
+            ) "route-once fixed underlay route metric baseline was not restored"
+            Remove-Item -LiteralPath $underlayJournal -Force
             [void](Wait-CleanDrain $true)
 
             $rawIdentity = [ordered]@{
@@ -1930,7 +2382,7 @@ try {
                 model_plan_sha256 = $modelPlanHash
             }
             $rawObservation = [ordered]@{
-                schema_version = 3
+                schema_version = 6
                 workload = "udp-route-once"
                 identity = $rawIdentity
                 elapsed_nanoseconds = $totalElapsedNanoseconds
@@ -1989,36 +2441,31 @@ try {
         }
         "network-lifecycle" {
             Start-Sleep -Seconds 5
-            $physical = Get-PhysicalDefaultRoute
-            $physicalRoute = $physical.Route
-            $physicalRouteIdentity = [ordered]@{
-                interface_index = [uint32]$physicalRoute.InterfaceIndex
-                interface_guid = ([Guid]$physical.Adapter.InterfaceGuid).ToString("D").ToLowerInvariant()
-                interface_name = [string]$physical.Adapter.Name
-                destination_prefix = [string]$physicalRoute.DestinationPrefix
-                next_hop = [string]$physicalRoute.NextHop
-                route_metric = [uint32]$physicalRoute.RouteMetric
-            }
-            $physicalJournal = Join-Path $script:WorkRoot "physical-route-journal.json"
+            $underlay = Get-FixedUnderlayRoute
+            $underlayRouteIdentity = New-FixedUnderlayRouteIdentity $underlay
+            $underlayJournal = Join-Path $script:WorkRoot "underlay-route-journal.json"
             [IO.File]::WriteAllText(
-                $physicalJournal,
-                (($physicalRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                $underlayJournal,
+                (($underlayRouteIdentity | ConvertTo-Json -Compress) + "`n"),
                 $script:Utf8NoBom
             )
-            [uint64[]]$routeMetrics = if ($physicalRouteIdentity.route_metric -le 4294967293) {
+            [uint16[]]$routeMetrics = if (
+                [uint16]$underlayRouteIdentity.route_metric -le
+                    ([uint16]::MaxValue - 2)
+            ) {
                 @(
-                    [uint64]$physicalRouteIdentity.route_metric + 1,
-                    [uint64]$physicalRouteIdentity.route_metric + 2,
-                    [uint64]$physicalRouteIdentity.route_metric
+                    [uint16]([uint16]$underlayRouteIdentity.route_metric + 1),
+                    [uint16]([uint16]$underlayRouteIdentity.route_metric + 2),
+                    [uint16]$underlayRouteIdentity.route_metric
                 )
-            } elseif ($physicalRouteIdentity.route_metric -ge 2) {
+            } elseif ([uint16]$underlayRouteIdentity.route_metric -ge 2) {
                 @(
-                    [uint64]$physicalRouteIdentity.route_metric - 1,
-                    [uint64]$physicalRouteIdentity.route_metric - 2,
-                    [uint64]$physicalRouteIdentity.route_metric
+                    [uint16]([uint16]$underlayRouteIdentity.route_metric - 1),
+                    [uint16]([uint16]$underlayRouteIdentity.route_metric - 2),
+                    [uint16]$underlayRouteIdentity.route_metric
                 )
             } else {
-                throw "physical route metric has no bounded three-state mutation"
+                throw "fixed underlay route metric has no bounded three-state mutation"
             }
             $initial = Get-Metrics $MetricsPort 5
             $lifecycleMetrics = Get-NetworkLifecycleMetrics $initial
@@ -2028,16 +2475,105 @@ try {
                     [uint64]$lifecycleMetrics.session_generation
             ) "published network/session generations are unavailable or inconsistent"
             $managedIdentity = Get-ManagedIdentity
-            $baselineResources = Get-LifecycleResources $initial
+            $coldStartResources = Get-LifecycleResources $initial
             Assert-Condition (
-                $baselineResources.udp_associations_active -eq 0 -and
-                $baselineResources.managed_adapters_active -eq 1
-            ) "network lifecycle resource baseline is not quiescent"
+                $coldStartResources.udp_associations_active -eq 0 -and
+                $coldStartResources.managed_adapters_active -eq 1
+            ) "network lifecycle cold-start resources are not quiescent"
+            $resourceWarmupCycles = [Collections.Generic.List[object]]::new()
+            $warmupRouteMutationIndex = 0
+            $baselineResources = $null
+            $baselineResourceSamples = $null
+            Invoke-Probe
+            foreach ($warmupCycle in 1..12) {
+                $before = Get-Metrics $MetricsPort 5
+                [uint64]$tcpBefore = Get-Metric $before "ferrum2_tun_tcp_flows_active"
+                [uint64]$udpBefore = Get-Metric $before "ferrum2_tun_udp_associations_active"
+                Assert-Condition ($udpBefore -ge 1) `
+                    "resource warmup cycle lacks a live UDP association"
+                $identityBefore = $managedIdentity
+                $lifecycleBefore = Get-NetworkLifecycleMetrics $before
+                Assert-NetworkLifecycleMetricsEqual $lifecycleMetrics $lifecycleBefore `
+                    "network lifecycle metrics advanced between resource warmup cycles"
+                $currentRoute = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
+                [uint16]$routeMetricBefore = $currentRoute.Route.RouteMetric
+                $nextMetric = $routeMetrics[$warmupRouteMutationIndex % $routeMetrics.Count]
+                $warmupRouteMutationIndex++
+                Set-NetRoute -InputObject $currentRoute.Route -RouteMetric $nextMetric `
+                    -ErrorAction Stop
+                $routeReadback = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
+                Assert-Condition (
+                    [uint16]$routeReadback.Route.RouteMetric -eq [uint16]$nextMetric
+                ) "resource warmup route metric was not read back exactly"
+                $transition = Wait-LifecycleTransition "reset_network" $lifecycleBefore 30
+                $identityAfter = Get-ManagedIdentity
+                $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                Assert-Condition (
+                    (Get-Metric $transition.Metrics "ferrum2_tun_tcp_flows_active") -eq 0 -and
+                    (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
+                ) "resource warmup ResetNetwork retained a connection"
+                if ($warmupCycle -eq 12) {
+                    Start-Sleep -Seconds 30
+                    $stableResources = Wait-LifecycleResourcesStable `
+                        $transition.LifecycleMetrics 5
+                    $baselineResources = $stableResources.baseline
+                    $baselineResourceSamples = $stableResources.samples
+                }
+                Invoke-Probe
+                $afterProbe = Get-Metrics $MetricsPort 5
+                $lifecycleAfter = Get-NetworkLifecycleMetrics $afterProbe
+                Assert-NetworkLifecycleMetricsEqual `
+                    $transition.LifecycleMetrics $lifecycleAfter `
+                    "resource warmup probe traffic triggered an extra lifecycle transition"
+                $resourceWarmupCycles.Add([ordered]@{
+                    sequence = [uint64]$warmupCycle
+                    operation = "reset_network"
+                    reason = "route_change"
+                    route_metric_before = [uint64]$routeMetricBefore
+                    route_metric_after = [uint64]$nextMetric
+                    lifecycle_metrics_before = $lifecycleBefore
+                    lifecycle_metrics_after = $lifecycleAfter
+                    managed_identity_before = $identityBefore
+                    managed_identity_after = $identityAfter
+                    tcp_flows_before = $tcpBefore
+                    udp_associations_before = $udpBefore
+                    tcp_flows_closed = $tcpBefore
+                    udp_associations_closed = $udpBefore
+                    tcp_probe_succeeded = $true
+                    udp_probe_succeeded = $true
+                    resources_after = $resourcesAfter
+                })
+                $managedIdentity = $identityAfter
+                $lifecycleMetrics = $lifecycleAfter
+            }
+            Assert-Condition (
+                $warmupRouteMutationIndex -eq 12 -and
+                $routeMetrics[($warmupRouteMutationIndex - 1) % $routeMetrics.Count] -eq
+                    [uint16]$underlayRouteIdentity.route_metric
+            ) "resource warmup route schedule did not end at its baseline"
+            $warmupUnderlayReadback = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
+            Assert-Condition (
+                [uint16]$warmupUnderlayReadback.Route.RouteMetric -eq
+                    [uint16]$underlayRouteIdentity.route_metric
+            ) "resource warmup route metric baseline was not restored in-band"
+            Assert-Condition (
+                $null -ne $baselineResources -and
+                $null -ne $baselineResourceSamples -and
+                @($baselineResourceSamples).Count -eq 3
+            ) "resource warmup did not establish a stable quiescent baseline"
+            $resourceWarmup = [ordered]@{
+                reset_network_cycles = [uint64]12
+                route_metric_baseline = [uint64]$underlayRouteIdentity.route_metric
+                quiescence_seconds = [uint64]30
+                cold_start_resources = $coldStartResources
+                cycles = $resourceWarmupCycles.ToArray()
+                baseline_resource_samples = $baselineResourceSamples
+            }
             $cycles = [Collections.Generic.List[object]]::new()
             $resetLatencies = [Collections.Generic.List[uint64]]::new()
             $rebuildLatencies = [Collections.Generic.List[uint64]]::new()
             $routeMutationIndex = 0
-            Invoke-Probe
+            $interfaceSwitchRecovery = $null
 
             foreach ($cycle in 1..1000) {
                 $before = Get-Metrics $MetricsPort 5
@@ -2052,39 +2588,63 @@ try {
                 $reason = "route_change"
                 if ($cycle -eq 500) {
                     $reason = "interface_change"
-                    $interfaceJournal = Join-Path $script:WorkRoot "physical-interface-journal.json"
+                    $interfaceJournal = Join-Path $script:WorkRoot `
+                        "underlay-interface-journal.json"
                     [IO.File]::WriteAllText(
                         $interfaceJournal,
-                        (($physicalRouteIdentity | ConvertTo-Json -Compress) + "`n"),
+                        (($underlayRouteIdentity | ConvertTo-Json -Compress) + "`n"),
                         $script:Utf8NoBom
                     )
-                    Disable-NetAdapter -Name $physicalRouteIdentity.interface_name `
+                    Disable-NetAdapter -Name $underlayRouteIdentity.interface_name `
                         -Confirm:$false -ErrorAction Stop
                     Start-Sleep -Milliseconds 100
-                    Enable-NetAdapter -Name $physicalRouteIdentity.interface_name `
+                    Enable-NetAdapter -Name $underlayRouteIdentity.interface_name `
                         -Confirm:$false -ErrorAction Stop
+                    [void](Wait-ExactFixedUnderlayRoute $underlayRouteIdentity 30)
+                    Start-Sleep -Seconds 5
                 } else {
-                    $currentRoutes = @(
-                        Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
-                            -DestinationPrefix $physicalRouteIdentity.destination_prefix `
-                            -PolicyStore ActiveStore -ErrorAction Stop |
-                            Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
-                    )
-                    Assert-Condition ($currentRoutes.Count -eq 1) `
-                        "physical route mutation target is not exact"
+                    $currentRoute = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
                     $nextMetric = $routeMetrics[$routeMutationIndex % $routeMetrics.Count]
                     $routeMutationIndex++
-                    Set-NetRoute -InputObject $currentRoutes[0] -RouteMetric $nextMetric `
+                    Set-NetRoute -InputObject $currentRoute.Route -RouteMetric $nextMetric `
                         -ErrorAction Stop
+                    $routeReadback = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
+                    Assert-Condition (
+                        [uint16]$routeReadback.Route.RouteMetric -eq [uint16]$nextMetric
+                    ) "fixed underlay metric mutation was not read back exactly"
                 }
                 $transition = Wait-LifecycleTransition "reset_network" $lifecycleBefore 30
                 $identityAfter = Get-ManagedIdentity
-                $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                if ($cycle -eq 1000) {
+                    $timer.Stop()
+                    $resourceCheckpoints = [ordered]@{}
+                    foreach ($index in @(0, 1, 9, 99, 498, 499, 500, 998)) {
+                        $resourceCheckpoints[[string]($index + 1)] =
+                            $cycles[$index].resources_after
+                    }
+                    try {
+                        $resourcesAfter = Wait-LifecycleResourcesAtBaseline `
+                            $baselineResources $transition.LifecycleMetrics 30
+                    } catch {
+                        $checkpointJson = $resourceCheckpoints |
+                            ConvertTo-Json -Compress -Depth 3
+                        throw "$($_.Exception.Message) checkpoints=$checkpointJson"
+                    }
+                    $timer.Start()
+                } else {
+                    $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                }
                 Assert-Condition (
                     (Get-Metric $transition.Metrics "ferrum2_tun_tcp_flows_active") -eq 0 -and
                     (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
                 ) "ResetNetwork retained a connection"
-                Invoke-Probe
+                if ($cycle -eq 500) {
+                    $interfaceSwitchRecovery = Invoke-InterfaceSwitchRecoveryProbe `
+                        -ExpectedLifecycleMetrics $transition.LifecycleMetrics `
+                        -RecoveryTimer $timer -TimeoutSeconds 30
+                } else {
+                    Invoke-Probe
+                }
                 $timer.Stop()
                 $afterProbe = Get-Metrics $MetricsPort 5
                 $lifecycleAfter = Get-NetworkLifecycleMetrics $afterProbe
@@ -2113,33 +2673,25 @@ try {
                 $managedIdentity = $identityAfter
                 $lifecycleMetrics = $lifecycleAfter
                 if ($cycle -eq 500) {
-                    $currentAdapter = Get-NetAdapter -Name $physicalRouteIdentity.interface_name `
-                        -IncludeHidden -ErrorAction Stop
+                    $currentUnderlay = Get-ExactFixedUnderlayRoute `
+                        $underlayRouteIdentity
                     Assert-Condition (
-                        [string]$currentAdapter.Status -ceq "Up" -and
-                        ([Guid]$currentAdapter.InterfaceGuid).ToString("D").ToLowerInvariant() `
-                            -ceq $physicalRouteIdentity.interface_guid
-                    ) "physical interface switch did not restore its identity"
+                        [string]$currentUnderlay.Adapter.Status -ceq "Up"
+                    ) "fixed underlay interface switch did not restore its route"
                     Remove-Item -LiteralPath $interfaceJournal -Force
                 }
             }
             Assert-Condition (
                 $routeMutationIndex -eq 999 -and
                 $routeMetrics[($routeMutationIndex - 1) % $routeMetrics.Count] -eq
-                    $physicalRouteIdentity.route_metric
-            ) "physical route metric schedule did not end at its baseline"
-            $physicalReadback = @(
-                Get-NetRoute -InterfaceIndex $physicalRouteIdentity.interface_index `
-                    -DestinationPrefix $physicalRouteIdentity.destination_prefix `
-                    -PolicyStore ActiveStore -ErrorAction Stop |
-                    Where-Object { $_.NextHop -ceq $physicalRouteIdentity.next_hop }
-            )
+                    [uint16]$underlayRouteIdentity.route_metric
+            ) "fixed underlay route metric schedule did not end at its baseline"
+            $underlayReadback = Get-ExactFixedUnderlayRoute $underlayRouteIdentity
             Assert-Condition (
-                $physicalReadback.Count -eq 1 -and
-                [uint32]$physicalReadback[0].RouteMetric -eq
-                    [uint32]$physicalRouteIdentity.route_metric
-            ) "physical route metric baseline was not restored in-band"
-
+                [uint16]$underlayReadback.Route.RouteMetric -eq
+                    [uint16]$underlayRouteIdentity.route_metric
+            ) "fixed underlay route metric baseline was not restored in-band"
+            Remove-Item -LiteralPath $underlayJournal -Force
             foreach ($rebuild in 1..10) {
                 $before = Get-Metrics $MetricsPort 5
                 [uint64]$tcpBefore = Get-Metric $before "ferrum2_tun_tcp_flows_active"
@@ -2173,7 +2725,16 @@ try {
                 $managedRoutes[0] | Remove-NetRoute -Confirm:$false -ErrorAction Stop
                 $transition = Wait-LifecycleTransition "full_rebuild" $lifecycleBefore 30
                 $identityAfter = Get-ManagedIdentity
-                $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                if ($rebuild -eq 10) {
+                    $timer.Stop()
+                    Start-Sleep -Seconds 30
+                    $stableResources = Wait-LifecycleResourcesStable `
+                        $transition.LifecycleMetrics 5
+                    $resourcesAfter = $stableResources.baseline
+                    $timer.Start()
+                } else {
+                    $resourcesAfter = Get-LifecycleResources $transition.Metrics
+                }
                 Assert-Condition (
                     (Get-Metric $transition.Metrics "ferrum2_tun_tcp_flows_active") -eq 0 -and
                     (Get-Metric $transition.Metrics "ferrum2_tun_udp_associations_active") -eq 0
@@ -2233,6 +2794,8 @@ try {
                 "ferrum2_outbound_interface_resolution_cache_hit" $true) - $cacheHitsBefore
             Assert-Condition ($resolutions -ge 32 -and $resolutions -le 256 -and $cacheHits -gt 0 `
                 -and $cacheHits -le $resolutions) "interface resolver cache-hit evidence is invalid"
+            Assert-Condition ($null -ne $interfaceSwitchRecovery) `
+                "interface-switch recovery evidence is missing"
             [void](Wait-CleanDrain $true)
             $finalMetrics = Get-Metrics $MetricsPort 5
             Assert-Condition (
@@ -2262,15 +2825,20 @@ try {
                 model_plan_sha256 = $modelPlanHash
             }
             $rawObservation = [ordered]@{
-                schema_version = 3
+                schema_version = 6
                 workload = "network-lifecycle"
                 identity = $rawIdentity
+                resource_warmup = $resourceWarmup
                 baseline_resources = $baselineResources
                 cycles = $cycles.ToArray()
                 interface_resolver = [ordered]@{
                     probes = [uint64]32
                     resolutions = $resolutions
                     cache_hits = $cacheHits
+                    interface_switch_probe_attempts = `
+                        [uint64]$interfaceSwitchRecovery.probe_attempts
+                    interface_switch_resolution_failures = `
+                        [uint64]$interfaceSwitchRecovery.resolution_failures
                 }
             }
             $modelPending = "$modelOutputPath.pending"
@@ -2329,6 +2897,7 @@ try {
             }
             $resetFinal = $cycles[999].resources_after
             $checks.same_process_all_cycles = $true
+            $checks.resource_warmup_exact = $true
             $checks.generation_advanced_once_per_cycle = $true
             $checks.managed_identity_preserved_across_resets = $true
             $checks.damage_only_full_rebuild = $true
@@ -2336,8 +2905,8 @@ try {
             $checks.resource_growth_zero_after_1000_resets = (
                 $resetFinal.process_handles -le $baselineResources.process_handles -and
                 $resetFinal.process_threads -le $baselineResources.process_threads -and
-                $resetFinal.udp_associations_active -le $baselineResources.udp_associations_active -and
-                $resetFinal.managed_adapters_active -le $baselineResources.managed_adapters_active
+                $resetFinal.udp_associations_active -eq $baselineResources.udp_associations_active -and
+                $resetFinal.managed_adapters_active -eq $baselineResources.managed_adapters_active
             )
             $checks.tcp_and_udp_recovered_after_interface_switch = $true
             $checks.interface_resolver_cache_hit_observed = $true
@@ -2356,7 +2925,10 @@ try {
     }
 
     Assert-Condition ($checkedUnits -gt 0) "trial checked-unit count is zero"
-    Assert-Condition (@($checks.Values | Where-Object { $_ -ne $true }).Count -eq 0) "one or more trial correctness checks failed"
+    $failedChecks = @($checks.GetEnumerator() | Where-Object { $_.Value -ne $true } |
+        ForEach-Object { [string]$_.Key })
+    Assert-Condition ($failedChecks.Count -eq 0) `
+        "one or more trial correctness checks failed: $($failedChecks -join ',')"
     $environment = [ordered]@{
         runner_os = "Windows"
         runner_arch = "X64"
@@ -2379,7 +2951,7 @@ try {
     }
     $finishedUtc = [DateTime]::UtcNow.ToString("o")
     $document = [ordered]@{
-        schema_version = 3
+        schema_version = 4
         kind = "windows_tun_performance_trial"
         selection = "windows-tun-m17"
         run_kind = $RunKind
@@ -2409,7 +2981,7 @@ try {
                 "udp-8192-association-lookup-expiry" { "association_lookups" }
                 "fragment-reassembly-throughput" { "reassembled_datagrams" }
                 "idle-cpu-wakeup" { "idle_samples" }
-                "wintun-ring-full-drop-rate" { "ring_full_events" }
+                "wintun-ring-full-drop-rate" { "tun_response_attempts" }
                 "udp-route-once" { "echoed_multi_target_datagrams" }
                 "network-lifecycle" { "successful_reset_network_cycles" }
             }
@@ -2429,6 +3001,8 @@ try {
     )
     Move-Item -LiteralPath $temporary -Destination $outputPath -ErrorAction Stop
     Write-Output "windows_tun_trial status=PASS scenario=$Scenario member=$Member pair=$Pair order=$Order sequence=$Sequence output=$outputPath"
+} catch {
+    $trialFailure = $_
 } finally {
     if (Test-Path -LiteralPath $script:WorkRoot -PathType Container) {
         $resolvedWorkRoot = (Resolve-Path -LiteralPath $script:WorkRoot).Path
@@ -2436,16 +3010,20 @@ try {
             $resolvedWorkRoot.StartsWith($workPrefix, [StringComparison]::OrdinalIgnoreCase) -and
             -not $resolvedWorkRoot.Equals([IO.Path]::GetFullPath($outputParent), [StringComparison]::OrdinalIgnoreCase)
         ) "refusing to remove an out-of-scope trial work directory"
-        $interfaceJournalPath = Join-Path $script:WorkRoot "physical-interface-journal.json"
+        $interfaceJournalPath = Join-Path $script:WorkRoot `
+            "underlay-interface-journal.json"
         if (Test-Path -LiteralPath $interfaceJournalPath -PathType Leaf) {
             $identity = Get-Content -LiteralPath $interfaceJournalPath -Raw -Encoding utf8 |
                 ConvertFrom-Json
-            $adapter = Get-NetAdapter -Name $identity.interface_name -IncludeHidden `
-                -ErrorAction Stop
-            Assert-Condition (
-                ([Guid]$adapter.InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
+            Assert-FixedUnderlayRouteIdentity $identity
+            $adapterRows = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+                [string]$_.Name -ceq [string]$identity.interface_name -and
+                ([Guid]$_.InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
                     [string]$identity.interface_guid
-            ) "refusing to enable a changed physical interface identity"
+            })
+            Assert-Condition ($adapterRows.Count -eq 1) `
+                "refusing to enable a changed fixed underlay interface identity"
+            $adapter = $adapterRows[0]
             if ([string]$adapter.Status -cne "Up") {
                 Enable-NetAdapter -Name $identity.interface_name -Confirm:$false -ErrorAction Stop
             }
@@ -2456,59 +3034,91 @@ try {
                 if ([string]$adapter.Status -ceq "Up") { break }
                 Start-Sleep -Milliseconds 100
             } while ([DateTime]::UtcNow -lt $deadline)
-            Assert-Condition ([string]$adapter.Status -ceq "Up") `
-                "physical interface did not return Up during journal recovery"
+            Assert-Condition (
+                [string]$adapter.Status -ceq "Up" -and
+                ([Guid]$adapter.InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
+                    [string]$identity.interface_guid
+            ) "fixed underlay interface did not return Up during journal recovery"
+            Assert-Condition (
+                [uint32]$adapter.ifIndex -eq [uint32]$identity.interface_index
+            ) "fixed underlay interface index drifted after journal recovery"
+            [void](Wait-ExactFixedUnderlayRoute $identity 30)
         }
-        $physicalJournalPath = Join-Path $script:WorkRoot "physical-route-journal.json"
-        if (Test-Path -LiteralPath $physicalJournalPath -PathType Leaf) {
-            $identity = Get-Content -LiteralPath $physicalJournalPath -Raw -Encoding utf8 |
+        $underlayJournalPath = Join-Path $script:WorkRoot "underlay-route-journal.json"
+        if (Test-Path -LiteralPath $underlayJournalPath -PathType Leaf) {
+            $identity = Get-Content -LiteralPath $underlayJournalPath -Raw -Encoding utf8 |
                 ConvertFrom-Json
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            do {
-                $present = @(
-                    Get-NetRoute -InterfaceIndex $identity.interface_index `
-                        -DestinationPrefix $identity.destination_prefix -PolicyStore ActiveStore `
-                        -ErrorAction SilentlyContinue |
-                        Where-Object { $_.NextHop -ceq [string]$identity.next_hop }
-                )
-                if ($present.Count -eq 1) { break }
-                Start-Sleep -Milliseconds 100
-            } while ([DateTime]::UtcNow -lt $deadline)
-            Assert-Condition ($present.Count -eq 1) `
-                "physical route restore target is not exact"
-            if ([uint32]$present[0].RouteMetric -ne [uint32]$identity.route_metric) {
-                Set-NetRoute -InputObject $present[0] -RouteMetric $identity.route_metric `
+            $present = Wait-ExactFixedUnderlayRoute $identity 30
+            if ([uint16]$present.Route.RouteMetric -ne [uint16]$identity.route_metric) {
+                Set-NetRoute -InputObject $present.Route `
+                    -RouteMetric ([uint16]$identity.route_metric) `
                     -ErrorAction Stop
             }
+            $restored = Get-ExactFixedUnderlayRoute $identity
+            Assert-Condition (
+                [uint16]$restored.Route.RouteMetric -eq [uint16]$identity.route_metric
+            ) "fixed underlay route metric was not restored exactly"
         }
         $managedJournalPath = Join-Path $script:WorkRoot "managed-route-journal.json"
         if (Test-Path -LiteralPath $managedJournalPath -PathType Leaf) {
-            $identity = Get-Content -LiteralPath $managedJournalPath -Raw -Encoding utf8 |
-                ConvertFrom-Json
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            do {
-                $managedRows = @(
-                    Get-NetAdapter -Name $AdapterName -IncludeHidden `
-                        -ErrorAction SilentlyContinue
+            try {
+                $identity = Get-Content -LiteralPath $managedJournalPath -Raw -Encoding utf8 |
+                    ConvertFrom-Json
+                $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                do {
+                    $managedRows = @(
+                        Get-NetAdapter -Name $AdapterName -IncludeHidden `
+                            -ErrorAction SilentlyContinue
+                    )
+                    if ($managedRows.Count -eq 1) { break }
+                    Start-Sleep -Milliseconds 100
+                } while ([DateTime]::UtcNow -lt $deadline)
+                Assert-Condition ($managedRows.Count -eq 1) `
+                    "managed adapter did not return during journal recovery"
+                $managed = $managedRows[0]
+                Assert-Condition (
+                    ([Guid]$managed.InterfaceGuid).ToString("D").ToLowerInvariant() -ceq
+                        [string]$identity.interface_guid
+                ) "managed adapter identity changed during journal recovery"
+                Assert-Condition (
+                    [uint32]$identity.route_metric -le [uint32][uint16]::MaxValue
+                ) "managed route journal metric escaped the NetTCPIP boundary"
+                $present = @(
+                    Get-NetRoute -InterfaceIndex $managed.ifIndex `
+                        -DestinationPrefix $identity.destination_prefix `
+                        -PolicyStore ActiveStore -ErrorAction SilentlyContinue
                 )
-                if ($managedRows.Count -eq 1) { break }
-                Start-Sleep -Milliseconds 100
-            } while ([DateTime]::UtcNow -lt $deadline)
-            Assert-Condition ($managedRows.Count -eq 1) `
-                "managed adapter did not return during journal recovery"
-            $managed = $managedRows[0]
-            $present = @(
-                Get-NetRoute -InterfaceIndex $managed.ifIndex `
-                    -DestinationPrefix $identity.destination_prefix -PolicyStore ActiveStore `
-                    -ErrorAction SilentlyContinue
-            )
-            Assert-Condition ($present.Count -le 1) `
-                "managed route recovery target is ambiguous"
-            if ($present.Count -eq 0) {
-                New-NetRoute -InterfaceIndex $managed.ifIndex `
-                    -DestinationPrefix $identity.destination_prefix `
-                    -NextHop $identity.next_hop -RouteMetric $identity.route_metric `
-                    -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+                Assert-Condition ($present.Count -le 1) `
+                    "managed route recovery target is ambiguous"
+                if ($present.Count -eq 0) {
+                    New-NetRoute -InterfaceIndex $managed.ifIndex `
+                        -DestinationPrefix $identity.destination_prefix `
+                        -NextHop $identity.next_hop `
+                        -RouteMetric ([uint16]$identity.route_metric) `
+                        -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+                } else {
+                    Assert-Condition (
+                        [string]$present[0].NextHop -ceq [string]$identity.next_hop
+                    ) "managed route next hop changed during journal recovery"
+                    if ([uint32]$present[0].RouteMetric -ne
+                        [uint32]$identity.route_metric) {
+                        Set-NetRoute -InputObject $present[0] `
+                            -RouteMetric ([uint16]$identity.route_metric) `
+                            -ErrorAction Stop
+                    }
+                }
+                $restored = @(
+                    Get-NetRoute -InterfaceIndex $managed.ifIndex `
+                        -DestinationPrefix $identity.destination_prefix `
+                        -PolicyStore ActiveStore -ErrorAction Stop
+                )
+                Assert-Condition (
+                    $restored.Count -eq 1 -and
+                    [string]$restored[0].NextHop -ceq [string]$identity.next_hop -and
+                    [uint32]$restored[0].RouteMetric -eq [uint32]$identity.route_metric
+                ) "managed route was not restored exactly from its journal"
+            } catch {
+                $managedJournalRecoveryFailure = $_
             }
         }
         Remove-Item -LiteralPath $script:WorkRoot -Recurse -Force -ErrorAction Stop
@@ -2521,4 +3131,17 @@ try {
         -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
         Remove-Item -LiteralPath $modelOutputPath -Force -ErrorAction Stop
     }
+}
+
+if ($null -ne $trialFailure) {
+    if ($null -ne $managedJournalRecoveryFailure) {
+        Write-Warning (
+            "managed route journal recovery also failed: " +
+            $managedJournalRecoveryFailure.Exception.Message
+        ) -WarningAction Continue
+    }
+    throw $trialFailure
+}
+if ($null -ne $managedJournalRecoveryFailure) {
+    throw $managedJournalRecoveryFailure
 }

@@ -70,7 +70,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleFileNameW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleFileNameW,
+    GetModuleHandleExW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 use windows_sys::Win32::System::Threading::{
@@ -169,6 +170,7 @@ trait LoaderOperations {
     fn verify_artifact(&mut self) -> Result<(), Error>;
     fn load_system32_scoped_library(&mut self) -> Result<(), Error>;
     fn resolve_exact_abi(&mut self) -> Result<(), Error>;
+    fn pin_loaded_library(&mut self) -> Result<(), Error>;
 }
 
 fn load_transaction(loader: &mut impl LoaderOperations) -> Result<(), Error> {
@@ -178,7 +180,8 @@ fn load_transaction(loader: &mut impl LoaderOperations) -> Result<(), Error> {
     loader.verify_dll_identity()?;
     loader.verify_artifact()?;
     loader.load_system32_scoped_library()?;
-    loader.resolve_exact_abi()
+    loader.resolve_exact_abi()?;
+    loader.pin_loaded_library()
 }
 
 #[derive(Default)]
@@ -272,6 +275,31 @@ impl LoaderOperations for PlatformLoader {
                 .and_then(|()| resolve_exports(module))?
         });
         Ok(())
+    }
+
+    fn pin_loaded_library(&mut self) -> Result<(), Error> {
+        let module = self.module;
+        if module.is_null() || self.exports.is_none() {
+            return Err(Error);
+        }
+        let mut pinned_module = null_mut();
+        // Wintun 0.14.1's WintunCloseAdapter queues a DLL callback through
+        // QueueUserWorkItem, whose Windows contract requires the DLL to remain
+        // loaded until its callbacks complete. PIN therefore intentionally lasts
+        // for the process lifetime.
+        // SAFETY: the preceding artifact and exact-export checks establish `module`
+        // as the verified, non-null base returned by LoadLibraryExW. FROM_ADDRESS
+        // identifies that already-loaded module from its base, and the output
+        // pointer remains valid for the call. On success Windows returns this same
+        // module and PIN cannot be undone, so only the API's failure is surfaced.
+        let result = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                module as *const u16,
+                &raw mut pinned_module,
+            )
+        };
+        if result == 0 { Err(Error) } else { Ok(()) }
     }
 }
 
@@ -7850,6 +7878,10 @@ mod tests {
         fn resolve_exact_abi(&mut self) -> Result<(), Error> {
             self.step("eleven-exports")
         }
+
+        fn pin_loaded_library(&mut self) -> Result<(), Error> {
+            self.step("process-lifetime-pin")
+        }
     }
 
     #[test]
@@ -7862,6 +7894,7 @@ mod tests {
             "size/hash",
             "system32-load",
             "eleven-exports",
+            "process-lifetime-pin",
         ];
         for failed in 0..order.len() {
             let mut loader = InjectedLoader {
