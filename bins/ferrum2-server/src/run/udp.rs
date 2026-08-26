@@ -56,15 +56,21 @@ pub(super) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits>
 struct UdpMappingState {
     by_capability: HashMap<ServerResponseCapability, BoundUdpSession>,
     by_handle: BTreeMap<UdpSessionHandle, ServerResponseCapability>,
-    orphaned: HashMap<ServerResponseCapability, usize>,
+    orphaned: HashMap<ServerResponseCapability, FrozenUdpIdentity>,
     retired: BTreeSet<UdpSessionHandle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FrozenUdpIdentity {
+    inbound: usize,
+    terminal: ServerTerminalRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BoundUdpSession {
     handle: UdpSessionHandle,
     inbound: usize,
-    outbound: usize,
+    terminal: ServerTerminalRoute,
 }
 
 pub(super) struct UdpMappings {
@@ -91,12 +97,15 @@ impl UdpMappings {
             .copied()
     }
 
-    fn inbound(&self, capability: ServerResponseCapability) -> Option<usize> {
+    fn identity(&self, capability: ServerResponseCapability) -> Option<FrozenUdpIdentity> {
         let state = self.state.lock().expect("UDP mapping lock poisoned");
         state
             .by_capability
             .get(&capability)
-            .map(|binding| binding.inbound)
+            .map(|binding| FrozenUdpIdentity {
+                inbound: binding.inbound,
+                terminal: binding.terminal,
+            })
             .or_else(|| state.orphaned.get(&capability).copied())
     }
 
@@ -121,7 +130,7 @@ impl UdpMappings {
         capability: ServerResponseCapability,
         handle: UdpSessionHandle,
         inbound: usize,
-        outbound: usize,
+        terminal: ServerTerminalRoute,
     ) -> Option<ServerResponseCapability> {
         let mut state = self.state.lock().expect("UDP mapping lock poisoned");
         if let Some(old) = state.by_capability.remove(&capability) {
@@ -132,13 +141,25 @@ impl UdpMappings {
         if let Some(old_capability) = state.by_handle.remove(&handle)
             && let Some(old) = state.by_capability.remove(&old_capability)
         {
-            state.orphaned.insert(old_capability, old.inbound);
+            state.orphaned.insert(
+                old_capability,
+                FrozenUdpIdentity {
+                    inbound: old.inbound,
+                    terminal: old.terminal,
+                },
+            );
         }
         state.retired.remove(&handle);
         let evicted = if state.by_handle.len() == self.limit {
             state.by_handle.pop_first().map(|(old_handle, capability)| {
                 if let Some(old) = state.by_capability.remove(&capability) {
-                    state.orphaned.insert(capability, old.inbound);
+                    state.orphaned.insert(
+                        capability,
+                        FrozenUdpIdentity {
+                            inbound: old.inbound,
+                            terminal: old.terminal,
+                        },
+                    );
                 }
                 retire_mapping_handle(&mut state, old_handle, self.limit);
                 capability
@@ -151,7 +172,7 @@ impl UdpMappings {
             BoundUdpSession {
                 handle,
                 inbound,
-                outbound,
+                terminal,
             },
         );
         state.by_handle.insert(handle, capability);
@@ -165,7 +186,13 @@ impl UdpMappings {
             .lock()
             .expect("UDP mapping lock poisoned")
             .orphaned
-            .insert(capability, inbound);
+            .insert(
+                capability,
+                FrozenUdpIdentity {
+                    inbound,
+                    terminal: ServerTerminalRoute::Reject,
+                },
+            );
     }
 
     fn invalidate_handle(&self, handle: UdpSessionHandle) {
@@ -173,7 +200,13 @@ impl UdpMappings {
         if let Some(capability) = state.by_handle.remove(&handle)
             && let Some(old) = state.by_capability.remove(&capability)
         {
-            state.orphaned.insert(capability, old.inbound);
+            state.orphaned.insert(
+                capability,
+                FrozenUdpIdentity {
+                    inbound: old.inbound,
+                    terminal: old.terminal,
+                },
+            );
         }
         retire_mapping_handle(&mut state, handle, self.limit);
         drop(state);
@@ -188,12 +221,24 @@ impl UdpMappings {
         let removed = active.len();
         for (handle, capability) in handles {
             if let Some(binding) = active.remove(&capability) {
-                state.orphaned.insert(capability, binding.inbound);
+                state.orphaned.insert(
+                    capability,
+                    FrozenUdpIdentity {
+                        inbound: binding.inbound,
+                        terminal: binding.terminal,
+                    },
+                );
             }
             retire_mapping_handle(&mut state, handle, self.limit);
         }
         for (capability, binding) in active {
-            state.orphaned.insert(capability, binding.inbound);
+            state.orphaned.insert(
+                capability,
+                FrozenUdpIdentity {
+                    inbound: binding.inbound,
+                    terminal: binding.terminal,
+                },
+            );
             retire_mapping_handle(&mut state, binding.handle, self.limit);
         }
         drop(state);
@@ -887,7 +932,7 @@ where
         tokio::pin!(shutdown);
         let mut readiness_drain = 0;
 
-        let terminal = loop {
+        let terminal = 'packets: loop {
             if readiness_drain == MAX_UDP_LISTENER_READINESS_DRAIN {
                 readiness_drain = 0;
                 tokio::select! {
@@ -955,15 +1000,6 @@ where
                     continue;
                 }
             };
-            let terminal = select_udp_route(
-                &routing,
-                inbound,
-                pending.datagram().target(),
-                pending.datagram().payload(),
-                &metrics,
-                &mut route_scratch,
-            )
-            .map_err(run_error_for_rule_compile)?;
             // The shared gate protects only protocol/mapping observations and their
             // synchronous commit. In particular, it is never held while a provisional
             // runtime session opens its socket below.
@@ -979,14 +1015,19 @@ where
                     break Err(RunError::RuntimeRoot);
                 }
             };
-            if existing
-                .and_then(|capability| mappings.inbound(capability))
-                .is_some_and(|bound_inbound| bound_inbound != inbound)
-            {
-                record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
-                continue;
-            }
-            if existing.is_none() {
+            let terminal = if let Some(capability) = existing {
+                let Some(identity) = mappings.identity(capability) else {
+                    // Authenticated protocol state without a frozen routing identity
+                    // cannot safely be routed again.
+                    record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
+                    continue;
+                };
+                if identity.inbound != inbound {
+                    record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
+                    continue;
+                }
+                identity.terminal
+            } else {
                 reconcile_udp_generations(&runtime, &mappings);
                 mappings.prune_protocol(&protocol, clock.monotonic_now());
                 match protocol.session_count() {
@@ -1000,7 +1041,16 @@ where
                         break Err(RunError::RuntimeRoot);
                     }
                 }
-            }
+                select_udp_route(
+                    &routing,
+                    inbound,
+                    pending.datagram().target(),
+                    pending.datagram().payload(),
+                    &metrics,
+                    &mut route_scratch,
+                )
+                .map_err(run_error_for_rule_compile)?
+            };
             if terminal == ServerTerminalRoute::Reject {
                 let (_datagram, commit) = pending.into_parts();
                 match protocol.commit_request(commit, peer, clock.monotonic_now(), &SystemRandom) {
@@ -1031,29 +1081,9 @@ where
                     record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
                     continue;
                 }
-                let ServerTerminalRoute::Direct(outbound) = terminal else {
+                let ServerTerminalRoute::Direct(_) = terminal else {
                     unreachable!("rejected UDP route returned before direct session reuse")
                 };
-                if binding.outbound != outbound {
-                    let (_datagram, commit) = pending.into_parts();
-                    match protocol.commit_request(
-                        commit,
-                        peer,
-                        clock.monotonic_now(),
-                        &SystemRandom,
-                    ) {
-                        Ok(accepted) if accepted.capability() == capability => {
-                            metrics.udp_datagram(
-                                Role::Server,
-                                Direction::ClientToTarget,
-                                Outcome::Rejected,
-                            );
-                        }
-                        Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
-                        Err(error) => record_udp_protocol_failure(&metrics, error),
-                    }
-                    continue;
-                }
                 let handle = binding.handle;
                 let reserved =
                     runtime.reserve_datagram(handle, pending.datagram().allocated_capacity());
@@ -1102,38 +1132,12 @@ where
             let ServerTerminalRoute::Direct(outbound) = terminal else {
                 unreachable!("rejected UDP route returned before direct session admission")
             };
-            let Some(session_resolver) = direct_resolvers
-                .get(outbound)
-                .cloned()
-                .map(|resolver| resolver.for_inbound(inbound))
-            else {
-                record_udp_failure(
-                    &metrics,
-                    Stage::Config,
-                    Reason::ConfigSemantic,
-                    Outcome::Failed,
-                );
-                continue;
-            };
-            let selection_target = pending.datagram().target().clone();
-            let initial_candidates = tokio::select! {
-                biased;
-                _ = &mut shutdown => break Ok(()),
-                selection = resolve_udp_selection_candidates(
-                    &session_resolver,
-                    &selection_target,
-                    connect_timeout,
-                ) => selection,
-            };
-            let initial_candidates = match initial_candidates {
-                Ok(candidates) => candidates,
-                Err(error) => {
-                    record_udp_runtime_failure(&metrics, error);
-                    continue;
-                }
-            };
-            let open_context = if let Some(policies) = network_policies.as_ref() {
-                let Some(outbound_policy) = policies.outbound_dial_options.get(outbound).cloned()
+            let mut outbound = outbound;
+            'open_direct: loop {
+                let Some(session_resolver) = direct_resolvers
+                    .get(outbound)
+                    .cloned()
+                    .map(|resolver| resolver.for_inbound(inbound))
                 else {
                     record_udp_failure(
                         &metrics,
@@ -1141,188 +1145,239 @@ where
                         Reason::ConfigSemantic,
                         Outcome::Failed,
                     );
-                    continue;
+                    continue 'packets;
                 };
-                Some(ServerUdpNetworkPolicy {
-                    outbound: outbound_policy,
-                    route: Arc::clone(&policies.route_network),
-                })
-            } else {
-                None
-            };
-            let provisional = tokio::select! {
-                biased;
-                _ = &mut shutdown => break Ok(()),
-                provisional = runtime.reserve_session_with_initial_candidates(
-                    tokio::time::Instant::now(),
-                    pending.datagram().allocated_capacity(),
-                    open_context,
-                    initial_candidates,
-                ) => provisional,
-            };
-            let provisional = match provisional {
-                Ok(admission) => admission,
-                Err(error) => {
-                    record_udp_runtime_failure(&metrics, error);
-                    continue;
-                }
-            };
-
-            // A concurrent packet may have committed this authenticated identity,
-            // replaced a stale runtime generation, or consumed the global protocol
-            // ceiling while the socket was opening. Recheck all three conditions
-            // before publishing the provisional resources.
-            let admission_guard = tokio::select! {
-                biased;
-                _ = &mut shutdown => break Ok(()),
-                guard = admission.lock() => guard,
-            };
-            let existing = match protocol.existing_capability(&pending) {
-                Ok(existing) => existing,
-                Err(error) => {
-                    record_udp_protocol_failure(&metrics, error);
-                    break Err(RunError::RuntimeRoot);
-                }
-            };
-            if existing
-                .and_then(|capability| mappings.inbound(capability))
-                .is_some_and(|bound_inbound| bound_inbound != inbound)
-            {
-                record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
-                continue;
-            }
-            if let Some((capability, binding)) = existing.and_then(|capability| {
-                mappings
-                    .handle(capability)
-                    .map(|binding| (capability, binding))
-            }) {
-                debug_assert_eq!(binding.inbound, inbound);
-                if binding.outbound != outbound {
-                    // The winning generation fixed a different Direct while this
-                    // packet's socket was opening. Roll back the losing provisional
-                    // resources, advance the authenticated protocol state, and fail
-                    // this packet closed instead of crossing resolver identities.
-                    drop(provisional);
-                    let (_datagram, commit) = pending.into_parts();
-                    match protocol.commit_request(
-                        commit,
-                        peer,
-                        clock.monotonic_now(),
-                        &SystemRandom,
-                    ) {
-                        Ok(accepted) if accepted.capability() == capability => {
-                            metrics.udp_datagram(
-                                Role::Server,
-                                Direction::ClientToTarget,
-                                Outcome::Rejected,
-                            );
-                        }
-                        Ok(_) => record_udp_protocol_failure(&metrics, UdpPacketError::Generation),
-                        Err(error) => record_udp_protocol_failure(&metrics, error),
-                    }
-                    continue;
-                }
-                match runtime
-                    .reserve_datagram(binding.handle, pending.datagram().allocated_capacity())
-                {
-                    Ok(reservation) => {
-                        // The winning generation owns this request; dropping the
-                        // provisional admission rolls its session, bytes, socket, and
-                        // owner permit back before protocol activity is committed.
-                        drop(provisional);
-                        let (datagram, commit) = pending.into_parts();
-                        let committed =
-                            reservation.commit_with(datagram, tokio::time::Instant::now(), || {
-                                let accepted = protocol.commit_request(
-                                    commit,
-                                    peer,
-                                    clock.monotonic_now(),
-                                    &SystemRandom,
-                                )?;
-                                if accepted.capability() == capability {
-                                    Ok(())
-                                } else {
-                                    Err(UdpPacketError::Generation)
-                                }
-                            });
-                        match committed {
-                            Ok(()) => record_udp_request_accepted(&metrics, wire_len),
-                            Err(UdpCommitError::Runtime(error)) => {
-                                mappings.invalidate_handle(binding.handle);
-                                record_udp_runtime_failure(&metrics, error);
-                            }
-                            Err(UdpCommitError::Protocol(error)) => {
-                                record_udp_protocol_failure(&metrics, error);
-                            }
-                        }
-                        continue;
-                    }
-                    Err(UdpRuntimeError::Cancelled) => {
-                        mappings.invalidate_handle(binding.handle);
-                    }
+                let selection_target = pending.datagram().target().clone();
+                let initial_candidates = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break 'packets Ok(()),
+                    selection = resolve_udp_selection_candidates(
+                        &session_resolver,
+                        &selection_target,
+                        connect_timeout,
+                    ) => selection,
+                };
+                let initial_candidates = match initial_candidates {
+                    Ok(candidates) => candidates,
                     Err(error) => {
                         record_udp_runtime_failure(&metrics, error);
-                        continue;
+                        continue 'packets;
                     }
-                }
-            }
-            if existing.is_none() {
-                reconcile_udp_generations(&runtime, &mappings);
-                mappings.prune_protocol(&protocol, clock.monotonic_now());
-                match protocol.session_count() {
-                    Ok(count) if count >= config.max_sessions => {
-                        record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
-                        continue;
+                };
+                let open_context = if let Some(policies) = network_policies.as_ref() {
+                    let Some(outbound_policy) =
+                        policies.outbound_dial_options.get(outbound).cloned()
+                    else {
+                        record_udp_failure(
+                            &metrics,
+                            Stage::Config,
+                            Reason::ConfigSemantic,
+                            Outcome::Failed,
+                        );
+                        continue 'packets;
+                    };
+                    Some(ServerUdpNetworkPolicy {
+                        outbound: outbound_policy,
+                        route: Arc::clone(&policies.route_network),
+                    })
+                } else {
+                    None
+                };
+                let provisional = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break 'packets Ok(()),
+                    provisional = runtime.reserve_session_with_initial_candidates(
+                        tokio::time::Instant::now(),
+                        pending.datagram().allocated_capacity(),
+                        open_context,
+                        initial_candidates,
+                    ) => provisional,
+                };
+                let provisional = match provisional {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        record_udp_runtime_failure(&metrics, error);
+                        continue 'packets;
                     }
-                    Ok(_) => {}
+                };
+
+                // A concurrent first packet may have frozen this identity while the
+                // provisional socket was opening. The winner's terminal governs the
+                // losing packet; only an orphaned, different Direct requires reopening.
+                let admission_guard = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break 'packets Ok(()),
+                    guard = admission.lock() => guard,
+                };
+                let existing = match protocol.existing_capability(&pending) {
+                    Ok(existing) => existing,
                     Err(error) => {
                         record_udp_protocol_failure(&metrics, error);
-                        break Err(RunError::RuntimeRoot);
+                        break 'packets Err(RunError::RuntimeRoot);
                     }
-                }
-            }
-            let (datagram, commit) = pending.into_parts();
-            let mut committed_capability = None;
-            let committed = runtime.commit_session_with_resolver(
-                provisional,
-                datagram,
-                tokio::time::Instant::now(),
-                session_resolver,
-                || {
-                    // QA-M2-T02-N01: new protocol state is created only inside
-                    // T03's reserved session/bytes/queue commit transition.
-                    let accepted = protocol.commit_request(
-                        commit,
-                        peer,
-                        clock.monotonic_now(),
-                        &SystemRandom,
-                    )?;
-                    committed_capability = Some(accepted.capability());
-                    Ok(())
-                },
-            );
-            match committed {
-                Ok(handle) => {
-                    let Some(capability) = committed_capability else {
-                        runtime.remove_session(handle);
-                        record_udp_protocol_failure(&metrics, UdpPacketError::Generation);
-                        break Err(RunError::RuntimeRoot);
+                };
+                if let Some(capability) = existing {
+                    let Some(identity) = mappings.identity(capability) else {
+                        drop(provisional);
+                        record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
+                        continue 'packets;
                     };
-                    if mappings
-                        .publish(capability, handle, inbound, outbound)
-                        .is_some()
-                    {
-                        mappings.prune_protocol(&protocol, clock.monotonic_now());
+                    if identity.inbound != inbound {
+                        drop(provisional);
+                        record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
+                        continue 'packets;
                     }
-                    record_udp_request_accepted(&metrics, wire_len);
+                    match identity.terminal {
+                        ServerTerminalRoute::Reject => {
+                            drop(provisional);
+                            let (_datagram, commit) = pending.into_parts();
+                            match protocol.commit_request(
+                                commit,
+                                peer,
+                                clock.monotonic_now(),
+                                &SystemRandom,
+                            ) {
+                                Ok(accepted) if accepted.capability() == capability => {
+                                    metrics.udp_datagram(
+                                        Role::Server,
+                                        Direction::ClientToTarget,
+                                        Outcome::Rejected,
+                                    );
+                                }
+                                Ok(_) => record_udp_protocol_failure(
+                                    &metrics,
+                                    UdpPacketError::Generation,
+                                ),
+                                Err(error) => record_udp_protocol_failure(&metrics, error),
+                            }
+                            continue 'packets;
+                        }
+                        ServerTerminalRoute::Direct(frozen_outbound) => {
+                            if let Some(binding) = mappings.handle(capability) {
+                                match runtime.reserve_datagram(
+                                    binding.handle,
+                                    pending.datagram().allocated_capacity(),
+                                ) {
+                                    Ok(reservation) => {
+                                        drop(provisional);
+                                        let (datagram, commit) = pending.into_parts();
+                                        let committed = reservation.commit_with(
+                                            datagram,
+                                            tokio::time::Instant::now(),
+                                            || {
+                                                let accepted = protocol.commit_request(
+                                                    commit,
+                                                    peer,
+                                                    clock.monotonic_now(),
+                                                    &SystemRandom,
+                                                )?;
+                                                if accepted.capability() == capability {
+                                                    Ok(())
+                                                } else {
+                                                    Err(UdpPacketError::Generation)
+                                                }
+                                            },
+                                        );
+                                        match committed {
+                                            Ok(()) => {
+                                                record_udp_request_accepted(&metrics, wire_len)
+                                            }
+                                            Err(UdpCommitError::Runtime(error)) => {
+                                                mappings.invalidate_handle(binding.handle);
+                                                record_udp_runtime_failure(&metrics, error);
+                                            }
+                                            Err(UdpCommitError::Protocol(error)) => {
+                                                record_udp_protocol_failure(&metrics, error);
+                                            }
+                                        }
+                                        continue 'packets;
+                                    }
+                                    Err(UdpRuntimeError::Cancelled) => {
+                                        mappings.invalidate_handle(binding.handle);
+                                    }
+                                    Err(error) => {
+                                        drop(provisional);
+                                        record_udp_runtime_failure(&metrics, error);
+                                        continue 'packets;
+                                    }
+                                }
+                            }
+                            if frozen_outbound != outbound {
+                                drop(provisional);
+                                drop(admission_guard);
+                                outbound = frozen_outbound;
+                                continue 'open_direct;
+                            }
+                        }
+                    }
+                } else {
+                    reconcile_udp_generations(&runtime, &mappings);
+                    mappings.prune_protocol(&protocol, clock.monotonic_now());
+                    match protocol.session_count() {
+                        Ok(count) if count >= config.max_sessions => {
+                            drop(provisional);
+                            record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
+                            continue 'packets;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            drop(provisional);
+                            record_udp_protocol_failure(&metrics, error);
+                            break 'packets Err(RunError::RuntimeRoot);
+                        }
+                    }
                 }
-                Err(UdpCommitError::Runtime(error)) => record_udp_runtime_failure(&metrics, error),
-                Err(UdpCommitError::Protocol(error)) => {
-                    record_udp_protocol_failure(&metrics, error)
+                let (datagram, commit) = pending.into_parts();
+                let mut committed_capability = None;
+                let committed = runtime.commit_session_with_resolver(
+                    provisional,
+                    datagram,
+                    tokio::time::Instant::now(),
+                    session_resolver,
+                    || {
+                        // New protocol state and its frozen Direct are published only
+                        // after the runtime session, socket, bytes, and queue are ready.
+                        let accepted = protocol.commit_request(
+                            commit,
+                            peer,
+                            clock.monotonic_now(),
+                            &SystemRandom,
+                        )?;
+                        committed_capability = Some(accepted.capability());
+                        Ok(())
+                    },
+                );
+                match committed {
+                    Ok(handle) => {
+                        let Some(capability) = committed_capability else {
+                            runtime.remove_session(handle);
+                            record_udp_protocol_failure(&metrics, UdpPacketError::Generation);
+                            break 'packets Err(RunError::RuntimeRoot);
+                        };
+                        if mappings
+                            .publish(
+                                capability,
+                                handle,
+                                inbound,
+                                ServerTerminalRoute::Direct(outbound),
+                            )
+                            .is_some()
+                        {
+                            mappings.prune_protocol(&protocol, clock.monotonic_now());
+                        }
+                        record_udp_request_accepted(&metrics, wire_len);
+                    }
+                    Err(UdpCommitError::Runtime(error)) => {
+                        record_udp_runtime_failure(&metrics, error)
+                    }
+                    Err(UdpCommitError::Protocol(error)) => {
+                        record_udp_protocol_failure(&metrics, error)
+                    }
                 }
+                drop(admission_guard);
+                update_udp_resource_metrics(&metrics, &registry);
+                continue 'packets;
             }
-            drop(admission_guard);
-            update_udp_resource_metrics(&metrics, &registry);
         };
 
         let forced = if terminal.is_err() {
@@ -2320,6 +2375,14 @@ mod tests {
         {
             let state = mappings.state.lock().expect("winning mapping");
             assert_eq!((state.by_capability.len(), state.by_handle.len()), (1, 1));
+            assert_eq!(
+                state
+                    .by_capability
+                    .values()
+                    .next()
+                    .map(|binding| binding.terminal),
+                Some(ServerTerminalRoute::Direct(0))
+            );
         }
 
         stop_first.send(()).expect("stop first root");
@@ -2634,7 +2697,15 @@ mod tests {
                 .expect("replacement seed queue")
                 .expect("replacement seed datagram"),
         );
-        assert_eq!(mappings.publish(capability, replacement_handle, 0, 0), None);
+        assert_eq!(
+            mappings.publish(
+                capability,
+                replacement_handle,
+                0,
+                ServerTerminalRoute::Direct(0),
+            ),
+            None
+        );
         socket_factory.open_gate.add_permits(1);
 
         let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
@@ -2856,7 +2927,10 @@ mod tests {
             })
             .expect("commit lifecycle generation");
         let capability = capability.expect("lifecycle capability");
-        assert_eq!(mappings.publish(capability, handle, 0, 0), None);
+        assert_eq!(
+            mappings.publish(capability, handle, 0, ServerTerminalRoute::Direct(0),),
+            None
+        );
         drop(
             manager
                 .pop(handle, UdpDirection::ToTarget)
@@ -2867,7 +2941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_udp_identities_share_one_protocol_session_ceiling() {
+    async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceiling() {
         const REJECT_DNS_QUERY: &[u8] = &[
             0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, b'r',
             b'e', b'j', b'e', b'c', b't', 0x04, b't', b'e', b's', b't', 0x00, 0x00, 0x01, 0x00,
@@ -2962,6 +3036,13 @@ mod tests {
         {
             let state = mappings.state.lock().expect("first mapping state");
             assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
+            assert_eq!(
+                state.orphaned.values().copied().next(),
+                Some(FrozenUdpIdentity {
+                    inbound: 0,
+                    terminal: ServerTerminalRoute::Reject,
+                })
+            );
         }
         assert_eq!(registry.snapshot().udp_sessions, 0);
         assert_pending(target.recv_from(&mut received), "typed reject forwarded").await;
@@ -2991,14 +3072,29 @@ mod tests {
         );
         peer.send_to(&first_direct, listen)
             .await
-            .expect("first direct upgrade");
-        let (length, _) = recv_udp(&target, &mut received).await;
-        assert_eq!(&received[..length], b"first-direct");
-        assert_eq!(protocol.session_count().expect("direct protocol count"), 1);
-        assert_eq!(registry.snapshot().udp_sessions, 1);
+            .expect("send after frozen reject");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if metrics.encode_text().expect("frozen reject metrics").contains(
+                    "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"rejected\"} 2",
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("frozen reject commit deadline");
+        assert_pending(
+            target.recv_from(&mut received),
+            "frozen reject upgraded to Direct",
+        )
+        .await;
+        assert_eq!(protocol.session_count().expect("reject protocol count"), 1);
+        assert_eq!(registry.snapshot().udp_sessions, 0);
         {
-            let state = mappings.state.lock().expect("direct mapping state");
-            assert_eq!((state.by_capability.len(), state.orphaned.len()), (1, 0));
+            let state = mappings.state.lock().expect("frozen reject mapping state");
+            assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
         }
 
         let oversized_payload = vec![b'x'; 513];
@@ -3011,10 +3107,25 @@ mod tests {
         peer.send_to(&oversized, listen)
             .await
             .expect("oversized authenticated datagram");
-        let (length, _) = recv_udp(&target, &mut received).await;
-        assert_eq!(&received[..length], oversized_payload);
-        assert!(metrics.encode_text().expect("oversized metrics").contains(
-            "ferrum2_sniff_total{role=\"server\",transport=\"udp\",stage=\"sniff\",outcome=\"limit\",protocol=\"none\"} 1"
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if metrics.encode_text().expect("oversized metrics").contains(
+                    "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"rejected\"} 3",
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("oversized frozen reject deadline");
+        assert_pending(
+            target.recv_from(&mut received),
+            "oversized frozen reject was forwarded",
+        )
+        .await;
+        assert!(!metrics.encode_text().expect("sniff metrics").contains(
+            "ferrum2_sniff_total{role=\"server\",transport=\"udp\",stage=\"sniff\",outcome=\"limit\""
         ));
 
         let mut second =
@@ -3042,9 +3153,9 @@ mod tests {
             .await
             .expect("shared session ceiling deadline");
             assert_eq!(protocol.session_count().expect("shared ceiling count"), 1);
-            assert_eq!(registry.snapshot().udp_sessions, 1);
+            assert_eq!(registry.snapshot().udp_sessions, 0);
             let state = mappings.state.lock().expect("shared ceiling mapping");
-            assert_eq!((state.by_capability.len(), state.orphaned.len()), (1, 0));
+            assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
         }
         assert_pending(
             target.recv_from(&mut received),
@@ -3059,9 +3170,24 @@ mod tests {
             encoded_udp_request(&mut first, clock.as_ref(), target_address, b"still-direct");
         peer.send_to(&still_direct, listen)
             .await
-            .expect("existing identity remains legal");
-        let (length, _) = recv_udp(&target, &mut received).await;
-        assert_eq!(&received[..length], b"still-direct");
+            .expect("existing rejected identity remains frozen");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if metrics.encode_text().expect("final reject metrics").contains(
+                    "ferrum2_udp_datagrams_total{role=\"server\",direction=\"client_to_target\",outcome=\"rejected\"} 4",
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("final frozen reject deadline");
+        assert_pending(
+            target.recv_from(&mut received),
+            "frozen reject later forwarded",
+        )
+        .await;
 
         stop.send(()).expect("stop production UDP root");
         assert_eq!(server.await.expect("production UDP task"), Ok(()));
@@ -3112,7 +3238,13 @@ mod tests {
         assert!(manager.remove(handle_a));
         mappings.reconcile_runtime(&manager);
         assert_eq!(mappings.handle(capability_a), None);
-        assert_eq!(mappings.inbound(capability_a), Some(0));
+        assert_eq!(
+            mappings.identity(capability_a),
+            Some(FrozenUdpIdentity {
+                inbound: 0,
+                terminal: ServerTerminalRoute::Direct(0),
+            })
+        );
         assert_eq!(mappings.capability(handle_a).await, None);
         assert_eq!(manager_registry.snapshot().udp_sessions, 0);
         mappings.prune_protocol(
@@ -3133,7 +3265,7 @@ mod tests {
             lifecycle_protocol.session_count().expect("retired A count"),
             0
         );
-        assert_eq!(mappings.inbound(capability_a), None);
+        assert_eq!(mappings.identity(capability_a), None);
         let late_response = Datagram::new(
             TargetAddr::ip(target).expect("late target"),
             b"late".as_slice().into(),
@@ -3235,7 +3367,13 @@ mod tests {
 
         assert_eq!(registry.snapshot().udp_sessions, 0);
         assert_eq!(mappings.handle(capability), None);
-        assert_eq!(mappings.inbound(capability), Some(0));
+        assert_eq!(
+            mappings.identity(capability),
+            Some(FrozenUdpIdentity {
+                inbound: 0,
+                terminal: ServerTerminalRoute::Direct(0),
+            })
+        );
         assert_eq!(mappings.capability(old_handle).await, None);
         assert_eq!(
             manager
@@ -3296,10 +3434,17 @@ mod tests {
         assert_eq!(registry.snapshot().udp_sessions, 0);
         assert_eq!(mappings.handle(capability), None);
         assert_eq!(mappings.capability(new_handle).await, None);
+        assert_eq!(
+            mappings.identity(capability),
+            Some(FrozenUdpIdentity {
+                inbound: 0,
+                terminal: ServerTerminalRoute::Direct(0),
+            })
+        );
     }
 
     #[tokio::test]
-    async fn udp_mapping_pins_first_direct_and_rejects_later_outbound() {
+    async fn udp_mapping_pins_first_direct_and_forwards_later_targets() {
         let listen = reserve_address();
         let first_target = udp_loopback().await;
         let second_target = udp_loopback().await;
@@ -3370,16 +3515,24 @@ max_sessions = 1
         .expect("first outbound receive");
         assert_eq!(&received[..length], b"first outbound");
 
-        let mismatched = encoded_udp_request(
+        let later_target = encoded_udp_request(
             &mut client,
             &clock,
             TargetAddr::ip(second_address).expect("second target"),
-            b"mismatched outbound",
+            b"frozen outbound",
         );
         socket
-            .send_to(&mismatched, listen)
+            .send_to(&later_target, listen)
             .await
-            .expect("send mismatched outbound request");
+            .expect("send later target request");
+        let (length, _) = tokio::time::timeout(
+            Duration::from_secs(1),
+            second_target.recv_from(&mut received),
+        )
+        .await
+        .expect("later target receive deadline")
+        .expect("later target receive");
+        assert_eq!(&received[..length], b"frozen outbound");
         let pinned = encoded_udp_request(
             &mut client,
             &clock,
@@ -3398,11 +3551,6 @@ max_sessions = 1
         .expect("pinned outbound receive deadline")
         .expect("pinned outbound receive");
         assert_eq!(&received[..length], b"pinned outbound");
-        assert_pending(
-            second_target.recv_from(&mut received),
-            "mismatched Direct outbound crossed the pinned UDP mapping",
-        )
-        .await;
 
         stop.send(()).expect("stop pinned UDP server");
         assert_eq!(server.await.expect("pinned UDP server task"), Ok(()));

@@ -686,7 +686,7 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
 }
 
 #[tokio::test]
-async fn route_sniff_reject_udp_prepares_before_policy_and_rejects_before_reservation() {
+async fn route_sniff_reject_udp_freezes_first_terminal_before_reservation() {
     const REJECT_DNS_QUERY: &[u8] = &[
         0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, b'r', b'e',
         b'j', b'e', b'c', b't', 0x04, b't', b'e', b's', b't', 0x00, 0x00, 0x01, 0x00, 0x01,
@@ -764,10 +764,28 @@ async fn route_sniff_reject_udp_prepares_before_policy_and_rejects_before_reserv
         "replayed reject reserved runtime"
     );
 
-    let routed = encoded_udp_request(&mut client, &clock, target_address, b"not-dns");
+    let frozen_reject =
+        encoded_udp_request(&mut client, &clock, target_address.clone(), b"not-dns");
+    peer.send_to(&frozen_reject, listen)
+        .await
+        .expect("frozen reject UDP send");
+    assert_pending(
+        target.recv_from(&mut received),
+        "frozen reject identity reached target",
+    )
+    .await;
+    assert_eq!(
+        registry.snapshot(),
+        baseline,
+        "frozen reject reserved target runtime"
+    );
+
+    let mut direct_client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("direct UDP identity");
+    let routed = encoded_udp_request(&mut direct_client, &clock, target_address, b"not-dns");
     peer.send_to(&routed, listen)
         .await
-        .expect("routed UDP send");
+        .expect("fresh routed UDP send");
     let (length, _) = recv_udp(&target, &mut received).await;
     assert_eq!(&received[..length], b"not-dns");
 

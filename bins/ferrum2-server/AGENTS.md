@@ -21,3 +21,5 @@ Place focused orchestration tests with the corresponding `run/` module. For exte
 ## Runtime and Security Rules
 
 Keep task, socket, session, and shutdown ownership explicit and bounded. Do not introduce protocol fallback after authentication or route selection fails. Errors and telemetry must not expose keys, plaintext, or peer data; use shared redaction and metric types. Preserve clean rebind behavior after shutdown and deterministic cleanup on partial failures. The repository-level `AGENTS.md` continues to apply.
+
+An authenticated Shadowsocks UDP identity performs one route decision when its first valid datagram commits. Freeze the resulting terminal and, for Direct, its outbound across every later target, RuleSet refresh, idle rebuild, and network reset until the protocol identity retires. Later datagrams must not re-run route or sniff evaluation. Resource failure before the first atomic runtime/protocol commit remains non-mutating and does not freeze a candidate route.

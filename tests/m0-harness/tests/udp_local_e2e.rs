@@ -96,7 +96,7 @@ fn dns_udp_round_trip(
 }
 
 #[test]
-fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
+fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
     const CLIENT_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
     const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
     const SERVER_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
@@ -130,10 +130,11 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
         })
     };
     let route_echo = echo_once(route_target);
-    let malformed_echo = echo_once(malformed_target);
-    rejected_target
-        .set_read_timeout(Some(Duration::from_millis(300)))
-        .expect("rejected target timeout");
+    for target in [&malformed_target, &rejected_target] {
+        target
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("rejected target timeout");
+    }
 
     let server_address = unused_tcp_udp_loopback();
     let client_address = unused_loopback();
@@ -179,7 +180,7 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
     wait_for_listener(&mut client, client_address);
     wait_for_metrics(client_metrics);
     drop(_spawn_guard);
-    let (control, application, relay) = udp_associate(client_address);
+    let (reject_control, reject_application, reject_relay) = udp_associate(client_address);
 
     let query = |id, name: &str| {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
@@ -189,7 +190,7 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
         ));
         message.to_vec().expect("M14 DNS query")
     };
-    let exchange = |target, payload: &[u8]| {
+    let exchange = |application: &UdpSocket, relay, target, payload: &[u8]| {
         let mut request = vec![0, 0, 0];
         request.extend_from_slice(&ip_target(target));
         request.extend_from_slice(payload);
@@ -205,22 +206,18 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
         assert_eq!(&response[..length], request);
     };
 
-    let routed_query = query(0x1401, "route.test.");
-    exchange(route_address, &routed_query);
-    assert_eq!(route_echo.join().expect("route target join"), routed_query);
-
     let rejected_query = query(0x1402, "reject.test.");
     let mut request = vec![0, 0, 0];
     request.extend_from_slice(&ip_target(rejected_address));
     request.extend_from_slice(&rejected_query);
-    application
-        .send_to(&request, relay)
+    reject_application
+        .send_to(&request, reject_relay)
         .expect("rejected UDP request");
-    application
+    reject_application
         .set_read_timeout(Some(Duration::from_millis(300)))
         .expect("rejected response timeout");
     assert!(matches!(
-        application.recv_from(&mut [0_u8; 1]),
+        reject_application.recv_from(&mut [0_u8; 1]),
         Err(error)
             if matches!(
                 error.kind(),
@@ -235,15 +232,58 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
             )
     ));
-    application
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("restore application timeout");
 
     let malformed = b"not-a-dns-query";
-    exchange(malformed_address, malformed);
+    let mut frozen_reject = vec![0, 0, 0];
+    frozen_reject.extend_from_slice(&ip_target(malformed_address));
+    frozen_reject.extend_from_slice(malformed);
+    reject_application
+        .send_to(&frozen_reject, reject_relay)
+        .expect("frozen reject UDP request");
+    assert!(matches!(
+        reject_application.recv_from(&mut [0_u8; 1]),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    ));
+    assert!(matches!(
+        malformed_target.recv_from(&mut [0_u8; 1]),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    ));
+    reject_application
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("restore rejected application timeout");
+
+    let (direct_control, direct_application, direct_relay) = udp_associate(client_address);
+    let routed_query = query(0x1401, "route.test.");
+    exchange(
+        &direct_application,
+        direct_relay,
+        route_address,
+        &routed_query,
+    );
+    assert_eq!(route_echo.join().expect("route target join"), routed_query);
+    rejected_target
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("restore frozen Direct target timeout");
+    let frozen_direct_echo = echo_once(rejected_target);
+    exchange(
+        &direct_application,
+        direct_relay,
+        rejected_address,
+        &rejected_query,
+    );
     assert_eq!(
-        malformed_echo.join().expect("malformed target join"),
-        malformed
+        frozen_direct_echo
+            .join()
+            .expect("frozen Direct target join"),
+        rejected_query
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -264,15 +304,32 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    drop((application, control));
+    drop((
+        reject_application,
+        reject_control,
+        direct_application,
+        direct_control,
+    ));
 
-    let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO_SESSION);
-    assert!(
-        client_body
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let client_body = loop {
+        let body = wait_for_metrics(client_metrics);
+        let zero_sessions = body
+            .windows(CLIENT_ZERO_SESSION.len())
+            .any(|window| window == CLIENT_ZERO_SESSION.as_bytes());
+        let zero_buffer = body
             .windows(CLIENT_ZERO_BUFFER.len())
-            .any(|window| window == CLIENT_ZERO_BUFFER.as_bytes()),
-        "client UDP buffer owner did not reap"
-    );
+            .any(|window| window == CLIENT_ZERO_BUFFER.as_bytes());
+        if zero_sessions && zero_buffer {
+            break body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client UDP owners did not reap: {}",
+            String::from_utf8_lossy(&body)
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
     thread::sleep(Duration::from_secs(61));
     let deadline = Instant::now() + Duration::from_secs(10);
     let server_body = loop {
@@ -312,8 +369,10 @@ fn m14_server_udp_dns_sniff_routes_and_rejects_before_target() {
     }
     let _spawn_guard = local_support::hold_process_spawns_at_or_below(baseline_children);
     assert_eq!(active_child_count(), baseline_children);
-    drop(rejected_target);
-    drop(UdpSocket::bind(relay).expect("M14 client UDP relay exact rebind"));
+    drop(malformed_target);
+    for relay in [reject_relay, direct_relay] {
+        drop(UdpSocket::bind(relay).expect("M14 client UDP relay exact rebind"));
+    }
     for address in [route_address, malformed_address, rejected_address] {
         drop(UdpSocket::bind(address).expect("M14 UDP target exact rebind"));
     }
