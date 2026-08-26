@@ -92,10 +92,10 @@ async fn ipv6_lookup_is_stored_without_family_conversion() {
 }
 
 #[derive(Clone, Copy)]
-struct StoredEndpoint(SocketAddrV4);
+struct StoredEndpoint(SocketAddr);
 
 impl LocalEndpoint for StoredEndpoint {
-    fn local_endpoint(&self) -> SocketAddrV4 {
+    fn local_socket_addr(&self) -> SocketAddr {
         self.0
     }
 }
@@ -112,10 +112,10 @@ impl Connector for RecordingConnector {
         _target: &TargetAddr,
     ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        ready(Ok(StoredEndpoint(SocketAddrV4::new(
+        ready(Ok(StoredEndpoint(SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::LOCALHOST,
             49152,
-        ))))
+        )))))
     }
 }
 

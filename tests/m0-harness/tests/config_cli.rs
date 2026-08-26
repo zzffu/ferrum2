@@ -10,7 +10,7 @@ use local_support::{
     unused_loopback, write_client_config, write_server_config, write_udp_client_config,
 };
 
-const CLIENT_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"127.0.0.1:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
+const CLIENT_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:1080\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\ntype = \"shadowsocks\"\nserver = \"127.0.0.1:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
 const SERVER_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"127.0.0.1:8388\"\noutbound = \"direct\"\n[[outbounds]]\ntag = \"direct\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n";
 
@@ -313,12 +313,12 @@ fn assert_startup_bind_failure(
 }
 
 fn tun_only_client() -> String {
-    "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".into()
+    "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\ntype = \"shadowsocks\"\nserver = \"192.0.2.10:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n".into()
 }
 
 fn tun_client(fields: &str) -> String {
     format!(
-        "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\n{fields}\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\nserver = \"192.0.2.10:8388\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+        "schema_version = 2\n[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\n{fields}\noutbound = \"proxy\"\n[[outbounds]]\ntag = \"proxy\"\ntype = \"shadowsocks\"\nserver = \"192.0.2.10:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
     )
 }
 
@@ -359,8 +359,19 @@ fn tagged_client(inbounds: &[SocketAddrV4], servers: &[SocketAddrV4]) -> String 
     }
     for (index, server) in servers.iter().enumerate() {
         source.push_str(&format!(
-            "[[outbounds]]\ntag = \"o{index}\"\nserver = \"{server}\"\n"
+            "[[outbounds]]\ntag = \"o{index}\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
         ));
+    }
+    source
+}
+
+fn tagged_server(inbounds: &[SocketAddrV4]) -> String {
+    let mut source = "schema_version = 2\n".to_owned();
+    for (index, listen) in inbounds.iter().enumerate() {
+        source.push_str(&format!(
+            "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"{listen}\"\noutbound = \"o{index}\"\n"
+        ));
+        source.push_str(&format!("[[outbounds]]\ntag = \"o{index}\"\n"));
     }
     source.push_str(
         "[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
@@ -368,27 +379,15 @@ fn tagged_client(inbounds: &[SocketAddrV4], servers: &[SocketAddrV4]) -> String 
     source
 }
 
-fn tagged_server(inbounds: &[SocketAddrV4]) -> String {
-    tagged_client(inbounds, inbounds)
-        .lines()
-        .filter(|line| !line.starts_with("server = "))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
-}
-
 fn routed_tagged(source: String) -> String {
-    source
+    let source = source
         .lines()
         .filter(|line| !line.starts_with("outbound = "))
         .collect::<Vec<_>>()
-        .join("\n")
-        .replacen(
-            "[shadowsocks]",
-            "[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\ndomain = \"example.test\"\nport = 443\noutbound = \"o1\"\n[shadowsocks]",
-            1,
-        )
-        + "\n"
+        .join("\n");
+    format!(
+        "{source}\n[route]\nfinal = \"o0\"\n[[route.rules]]\ninbound = \"i0\"\nnetwork = \"tcp\"\ndomain = \"example.test\"\nport = 443\naction = \"route\"\noutbound = \"o1\"\n"
+    )
 }
 
 fn reserve_server_tcp_udp() -> (TcpListener, UdpSocket, SocketAddrV4) {
@@ -924,19 +923,19 @@ fn invalid_matrix_is_redacted_and_uses_exit_two() {
             "client unknown method",
             "ferrum2-client",
             CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "future-method", 1),
-            Some("shadowsocks.method"),
+            Some("outbounds.method"),
         ),
         (
             "client AES256 short PSK",
             "ferrum2-client",
             CLIENT_BASE.replacen("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", 1),
-            Some("shadowsocks.psk"),
+            Some("outbounds.psk"),
         ),
         (
             "client secret",
             "ferrum2-client",
             CLIENT_BASE.replacen("AAECAwQFBgcICQoLDA0ODw==", sentinel, 1),
-            Some("shadowsocks.psk"),
+            Some("outbounds.psk"),
         ),
         (
             "client metrics non-loopback",
@@ -1074,11 +1073,14 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         )),
     )
     .expect("client routed config");
-    #[rustfmt::skip]
-    let chain = tagged_client(&[client_address_a], &[server_address_a, server_address_b])
-        .replacen("outbound = \"o0\"", "outbound = \"two-hop\"", 1)
-        .replacen(&format!("server = \"{server_address_b}\""), &format!("server = \"{server_address_b}\"\nmethod = \"2022-blake3-aes-256-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\""), 1)
-        .replacen("[shadowsocks]", "[[chains]]\ntag = \"two-hop\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1);
+    let chain = format!(
+        "{}[[chains]]\ntag = \"two-hop\"\nhops = [\"o0\", \"o1\"]\n",
+        tagged_client(&[client_address_a], &[server_address_a, server_address_b]).replacen(
+            "outbound = \"o0\"",
+            "outbound = \"two-hop\"",
+            1
+        )
+    );
     std::fs::write(&client_chain_path, chain).expect("client chain config");
     std::fs::write(
         &server_route_path,
@@ -1088,10 +1090,12 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
     let selectors =
         "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n";
     let selector = |source: String| {
-        source
-            .replace("outbound = \"o0\"", "outbound = \"manual\"")
-            .replace("outbound = \"o1\"", "outbound = \"manual\"")
-            .replacen("[shadowsocks]", &format!("{selectors}[shadowsocks]"), 1)
+        format!(
+            "{}{selectors}",
+            source
+                .replace("outbound = \"o0\"", "outbound = \"manual\"")
+                .replace("outbound = \"o1\"", "outbound = \"manual\"")
+        )
     };
     std::fs::write(
         &client_selector_path,
@@ -1222,31 +1226,39 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
         "error[config.dependency_cycle] config.dependency_cycle: the configuration dependency graph contains a cycle: selector[0] -> selector[0]\n",
         cycle_sentinel,
     );
-    for (name, source, field) in [
-        (
-            "partial-outbound-credential",
-            tagged_client(&[client_address_a], &[server_address_a]).replacen(
-                &format!("server = \"{server_address_a}\""),
-                &format!("server = \"{server_address_a}\"\nmethod = \"2022-blake3-aes-128-gcm\""),
-                1,
+    for (name, source, field) in
+        [
+            (
+                "partial-outbound-credential",
+                tagged_client(&[client_address_a], &[server_address_a]).replacen(
+                    "psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n",
+                    "",
+                    1,
+                ),
+                "outbounds.psk",
             ),
-            "outbounds.psk",
-        ),
-        (
-            "invalid-chain-hop",
-            tagged_client(&[client_address_a], &[server_address_a, server_address_b])
-                .replacen("outbound = \"o0\"", "outbound = \"two-hop\"", 1)
-                .replacen("[shadowsocks]", "[[chains]]\ntag = \"two-hop\"\nhops = [\"o0\", \"missing-hop\"]\n[shadowsocks]", 1),
-            "chains.hops",
-        ),
-    ] {
+            (
+                "invalid-chain-hop",
+                format!(
+                    "{}[[chains]]\ntag = \"two-hop\"\nhops = [\"o0\", \"missing-hop\"]\n",
+                    tagged_client(&[client_address_a], &[server_address_a, server_address_b])
+                        .replacen("outbound = \"o0\"", "outbound = \"two-hop\"", 1)
+                ),
+                "chains.hops",
+            ),
+        ]
+    {
         let path = directory.path().join(format!("{name}.toml"));
         std::fs::write(&path, source).expect(name);
         assert_invalid(
             "ferrum2-client",
             &path,
             &format!("error[config.semantic] {field}: configuration value is invalid\n"),
-            if name.starts_with("invalid") { "missing-hop" } else { "2022-blake3-aes-128-gcm" },
+            if name.starts_with("invalid") {
+                "missing-hop"
+            } else {
+                "2022-blake3-aes-128-gcm"
+            },
         );
     }
 
@@ -1268,7 +1280,7 @@ fn tagged_check_is_offline_and_multi_run_uses_transition_startup_errors() {
 }
 
 #[test]
-fn one_entry_tagged_run_matches_legacy_startup_behavior() {
+fn one_entry_tagged_run_matches_stable_startup_behavior() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (_client_listener, client_address) = reserve_loopback();
     let (_server_listener, _server_udp, server_address) = reserve_server_tcp_udp();
@@ -1286,30 +1298,31 @@ fn one_entry_tagged_run_matches_legacy_startup_behavior() {
             tagged_server(&[server_address]),
         ),
     ];
-    for (binary, legacy, tagged) in cases {
-        let legacy_path = directory.path().join(format!("{binary}-legacy.toml"));
+    for (binary, baseline, tagged) in cases {
+        let baseline_path = directory.path().join(format!("{binary}-baseline.toml"));
         let tagged_path = directory.path().join(format!("{binary}-tagged.toml"));
-        std::fs::write(&legacy_path, legacy).expect("legacy config");
+        std::fs::write(&baseline_path, baseline).expect("baseline config");
         std::fs::write(&tagged_path, tagged).expect("tagged config");
-        let legacy = run_binary(
+        let baseline = run_binary(
             binary,
-            &["--config", legacy_path.to_str().expect("UTF-8 path")],
+            &["--config", baseline_path.to_str().expect("UTF-8 path")],
         );
         let tagged = run_binary(
             binary,
             &["--config", tagged_path.to_str().expect("UTF-8 path")],
         );
-        assert_eq!(tagged.status.code(), legacy.status.code(), "{binary}");
-        assert_eq!(tagged.stdout, legacy.stdout, "{binary}");
-        let legacy_report = assert_startup_bind_failure(&legacy, binary, &legacy_path, binary);
+        assert_eq!(tagged.status.code(), baseline.status.code(), "{binary}");
+        assert_eq!(tagged.stdout, baseline.stdout, "{binary}");
+        let baseline_report =
+            assert_startup_bind_failure(&baseline, binary, &baseline_path, binary);
         let tagged_report = assert_startup_bind_failure(&tagged, binary, &tagged_path, binary);
-        match (legacy_report, tagged_report) {
-            (Some(legacy), Some(tagged)) => assert_eq!(
+        match (baseline_report, tagged_report) {
+            (Some(baseline), Some(tagged)) => assert_eq!(
                 stable_client_startup_bind_semantics(&tagged),
-                stable_client_startup_bind_semantics(&legacy),
+                stable_client_startup_bind_semantics(&baseline),
                 "{binary} stable startup semantics"
             ),
-            (None, None) => assert_eq!(tagged.stderr, legacy.stderr, "{binary}"),
+            (None, None) => assert_eq!(tagged.stderr, baseline.stderr, "{binary}"),
             _ => panic!("{binary} startup report shape changed between configurations"),
         }
     }

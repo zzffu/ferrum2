@@ -6,16 +6,16 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ferrum2_core::TargetAddr;
-use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use ferrum2_core::route::compile_egress_plans_with_roots;
+use ferrum2_crypto::{MethodProfile, MethodPsk};
 use ferrum2_rule::{
-    ActionTable, EgressPlanHandle, Network, RouteRule, RouteTable, SelectorCompileError,
-    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute, TaggedRouteRule,
-    TaggedStaticBinding, compile_selector_plans_with_roots,
+    EgressPlanHandle, SelectorCompileError, SelectorControl, SelectorDefinition, TaggedInbound,
+    TaggedOutbound, TaggedPlan,
 };
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
+use crate::error::{ConfigError, ConfigField};
 use crate::model::{
     ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, DirectDomainResolver,
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsRuntimeConfig,
@@ -27,7 +27,7 @@ use crate::model::{
 use crate::raw::{
     RawChain, RawClientInbound, RawClientOutbound, RawClientRoot, RawDns, RawLogging, RawMetrics,
     RawReplay, RawRoute, RawRuntime, RawSelector, RawServerInbound, RawServerOutbound,
-    RawServerRoot, RawShadowsocks, RawTun, RawUdp, ScalarOrList, SecretString,
+    RawServerRoot, RawTun, RawUdp, SecretString,
 };
 
 pub(super) mod v2;
@@ -116,6 +116,7 @@ struct GraphValidation<'a> {
     route_roots: &'a [&'a str],
     detour_tags: &'a [&'a str],
     retained_client_inbounds: usize,
+    explicit_route: bool,
 }
 
 fn validate_dns(
@@ -268,6 +269,19 @@ fn validate_dns(
         if rule.outbound.is_some() {
             return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
         }
+        let action = rule
+            .action
+            .as_deref()
+            .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesAction))?;
+        if action == "reject" {
+            if rule.server.is_some() {
+                return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
+            }
+            continue;
+        }
+        if action != "route" {
+            return Err(ConfigError::semantic(ConfigField::DnsRouteRulesAction));
+        }
         let server_tag = rule
             .server
             .as_deref()
@@ -282,12 +296,9 @@ fn validate_dns(
     if reached.contains(&false) {
         return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
     }
-    let route = ActionTable::new(Vec::new(), final_server)
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRules))?;
     Ok(Some(DnsConfig {
         inbounds,
         servers,
-        route,
         timeout,
         max_inflight,
         runtime: dns_runtime,
@@ -348,33 +359,6 @@ pub(super) fn validate_direct_domain_resolver(
         Some(_) => return Err(ConfigError::semantic(ConfigField::OutboundsDomainStrategy)),
     };
     Ok(DirectDomainResolver::DnsServer { server, strategy })
-}
-
-fn validate_network(
-    value: Option<&str>,
-    field: ConfigField,
-) -> Result<Option<Network>, ConfigError> {
-    value
-        .map(|network| match network {
-            "tcp" => Ok(Network::Tcp),
-            "udp" => Ok(Network::Udp),
-            _ => Err(ConfigError::semantic(field)),
-        })
-        .transpose()
-}
-
-fn scalar_string(
-    value: Option<&ScalarOrList<String>>,
-    field: ConfigField,
-) -> Result<Option<&str>, ConfigError> {
-    value
-        .map(|value| {
-            value
-                .scalar()
-                .map(String::as_str)
-                .ok_or_else(|| ConfigError::semantic(field))
-        })
-        .transpose()
 }
 
 fn parse_socket(value: &str, field: ConfigField) -> Result<SocketAddr, ConfigError> {
@@ -937,10 +921,6 @@ pub(super) struct PreparedServerValidation {
     pub(super) dependency_egress_direct: Vec<bool>,
 }
 
-pub(super) fn validate_client(raw: RawClientRoot) -> Result<ValidatedClientConfig, ConfigError> {
-    validate_client_inner(raw, &[], &[], &[], false, true).map(|prepared| prepared.config)
-}
-
 pub(super) fn validate_client_prepared(
     raw: RawClientRoot,
     rule_set_tags: &[&str],
@@ -953,7 +933,6 @@ pub(super) fn validate_client_prepared(
         dependency_egress_tags,
         dependency_dns_servers,
         true,
-        false,
     )
 }
 
@@ -963,7 +942,6 @@ fn validate_client_inner(
     dependency_egress_tags: &[&str],
     dependency_dns_servers: &[usize],
     defer_tun_targets: bool,
-    compile_dns_compatibility: bool,
 ) -> Result<PreparedClientValidation, ConfigError> {
     let schema_version = v2::validate_version(raw.schema_version)?;
     let route_network = validate_route_network(raw.route.as_ref())?;
@@ -1010,39 +988,43 @@ fn validate_client_inner(
         .iter()
         .map(|inbound| inbound.tag.clone())
         .collect::<Vec<_>>();
+    let context_outbounds = raw
+        .inbounds
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|inbound| inbound.outbound.clone())
+        .collect::<Vec<_>>();
+    let explicit_route = raw.route.is_some();
     let route_draft = v2::compile_route_draft(
         raw.route.as_ref(),
         &context_inbounds,
+        &context_outbounds,
         rule_set_tags,
         v2::Role::Client,
         tun.as_ref().map(|_| socks_inbound_count),
         raw.dns.is_some(),
         raw.runtime.max_connections,
     )?;
-    let route_roots = route_draft
-        .as_ref()
-        .map(v2::RouteDraft::root_tags)
-        .unwrap_or_default();
+    let route_roots = route_draft.root_tags();
     let dns_detour_tags = raw.dns.as_ref().map(dns_detour_tags).unwrap_or_default();
     let detour_tags = dependency_egress_tags
         .iter()
         .copied()
         .chain(dns_detour_tags.iter().copied())
         .collect::<Vec<_>>();
-    let graph_route = raw.route.as_ref().map(v2_graph_route);
-    let (listen, inbounds, outbounds, route, mut roots, physical_first_hops, mut direct_detours) =
+    let (inbounds, outbounds, selector, mut roots, physical_first_hops, mut direct_detours) =
         validate_client_graph(
-            raw.shadowsocks,
             raw.inbounds,
             raw.outbounds,
             raw.chains,
             raw.selectors,
-            graph_route,
             &direct_domain_resolvers,
             GraphValidation {
                 route_roots: &route_roots,
                 detour_tags: &detour_tags,
                 retained_client_inbounds: socks_inbound_count,
+                explicit_route,
             },
         )?;
     if roots.len() < route_roots.len()
@@ -1054,7 +1036,7 @@ fn validate_client_inner(
     let dns_direct_detours = direct_detours.split_off(dependency_egress_tags.len());
     let mut detours = roots.split_off(route_roots.len());
     let dns_detours = detours.split_off(dependency_egress_tags.len());
-    let route_program = route_draft.map(|draft| draft.finish(roots)).transpose()?;
+    let route = route_draft.finish(roots, selector)?;
     let ordinary_listens = inbounds
         .iter()
         .map(|inbound| SocketAddr::V4(inbound.listen))
@@ -1089,19 +1071,12 @@ fn validate_client_inner(
             )?;
         }
     }
-    let dns_route = if compile_dns_compatibility {
-        dns_route_raw
-            .as_ref()
-            .map(|dns| v2::compile_client_dns(dns, &context_inbounds))
-            .transpose()?
-    } else {
-        dns_route_raw.as_ref().map(|_| ClientDnsRoute {
-            compatibility_program: None,
-            listener_count: dns.as_ref().map_or(0, |dns| dns.inbounds.len()),
-            ordinary_count: context_inbounds.len(),
-            policy_blueprint: None,
-        })
-    };
+    let dns_route = dns_route_raw.as_ref().map(|dns| ClientDnsRoute {
+        listener_count: dns.inbounds.as_deref().map_or(0, <[_]>::len),
+        ordinary_count: context_inbounds.len(),
+        rule_count: dns.route.as_ref().map_or(0, |route| route.rules.len()),
+        policy_blueprint: None,
+    });
     let runtime = validate_runtime(raw.runtime)?;
     let udp = raw.udp.map(validate_udp).transpose()?;
     let logging = validate_logging(raw.logging)?;
@@ -1120,12 +1095,10 @@ fn validate_client_inner(
     Ok(PreparedClientValidation {
         config: ValidatedClientConfig {
             schema_version,
-            listen,
             inbounds,
             outbounds,
             route,
             route_network,
-            route_program,
             tun: tun.map(|tun| tun.config),
             dns,
             dns_route,
@@ -1141,10 +1114,6 @@ fn validate_client_inner(
     })
 }
 
-pub(super) fn validate_server(raw: RawServerRoot) -> Result<ValidatedServerConfig, ConfigError> {
-    validate_server_inner(raw, &[], &[], &[], true).map(|prepared| prepared.config)
-}
-
 pub(super) fn validate_server_prepared(
     raw: RawServerRoot,
     rule_set_tags: &[&str],
@@ -1156,7 +1125,6 @@ pub(super) fn validate_server_prepared(
         rule_set_tags,
         dependency_egress_tags,
         dependency_dns_servers,
-        false,
     )
 }
 
@@ -1165,7 +1133,6 @@ fn validate_server_inner(
     rule_set_tags: &[&str],
     dependency_egress_tags: &[&str],
     dependency_dns_servers: &[usize],
-    compile_dns_compatibility: bool,
 ) -> Result<PreparedServerValidation, ConfigError> {
     if raw.tun.is_some() {
         return Err(ConfigError::semantic(ConfigField::Tun));
@@ -1200,39 +1167,44 @@ fn validate_server_inner(
         .iter()
         .map(|inbound| inbound.tag.clone())
         .collect::<Vec<_>>();
+    let context_outbounds = raw
+        .inbounds
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|inbound| inbound.outbound.clone())
+        .collect::<Vec<_>>();
     if raw.chains.is_some() {
         return Err(ConfigError::semantic(ConfigField::Chains));
     }
+    let explicit_route = raw.route.is_some();
     let route_draft = v2::compile_route_draft(
         raw.route.as_ref(),
         &context_inbounds,
+        &context_outbounds,
         rule_set_tags,
         v2::Role::Server,
         None,
         raw.dns.is_some(),
         raw.runtime.max_connections,
     )?;
-    let route_roots = route_draft
-        .as_ref()
-        .map(v2::RouteDraft::root_tags)
-        .unwrap_or_default();
+    let route_roots = route_draft.root_tags();
     let dns_detour_tags = raw.dns.as_ref().map(dns_detour_tags).unwrap_or_default();
     let detour_tags = dependency_egress_tags
         .iter()
         .copied()
         .chain(dns_detour_tags.iter().copied())
         .collect::<Vec<_>>();
-    let graph_route = raw.route.as_ref().map(v2_graph_route);
-    let (listen, inbounds, outbounds, route, mut roots) = validate_server_graph(
+    let (inbounds, outbounds, selector, mut roots) = validate_server_graph(
         raw.inbounds,
         raw.outbounds,
         raw.selectors,
-        graph_route,
         &direct_domain_resolvers,
         GraphValidation {
             route_roots: &route_roots,
             detour_tags: &detour_tags,
             retained_client_inbounds: 0,
+            explicit_route,
         },
     )?;
     if roots.len() < route_roots.len() || roots.len() - route_roots.len() != detour_tags.len() {
@@ -1240,7 +1212,7 @@ fn validate_server_inner(
     }
     let mut detours = roots.split_off(route_roots.len());
     let dns_detours = detours.split_off(dependency_egress_tags.len());
-    let route_program = route_draft.map(|draft| draft.finish(roots)).transpose()?;
+    let route = route_draft.finish(roots, selector)?;
     let dns_route_raw = raw.dns.clone();
     let dns = validate_dns(
         raw.dns,
@@ -1253,18 +1225,11 @@ fn validate_server_inner(
         },
         dns_detours,
     )?;
-    let dns_route = if compile_dns_compatibility {
-        dns_route_raw
-            .as_ref()
-            .map(|dns| v2::compile_server_dns(dns, &context_inbounds))
-            .transpose()?
-    } else {
-        dns_route_raw.as_ref().map(|_| ServerDnsRoute {
-            compatibility_program: None,
-            ordinary_count: context_inbounds.len(),
-            policy_blueprint: None,
-        })
-    };
+    let dns_route = dns_route_raw.as_ref().map(|dns| ServerDnsRoute {
+        ordinary_count: context_inbounds.len(),
+        rule_count: dns.route.as_ref().map_or(0, |route| route.rules.len()),
+        policy_blueprint: None,
+    });
     let method = parse_method(&raw.shadowsocks.method, ConfigField::ShadowsocksMethod)?;
     let psk = parse_psk(method, &raw.shadowsocks.psk, ConfigField::ShadowsocksPsk)?;
     let runtime = validate_runtime(raw.runtime)?;
@@ -1281,12 +1246,10 @@ fn validate_server_inner(
     Ok(PreparedServerValidation {
         config: ValidatedServerConfig {
             schema_version,
-            listen,
             inbounds,
             outbounds,
             route,
             route_network,
-            route_program,
             dns,
             dns_route,
             psk,
@@ -1299,17 +1262,6 @@ fn validate_server_inner(
         dependency_egress_plans: detours,
         dependency_egress_direct,
     })
-}
-
-fn v2_graph_route(route: &RawRoute) -> RawRoute {
-    RawRoute {
-        auto_detect_interface: route.auto_detect_interface,
-        default_interface: route.default_interface.clone(),
-        final_outbound: route.final_outbound.clone(),
-        sniff: None,
-        rules: Vec::new(),
-        rule_set: Vec::new(),
-    }
 }
 
 fn validate_route_network(raw: Option<&RawRoute>) -> Result<RouteNetworkConfig, ConfigError> {
@@ -1370,10 +1322,9 @@ fn validate_outbound_dial_options(
 }
 
 type ValidatedClientGraph = (
-    SocketAddrV4,
     Vec<ClientInboundConfig>,
     Vec<ClientOutboundConfig>,
-    RouteTable,
+    SelectorControl,
     Vec<EgressPlanHandle>,
     Vec<usize>,
     Vec<bool>,
@@ -1381,12 +1332,10 @@ type ValidatedClientGraph = (
 
 #[allow(clippy::too_many_arguments)]
 fn validate_client_graph(
-    global: Option<RawShadowsocks>,
     tagged_inbounds: Option<Vec<RawClientInbound>>,
     tagged_outbounds: Option<Vec<RawClientOutbound>>,
     chains: Option<Vec<RawChain>>,
     selectors: Option<Vec<RawSelector>>,
-    route: Option<RawRoute>,
     direct_domain_resolvers: &[Option<DirectDomainResolver>],
     validation: GraphValidation<'_>,
 ) -> Result<ValidatedClientGraph, ConfigError> {
@@ -1394,20 +1343,14 @@ fn validate_client_graph(
         route_roots,
         detour_tags,
         retained_client_inbounds: socks_inbound_count,
+        explicit_route,
     } = validation;
-    let global_method = global
-        .as_ref()
-        .map(|global| parse_method(&global.method, ConfigField::ShadowsocksMethod))
-        .transpose()?;
-    let global_psk = global
-        .as_ref()
-        .zip(global_method)
-        .map(|(global, method)| parse_psk(method, &global.psk, ConfigField::ShadowsocksPsk))
-        .transpose()?
-        .map(Arc::new);
     let inbounds = tagged_inbounds.ok_or_else(|| ConfigError::semantic(ConfigField::Inbounds))?;
     let outbounds =
         tagged_outbounds.ok_or_else(|| ConfigError::semantic(ConfigField::Outbounds))?;
+    if selectors.as_deref().is_some_and(<[RawSelector]>::is_empty) {
+        return Err(ConfigError::semantic(ConfigField::Selectors));
+    }
     validate_count(inbounds.len(), ConfigField::Inbounds)?;
     validate_count(outbounds.len(), ConfigField::Outbounds)?;
 
@@ -1446,7 +1389,11 @@ fn validate_client_graph(
             outbound.inet4_bind_address.as_deref(),
             outbound.inet6_bind_address.as_deref(),
         )?;
-        match outbound.outbound_type.as_deref().unwrap_or("shadowsocks") {
+        match outbound
+            .outbound_type
+            .as_deref()
+            .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsType))?
+        {
             "direct" => {
                 if outbound.server.is_some() {
                     return Err(ConfigError::semantic(ConfigField::OutboundsServer));
@@ -1468,24 +1415,16 @@ fn validate_client_graph(
                 });
             }
             "shadowsocks" => {
-                global.as_ref().ok_or_else(|| {
-                    ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config)
-                })?;
-                let psk = match (&outbound.method, &outbound.psk) {
-                    (None, None) => Arc::clone(global_psk.as_ref().ok_or_else(|| {
-                        ConfigError::new(ConfigErrorKind::Syntax, ConfigField::Config)
-                    })?),
-                    (Some(_), None) => {
-                        return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
-                    }
-                    (None, Some(_)) => {
-                        return Err(ConfigError::semantic(ConfigField::OutboundsMethod));
-                    }
-                    (Some(method), Some(psk)) => {
-                        let method = parse_method(method, ConfigField::OutboundsMethod)?;
-                        Arc::new(parse_psk(method, psk, ConfigField::OutboundsPsk)?)
-                    }
-                };
+                let method = outbound
+                    .method
+                    .as_deref()
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsMethod))?;
+                let psk = outbound
+                    .psk
+                    .as_ref()
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsPsk))?;
+                let method = parse_method(method, ConfigField::OutboundsMethod)?;
+                let psk = Arc::new(parse_psk(method, psk, ConfigField::OutboundsPsk)?);
                 let server = parse_socket(
                     outbound
                         .server
@@ -1525,7 +1464,9 @@ fn validate_client_graph(
                 .as_deref()
                 .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == tag))
         {
-            return Err(ConfigError::semantic(if index == 0 {
+            return Err(ConfigError::semantic(if !explicit_route {
+                ConfigField::InboundsOutbound
+            } else if index == 0 {
                 ConfigField::RouteFinal
             } else {
                 ConfigField::RouteRulesOutbound
@@ -1551,44 +1492,29 @@ fn validate_client_graph(
         .chain(detour_tags.iter().copied())
         .collect::<Vec<_>>();
     let extra_roots = graph_roots.as_slice();
-    let ordinary_roots: Vec<String> = if !route_roots.is_empty() {
-        route_roots.iter().map(|tag| (*tag).to_owned()).collect()
-    } else if let Some(route) = route.as_ref() {
-        route
-            .final_outbound
+    let ordinary_roots = route_roots
+        .iter()
+        .map(|tag| (*tag).to_owned())
+        .collect::<Vec<_>>();
+    let (selector, detours) = compile_graph_roots(
+        &inbounds
             .iter()
-            .chain(route.rules.iter().filter_map(|rule| rule.outbound.as_ref()))
-            .cloned()
-            .collect()
-    } else {
-        inbounds
-            .iter()
-            .filter_map(|inbound| inbound.outbound.clone())
-            .collect()
-    };
-    let (route, detours) = validate_route(
-        route,
-        inbounds
-            .iter()
-            .map(|inbound| (inbound.tag.as_str(), inbound.outbound.as_deref()))
-            .collect(),
-        outbounds
+            .map(|inbound| inbound.tag.as_str())
+            .collect::<Vec<_>>(),
+        &outbounds
             .iter()
             .map(|outbound| outbound.tag.as_str())
-            .collect(),
-        selectors.as_deref(),
+            .collect::<Vec<_>>(),
+        selectors.as_deref().unwrap_or(&[]),
         &plans,
         extra_roots,
+        explicit_route,
     )?;
     let validated_inbounds = listens
         .into_iter()
         .take(socks_inbound_count)
         .map(|listen| ClientInboundConfig { listen })
         .collect::<Vec<_>>();
-    let compatibility_listen = validated_inbounds.first().map_or(
-        SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
-        |inbound| inbound.listen,
-    );
     let first_hops = |root: &str| {
         let mut pending = vec![root];
         let mut first = Vec::new();
@@ -1642,10 +1568,9 @@ fn validate_client_graph(
     physical_first_hops.sort_unstable();
     physical_first_hops.dedup();
     Ok((
-        compatibility_listen,
         validated_inbounds,
         validated_outbounds,
-        route,
+        selector,
         detours,
         physical_first_hops,
         direct_detours,
@@ -1711,10 +1636,9 @@ fn validate_chains<'a>(
 }
 
 type ValidatedServerGraph = (
-    SocketAddrV4,
     Vec<ServerInboundConfig>,
     Vec<ServerOutboundConfig>,
-    RouteTable,
+    SelectorControl,
     Vec<EgressPlanHandle>,
 );
 
@@ -1722,7 +1646,6 @@ fn validate_server_graph(
     tagged_inbounds: Option<Vec<RawServerInbound>>,
     tagged_outbounds: Option<Vec<RawServerOutbound>>,
     selectors: Option<Vec<RawSelector>>,
-    route: Option<RawRoute>,
     direct_domain_resolvers: &[DirectDomainResolver],
     validation: GraphValidation<'_>,
 ) -> Result<ValidatedServerGraph, ConfigError> {
@@ -1730,10 +1653,14 @@ fn validate_server_graph(
         route_roots,
         detour_tags,
         retained_client_inbounds: _,
+        explicit_route,
     } = validation;
     let inbounds = tagged_inbounds.ok_or_else(|| ConfigError::semantic(ConfigField::Inbounds))?;
     let outbounds =
         tagged_outbounds.ok_or_else(|| ConfigError::semantic(ConfigField::Outbounds))?;
+    if selectors.as_deref().is_some_and(<[RawSelector]>::is_empty) {
+        return Err(ConfigError::semantic(ConfigField::Selectors));
+    }
     validate_count(inbounds.len(), ConfigField::Inbounds)?;
     validate_count(outbounds.len(), ConfigField::Outbounds)?;
 
@@ -1769,7 +1696,9 @@ fn validate_server_graph(
                 .as_deref()
                 .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == tag))
         {
-            return Err(ConfigError::semantic(if index == 0 {
+            return Err(ConfigError::semantic(if !explicit_route {
+                ConfigField::InboundsOutbound
+            } else if index == 0 {
                 ConfigField::RouteFinal
             } else {
                 ConfigField::RouteRulesOutbound
@@ -1790,26 +1719,25 @@ fn validate_server_graph(
         .chain(detour_tags.iter().copied())
         .collect::<Vec<_>>();
     let detour_tags = graph_roots.as_slice();
-    let (route, detours) = validate_route(
-        route,
-        inbounds
+    let (selector, detours) = compile_graph_roots(
+        &inbounds
             .iter()
-            .map(|inbound| (inbound.tag.as_str(), inbound.outbound.as_deref()))
-            .collect(),
-        outbounds
+            .map(|inbound| inbound.tag.as_str())
+            .collect::<Vec<_>>(),
+        &outbounds
             .iter()
             .map(|outbound| outbound.tag.as_str())
-            .collect(),
-        selectors.as_deref(),
+            .collect::<Vec<_>>(),
+        selectors.as_deref().unwrap_or(&[]),
         &[],
         detour_tags,
+        explicit_route,
     )?;
     let validated_inbounds = listens
         .into_iter()
         .map(|listen| ServerInboundConfig { listen })
         .collect::<Vec<_>>();
     Ok((
-        validated_inbounds[0].listen,
         validated_inbounds,
         outbounds
             .iter()
@@ -1825,159 +1753,23 @@ fn validate_server_graph(
                 })
             })
             .collect::<Result<Vec<_>, ConfigError>>()?,
-        route,
+        selector,
         detours,
     ))
 }
 
-fn validate_route(
-    route: Option<RawRoute>,
-    inbounds: Vec<(&str, Option<&str>)>,
-    outbounds: Vec<&str>,
-    selectors: Option<&[RawSelector]>,
-    plans: &[TaggedPlan<'_>],
-    extra_roots: &[&str],
-) -> Result<(RouteTable, Vec<EgressPlanHandle>), ConfigError> {
-    if selectors.is_some_and(<[RawSelector]>::is_empty) {
-        return Err(ConfigError::semantic(ConfigField::Selectors));
-    }
-    if selectors.is_some() || !plans.is_empty() {
-        return validate_selector_route(
-            route,
-            &inbounds,
-            &outbounds,
-            selectors.unwrap_or(&[]),
-            plans,
-            extra_roots,
-        );
-    }
-    let Some(route) = route else {
-        let mut referenced = vec![false; outbounds.len()];
-        let mut bindings = Vec::with_capacity(inbounds.len());
-        for (_, outbound) in inbounds {
-            let outbound =
-                outbound.ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))?;
-            validate_tag(outbound, ConfigField::InboundsOutbound)?;
-            let index = outbounds
-                .iter()
-                .position(|tag| *tag == outbound)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))?;
-            referenced[index] = true;
-            bindings.push(index);
-        }
-        if referenced.contains(&false) {
-            for tag in extra_roots {
-                let index = outbounds
-                    .iter()
-                    .position(|outbound| outbound == tag)
-                    .ok_or_else(|| ConfigError::semantic(ConfigField::DnsServersDetour))?;
-                referenced[index] = true;
-            }
-        }
-        if referenced.contains(&false) {
-            return Err(ConfigError::semantic(ConfigField::OutboundsTag));
-        }
-        let route = RouteTable::static_bindings(bindings)
-            .ok_or_else(|| ConfigError::semantic(ConfigField::Inbounds))?;
-        let detours = extra_roots
-            .iter()
-            .map(|tag| {
-                let outbound = outbounds
-                    .iter()
-                    .position(|candidate| candidate == tag)
-                    .expect("validated direct detour");
-                EgressPlanHandle::direct(outbound)
-            })
-            .collect();
-        return Ok((route, detours));
-    };
-
-    if inbounds.iter().any(|(_, outbound)| outbound.is_some()) {
-        return Err(ConfigError::semantic(ConfigField::Route));
-    }
-    let final_tag = route
-        .final_outbound
-        .as_deref()
-        .ok_or_else(|| ConfigError::semantic(ConfigField::RouteFinal))?;
-    validate_tag(final_tag, ConfigField::RouteFinal)?;
-    let final_outbound = outbounds
-        .iter()
-        .position(|tag| *tag == final_tag)
-        .ok_or_else(|| ConfigError::semantic(ConfigField::RouteFinal))?;
-    let mut referenced = vec![false; outbounds.len()];
-    referenced[final_outbound] = true;
-    let mut rules = Vec::with_capacity(route.rules.len());
-    for rule in route.rules {
-        if rule.server.is_some() {
-            return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
-        }
-        if rule.inbound.is_none() && rule.network.is_none() {
-            return Err(ConfigError::semantic(ConfigField::RouteRules));
-        }
-        let inbound = scalar_string(rule.inbound.as_ref(), ConfigField::RouteRulesInbound)?
-            .map(|tag| {
-                validate_tag(tag, ConfigField::RouteRulesInbound)?;
-                inbounds
-                    .iter()
-                    .position(|(inbound, _)| *inbound == tag)
-                    .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesInbound))
-            })
-            .transpose()?;
-        let network = validate_network(
-            scalar_string(rule.network.as_ref(), ConfigField::RouteRulesNetwork)?,
-            ConfigField::RouteRulesNetwork,
-        )?;
-        let outbound_tag = rule
-            .outbound
-            .as_deref()
-            .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesOutbound))?;
-        validate_tag(outbound_tag, ConfigField::RouteRulesOutbound)?;
-        let outbound = outbounds
-            .iter()
-            .position(|tag| *tag == outbound_tag)
-            .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesOutbound))?;
-        referenced[outbound] = true;
-        rules.push(RouteRule::new(inbound, network, None, outbound));
-    }
-    if referenced.contains(&false) {
-        for tag in extra_roots {
-            let index = outbounds
-                .iter()
-                .position(|outbound| outbound == tag)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::DnsServersDetour))?;
-            referenced[index] = true;
-        }
-    }
-    if referenced.contains(&false) {
-        return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
-    }
-    let route = RouteTable::routed(rules, final_outbound)
-        .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRules))?;
-    let detours = extra_roots
-        .iter()
-        .map(|tag| {
-            let outbound = outbounds
-                .iter()
-                .position(|candidate| candidate == tag)
-                .expect("validated direct detour");
-            EgressPlanHandle::direct(outbound)
-        })
-        .collect();
-    Ok((route, detours))
-}
-
-fn validate_selector_route(
-    route: Option<RawRoute>,
-    inbounds: &[(&str, Option<&str>)],
+fn compile_graph_roots(
+    inbounds: &[&str],
     outbounds: &[&str],
     selectors: &[RawSelector],
     plans: &[TaggedPlan<'_>],
-    extra_roots: &[&str],
-) -> Result<(RouteTable, Vec<EgressPlanHandle>), ConfigError> {
+    roots: &[&str],
+    explicit_route: bool,
+) -> Result<(SelectorControl, Vec<EgressPlanHandle>), ConfigError> {
     let tagged_inbounds = inbounds
         .iter()
         .enumerate()
-        .map(|(index, (tag, _))| TaggedInbound::new(tag, index))
+        .map(|(index, tag)| TaggedInbound::new(tag, index))
         .collect::<Vec<_>>();
     let tagged_outbounds = outbounds
         .iter()
@@ -1995,62 +1787,18 @@ fn validate_selector_route(
         })
         .collect::<Vec<_>>();
 
-    let (tagged_route, routed) = match route.as_ref() {
-        None => {
-            let bindings = inbounds
-                .iter()
-                .map(|(inbound, outbound)| {
-                    outbound
-                        .map(|outbound| TaggedStaticBinding::new(inbound, outbound))
-                        .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            (TaggedRoute::Static(bindings), false)
-        }
-        Some(route) => {
-            if inbounds.iter().any(|(_, outbound)| outbound.is_some()) {
-                return Err(ConfigError::semantic(ConfigField::Route));
-            }
-            let mut rules = Vec::with_capacity(route.rules.len());
-            for rule in &route.rules {
-                if rule.server.is_some() {
-                    return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
-                }
-                let network = validate_network(
-                    scalar_string(rule.network.as_ref(), ConfigField::RouteRulesNetwork)?,
-                    ConfigField::RouteRulesNetwork,
-                )?;
-                rules.push(TaggedRouteRule::new(
-                    scalar_string(rule.inbound.as_ref(), ConfigField::RouteRulesInbound)?,
-                    network,
-                    None,
-                    rule.outbound.as_deref(),
-                ));
-            }
-            (
-                TaggedRoute::Routed {
-                    rules,
-                    final_outbound: route.final_outbound.as_deref(),
-                },
-                true,
-            )
-        }
-    };
-
-    compile_selector_plans_with_roots(
+    compile_egress_plans_with_roots(
         &tagged_inbounds,
         &tagged_outbounds,
         plans,
         &definitions,
-        tagged_route,
-        extra_roots,
+        roots,
     )
-    .map(|(route, _, roots)| (route, roots))
     .map_err(|error| match error {
         SelectorCompileError::Allocation => ConfigError::rule_allocation(ConfigField::RouteRules),
         SelectorCompileError::RuleCompile => ConfigError::rule_compile(ConfigField::RouteRules),
         SelectorCompileError::ExtraRoot => ConfigError::semantic(ConfigField::DnsServersDetour),
-        _ => ConfigError::semantic(selector_error_field(error, routed)),
+        _ => ConfigError::semantic(selector_error_field(error, explicit_route)),
     })
 }
 
@@ -2111,17 +1859,17 @@ fn parse_endpoint(value: &str, field: ConfigField) -> Result<SocketAddrV4, Confi
     Ok(endpoint)
 }
 
-fn parse_method(value: &str, field: ConfigField) -> Result<TcpMethodProfile, ConfigError> {
+fn parse_method(value: &str, field: ConfigField) -> Result<MethodProfile, ConfigError> {
     match value {
-        "2022-blake3-aes-128-gcm" => Ok(TcpMethodProfile::Blake3Aes128Gcm2022),
-        "2022-blake3-aes-256-gcm" => Ok(TcpMethodProfile::Blake3Aes256Gcm2022),
-        "2022-blake3-chacha20-poly1305" => Ok(TcpMethodProfile::Blake3ChaCha20Poly13052022),
+        "2022-blake3-aes-128-gcm" => Ok(MethodProfile::Blake3Aes128Gcm2022),
+        "2022-blake3-aes-256-gcm" => Ok(MethodProfile::Blake3Aes256Gcm2022),
+        "2022-blake3-chacha20-poly1305" => Ok(MethodProfile::Blake3ChaCha20Poly13052022),
         _ => Err(ConfigError::semantic(field)),
     }
 }
 
 fn parse_psk(
-    method: TcpMethodProfile,
+    method: MethodProfile,
     value: &SecretString,
     field: ConfigField,
 ) -> Result<MethodPsk, ConfigError> {

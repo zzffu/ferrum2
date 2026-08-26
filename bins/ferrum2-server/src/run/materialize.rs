@@ -170,8 +170,10 @@ impl ServerV2MaterializeContext {
         let loader_config = runtime_loader_config(prepared)?;
         let needs_tagged = prepared.rule_sets().iter().any(|rule_set| {
             matches!(
-                rule_set.download_resolver(),
-                Some(ResolverRef::DnsServer(_))
+                rule_set.download_mode(),
+                ferrum2_config::PreparedRuleSetDownloadMode::ClientResolved {
+                    resolver: ResolverRef::DnsServer(_)
+                }
             )
         }) || blueprint
             .outbounds
@@ -1432,17 +1434,13 @@ async fn prepare_runtime_root(
     let Some(pending) = pending else {
         return Ok(None);
     };
-    let registry = config
-        .route_program
-        .as_ref()
-        .and_then(ferrum2_config::CompiledRoute::rule_registry)
-        .or_else(|| {
-            config
-                .dns_route
-                .as_ref()
-                .and_then(ferrum2_config::ServerDnsRoute::policy_blueprint)
-                .map(ferrum2_config::DnsPolicyBlueprintBinding::registry)
-        });
+    let registry = config.route.rule_registry().or_else(|| {
+        config
+            .dns_route
+            .as_ref()
+            .and_then(ferrum2_config::ServerDnsRoute::policy_blueprint)
+            .map(ferrum2_config::DnsPolicyBlueprintBinding::registry)
+    });
     let Some(registry) = registry else {
         pending.shutdown().await?;
         return Err(RunError::StartupProtocol);
@@ -1643,7 +1641,7 @@ mod tests {
         let _ = accepted.await.expect("deferred RuleSet accept join");
     }
 
-    fn old_v2_source(listen: SocketAddr) -> String {
+    fn minimal_v2_source(listen: SocketAddr) -> String {
         format!(
             r#"schema_version = 2
 
@@ -1743,10 +1741,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
 
     #[tokio::test]
-    async fn old_v2_materializes_without_network_or_refresh_owner() {
+    async fn minimal_v2_materializes_without_network_or_refresh_owner() {
         let listen = reserve_address();
-        let file = TestConfig::new(|_| old_v2_source(listen));
-        let prepared = ferrum2_config::prepare_server_v2(&file.path).expect("prepare old V2");
+        let file = TestConfig::new(|_| minimal_v2_source(listen));
+        let prepared = ferrum2_config::prepare_server(&file.path).expect("prepare minimal config");
         let downloader = Arc::new(RecordingDownloader::failure());
         let context = ServerV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -1755,7 +1753,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
         let materialized = materialize_prepared(prepared, &context)
             .await
-            .expect("materialize old V2");
+            .expect("materialize minimal config");
         assert!(downloader.seen().is_empty());
         assert!(materialized.pending.is_none());
         let config = materialized
@@ -1848,7 +1846,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             )
         });
         let prepared =
-            ferrum2_config::prepare_server_v2(&file.path).expect("prepare domain DNS upstream V2");
+            ferrum2_config::prepare_server(&file.path).expect("prepare domain DNS upstream");
         let order = prepared.materialization_order();
         let bootstrap_position = order
             .iter()
@@ -2044,7 +2042,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 tls_address.port()
             )
         });
-        let prepared = ferrum2_config::prepare_server_v2(&file.path)
+        let prepared = ferrum2_config::prepare_server(&file.path)
             .expect("prepare production tagged RuleSet V2");
         let order = prepared.materialization_order();
         let resolver_position = order
@@ -2109,8 +2107,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     #[test]
     fn validate_only_entrypoint_never_binds_listener() {
         let listen = reserve_address();
-        let file = TestConfig::new(|_| old_v2_source(listen));
-        let prepared = ferrum2_config::prepare_server_v2(&file.path).expect("prepare old V2");
+        let file = TestConfig::new(|_| minimal_v2_source(listen));
+        let prepared = ferrum2_config::prepare_server(&file.path).expect("prepare minimal config");
         super::super::materialize_only(prepared).expect("materialized validation");
         let rebound = TcpListener::bind(listen).expect("validate-only did not bind listener");
         drop(rebound);
@@ -2120,7 +2118,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     async fn real_srs_initial_snapshot_finishes_before_listener_bind() {
         let listen = reserve_address();
         let file = TestConfig::new(|cache| remote_v2_source(listen, cache, false));
-        let prepared = ferrum2_config::prepare_server_v2(&file.path).expect("prepare remote V2");
+        let prepared = ferrum2_config::prepare_server(&file.path).expect("prepare remote config");
         let downloader = Arc::new(RecordingDownloader::success());
         let metrics = Arc::new(Metrics::new());
         let context =
@@ -2131,9 +2129,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .expect("materialize real SRS");
         let registry = materialized
             .config()
-            .route_program
-            .as_ref()
-            .and_then(ferrum2_config::CompiledRoute::rule_registry)
+            .route
+            .rule_registry()
             .expect("materialized registry");
         let snapshot = registry.snapshot();
         let rule_set = snapshot.rule_set_id("ads").expect("compiled ads RuleSet");
@@ -2169,7 +2166,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     async fn initial_ruleset_failure_returns_before_listener_bind() {
         let listen = reserve_address();
         let file = TestConfig::new(|cache| remote_v2_source(listen, cache, false));
-        let prepared = ferrum2_config::prepare_server_v2(&file.path).expect("prepare remote V2");
+        let prepared = ferrum2_config::prepare_server(&file.path).expect("prepare remote config");
         let downloader = Arc::new(RecordingDownloader::failure());
         let context = ServerV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -2189,7 +2186,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     async fn refresh_failure_retains_generation_and_root_cleanup_is_explicit() {
         let listen = reserve_address();
         let file = TestConfig::new(|cache| remote_v2_source(listen, cache, true));
-        let prepared = ferrum2_config::prepare_server_v2(&file.path).expect("prepare refresh V2");
+        let prepared = ferrum2_config::prepare_server(&file.path).expect("prepare refresh config");
         let downloader = Arc::new(RecordingDownloader::success_then_failure());
         let context = ServerV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -2202,11 +2199,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .into_run_parts()
             .await
             .expect("transfer refresh ownership");
-        let registry = config
-            .route_program
-            .as_ref()
-            .and_then(ferrum2_config::CompiledRoute::rule_registry)
-            .expect("route registry");
+        let registry = config.route.rule_registry().expect("route registry");
         let mut root = root.expect("refresh root");
         let outcome = root
             .service
@@ -2234,7 +2227,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .expect("owner probe upstream");
         let upstream_address = upstream.local_addr().expect("probe upstream address");
         let file = TestConfig::new(|_| cached_dns_v2_source(listen, upstream_address));
-        let prepared = ferrum2_config::prepare_server_v2(&file.path).expect("prepare cached V2");
+        let prepared = ferrum2_config::prepare_server(&file.path).expect("prepare cached config");
         let context = ServerV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
             Arc::new(RecordingDownloader::failure()),

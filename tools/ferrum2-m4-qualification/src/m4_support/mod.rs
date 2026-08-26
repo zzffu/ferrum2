@@ -1350,15 +1350,7 @@ fn run_profile_udp(arguments: &ProfileArgs, ready_file: &Path) -> Result<Profile
         let client_source = match topology {
             ProfileUdpTopology::Shadowsocks => {
                 let server = server.expect("Shadowsocks UDP server address");
-                m14_udp_client_config(
-                    proxy,
-                    server,
-                    server,
-                    server,
-                    server,
-                    false,
-                    PROFILE_UDP_MAX_BUFFERED_BYTES,
-                )
+                profile_shadowsocks_udp_client_config(proxy, server)
             }
             ProfileUdpTopology::Direct => profile_direct_udp_client_config(proxy),
         };
@@ -2457,7 +2449,6 @@ fn run_resource(arguments: HostedArgs) -> Result<String, String> {
 
 #[derive(Clone, Copy)]
 enum M14TcpProfile {
-    Legacy,
     Rules64,
     HttpSniff,
     TlsSniff,
@@ -2466,24 +2457,20 @@ enum M14TcpProfile {
 fn run_m14_measurements(output: &mut Evidence, work: &Path) -> Result<(), String> {
     let tls = m14_tls_client_hello()?;
     validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, true)?;
-    run_m14_migration_rejection(output, work)?;
+    run_m14_schema_v1_rejection(output, work)?;
     for (phase, profile) in [
-        ("legacy-no-sniff-tcp", M14TcpProfile::Legacy),
         ("64-rule", M14TcpProfile::Rules64),
         ("server-tls-sniff", M14TcpProfile::TlsSniff),
         ("server-http-sniff", M14TcpProfile::HttpSniff),
     ] {
         run_m14_tcp_measurement(output, work, phase, profile, &tls)?;
     }
-    run_m14_udp_measurement(output, work, "legacy-no-sniff-udp", false)?;
-    run_m14_udp_measurement(output, work, "association-route-once", true)?;
+    run_m14_udp_measurement(output, work)?;
     run_m14_dns_hijack_measurements(output, work)?;
     assert_no_owners()
 }
 
-const M14_MEASUREMENT_PHASES: [&str; 8] = [
-    "legacy-no-sniff-tcp",
-    "legacy-no-sniff-udp",
+const M14_MEASUREMENT_PHASES: [&str; 6] = [
     "schema-v1-routed-udp-rejection",
     "64-rule",
     "server-tls-sniff",
@@ -2498,7 +2485,7 @@ fn validate_m14_measurement_plan(
     terminal_outcomes_distinguishable: bool,
 ) -> Result<(), String> {
     if !phases.contains(&"schema-v1-routed-udp-rejection") {
-        return Err("missing M14 migration phase".to_owned());
+        return Err("missing M14 schema-v1 rejection phase".to_owned());
     }
     let mut acceptor = rustls::server::Acceptor::default();
     let mut input = tls_client_hello;
@@ -2541,9 +2528,9 @@ fn m14_tls_client_hello() -> Result<Vec<u8>, String> {
     Ok(wire)
 }
 
-fn run_m14_migration_rejection(output: &mut Evidence, work: &Path) -> Result<(), String> {
+fn run_m14_schema_v1_rejection(output: &mut Evidence, work: &Path) -> Result<(), String> {
     let directory = tempfile::Builder::new()
-        .prefix("m14-migration-")
+        .prefix("m14-schema-v1-rejection-")
         .tempdir_in(work)
         .map_err(clean_io)?;
     let client = PortReservation::new()?;
@@ -2569,24 +2556,24 @@ fn run_m14_migration_rejection(output: &mut Evidence, work: &Path) -> Result<(),
             OsStr::new("--check-config"),
         ])
         .output()
-        .map_err(|_| "M14 migration check did not start".to_owned())?;
+        .map_err(|_| "M14 schema-v1 rejection check did not start".to_owned())?;
     if result.status.code() != Some(2)
         || !result.stdout.is_empty()
         || result.stderr
             != b"error[config.semantic] schema_version: configuration value is invalid\n"
     {
-        return Err("M14 migration check had the wrong observable".to_owned());
+        return Err("M14 schema-v1 rejection check had the wrong observable".to_owned());
     }
     ensure_redacted(
-        std::str::from_utf8(&result.stderr).map_err(|_| "migration stderr".to_owned())?,
+        std::str::from_utf8(&result.stderr).map_err(|_| "schema-v1 rejection stderr".to_owned())?,
     )?;
     let elapsed = started.elapsed();
     let client_address = client.address;
     let server_address = server.address;
     drop((client, server));
     directory.close().map_err(clean_io)?;
-    prove_tcp_rebind(client_address, "M14 migration client")?;
-    prove_tcp_udp_rebind(server_address, "M14 migration server")?;
+    prove_tcp_rebind(client_address, "M14 schema-v1 rejection client")?;
+    prove_tcp_udp_rebind(server_address, "M14 schema-v1 rejection server")?;
     output.line(format!(
         "{{\"kind\":\"m14_measurement\",\"phase\":\"schema-v1-routed-udp-rejection\",\
          \"exit_code\":2,\"elapsed_ns\":{},\"side_effects\":\"none\",\"rebind\":\"PASS\"}}",
@@ -2620,7 +2607,7 @@ fn run_m14_tcp_measurement(
             (b"G@T invalid\r\n\r\n".to_vec(), true),
         ],
         M14TcpProfile::TlsSniff => vec![(tls_client_hello.to_vec(), false), (vec![0], true)],
-        _ => vec![(b"m14-measurement".to_vec(), true)],
+        M14TcpProfile::Rules64 => vec![(b"m14-measurement".to_vec(), true)],
     };
     let client_config = directory.path().join("client.toml");
     let server_config = directory.path().join("server.toml");
@@ -2690,7 +2677,6 @@ fn run_m14_tcp_measurement(
 
 fn m14_tcp_server_config(listen: SocketAddrV4, profile: M14TcpProfile) -> String {
     match profile {
-        M14TcpProfile::Legacy => ferrum_server_config(listen, None),
         M14TcpProfile::Rules64 => {
             let mut rules = String::new();
             for port in 1..=64 {
@@ -2727,12 +2713,7 @@ fn m14_tcp_server_config(listen: SocketAddrV4, profile: M14TcpProfile) -> String
     }
 }
 
-fn run_m14_udp_measurement(
-    output: &mut Evidence,
-    work: &Path,
-    phase: &str,
-    association_route_once: bool,
-) -> Result<(), String> {
+fn run_m14_udp_measurement(output: &mut Evidence, work: &Path) -> Result<(), String> {
     let directory = tempfile::Builder::new()
         .prefix("m14-udp-")
         .tempdir_in(work)
@@ -2766,7 +2747,6 @@ fn run_m14_udp_measurement(
             unselected,
             first_target,
             second_target,
-            association_route_once,
             1_048_576,
         ),
     )
@@ -2791,12 +2771,8 @@ fn run_m14_udp_measurement(
     let started = Instant::now();
     let (control, application, relay) = m14_udp_associate(proxy)?;
     m14_udp_round_trip(&application, relay, &first, first_target, b"first")?;
-    let transactions = if association_route_once {
-        m14_udp_round_trip(&application, relay, &second, second_target, b"later")?;
-        2
-    } else {
-        1
-    };
+    m14_udp_round_trip(&application, relay, &second, second_target, b"later")?;
+    let transactions = 2;
     let elapsed = started.elapsed();
     drop((application, control));
     client_process.ensure_running()?;
@@ -2815,7 +2791,7 @@ fn run_m14_udp_measurement(
     output.line(format!(
         "{{\"kind\":\"m14_measurement\",\"phase\":{},\"datagrams\":{transactions},\
          \"elapsed_ns\":{},\"config_sha256\":{},\"drain\":\"PASS\",\"rebind\":\"PASS\"}}",
-        json(phase),
+        json("association-route-once"),
         elapsed.as_nanos(),
         json(&config_hash),
     ))
@@ -2843,25 +2819,26 @@ fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
     )
 }
 
+fn profile_shadowsocks_udp_client_config(listen: SocketAddrV4, server: SocketAddrV4) -> String {
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
+         [[outbounds]]\ntag = \"profile-proxy\"\nserver = \"{server}\"\n\
+         [route]\nfinal = \"profile-proxy\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
+
 fn m14_udp_client_config(
     listen: SocketAddrV4,
     server: SocketAddrV4,
     unselected: SocketAddrV4,
     first: SocketAddrV4,
     second: SocketAddrV4,
-    association_route_once: bool,
     max_buffered_bytes: usize,
 ) -> String {
-    if !association_route_once {
-        return format!(
-            "schema_version = 2\n[[inbounds]]\ntag = \"client-in\"\nlisten = \"{listen}\"\noutbound = \"proxy\"\n\
-             [[outbounds]]\ntag = \"proxy\"\nserver = \"{server}\"\n\
-             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-             [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-             [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
-             [logging]\nlevel = \"error\"\n"
-        );
-    }
     format!(
         "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
          [[outbounds]]\ntag = \"selected\"\nserver = \"{server}\"\n\
@@ -4489,12 +4466,12 @@ ferrum2_tcp_replay_entries 0\n\
     expect_rejected("secret output", || ensure_redacted(PSK))?;
     let tls = m14_tls_client_hello()?;
     validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &tls, true)?;
-    let missing_migration: Vec<_> = M14_MEASUREMENT_PHASES
+    let missing_schema_v1_rejection: Vec<_> = M14_MEASUREMENT_PHASES
         .into_iter()
         .filter(|phase| *phase != "schema-v1-routed-udp-rejection")
         .collect();
-    expect_rejected("missing M14 migration phase", || {
-        validate_m14_measurement_plan(&missing_migration, &tls, true)
+    expect_rejected("missing M14 schema-v1 rejection phase", || {
+        validate_m14_measurement_plan(&missing_schema_v1_rejection, &tls, true)
     })?;
     expect_rejected("invalid M14 TLS ClientHello", || {
         validate_m14_measurement_plan(&M14_MEASUREMENT_PHASES, &[0x16, 0x03, 0x03, 0, 0], true)

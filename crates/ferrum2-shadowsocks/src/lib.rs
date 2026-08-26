@@ -27,9 +27,9 @@ use ferrum2_core::{
     SessionReply, TargetAddr,
 };
 use ferrum2_crypto::{
-    AeadError, Clock, KeyProvider, KeySelector, MethodKeyProvider, MethodSecretKeyRef,
-    MethodTcpSalt, MonotonicInstant, SecureRandom, TcpMethod, TcpMethodProfile, TcpOpener, TcpSalt,
-    TcpSealer, generate_method_request_salt, generate_method_response_salt,
+    AeadError, Clock, KeySelector, MethodKeyProvider, MethodProfile, MethodSecretKeyRef,
+    MethodTcpSalt, MonotonicInstant, SecureRandom, TcpOpener, TcpSealer,
+    generate_method_request_salt, generate_method_response_salt,
 };
 use thiserror::Error;
 
@@ -53,7 +53,7 @@ pub const MAX_ENCRYPT_WIRE_LEN: usize = MAX_TCP_SALT_LEN
     + TAG_LEN
     + MAX_ENCODE_PAYLOAD_LEN
     + TAG_LEN;
-/// Largest SIP022 request padding accepted by M0.
+/// Largest SIP022 request padding accepted by this implementation.
 pub const MAX_PADDING_LEN: usize = 900;
 
 const REQUEST_TYPE: u8 = 0;
@@ -73,7 +73,7 @@ const MAX_REPLAY_CAPACITY: usize = 1_048_576;
 /// Narrow method-aware key capability consumed by the shared TCP state machine.
 pub trait TcpKeyProvider: Send + Sync {
     /// Returns the immutable method profile before wire buffers are read.
-    fn tcp_profile(&self) -> TcpMethodProfile;
+    fn tcp_profile(&self) -> MethodProfile;
 
     /// Creates the outbound owner for a same-profile salt.
     fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError>;
@@ -86,28 +86,6 @@ pub trait TcpKeyProvider: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("TCP key unavailable")]
 pub struct TcpKeyError;
-
-impl<K: KeyProvider> TcpKeyProvider for K {
-    fn tcp_profile(&self) -> TcpMethodProfile {
-        TcpMethodProfile::Blake3Aes128Gcm2022
-    }
-
-    fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
-        let legacy = legacy_salt(salt)?;
-        self.with_key(KeySelector::Default, |key| {
-            TcpSealer::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &legacy))
-        })
-        .map_err(|_| TcpKeyError)
-    }
-
-    fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
-        let legacy = legacy_salt(salt)?;
-        self.with_key(KeySelector::Default, |key| {
-            TcpOpener::new(key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &legacy))
-        })
-        .map_err(|_| TcpKeyError)
-    }
-}
 
 /// Owns a method-aware crypto provider behind the shared protocol capability.
 pub struct MethodKeyAdapter<K>(K);
@@ -125,7 +103,7 @@ impl<K> MethodKeyAdapter<K> {
 }
 
 impl<K: MethodKeyProvider> TcpKeyProvider for MethodKeyAdapter<K> {
-    fn tcp_profile(&self) -> TcpMethodProfile {
+    fn tcp_profile(&self) -> MethodProfile {
         self.0.profile()
     }
 
@@ -151,7 +129,7 @@ impl<K: MethodKeyProvider> TcpKeyProvider for MethodKeyAdapter<K> {
 impl<K: MethodKeyProvider> MethodKeyProvider for MethodKeyAdapter<K> {
     type Error = K::Error;
 
-    fn profile(&self) -> TcpMethodProfile {
+    fn profile(&self) -> MethodProfile {
         self.0.profile()
     }
 
@@ -162,11 +140,6 @@ impl<K: MethodKeyProvider> MethodKeyProvider for MethodKeyAdapter<K> {
     ) -> Result<T, Self::Error> {
         self.0.with_method_key(selector, use_key)
     }
-}
-
-fn legacy_salt(salt: &MethodTcpSalt) -> Result<TcpSalt, TcpKeyError> {
-    let bytes: [u8; TCP_SALT_LEN] = salt.as_bytes().try_into().map_err(|_| TcpKeyError)?;
-    Ok(TcpSalt::from_bytes(bytes))
 }
 
 /// A closed deterministic codec failure.
@@ -184,10 +157,10 @@ pub enum FrameError {
     /// A length cannot be represented by the SIP022 frame.
     #[error("frame bounds invalid")]
     Bounds,
-    /// M0 accepts only IPv4 target addresses.
+    /// The target address type or encoding is unsupported.
     #[error("target address unsupported")]
     AddressUnsupported,
-    /// Padding exceeds the fixed M0 bound.
+    /// Padding exceeds the fixed implementation bound.
     #[error("padding bounds invalid")]
     PaddingBounds,
     /// A request supplied neither padding nor initial payload.
@@ -216,7 +189,7 @@ pub enum DetectionReason {
     TimestampSkew,
     /// Authenticated frame lengths were invalid.
     FrameBounds,
-    /// The authenticated address was not a valid M0 IPv4 target.
+    /// The authenticated address encoding was invalid or unsupported.
     AddressBounds,
     /// Authenticated padding was malformed or exceeded 900 bytes.
     PaddingBounds,
@@ -532,9 +505,9 @@ pub struct NoReply;
 impl SessionReply for NoReply {
     type Error = Infallible;
 
-    fn succeeded(
+    fn succeeded_socket(
         self,
-        _bound: std::net::SocketAddrV4,
+        _bound: SocketAddr,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         ready(Ok(()))
     }
@@ -733,16 +706,6 @@ where
     T: Clock + Sync,
     R: SecureRandom,
 {
-    /// Fused compatibility helper that connects, then writes the request.
-    pub async fn open_stream(
-        &self,
-        application_target: &TargetAddr,
-    ) -> Result<ClientFlow<'a, C::Stream, K, T>, ShadowsocksError> {
-        self.connect_server()
-            .await?
-            .write_request(application_target)
-            .await
-    }
 }
 
 impl<'a, K, C, T, R> Outbound for ClientTcpOutbound<'a, K, C, T, R>
@@ -757,7 +720,7 @@ where
     type Error = ShadowsocksError;
 
     async fn open(&self, target: &TargetAddr) -> Result<Self::Stream, Self::Error> {
-        self.open_stream(target).await
+        self.connect_server().await?.write_request(target).await
     }
 }
 
@@ -1176,15 +1139,6 @@ where
 }
 
 impl LocalEndpoint for BoxedClientFlow<'_> {
-    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
-        match self.local_socket_addr {
-            SocketAddr::V4(endpoint) => endpoint,
-            SocketAddr::V6(endpoint) => {
-                std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.port())
-            }
-        }
-    }
-
     fn local_socket_addr(&self) -> SocketAddr {
         self.local_socket_addr
     }
@@ -1233,10 +1187,6 @@ impl TransportIo for BoxedClientFlow<'_> {
 }
 
 impl<S: LocalEndpoint, K, T> LocalEndpoint for ClientFlow<'_, S, K, T> {
-    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
-        self.io.local_endpoint()
-    }
-
     fn local_socket_addr(&self) -> SocketAddr {
         self.io.local_socket_addr()
     }
@@ -2563,7 +2513,7 @@ fn open_data_frame_into(
     Ok(())
 }
 
-fn response_fixed_plaintext_len(profile: TcpMethodProfile) -> usize {
+fn response_fixed_plaintext_len(profile: MethodProfile) -> usize {
     11 + profile.salt_bytes()
 }
 
@@ -2707,7 +2657,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use ferrum2_crypto::{Aes128Psk, SinglePskProvider};
+    use ferrum2_crypto::{MethodPsk, MethodSinglePskProvider};
 
     use super::*;
 
@@ -2755,17 +2705,17 @@ mod tests {
         }
     }
 
-    fn provider() -> SinglePskProvider {
-        SinglePskProvider::new(Aes128Psk::from_bytes([
+    fn provider() -> MethodKeyAdapter<MethodSinglePskProvider> {
+        MethodKeyAdapter::new(MethodSinglePskProvider::new(MethodPsk::aes128([
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
             0x0e, 0x0f,
-        ]))
+        ])))
     }
 
     fn salt(last: u8) -> MethodTcpSalt {
         let mut bytes = [0_u8; TCP_SALT_LEN];
         bytes[TCP_SALT_LEN - 1] = last;
-        MethodTcpSalt::try_from_slice(TcpMethodProfile::Blake3Aes128Gcm2022, &bytes)
+        MethodTcpSalt::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &bytes)
             .expect("AES-128 salt")
     }
 

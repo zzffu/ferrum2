@@ -78,10 +78,7 @@ impl Future for RouteGenerationChange {
 impl ClientRouting {
     pub(super) fn route_generation(&self) -> RouteGeneration {
         RouteGeneration {
-            rule_engine: self
-                .program
-                .as_ref()
-                .map_or(0, ferrum2_config::CompiledRoute::rule_engine_generation),
+            rule_engine: self.program.rule_engine_generation(),
             selector: self.selector.generation(),
         }
     }
@@ -93,18 +90,14 @@ impl ClientRouting {
         RouteGenerationChange {
             rule_engine: self
                 .program
-                .as_ref()
-                .and_then(ferrum2_config::CompiledRoute::rule_registry)
+                .rule_registry()
                 .map(|registry| registry.watch_generation_from(generation.rule_engine)),
             selector: self.selector.watch_generation_from(generation.selector),
         }
     }
 
-    pub(super) fn route_scratch(&self) -> Result<Option<RuleEvaluationScratch>, RuleCompileError> {
-        self.program
-            .as_ref()
-            .map(ferrum2_config::CompiledRoute::evaluation_scratch)
-            .transpose()
+    pub(super) fn route_scratch(&self) -> Result<RuleEvaluationScratch, RuleCompileError> {
+        self.program.evaluation_scratch()
     }
 
     pub(super) fn select_terminal_with_scratch(
@@ -114,16 +107,9 @@ impl ClientRouting {
         target: &TargetAddr,
         payload: Option<&[u8]>,
         metrics: &Metrics,
-        scratch: Option<&mut RuleEvaluationScratch>,
+        scratch: &mut RuleEvaluationScratch,
     ) -> Result<ClientTerminalRoute, RuleCompileError> {
-        let Some(program) = self.program.as_ref() else {
-            return Ok(ClientTerminalRoute::Route(
-                self.legacy.select_plan_snapshot(inbound, network, target),
-            ));
-        };
-        let Some(scratch) = scratch else {
-            return Err(RuleCompileError::Internal);
-        };
+        let program = &self.program;
         let mut evaluation = program.evaluate_with_scratch(inbound, network, target, scratch);
         evaluation.enable_match_observation();
         let mut observation = RouteProgramObservation::new(metrics);
@@ -182,16 +168,7 @@ impl ClientRouting {
         IO: AsyncRead + Unpin,
         C: Future,
     {
-        let Some(program) = self.program.as_ref() else {
-            return Ok(Some(TcpRouteSelection {
-                terminal: ClientTerminalRoute::Route(self.legacy.select_plan_snapshot(
-                    inbound,
-                    Network::Tcp,
-                    target,
-                )),
-                prefix: TcpRoutePrefix::Empty,
-            }));
-        };
+        let program = &self.program;
         let mut scratch = program.evaluation_scratch()?;
         let mut evaluation =
             program.evaluate_with_scratch(inbound, Network::Tcp, target, &mut scratch);

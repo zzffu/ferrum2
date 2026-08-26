@@ -44,13 +44,10 @@ pub enum ProxyIngress {
     Ordinary(usize),
 }
 
-type SelectServer = dyn Fn(ProxyIngress, ProxyTransport, &Name, u16) -> Option<usize> + Send + Sync;
-
 /// Hickory-backed DNS proxy request seam.
 pub struct DnsProxy {
     resolver: Arc<TaggedResolver>,
-    select: Arc<SelectServer>,
-    policy: Option<ProxyPolicy>,
+    policy: ProxyPolicy,
     policy_observer: Option<Arc<dyn DnsPolicyObserver>>,
     cache: Option<ProxyCache>,
 }
@@ -64,7 +61,6 @@ struct ProxyPolicy {
 
 struct ProxyCache {
     cache: DnsCache,
-    generation: ResolverGeneration,
 }
 
 #[derive(Clone, Copy)]
@@ -195,42 +191,28 @@ impl DnsProxySockets {
 }
 
 impl DnsProxy {
-    /// Binds one validated first-match selector to one tagged resolver graph.
-    pub fn new(
-        resolver: Arc<TaggedResolver>,
-        select: impl Fn(ProxyIngress, ProxyTransport, &Name, u16) -> Option<usize>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        Self {
-            resolver,
-            select: Arc::new(select),
-            policy: None,
-            policy_observer: None,
-            cache: None,
-        }
-    }
-
-    /// Enables the two-stage compiled DNS policy for wire and application queries.
+    /// Binds one compiled DNS policy to one tagged resolver graph.
     ///
     /// Listener identities precede ordinary identities in the same
-    /// collision-free order used by the compiled policy. Without this binding,
-    /// both paths retain the selector supplied to [`Self::new`].
-    pub fn with_policy(
-        mut self,
+    /// collision-free order used by the compiled policy.
+    pub fn new(
+        resolver: Arc<TaggedResolver>,
         program: Arc<DnsPolicyProgram>,
         registry: Arc<RuleEngineRegistry>,
         listener_count: usize,
         ordinary_count: usize,
     ) -> Self {
-        self.policy = Some(ProxyPolicy {
-            program,
-            registry,
-            listener_count,
-            ordinary_count,
-        });
-        self
+        Self {
+            resolver,
+            policy: ProxyPolicy {
+                program,
+                registry,
+                listener_count,
+                ordinary_count,
+            },
+            policy_observer: None,
+            cache: None,
+        }
     }
 
     /// Adds one identity-free observer called once per complete policy continuation.
@@ -243,8 +225,8 @@ impl DnsProxy {
     ///
     /// Wire proxy responses remain complete upstream messages and do not enter
     /// this typed address cache.
-    pub fn with_cache(mut self, cache: DnsCache, generation: ResolverGeneration) -> Self {
-        self.cache = Some(ProxyCache { cache, generation });
+    pub fn with_cache(mut self, cache: DnsCache) -> Self {
+        self.cache = Some(ProxyCache { cache });
         self
     }
 
@@ -281,16 +263,11 @@ impl DnsProxy {
         let mut ipv4 = Vec::new();
         let mut ipv6 = Vec::new();
         let requested_strategy = request.strategy();
-        let first_qtype = match (self.policy.is_none(), requested_strategy) {
-            // Preserve the established selector path's stable A-then-AAAA
-            // request order. Policy-bound resolution may start with the
-            // preferred family because the first selected row can override
-            // the strategy used for the continuation.
-            (true, DnsStrategy::PreferIpv6) => RecordType::A,
-            (_, DnsStrategy::PreferIpv6 | DnsStrategy::Ipv6Only) => RecordType::AAAA,
-            (_, DnsStrategy::PreferIpv4 | DnsStrategy::Ipv4Only) => RecordType::A,
+        let first_qtype = match requested_strategy {
+            DnsStrategy::PreferIpv6 | DnsStrategy::Ipv6Only => RecordType::AAAA,
+            DnsStrategy::PreferIpv4 | DnsStrategy::Ipv4Only => RecordType::A,
         };
-        let policy_strategy = self
+        let effective_strategy = self
             .lookup_application_family(
                 ingress,
                 transport,
@@ -303,7 +280,6 @@ impl DnsProxy {
             .await?;
         // The first selected policy row supplies the per-rule override. The
         // other family, when required, uses the same final ordering/filter.
-        let effective_strategy = policy_strategy.unwrap_or(requested_strategy);
         let second_qtype = match (first_qtype, effective_strategy) {
             (RecordType::A, DnsStrategy::PreferIpv4 | DnsStrategy::PreferIpv6)
             | (RecordType::A, DnsStrategy::Ipv6Only) => Some(RecordType::AAAA),
@@ -342,54 +318,30 @@ impl DnsProxy {
         application: ApplicationQueryContext<'_>,
         ipv4: &mut Vec<std::net::Ipv4Addr>,
         ipv6: &mut Vec<std::net::Ipv6Addr>,
-    ) -> Result<Option<DnsStrategy>, DnsError> {
+    ) -> Result<DnsStrategy, DnsError> {
         let mut request = Message::new(0, MessageType::Query, OpCode::Query);
         let question = Query::query(name.clone(), record_type);
         request.add_query(question.clone());
-        if let Some(policy) = &self.policy {
-            let PolicyQueryOutcome::Response { route, response } = self
-                .evaluate_policy_query(
-                    policy,
-                    ingress,
-                    transport,
-                    &request,
-                    &question,
-                    Some(application),
-                )
-                .await?
-            else {
-                return Err(DnsError::Protocol);
-            };
-            match response.metadata.response_code {
-                ResponseCode::NoError => {}
-                ResponseCode::NXDomain => return Err(DnsError::NxDomain),
-                _ => return Err(DnsError::Protocol),
-            }
-            append_application_records(name, record_type, &response, ipv4, ipv6);
-            return Ok(Some(route.strategy()));
-        }
-        let server = (self.select)(ingress, transport, name, u16::from(record_type))
-            .ok_or(DnsError::InvalidServer)?;
-        let server = u32::try_from(server)
-            .map(DnsServerId::new)
-            .map_err(|_| DnsError::InvalidServer)?;
-        let response = self
-            .application_server_response(
-                server,
-                name,
-                record_type,
+        let PolicyQueryOutcome::Response { route, response } = self
+            .evaluate_policy_query(
+                &self.policy,
+                ingress,
+                transport,
                 &request,
-                application.domain,
-                application.generation,
+                &question,
+                Some(application),
             )
-            .await?;
+            .await?
+        else {
+            return Err(DnsError::Protocol);
+        };
         match response.metadata.response_code {
             ResponseCode::NoError => {}
             ResponseCode::NXDomain => return Err(DnsError::NxDomain),
             _ => return Err(DnsError::Protocol),
         }
         append_application_records(name, record_type, &response, ipv4, ipv6);
-        Ok(None)
+        Ok(route.strategy())
     }
 
     /// Parses, selects, resolves and encodes one DNS message through Hickory.
@@ -423,28 +375,8 @@ impl DnsProxy {
         if query.query_class() != DNSClass::IN {
             return error_response(request, ResponseCode::Refused);
         }
-        if let Some(policy) = &self.policy {
-            return self
-                .policy_response(policy, ingress, transport, request, query)
-                .await;
-        }
-        let Some(server) = (self.select)(
-            ingress,
-            transport,
-            query.name(),
-            u16::from(query.query_type()),
-        ) else {
-            return error_response(request, ResponseCode::ServFail);
-        };
-        match self.resolver.query(server, request.clone()).await {
-            Ok(mut response) => {
-                response.metadata.id = request.metadata.id;
-                response.queries.clear();
-                response.add_query(query.clone());
-                response
-            }
-            Err(_) => error_response(request, ResponseCode::ServFail),
-        }
+        self.policy_response(&self.policy, ingress, transport, request, query)
+            .await
     }
 
     async fn policy_response(
@@ -660,7 +592,7 @@ impl DnsProxy {
             server,
             domain.clone(),
             cache_qtype,
-            captured_generation.unwrap_or(cache.generation),
+            captured_generation.ok_or(DnsError::Protocol)?,
         );
         match cache
             .cache

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferrum2_core::{CanonicalDomain, DomainName, TargetAddr};
-use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use ferrum2_crypto::{MethodProfile, MethodPsk};
 use ferrum2_rule::{
     CompiledMatchSet, DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, DnsPolicyBlueprint,
     DnsPolicyBlueprintError, DnsPolicyMatcherDescriptor, DnsPolicyRouteDescriptor,
@@ -244,7 +244,7 @@ pub enum PreparedClientOutboundKind {
 pub struct PreparedClientOutboundDescriptor<'a> {
     index: u32,
     kind: PreparedClientOutboundKind,
-    method: Option<TcpMethodProfile>,
+    method: Option<MethodProfile>,
     psk: Option<&'a Arc<MethodPsk>>,
     endpoint: Option<&'a DialEndpoint>,
     domain_resolver: Option<DirectDomainResolver>,
@@ -260,7 +260,7 @@ impl<'a> PreparedClientOutboundDescriptor<'a> {
         self.kind
     }
 
-    pub const fn method(self) -> Option<TcpMethodProfile> {
+    pub const fn method(self) -> Option<MethodProfile> {
         self.method
     }
 
@@ -417,13 +417,6 @@ impl PreparedRuleSet {
         self.download_mode
     }
 
-    pub const fn download_resolver(&self) -> Option<ResolverRef> {
-        match self.download_mode {
-            PreparedRuleSetDownloadMode::ClientResolved { resolver } => Some(resolver),
-            PreparedRuleSetDownloadMode::DeferredToDetour => None,
-        }
-    }
-
     pub const fn download_detour(&self) -> Option<PreparedEgressRef> {
         self.download_detour
     }
@@ -487,13 +480,6 @@ pub struct ResolvedDnsEndpoint {
 }
 
 impl ResolvedDnsEndpoint {
-    pub fn new(server: u32, address: SocketAddr) -> Self {
-        Self {
-            server,
-            addresses: Box::new([address]),
-        }
-    }
-
     pub fn from_candidates(server: u32, addresses: Box<[SocketAddr]>) -> Self {
         Self { server, addresses }
     }
@@ -504,10 +490,6 @@ impl ResolvedDnsEndpoint {
 
     pub fn addresses(&self) -> &[SocketAddr] {
         &self.addresses
-    }
-
-    pub fn address(&self) -> Option<SocketAddr> {
-        self.addresses.first().copied()
     }
 }
 
@@ -945,27 +927,50 @@ impl PreparedServerV2 {
 /// Reads and prepares a client schema-v2 config without external I/O.
 pub fn prepare_client(path: impl AsRef<Path>) -> Result<PreparedClientV2, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawClientRoot = parse_v2_toml(&source)?;
-    let validation_raw: RawClientRoot = parse_v2_toml(&source)?;
+    prepare_client_source(&source)
+}
+
+fn prepare_client_source(source: &str) -> Result<PreparedClientV2, ConfigError> {
+    let raw: RawClientRoot = parse_v2_toml(source)?;
+    let validation_raw: RawClientRoot = parse_v2_toml(source)?;
     prepare_client_inner(raw, validation_raw)
 }
 
 /// Reads and prepares a server schema-v2 config without external I/O.
 pub fn prepare_server(path: impl AsRef<Path>) -> Result<PreparedServerV2, ConfigError> {
     let source = read_bounded_utf8(path.as_ref())?;
-    let raw: RawServerRoot = parse_v2_toml(&source)?;
-    let validation_raw: RawServerRoot = parse_v2_toml(&source)?;
+    prepare_server_source(&source)
+}
+
+fn prepare_server_source(source: &str) -> Result<PreparedServerV2, ConfigError> {
+    let raw: RawServerRoot = parse_v2_toml(source)?;
+    let validation_raw: RawServerRoot = parse_v2_toml(source)?;
     prepare_server_inner(raw, validation_raw)
 }
 
-/// Reads and prepares a client V2 config without DNS, download, socket, or listener I/O.
-pub fn prepare_client_v2(path: impl AsRef<Path>) -> Result<PreparedClientV2, ConfigError> {
-    prepare_client(path)
+pub(super) fn validate_client_source(source: &str) -> Result<ValidatedClientConfig, ConfigError> {
+    let mut prepared = prepare_client_source(source)?;
+    let has_deferred_endpoint = prepared
+        .outbound_endpoints
+        .iter()
+        .flatten()
+        .any(DialEndpoint::is_domain)
+        || prepared
+            .dns_endpoints
+            .iter()
+            .any(PreparedDnsEndpoint::is_domain);
+    if !has_deferred_endpoint {
+        finish_client_tun_targets(
+            &mut prepared.validated,
+            &prepared.physical_first_hops,
+            &prepared.direct_detours,
+        )?;
+    }
+    Ok(prepared.validated)
 }
 
-/// Reads and prepares a server V2 config without DNS, download, socket, or listener I/O.
-pub fn prepare_server_v2(path: impl AsRef<Path>) -> Result<PreparedServerV2, ConfigError> {
-    prepare_server(path)
+pub(super) fn validate_server_source(source: &str) -> Result<ValidatedServerConfig, ConfigError> {
+    prepare_server_source(source).map(|prepared| prepared.validated)
 }
 
 /// Materializes client V2 resources through an injected context, then finishes synchronously.
@@ -1191,25 +1196,23 @@ fn attach_rule_registry<T: ValidatedRoute>(
     let Some(registry) = registry else {
         return Ok(());
     };
-    if let Some(route) = validated.route_program_mut() {
-        route.attach_rule_registry(registry);
-    }
+    validated.route_mut().attach_rule_registry(registry);
     Ok(())
 }
 
 trait ValidatedRoute {
-    fn route_program_mut(&mut self) -> Option<&mut crate::model::CompiledRoute>;
+    fn route_mut(&mut self) -> &mut crate::model::CompiledRoute;
 }
 
 impl ValidatedRoute for ValidatedClientConfig {
-    fn route_program_mut(&mut self) -> Option<&mut crate::model::CompiledRoute> {
-        self.route_program.as_mut()
+    fn route_mut(&mut self) -> &mut crate::model::CompiledRoute {
+        &mut self.route
     }
 }
 
 impl ValidatedRoute for ValidatedServerConfig {
-    fn route_program_mut(&mut self) -> Option<&mut crate::model::CompiledRoute> {
-        self.route_program.as_mut()
+    fn route_mut(&mut self) -> &mut crate::model::CompiledRoute {
+        &mut self.route
     }
 }
 
@@ -1486,7 +1489,10 @@ fn prepared_dependency_dns_servers(
         .chain(
             rule_sets
                 .iter()
-                .filter_map(PreparedRuleSet::download_resolver),
+                .filter_map(|rule_set| match rule_set.download_mode() {
+                    PreparedRuleSetDownloadMode::ClientResolved { resolver } => Some(resolver),
+                    PreparedRuleSetDownloadMode::DeferredToDetour => None,
+                }),
         );
     for resolver in candidates {
         let ResolverRef::DnsServer(server) = resolver else {
@@ -1760,11 +1766,11 @@ fn prepare_client_outbounds(
         .try_reserve_exact(outbounds.len())
         .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
     for outbound in outbounds {
-        match outbound.outbound_type.as_deref().unwrap_or("shadowsocks") {
-            "direct" => {
+        match outbound.outbound_type.as_deref() {
+            Some("direct") => {
                 endpoints.push(None);
             }
-            "shadowsocks" => {
+            Some("shadowsocks") => {
                 let Some(server) = outbound.server.as_deref() else {
                     endpoints.push(None);
                     continue;
@@ -2539,7 +2545,11 @@ fn prepare_dns_rules(
             .map(|raw| resolve_rule_set_refs(raw, rule_sets, ConfigField::DnsRouteRulesRuleSet))
             .transpose()?
             .unwrap_or_default();
-        let action = match rule.action.as_deref().unwrap_or("route") {
+        let action = match rule
+            .action
+            .as_deref()
+            .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesAction))?
+        {
             "route" => {
                 if rule.outbound.is_some() {
                     return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
@@ -3031,7 +3041,7 @@ fn build_dependency_order(
     }
     for (index, rule_set) in rule_sets.iter().enumerate() {
         let from = rule_set_node(index)?;
-        if let Some(resolver) = rule_set.download_resolver() {
+        if let PreparedRuleSetDownloadMode::ClientResolved { resolver } = rule_set.download_mode() {
             graph
                 .try_add_edge(
                     from,
@@ -3149,16 +3159,10 @@ fn sanitize_dns(dns: Option<&mut RawDns>) {
     let Some(route) = &mut dns.route else {
         return;
     };
-    let final_server = route.final_server.clone();
     for rule in &mut route.rules {
         rule.rule_set = None;
         if !dns_matcher_present(rule) {
             rule.domain_keyword = Some(ScalarOrList::Scalar(PLACEHOLDER_DOMAIN.to_owned()));
         }
-        if rule.action.as_deref() == Some("reject") {
-            rule.server = final_server.clone();
-        }
-        rule.action = None;
-        rule.strategy = None;
     }
 }

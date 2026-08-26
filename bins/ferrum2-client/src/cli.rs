@@ -5,7 +5,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "ferrum2-client", version, about = "ferrum2 SOCKS5 client")]
 pub(crate) struct Cli {
-    /// Path to the schema version 1 or 2 TOML configuration.
+    /// Path to the schema version 2 TOML configuration.
     #[arg(long, value_name = "PATH")]
     pub(crate) config: PathBuf,
 

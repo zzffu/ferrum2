@@ -33,7 +33,10 @@ async fn full_request_salt_binding_precedes_first_payload_forwarding() {
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
     let mut flow = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first-write");
     let mut destination = [0_u8; 64];
@@ -68,7 +71,10 @@ async fn authenticated_bound_response_releases_exact_first_payload() {
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
     let mut flow = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first-write");
     let mut destination = [0_u8; 16];
@@ -103,7 +109,10 @@ async fn tampered_first_payload_is_never_released() {
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
     let mut flow = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first-write");
     let mut destination = [0_u8; 16];

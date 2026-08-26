@@ -905,32 +905,6 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         })
     }
 
-    pub(super) async fn open_tcp<'a>(
-        &'a self,
-        origin: ClientRequestOrigin,
-        plan: Option<EgressPlanSnapshot>,
-        application_target: &TargetAddr,
-        timeout_limit: Option<Duration>,
-        #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
-    ) -> Result<tcp::ClientTcpFlow<'a, C::Stream>, ClientOpenFailure>
-    where
-        C: ClientPhysicalConnector,
-        C::Stream: TransportIo + LocalEndpoint + 'a,
-        T: Clock + Sync,
-        R: SecureRandom,
-    {
-        self.open_tcp_for_ingress(
-            origin,
-            0,
-            plan,
-            application_target,
-            timeout_limit,
-            #[cfg(test)]
-            observers,
-        )
-        .await
-    }
-
     pub(super) async fn open_tcp_for_ingress<'a>(
         &'a self,
         origin: ClientRequestOrigin,
@@ -1041,18 +1015,6 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             observers,
         );
         open.await.map(tcp::ClientTcpFlow::Proxy)
-    }
-
-    pub(super) async fn prepare_udp(
-        &self,
-        origin: ClientRequestOrigin,
-        plan: Option<EgressPlanSnapshot>,
-        target: Option<&TargetAddr>,
-    ) -> Result<ClientUdpAssociation, ClientUdpPrepareFailure>
-    where
-        C: ClientPhysicalConnector,
-    {
-        self.prepare_udp_for_ingress(origin, 0, plan, target).await
     }
 
     pub(super) async fn prepare_udp_for_ingress(
@@ -1308,8 +1270,9 @@ mod m16_tests {
 
         assert!(matches!(
             engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(direct_plan.clone()),
                     &direct_target,
                     None,
@@ -1322,8 +1285,9 @@ mod m16_tests {
         ));
         assert!(matches!(
             engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(proxy_plan.clone()),
                     &application_target,
                     None,
@@ -1336,8 +1300,9 @@ mod m16_tests {
         ));
 
         let mut direct_udp = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(direct_plan),
                 Some(&direct_target),
             )
@@ -1358,8 +1323,9 @@ mod m16_tests {
             Ok(length) if length == wire_length
         ));
         let _proxy_udp = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(proxy_plan),
                 Some(&application_target),
             )
@@ -1585,8 +1551,9 @@ mod m16_tests {
 
         assert!(matches!(
             engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(direct.clone()),
                     &target,
                     None,
@@ -1599,7 +1566,12 @@ mod m16_tests {
         ));
         assert!(matches!(
             engine
-                .prepare_udp(ClientRequestOrigin::Socks, Some(direct), Some(&target),)
+                .prepare_udp_for_ingress(
+                    ClientRequestOrigin::Socks,
+                    0,
+                    Some(direct),
+                    Some(&target),
+                )
                 .await,
             Err(ClientUdpPrepareFailure::Unavailable)
         ));
@@ -1784,8 +1756,9 @@ mod m16_tests {
         );
         assert!(
             engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(direct.clone()),
                     &tcp_target,
                     None,
@@ -1793,7 +1766,7 @@ mod m16_tests {
                 )
                 .await
                 .is_err(),
-            "compatibility entry point must retain ingress zero"
+            "ingress zero must remain isolated from configured routes"
         );
         let mut failed_udp = engine
             .prepare_udp_for_ingress(
@@ -1870,7 +1843,7 @@ mod m16_tests {
     }
 
     fn selected(hops: Vec<usize>) -> EgressPlanSnapshot {
-        let route = compile_selector_plans_with_roots(
+        let (_, handles) = ferrum2_core::route::compile_egress_plans_with_roots(
             &[TaggedInbound::new("entry", 0)],
             &[
                 TaggedOutbound::new("direct-a", 0),
@@ -1879,16 +1852,10 @@ mod m16_tests {
             ],
             &[TaggedPlan::new("selected", hops)],
             &[],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "selected")]),
-            &["direct-a", "direct-b", "m16-tag-sentinel"],
+            &["selected", "direct-a", "direct-b", "m16-tag-sentinel"],
         )
-        .expect("selected plan")
-        .0;
-        route.select_plan_snapshot(
-            0,
-            ferrum2_core::route::Network::Tcp,
-            &TargetAddr::domain("snapshot.invalid", 443).unwrap(),
-        )
+        .expect("selected plan");
+        handles[0].snapshot_owned()
     }
 
     #[tokio::test]
@@ -1944,8 +1911,9 @@ mod m16_tests {
             assert!(
                 matches!(
                     engine
-                        .open_tcp(
-                            ClientRequestOrigin::Socks,
+                .open_tcp_for_ingress(
+                    ClientRequestOrigin::Socks,
+                    0,
                             Some(plan.clone()),
                             &target,
                             None,
@@ -1975,7 +1943,7 @@ mod m16_tests {
 
         assert!(matches!(
             engine
-                .open_tcp(ClientRequestOrigin::Socks, None, &target, None, None)
+                .open_tcp_for_ingress(ClientRequestOrigin::Socks, 0, None, &target, None, None)
                 .await,
             Err(ClientOpenFailure::Plan(ClientPlanFailure::Invalid))
         ));
@@ -1985,8 +1953,9 @@ mod m16_tests {
         let redacted_tcp = format!(
             "{:?}",
             engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(mixed.clone()),
                     &target,
                     None,
@@ -1999,7 +1968,7 @@ mod m16_tests {
         let redacted_udp = format!(
             "{:?}",
             engine
-                .prepare_udp(ClientRequestOrigin::Socks, Some(mixed), Some(&target))
+                .prepare_udp_for_ingress(ClientRequestOrigin::Socks, 0, Some(mixed), Some(&target),)
                 .await
                 .err()
                 .unwrap()
@@ -2028,8 +1997,9 @@ mod m16_tests {
             None,
         );
         let mut association = packet_engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Dns,
+                0,
                 Some(direct.clone()),
                 Some(&dns_target),
             )
@@ -2058,8 +2028,9 @@ mod m16_tests {
 
         let dns_connect_target = TargetAddr::ip("192.0.2.53:53".parse().unwrap()).unwrap();
         let connect_kind = match engine
-            .open_tcp(
+            .open_tcp_for_ingress(
                 ClientRequestOrigin::Dns,
+                0,
                 Some(direct),
                 &dns_connect_target,
                 None,
@@ -2136,8 +2107,9 @@ mod m16_tests {
         let direct = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
         assert!(matches!(
             engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(direct),
                     &TargetAddr::ip("[::1]:443".parse().unwrap()).unwrap(),
                     None,

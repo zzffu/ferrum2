@@ -135,7 +135,6 @@ const fn run_error_for_dns_state(error: dns_egress::ServerDnsStateBuildError) ->
     match error {
         dns_egress::ServerDnsStateBuildError::CacheAllocation => RunError::RuleAllocation,
         dns_egress::ServerDnsStateBuildError::InvalidRuntime => RunError::StartupProtocol,
-        dns_egress::ServerDnsStateBuildError::Rule(error) => run_error_for_rule_compile(error),
         dns_egress::ServerDnsStateBuildError::DnsPolicy(error) => {
             run_error_for_dns_policy_compile(error)
         }
@@ -360,14 +359,13 @@ where
                 Some(DnsConfig {
                     inbounds: _,
                     servers: _,
-                    route,
                     timeout,
                     max_inflight,
                     runtime,
                 }),
-                policy,
+                Some(policy),
                 Some(servers),
-            ) => Some((servers, route, policy, timeout, max_inflight, runtime)),
+            ) => Some((servers, policy, timeout, max_inflight, runtime)),
             (None, None, None) => None,
             _ => return Err(RunError::StartupProtocol),
         };
@@ -392,8 +390,7 @@ where
         let udp_config = config.udp;
         let clock = Arc::new(SystemClock::new());
         let routing = Arc::new(ServerRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbound_count: config.outbounds.len(),
         });
         // Probe caller-owned route scratch before any listener is prepared so
@@ -426,16 +423,15 @@ where
         #[cfg(all(windows, not(test)))]
         let mut udp_network_reset = None;
         let _dns = match dns {
-            Some((servers, route, policy, timeout, max_inflight, runtime)) => {
+            Some((servers, policy, timeout, max_inflight, runtime)) => {
                 let state = if materialized {
                     dns_egress::ServerDnsState::try_new_with_cache(
-                        route,
                         policy,
                         runtime,
                         materialized_cache,
                     )
                 } else {
-                    dns_egress::ServerDnsState::try_new(route, policy, runtime)
+                    dns_egress::ServerDnsState::try_new(policy, runtime)
                 }
                 .map_err(run_error_for_dns_state)?
                 .with_policy_observer(dns_egress::dns_policy_observer(&metrics));
@@ -628,10 +624,11 @@ where
 }
 
 fn publish_rule_program_metadata(config: &ValidatedServerConfig, metrics: &Metrics) {
-    if let Some(route) = config.route_program.as_ref() {
-        metrics.set_rule_program_mode(RuleProgram::Route, rule_program_mode(route.program_mode()));
-        metrics.set_rule_program_rules(RuleProgram::Route, route.rule_count());
-    }
+    metrics.set_rule_program_mode(
+        RuleProgram::Route,
+        rule_program_mode(config.route.program_mode()),
+    );
+    metrics.set_rule_program_rules(RuleProgram::Route, config.route.rule_count());
     let Some(dns) = config.dns_route.as_ref() else {
         return;
     };

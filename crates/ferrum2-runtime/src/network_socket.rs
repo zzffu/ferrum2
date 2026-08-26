@@ -561,13 +561,6 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for GenerationBoundTcpStream<T> {
 }
 
 impl<T> LocalEndpoint for GenerationBoundTcpStream<T> {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        match self.local_socket_addr {
-            SocketAddr::V4(endpoint) => endpoint,
-            SocketAddr::V6(endpoint) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.port()),
-        }
-    }
-
     fn local_socket_addr(&self) -> SocketAddr {
         self.local_socket_addr
     }

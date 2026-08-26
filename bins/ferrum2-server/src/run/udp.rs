@@ -668,7 +668,7 @@ where
     runtime: ServerUdpRuntime<L, F>,
     mappings: Arc<UdpMappings>,
     admission: Arc<tokio::sync::Mutex<()>>,
-    route_scratch: Option<RuleEvaluationScratch>,
+    route_scratch: RuleEvaluationScratch,
     scratch: UdpPacketScratch,
     wire: BytesMut,
     maintenance: tokio::time::Interval,
@@ -961,7 +961,7 @@ where
                 pending.datagram().target(),
                 pending.datagram().payload(),
                 &metrics,
-                route_scratch.as_mut(),
+                &mut route_scratch,
             )
             .map_err(run_error_for_rule_compile)?;
             // The shared gate protects only protocol/mapping observations and their
@@ -984,9 +984,6 @@ where
                 .is_some_and(|bound_inbound| bound_inbound != inbound)
             {
                 record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
-                continue;
-            }
-            if terminal == ServerTerminalRoute::Reject && routing.program().is_none() {
                 continue;
             }
             if existing.is_none() {
@@ -1408,14 +1405,9 @@ fn select_udp_route(
     target: &TargetAddr,
     payload: &[u8],
     metrics: &Metrics,
-    scratch: Option<&mut RuleEvaluationScratch>,
+    scratch: &mut RuleEvaluationScratch,
 ) -> Result<ServerTerminalRoute, RuleCompileError> {
-    let Some(program) = routing.program() else {
-        return Ok(routing.legacy(inbound, Network::Udp, target));
-    };
-    let Some(scratch) = scratch else {
-        return Err(RuleCompileError::Internal);
-    };
+    let program = routing.program();
     let mut evaluation = program.evaluate_with_scratch(inbound, Network::Udp, target, scratch);
     evaluation.enable_match_observation();
     let mut protocol = None;
@@ -2038,8 +2030,7 @@ mod tests {
             Arc::clone(&listener),
             ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    legacy: config.route,
-                    program: config.route_program,
+                    program: config.route,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol: Arc::clone(&protocol),
@@ -2139,8 +2130,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let shared = ServerUdpShared {
             routing: Arc::new(ServerRouting {
-                legacy: config.route,
-                program: config.route_program,
+                program: config.route,
                 outbound_count: config.outbounds.len(),
             }),
             protocol: Arc::clone(&protocol),
@@ -2255,8 +2245,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let shared = ServerUdpShared {
             routing: Arc::new(ServerRouting {
-                legacy: config.route,
-                program: config.route_program,
+                program: config.route,
                 outbound_count: config.outbounds.len(),
             }),
             protocol: Arc::clone(&protocol),
@@ -2378,8 +2367,7 @@ mod tests {
             listener,
             ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    legacy: config.route,
-                    program: config.route_program,
+                    program: config.route,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol: Arc::clone(&protocol),
@@ -2465,8 +2453,7 @@ mod tests {
             listener,
             ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    legacy: config.route,
-                    program: config.route_program,
+                    program: config.route,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol: Arc::clone(&protocol),
@@ -2599,8 +2586,7 @@ mod tests {
             listener,
             ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    legacy: config.route,
-                    program: config.route_program,
+                    program: config.route,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol: Arc::clone(&protocol),
@@ -2736,8 +2722,7 @@ mod tests {
             let observed_mappings = Arc::clone(&mappings);
             let shared = ServerUdpShared {
                 routing: Arc::new(ServerRouting {
-                    legacy: config.route,
-                    program: config.route_program,
+                    program: config.route,
                     outbound_count: config.outbounds.len(),
                 }),
                 protocol,
@@ -2909,8 +2894,7 @@ mod tests {
         let (path, mut config) = server_v2_test_config(listen, route);
         config.udp.max_sessions = 1;
         let routing = ServerRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbound_count: config.outbounds.len(),
         };
         let registry = OwnerRegistry::new();

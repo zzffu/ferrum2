@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
 mod candidate;
-mod compat;
 mod compiled_program;
 mod dns_blueprint;
 mod error;
@@ -13,11 +12,6 @@ pub mod srs;
 pub use candidate::{
     MatchCandidateIndex, MatchCandidateIndexBuilder, MatchCategories, PortRangeCandidateIndex,
     PortRangeCandidateIndexBuilder, SparseValueIndex, SparseValueIndexBuilder,
-};
-pub use compat::{
-    ActionRule, ActionTable, RouteRule, RouteTable, TaggedRoute, TaggedRouteRule,
-    TaggedStaticBinding, compile_selector_plans, compile_selector_plans_with_roots,
-    compile_selector_route,
 };
 pub use compiled_program::{CompiledRuleProgram, RuleProgramMode};
 pub use dns_blueprint::{
@@ -32,8 +26,7 @@ pub use match_set::{
 pub use program::{
     OrderedRouteProgram, OrderedRouteRule, PortRange, RouteMatchField, RouteMatchObservation,
     RouteMatchSource, RouteMatchType, RouteMatcher, RouteMetadata, RouteProgramAction,
-    RouteProgramEvaluation, RouteProgramEvaluationWithScratch, RouteRuleAction,
-    RuleEvaluationScratch,
+    RouteProgramEvaluationWithScratch, RouteRuleAction, RuleEvaluationScratch,
 };
 pub use registry::{
     MatchSetId, RegistryPublishError, RuleEngineRegistry, RuleEngineSnapshot,

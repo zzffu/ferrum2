@@ -111,7 +111,27 @@ mod tests {
         )
         .expect("resolver owner handoff");
         let resolver = Arc::new(resolver);
-        let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0)));
+        let snapshot = ferrum2_rule::RuleEngineSnapshotBuilder::new(1)
+            .build()
+            .expect("empty DNS rule snapshot");
+        let policy = Arc::new(
+            ferrum2_dns::DnsPolicyProgram::try_new(
+                Vec::new(),
+                ferrum2_dns::DnsPolicyRoute::new(
+                    ferrum2_dns::DnsServerId::new(0),
+                    ferrum2_dns::DnsStrategy::PreferIpv4,
+                ),
+                &snapshot,
+            )
+            .expect("final-only DNS policy"),
+        );
+        let proxy = Arc::new(ferrum2_dns::DnsProxy::new(
+            Arc::clone(&resolver),
+            policy,
+            Arc::new(ferrum2_rule::RuleEngineRegistry::new(snapshot)),
+            1,
+            0,
+        ));
         let (readiness_sender, readiness_gate) = tokio::sync::oneshot::channel();
         let root = ProcessRoot::new(move || async move {
             Ok(ClientDnsRoot {

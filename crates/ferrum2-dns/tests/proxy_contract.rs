@@ -1,16 +1,16 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ferrum2_core::route::Network;
 use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
-    ApplicationResolveContext, ApplicationResolveRequest, DnsError, DnsProxy, DnsProxyListeners,
-    DnsStrategy, DnsUpstreamSpec, DnsUpstreamTransport, ProxyIngress, ProxyTransport,
-    TaggedResolver,
+    ApplicationResolveContext, ApplicationResolveRequest, DnsError, DnsPolicyProgram,
+    DnsPolicyRoute, DnsProxy, DnsProxyListeners, DnsServerId, DnsStrategy, DnsUpstreamSpec,
+    DnsUpstreamTransport, ProxyIngress, ProxyTransport, TaggedResolver,
 };
+use ferrum2_rule::{RuleEngineRegistry, RuleEngineSnapshotBuilder};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
@@ -18,6 +18,32 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 static TEST_NETWORK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn final_proxy(
+    resolver: Arc<TaggedResolver>,
+    strategy: DnsStrategy,
+    listener_count: usize,
+    ordinary_count: usize,
+) -> DnsProxy {
+    let snapshot = RuleEngineSnapshotBuilder::new(1)
+        .build()
+        .expect("empty rule snapshot");
+    let policy = Arc::new(
+        DnsPolicyProgram::try_new(
+            Vec::new(),
+            DnsPolicyRoute::new(DnsServerId::new(0), strategy),
+            &snapshot,
+        )
+        .expect("final-only DNS policy"),
+    );
+    DnsProxy::new(
+        resolver,
+        policy,
+        Arc::new(RuleEngineRegistry::new(snapshot)),
+        listener_count,
+        ordinary_count,
+    )
+}
 
 #[tokio::test]
 async fn application_resolution_uses_qtype_policy_strategy_and_no_system_fallback() {
@@ -28,7 +54,7 @@ async fn application_resolution_uses_qtype_policy_strategy_and_no_system_fallbac
     let upstream_address = upstream.local_addr().expect("application upstream address");
     let upstream_task = tokio::spawn(async move {
         let mut wire = [0_u8; 4096];
-        for expected in [RecordType::A, RecordType::AAAA] {
+        for expected in [RecordType::AAAA, RecordType::A] {
             let (length, peer) = upstream
                 .recv_from(&mut wire)
                 .await
@@ -70,12 +96,7 @@ async fn application_resolution_uses_qtype_policy_strategy_and_no_system_fallbac
     .expect("application resolver");
     owner.ready().await.expect("application resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |ingress, transport, _, qtype| {
-        assert_eq!(ingress, ProxyIngress::Ordinary(7));
-        assert_eq!(transport, ProxyTransport::Tcp);
-        assert!(matches!(qtype, 1 | 28));
-        Some(0)
-    });
+    let proxy = final_proxy(Arc::clone(&resolver), DnsStrategy::PreferIpv6, 0, 8);
     let domain = CanonicalDomain::new("Strategy.Example.").expect("canonical application name");
     let request = ApplicationResolveRequest::new(
         ApplicationResolveContext::new(7, Network::Tcp),
@@ -102,7 +123,7 @@ async fn application_resolution_uses_qtype_policy_strategy_and_no_system_fallbac
     );
     upstream_task.await.expect("application upstream join");
 
-    let closed = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| None);
+    let closed = final_proxy(Arc::clone(&resolver), DnsStrategy::PreferIpv6, 0, 0);
     assert_eq!(
         closed
             .resolve_application(request)
@@ -225,19 +246,7 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
     .expect("resolver");
     owner.ready().await.expect("resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |ingress, transport, name, qtype| {
-        if name.to_ascii().ends_with(".suffix.example.") {
-            assert_eq!(ingress, ProxyIngress::Ordinary(0));
-            assert_eq!(transport, ProxyTransport::Tcp);
-            assert_eq!(qtype, u16::from(RecordType::AAAA));
-            return None;
-        }
-        assert_eq!(ingress, ProxyIngress::Listener(0));
-        assert_eq!(transport, ProxyTransport::Udp);
-        assert!(name.is_fqdn(), "wire query must be absolute");
-        assert!(matches!(qtype, 1 | 28));
-        Some(0)
-    });
+    let proxy = final_proxy(Arc::clone(&resolver), DnsStrategy::PreferIpv4, 1, 0);
     let mut request = Message::new(0x1234, MessageType::Query, OpCode::Query);
     request.add_query(Query::query(
         Name::from_ascii("selected.example.").expect("query name"),
@@ -405,12 +414,12 @@ async fn udp_proxy_drops_malformed_and_rejects_shape_without_upstream_work() {
     .expect("shape resolver");
     owner.ready().await.expect("shape resolver ready");
     let resolver = Arc::new(resolver);
-    let selections = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&selections);
-    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), move |_, _, _, _| {
-        observed.fetch_add(1, Ordering::AcqRel);
-        Some(0)
-    }));
+    let proxy = Arc::new(final_proxy(
+        Arc::clone(&resolver),
+        DnsStrategy::PreferIpv4,
+        1,
+        0,
+    ));
     let listen = reserve_paired_addresses(1)[0];
     let listeners = DnsProxyListeners::bind(
         vec![listen],
@@ -490,7 +499,6 @@ async fn udp_proxy_drops_malformed_and_rejects_shape_without_upstream_work() {
             expected
         );
     }
-    assert_eq!(selections.load(Ordering::Acquire), 0);
     assert!(
         tokio::time::timeout(Duration::from_millis(20), upstream.recv_from(&mut wire))
             .await
@@ -534,7 +542,12 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     .expect("timeout resolver");
     owner.ready().await.expect("timeout resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = Arc::new(DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0)));
+    let proxy = Arc::new(final_proxy(
+        Arc::clone(&resolver),
+        DnsStrategy::PreferIpv4,
+        1,
+        0,
+    ));
     let query = |id| {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
         message.add_query(Query::query(
@@ -643,7 +656,7 @@ async fn proxy_busy_timeout_and_udp_truncation_are_typed() {
     .expect("large resolver");
     owner.ready().await.expect("large resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0));
+    let proxy = final_proxy(Arc::clone(&resolver), DnsStrategy::PreferIpv4, 1, 0);
     let mut request = Message::new(0x5203, MessageType::Query, OpCode::Query);
     request
         .add_query(Query::query(
@@ -734,12 +747,7 @@ async fn udp_tc_retries_tcp_on_the_same_selected_server() {
     .expect("TC resolver");
     owner.ready().await.expect("TC resolver ready");
     let resolver = Arc::new(resolver);
-    let selections = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&selections);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), move |_, _, _, _| {
-        observed.fetch_add(1, Ordering::AcqRel);
-        Some(0)
-    });
+    let proxy = final_proxy(Arc::clone(&resolver), DnsStrategy::PreferIpv4, 1, 0);
     let mut request = Message::new(0x5301, MessageType::Query, OpCode::Query);
     request.add_query(Query::query(
         Name::from_ascii("tc.proxy.example.").expect("TC proxy name"),
@@ -759,7 +767,6 @@ async fn udp_tc_retries_tcp_on_the_same_selected_server() {
         response.answers.first().map(|record| &record.data),
         Some(&RData::A(A(Ipv4Addr::new(203, 0, 113, 53))))
     );
-    assert_eq!(selections.load(Ordering::Acquire), 1);
     udp_task.await.expect("TC UDP join");
     tcp_task.await.expect("TC TCP join");
     drop((proxy, resolver));
@@ -809,12 +816,11 @@ async fn tcp_listener_handles_multi_query_frames_bounds_and_clean_eof() {
     .expect("resolver");
     owner.ready().await.expect("resolver ready");
     let resolver = Arc::new(resolver);
-    let proxy = Arc::new(DnsProxy::new(
+    let proxy = Arc::new(final_proxy(
         Arc::clone(&resolver),
-        |_, transport, _, _| {
-            assert_eq!(transport, ProxyTransport::Tcp);
-            Some(0)
-        },
+        DnsStrategy::PreferIpv4,
+        2,
+        0,
     ));
     let listen: [SocketAddr; 2] = reserve_paired_addresses(2)
         .try_into()

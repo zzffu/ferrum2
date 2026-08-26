@@ -204,7 +204,7 @@ fn direct_udp_real_process_preserves_raw_datagrams_and_association_lifetime() {
         let root = match form {
             "static" => "outbound = \"exit\"\n".to_owned(),
             "rule" => format!(
-                "[route]\nfinal = \"fallback\"\n[[route.rules]]\nnetwork = \"udp\"\nip = \"{}\"\nport = {}\noutbound = \"exit\"\n",
+                "[route]\nfinal = \"fallback\"\n[[route.rules]]\nnetwork = \"udp\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"exit\"\n",
                 echo_address.ip(),
                 echo_address.port(),
             ),
@@ -214,7 +214,7 @@ fn direct_udp_real_process_preserves_raw_datagrams_and_association_lifetime() {
         };
         let proxy = matches!(form, "rule" | "selector").then(|| {
             format!(
-                "[[outbounds]]\ntag = \"fallback\"\nserver = \"{fallback_address}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"bTE2LXNlY3JldC1rZXkhIQ==\"\n"
+                "[[outbounds]]\ntag = \"fallback\"\ntype = \"shadowsocks\"\nserver = \"{fallback_address}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"bTE2LXNlY3JldC1rZXkhIQ==\"\n"
             )
         });
         let config = directory.path().join(format!("m16-direct-udp-{form}.toml"));
@@ -346,8 +346,8 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
         format!(
             "schema_version = 2\n\
              [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
-             [[outbounds]]\ntag = \"{selected_tag}\"\nserver = \"{selected_server}\"\n\
-             [[outbounds]]\ntag = \"{unselected_tag}\"\nserver = \"{unselected_server_address}\"\n\
+             [[outbounds]]\ntag = \"{selected_tag}\"\ntype = \"shadowsocks\"\nserver = \"{selected_server}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+             [[outbounds]]\ntag = \"{unselected_tag}\"\ntype = \"shadowsocks\"\nserver = \"{unselected_server_address}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
              [[selectors]]\ntag = \"{selector_tag}\"\noutbounds = [\"{selected_tag}\", \"{unselected_tag}\"]\ndefault = \"{selected_tag}\"\n\
              [route]\nfinal = \"{unselected_tag}\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"{selector_tag}\"\n\
@@ -359,7 +359,6 @@ fn m14_client_udp_association_actions_route_once_and_reap() {
              [[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
              [[dns.servers]]\ntag = \"dns\"\ntransport = \"udp\"\naddress = \"{dns_upstream_address}\"\n\
              [dns.route]\nfinal = \"dns\"\n\
-             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
              [udp]\nmax_sessions = 8\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
              [metrics]\nlisten = \"{client_metrics}\"\n",
             route_first_address.ip(),

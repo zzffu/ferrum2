@@ -180,7 +180,7 @@ impl OwnerRegistry {
     ) -> Option<OwnerGuard> {
         self.counters
             .sniff_buffered_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current
                     .checked_add(capacity)
                     .filter(|updated| *updated <= aggregate_limit)

@@ -5,13 +5,11 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use ferrum2_crypto::{
-    AeadError, Aes128Psk, Clock, ClockError, KeyProvider, KeyProviderError, KeySelector,
-    MethodKeyProvider, MethodProfile, MethodProfileMismatchError, MethodPsk, MethodPskLengthError,
-    MethodSaltLengthError, MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, NonceCounter,
-    PskLengthError, RandomError, SecureRandom, SinglePskProvider, SystemClock, SystemRandom,
-    TcpMethod, TcpMethodProfile, TcpSalt, TcpSealer, UdpOutboundSession, UdpSessionId,
-    generate_method_request_salt, generate_method_response_salt, generate_request_salt,
-    generate_response_salt,
+    AeadError, Clock, ClockError, KeyProviderError, KeySelector, MethodKeyProvider, MethodProfile,
+    MethodProfileMismatchError, MethodPsk, MethodPskLengthError, MethodSaltLengthError,
+    MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, NonceCounter, RandomError,
+    SecureRandom, SystemClock, SystemRandom, TcpSealer, UdpOutboundSession, UdpSessionId,
+    generate_method_request_salt, generate_method_response_salt,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -30,21 +28,6 @@ impl Hasher for RecordingHasher {
     }
 }
 
-fn seal_with_provider(provider: &SinglePskProvider) -> BytesMut {
-    let salt = TcpSalt::from_bytes([0x44; 16]);
-    let subkey = provider
-        .with_key(KeySelector::Default, |key| {
-            key.derive_tcp_subkey(TcpMethod::Blake3Aes128Gcm2022, &salt)
-        })
-        .expect("default key");
-    let mut buffer = BytesMut::with_capacity(20);
-    buffer.extend_from_slice(b"test");
-    TcpSealer::new(subkey)
-        .seal_in_place(&mut buffer)
-        .expect("seal");
-    buffer
-}
-
 fn seal_with_method_provider(provider: &MethodSinglePskProvider, salt: &MethodTcpSalt) -> BytesMut {
     let subkey = provider
         .with_method_key(KeySelector::Default, |key| key.derive_tcp_subkey(salt))
@@ -56,38 +39,6 @@ fn seal_with_method_provider(provider: &MethodSinglePskProvider, salt: &MethodTc
         .seal_in_place(&mut buffer)
         .expect("seal");
     buffer
-}
-
-#[test]
-fn secret_owners_are_redacted_explicitly_clearable_and_drop_zeroizing() {
-    let sentinel = *b"visible-secret!!";
-    let mut psk = Aes128Psk::from_bytes(sentinel);
-    let rendered = format!("{psk:?}");
-    assert!(rendered.contains("[REDACTED]"));
-    assert!(!rendered.contains("visible-secret"));
-    assert_zeroize_on_drop::<Aes128Psk>();
-
-    psk.clear();
-    let cleared = seal_with_provider(&SinglePskProvider::new(psk));
-    let all_zero = seal_with_provider(&SinglePskProvider::new(Aes128Psk::from_bytes([0; 16])));
-    assert_eq!(cleared, all_zero);
-
-    assert_eq!(
-        Aes128Psk::try_from(&b"short"[..]).unwrap_err(),
-        PskLengthError
-    );
-    assert!(!PskLengthError.to_string().contains("short"));
-}
-
-#[test]
-fn single_psk_provider_rejects_identity_without_disclosing_it() {
-    let provider = SinglePskProvider::new(Aes128Psk::from_bytes([7; 16]));
-    let identity = *b"identity-secret!";
-    let error = provider
-        .with_key(KeySelector::Identity(&identity), |_| ())
-        .unwrap_err();
-    assert_eq!(error, KeyProviderError::IdentityUnsupported);
-    assert!(!error.to_string().contains("identity-secret"));
 }
 
 struct ScriptedRandom {
@@ -127,21 +78,22 @@ impl SecureRandom for ScriptedRandom {
 fn entropy_failure_has_no_fallback_and_response_salt_retries_are_bounded() {
     let unavailable = ScriptedRandom::new::<16>([Err(RandomError::Unavailable)]);
     assert_eq!(
-        generate_request_salt(&unavailable).unwrap_err(),
+        generate_method_request_salt(MethodProfile::Blake3Aes128Gcm2022, &unavailable).unwrap_err(),
         RandomError::Unavailable
     );
 
-    let request = TcpSalt::from_bytes([0x11; 16]);
+    let request = MethodTcpSalt::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &[0x11; 16])
+        .expect("AES-128 salt");
     let eight_collisions = ScriptedRandom::new((0..8).map(|_| Ok([0x11; 16])));
     assert_eq!(
-        generate_response_salt(&eight_collisions, &request).unwrap_err(),
+        generate_method_response_salt(&eight_collisions, &request).unwrap_err(),
         RandomError::RepeatedSalt
     );
 
     let seventh_then_distinct =
         ScriptedRandom::new((0..7).map(|_| Ok([0x11; 16])).chain([Ok([0x22; 16])]));
-    let response =
-        generate_response_salt(&seventh_then_distinct, &request).expect("eighth draw differs");
+    let response = generate_method_response_salt(&seventh_then_distinct, &request)
+        .expect("eighth draw differs");
     assert_eq!(response.as_bytes(), &[0x22; 16]);
 }
 
@@ -178,8 +130,6 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
     assert_zeroize_on_drop::<MethodTcpSalt>();
 
     for (profile, width, request_read, response_read, udp_overhead, bytes) in rows {
-        let tcp_alias: TcpMethodProfile = profile;
-        assert_eq!(tcp_alias, profile);
         assert_eq!(profile.key_bytes(), width);
         assert_eq!(profile.salt_bytes(), width);
         assert_eq!(profile.tag_bytes(), 16);
@@ -238,8 +188,8 @@ fn method_profiles_bind_exact_width_secret_salt_and_key_capabilities() {
         assert_eq!(cleared, zeroed);
     }
 
-    for psk_profile in TcpMethodProfile::ALL {
-        for salt_profile in TcpMethodProfile::ALL {
+    for psk_profile in MethodProfile::ALL {
+        for salt_profile in MethodProfile::ALL {
             if psk_profile == salt_profile {
                 continue;
             }
@@ -328,17 +278,17 @@ fn udp_session_ids_retry_live_collisions_without_exposing_partial_state() {
 fn profile_salt_entropy_uses_complete_width_and_full_width_collision_checks() {
     for (profile, first, second) in [
         (
-            TcpMethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3Aes128Gcm2022,
             vec![0x61; 16],
             vec![0x62; 16],
         ),
         (
-            TcpMethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3Aes256Gcm2022,
             vec![0x71; 32],
             vec![0x72; 32],
         ),
         (
-            TcpMethodProfile::Blake3ChaCha20Poly13052022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
             vec![0x81; 32],
             vec![0x82; 32],
         ),

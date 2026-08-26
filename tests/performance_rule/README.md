@@ -29,8 +29,9 @@ The immutable evidence chain is:
 - `release-ab-v3-all-suite-median-diagnostic.json`, the failed v3 A/B report,
   SHA-256
   `679a85722049e5dc0ea9fa601807623defc267be064d9bb4694aae0bf59719f3`;
-- canonical v4 `release-aa.json` and `release-ab.json`, deterministically
-  reclassified from those v3 reports without executing a runner.
+- canonical v4 `release-aa.json` and `release-ab.json`, whose checked-in
+  provenance records their historical deterministic derivation from those v3
+  reports.
 
 V4 derives each suite from the explicit `suite` field in every retained raw
 measurement and fails closed for missing, inconsistent, or unknown suites.
@@ -52,18 +53,9 @@ decision, source-file SHA-256, and canonical raw-pair SHA-256. The original v3
 A/B report's 19 failed route/DNS comparisons remain explicit provenance; v4
 does not relabel them as passes.
 
-After archiving the v3 reports, generate canonical v4 evidence offline:
-
-```text
-python3 -B tools/performance_rule.py \
-  --reclassify-v3-aa tests/performance_rule/release-aa-v3-all-suite-median.json \
-  --output tests/performance_rule/release-aa.json
-python3 -B tools/performance_rule.py \
-  --reclassify-v3-ab tests/performance_rule/release-ab-v3-all-suite-median-diagnostic.json \
-  --source-calibration tests/performance_rule/release-aa-v3-all-suite-median.json \
-  --calibration tests/performance_rule/release-aa.json \
-  --output tests/performance_rule/release-ab.json
-```
+The v2 and v3 files are immutable provenance inputs for validating the
+checked-in v4 evidence only. The controller does not accept them as generation
+inputs; new evidence is generated directly in the current v4 schema.
 
 Generate A/A with the pinned parent:
 

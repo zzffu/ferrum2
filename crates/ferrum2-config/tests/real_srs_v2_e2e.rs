@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use ferrum2_config::{
     ClientV2Resources, CompiledRuleSetResource, DnsIngressId, ResolvedOutboundEndpoint,
-    RouteAction, finish_client_v2, prepare_client_v2,
+    RouteAction, finish_client_v2, prepare_client,
 };
 use ferrum2_core::TargetAddr;
 use ferrum2_rule::srs::decode_srs;
@@ -42,7 +42,8 @@ fn terminal_route_hops(
     route: &ferrum2_config::CompiledRoute,
     target: &TargetAddr,
 ) -> Option<Vec<usize>> {
-    let mut evaluation = route.evaluate(0, Network::Tcp, target);
+    let mut scratch = route.evaluation_scratch().expect("route scratch");
+    let mut evaluation = route.evaluate_with_scratch(0, Network::Tcp, target, &mut scratch);
     match evaluation.next(RouteMetadata::new(None, None)) {
         Some(RouteProgramAction::Terminal(RouteAction::Route(plan))) => {
             Some(plan.snapshot_owned().hops().to_vec())
@@ -55,15 +56,16 @@ fn terminal_route_hops(
 fn four_pinned_srs_finish_into_one_v2_route_and_dns_blueprint_snapshot() {
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/examples/client-v2-dns-rulesets.toml");
-    let prepared = prepare_client_v2(example).expect("prepare tracked V2 example");
+    let prepared = prepare_client(example).expect("prepare tracked V2 example");
     let config = finish_client_v2(prepared, resources()).expect("finish real SRS resources");
 
-    let route = config.route_program.as_ref().expect("ordinary route");
+    let route = &config.route;
     let registry = route.rule_registry().expect("shared RuleSet registry");
     assert_eq!(registry.generation(), 41);
 
     let ads = TargetAddr::domain("x.0.myikas.com", 443).expect("ads target");
-    let mut evaluation = route.evaluate(0, Network::Tcp, &ads);
+    let mut scratch = route.evaluation_scratch().expect("route scratch");
+    let mut evaluation = route.evaluate_with_scratch(0, Network::Tcp, &ads, &mut scratch);
     assert!(matches!(
         evaluation.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Terminal(RouteAction::Reject))

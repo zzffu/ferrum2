@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferrum2_core::TargetAddr;
-use ferrum2_crypto::{MethodPsk, TcpMethodProfile};
+use ferrum2_crypto::{MethodProfile, MethodPsk};
 use ferrum2_rule::{
-    ActionTable, DnsPolicyBlueprint, EgressPlanHandle, Network, OrderedRouteProgram, RouteMetadata,
-    RouteProgramAction, RouteProgramEvaluation, RouteProgramEvaluationWithScratch, RouteTable,
-    RuleCompileError, RuleEvaluationScratch,
+    DnsPolicyBlueprint, EgressPlanHandle, Network, OrderedRouteProgram,
+    RouteProgramEvaluationWithScratch, RuleCompileError, RuleEvaluationScratch,
 };
 use ferrum2_rule::{RuleEngineRegistry, SelectorControl};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -16,12 +15,10 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 /// A validated client configuration with no retained source text.
 pub struct ValidatedClientConfig {
     pub schema_version: SchemaVersion,
-    pub listen: SocketAddrV4,
     pub inbounds: Vec<ClientInboundConfig>,
     pub outbounds: Vec<ClientOutboundConfig>,
-    pub route: RouteTable,
+    pub route: CompiledRoute,
     pub route_network: RouteNetworkConfig,
-    pub route_program: Option<CompiledRoute>,
     pub tun: Option<TunConfig>,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ClientDnsRoute>,
@@ -101,7 +98,7 @@ impl ClientOutboundConfig {
         }
     }
 
-    pub fn method(&self) -> Option<TcpMethodProfile> {
+    pub fn method(&self) -> Option<MethodProfile> {
         match self {
             Self::Shadowsocks { psk, .. } => Some(psk.profile()),
             Self::Direct { .. } => None,
@@ -205,12 +202,10 @@ impl RouteNetworkConfig {
 /// A validated server configuration with no retained source text.
 pub struct ValidatedServerConfig {
     pub schema_version: SchemaVersion,
-    pub listen: SocketAddrV4,
     pub inbounds: Vec<ServerInboundConfig>,
     pub outbounds: Vec<ServerOutboundConfig>,
-    pub route: RouteTable,
+    pub route: CompiledRoute,
     pub route_network: RouteNetworkConfig,
-    pub route_program: Option<CompiledRoute>,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ServerDnsRoute>,
     pub psk: MethodPsk,
@@ -309,6 +304,7 @@ pub struct RouteSniffConfig {
 pub struct CompiledRoute {
     pub(super) program: OrderedRouteProgram<RouteProtocol, RouteAction>,
     pub(super) registry: Option<Arc<RuleEngineRegistry>>,
+    pub(super) selector: SelectorControl,
     pub sniff: RouteSniffConfig,
 }
 
@@ -334,22 +330,6 @@ impl CompiledRoute {
         self.program.len()
     }
 
-    /// Starts one private-cursor ordered evaluation with newly allocated scratch.
-    /// Production hot paths should use [`Self::evaluate_with_scratch`].
-    pub fn evaluate<'program, 'target>(
-        &'program self,
-        inbound: usize,
-        network: Network,
-        original: &'target TargetAddr,
-    ) -> RouteProgramEvaluation<'program, 'target, RouteProtocol, RouteAction> {
-        match &self.registry {
-            Some(registry) => self
-                .program
-                .evaluate_with_registry(inbound, network, original, registry),
-            None => self.program.evaluate(inbound, network, original),
-        }
-    }
-
     /// Starts an allocation-free evaluation using caller-owned reusable scratch.
     pub fn evaluate_with_scratch<'program, 'target, 'scratch>(
         &'program self,
@@ -372,6 +352,11 @@ impl CompiledRoute {
     /// Returns the live RuleSet registry captured by new-V2 evaluations.
     pub fn rule_registry(&self) -> Option<Arc<RuleEngineRegistry>> {
         self.registry.as_ref().map(Arc::clone)
+    }
+
+    /// Returns a control handle sharing this route program's selector state.
+    pub fn selector_control(&self) -> SelectorControl {
+        self.selector.clone()
     }
 
     pub(super) fn attach_rule_registry(&mut self, registry: Arc<RuleEngineRegistry>) {
@@ -407,91 +392,27 @@ pub enum DnsQueryType {
 
 /// Compiled client query policy with distinct listener and ordinary identities.
 pub struct ClientDnsRoute {
-    pub(super) compatibility_program: Option<OrderedRouteProgram<DnsQueryType, usize>>,
     pub(super) listener_count: usize,
     pub(super) ordinary_count: usize,
+    pub(super) rule_count: usize,
     pub(super) policy_blueprint: Option<DnsPolicyBlueprintBinding>,
 }
 
 impl ClientDnsRoute {
-    /// Reports whether this value retains the synchronous compatibility program.
-    /// Materialized V2 policies own only their [`DnsPolicyBlueprintBinding`].
-    pub const fn has_compatibility_program(&self) -> bool {
-        self.compatibility_program.is_some()
+    pub const fn listener_count(&self) -> usize {
+        self.listener_count
     }
 
-    /// Allocates one scratch owner for repeated compatibility selections.
-    pub fn evaluation_scratch(&self) -> Result<RuleEvaluationScratch, RuleCompileError> {
-        self.compatibility_program
-            .as_ref()
-            .ok_or(RuleCompileError::Internal)?
-            .evaluation_scratch()
+    pub const fn ordinary_count(&self) -> usize {
+        self.ordinary_count
     }
 
     pub fn program_mode(&self) -> ferrum2_rule::RuleProgramMode {
-        self.policy_blueprint.as_ref().map_or_else(
-            || {
-                self.compatibility_program
-                    .as_ref()
-                    .map_or(ferrum2_rule::RuleProgramMode::SmallLinear, |program| {
-                        program.mode()
-                    })
-            },
-            |binding| ferrum2_rule::RuleProgramMode::for_rule_count(binding.blueprint().len()),
-        )
+        ferrum2_rule::RuleProgramMode::for_rule_count(self.rule_count)
     }
 
-    pub fn rule_count(&self) -> usize {
-        self.policy_blueprint.as_ref().map_or_else(
-            || {
-                self.compatibility_program
-                    .as_ref()
-                    .map_or(0, |program| program.len())
-            },
-            |binding| binding.blueprint().len(),
-        )
-    }
-
-    /// Selects one DNS server with newly allocated compatibility scratch.
-    ///
-    /// An absent query type represents a wire type outside the closed policy vocabulary.
-    pub fn select(
-        &self,
-        ingress: DnsIngressId,
-        network: Network,
-        target: &TargetAddr,
-        qtype: Option<DnsQueryType>,
-    ) -> Option<usize> {
-        let mut scratch = self.evaluation_scratch().ok()?;
-        self.select_with_scratch(ingress, network, target, qtype, &mut scratch)
-    }
-
-    /// Selects with caller-owned scratch and performs no hot-path allocation.
-    pub fn select_with_scratch(
-        &self,
-        ingress: DnsIngressId,
-        network: Network,
-        target: &TargetAddr,
-        qtype: Option<DnsQueryType>,
-        scratch: &mut RuleEvaluationScratch,
-    ) -> Option<usize> {
-        let inbound = match ingress {
-            DnsIngressId::Listener(index) if index < self.listener_count => index,
-            DnsIngressId::Ordinary(index) if index < self.ordinary_count => {
-                self.listener_count + index
-            }
-            _ => return None,
-        };
-        let mut evaluation = self
-            .compatibility_program
-            .as_ref()?
-            .evaluate_with_scratch(inbound, network, target, scratch);
-        match evaluation.next(RouteMetadata::new(qtype, None))? {
-            RouteProgramAction::Terminal(server) | RouteProgramAction::Final(server) => {
-                Some(*server)
-            }
-            RouteProgramAction::Continue(_) => unreachable!("DNS actions are terminal"),
-        }
+    pub const fn rule_count(&self) -> usize {
+        self.rule_count
     }
 
     /// Returns the runtime-neutral materialized DNS policy blueprint.
@@ -509,7 +430,7 @@ impl ClientDnsRoute {
         blueprint: DnsPolicyBlueprint,
         registry: Arc<RuleEngineRegistry>,
     ) {
-        self.compatibility_program = None;
+        debug_assert_eq!(blueprint.len(), self.rule_count);
         self.policy_blueprint = Some(DnsPolicyBlueprintBinding::new(
             blueprint,
             registry,
@@ -521,78 +442,22 @@ impl ClientDnsRoute {
 
 /// Compiled server application-domain resolution policy.
 pub struct ServerDnsRoute {
-    pub(super) compatibility_program: Option<OrderedRouteProgram<(), usize>>,
     pub(super) ordinary_count: usize,
+    pub(super) rule_count: usize,
     pub(super) policy_blueprint: Option<DnsPolicyBlueprintBinding>,
 }
 
 impl ServerDnsRoute {
-    /// Reports whether this value retains the synchronous compatibility program.
-    /// Materialized V2 policies own only their [`DnsPolicyBlueprintBinding`].
-    pub const fn has_compatibility_program(&self) -> bool {
-        self.compatibility_program.is_some()
-    }
-
-    /// Allocates one scratch owner for repeated compatibility selections.
-    pub fn evaluation_scratch(&self) -> Result<RuleEvaluationScratch, RuleCompileError> {
-        self.compatibility_program
-            .as_ref()
-            .ok_or(RuleCompileError::Internal)?
-            .evaluation_scratch()
+    pub const fn ordinary_count(&self) -> usize {
+        self.ordinary_count
     }
 
     pub fn program_mode(&self) -> ferrum2_rule::RuleProgramMode {
-        self.policy_blueprint.as_ref().map_or_else(
-            || {
-                self.compatibility_program
-                    .as_ref()
-                    .map_or(ferrum2_rule::RuleProgramMode::SmallLinear, |program| {
-                        program.mode()
-                    })
-            },
-            |binding| ferrum2_rule::RuleProgramMode::for_rule_count(binding.blueprint().len()),
-        )
+        ferrum2_rule::RuleProgramMode::for_rule_count(self.rule_count)
     }
 
-    pub fn rule_count(&self) -> usize {
-        self.policy_blueprint.as_ref().map_or_else(
-            || {
-                self.compatibility_program
-                    .as_ref()
-                    .map_or(0, |program| program.len())
-            },
-            |binding| binding.blueprint().len(),
-        )
-    }
-
-    /// Selects one DNS server with newly allocated compatibility scratch.
-    pub fn select(&self, inbound: usize, network: Network, target: &TargetAddr) -> usize {
-        let mut scratch = self
-            .evaluation_scratch()
-            .expect("validated server DNS route scratch allocation failed");
-        self.select_with_scratch(inbound, network, target, &mut scratch)
-    }
-
-    /// Selects with caller-owned scratch and performs no hot-path allocation.
-    pub fn select_with_scratch(
-        &self,
-        inbound: usize,
-        network: Network,
-        target: &TargetAddr,
-        scratch: &mut RuleEvaluationScratch,
-    ) -> usize {
-        let mut evaluation = self
-            .compatibility_program
-            .as_ref()
-            .expect("compatibility DNS program is unavailable after policy materialization")
-            .evaluate_with_scratch(inbound, network, target, scratch);
-        match evaluation
-            .next(RouteMetadata::new(None, None))
-            .expect("DNS program has a mandatory final")
-        {
-            RouteProgramAction::Terminal(server) | RouteProgramAction::Final(server) => *server,
-            RouteProgramAction::Continue(_) => unreachable!("DNS actions are terminal"),
-        }
+    pub const fn rule_count(&self) -> usize {
+        self.rule_count
     }
 
     /// Returns the runtime-neutral materialized DNS policy blueprint.
@@ -610,7 +475,7 @@ impl ServerDnsRoute {
         blueprint: DnsPolicyBlueprint,
         registry: Arc<RuleEngineRegistry>,
     ) {
-        self.compatibility_program = None;
+        debug_assert_eq!(blueprint.len(), self.rule_count);
         self.policy_blueprint = Some(DnsPolicyBlueprintBinding::new(
             blueprint,
             registry,
@@ -692,7 +557,6 @@ impl std::fmt::Debug for DnsPolicyBlueprintBinding {
 pub struct DnsConfig {
     pub inbounds: Vec<DnsInboundConfig>,
     pub servers: Vec<DnsServerConfig>,
-    pub route: ActionTable<usize>,
     pub timeout: Duration,
     pub max_inflight: NonZeroU16,
     pub runtime: DnsRuntimeConfig,
@@ -808,7 +672,7 @@ pub struct UdpConfig {
 
 impl ValidatedServerConfig {
     /// Returns the immutable TCP method bound to the validated PSK.
-    pub const fn method(&self) -> TcpMethodProfile {
+    pub const fn method(&self) -> MethodProfile {
         self.psk.profile()
     }
 

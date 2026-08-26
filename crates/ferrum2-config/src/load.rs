@@ -8,8 +8,8 @@ use zeroize::Zeroizing;
 use crate::MAX_CONFIG_BYTES;
 use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
 use crate::model::{ValidatedClientConfig, ValidatedServerConfig};
-use crate::raw::{RawClientRoot, RawServerRoot};
-use crate::validation::{validate_client, validate_server, validate_version};
+use crate::prepared::{validate_client_source, validate_server_source};
+use crate::validation::validate_version;
 
 #[derive(Deserialize)]
 struct RawSchemaRoot {
@@ -29,13 +29,11 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, Conf
 }
 
 fn parse_client_source(source: &str) -> Result<ValidatedClientConfig, ConfigError> {
-    let raw: RawClientRoot = parse_v2_toml(source)?;
-    validate_client(raw)
+    validate_client_source(source)
 }
 
 fn parse_server_source(source: &str) -> Result<ValidatedServerConfig, ConfigError> {
-    let raw: RawServerRoot = parse_v2_toml(source)?;
-    validate_server(raw)
+    validate_server_source(source)
 }
 
 #[cfg(feature = "fuzzing")]

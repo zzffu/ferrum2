@@ -1,5 +1,5 @@
-use ferrum2_core::{ConnectErrorKind, Inbound, Session, SessionReply, TargetAddr};
-use ferrum2_socks5::{Socks5Inbound, SocksCommand, SocksError, SocksReplyPending, SocksStream};
+use ferrum2_core::{ConnectErrorKind, SessionReply, TargetAddr};
+use ferrum2_socks5::{Socks5Inbound, SocksCommand, SocksError};
 use std::{
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
@@ -17,47 +17,44 @@ const HOST: &[u8] = &[5, 4, 0, 1, 0, 0, 0, 0, 0, 0];
 const REFUSED: &[u8] = &[5, 5, 0, 1, 0, 0, 0, 0, 0, 0];
 const COMMAND: &[u8] = &[5, 7, 0, 1, 0, 0, 0, 0, 0, 0];
 const ADDRESS: &[u8] = &[5, 8, 0, 1, 0, 0, 0, 0, 0, 0];
-type Legacy = Session<SocksStream<DuplexStream>, SocksReplyPending<DuplexStream>>;
-
 #[tokio::test]
-async fn legacy_connect_rows_keep_targets_replies_and_stream_exact() {
+async fn connect_rows_keep_targets_replies_and_stream_exact() {
     let (mut client, server) = tokio::io::duplex(128);
-    let task = tokio::spawn(async move { Socks5Inbound::new().accept(server).await });
+    let task = tokio::spawn(async move { Socks5Inbound::new().accept_command(server).await });
     fragmented(&mut client, &[5, 1, 0]).await;
     assert_eq!(
         read::<2>(&mut client).await,
         METHOD,
-        "legacy-fragmented-ipv4 method"
+        "fragmented-ipv4 method"
     );
     fragmented(&mut client, &[5, 1, 0, 1, 192, 0, 2, 10, 0x1f, 0x90]).await;
-    let mut session = task.await.unwrap().unwrap();
-    assert_eq!(session.target, ip("192.0.2.10:8080"), "legacy-ipv4 target");
-    assert!(
-        session.initial_payload.is_empty(),
-        "legacy-ipv4 initial payload"
-    );
+    let SocksCommand::Connect(mut session) = task.await.unwrap().unwrap() else {
+        panic!("fragmented IPv4 CONNECT command")
+    };
+    assert_eq!(session.target, ip("192.0.2.10:8080"), "ipv4 target");
+    assert!(session.initial_payload.is_empty(), "ipv4 initial payload");
     session
         .reply
-        .succeeded("127.0.0.7:49152".parse().unwrap())
+        .succeeded_socket("127.0.0.7:49152".parse().unwrap())
         .await
         .unwrap();
     assert_eq!(
         read::<10>(&mut client).await,
         [5, 0, 0, 1, 127, 0, 0, 7, 0xc0, 0],
-        "legacy-ipv4 reply"
+        "ipv4 reply"
     );
     client.write_all(b"ping").await.unwrap();
     let mut bytes = [0; 4];
     session.stream.read_exact(&mut bytes).await.unwrap();
-    assert_eq!(&bytes, b"ping", "legacy inbound stream");
+    assert_eq!(&bytes, b"ping", "inbound stream");
     session.stream.write_all(b"pong").await.unwrap();
     client.read_exact(&mut bytes).await.unwrap();
-    assert_eq!(&bytes, b"pong", "legacy outbound stream");
+    assert_eq!(&bytes, b"pong", "outbound stream");
 
     let bound = "2001:db8::7".parse::<Ipv6Addr>().unwrap();
     for (case, suffix, target) in [
         (
-            "legacy-ipv6",
+            "ipv6",
             [
                 vec![4],
                 Ipv6Addr::LOCALHOST.octets().to_vec(),
@@ -67,12 +64,12 @@ async fn legacy_connect_rows_keep_targets_replies_and_stream_exact() {
             ip("[::1]:443"),
         ),
         (
-            "legacy-domain",
+            "domain",
             [vec![3, 12], b"example.test".to_vec(), vec![1, 0xbb]].concat(),
             TargetAddr::domain("example.test", 443).unwrap(),
         ),
     ] {
-        let (mut client, session) = legacy(&wire(1, &suffix)).await;
+        let (mut client, session) = connect(&wire(1, &suffix)).await;
         assert_eq!(session.target, target, "{case} target");
         session
             .reply
@@ -87,7 +84,7 @@ async fn legacy_connect_rows_keep_targets_replies_and_stream_exact() {
 }
 
 #[tokio::test]
-async fn legacy_negative_rows_keep_every_exact_byte() {
+async fn connect_negative_rows_keep_every_exact_byte() {
     let selected = |reply: &[u8]| [METHOD, reply].concat();
     let full = wire(1, &[1, 127, 0, 0, 1, 0, 80]);
     let rows = vec![
@@ -177,22 +174,12 @@ async fn legacy_negative_rows_keep_every_exact_byte() {
         ),
     ];
     for (case, input, output, error) in rows {
-        rejected(case, &input, &output, error, false).await;
-    }
-    for (case, command) in [("legacy-bind", 2), ("legacy-udp-disabled", 3)] {
-        rejected(
-            case,
-            &wire(command, &[1, 127, 0, 0, 1, 0, 80]),
-            &selected(COMMAND),
-            SocksError::CommandNotSupported,
-            false,
-        )
-        .await;
+        rejected(case, &input, &output, error).await;
     }
 }
 
 #[tokio::test]
-async fn legacy_failure_replies_are_mapped_and_exactly_once() {
+async fn connect_failure_replies_are_mapped_and_exactly_once() {
     for (case, kind, expected) in [
         ("network", ConnectErrorKind::NetworkUnreachable, NETWORK),
         ("host", ConnectErrorKind::HostUnreachable, HOST),
@@ -201,12 +188,12 @@ async fn legacy_failure_replies_are_mapped_and_exactly_once() {
         ("timeout", ConnectErrorKind::Timeout, GENERAL),
         ("other", ConnectErrorKind::Other, GENERAL),
     ] {
-        let (mut client, session) = legacy(&wire(1, &[1, 192, 0, 2, 10, 0, 80])).await;
+        let (mut client, session) = connect(&wire(1, &[1, 192, 0, 2, 10, 0, 80])).await;
         session.reply.failed(kind).await.unwrap();
         drop(session.stream);
         let mut actual = Vec::new();
         client.read_to_end(&mut actual).await.unwrap();
-        assert_eq!(actual, expected, "legacy-reply-{case}");
+        assert_eq!(actual, expected, "reply-{case}");
     }
 }
 
@@ -227,6 +214,18 @@ async fn command_variant_and_udp_source_hint_rows_are_validated() {
         GENERAL,
         "command-connect reply"
     );
+
+    let (mut client, command) = commands(&wire(3, &[1, 127, 0, 0, 1, 0, 0])).await;
+    let SocksCommand::UdpAssociate(association) = command else {
+        panic!("UDP ASSOCIATE command")
+    };
+    association.reject_command_not_supported().await.unwrap();
+    assert_eq!(
+        read::<10>(&mut client).await,
+        COMMAND,
+        "composition command rejection"
+    );
+
     let maximum = "a".repeat(255);
     for (case, suffix, port) in [
         ("hint-ipv4-zero", vec![1, 0, 0, 0, 0, 0, 0], 0),
@@ -278,7 +277,10 @@ async fn fragmented_udp_command_retains_control_and_actual_reply() {
     assert_eq!(&control, b"control", "retained-control");
     association
         .reply
-        .succeeded(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152))
+        .succeeded_socket(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            49_152,
+        )))
         .await
         .unwrap();
     assert_eq!(
@@ -323,7 +325,7 @@ async fn command_failure_rows_and_one_shot_write_failure_are_exact() {
             SocksError::Malformed,
         ),
     ] {
-        rejected(case, &input, &output, error, true).await;
+        rejected(case, &input, &output, error).await;
     }
     let request = wire(3, &[1, 127, 0, 0, 1, 0, 0]);
     let (mut client, command) = commands(&request).await;
@@ -421,13 +423,6 @@ async fn read<const N: usize>(io: &mut DuplexStream) -> [u8; N] {
     io.read_exact(&mut bytes).await.unwrap();
     bytes
 }
-async fn legacy(input: &[u8]) -> (DuplexStream, Legacy) {
-    let (mut client, server) = tokio::io::duplex(512);
-    let task = tokio::spawn(async move { Socks5Inbound::new().accept(server).await });
-    client.write_all(input).await.unwrap();
-    assert_eq!(read::<2>(&mut client).await, METHOD, "legacy helper method");
-    (client, task.await.unwrap().unwrap())
-}
 async fn commands(input: &[u8]) -> (DuplexStream, SocksCommand<DuplexStream>) {
     let (mut client, server) = tokio::io::duplex(512);
     let task = tokio::spawn(async move { Socks5Inbound::new().accept_command(server).await });
@@ -439,17 +434,28 @@ async fn commands(input: &[u8]) -> (DuplexStream, SocksCommand<DuplexStream>) {
     );
     (client, task.await.unwrap().unwrap())
 }
-async fn rejected(case: &str, input: &[u8], output: &[u8], error: SocksError, commands: bool) {
+async fn connect(
+    input: &[u8],
+) -> (
+    DuplexStream,
+    ferrum2_core::Session<
+        ferrum2_socks5::SocksStream<DuplexStream>,
+        ferrum2_socks5::SocksReplyPending<DuplexStream>,
+    >,
+) {
+    let (client, command) = commands(input).await;
+    let SocksCommand::Connect(session) = command else {
+        panic!("CONNECT command")
+    };
+    (client, session)
+}
+async fn rejected(case: &str, input: &[u8], output: &[u8], error: SocksError) {
     let (mut client, server) = tokio::io::duplex(512);
     let task = tokio::spawn(async move {
-        if commands {
-            Socks5Inbound::new()
-                .accept_command(server)
-                .await
-                .map(|_| ())
-        } else {
-            Socks5Inbound::new().accept(server).await.map(|_| ())
-        }
+        Socks5Inbound::new()
+            .accept_command(server)
+            .await
+            .map(|_| ())
     });
     client.write_all(input).await.unwrap();
     client.shutdown().await.unwrap();

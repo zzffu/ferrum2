@@ -193,7 +193,13 @@ async fn client_entropy_and_clock_failures_mark_once_before_any_write() {
         ClientTcpOutbound::new(server_target(), &keys, &entropy_connector, &clock, &random)
             .with_observers(&entropy_observers, &entropy_observers);
     assert_eq!(
-        outbound.open_stream(&target()).await.err(),
+        outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .err(),
         Some(ShadowsocksError::Detection(
             DetectionReason::RandomUnavailable
         ))
@@ -227,7 +233,13 @@ async fn client_entropy_and_clock_failures_mark_once_before_any_write() {
     )
     .with_observers(&clock_observers, &clock_observers);
     assert_eq!(
-        outbound.open_stream(&target()).await.err(),
+        outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .err(),
         Some(ShadowsocksError::Detection(
             DetectionReason::ClockUnavailable
         ))
@@ -258,7 +270,10 @@ async fn request_first_write_is_one_operation_and_short_write_is_terminal() {
         .with_observers(&observers, &observers);
 
     let error = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .err()
         .expect("short write");
@@ -294,7 +309,13 @@ async fn request_first_write_transport_failure_is_one_operation_and_terminal_bef
         .with_observers(&observers, &observers);
 
     assert_eq!(
-        outbound.open_stream(&target()).await.err(),
+        outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .err(),
         Some(ShadowsocksError::Detection(DetectionReason::WriteFailed))
     );
     let observed = observation.lock().expect("observation");
@@ -497,7 +518,13 @@ async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_b
         let random = ScriptedRandom::new(client_random_bytes(&request_salt));
         let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
             .with_observers(&observers, &observers);
-        let mut flow = outbound.open_stream(&target()).await.expect("client");
+        let mut flow = outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .expect("client");
         let mut destination = [0_u8; 16];
 
         let error = read_plain(&mut flow, &mut destination)
@@ -568,7 +595,13 @@ async fn client_response_key_and_clock_failures_are_single_fixed_io_and_persiste
     );
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
         .with_observers(&key_observers, &key_observers);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     assert_eq!(
         read_plain(&mut flow, &mut [0_u8; 16]).await,
         Err(ShadowsocksError::Detection(DetectionReason::KeyUnavailable))
@@ -610,7 +643,13 @@ async fn client_response_key_and_clock_failures_are_single_fixed_io_and_persiste
     );
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
         .with_observers(&clock_observers, &clock_observers);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     clock.set_wall_failure(true);
     assert_eq!(
         read_plain(&mut flow, &mut [0_u8; 16]).await,

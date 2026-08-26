@@ -1,6 +1,5 @@
 param(
     [Parameter(Mandatory = $true)]
-    # Legacy M15 mode contract: [ValidateSet("lifecycle", "tcp", "udp", "cycles", "full", "performance", "cleanup")]
     [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "hard-kill", "network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
     [string]$Mode,
     [ValidateSet(10, 100, 1000)]
@@ -62,14 +61,14 @@ if ($computerSystem.Manufacturer -cne "Microsoft Corporation" -or
     throw "Windows TUN qualification must run inside an isolated Hyper-V guest"
 }
 
-function Assert-M17GuestIdentityMarker([string]$Path) {
+function Assert-CurrentGuestIdentityMarker([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) {
-        throw "M17 Windows TUN qualification requires an identity ledger"
+        throw "Windows TUN qualification requires an identity ledger"
     }
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
     if ($item.Length -lt 2 -or $item.Length -gt 65536 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "M17 identity ledger file boundary is invalid"
+        throw "Windows TUN identity ledger file boundary is invalid"
     }
     $ledger = Get-Content -LiteralPath $resolved -Raw -Encoding utf8 | ConvertFrom-Json -Depth 4 -ErrorAction Stop
     $vmId = [Guid]::Empty
@@ -81,7 +80,7 @@ function Assert-M17GuestIdentityMarker([string]$Path) {
         [string]$ledger.checkpoint_name -cnotmatch '^[^\r\n]{1,128}$' -or
         -not [Guid]::TryParseExact([string]$ledger.checkpoint_id, "D", [ref]$checkpointId) -or
         $checkpointId -eq [Guid]::Empty) {
-        throw "M17 identity ledger does not name one bounded Hyper-V guest checkpoint"
+        throw "Windows TUN identity ledger does not name one bounded Hyper-V guest checkpoint"
     }
     $script:expectedHyperVVmName = [string]$ledger.vm_name
     $script:expectedHyperVVmId = $vmId.ToString("D")
@@ -90,9 +89,9 @@ function Assert-M17GuestIdentityMarker([string]$Path) {
     return $resolved
 }
 
-$m17IdentityMarker = $null
-if ($Mode -in $m17Modes) {
-    $m17IdentityMarker = Assert-M17GuestIdentityMarker $IdentityLedger
+$identityMarker = $null
+if ($Mode -ne "cleanup") {
+    $identityMarker = Assert-CurrentGuestIdentityMarker $IdentityLedger
 }
 
 $expectedZipHash = "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51"
@@ -329,12 +328,10 @@ function Write-RunIdentityJournal {
         "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.cleanup-identity.v1"
+        schema = "ferrum2.windows-tun.cleanup-identity.v2"
         run_token = $script:runIdentity
         mode = $script:Mode
-        identity_sha256 = if ($script:Mode -in $script:m17Modes) {
-            (Get-FileHash -LiteralPath $script:m17IdentityMarker -Algorithm SHA256).Hash.ToLowerInvariant()
-        } else { $null }
+        identity_sha256 = (Get-FileHash -LiteralPath $script:identityMarker -Algorithm SHA256).Hash.ToLowerInvariant()
         work_path = $workPath
         product_root = $productRoot
         client_binary_path = $clientPath
@@ -372,18 +369,14 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
         "sibling_dll_path", "dll_ownership", "dll_marker_path", "expected_dll_sha256",
         "controller_path", "controller_sha256"
     ) "run identity journal"
-    Assert-True ($document.schema -ceq "ferrum2.windows-tun.cleanup-identity.v1" -and
+    Assert-True ($document.schema -ceq "ferrum2.windows-tun.cleanup-identity.v2" -and
         $document.run_token -ceq $script:runIdentity) "run identity journal schema/token mismatch"
     Assert-True ($document.mode -in @(
         "lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance",
         "network-feasibility", "managed-product", "hard-kill", "network-reset",
         "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
     )) "run identity journal mode is invalid"
-    if ($document.mode -in $script:m17Modes) {
-        Assert-True ([string]$document.identity_sha256 -cmatch '^[0-9a-f]{64}$') "M17 run identity journal hash is invalid"
-    } else {
-        Assert-True ($null -eq $document.identity_sha256) "legacy run identity journal unexpectedly has an M17 identity hash"
-    }
+    Assert-True ([string]$document.identity_sha256 -cmatch '^[0-9a-f]{64}$') "run identity journal hash is invalid"
     $workPath = Get-CanonicalJournalPath ([string]$document.work_path) "journal work_path"
     Assert-True (@($ExpectedWorks | Where-Object { $_.Equals($workPath, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) "run identity journal work path is outside the token scope"
     $productRoot = Get-CanonicalJournalPath ([string]$document.product_root) "journal product_root"
@@ -853,7 +846,7 @@ if ($Mode -eq "cleanup") {
     }
     $artifactLedgerPath = Join-Path $externalArtifactRoot "identity-ledger.json"
     $artifactResultPath = Join-Path $externalArtifactRoot "m17-result.json"
-    [void](Assert-M17GuestIdentityMarker $artifactLedgerPath)
+    [void](Assert-CurrentGuestIdentityMarker $artifactLedgerPath)
     $artifactIdentityHash = (Get-FileHash -LiteralPath $artifactLedgerPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True (Test-Path -LiteralPath $artifactResultPath -PathType Leaf) "external cleanup requires the M17 result artifact"
     Assert-NotReparsePoint $artifactResultPath "M17 result artifact"
@@ -1168,8 +1161,6 @@ $m17ProcessOrdinal = 0
 $m17ServerProcess = $null
 $m17ServerPort = $null
 $m17MetricsPort = $null
-$m17ExpectedWarning = $null
-$m17ExpectedWarningCount = $null
 
 function Get-Tcp08ElapsedMilliseconds([long]$MonotonicTimestamp) {
     return [Math]::Round(
@@ -1546,11 +1537,10 @@ function ConvertTo-Tcp08ProductShutdownReport([object]$Report) {
         "event", "role", "process_states", "process_transitions", "shutdown_grace_ns",
         "actual_grace_deadline_elapsed_ns", "actual_grace_deadline_source", "termination_cause",
         "root", "root_exit_category", "root_error_category", "forced_root_count",
-        "owner_baseline", "owner_stopped", "owner_delta", "cleanup_failure"
+        "owner_baseline", "owner_stopped", "owner_delta", "cleanup_failure", "root_exit_events"
     )
-    $allowedReportProperties = @($requiredReportProperties) + @("root_exit_events")
     $actualReportProperties = @($Report.PSObject.Properties.Name)
-    Assert-True (@($actualReportProperties | Where-Object { -not ($allowedReportProperties -ccontains $_) }).Count -eq 0) "process shutdown report has unknown properties"
+    Assert-True (@($actualReportProperties | Where-Object { -not ($requiredReportProperties -ccontains $_) }).Count -eq 0) "process shutdown report has unknown properties"
     Assert-True (@($requiredReportProperties | Where-Object { -not ($actualReportProperties -ccontains $_) }).Count -eq 0) "process shutdown report is missing required properties"
     Assert-True ((Get-Tcp08JsonProperty $Report "event") -ceq "process_shutdown_report") "process shutdown report event is invalid"
     Assert-True ((Get-Tcp08JsonProperty $Report "role") -ceq "client") "process shutdown report role is invalid"
@@ -1580,49 +1570,40 @@ function ConvertTo-Tcp08ProductShutdownReport([object]$Report) {
     $reportElapsed = [uint64]$previousTransitionElapsed
 
     $rootExitEvents = [System.Collections.Generic.List[object]]::new()
-    $rootExitEventsAvailability = "unavailable"
-    $rootExitEventsSchemaGeneration = "legacy"
-    $rootExitEventsUnavailableReason = "legacy_process_shutdown_report_missing_root_exit_events"
-    $rootExitEventsProperty = $Report.PSObject.Properties["root_exit_events"]
-    if ($null -ne $rootExitEventsProperty) {
-        $rootExitEventsAvailability = "available"
-        $rootExitEventsSchemaGeneration = "current"
-        $rootExitEventsUnavailableReason = $null
-        $rawRootExitEvents = $rootExitEventsProperty.Value
-        Assert-True ($rawRootExitEvents -is [System.Array]) "process shutdown report root_exit_events is not an array"
-        Assert-True (@($rawRootExitEvents).Count -le 4) "process shutdown report has too many root exit events"
-        $seenRootIds = @{}
-        $seenRootNames = @{}
-        $previousRootElapsed = $null
-        $allowedRootPhases = @("Active", "Draining", "Forced", "WatchdogAbort")
-        $allowedRootExitCategories = @("Completed", "Failed", "Panicked", "JoinFailed", "Aborted")
-        foreach ($rawRootEvent in @($rawRootExitEvents)) {
-            Assert-ClosedJsonProperties $rawRootEvent @("root", "phase", "exit_category", "elapsed_ns") "process shutdown report root exit event"
-            $root = ConvertTo-Tcp08ProductRoot (Get-Tcp08JsonProperty $rawRootEvent "root")
-            Assert-True ($null -ne $root) "process shutdown report root exit event has no root"
-            $rootIdKey = ([uint64]$root.id).ToString([Globalization.CultureInfo]::InvariantCulture)
-            $rootNameKey = [string]$root.name
-            Assert-True (-not $seenRootIds.ContainsKey($rootIdKey)) "process shutdown report has a duplicate root exit ID"
-            Assert-True (-not $seenRootNames.ContainsKey($rootNameKey)) "process shutdown report has a duplicate stable root exit name"
-            $seenRootIds[$rootIdKey] = $true
-            $seenRootNames[$rootNameKey] = $true
-            $phase = [string](Get-Tcp08JsonProperty $rawRootEvent "phase")
-            Assert-True ($allowedRootPhases -ccontains $phase) "process shutdown report root exit phase is invalid"
-            $exitCategory = [string](Get-Tcp08JsonProperty $rawRootEvent "exit_category")
-            Assert-True ($allowedRootExitCategories -ccontains $exitCategory) "process shutdown report root exit category is invalid"
-            $elapsed = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $rawRootEvent "elapsed_ns") "root_exit_events.elapsed_ns"
-            if ($null -ne $previousRootElapsed) {
-                Assert-True ($elapsed -ge $previousRootElapsed) "process shutdown report root exit events are not monotonic"
-            }
-            Assert-True ($elapsed -le $reportElapsed) "process shutdown report root exit event is later than report completion"
-            $previousRootElapsed = $elapsed
-            $rootExitEvents.Add([ordered]@{
-                root = $root
-                phase = $phase
-                exit_category = $exitCategory
-                elapsed_ns = $elapsed
-            })
+    $rawRootExitEvents = Get-Tcp08JsonProperty $Report "root_exit_events"
+    Assert-True ($rawRootExitEvents -is [System.Array]) "process shutdown report root_exit_events is not an array"
+    Assert-True (@($rawRootExitEvents).Count -le 4) "process shutdown report has too many root exit events"
+    $seenRootIds = @{}
+    $seenRootNames = @{}
+    $previousRootElapsed = $null
+    $allowedRootPhases = @("Active", "Draining", "Forced", "WatchdogAbort")
+    $allowedRootExitCategories = @("Completed", "Failed", "Panicked", "JoinFailed", "Aborted")
+    foreach ($rawRootEvent in @($rawRootExitEvents)) {
+        Assert-ClosedJsonProperties $rawRootEvent @("root", "phase", "exit_category", "elapsed_ns") "process shutdown report root exit event"
+        $root = ConvertTo-Tcp08ProductRoot (Get-Tcp08JsonProperty $rawRootEvent "root")
+        Assert-True ($null -ne $root) "process shutdown report root exit event has no root"
+        $rootIdKey = ([uint64]$root.id).ToString([Globalization.CultureInfo]::InvariantCulture)
+        $rootNameKey = [string]$root.name
+        Assert-True (-not $seenRootIds.ContainsKey($rootIdKey)) "process shutdown report has a duplicate root exit ID"
+        Assert-True (-not $seenRootNames.ContainsKey($rootNameKey)) "process shutdown report has a duplicate stable root exit name"
+        $seenRootIds[$rootIdKey] = $true
+        $seenRootNames[$rootNameKey] = $true
+        $phase = [string](Get-Tcp08JsonProperty $rawRootEvent "phase")
+        Assert-True ($allowedRootPhases -ccontains $phase) "process shutdown report root exit phase is invalid"
+        $exitCategory = [string](Get-Tcp08JsonProperty $rawRootEvent "exit_category")
+        Assert-True ($allowedRootExitCategories -ccontains $exitCategory) "process shutdown report root exit category is invalid"
+        $elapsed = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $rawRootEvent "elapsed_ns") "root_exit_events.elapsed_ns"
+        if ($null -ne $previousRootElapsed) {
+            Assert-True ($elapsed -ge $previousRootElapsed) "process shutdown report root exit events are not monotonic"
         }
+        Assert-True ($elapsed -le $reportElapsed) "process shutdown report root exit event is later than report completion"
+        $previousRootElapsed = $elapsed
+        $rootExitEvents.Add([ordered]@{
+            root = $root
+            phase = $phase
+            exit_category = $exitCategory
+            elapsed_ns = $elapsed
+        })
     }
     $terminationCause = [string](Get-Tcp08JsonProperty $Report "termination_cause")
     Assert-True (@("ExternalShutdown", "PreparationFailed", "PreparationPanicked", "ActivationFailed", "ActivationPanicked", "RootStopped") -ccontains $terminationCause) "process shutdown report cause is invalid"
@@ -1660,9 +1641,6 @@ function ConvertTo-Tcp08ProductShutdownReport([object]$Report) {
         report_elapsed_ns = $reportElapsed
         report_elapsed_source = "final_Stopped_process_transition"
         root_exit_events = $rootExitEvents
-        root_exit_events_availability = $rootExitEventsAvailability
-        root_exit_events_schema_generation = $rootExitEventsSchemaGeneration
-        root_exit_events_unavailable_reason = $rootExitEventsUnavailableReason
         shutdown_grace_ns = ConvertTo-Tcp08NonNegativeUInt64 (Get-Tcp08JsonProperty $Report "shutdown_grace_ns") "shutdown_grace_ns"
         actual_grace_deadline_elapsed_ns = $actualGraceDeadline
         actual_grace_deadline_source = $actualGraceDeadlineSource
@@ -1796,10 +1774,6 @@ function Get-Tcp08ForcedReportAssessment(
         $failures.Add("ExternalShutdown_report_has_primary_root_exit")
     }
     if ($null -ne $Report.cleanup_failure) { $failures.Add("cleanup_failure_present") }
-    if ($Report.root_exit_events_availability -cne "available" -or
-        $Report.root_exit_events_schema_generation -cne "current") {
-        $failures.Add("current_root_exit_events_unavailable")
-    }
     if ($null -eq $Report.actual_grace_deadline_elapsed_ns -or
         $Report.actual_grace_deadline_source -cne "runtime_process_supervisor") {
         $failures.Add("actual_runtime_grace_deadline_unavailable")
@@ -1974,11 +1948,6 @@ function Get-Tcp08ProductShutdownEvidence {
         elseif ($invalidRecords -gt 0) { "invalid" }
         else { "unavailable" }
     $unavailableReason = if ($availability -eq "unavailable") { "no_closed_process_shutdown_report_record" } else { $null }
-    $schemaGeneration = if ($reports.Count -gt 0) {
-        $generations = @($reports | ForEach-Object { $_.root_exit_events_schema_generation } | Select-Object -Unique)
-        if ($generations.Count -eq 1) { [string]$generations[0] } else { "mixed" }
-    } elseif ($availability -eq "unavailable") { "legacy" }
-    else { "unknown" }
     $allForcedMatches = @($assessments | Where-Object { $_.classification -ceq "tcp08_forced_candidate" })
     $allIncompleteForced = @($assessments | Where-Object { $_.classification -ceq "incomplete_forced_report" })
     $allAllowedNonForced = @($assessments | Where-Object { $_.classification -ceq "allowed_non_forced_report" })
@@ -2010,13 +1979,6 @@ function Get-Tcp08ProductShutdownEvidence {
         elseif ($windowAssessments.Count -gt 0) { "available" }
         elseif ($windowInvalidRecordDetails.Count -gt 0) { "invalid" }
         else { "unavailable" }
-    $windowSchemaGeneration = if ($windowAssessments.Count -gt 0) {
-        $windowGenerations = @($windowAssessments | ForEach-Object {
-            $reports[[int]$_.record_index].root_exit_events_schema_generation
-        } | Select-Object -Unique)
-        if ($windowGenerations.Count -eq 1) { [string]$windowGenerations[0] } else { "mixed" }
-    } elseif ($windowBoundsValid -and $windowCandidateLines -eq 0) { "legacy" }
-    else { "unknown" }
     $strictFailures = [System.Collections.Generic.List[string]]::new()
     if ($script:RequireTcp08ProductMetrics) {
         if ($readFailureType) { $strictFailures.Add("client_stderr_read_failed") }
@@ -2051,7 +2013,6 @@ function Get-Tcp08ProductShutdownEvidence {
         source = "client.stderr.log"
         source_format = "closed allowlisted process_shutdown_report JSON line"
         availability = $availability
-        schema_generation = $schemaGeneration
         unavailable_reason = $unavailableReason
         clock = [ordered]@{
             kind = "product process-relative monotonic duration"
@@ -2063,7 +2024,6 @@ function Get-Tcp08ProductShutdownEvidence {
             status = $strictStatus
             candidate_window = $selectionWindow
             candidate_window_availability = $windowAvailability
-            candidate_window_schema_generation = $windowSchemaGeneration
             candidate_line_count = $windowCandidateLines
             valid_record_count = $windowAssessments.Count
             invalid_record_count = $windowInvalidRecordDetails.Count
@@ -5789,8 +5749,8 @@ $TunFields
 $tunOutbound
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "192.0.2.10:8388"
-[shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 $dns
@@ -6450,16 +6410,12 @@ $supportBinding
 @"
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "127.0.0.1:$script:m17ServerPort"
-"@
-    }
-    $shadowsocks = if ($Outbound -eq "proxy") {
-@"
-[shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@
-    } else { "" }
+    }
     @"
 schema_version = 2
 [tun]
@@ -6479,19 +6435,13 @@ shutdown_grace_ms = 1000
 idle_timeout_ms = 2000
 [metrics]
 listen = "127.0.0.1:$MetricsPort"
-$shadowsocks
 "@ | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
 
-function Assert-M17Config([string]$Path, [string]$Label, [bool]$ExpectDeprecatedWarning = $false) {
+function Assert-M17Config([string]$Path, [string]$Label) {
     $result = Invoke-M17BoundedCommand "config-$Label" $script:binary @("--config", $Path, "--check-config") (Split-Path -Parent $script:binary) 30
     Assert-True ($result.ExitCode -eq 0 -and $result.Stdout.TrimEnd([char[]]"`r`n") -ceq "configuration valid") "M17 live config validation failed: $Label"
-    if ($ExpectDeprecatedWarning) {
-        Assert-True ([regex]::Matches($result.Stderr, [regex]::Escape($script:m17ExpectedWarning)).Count -eq $script:m17ExpectedWarningCount -and
-            $result.Stderr.TrimEnd([char[]]"`r`n") -ceq $script:m17ExpectedWarning) "M17 live config warning changed: $Label"
-    } else {
-        Assert-True ([string]::IsNullOrEmpty($result.Stderr)) "M17 live config emitted stderr: $Label"
-    }
+    Assert-True ([string]::IsNullOrEmpty($result.Stderr)) "M17 live config emitted stderr: $Label"
 }
 
 function Stop-M17Candidate([System.Diagnostics.Process]$Process, [string]$Label) {
@@ -7273,7 +7223,10 @@ ready_timeout_ms = 15000
 "@ "direct" $script:m17MetricsPort @"
 [[outbounds]]
 tag = "network-probe"
+type = "shadowsocks"
 server = "$($script:m17NetworkResetProbeAddress):8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "dns-direct"
 type = "direct"
@@ -7283,9 +7236,6 @@ outbounds = ["direct", "network-probe"]
 default = "direct"
 [route]
 final = "network-egress"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 [dns]
 timeout_ms = 1000
 max_inflight = 8
@@ -8982,10 +8932,16 @@ ready_timeout_ms = 15000
 ring_capacity = 8388608
 [[outbounds]]
 tag = "proxy-tcp"
+type = "shadowsocks"
 server = "${supportAddress}:$supportTcpPort"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "proxy-udp"
+type = "shadowsocks"
 server = "${supportAddress}:$supportUdpPort"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "direct"
 type = "direct"
@@ -9038,15 +8994,13 @@ final = "dns-udp"
 [[dns.route.rules]]
 inbound = "dns-product"
 network = "tcp"
+action = "route"
 server = "dns-tcp"
 [runtime]
 shutdown_grace_ms = 1000
 idle_timeout_ms = 2000
 [metrics]
 listen = "127.0.0.1:$autoMetricsPort"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $managedAutoConfig -Encoding utf8NoBOM
 
         @"
@@ -9322,7 +9276,10 @@ tag = "direct"
 type = "direct"
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "${supportAddress}:$supportTcpPort"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [route]
 final = "direct"
 [[route.rules]]
@@ -9358,9 +9315,6 @@ shutdown_grace_ms = 1000
 idle_timeout_ms = 2000
 [metrics]
 listen = "127.0.0.1:$managedMetricsPort"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $managedLifecycleConfig -Encoding utf8NoBOM
 
         @"
@@ -9866,7 +9820,10 @@ ready_timeout_ms = 15000
 ring_capacity = 8388608
 [[outbounds]]
 tag = "dead"
+type = "shadowsocks"
 server = "127.0.0.1:9"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [route]
 final = "dead"
 [[route.rules]]
@@ -9913,9 +9870,6 @@ shutdown_grace_ms = 1000
 idle_timeout_ms = 2000
 [metrics]
 listen = "127.0.0.1:$metricsPort"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
 
         $dnsResponder = [Ferrum2DnsResponder]::new($dnsPort)
@@ -10149,14 +10103,14 @@ outbound = "proxy"
 ready_timeout_ms = 15000
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "192.0.2.10:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [runtime]
 shutdown_grace_ms = 1000
 [metrics]
 listen = "127.0.0.1:$metricsPort"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
 
     Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
@@ -10292,14 +10246,14 @@ outbound = "proxy"
 ready_timeout_ms = 15000
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "192.0.2.10:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [runtime]
 shutdown_grace_ms = 1000
 [metrics]
 listen = "127.0.0.1:$metricsPort"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
         Assert-True (-not (Test-Path -LiteralPath $siblingDll)) "sibling DLL baseline not absent"
         Assert-InterfaceGone $adapterName $null
@@ -10396,25 +10350,46 @@ ring_capacity = 8388608
 max_udp_mappings = 4
 [[outbounds]]
 tag = "one"
+type = "shadowsocks"
 server = "127.0.0.1:$gatePortA"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "inner"
+type = "shadowsocks"
 server = "127.0.0.1:$serverPortB"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "sniff"
+type = "shadowsocks"
 server = "127.0.0.1:$gatePortB"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "dead"
+type = "shadowsocks"
 server = "127.0.0.1:$deadPort"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "fallback"
+type = "shadowsocks"
 server = "127.0.0.1:$gatePortB"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "udp-one"
+type = "shadowsocks"
 server = "${udpGateAddress}:$gatePortA"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "udp-inner"
+type = "shadowsocks"
 server = "${udpGateAddress}:$gatePortB"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 ${performanceDirectOutbound}[[chains]]
 tag = "two-hop"
 hops = ["one", "inner"]
@@ -10603,9 +10578,6 @@ shutdown_grace_ms = 1000
 idle_timeout_ms = $runtimeIdleTimeoutMilliseconds
 [metrics]
 listen = "127.0.0.1:$metricsPort"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "@ | Set-Content -LiteralPath $config -Encoding utf8NoBOM
 
         if ($Mode -eq "full") {

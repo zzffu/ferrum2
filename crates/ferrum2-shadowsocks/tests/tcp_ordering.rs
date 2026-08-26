@@ -1,7 +1,7 @@
 mod common;
 
 use std::future::{Future, poll_fn};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,8 +54,8 @@ impl AbortiveClose for ControlledClientIo {
 }
 
 impl LocalEndpoint for ControlledClientIo {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152)
+    fn local_socket_addr(&self) -> SocketAddr {
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152).into()
     }
 }
 
@@ -325,7 +325,7 @@ async fn connector_error_before_write() {
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
 
     let error = outbound
-        .open_stream(&target())
+        .connect_server()
         .await
         .err()
         .expect("connector failure");
@@ -351,7 +351,10 @@ async fn connector_target_and_request_target() {
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
 
     let _flow = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first-write");
 
@@ -483,27 +486,6 @@ fn client_open_phase_contract() {
         ShadowsocksError::Detection(DetectionReason::WriteFailed)
     );
     assert_eq!(failure_control.abortive_calls.load(Ordering::SeqCst), 1);
-
-    let fused_control = Arc::new(ClientOpenControl::default());
-    fused_control.connect_ready.store(true, Ordering::SeqCst);
-    fused_control.write_ready.store(true, Ordering::SeqCst);
-    let fused_connector = ControlledClientConnector::new(Arc::clone(&fused_control), false);
-    let fused_random = ScriptedRandom::new(client_random_bytes(&salt_with_last(33)));
-    let fused_outbound = ClientTcpOutbound::new(
-        server_target(),
-        &keys,
-        &fused_connector,
-        &clock,
-        &fused_random,
-    );
-    let mut fused = Box::pin(fused_outbound.open_stream(&application_target));
-    let fused_flow = match poll_once(fused.as_mut()) {
-        Poll::Ready(Ok(flow)) => flow,
-        Poll::Ready(Err(error)) => panic!("fused open failed: {error}"),
-        Poll::Pending => panic!("fused open did not complete"),
-    };
-    assert_eq!(fused_control.completed_writes.load(Ordering::SeqCst), 1);
-    drop(fused_flow);
 }
 
 #[tokio::test]
@@ -517,7 +499,10 @@ async fn opened_stream_delegates_stored_local_endpoint_without_open_time_query()
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
 
     let opened = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first-write");
     {
@@ -525,6 +510,6 @@ async fn opened_stream_delegates_stored_local_endpoint_without_open_time_query()
         assert_eq!(observed.write_calls, 1);
         assert_eq!(observed.endpoint_calls, 0);
     }
-    assert_eq!(opened.local_endpoint().port(), 49152);
+    assert_eq!(opened.local_socket_addr().port(), 49152);
     assert_eq!(observation.lock().expect("observation").endpoint_calls, 1);
 }

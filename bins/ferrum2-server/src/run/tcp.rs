@@ -23,8 +23,8 @@ use ferrum2_observability::{InterfaceResolutionResult, InterfaceResolutionSource
 use ferrum2_observability::{NetworkLifecycleResult, NetworkResetReason};
 use ferrum2_rule::{
     RouteMatchObservation as EngineMatchObservation, RouteMatchSource as EngineMatchSource,
-    RouteMatchType as EngineMatchType, RouteMetadata, RouteProgramAction, RouteTable,
-    RuleCompileError, RuleEvaluationScratch,
+    RouteMatchType as EngineMatchType, RouteMetadata, RouteProgramAction, RuleCompileError,
+    RuleEvaluationScratch,
 };
 #[cfg(all(windows, not(test)))]
 use ferrum2_runtime::SystemNetworkSocketOperations;
@@ -494,8 +494,7 @@ impl ferrum2_runtime::NetworkSocketOperations for TestNetworkSocketOperations {
 }
 
 pub(super) struct ServerRouting {
-    pub(super) legacy: RouteTable,
-    pub(super) program: Option<CompiledRoute>,
+    pub(super) program: CompiledRoute,
     pub(super) outbound_count: usize,
 }
 
@@ -565,29 +564,12 @@ pub(super) enum ServerTerminalRoute {
 }
 
 impl ServerRouting {
-    pub(super) fn program(&self) -> Option<&CompiledRoute> {
-        self.program.as_ref()
+    pub(super) const fn program(&self) -> &CompiledRoute {
+        &self.program
     }
 
-    pub(super) fn route_scratch(&self) -> Result<Option<RuleEvaluationScratch>, RuleCompileError> {
-        self.program
-            .as_ref()
-            .map(CompiledRoute::evaluation_scratch)
-            .transpose()
-    }
-
-    pub(super) fn legacy(
-        &self,
-        inbound: usize,
-        network: Network,
-        target: &TargetAddr,
-    ) -> ServerTerminalRoute {
-        let outbound = self.legacy.select(inbound, network, target);
-        if outbound < self.outbound_count {
-            ServerTerminalRoute::Direct(outbound)
-        } else {
-            ServerTerminalRoute::Reject
-        }
+    pub(super) fn route_scratch(&self) -> Result<RuleEvaluationScratch, RuleCompileError> {
+        self.program.evaluation_scratch()
     }
 
     pub(super) fn terminal(&self, action: &RouteAction) -> ServerTerminalRoute {
@@ -1014,14 +996,7 @@ where
     P: AsRef<[u8]>,
 {
     let mut prefix = TcpRoutePrefix::Initial(initial_payload);
-    let Some(program) = context.routing.program() else {
-        return Ok(TcpRouteSelection {
-            terminal: context
-                .routing
-                .legacy(context.inbound, Network::Tcp, target),
-            prefix,
-        });
-    };
+    let program = context.routing.program();
     let mut scratch = match program.evaluation_scratch() {
         Ok(scratch) => scratch,
         Err(error) => {
@@ -1464,8 +1439,8 @@ mod tests {
     }
 
     impl LocalEndpoint for RecordingStream {
-        fn local_endpoint(&self) -> SocketAddrV4 {
-            self.endpoint
+        fn local_socket_addr(&self) -> SocketAddr {
+            SocketAddr::V4(self.endpoint)
         }
     }
 

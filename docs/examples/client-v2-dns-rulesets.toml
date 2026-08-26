@@ -16,11 +16,15 @@ domain_strategy = "ipv4_only"
 tag = "ss-ip"
 type = "shadowsocks"
 server = "192.0.2.10:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 [[outbounds]]
 tag = "ss-domain"
 type = "shadowsocks"
 server = "edge.example.invalid:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 domain_resolver = "local"
 domain_strategy = "ipv4_only"
 
@@ -190,10 +194,6 @@ enabled = true
 max_sessions = 4096
 max_buffered_bytes = 16777216
 idle_timeout_ms = 300000
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 [logging]
 level = "info"

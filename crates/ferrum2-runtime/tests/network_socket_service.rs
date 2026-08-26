@@ -192,8 +192,8 @@ impl AsyncWrite for FakeTcpStream {
 }
 
 impl LocalEndpoint for FakeTcpStream {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 49_152)
+    fn local_socket_addr(&self) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 49_152))
     }
 }
 

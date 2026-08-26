@@ -21,7 +21,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 const AES_128_KEY_BYTES: usize = 16;
 const WIDE_KEY_BYTES: usize = 32;
 const AEAD_NONCE_BYTES: usize = 12;
-const TCP_SALT_BYTES: usize = 16;
 const AEAD_TAG_BYTES: usize = 16;
 const UDP_SESSION_ID_BYTES: usize = 8;
 const UDP_PACKET_ID_BYTES: usize = 8;
@@ -29,62 +28,6 @@ const UDP_IDENTITY_BYTES: usize = UDP_SESSION_ID_BYTES + UDP_PACKET_ID_BYTES;
 const XCHACHA_NONCE_BYTES: usize = 24;
 const RESPONSE_SALT_ATTEMPTS: usize = 8;
 const UDP_SESSION_ID_ATTEMPTS: usize = 8;
-
-/// An exact-width AES-128 pre-shared key.
-///
-/// The owner is intentionally neither `Clone` nor printable.
-pub struct Aes128Psk {
-    bytes: Zeroizing<[u8; AES_128_KEY_BYTES]>,
-}
-
-impl Aes128Psk {
-    /// Takes ownership of an exact-width decoded PSK buffer.
-    pub fn from_bytes(bytes: [u8; AES_128_KEY_BYTES]) -> Self {
-        Self {
-            bytes: Zeroizing::new(bytes),
-        }
-    }
-
-    /// Explicitly clears the owned PSK before its eventual drop.
-    pub fn clear(&mut self) {
-        self.zeroize();
-    }
-}
-
-impl TryFrom<&[u8]> for Aes128Psk {
-    type Error = PskLengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let bytes: [u8; AES_128_KEY_BYTES] = value.try_into().map_err(|_| PskLengthError)?;
-        Ok(Self::from_bytes(bytes))
-    }
-}
-
-impl fmt::Debug for Aes128Psk {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Aes128Psk([REDACTED])")
-    }
-}
-
-impl Zeroize for Aes128Psk {
-    fn zeroize(&mut self) {
-        self.bytes.zeroize();
-    }
-}
-
-impl ZeroizeOnDrop for Aes128Psk {}
-
-/// A closed error for a decoded PSK with the wrong width.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PskLengthError;
-
-impl fmt::Display for PskLengthError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid AES-128 key length")
-    }
-}
-
-impl Error for PskLengthError {}
 
 /// One of the three immutable SIP022 cryptographic method profiles.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -171,9 +114,6 @@ impl MethodProfile {
         }
     }
 }
-
-/// Source-compatible M1 name for the canonical transport-neutral profile.
-pub type TcpMethodProfile = MethodProfile;
 
 /// An immutable method-bound pre-shared key.
 ///
@@ -945,52 +885,10 @@ pub enum KeySelector<'a> {
     Identity(&'a [u8; AES_128_KEY_BYTES]),
 }
 
-/// A scoped key lookup capability that never returns raw PSK bytes.
-pub trait KeyProvider: Send + Sync {
-    /// Closed provider error.
-    type Error;
-
-    /// Runs one operation with a capability borrowed from the selected key.
-    fn with_key<T>(
-        &self,
-        selector: KeySelector<'_>,
-        use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
-    ) -> Result<T, Self::Error>;
-}
-
-/// The M0 process-level owner for one default AES-128 PSK.
-pub struct SinglePskProvider {
-    psk: Aes128Psk,
-}
-
-impl SinglePskProvider {
-    /// Takes ownership of the configured process key.
-    pub fn new(psk: Aes128Psk) -> Self {
-        Self { psk }
-    }
-}
-
-impl KeyProvider for SinglePskProvider {
-    type Error = KeyProviderError;
-
-    fn with_key<T>(
-        &self,
-        selector: KeySelector<'_>,
-        use_key: impl FnOnce(SecretKeyRef<'_>) -> T,
-    ) -> Result<T, Self::Error> {
-        match selector {
-            KeySelector::Default => Ok(use_key(SecretKeyRef {
-                psk: &self.psk.bytes,
-            })),
-            KeySelector::Identity(_) => Err(KeyProviderError::IdentityUnsupported),
-        }
-    }
-}
-
 /// A closed key lookup error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyProviderError {
-    /// M0 does not implement identity selection or SIP023.
+    /// Identity selection and SIP023 are not implemented.
     IdentityUnsupported,
 }
 
@@ -1001,22 +899,6 @@ impl fmt::Display for KeyProviderError {
 }
 
 impl Error for KeyProviderError {}
-
-/// A scoped capability for deriving a session key without exposing its PSK.
-pub struct SecretKeyRef<'a> {
-    psk: &'a [u8; AES_128_KEY_BYTES],
-}
-
-impl SecretKeyRef<'_> {
-    /// Derives the SIP022 TCP subkey for the selected method and salt.
-    pub fn derive_tcp_subkey(self, method: TcpMethod, salt: &TcpSalt) -> TcpSubkey {
-        match method {
-            TcpMethod::Blake3Aes128Gcm2022 => {
-                TcpSubkey::derive(MethodProfile::Blake3Aes128Gcm2022, self.psk, &salt.bytes)
-            }
-        }
-    }
-}
 
 fn udp_identity(session_id: &UdpSessionId, packet_id: u64) -> [u8; UDP_IDENTITY_BYTES] {
     let mut identity = [0_u8; UDP_IDENTITY_BYTES];
@@ -1194,37 +1076,6 @@ fn map_udp_operation_error(_: ShadowsocksCryptoError) -> UdpCryptoError {
     UdpCryptoError::OperationFailed
 }
 
-/// The only TCP cipher method implemented by M0.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TcpMethod {
-    /// SIP022 `2022-blake3-aes-128-gcm`.
-    Blake3Aes128Gcm2022,
-}
-
-/// A typed 16-byte TCP salt that redacts its diagnostic representation.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub struct TcpSalt {
-    bytes: [u8; TCP_SALT_BYTES],
-}
-
-impl TcpSalt {
-    /// Wraps salt bytes received from the wire or a secure random source.
-    pub const fn from_bytes(bytes: [u8; TCP_SALT_BYTES]) -> Self {
-        Self { bytes }
-    }
-
-    /// Returns the wire representation.
-    pub const fn as_bytes(&self) -> &[u8; TCP_SALT_BYTES] {
-        &self.bytes
-    }
-}
-
-impl fmt::Debug for TcpSalt {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TcpSalt([REDACTED])")
-    }
-}
-
 /// A standalone u96le counter fixture seam.
 ///
 /// TCP AEAD owners use an internal counter of the same shape and never accept
@@ -1394,31 +1245,6 @@ impl SecureRandom for SystemRandom {
     fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
         getrandom::fill(destination).map_err(|_| RandomError::Unavailable)
     }
-}
-
-/// Generates a fresh request salt from the supplied secure-random capability.
-pub fn generate_request_salt(
-    random: &(impl SecureRandom + ?Sized),
-) -> Result<TcpSalt, RandomError> {
-    let mut bytes = [0_u8; TCP_SALT_BYTES];
-    random.fill(&mut bytes)?;
-    Ok(TcpSalt::from_bytes(bytes))
-}
-
-/// Generates a response salt distinct from its request salt.
-///
-/// Eight consecutive collisions fail closed.
-pub fn generate_response_salt(
-    random: &(impl SecureRandom + ?Sized),
-    request: &TcpSalt,
-) -> Result<TcpSalt, RandomError> {
-    for _ in 0..RESPONSE_SALT_ATTEMPTS {
-        let candidate = generate_request_salt(random)?;
-        if candidate != *request {
-            return Ok(candidate);
-        }
-    }
-    Err(RandomError::RepeatedSalt)
 }
 
 /// Generates a request salt with the exact width of the selected profile.

@@ -10,15 +10,24 @@ listen = "127.0.0.1:10001"
 
 [[outbounds]]
 tag = "o0"
+type = "shadowsocks"
 server = "127.0.0.1:20000"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 [[outbounds]]
 tag = "o1"
+type = "shadowsocks"
 server = "127.0.0.1:20001"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 [[outbounds]]
 tag = "o2"
+type = "shadowsocks"
 server = "127.0.0.1:20002"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 [route]
 final = "o0"
@@ -28,14 +37,12 @@ inbound = "i0"
 network = "tcp"
 domain = "example.test"
 port = 443
+action = "route"
 outbound = "o1"
 
 [[route.rules]]
 network = "udp"
 ip = "192.0.2.1"
 port = 53
+action = "route"
 outbound = "o2"
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use ferrum2_core::{ConnectErrorKind, Inbound, Session, SessionReply, TargetAddr, TargetHostRef};
+use ferrum2_core::{ConnectErrorKind, Session, SessionReply, TargetAddr, TargetHostRef};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
@@ -50,7 +50,7 @@ impl Socks5Inbound {
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        let (io, command) = accept_command(io, true).await?;
+        let (io, command) = accept_command(io).await?;
         Ok(match command {
             ParsedCommand::Connect(target) => SocksCommand::Connect(connect_session(io, target)),
             ParsedCommand::UdpAssociate(source_port) => {
@@ -127,6 +127,17 @@ impl<IO> SocksUdpAssociate<IO> {
     }
 }
 
+impl<IO> SocksUdpAssociate<IO>
+where
+    IO: AsyncWrite + Unpin,
+{
+    /// Rejects a parsed UDP association when the composition does not expose that command.
+    pub async fn reject_command_not_supported(self) -> Result<(), SocksError> {
+        let mut stream = SocksStream { io: self.reply.io };
+        write_failure(&mut stream, REPLY_COMMAND_NOT_SUPPORTED).await
+    }
+}
+
 /// A validated borrowed SOCKS5 UDP datagram.
 pub struct SocksUdpDatagram<'a> {
     host: TargetHostRef<'a>,
@@ -171,23 +182,6 @@ pub enum SocksUdpError {
     /// The complete datagram or supplied output exceeds the fixed wire bound.
     #[error("SOCKS5 UDP datagram exceeds bounds")]
     Bounds,
-}
-
-impl<IO> Inbound<IO> for Socks5Inbound
-where
-    IO: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    type Stream = SocksStream<IO>;
-    type Reply = SocksReplyPending<IO>;
-    type Error = SocksError;
-
-    async fn accept(&self, io: IO) -> Result<Session<Self::Stream, Self::Reply>, Self::Error> {
-        let (io, command) = accept_command(io, false).await?;
-        match command {
-            ParsedCommand::Connect(target) => Ok(connect_session(io, target)),
-            ParsedCommand::UdpAssociate(_) => Err(SocksError::CommandNotSupported),
-        }
-    }
 }
 
 /// Decodes one complete SOCKS5 UDP datagram without allocating.
@@ -290,10 +284,6 @@ where
 {
     type Error = SocksError;
 
-    async fn succeeded(self, bound: std::net::SocketAddrV4) -> Result<(), Self::Error> {
-        self.succeeded_socket(SocketAddr::V4(bound)).await
-    }
-
     async fn succeeded_socket(self, bound: SocketAddr) -> Result<(), Self::Error> {
         let mut reply = [0_u8; 22];
         reply[..3].copy_from_slice(&[SOCKS_VERSION, 0x00, 0x00]);
@@ -382,10 +372,7 @@ enum ParsedCommand {
     UdpAssociate(u16),
 }
 
-async fn accept_command<IO>(
-    mut io: IO,
-    udp_enabled: bool,
-) -> Result<(IO, ParsedCommand), SocksError>
+async fn accept_command<IO>(mut io: IO) -> Result<(IO, ParsedCommand), SocksError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -409,9 +396,7 @@ where
     if request_header[0] != SOCKS_VERSION || request_header[2] != 0 {
         return Err(SocksError::Malformed);
     }
-    if request_header[1] != COMMAND_CONNECT
-        && (request_header[1] != COMMAND_UDP_ASSOCIATE || !udp_enabled)
-    {
+    if request_header[1] != COMMAND_CONNECT && request_header[1] != COMMAND_UDP_ASSOCIATE {
         write_failure(&mut io, REPLY_COMMAND_NOT_SUPPORTED).await?;
         return Err(SocksError::CommandNotSupported);
     }

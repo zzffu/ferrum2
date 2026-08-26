@@ -1985,8 +1985,9 @@ mod tests {
         let target_endpoint = target_socket.local_addr().expect("TUN target address");
         let target = TargetAddr::ip(target_endpoint).expect("TUN target");
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Tun,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 Some(&target),
             )
@@ -2122,8 +2123,9 @@ mod tests {
                 .expect("second target"),
         ];
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Tun,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 Some(&targets[0]),
             )
@@ -2257,8 +2259,9 @@ mod tests {
             .expect("ordinary target");
         let direct_plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(direct_plan.clone()),
                 Some(&target),
             )
@@ -2302,7 +2305,7 @@ mod tests {
         ] {
             assert!(
                 engine
-                    .prepare_udp(origin, Some(direct_plan.clone()), Some(&target))
+                    .prepare_udp_for_ingress(origin, 0, Some(direct_plan.clone()), Some(&target))
                     .await
                     .is_err(),
                 "ordinary association fixed buffers bypassed the full budget for {origin:?}"
@@ -2571,8 +2574,9 @@ mod tests {
         );
         let target = TargetAddr::domain("configured-only.invalid", 53).expect("domain target");
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 Some(&target),
             )
@@ -2627,8 +2631,9 @@ mod tests {
             .expect("echo bind");
         let target = TargetAddr::ip(echo.local_addr().expect("echo address")).expect("target");
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 super::super::ClientRequestOrigin::Socks,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 Some(&target),
             )
@@ -2729,7 +2734,12 @@ mod tests {
                 .expect("DNS echo bind");
             let target = TargetAddr::ip(echo.local_addr().unwrap()).unwrap();
             let mut association = engine
-                .prepare_udp(super::super::ClientRequestOrigin::Dns, plan, Some(&target))
+                .prepare_udp_for_ingress(
+                    super::super::ClientRequestOrigin::Dns,
+                    0,
+                    plan,
+                    Some(&target),
+                )
                 .await
                 .unwrap_or_else(|_| panic!("{case} direct association"));
             association.activate(&engine).unwrap();
@@ -2776,8 +2786,9 @@ mod tests {
             if ipv6_ready {
                 let target = TargetAddr::ip(echo_address).unwrap();
                 let mut association = engine
-                    .prepare_udp(
+                    .prepare_udp_for_ingress(
                         super::super::ClientRequestOrigin::Socks,
+                        0,
                         Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                         Some(&target),
                     )
@@ -2831,8 +2842,9 @@ mod tests {
         let target_a = TargetAddr::ip(echo_a.local_addr().unwrap()).unwrap();
         let target_b = TargetAddr::ip(echo_b.local_addr().unwrap()).unwrap();
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 super::super::ClientRequestOrigin::Socks,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 None,
             )

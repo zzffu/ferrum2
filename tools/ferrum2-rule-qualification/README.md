@@ -37,9 +37,9 @@ binary source wrappers to the exact same decoded `CompiledMatchSet`, so object
 layout cannot masquerade as a matcher-backend regression. The rows retain the
 independent materialization correctness, build-time, and compiled-memory
 evidence and are subject to the same 5% median, 15% p99, and zero-match-
-allocation gates. The smoke profile deliberately omits this added matrix so
-its scenario-ID set remains compatible with the pre-matrix parent runner used
-for alternating A/A and A/B qualification.
+allocation gates. The smoke profile deliberately omits this expensive binary-
+SRS matrix; every profile still exercises the complete Route observation
+matrix used by the current product.
 
 The generated ordinary and synthetic sources share the exact compiled object
 during paired timing; the source-specific direct/snapshot materialization and
@@ -50,11 +50,10 @@ noise.
 
 Route measurements cover ordinary-only, RuleSet-only, and mixed constraints;
 first, middle, last, and miss lookups; and the actual `SmallLinear` or
-`Indexed` mode selected by the compiler. At the 1,000/10,000 qualification
-scales, additional mixed rows enable and consume the same selected-rule match
+`Indexed` mode selected by the compiler. At every smoke and qualification
+scale, additional mixed rows enable and consume the same selected-rule match
 observation used by production metrics, including its allocation-free matcher
-category recheck. These rows are omitted from Smoke to preserve its pinned
-parent scenario set. DNS measurements cover ordinary and
+category recheck. DNS measurements cover ordinary and
 RuleSet qname routing, CN-IP response hit/miss, cache hit/miss, and reuse of one
 response across same-server continuation. Qname rows cover the 64/65 linear-to-
 indexed boundary and 1,000/10,000 indexed scales; every row records the actual
@@ -110,9 +109,9 @@ cargo run --release -p ferrum2-rule-qualification --locked -- \
 six pairs so process order is exactly balanced. The controller alternates run
 order (`parent,candidate`, then `candidate,parent`), verifies the SHA-256
 reported inside every run against the executable actually invoked, requires an
-identical scenario-ID set, and retains all raw reports. Its v3 outer gate uses
-only process-level p50 medians. V4 additionally derives a fail-closed suite
-catalog from every raw measurement's explicit `suite` field. Only `match_set`
+identical scenario-ID set, and retains all raw reports. Its v4 outer gate uses
+only process-level p50 medians and derives a fail-closed suite catalog from
+every raw measurement's explicit `suite` field. Only `match_set`
 uses that outer median gate: A/A requires its median absolute paired noise at
 or below 10%, and that observation calibrates its A/B limit between the 5%
 local target and 10% noisy ceiling. Route-program and DNS-policy p50/p99 remain
@@ -133,19 +132,10 @@ The checked-in history preserves the original v2 A/A diagnostic, the passing
 v3 all-suite A/A, and the failed v3 all-suite A/B with all 19 route/DNS failed
 comparisons. Canonical v4 A/A and A/B are deterministic offline scope
 reclassifications. They record the source files' SHA-256, policies, decisions,
-comparisons, failure IDs, and canonical raw-pair hashes. No runner executes and
-no sample is removed or re-aggregated:
-
-```text
-python3 -B tools/performance_rule.py \
-  --reclassify-v3-aa tests/performance_rule/release-aa-v3-all-suite-median.json \
-  --output tests/performance_rule/release-aa.json
-python3 -B tools/performance_rule.py \
-  --reclassify-v3-ab tests/performance_rule/release-ab-v3-all-suite-median-diagnostic.json \
-  --source-calibration tests/performance_rule/release-aa-v3-all-suite-median.json \
-  --calibration tests/performance_rule/release-aa.json \
-  --output tests/performance_rule/release-ab.json
-```
+comparisons, failure IDs, and canonical raw-pair hashes. These archived files
+are immutable provenance inputs: the controller verifies their source hashes
+and unmodified raw pairs but exposes no v2/v3 conversion path. Generate fresh
+canonical evidence with the current controller commands below.
 
 Use the same binary for A/A calibration:
 

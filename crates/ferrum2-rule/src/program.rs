@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::net::IpAddr;
 use std::num::NonZeroU16;
 use std::sync::Arc;
@@ -16,7 +15,7 @@ use crate::{
     RuleEngineSnapshot, RuleProgramMode, RuleSetId,
 };
 
-const FIELD_KIND_COUNT: usize = 13;
+const FIELD_KIND_COUNT: usize = 12;
 
 /// One validated inclusive non-zero port interval.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -33,11 +32,6 @@ impl PortRange {
             return Err(RuleCompileError::EmptyField);
         }
         Ok(Self { first, last })
-    }
-
-    /// Compatibility shim for callers migrating to [`Self::try_new`].
-    pub fn new(first: u16, last: u16) -> Option<Self> {
-        Self::try_new(first, last).ok()
     }
 
     pub const fn first(self) -> NonZeroU16 {
@@ -65,7 +59,6 @@ pub enum RouteMatchField<P> {
     Cidr(Vec<IpNet>),
     Port(Vec<NonZeroU16>),
     PortRange(Vec<PortRange>),
-    Target(Vec<TargetAddr>),
     /// A synthetic or decoded RuleSet whose internal categories are ORed.
     MatchSet(CompiledMatchSet),
     /// Stable RuleSet references. Multiple references within this field are ORed.
@@ -84,9 +77,8 @@ enum FieldKind {
     Cidr = 7,
     Port = 8,
     PortRange = 9,
-    Target = 10,
-    MatchSet = 11,
-    RuleSet = 12,
+    MatchSet = 10,
+    RuleSet = 11,
 }
 
 impl FieldKind {
@@ -101,7 +93,6 @@ impl FieldKind {
         Self::Cidr,
         Self::Port,
         Self::PortRange,
-        Self::Target,
         Self::MatchSet,
         Self::RuleSet,
     ];
@@ -122,7 +113,6 @@ enum CompiledField<P> {
     Cidr(CompiledMatchSet),
     Port(Box<[NonZeroU16]>),
     PortRange(Box<[PortRange]>),
-    Target(Box<[TargetAddr]>),
     MatchSet(CompiledMatchSet),
     RuleSet(Box<[RuleSetId]>),
 }
@@ -223,7 +213,6 @@ impl<P> CompiledField<P> {
             Self::Cidr(_) => FieldKind::Cidr,
             Self::Port(_) => FieldKind::Port,
             Self::PortRange(_) => FieldKind::PortRange,
-            Self::Target(_) => FieldKind::Target,
             Self::MatchSet(_) => FieldKind::MatchSet,
             Self::RuleSet(_) => FieldKind::RuleSet,
         }
@@ -243,63 +232,15 @@ impl<P: Eq> RouteMatcher<P> {
         Self::compile(fields)
     }
 
-    /// Compatibility shim for callers migrating to [`Self::try_new`].
-    pub fn new(fields: Vec<RouteMatchField<P>>) -> Option<Self> {
-        Self::try_new(fields).ok()
-    }
-
-    /// Creates an explicit unconditional matcher for generated compatibility rules.
+    /// Creates an explicit unconditional matcher for ordered continuation rules.
     pub fn unconditional() -> Self {
         Self {
             fields: Box::new([]),
         }
     }
 
-    pub(crate) fn legacy(
-        inbound: Option<usize>,
-        network: Option<Network>,
-        target: Option<TargetAddr>,
-    ) -> Self {
-        let mut fields = Vec::with_capacity(3);
-        if let Some(inbound) = inbound {
-            fields.push(RouteMatchField::Inbound(vec![inbound]));
-        }
-        if let Some(network) = network {
-            fields.push(RouteMatchField::Network(vec![network]));
-        }
-        if let Some(target) = target {
-            fields.push(RouteMatchField::Target(vec![target]));
-        }
-        if fields.is_empty() {
-            Self::unconditional()
-        } else {
-            Self::compile(fields).expect("legacy matcher fields are valid")
-        }
-    }
-
     fn compile(fields: Vec<RouteMatchField<P>>) -> Result<Self, RuleCompileError> {
         let mut seen = [false; FIELD_KIND_COUNT];
-        let has_target = fields
-            .iter()
-            .any(|field| matches!(field, RouteMatchField::Target(_)));
-        if has_target
-            && fields.iter().any(|field| {
-                matches!(
-                    field,
-                    RouteMatchField::Domain(_)
-                        | RouteMatchField::DomainSuffix(_)
-                        | RouteMatchField::DomainKeyword(_)
-                        | RouteMatchField::Ip(_)
-                        | RouteMatchField::Cidr(_)
-                        | RouteMatchField::Port(_)
-                        | RouteMatchField::PortRange(_)
-                        | RouteMatchField::MatchSet(_)
-                )
-            })
-        {
-            return Err(RuleCompileError::ConflictingFields);
-        }
-
         let mut compiled = Vec::new();
         compiled
             .try_reserve(fields.len())
@@ -386,8 +327,7 @@ impl<P: Eq> RouteMatcher<P> {
                 | CompiledField::Network(_)
                 | CompiledField::Protocol(_)
                 | CompiledField::Port(_)
-                | CompiledField::PortRange(_)
-                | CompiledField::Target(_) => {
+                | CompiledField::PortRange(_) => {
                     observation.record(RouteMatchSource::Inline, RouteMatchType::Scalar);
                 }
             }
@@ -498,10 +438,6 @@ fn compile_field<P: Eq>(field: RouteMatchField<P>) -> Result<CompiledField<P>, R
             validate_unique(&mut values)?;
             CompiledField::PortRange(values.into_boxed_slice())
         }
-        RouteMatchField::Target(values) => {
-            validate_unique_targets(&values)?;
-            CompiledField::Target(values.into_boxed_slice())
-        }
         RouteMatchField::MatchSet(values) => {
             if values.is_empty() {
                 return Err(RuleCompileError::EmptyField);
@@ -542,21 +478,6 @@ fn validate_unique_eq<T: Eq>(values: &[T]) -> Result<(), RuleCompileError> {
     }
 }
 
-fn validate_unique_targets(values: &[TargetAddr]) -> Result<(), RuleCompileError> {
-    if values.is_empty() {
-        return Err(RuleCompileError::EmptyField);
-    }
-    if values.iter().enumerate().any(|(index, value)| {
-        values[..index]
-            .iter()
-            .any(|other| legacy_target_matches(other, value))
-    }) {
-        Err(RuleCompileError::DuplicateValue)
-    } else {
-        Ok(())
-    }
-}
-
 fn matches_field<P: Eq>(
     field: &CompiledField<P>,
     inbound: usize,
@@ -589,9 +510,6 @@ fn matches_field<P: Eq>(
         CompiledField::PortRange(values) => {
             values.iter().any(|range| range.contains(original.port()))
         }
-        CompiledField::Target(values) => values
-            .iter()
-            .any(|expected| legacy_target_matches(expected, original)),
         CompiledField::MatchSet(values) => values.matches(domain, address),
         CompiledField::RuleSet(values) => snapshot.is_some_and(|snapshot| {
             values
@@ -609,17 +527,6 @@ fn selected_domain<'a, P>(
         Some(domain) => domain.canonical(),
         None => original.canonical_domain(),
     }
-}
-
-fn legacy_target_matches(expected: &TargetAddr, actual: &TargetAddr) -> bool {
-    expected.port() == actual.port()
-        && match (expected.host(), actual.host()) {
-            (TargetHostRef::Ip(expected), TargetHostRef::Ip(actual)) => expected == actual,
-            (TargetHostRef::Domain(expected), TargetHostRef::Domain(actual)) => {
-                expected.eq_ignore_ascii_case(actual)
-            }
-            _ => false,
-        }
 }
 
 /// Caller-owned recognized metadata used by one ordered evaluation step.
@@ -655,50 +562,6 @@ impl<P, A> OrderedRouteRule<P, A> {
     }
 }
 
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-enum IndexedTarget {
-    Ip(IpAddr, NonZeroU16),
-    Domain(Box<str>, NonZeroU16),
-}
-
-impl IndexedTarget {
-    fn try_from_target(target: &TargetAddr) -> Result<Self, RuleCompileError> {
-        Ok(match target.host() {
-            TargetHostRef::Ip(address) => Self::Ip(address, target.port()),
-            TargetHostRef::Domain(domain) => {
-                let mut normalized = String::new();
-                normalized
-                    .try_reserve_exact(domain.len())
-                    .map_err(|_| RuleCompileError::Allocation)?;
-                normalized.extend(
-                    domain
-                        .bytes()
-                        .map(|byte| char::from(byte.to_ascii_lowercase())),
-                );
-                Self::Domain(normalized.into_boxed_str(), target.port())
-            }
-        })
-    }
-
-    fn cmp_target(&self, target: &TargetAddr) -> Ordering {
-        match (self, target.host()) {
-            (Self::Ip(expected, expected_port), TargetHostRef::Ip(actual)) => expected
-                .cmp(&actual)
-                .then(expected_port.cmp(&target.port())),
-            (Self::Ip(..), TargetHostRef::Domain(_)) => Ordering::Less,
-            (Self::Domain(..), TargetHostRef::Ip(_)) => Ordering::Greater,
-            (Self::Domain(expected, expected_port), TargetHostRef::Domain(actual)) => {
-                cmp_ascii_lowercase(expected, actual).then(expected_port.cmp(&target.port()))
-            }
-        }
-    }
-}
-
-fn cmp_ascii_lowercase(left: &str, right: &str) -> Ordering {
-    left.bytes()
-        .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
-}
-
 struct ConstraintIndex<P> {
     masks: [Box<[u64]>; FIELD_KIND_COUNT],
     inbound: SparseValueIndex<usize>,
@@ -711,7 +574,6 @@ struct ConstraintIndex<P> {
     cidr: MatchCandidateIndex,
     port: SparseValueIndex<NonZeroU16>,
     port_range: PortRangeCandidateIndex,
-    target: SparseValueIndex<IndexedTarget>,
     match_set: MatchCandidateIndex,
     rule_set: SparseValueIndex<RuleSetId>,
 }
@@ -743,11 +605,6 @@ impl<P: Clone + Ord, A> OrderedRouteProgram<P, A> {
         })
     }
 
-    /// Compatibility shim for callers migrating to [`Self::try_new`].
-    pub fn new(rules: Vec<OrderedRouteRule<P, A>>, final_action: A) -> Option<Self> {
-        Self::try_new(rules, final_action).ok()
-    }
-
     pub const fn mode(&self) -> RuleProgramMode {
         self.compiled.mode()
     }
@@ -762,66 +619,6 @@ impl<P: Clone + Ord, A> OrderedRouteProgram<P, A> {
 
     pub fn evaluation_scratch(&self) -> Result<RuleEvaluationScratch, RuleCompileError> {
         RuleEvaluationScratch::try_for_program(self)
-    }
-
-    /// Starts one evaluation with an immutable original target and private cursor.
-    ///
-    /// This compatibility entry allocates scratch. Production hot paths should
-    /// retain [`Self::evaluation_scratch`] and call [`Self::evaluate_with_scratch`].
-    pub fn evaluate<'program, 'target>(
-        &'program self,
-        inbound: usize,
-        network: Network,
-        original: &'target TargetAddr,
-    ) -> RouteProgramEvaluation<'program, 'target, P, A> {
-        self.evaluate_captured(inbound, network, original, None)
-    }
-
-    /// Starts an evaluation against one already captured immutable snapshot.
-    /// This compatibility entry allocates scratch per evaluation.
-    pub fn evaluate_with_snapshot<'program, 'target>(
-        &'program self,
-        inbound: usize,
-        network: Network,
-        original: &'target TargetAddr,
-        snapshot: Arc<RuleEngineSnapshot>,
-    ) -> RouteProgramEvaluation<'program, 'target, P, A> {
-        self.evaluate_captured(inbound, network, original, Some(snapshot))
-    }
-
-    /// Captures the registry once and keeps that generation for the whole evaluation.
-    /// This compatibility entry allocates scratch per evaluation.
-    pub fn evaluate_with_registry<'program, 'target>(
-        &'program self,
-        inbound: usize,
-        network: Network,
-        original: &'target TargetAddr,
-        registry: &RuleEngineRegistry,
-    ) -> RouteProgramEvaluation<'program, 'target, P, A> {
-        self.evaluate_captured(inbound, network, original, Some(registry.snapshot()))
-    }
-
-    fn evaluate_captured<'program, 'target>(
-        &'program self,
-        inbound: usize,
-        network: Network,
-        original: &'target TargetAddr,
-        snapshot: Option<Arc<RuleEngineSnapshot>>,
-    ) -> RouteProgramEvaluation<'program, 'target, P, A> {
-        RouteProgramEvaluation {
-            program: self,
-            inbound,
-            network,
-            original,
-            cursor: 0,
-            finished: false,
-            snapshot,
-            scratch: self
-                .evaluation_scratch()
-                .expect("rule evaluation scratch allocation failed"),
-            observe_matches: false,
-            last_match: RouteMatchObservation::default(),
-        }
     }
 
     /// Starts an allocation-free evaluation using caller-owned reusable scratch
@@ -975,7 +772,6 @@ fn build_constraints<P: Clone + Ord, A>(
     let mut cidr = MatchCandidateIndexBuilder::new();
     let mut port = SparseValueIndexBuilder::new();
     let mut port_range = PortRangeCandidateIndexBuilder::new();
-    let mut target = SparseValueIndexBuilder::new();
     let mut match_set = MatchCandidateIndexBuilder::new();
     let mut rule_set = SparseValueIndexBuilder::new();
     for (index, rule) in rules.iter().enumerate() {
@@ -1022,11 +818,6 @@ fn build_constraints<P: Clone + Ord, A>(
                         port_range.try_add(value.first, value.last, index)?;
                     }
                 }
-                CompiledField::Target(values) => {
-                    for value in values {
-                        target.try_add(IndexedTarget::try_from_target(value)?, index)?;
-                    }
-                }
                 CompiledField::MatchSet(values) => {
                     match_set.try_add_match_set(index, values, MatchCategories::ALL)?;
                 }
@@ -1050,7 +841,6 @@ fn build_constraints<P: Clone + Ord, A>(
         cidr: cidr.build()?,
         port: port.build()?,
         port_range: port_range.build()?,
-        target: target.build()?,
         match_set: match_set.build()?,
         rule_set: rule_set.build()?,
     })
@@ -1093,9 +883,6 @@ impl<P: Ord> ConstraintIndex<P> {
             FieldKind::Cidr => self.cidr.visit_matches(None, address, mark),
             FieldKind::Port => self.port.visit(&original.port(), mark),
             FieldKind::PortRange => self.port_range.visit(original.port(), mark),
-            FieldKind::Target => self
-                .target
-                .visit_by(|candidate| candidate.cmp_target(original), mark),
             FieldKind::MatchSet => self.match_set.visit_matches(domain, address, mark),
             FieldKind::RuleSet => {
                 if let Some(snapshot) = snapshot {
@@ -1213,61 +1000,6 @@ impl<A> std::fmt::Debug for RouteProgramAction<'_, A> {
             Self::Terminal(_) => "RouteProgramAction::Terminal([redacted])",
             Self::Final(_) => "RouteProgramAction::Final([redacted])",
         })
-    }
-}
-
-/// One private-cursor evaluation borrowing a reusable ordered program.
-pub struct RouteProgramEvaluation<'program, 'target, P, A> {
-    program: &'program OrderedRouteProgram<P, A>,
-    inbound: usize,
-    network: Network,
-    original: &'target TargetAddr,
-    cursor: usize,
-    finished: bool,
-    snapshot: Option<Arc<RuleEngineSnapshot>>,
-    scratch: RuleEvaluationScratch,
-    observe_matches: bool,
-    last_match: RouteMatchObservation,
-}
-
-impl<'program, P: Ord, A> RouteProgramEvaluation<'program, '_, P, A> {
-    /// Returns the single captured generation, or `None` for a registry-free program.
-    pub fn snapshot_generation(&self) -> Option<u64> {
-        self.snapshot.as_ref().map(|snapshot| snapshot.generation())
-    }
-
-    /// Returns the sparse posting/rule visits performed by the most recent step.
-    pub const fn candidate_visits(&self) -> usize {
-        self.scratch.candidate_visits()
-    }
-
-    /// Returns the categories evaluated by the rule selected by the latest step.
-    pub const fn last_match_observation(&self) -> RouteMatchObservation {
-        self.last_match
-    }
-
-    /// Enables allocation-free category telemetry for subsequent steps.
-    pub fn enable_match_observation(&mut self) {
-        self.observe_matches = true;
-    }
-
-    pub fn next(
-        &mut self,
-        metadata: RouteMetadata<'_, P>,
-    ) -> Option<RouteProgramAction<'program, A>> {
-        next_action(
-            self.program,
-            self.inbound,
-            self.network,
-            self.original,
-            &mut self.cursor,
-            &mut self.finished,
-            &metadata,
-            self.snapshot.as_deref(),
-            &mut self.scratch,
-            self.observe_matches,
-            &mut self.last_match,
-        )
     }
 }
 

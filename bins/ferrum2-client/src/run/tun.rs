@@ -1080,7 +1080,7 @@ async fn run_udp(
         metrics: &context.metrics,
     };
     let Ok((route_generation, plan)) =
-        select_udp_target_generation_stable(first_request, route_scratch.as_mut())
+        select_udp_target_generation_stable(first_request, &mut route_scratch)
     else {
         return;
     };
@@ -1171,7 +1171,7 @@ async fn run_udp_synthetic_candidate(
             metrics: &context.metrics,
         };
         let Ok((route_generation, plan)) =
-            select_udp_target_generation_stable(request, route_scratch.as_mut())
+            select_udp_target_generation_stable(request, &mut route_scratch)
         else {
             return;
         };
@@ -1398,7 +1398,7 @@ struct TunUdpRouteRequest<'a> {
 
 fn select_udp_target_generation_stable(
     request: TunUdpRouteRequest<'_>,
-    scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
+    scratch: &mut ferrum2_rule::RuleEvaluationScratch,
 ) -> Result<(RouteGeneration, TunUdpPlan), ferrum2_rule::RuleCompileError> {
     let before = request.routing.route_generation();
     let plan = match select_udp_target_with_scratch(request, scratch) {
@@ -1433,7 +1433,7 @@ fn select_udp_target_generation_stable(
 
 fn select_udp_target_with_scratch(
     request: TunUdpRouteRequest<'_>,
-    scratch: Option<&mut ferrum2_rule::RuleEvaluationScratch>,
+    scratch: &mut ferrum2_rule::RuleEvaluationScratch,
 ) -> Result<TunUdpPlan, ferrum2_rule::RuleCompileError> {
     if is_synthetic_dns_target(request.target, request.synthetic_dns) {
         return Ok(TunUdpPlan::SyntheticDns);
@@ -1484,7 +1484,7 @@ fn select_udp_target(
     _response_payload_bound: usize,
     metrics: &ferrum2_observability::Metrics,
 ) -> Option<TunUdpPlan> {
-    let mut scratch = routing.route_scratch().ok().flatten();
+    let mut scratch = routing.route_scratch().ok()?;
     select_udp_target_with_scratch(
         TunUdpRouteRequest {
             routing,
@@ -1497,7 +1497,7 @@ fn select_udp_target(
             payload,
             metrics,
         },
-        scratch.as_mut(),
+        &mut scratch,
     )
     .ok()
 }
@@ -2492,13 +2492,13 @@ mod tests {
             20_000,
         );
         let routing = ClientRouting {
-            legacy: route,
-            program: None,
+            program: route,
             outbounds,
             selector: selector.clone(),
         };
         let target = TargetAddr::ip("192.0.2.8:53".parse().unwrap()).unwrap();
         let metrics = ferrum2_observability::Metrics::new();
+        let mut scratch = routing.route_scratch().expect("route scratch");
         let (first_generation, first_plan) = select_udp_target_generation_stable(
             TunUdpRouteRequest {
                 routing: &routing,
@@ -2508,7 +2508,7 @@ mod tests {
                 payload: b"first",
                 metrics: &metrics,
             },
-            None,
+            &mut scratch,
         )
         .expect("first stable generation");
         let encoded = metrics.encode_text().expect("route result metrics");
@@ -2560,7 +2560,10 @@ tag = "direct"
 type = "direct"
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "192.0.2.10:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[selectors]]
 tag = "manual"
 outbounds = ["direct", "proxy"]
@@ -2572,33 +2575,22 @@ inbound = "tun-in"
 network = "tcp"
 action = "route"
 outbound = "direct"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#,
         )
         .expect("schema-v2 selector config");
         let config = ferrum2_config::load_client(&path).expect("validated schema-v2 selector");
         std::fs::remove_file(path).expect("remove schema-v2 selector config");
-        assert!(
-            config.route_program.is_some(),
-            "missing compiled route program"
-        );
         let inbound = config.inbounds.len();
         let selector = config.selector_control();
         let outbounds = prepare_client_outbounds(config.outbounds).expect("outbound contexts");
         let routing = ClientRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbounds,
             selector: selector.clone(),
         };
         let target = TargetAddr::ip("192.0.2.8:53".parse().unwrap()).unwrap();
         let metrics = ferrum2_observability::Metrics::new();
-        let mut scratch = routing
-            .route_scratch()
-            .expect("route scratch")
-            .expect("compiled route scratch");
+        let mut scratch = routing.route_scratch().expect("route scratch");
         let select = |payload: &[u8], scratch: &mut ferrum2_rule::RuleEvaluationScratch| {
             select_udp_target_generation_stable(
                 TunUdpRouteRequest {
@@ -2609,7 +2601,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     payload,
                     metrics: &metrics,
                 },
-                Some(scratch),
+                scratch,
             )
             .expect("stable schema-v2 selection")
         };
@@ -2715,8 +2707,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             20_000,
         );
         let routing = ClientRouting {
-            legacy: route,
-            program: None,
+            program: route,
             outbounds,
             selector: selector.clone(),
         };
@@ -2793,24 +2784,30 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             },
         ])
         .expect("direct and proxy outbounds");
-        let (route, direct_selector) = compile_selector_plans(
-            &[TaggedInbound::new("tun", 0)],
-            &[
-                TaggedOutbound::new("direct", 0),
-                TaggedOutbound::new("proxy", 1),
-            ],
-            &[],
-            &[SelectorDefinition::new(
-                "manual",
-                vec!["direct", "proxy"],
-                Some("direct"),
-            )],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("tun", "manual")]),
-        )
-        .expect("direct selector route");
+        let route_path = write_client_test_source(&format!(
+            r#"schema_version = 2
+[[inbounds]]
+tag = "tun"
+listen = "{}"
+outbound = "manual"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+[[outbounds]]
+tag = "proxy"
+type = "direct"
+[[selectors]]
+tag = "manual"
+outbounds = ["direct", "proxy"]
+default = "direct"
+"#,
+            reserve_address()
+        ));
+        let route_config = ferrum2_config::load_client(&route_path).expect("direct selector route");
+        std::fs::remove_file(route_path).expect("remove direct selector route config");
+        let direct_selector = route_config.selector_control();
         let routing = ClientRouting {
-            legacy: route,
-            program: None,
+            program: route_config.route,
             outbounds: Arc::clone(&outbounds),
             selector: direct_selector.clone(),
         };
@@ -2860,8 +2857,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             None,
         );
         let mut association = engine
-            .prepare_udp(
+            .prepare_udp_for_ingress(
                 super::super::egress::ClientRequestOrigin::Tun,
+                0,
                 Some(direct),
                 Some(&target),
             )
@@ -2988,8 +2986,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let selector = config.selector_control();
         let outbounds = prepare_client_outbounds(config.outbounds).expect("outbound contexts");
         let routing = ClientRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbounds,
             selector,
         };
@@ -3121,7 +3118,10 @@ ipv4_address = "198.18.0.2/30"
 ipv6_address = "fd00::2/126"
 [[outbounds]]
 tag = "fallback"
+type = "shadowsocks"
 server = "{fallback_address}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [route]
 final = "fallback"
 [dns]
@@ -3134,9 +3134,6 @@ transport = "udp"
 address = "{dns_address}"
 [dns.route]
 final = "resolver"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#
             ),
         )
@@ -3145,14 +3142,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         std::fs::remove_file(&path).expect("remove TUN DNS config");
         let runtime = config.runtime;
         let selector = config.selector_control();
-        let test_server = match config.outbounds[0].server().unwrap() {
-            SocketAddr::V4(server) => server,
-            SocketAddr::V6(_) => panic!("IPv4 test server"),
-        };
         let outbounds = prepare_client_outbounds(config.outbounds).expect("test outbounds");
         let routing = Arc::new(ClientRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbounds: Arc::clone(&outbounds),
             selector,
         });
@@ -3168,7 +3160,27 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         )
         .expect("test resolver");
         resolver_owner.ready().await.expect("resolver ready");
-        let proxy = Arc::new(DnsProxy::new(Arc::new(resolver), |_, _, _, _| Some(0)));
+        let dns_snapshot = ferrum2_rule::RuleEngineSnapshotBuilder::new(1)
+            .build()
+            .expect("empty DNS rule snapshot");
+        let dns_policy = Arc::new(
+            ferrum2_dns::DnsPolicyProgram::try_new(
+                Vec::new(),
+                ferrum2_dns::DnsPolicyRoute::new(
+                    ferrum2_dns::DnsServerId::new(0),
+                    ferrum2_dns::DnsStrategy::PreferIpv4,
+                ),
+                &dns_snapshot,
+            )
+            .expect("final-only DNS policy"),
+        );
+        let proxy = Arc::new(DnsProxy::new(
+            Arc::new(resolver),
+            dns_policy,
+            Arc::new(ferrum2_rule::RuleEngineRegistry::new(dns_snapshot)),
+            1,
+            1,
+        ));
         let dns = Arc::new(std::sync::OnceLock::new());
         assert!(dns.set(proxy).is_ok(), "one DNS proxy");
         let registry = OwnerRegistry::new();
@@ -3190,11 +3202,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             )),
             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk())),
             runtime,
-            udp_associate_enabled: false,
+            public_udp_slots: None,
             registry: registry.clone(),
             metrics: Arc::new(Metrics::new()),
             dns: Some(dns),
-            test_udp_server: test_server,
         });
 
         let (cancellation_sender, cancellation_receiver) = tokio::sync::oneshot::channel();
@@ -3258,11 +3269,17 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 dial_options: Default::default(),
             }])
             .expect("direct TUN outbound");
+        let route_path = write_client_test_source(&format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"tun\"\nlisten = \"{}\"\noutbound = \"direct\"\n[[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\n",
+            reserve_address()
+        ));
+        let route_config = ferrum2_config::load_client(&route_path).expect("direct TUN route");
+        std::fs::remove_file(route_path).expect("remove direct TUN route config");
+        let direct_selector = route_config.selector_control();
         let direct_routing = Arc::new(ClientRouting {
-            legacy: ferrum2_rule::RouteTable::static_bindings(vec![0]).expect("direct TUN route"),
-            program: None,
+            program: route_config.route,
             outbounds: Arc::clone(&direct_outbounds),
-            selector: ferrum2_rule::SelectorControl::empty(),
+            selector: direct_selector,
         });
         let direct_context = Arc::new(ClientContext {
             inbound: Socks5Inbound::new(),
@@ -3285,11 +3302,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             )),
             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(default_test_psk())),
             runtime: context.runtime,
-            udp_associate_enabled: false,
+            public_udp_slots: None,
             registry: direct_registry.clone(),
             metrics: Arc::new(Metrics::new()),
             dns: None,
-            test_udp_server: reserve_address(),
         });
         let target = tokio::spawn(async move {
             let (mut stream, _) = direct_listener.accept().await.expect("direct TUN accept");

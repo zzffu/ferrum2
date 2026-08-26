@@ -55,6 +55,5 @@ pub use prepared::{
     PreparedServerOutboundDescriptor, PreparedServerV2, ResolvedDnsEndpoint,
     ResolvedOutboundEndpoint, RuleSetLoaderConfig, ServerV2MaterializeContext,
     ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2,
-    materialize_client_v2, materialize_server_v2, prepare_client, prepare_client_v2,
-    prepare_server, prepare_server_v2,
+    materialize_client_v2, materialize_server_v2, prepare_client, prepare_server,
 };

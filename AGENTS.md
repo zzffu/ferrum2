@@ -23,6 +23,10 @@ Use `cargo run -p ferrum2-client -- --help` (or `ferrum2-server`) for CLI help. 
 
 Accept `rustfmt` output (four-space indentation). Use `snake_case` for modules, functions, and tests; use `UpperCamelCase` for types and traits. Keep dependencies inherited and exactly pinned in the workspace manifest. Workspace Rust code forbids unsafe code; do not broaden the narrowly controlled Wintun exception. Python control scripts use four spaces, standard-library APIs, and `unittest`. Prefer behavioral assertions over source-text or implementation-shape checks.
 
+## Compatibility Policy
+
+Ferrum2 does not preserve backward compatibility. Remove obsolete APIs, schemas, aliases, migration shims, and legacy behavior instead of retaining compatibility paths; update every in-repository caller, fixture, and test to the current contract in the same change.
+
 ## Testing Guidelines
 
 Place focused unit tests beside their module, public contract tests in `crates/*/tests`, and process/network behavior in `tests/m0-harness`. Name tests as descriptive outcomes, for example `missing_mandatory_guard_is_invalid`. Preserve fixture provenance when changing vectors. Platform- or privilege-dependent coverage belongs in the corresponding manual/platform workflow, not the ordinary unit suite.

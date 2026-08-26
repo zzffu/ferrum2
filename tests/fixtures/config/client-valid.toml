@@ -7,8 +7,7 @@ outbound = "proxy-out"
 
 [[outbounds]]
 tag = "proxy-out"
+type = "shadowsocks"
 server = "127.0.0.1:8388"
-
-[shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="

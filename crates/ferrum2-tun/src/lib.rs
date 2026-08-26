@@ -16,13 +16,15 @@ mod wake;
 pub use supervisor::SessionCancellation;
 pub use tcp::TcpFlow;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-use udp::{Admission as UdpAdmission, InjectOutcome as UdpInjectOutcome, UdpTable};
+use udp::{
+    Admission as UdpAdmission, InjectOutcome as UdpInjectOutcome, UdpDatagramEndpoints, UdpTable,
+};
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use udp::{GenerationId, GenerationTable};
 pub use udp::{
     UdpAssociation, UdpCandidate, UdpCommitError, UdpDatagram, UdpFiltering, UdpPeerAuthorization,
     UdpPeerPolicyHandle, UdpPeerReservation, UdpPeerReservationOutcome, UdpResponseSendOutcome,
-    UdpResponseSink, UdpTuple,
+    UdpResponseSink,
 };
 pub use wake::OwnerWake;
 
@@ -2949,7 +2951,7 @@ impl PacketValidator {
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[cfg(test)]
-fn udp_datagram(packet: &[u8], mtu: usize) -> Option<(UdpTuple, &[u8], usize)> {
+fn udp_datagram(packet: &[u8], mtu: usize) -> Option<(UdpDatagramEndpoints, &[u8], usize)> {
     let ParsedPacket::Complete(parsed) = PacketParser::new(Families::DUAL).parse(packet).ok()?
     else {
         return None;
@@ -2962,7 +2964,7 @@ fn udp_datagram_from_parsed(
     packet: &[u8],
     parsed: ParsedIpPacket,
     mtu: usize,
-) -> Option<(UdpTuple, &[u8], usize)> {
+) -> Option<(UdpDatagramEndpoints, &[u8], usize)> {
     let TransportMetadata::Udp(udp) = parsed.transport else {
         return None;
     };
@@ -2971,7 +2973,7 @@ fn udp_datagram_from_parsed(
         IpFamily::Ipv6 => mtu.checked_sub(48)?,
     };
     Some((
-        UdpTuple::new(
+        UdpDatagramEndpoints::new(
             SocketAddr::new(parsed.source, udp.source_port),
             SocketAddr::new(parsed.destination, udp.destination_port),
         ),
@@ -3131,7 +3133,11 @@ impl MemoryDevice {
         }
     }
 
-    fn inject_udp_response(&mut self, tuple: UdpTuple, payload: &[u8]) -> UdpInjectOutcome {
+    fn inject_udp_response(
+        &mut self,
+        endpoints: UdpDatagramEndpoints,
+        payload: &[u8],
+    ) -> UdpInjectOutcome {
         if self.output_count != 0 {
             return UdpInjectOutcome::Backpressured;
         }
@@ -3139,7 +3145,7 @@ impl MemoryDevice {
             .output_tail_index()
             .expect("empty output queue has a writable slot");
         self.prepare_output_slot(index);
-        let length = match write_udp_response(&mut self.output[index].bytes, tuple, payload) {
+        let length = match write_udp_response(&mut self.output[index].bytes, endpoints, payload) {
             Ok(length) => length,
             Err(reason) => {
                 self.rejected_output += 1;
@@ -3202,10 +3208,10 @@ impl MemoryDevice {
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 fn write_udp_response(
     output: &mut [u8],
-    tuple: UdpTuple,
+    endpoints: UdpDatagramEndpoints,
     payload: &[u8],
 ) -> Result<usize, packet::PacketRejectReason> {
-    let (header, source, target) = match (tuple.target().ip(), tuple.source().ip()) {
+    let (header, source, target) = match (endpoints.target().ip(), endpoints.source().ip()) {
         (IpAddr::V4(source), IpAddr::V4(target)) => {
             let length = 28_usize
                 .checked_add(payload.len())
@@ -3254,8 +3260,8 @@ fn write_udp_response(
     let udp_len = 8_usize
         .checked_add(payload.len())
         .ok_or(packet::PacketRejectReason::InvalidTransport)?;
-    output[header..header + 2].copy_from_slice(&tuple.target().port().to_be_bytes());
-    output[header + 2..header + 4].copy_from_slice(&tuple.source().port().to_be_bytes());
+    output[header..header + 2].copy_from_slice(&endpoints.target().port().to_be_bytes());
+    output[header + 2..header + 4].copy_from_slice(&endpoints.source().port().to_be_bytes());
     output[header + 4..header + 6].copy_from_slice(
         &u16::try_from(udp_len)
             .map_err(|_| packet::PacketRejectReason::InvalidTransport)?
@@ -4415,8 +4421,8 @@ mod tests {
         NetworkResetHealthDisposition, NetworkResetRequest, OutputFlushOutcome, OutputSendOutcome,
         OutputSlot, OwnerControl, OwnerExit, OwnerRegistry, OwnerThread, OwnerWake, PacketParser,
         PacketValidator, ParsedPacket, SessionItem, Stack, TunEvent, TunEventSink,
-        TunNetworkResetReason, TunRejectReason, TunRoot, UdpFiltering, UdpInjectOutcome,
-        UdpPeerAuthorization, UdpResponseDropReason, UdpTuple, classify_network_change,
+        TunNetworkResetReason, TunRejectReason, TunRoot, UdpDatagramEndpoints, UdpFiltering,
+        UdpInjectOutcome, UdpPeerAuthorization, UdpResponseDropReason, classify_network_change,
         classify_network_change_error, classify_network_reset_health,
         classify_network_reset_refresh_error, finish_stack_setup, map_managed_state_damage,
         map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
@@ -4652,12 +4658,12 @@ mod tests {
     #[test]
     fn ring_full_drops_exactly_one_complete_output_and_fatal_retains_it() {
         let mut device = MemoryDevice::new(1_420, Families::DUAL);
-        let tuple = UdpTuple::new(
+        let endpoints = UdpDatagramEndpoints::new(
             "198.18.0.1:10000".parse().expect("local"),
             "192.0.2.1:53".parse().expect("remote"),
         );
         assert_eq!(
-            device.inject_udp_response(tuple, b"one"),
+            device.inject_udp_response(endpoints, b"one"),
             super::UdpInjectOutcome::Injected
         );
         assert_eq!(
@@ -4671,7 +4677,7 @@ mod tests {
         );
 
         assert_eq!(
-            device.inject_udp_response(tuple, b"two"),
+            device.inject_udp_response(endpoints, b"two"),
             super::UdpInjectOutcome::Injected
         );
         assert_eq!(
@@ -4707,12 +4713,12 @@ mod tests {
         assert_eq!(device.output_count, OUTPUT_SLOTS);
         assert_eq!(device.front_output(), Some(packets[0].as_slice()));
 
-        let tuple = UdpTuple::new(
+        let endpoints = UdpDatagramEndpoints::new(
             "198.18.0.1:10000".parse().expect("local"),
             "192.0.2.1:53".parse().expect("remote"),
         );
         assert_eq!(
-            device.inject_udp_response(tuple, b"deferred"),
+            device.inject_udp_response(endpoints, b"deferred"),
             UdpInjectOutcome::Backpressured,
             "UDP keeps its response while a TCP wave is queued"
         );
@@ -4750,7 +4756,7 @@ mod tests {
             OutputFlushOutcome::Sent
         );
         assert_eq!(
-            device.inject_udp_response(tuple, b"released"),
+            device.inject_udp_response(endpoints, b"released"),
             UdpInjectOutcome::Injected,
             "the same UDP path resumes only after the TCP wave drains"
         );
@@ -4759,7 +4765,7 @@ mod tests {
     #[test]
     fn udp_injection_preserves_the_canonical_packet_reject_reason() {
         let mut device = MemoryDevice::new(1_420, Families::IPV4_ONLY);
-        let ipv6 = UdpTuple::new(
+        let ipv6 = UdpDatagramEndpoints::new(
             "[fd00::1]:10000".parse().expect("local IPv6"),
             "[2001:db8::1]:53".parse().expect("remote IPv6"),
         );
@@ -4767,7 +4773,7 @@ mod tests {
             device.inject_udp_response(ipv6, b"disabled family"),
             super::UdpInjectOutcome::Rejected(super::TunRejectReason::FamilyDisabled)
         );
-        let mixed = UdpTuple::new(
+        let mixed = UdpDatagramEndpoints::new(
             "198.18.0.1:10000".parse().expect("local IPv4"),
             "[2001:db8::1]:53".parse().expect("remote IPv6"),
         );
@@ -6722,7 +6728,7 @@ mod tests {
         ));
         assert!(stack.enqueue_at(&first, true, 2));
         let candidate = candidates.try_recv().expect("reassembled candidate");
-        assert_eq!(candidate.payload(), &[0, 1, 2, 3]);
+        assert_eq!(candidate.first_payload(), &[0, 1, 2, 3]);
     }
 
     #[tokio::test]
@@ -6768,7 +6774,7 @@ mod tests {
             candidates
                 .try_recv()
                 .expect("normalized UDP candidate")
-                .payload(),
+                .first_payload(),
             b"test"
         );
         assert_eq!(stack.reassembly.len(), 0);
@@ -6885,7 +6891,7 @@ mod tests {
                 assert!(stack.enqueue_at(fragment, true, 1));
             }
             let candidate = candidates.try_recv().expect("reassembled candidate");
-            assert_eq!(candidate.payload(), payload);
+            assert_eq!(candidate.first_payload(), payload);
             assert_eq!(candidate.packet_payload_bound(), response_payload_bound);
             let commit = tokio::spawn(candidate.commit_association());
             tokio::task::yield_now().await;
@@ -6983,9 +6989,9 @@ mod tests {
                 "provisional is not active"
             );
             let candidate = candidates.try_recv().expect("candidate");
-            assert_eq!(candidate.tuple().source(), expected_source);
-            assert_eq!(candidate.tuple().target(), expected_target);
-            assert_eq!(candidate.payload(), &packet[packet.len() - 4..]);
+            assert_eq!(candidate.source(), expected_source);
+            assert_eq!(candidate.first_target(), expected_target);
+            assert_eq!(candidate.first_payload(), &packet[packet.len() - 4..]);
             let commit = tokio::spawn(candidate.commit_association());
             tokio::task::yield_now().await;
             assert_eq!(stack.poll_udp_events(1, true).committed, 1);
@@ -7052,17 +7058,17 @@ mod tests {
             .expect("old-generation TCP flow");
         assert_eq!(flow_count.load(Ordering::Acquire), 1);
 
-        let tuple = UdpTuple::new(
+        let endpoints = UdpDatagramEndpoints::new(
             "198.18.0.1:20000".parse().expect("source"),
             "192.0.2.9:53".parse().expect("target"),
         );
         assert_ne!(
-            stack.udp.admit(tuple, b"request", 128, 0, true),
+            stack.udp.admit(endpoints, b"request", 128, 0, true),
             super::UdpAdmission::Dropped
         );
         let candidate = candidates.try_recv().expect("old-generation candidate");
         assert_eq!(
-            stack.device.inject_udp_response(tuple, b"response"),
+            stack.device.inject_udp_response(endpoints, b"response"),
             UdpInjectOutcome::Injected
         );
         assert!(stack.pending() != 0 && stack.has_output());

@@ -4,12 +4,11 @@ use std::sync::Mutex;
 use bytes::BytesMut;
 use ferrum2_crypto::{
     KeySelector, MethodKeyProvider, MethodProfile, MethodPsk, MethodSinglePskProvider,
-    MethodTcpSalt, NonceCounter, RandomError, SecureRandom, TcpMethodProfile, TcpOpener, TcpSealer,
-    TcpSubkey, UdpCryptoError,
+    MethodTcpSalt, NonceCounter, RandomError, SecureRandom, TcpOpener, TcpSealer, TcpSubkey,
+    UdpCryptoError,
 };
 use serde_json::Value;
 
-const AES128_FIXTURE: &str = include_str!("../../../tests/fixtures/crypto/sip022-kdf-v1.json");
 const PROFILE_FIXTURE: &str =
     include_str!("../../../tests/fixtures/crypto/sip022-kdf-profiles-v1.json");
 const UDP_FIXTURE: &str =
@@ -22,11 +21,11 @@ fn decode_array<const N: usize>(encoded: &str) -> [u8; N] {
         .unwrap_or_else(|_| panic!("fixture field has {N} bytes"))
 }
 
-fn profile(method: &str) -> TcpMethodProfile {
+fn profile(method: &str) -> MethodProfile {
     match method {
-        "2022-blake3-aes-128-gcm" => TcpMethodProfile::Blake3Aes128Gcm2022,
-        "2022-blake3-aes-256-gcm" => TcpMethodProfile::Blake3Aes256Gcm2022,
-        "2022-blake3-chacha20-poly1305" => TcpMethodProfile::Blake3ChaCha20Poly13052022,
+        "2022-blake3-aes-128-gcm" => MethodProfile::Blake3Aes128Gcm2022,
+        "2022-blake3-aes-256-gcm" => MethodProfile::Blake3Aes256Gcm2022,
+        "2022-blake3-chacha20-poly1305" => MethodProfile::Blake3ChaCha20Poly13052022,
         other => panic!("unexpected fixture method {other}"),
     }
 }
@@ -66,7 +65,7 @@ fn sip022_kdf_aead_nonce_and_authentication_table_covers_every_profile() {
         hex::decode(fixture["aead_plaintext"].as_str().expect("plaintext")).expect("plaintext");
 
     let cases = fixture["cases"].as_array().expect("profile cases");
-    assert_eq!(cases.len(), TcpMethodProfile::ALL.len());
+    assert_eq!(cases.len(), MethodProfile::ALL.len());
     for case in cases {
         let method_name = case["method"].as_str().expect("method");
         let profile = profile(method_name);
@@ -154,20 +153,6 @@ fn sip022_kdf_aead_nonce_and_authentication_table_covers_every_profile() {
             .expect("failed authentication did not advance nonce");
         assert_eq!(valid.as_ref(), plaintext);
     }
-
-    let old: Value = serde_json::from_str(AES128_FIXTURE).expect("valid M0 fixture");
-    assert_eq!(old["psk"], cases[0]["psk"]);
-    assert_eq!(old["salt"], cases[0]["salt"]);
-    assert_eq!(old["full_derive_output"], cases[0]["full_derive_output"]);
-    assert_eq!(old["selected_subkey"], cases[0]["selected_subkey"]);
-    assert_eq!(
-        old["nonce_0_ciphertext_and_tag"],
-        cases[0]["nonce_0_ciphertext_and_tag"]
-    );
-    assert_eq!(
-        old["nonce_1_ciphertext_and_tag"],
-        cases[0]["nonce_1_ciphertext_and_tag"]
-    );
 }
 
 #[test]

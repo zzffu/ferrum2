@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 
 use ferrum2_core::route::Network;
-use ferrum2_core::{ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply as _, TargetAddr};
+use ferrum2_core::{ConnectErrorKind, LocalEndpoint, SessionReply as _, TargetAddr};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
@@ -279,13 +279,7 @@ async fn client_connection(
         _ = cancellation.cancelled() => return,
         result = tokio::time::timeout(
             context.runtime.handshake_timeout,
-            async {
-                if context.udp_associate_enabled {
-                    context.inbound.accept_command(stream).await
-                } else {
-                    context.inbound.accept(stream).await.map(SocksCommand::Connect)
-                }
-            },
+            context.inbound.accept_command(stream),
         ) => result,
     };
     let command = match accepted {
@@ -312,6 +306,14 @@ async fn client_connection(
     let session = match command {
         SocksCommand::Connect(session) => session,
         SocksCommand::UdpAssociate(association) => {
+            let Some(public_udp_slots) = context.public_udp_slots.as_ref() else {
+                let _ = association.reject_command_not_supported().await;
+                return;
+            };
+            let Ok(public_udp_slot) = Arc::clone(public_udp_slots).try_acquire_owned() else {
+                let _ = association.reply.failed(ConnectErrorKind::Other).await;
+                return;
+            };
             let (Some(peer_ip), Some(local_ip)) = (peer_ip, local_ip) else {
                 let _ = association.reply.failed(ConnectErrorKind::Other).await;
                 return;
@@ -326,6 +328,7 @@ async fn client_connection(
                 UdpSocket::bind,
             )
             .await;
+            drop(public_udp_slot);
             return;
         }
     };
@@ -345,7 +348,7 @@ async fn client_connection(
         &target,
         None,
         &context.metrics,
-        route_scratch.as_mut(),
+        &mut route_scratch,
     ) else {
         let _ = reply.failed(ConnectErrorKind::Other).await;
         return;
@@ -485,25 +488,11 @@ async fn run_udp_association<IO, F, Fut>(
         mut control, reply, ..
     } = association;
     let (inbound, routing) = route;
-    let static_plan = if routing.program.is_none() {
-        let placeholder = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1))
-            .expect("fixed valid route target");
-        let plan = routing
-            .legacy
-            .select_plan_snapshot(inbound, Network::Udp, &placeholder);
-        Some(plan)
-    } else {
-        None
-    };
-    if routing.program.is_none() && static_plan.is_none() {
-        let _ = reply.failed(ConnectErrorKind::Other).await;
-        return;
-    }
     let endpoint = tokio::select! {
         _ = cancellation.cancelled() => return,
         endpoint = SocksUdpEndpoint::bind(local_ip, peer_ip, requested_port, &mut bind) => endpoint,
     };
-    let mut endpoint = match endpoint {
+    let endpoint = match endpoint {
         Ok(endpoint) => endpoint,
         Err(_) => {
             let _ = reply.failed(ConnectErrorKind::Other).await;
@@ -517,55 +506,18 @@ async fn run_udp_association<IO, F, Fut>(
             return;
         }
     };
-    let mut static_association = if let Some(plan) = static_plan {
-        let prepared = tokio::select! {
-            _ = cancellation.cancelled() => return,
-            prepared = context.egress.prepare_udp_for_ingress(
-                ClientRequestOrigin::Socks,
-                inbound,
-                Some(plan),
-                None,
-            ) => prepared,
-        };
-        match prepared {
-            Ok(prepared) => Some(prepared),
-            Err(_) => {
-                let _ = reply.failed(ConnectErrorKind::Other).await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    if reply.succeeded(bound).await.is_err() {
+    if reply.succeeded_socket(SocketAddr::V4(bound)).await.is_err() {
         return;
     }
-
-    match static_association.as_mut() {
-        Some(prepared) => {
-            relay_udp_association(
-                &mut endpoint,
-                prepared,
-                &mut control,
-                cancellation,
-                &context,
-                routing,
-                None,
-            )
-            .await;
-        }
-        None => {
-            classify_udp_association(
-                endpoint,
-                &mut control,
-                cancellation,
-                &context,
-                inbound,
-                routing,
-            )
-            .await;
-        }
-    }
+    classify_udp_association(
+        endpoint,
+        &mut control,
+        cancellation,
+        &context,
+        inbound,
+        routing,
+    )
+    .await;
 }
 
 async fn relay_udp_association<IO>(
@@ -877,7 +829,7 @@ async fn classify_udp_association<IO>(
             &target,
             Some(decoded.payload()),
             &context.metrics,
-            route_scratch.as_mut(),
+            &mut route_scratch,
         ) else {
             return;
         };
@@ -1151,10 +1103,13 @@ pub(in crate::run) mod tests {
             peer.read_exact(&mut reply).await.expect("failure reply");
             reply
         });
-        let session = Socks5Inbound::new()
-            .accept(application)
+        let command = Socks5Inbound::new()
+            .accept_command(application)
             .await
             .expect("accepted SOCKS request");
+        let SocksCommand::Connect(session) = command else {
+            panic!("CONNECT request")
+        };
         session
             .reply
             .failed(ConnectErrorKind::Other)
@@ -1166,8 +1121,10 @@ pub(in crate::run) mod tests {
         );
     }
 
-    fn udp_test_context(registry: OwnerRegistry) -> (PathBuf, Arc<ClientContext>) {
-        udp_test_context_for_server(registry, reserve_address())
+    fn udp_test_context(registry: OwnerRegistry) -> (PathBuf, Arc<ClientContext>, SocketAddrV4) {
+        let server = reserve_address();
+        let (path, context) = udp_test_context_for_server(registry, server);
+        (path, context, server)
     }
 
     async fn execute_test_udp_association<IO, F, Fut>(
@@ -1244,7 +1201,7 @@ pub(in crate::run) mod tests {
         for fail_at in 0..1 {
             let registry = OwnerRegistry::new();
             let baseline = registry.snapshot();
-            let (path, context) = udp_test_context(registry.clone());
+            let (path, context, server) = udp_test_context(registry.clone());
             let (association, mut peer) = parsed_udp_association().await;
             let calls = Arc::new(AtomicUsize::new(0));
             let bound = Arc::new(Mutex::new(Vec::new()));
@@ -1255,7 +1212,7 @@ pub(in crate::run) mod tests {
                 execute_test_udp_association(
                     association,
                     Arc::clone(&context),
-                    Arc::new(test_routing(context.test_udp_server, default_test_psk())),
+                    Arc::new(test_routing(server, default_test_psk())),
                     move |address| {
                         let call = bind_calls.fetch_add(1, Ordering::SeqCst);
                         let bound_addresses = Arc::clone(&bound_addresses);
@@ -1297,13 +1254,13 @@ pub(in crate::run) mod tests {
     async fn success_reply_write_failure_rolls_back_and_next_setup_rebinds() {
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
-        let (path, context) = udp_test_context(registry.clone());
+        let (path, context, server) = udp_test_context(registry.clone());
         let (association, peer) = parsed_udp_association().await;
         drop(peer);
         execute_test_udp_association(
             association,
             Arc::clone(&context),
-            Arc::new(test_routing(context.test_udp_server, default_test_psk())),
+            Arc::new(test_routing(server, default_test_psk())),
             UdpSocket::bind,
         )
         .await;
@@ -1347,7 +1304,7 @@ pub(in crate::run) mod tests {
     async fn application_binder_receives_the_accepted_concrete_local_ip() {
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
-        let (path, context) = udp_test_context(registry.clone());
+        let (path, context, _) = udp_test_context(registry.clone());
         let calls = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&calls);
         let mut bind = move |address| {
@@ -1404,7 +1361,7 @@ pub(in crate::run) mod tests {
             let task = tokio::spawn(execute_test_udp_association(
                 association,
                 Arc::clone(&context),
-                Arc::new(test_routing(context.test_udp_server, default_test_psk())),
+                Arc::new(test_routing(server, default_test_psk())),
                 UdpSocket::bind,
             ));
             let mut reply = [0; 10];
@@ -1756,7 +1713,10 @@ pub(in crate::run) mod tests {
              listen = \"{listen}\"\n\
              [[outbounds]]\n\
              tag = \"o0\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{shadowsocks_address}\"\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [route]\n\
              final = \"o0\"\n\
              [[route.rules]]\n\
@@ -1775,9 +1735,6 @@ pub(in crate::run) mod tests {
              address = \"{dns_address}\"\n\
              [dns.route]\n\
              final = \"upstream\"\n\
-             [shadowsocks]\n\
-             method = \"2022-blake3-aes-128-gcm\"\n\
-             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [runtime]\n\
              shutdown_grace_ms = 0\n\
              [udp]\n\
@@ -1786,7 +1743,12 @@ pub(in crate::run) mod tests {
              max_buffered_bytes = 1048576\n"
         );
         std::fs::write(&path, source).expect("schema v2 client config");
-        let config = ferrum2_config::load_client(&path).expect("client route actions");
+        let prepared = ferrum2_config::prepare_client(&path).expect("prepare client route actions");
+        let config = ferrum2_config::finish_client_v2(
+            prepared,
+            ferrum2_config::ClientV2Resources::default(),
+        )
+        .expect("finish client route actions");
         let registry = OwnerRegistry::new();
         let baseline = registry.snapshot();
         let dns_task = tokio::spawn(async move {
@@ -1980,19 +1942,34 @@ pub(in crate::run) mod tests {
              listen = \"{}\"\n\
              [[outbounds]]\n\
              tag = \"o0\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{}\"\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [[outbounds]]\n\
              tag = \"o1\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{}\"\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [[outbounds]]\n\
              tag = \"o2\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{}\"\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [[outbounds]]\n\
              tag = \"o3\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{}\"\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [[outbounds]]\n\
              tag = \"o4\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{}\"\n\
+             method = \"2022-blake3-aes-128-gcm\"\n\
+             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [[chains]]\n\
              tag = \"selected-a\"\n\
              hops = [\"o1\", \"o2\"]\n\
@@ -2017,9 +1994,6 @@ pub(in crate::run) mod tests {
              port = 53\n\
              action = \"route\"\n\
              outbound = \"manual\"\n\
-             [shadowsocks]\n\
-             method = \"2022-blake3-aes-128-gcm\"\n\
-             psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
              [udp]\n\
              enabled = true\n\
              max_sessions = 1\n\
@@ -2039,8 +2013,7 @@ pub(in crate::run) mod tests {
             .expect("unique egress")
             .outbounds = Arc::clone(&outbounds);
         let routing = Arc::new(ClientRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbounds,
             selector: selector.clone(),
         });
@@ -2774,18 +2747,60 @@ pub(in crate::run) mod tests {
             MethodProfile::Blake3Aes256Gcm2022,
             MethodProfile::Blake3ChaCha20Poly13052022,
         ];
-        let tagged = [
-            TaggedOutbound::new("a", 0),
-            TaggedOutbound::new("b", 1),
-            TaggedOutbound::new("c", 2),
-        ];
-        let plans = [
-            TaggedPlan::new("a-b", vec![0, 1]),
-            TaggedPlan::new("a-c", vec![0, 2]),
-        ];
-
         let static_listen = reserve_address();
-        let (static_path, mut static_config) = client_udp_test_config(static_listen, servers[0]);
+        let selector_source = |listen: SocketAddrV4, routed: bool| {
+            let mut source = format!(
+                r#"schema_version = 2
+[runtime]
+shutdown_grace_ms = 0
+[udp]
+max_sessions = 2
+max_buffered_bytes = 1048576
+[[inbounds]]
+tag = "entry"
+listen = "{listen}"
+"#,
+            );
+            if !routed {
+                source.push_str("outbound = \"manual\"\n");
+            }
+            for (tag, server) in ["a", "b", "c"].into_iter().zip(servers) {
+                source.push_str(&test_shadowsocks_outbound_source(tag, server));
+            }
+            source.push_str(
+                r#"
+[[chains]]
+tag = "a-b"
+hops = ["a", "b"]
+[[chains]]
+tag = "a-c"
+hops = ["a", "c"]
+[[selectors]]
+tag = "manual"
+outbounds = ["a-b", "a-c"]
+default = "a-b"
+"#,
+            );
+            if routed {
+                source.push_str(
+                    r#"[route]
+final = "a-b"
+[[route.rules]]
+inbound = "entry"
+network = "udp"
+ip = "192.0.2.40"
+port = 53
+action = "route"
+outbound = "manual"
+"#,
+                );
+            }
+            source
+        };
+
+        let static_path = write_client_test_source(&selector_source(static_listen, false));
+        let mut static_config =
+            ferrum2_config::load_client(&static_path).expect("static chain selector");
         static_config.outbounds = servers
             .into_iter()
             .zip(methods)
@@ -2797,28 +2812,11 @@ pub(in crate::run) mod tests {
                 },
             )
             .collect();
-        let (static_route, static_selector) = compile_selector_plans(
-            &[TaggedInbound::new("entry", 0)],
-            &tagged,
-            &plans,
-            &[SelectorDefinition::new(
-                "manual",
-                vec!["a-b", "a-c"],
-                Some("a-b"),
-            )],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
-        )
-        .expect("static chain selector");
-        static_config.route = static_route;
+        let static_selector = static_config.selector_control();
         static_config.udp.as_mut().expect("UDP config").max_sessions = 2;
         let static_registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(static_config, &static_registry);
         wait_until_bound(static_listen).await;
-        let first = udp_association(static_listen).await;
-        static_selector
-            .switch("manual", "a-c")
-            .expect("switch static chain");
-        let second = udp_association(static_listen).await;
         let target = TargetAddr::ipv4("192.0.2.40:53".parse().expect("target")).expect("target");
         let mut socks = [0; 64];
         let length = encode_udp_datagram(&target, b"snapshot", &mut socks).expect("request");
@@ -2829,8 +2827,11 @@ pub(in crate::run) mod tests {
         let mut scratch = UdpPacketScratch::new();
         let mut wire = vec![0; MAX_UDP_WIRE_LEN];
         let mut relays = Vec::new();
-        for ((control, application, relay), expected) in [(first, servers[1]), (second, servers[2])]
-        {
+        for (selected, expected) in [("a-b", servers[1]), ("a-c", servers[2])] {
+            static_selector
+                .switch("manual", selected)
+                .expect("switch static chain");
+            let (control, application, relay) = udp_association(static_listen).await;
             application
                 .send_to(&socks[..length], relay)
                 .await
@@ -2840,13 +2841,18 @@ pub(in crate::run) mod tests {
                     .await
                     .expect("static chain timeout")
                     .expect("static chain request");
+            let actual = outer_server
+                .prepare_request(&clock, &wire[..received], &mut scratch)
+                .expect("static outer")
+                .datagram()
+                .target()
+                .clone();
             assert_eq!(
-                outer_server
-                    .prepare_request(&clock, &wire[..received], &mut scratch)
-                    .expect("static outer")
-                    .datagram()
-                    .target(),
-                &TargetAddr::ipv4(expected).expect("expected inner")
+                actual,
+                TargetAddr::ipv4(expected).expect("expected inner"),
+                "expected inner port {}, actual port {}",
+                expected.port(),
+                actual.port()
             );
             relays.push(relay);
             drop((control, application));
@@ -2880,28 +2886,10 @@ pub(in crate::run) mod tests {
                 .collect(),
         )
         .expect("routed chain outbounds");
-        let (route, selector) = compile_selector_plans(
-            &[TaggedInbound::new("entry", 0)],
-            &tagged,
-            &plans,
-            &[SelectorDefinition::new(
-                "manual",
-                vec!["a-b", "a-c"],
-                Some("a-b"),
-            )],
-            TaggedRoute::Routed {
-                rules: vec![TaggedRouteRule::new(
-                    Some("entry"),
-                    Some(Network::Udp),
-                    Some(target.clone()),
-                    Some("manual"),
-                )],
-                final_outbound: Some("a-b"),
-            },
-        )
-        .expect("routed chain selector");
-        let selected = route.select_plan_snapshot(0, Network::Udp, &target);
-        assert_eq!(selected.hops(), &[0, 1]);
+        let route_path = write_client_test_source(&selector_source(reserve_address(), true));
+        let route_config = ferrum2_config::load_client(&route_path).expect("routed chain selector");
+        std::fs::remove_file(route_path).expect("remove routed selector config");
+        let selector = route_config.selector_control();
         let egress = Arc::get_mut(
             &mut Arc::get_mut(&mut context)
                 .expect("unique routed context")
@@ -2911,11 +2899,25 @@ pub(in crate::run) mod tests {
         egress.outbounds = Arc::clone(&outbounds);
         egress.udp_id_random = Some(Arc::new(IdSequenceRandom::new([0x41, 0x42])));
         let routing = Arc::new(ClientRouting {
-            legacy: route,
-            program: None,
+            program: route_config.route,
             outbounds,
             selector: selector.clone(),
         });
+        let mut route_scratch = routing.route_scratch().expect("routed route scratch");
+        let ClientTerminalRoute::Route(selected) = routing
+            .select_terminal_with_scratch(
+                0,
+                Network::Udp,
+                &target,
+                Some(b"snapshot"),
+                &context.metrics,
+                &mut route_scratch,
+            )
+            .expect("routed chain selection")
+        else {
+            panic!("routed chain terminal")
+        };
+        assert_eq!(selected.hops(), &[0, 1]);
         let endpoint = SocksUdpEndpoint::bind(
             Ipv4Addr::LOCALHOST,
             IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -3043,32 +3045,48 @@ pub(in crate::run) mod tests {
                 .collect(),
         )
         .expect("eight-hop outbounds");
-        let tags = ["o0", "o1", "o2", "o3", "o4", "o5", "o6", "o7"];
-        let tagged_outbounds = tags
-            .iter()
-            .enumerate()
-            .map(|(hop, tag)| TaggedOutbound::new(tag, hop))
-            .collect::<Vec<_>>();
-        let hops = (0..MAX_UDP_PLAN_HOPS).collect::<Vec<_>>();
-        let (route, _) = compile_selector_plans(
-            &[TaggedInbound::new("entry", 0)],
-            &tagged_outbounds,
-            &[TaggedPlan::new("chain", hops.clone())],
-            &[],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "chain")]),
-        )
-        .expect("eight-hop route");
-        let plan = route.select_plan_snapshot(
-            0,
-            Network::Udp,
-            &TargetAddr::domain("eight-hop.test", 53).expect("eight-hop target"),
+        let mut source = format!(
+            "schema_version = 2\n[[inbounds]]\ntag = \"entry\"\nlisten = \"{}\"\noutbound = \"chain\"\n",
+            reserve_address()
         );
+        for (hop, server) in servers.iter().copied().enumerate() {
+            source.push_str(&test_shadowsocks_outbound_source(
+                &format!("o{hop}"),
+                server,
+            ));
+        }
+        let hop_tags = (0..MAX_UDP_PLAN_HOPS)
+            .map(|hop| format!("\"o{hop}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        source.push_str(&format!(
+            "[[chains]]\ntag = \"chain\"\nhops = [{hop_tags}]\n"
+        ));
+        let route_path = write_client_test_source(&source);
+        let route_config = ferrum2_config::load_client(&route_path).expect("eight-hop route");
+        std::fs::remove_file(route_path).expect("remove eight-hop route config");
+        let selector = route_config.selector_control();
         let routing = Arc::new(ClientRouting {
-            legacy: route,
-            program: None,
+            program: route_config.route,
             outbounds,
-            selector: ferrum2_rule::SelectorControl::empty(),
+            selector,
         });
+        let route_target = TargetAddr::domain("eight-hop.test", 53).expect("eight-hop target");
+        let mut route_scratch = routing.route_scratch().expect("eight-hop route scratch");
+        let ClientTerminalRoute::Route(plan) = routing
+            .select_terminal_with_scratch(
+                0,
+                Network::Udp,
+                &route_target,
+                None,
+                &Metrics::new(),
+                &mut route_scratch,
+            )
+            .expect("eight-hop route selection")
+        else {
+            panic!("eight-hop route terminal")
+        };
+        let hops = (0..MAX_UDP_PLAN_HOPS).collect::<Vec<_>>();
         let (path, mut context) = udp_test_context_for_psk(
             registry.clone(),
             servers[0],
@@ -3132,7 +3150,7 @@ pub(in crate::run) mod tests {
         assert_eq!(
             manager.session_count(),
             1,
-            "schema-v1 setup owner stays pending after an over-bound packet"
+            "UDP setup owner stays pending after an over-bound packet"
         );
         assert_eq!(
             context

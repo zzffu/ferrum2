@@ -22,7 +22,10 @@ async fn client_upload_progresses_while_response_fixed_read_is_pending() {
     let connector = RecordingConnector::succeeds(io.with_pending_reads(1));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
     let mut flow = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first write");
 
@@ -112,7 +115,13 @@ async fn production_shaped_flows_are_send_and_unpin() {
     let client_random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound =
         ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random);
-    let client = outbound.open_stream(&target()).await.expect("client");
+    let client = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     assert_send_unpin(&client);
 }
 
@@ -134,7 +143,13 @@ async fn pending_response_capability_derives_each_direction_cipher_exactly_once(
     let client_random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound =
         ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random);
-    let mut client = outbound.open_stream(&target()).await.expect("client");
+    let mut client = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     assert_eq!(keys.call_count(), 1, "request sealer is the current owner");
 
     let waker = Waker::noop();
@@ -205,7 +220,13 @@ async fn always_ready_one_byte_duplex_uses_at_most_one_io_per_outer_poll_and_is_
     let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 1));
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     let mut destination = [0_u8; 8];

@@ -22,12 +22,14 @@ final = "o0"
 
 [[route.rules]]
 inbound = "i1"
+action = "route"
 outbound = "o1"
 
 [[route.rules]]
 network = "udp"
 ip = "2001:db8::1"
 port = 53
+action = "route"
 outbound = "o2"
 
 [shadowsocks]

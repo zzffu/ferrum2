@@ -210,7 +210,14 @@ fn multiple_rule_sets_are_ored_and_external_fields_remain_anded() {
         TargetAddr::domain("DOMAIN.EXAMPLE.", 443).unwrap(),
         TargetAddr::ip("198.51.100.7:443".parse().unwrap()).unwrap(),
     ] {
-        let mut evaluation = program.evaluate_with_registry(0, Network::Tcp, &target, &registry);
+        let mut scratch = program.evaluation_scratch().unwrap();
+        let mut evaluation = program.evaluate_with_registry_and_scratch(
+            0,
+            Network::Tcp,
+            &target,
+            &registry,
+            &mut scratch,
+        );
         assert_eq!(evaluation.snapshot_generation(), Some(1));
         assert_eq!(
             evaluation.next(RouteMetadata::new(None, None)),
@@ -219,12 +226,20 @@ fn multiple_rule_sets_are_ored_and_external_fields_remain_anded() {
     }
 
     let target = TargetAddr::domain("domain.example", 443).unwrap();
-    let mut wrong_network = program.evaluate_with_registry(0, Network::Udp, &target, &registry);
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let mut wrong_network = program.evaluate_with_registry_and_scratch(
+        0,
+        Network::Udp,
+        &target,
+        &registry,
+        &mut scratch,
+    );
     assert_eq!(
         wrong_network.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Final(&"final"))
     );
-    let mut no_snapshot = program.evaluate(0, Network::Tcp, &target);
+    drop(wrong_network);
+    let mut no_snapshot = program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
     assert_eq!(
         no_snapshot.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Final(&"final")),
@@ -259,14 +274,28 @@ fn one_composite_rule_set_ors_categories_and_uses_the_sniffed_domain() {
 
     let original_ip = TargetAddr::ip("192.0.2.1:443".parse().unwrap()).unwrap();
     let sniffed = DomainName::new("SNIFFED.EXAMPLE.").unwrap();
-    let mut by_sniff = program.evaluate_with_registry(0, Network::Tcp, &original_ip, &registry);
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let mut by_sniff = program.evaluate_with_registry_and_scratch(
+        0,
+        Network::Tcp,
+        &original_ip,
+        &registry,
+        &mut scratch,
+    );
     assert_eq!(
         by_sniff.next(RouteMetadata::new(None, Some(&sniffed))),
         Some(RouteProgramAction::Terminal(&true))
     );
 
     let matching_ip = TargetAddr::ip("203.0.113.9:443".parse().unwrap()).unwrap();
-    let mut by_ip = program.evaluate_with_registry(0, Network::Tcp, &matching_ip, &registry);
+    drop(by_sniff);
+    let mut by_ip = program.evaluate_with_registry_and_scratch(
+        0,
+        Network::Tcp,
+        &matching_ip,
+        &registry,
+        &mut scratch,
+    );
     assert_eq!(
         by_ip.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Terminal(&true))
@@ -295,7 +324,14 @@ fn one_evaluation_never_crosses_generation_during_continue() {
     )
     .unwrap();
     let old_target = TargetAddr::domain("old.example", 443).unwrap();
-    let mut held = program.evaluate_with_registry(0, Network::Tcp, &old_target, &registry);
+    let mut held_scratch = program.evaluation_scratch().unwrap();
+    let mut held = program.evaluate_with_registry_and_scratch(
+        0,
+        Network::Tcp,
+        &old_target,
+        &registry,
+        &mut held_scratch,
+    );
     assert_eq!(held.snapshot_generation(), Some(1));
     assert_eq!(
         held.next(RouteMetadata::new(None, None)),
@@ -315,7 +351,14 @@ fn one_evaluation_never_crosses_generation_during_continue() {
         Some(RouteProgramAction::Terminal(&"matched"))
     );
 
-    let mut fresh_old = program.evaluate_with_registry(0, Network::Tcp, &old_target, &registry);
+    let mut fresh_scratch = program.evaluation_scratch().unwrap();
+    let mut fresh_old = program.evaluate_with_registry_and_scratch(
+        0,
+        Network::Tcp,
+        &old_target,
+        &registry,
+        &mut fresh_scratch,
+    );
     assert_eq!(
         fresh_old.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Continue(&"continue"))
@@ -324,8 +367,15 @@ fn one_evaluation_never_crosses_generation_during_continue() {
         fresh_old.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Final(&"final"))
     );
+    drop(fresh_old);
     let new_target = TargetAddr::domain("new.example", 443).unwrap();
-    let mut fresh_new = program.evaluate_with_registry(0, Network::Tcp, &new_target, &registry);
+    let mut fresh_new = program.evaluate_with_registry_and_scratch(
+        0,
+        Network::Tcp,
+        &new_target,
+        &registry,
+        &mut fresh_scratch,
+    );
     assert!(matches!(
         fresh_new.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Continue(_))

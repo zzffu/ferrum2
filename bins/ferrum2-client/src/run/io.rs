@@ -92,10 +92,6 @@ impl<T> LocalEndpoint for TokioTransport<T>
 where
     T: LocalEndpoint,
 {
-    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
-        self.inner.local_endpoint()
-    }
-
     fn local_socket_addr(&self) -> SocketAddr {
         self.inner.local_socket_addr()
     }
@@ -260,10 +256,6 @@ pub(in crate::run) mod tests {
         struct FullEndpoint;
 
         impl LocalEndpoint for FullEndpoint {
-            fn local_endpoint(&self) -> std::net::SocketAddrV4 {
-                std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)
-            }
-
             fn local_socket_addr(&self) -> SocketAddr {
                 SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 49_152)
             }
@@ -333,7 +325,7 @@ pub(in crate::run) mod tests {
             3
         );
         assert_eq!(&data, b"abc");
-        assert_eq!(delegated.local_endpoint(), endpoint);
+        assert_eq!(delegated.local_socket_addr(), SocketAddr::V4(endpoint));
         delegated.mark_abortive().expect("abortive delegation");
         assert_eq!(aborts.load(Ordering::SeqCst), 1);
 
@@ -393,7 +385,7 @@ pub(in crate::run) mod tests {
 
         gate.notify_one();
         let stream = task.await.expect("connector task").expect("connected");
-        assert_eq!(stream.local_endpoint(), endpoint);
+        assert_eq!(stream.local_socket_addr(), SocketAddr::V4(endpoint));
     }
 
     struct OneReadFlow {

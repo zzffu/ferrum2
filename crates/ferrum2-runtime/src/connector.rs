@@ -1,5 +1,5 @@
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -108,13 +108,6 @@ impl RuntimeTcpStream {
 }
 
 impl LocalEndpoint for RuntimeTcpStream {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        match self.local_endpoint {
-            SocketAddr::V4(endpoint) => endpoint,
-            SocketAddr::V6(endpoint) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.port()),
-        }
-    }
-
     fn local_socket_addr(&self) -> SocketAddr {
         self.local_endpoint
     }

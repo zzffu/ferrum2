@@ -3,11 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use ferrum2_config::{
-    ClientOutboundConfig, DirectDomainResolver, DnsConfig, DnsIngressId, PreparedClientV2,
-    ValidatedClientConfig,
+    ClientOutboundConfig, DirectDomainResolver, DnsConfig, PreparedClientV2, ValidatedClientConfig,
 };
-use ferrum2_core::TargetAddr;
-use ferrum2_core::route::Network;
 #[cfg(test)]
 use ferrum2_crypto::MethodProfile;
 #[cfg(test)]
@@ -17,8 +14,7 @@ use ferrum2_dns::{
     ApplicationResolveOutcome, ApplicationResolver, ApplicationResolverMode, DnsCache,
     DnsPolicyCompileError, DnsPolicyMatchResult, DnsPolicyMatchSource, DnsPolicyMatchType,
     DnsPolicyObservation, DnsPolicyObserver, DnsPolicyProgram, DnsPolicyStage, DnsProxy,
-    DnsProxySockets, DnsStrategy, ProxyIngress, ProxyTransport, ResolverGeneration, TaggedResolver,
-    TaggedServerApplicationResolveBackend,
+    DnsProxySockets, DnsStrategy, TaggedResolver, TaggedServerApplicationResolveBackend,
 };
 use ferrum2_observability::{
     Metrics, Role, RuleMatchResult, RuleMatchType, RuleProgram, RuleProgramMode, RuleSource,
@@ -1117,12 +1113,11 @@ where
                 Some(DnsConfig {
                     inbounds,
                     servers,
-                    route,
                     timeout,
                     max_inflight,
                     runtime,
                 }),
-                policy,
+                Some(policy),
                 Some(specs),
             ) => {
                 let internal_udp_needed = servers
@@ -1131,7 +1126,6 @@ where
                 Some((
                     inbounds,
                     specs,
-                    route,
                     policy,
                     timeout,
                     max_inflight,
@@ -1145,17 +1139,9 @@ where
         let dns_proxy_runtime = dns
             .as_mut()
             .map(|dns| {
-                ClientDnsProxyRuntime::try_new(dns.3.as_mut(), dns.6, materialized_cache, &metrics)
+                ClientDnsProxyRuntime::try_new(&mut dns.2, dns.5, materialized_cache, &metrics)
             })
             .transpose()?;
-        if let Some(dns) = dns.as_mut()
-            && dns
-                .3
-                .as_ref()
-                .is_some_and(|policy| !policy.has_compatibility_program())
-        {
-            dns.3 = None;
-        }
         let ordinary_dns = dns.as_ref().map(|_| Arc::new(std::sync::OnceLock::new()));
         let tagged_dns = Arc::new(std::sync::OnceLock::new());
         let application_resolver = ApplicationResolver::system_default();
@@ -1173,6 +1159,9 @@ where
         metrics.set_udp_buffered_bytes(Role::Client, 0);
         let configured_udp = config.udp;
         let public_udp_enabled = configured_udp.is_some_and(|udp| udp.enabled);
+        let public_udp_slots = configured_udp
+            .filter(|udp| udp.enabled)
+            .map(|udp| Arc::new(tokio::sync::Semaphore::new(udp.max_sessions)));
         let tun_udp_defaults = tun_config.as_ref().map(|_| {
             let defaults = UdpRuntimeLimits::default();
             (
@@ -1182,18 +1171,18 @@ where
             )
         });
         let internal_udp_needed =
-            dns.as_ref().is_some_and(|dns| dns.7) || tun_udp_defaults.is_some();
+            dns.as_ref().is_some_and(|dns| dns.6) || tun_udp_defaults.is_some();
         let udp_limits = if let Some(udp) = configured_udp {
             Some((udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout))
         } else if let Some(defaults) = tun_udp_defaults {
             Some(defaults)
-        } else if let Some(dns) = dns.as_ref().filter(|dns| dns.7) {
-            let sessions = usize::from(dns.5.get());
+        } else if let Some(dns) = dns.as_ref().filter(|dns| dns.6) {
+            let sessions = usize::from(dns.4.get());
             let bytes = sessions
                 .checked_mul(3 * MAX_UDP_WIRE_LEN)
                 .ok_or(RunError::StartupProtocol)?
                 .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
-            Some((sessions, bytes, dns.4.max(MIN_UDP_IDLE_TIMEOUT)))
+            Some((sessions, bytes, dns.3.max(MIN_UDP_IDLE_TIMEOUT)))
         } else {
             None
         };
@@ -1201,11 +1190,6 @@ where
             .as_ref()
             .map(|_| udp_limits.expect("TUN UDP requires internal limits").2);
         let runtime = config.runtime;
-        #[cfg(test)]
-        let test_udp_server = match config.outbounds[0].server().expect("proxy-only runtime") {
-            std::net::SocketAddr::V4(server) => server,
-            std::net::SocketAddr::V6(_) => panic!("IPv4-only legacy test context"),
-        };
         let outbounds = prepare_client_outbounds(config.outbounds)?;
         let shutdown_grace = config.runtime.shutdown_grace;
         let listen_backlog = u32::from(config.runtime.listen_backlog.get());
@@ -1261,18 +1245,15 @@ where
                 test_support::default_test_psk(),
             )),
             runtime: config.runtime,
-            udp_associate_enabled: public_udp_enabled,
+            public_udp_slots,
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
             dns: ordinary_dns.as_ref().map(Arc::clone),
-            #[cfg(test)]
-            test_udp_server,
         });
         let mut listens = Vec::with_capacity(config.inbounds.len());
         let tun_inbound = config.inbounds.len();
         let routing = Arc::new(ClientRouting {
-            legacy: config.route,
-            program: config.route_program,
+            program: config.route,
             outbounds,
             selector,
         });
@@ -1340,11 +1321,10 @@ where
                 }),
             );
         }
-        if let Some((inbounds, servers, route, policy, timeout, max_inflight, _, _)) = dns {
+        if let Some((inbounds, servers, _policy, timeout, max_inflight, _, _)) = dns {
             let ordinary_dns = ordinary_dns.expect("validated DNS graph has an ordinary handle");
             let tagged_dns = Arc::clone(&tagged_dns);
             let addresses = inbounds.into_iter().map(|inbound| inbound.listen).collect();
-            let route = Arc::new(route);
             roots.push(
                 ClientRootName::Dns,
                 ProcessRoot::new(move || async move {
@@ -1371,62 +1351,9 @@ where
                     if let Some(observer) = dns_observer.take() {
                         let _ = observer.send((Arc::clone(&dns_context), Arc::clone(&resolver)));
                     }
-                    let selection = Arc::clone(&route);
-                    let policy_scratch = policy
-                        .as_ref()
-                        .filter(|policy| policy.has_compatibility_program())
-                        .map(ferrum2_config::ClientDnsRoute::evaluation_scratch)
-                        .transpose()
-                        .map_err(run_error_for_rule_compile)?
-                        .map(std::sync::Mutex::new);
-                    let mut proxy = DnsProxy::new(
-                        Arc::clone(&resolver),
-                        move |ingress, transport, name, qtype| {
-                            let network = match transport {
-                                ProxyTransport::Udp => Network::Udp,
-                                ProxyTransport::Tcp => Network::Tcp,
-                            };
-                            let Ok(target) = TargetAddr::domain(&name.to_ascii(), 53) else {
-                                return Some(selection.final_action());
-                            };
-                            let qtype = dns_egress::dns_query_type(qtype);
-                            match (&policy, ingress) {
-                                (Some(policy), ProxyIngress::Listener(inbound)) => {
-                                    let policy_scratch = policy_scratch.as_ref()?;
-                                    let mut scratch = policy_scratch
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    policy.select_with_scratch(
-                                        DnsIngressId::Listener(inbound),
-                                        network,
-                                        &target,
-                                        qtype,
-                                        &mut scratch,
-                                    )
-                                }
-                                (Some(policy), ProxyIngress::Ordinary(inbound)) => {
-                                    let policy_scratch = policy_scratch.as_ref()?;
-                                    let mut scratch = policy_scratch
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    policy.select_with_scratch(
-                                        DnsIngressId::Ordinary(inbound),
-                                        network,
-                                        &target,
-                                        qtype,
-                                        &mut scratch,
-                                    )
-                                }
-                                (None, ProxyIngress::Listener(inbound)) => {
-                                    Some(selection.select(inbound, network, &target))
-                                }
-                                (None, ProxyIngress::Ordinary(_)) => None,
-                            }
-                        },
-                    );
-                    if let Some(runtime) = dns_proxy_runtime {
-                        proxy = runtime.bind(proxy);
-                    }
+                    let proxy = dns_proxy_runtime
+                        .ok_or(RunError::StartupProtocol)?
+                        .bind(Arc::clone(&resolver));
                     let proxy = Arc::new(proxy);
                     ordinary_dns
                         .set(Arc::clone(&proxy))
@@ -1576,10 +1503,11 @@ fn observed_application_resolver(
 }
 
 fn publish_rule_program_metadata(config: &ValidatedClientConfig, metrics: &Metrics) {
-    if let Some(route) = config.route_program.as_ref() {
-        metrics.set_rule_program_mode(RuleProgram::Route, rule_program_mode(route.program_mode()));
-        metrics.set_rule_program_rules(RuleProgram::Route, route.rule_count());
-    }
+    metrics.set_rule_program_mode(
+        RuleProgram::Route,
+        rule_program_mode(config.route.program_mode()),
+    );
+    metrics.set_rule_program_rules(RuleProgram::Route, config.route.rule_count());
     let Some(dns) = config.dns_route.as_ref() else {
         return;
     };
@@ -1675,39 +1603,31 @@ struct ClientDnsProxyPolicy {
 }
 
 struct ClientDnsProxyRuntime {
-    policy: Option<ClientDnsProxyPolicy>,
+    policy: ClientDnsProxyPolicy,
     observer: Arc<dyn DnsPolicyObserver>,
     cache: Option<DnsCache>,
-    generation: ResolverGeneration,
 }
 
 impl ClientDnsProxyRuntime {
     fn try_new(
-        route: Option<&mut ferrum2_config::ClientDnsRoute>,
+        route: &mut ferrum2_config::ClientDnsRoute,
         runtime: ferrum2_config::DnsRuntimeConfig,
         materialized_cache: Option<DnsCache>,
         metrics: &Arc<Metrics>,
     ) -> Result<Self, RunError> {
-        let policy = route
-            .and_then(ferrum2_config::ClientDnsRoute::take_policy_blueprint)
-            .map(|binding| {
-                let (blueprint, registry, listener_count, ordinary_count) = binding.into_parts();
-                let snapshot = registry.snapshot();
-                let program = DnsPolicyProgram::try_from_blueprint(blueprint, &snapshot)
-                    .map_err(run_error_for_dns_policy_compile)?;
-                Ok::<ClientDnsProxyPolicy, RunError>(ClientDnsProxyPolicy {
-                    program: Arc::new(program),
-                    registry,
-                    listener_count,
-                    ordinary_count,
-                })
-            })
-            .transpose()?;
-        let generation = policy
-            .as_ref()
-            .map_or(ResolverGeneration::new(0), |policy| {
-                ResolverGeneration::new(policy.registry.generation())
-            });
+        let binding = route
+            .take_policy_blueprint()
+            .ok_or(RunError::StartupProtocol)?;
+        let (blueprint, registry, listener_count, ordinary_count) = binding.into_parts();
+        let snapshot = registry.snapshot();
+        let program = DnsPolicyProgram::try_from_blueprint(blueprint, &snapshot)
+            .map_err(run_error_for_dns_policy_compile)?;
+        let policy = ClientDnsProxyPolicy {
+            program: Arc::new(program),
+            registry,
+            listener_count,
+            ordinary_count,
+        };
         let cache_config = runtime.cache();
         let cache = if cache_config.enabled {
             match materialized_cache {
@@ -1727,22 +1647,21 @@ impl ClientDnsProxyRuntime {
             policy,
             observer: dns_policy_observer(metrics),
             cache,
-            generation,
         })
     }
 
-    fn bind(self, mut proxy: DnsProxy) -> DnsProxy {
-        if let Some(policy) = self.policy {
-            proxy = proxy.with_policy(
-                policy.program,
-                policy.registry,
-                policy.listener_count,
-                policy.ordinary_count,
-            );
-            proxy = proxy.with_policy_observer(self.observer);
-        }
+    fn bind(self, resolver: Arc<TaggedResolver>) -> DnsProxy {
+        let policy = self.policy;
+        let mut proxy = DnsProxy::new(
+            resolver,
+            policy.program,
+            policy.registry,
+            policy.listener_count,
+            policy.ordinary_count,
+        )
+        .with_policy_observer(self.observer);
         if let Some(cache) = self.cache {
-            proxy = proxy.with_cache(cache, self.generation);
+            proxy = proxy.with_cache(cache);
         }
         proxy
     }

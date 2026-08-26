@@ -27,7 +27,6 @@ pub(super) struct RawClientRoot {
     pub(super) dns: Option<RawDns>,
     pub(super) rule_set_loader: Option<RawRuleSetLoader>,
     pub(super) tun: Option<RawTun>,
-    pub(super) shadowsocks: Option<RawShadowsocks>,
     #[serde(default)]
     pub(super) runtime: RawRuntime,
     pub(super) udp: Option<RawUdp>,
@@ -333,13 +332,6 @@ impl<T> ScalarOrList<T> {
         match self {
             Self::Scalar(value) => std::slice::from_ref(value).iter(),
             Self::List(values) => values.iter(),
-        }
-    }
-
-    pub fn scalar(&self) -> Option<&T> {
-        match self {
-            Self::Scalar(value) => Some(value),
-            Self::List(_) => None,
         }
     }
 }

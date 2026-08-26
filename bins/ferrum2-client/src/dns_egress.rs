@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use ferrum2_config::{DnsQueryType, DnsServerConfig, DnsTransport};
+use ferrum2_config::{DnsServerConfig, DnsTransport};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
 #[cfg(test)]
@@ -146,26 +146,6 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
         .collect()
 }
 
-pub(super) fn dns_query_type(code: u16) -> Option<DnsQueryType> {
-    [
-        DnsQueryType::A,
-        DnsQueryType::Aaaa,
-        DnsQueryType::Cname,
-        DnsQueryType::Mx,
-        DnsQueryType::Ns,
-        DnsQueryType::Ptr,
-        DnsQueryType::Soa,
-        DnsQueryType::Srv,
-        DnsQueryType::Txt,
-        DnsQueryType::Caa,
-        DnsQueryType::Svcb,
-        DnsQueryType::Https,
-        DnsQueryType::Any,
-    ]
-    .into_iter()
-    .find(|qtype| *qtype as u16 == code)
-}
-
 pub(super) struct ClientDnsEgress {
     engine: Arc<ClientEgressEngine>,
     udp_pool: DnsUdpPool,
@@ -281,8 +261,9 @@ impl DnsEgress for ClientDnsEgress {
             });
             tasks.spawn(DnsEgressTaskKind::Session, async move {
                 let Ok(flow) = engine
-                    .open_tcp(
+                    .open_tcp_for_ingress(
                         ClientRequestOrigin::Dns,
+                        0,
                         plan,
                         &target,
                         Some(timeout),
@@ -321,7 +302,12 @@ impl DnsEgress for ClientDnsEgress {
                 None => IdleDnsUdp {
                     key,
                     association: engine
-                        .prepare_udp(ClientRequestOrigin::Dns, plan.clone(), Some(&target))
+                        .prepare_udp_for_ingress(
+                            ClientRequestOrigin::Dns,
+                            0,
+                            plan.clone(),
+                            Some(&target),
+                        )
                         .await
                         .map_err(|_| io::Error::other("DNS UDP egress unavailable"))?,
                 },
@@ -459,16 +445,15 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
 
     use ferrum2_config::{
-        ClientV2Resources, CompiledRuleSetResource, finish_client_v2, prepare_client_v2,
+        ClientV2Resources, CompiledRuleSetResource, finish_client_v2, prepare_client,
     };
     use ferrum2_core::CanonicalDomain;
-    use ferrum2_core::route::{EgressPlanHandle, Network};
+    use ferrum2_core::Inbound as _;
+    use ferrum2_core::route::{EgressPlanHandle, Network, compile_egress_plans_with_roots};
+    use ferrum2_core::selector::{SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan};
     use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
-    use ferrum2_dns::{ResolverGeneration, TaggedResolver};
-    use ferrum2_rule::{
-        MatchSetBuilder, SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan,
-        TaggedRoute, TaggedStaticBinding, compile_selector_plans,
-    };
+    use ferrum2_dns::TaggedResolver;
+    use ferrum2_rule::MatchSetBuilder;
     use ferrum2_shadowsocks::{MethodKeyAdapter, UdpPacketScratch, UdpServer};
 
     use crate::run::egress::{UdpIoFaultPlan, UdpIoOperation};
@@ -505,28 +490,6 @@ mod tests {
             3,
             "an owner acquired before reset cannot return to the new pool generation"
         );
-    }
-
-    #[test]
-    fn proxy_qtype_codes_map_to_the_closed_config_vocabulary() {
-        for qtype in [
-            ferrum2_config::DnsQueryType::A,
-            ferrum2_config::DnsQueryType::Aaaa,
-            ferrum2_config::DnsQueryType::Cname,
-            ferrum2_config::DnsQueryType::Mx,
-            ferrum2_config::DnsQueryType::Ns,
-            ferrum2_config::DnsQueryType::Ptr,
-            ferrum2_config::DnsQueryType::Soa,
-            ferrum2_config::DnsQueryType::Srv,
-            ferrum2_config::DnsQueryType::Txt,
-            ferrum2_config::DnsQueryType::Caa,
-            ferrum2_config::DnsQueryType::Svcb,
-            ferrum2_config::DnsQueryType::Https,
-            ferrum2_config::DnsQueryType::Any,
-        ] {
-            assert_eq!(dns_query_type(qtype as u16), Some(qtype));
-        }
-        assert_eq!(dns_query_type(0), None);
     }
 
     #[test]
@@ -744,10 +707,6 @@ rule_set = "cnip"
 action = "route"
 server = "local"
 strategy = "ipv4_only"
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#,
             local.local_addr().unwrap(),
             fallback.local_addr().unwrap(),
@@ -763,7 +722,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             socks.port()
         ));
         std::fs::write(&path, source).expect("write V2 client config");
-        let prepared = prepare_client_v2(&path).expect("prepare V2 client config");
+        let prepared = prepare_client(&path).expect("prepare client config");
         let mut ads = MatchSetBuilder::new();
         ads.add_exact_domain("ads.example").unwrap();
         let mut cnip = MatchSetBuilder::new();
@@ -785,15 +744,18 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         crate::run::publish_rule_program_metadata(&config, &metrics);
         let dns = config.dns.take().expect("materialized DNS graph");
         let runtime = crate::run::ClientDnsProxyRuntime::try_new(
-            config.dns_route.as_mut(),
+            config
+                .dns_route
+                .as_mut()
+                .expect("materialized client DNS policy"),
             dns.runtime,
             None,
             &metrics,
         )
         .expect("client proxy runtime");
-        assert_eq!(runtime.generation, ResolverGeneration::new(23));
-        assert_eq!(runtime.policy.as_ref().unwrap().listener_count, 1);
-        assert_eq!(runtime.policy.as_ref().unwrap().ordinary_count, 1);
+        assert_eq!(runtime.policy.registry.generation(), 23);
+        assert_eq!(runtime.policy.listener_count, 1);
+        assert_eq!(runtime.policy.ordinary_count, 1);
         assert_eq!(runtime.cache.as_ref().unwrap().capacity().unwrap(), 16);
         let (resolver, mut owner) = TaggedResolver::new(
             dns_runtime_specs(&dns.servers),
@@ -803,7 +765,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         )
         .expect("tagged DNS resolver");
         owner.ready().await.expect("tagged DNS ready");
-        let proxy = Arc::new(runtime.bind(DnsProxy::new(Arc::new(resolver), |_, _, _, _| Some(1))));
+        let proxy = Arc::new(runtime.bind(Arc::new(resolver)));
 
         let name: Name = "ads.example.".parse().unwrap();
         let mut request = Message::new(91, MessageType::Query, OpCode::Query);
@@ -903,7 +865,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
     #[tokio::test]
     async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_state() {
-        let (route, selector) = compile_selector_plans(
+        let (selector, mut roots) = compile_egress_plans_with_roots(
             &[TaggedInbound::new("entry", 0)],
             &[
                 TaggedOutbound::new("a", 0),
@@ -919,15 +881,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 vec!["a-b", "b-a", "c"],
                 Some("a-b"),
             )],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
+            &["manual"],
         )
         .expect("DNS UDP pool plans");
         let target = TargetAddr::domain("pool.test", 53).expect("pool target");
-        let selected = route.select_plan_snapshot(0, Network::Udp, &target);
+        let route = roots.remove(0);
+        let selected = route.snapshot_owned();
         selector.switch("manual", "b-a").expect("reverse plan");
-        let reversed = route.select_plan_snapshot(0, Network::Udp, &target);
+        let reversed = route.snapshot_owned();
         selector.switch("manual", "c").expect("later plan");
-        let later = route.select_plan_snapshot(0, Network::Udp, &target);
+        let later = route.snapshot_owned();
         let key_cases = [
             (
                 "equal snapshot",
@@ -1540,54 +1503,66 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => unreachable!("IPv4 DNS detour"),
         });
+        let [outer_server, inner_server, later_server, dead_server] = detour_addresses;
         let [outer, inner, later, dead] = detours;
-        let (path, mut config) = client_test_config(socks, detour_addresses[3]);
-        config.outbounds = detour_addresses
-            .into_iter()
-            .map(|server| ferrum2_config::ClientOutboundConfig::Shadowsocks {
-                server: server.into(),
-                psk: Arc::new(default_test_psk()),
-                dial_options: Default::default(),
-            })
-            .collect();
-        let (route, selector, mut dns_roots) = compile_selector_plans_with_roots(
-            &[TaggedInbound::new("entry", 0)],
-            &[
-                TaggedOutbound::new("outer", 0),
-                TaggedOutbound::new("inner", 1),
-                TaggedOutbound::new("later", 2),
-                TaggedOutbound::new("dead", 3),
-            ],
-            &[TaggedPlan::new("chain", vec![0, 1])],
-            &[SelectorDefinition::new(
-                "dns-manual",
-                vec!["chain", "later", "dead"],
-                Some("chain"),
-            )],
-            TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "dead")]),
-            &["dns-manual"],
-        )
-        .expect("DNS selector graph");
-        config.route = route;
-        config.dns = Some(ferrum2_config::DnsConfig {
-            inbounds: vec![ferrum2_config::DnsInboundConfig {
-                listen: SocketAddr::V4(dns),
-            }],
-            servers: vec![ferrum2_config::DnsServerConfig {
-                transport: ferrum2_config::DnsTransport::Tcp,
-                target: TargetAddr::ip(upstream_address).expect("numeric DNS target"),
-                resolved_targets: Box::new([]),
-                endpoint_mode: ferrum2_config::DnsEndpointMode::Numeric,
-                server_name: None,
-                path: None,
-                detour: Some(dns_roots.remove(0)),
-            }],
-            route: ferrum2_rule::ActionTable::new(Vec::new(), 0).expect("selector DNS final"),
-            timeout: Duration::from_millis(150),
-            max_inflight: std::num::NonZeroU16::new(1).expect("selector DNS admission"),
-            runtime: ferrum2_config::DnsRuntimeConfig::default(),
-        });
-
+        let path = write_client_test_source(&format!(
+            r#"schema_version = 2
+[runtime]
+shutdown_grace_ms = 0
+[[inbounds]]
+tag = "entry"
+listen = "{socks}"
+outbound = "dead"
+[[outbounds]]
+tag = "outer"
+type = "shadowsocks"
+server = "{outer_server}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[[outbounds]]
+tag = "inner"
+type = "shadowsocks"
+server = "{inner_server}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[[outbounds]]
+tag = "later"
+type = "shadowsocks"
+server = "{later_server}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[[outbounds]]
+tag = "dead"
+type = "shadowsocks"
+server = "{dead_server}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[[chains]]
+tag = "chain"
+hops = ["outer", "inner"]
+[[selectors]]
+tag = "dns-manual"
+outbounds = ["chain", "later", "dead"]
+default = "chain"
+[dns]
+timeout_ms = 150
+max_inflight = 1
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "{dns}"
+[[dns.servers]]
+tag = "upstream"
+transport = "tcp"
+address = "{upstream_address}"
+detour = "dns-manual"
+[dns.route]
+final = "upstream"
+"#,
+        ));
+        let prepared = prepare_client(&path).expect("prepare DNS selector config");
+        let config = finish_client_v2(prepared, ClientV2Resources::default())
+            .expect("finish DNS selector config");
+        let selector = config.selector_control();
         let upstream_task = tokio::spawn(async move {
             for answer in [
                 Ipv4Addr::new(203, 0, 113, 50),
@@ -1792,12 +1767,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
              listen = \"{socks}\"\n\
              [[outbounds]]\n\
              tag = \"o0\"\n\
+             type = \"shadowsocks\"\n\
              server = \"{shadowsocks}\"\n\
-             [route]\n\
-             final = \"o0\"\n\
-             [shadowsocks]\n\
              method = \"2022-blake3-aes-128-gcm\"\n\
              psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+             [route]\n\
+             final = \"o0\"\n\
              [runtime]\n\
              shutdown_grace_ms = 0\n\
              [dns]\n\
@@ -1827,23 +1802,27 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
              network = \"udp\"\n\
              qname_suffix = \"selected.example\"\n\
              qtype = \"A\"\n\
+             action = \"route\"\n\
              server = \"rule\"\n\
              [[dns.route.rules]]\n\
              inbound = \"d0\"\n\
              network = \"tcp\"\n\
              qname = \"exact.example\"\n\
              qtype = \"AAAA\"\n\
+             action = \"route\"\n\
              server = \"rule\"\n\
              [[dns.route.rules]]\n\
              inbound = \"d0\"\n\
              network = \"udp\"\n\
              qname = \"unknown.policy.example\"\n\
              qtype = \"ANY\"\n\
+             action = \"route\"\n\
              server = \"any\"\n\
              [[dns.route.rules]]\n\
              inbound = \"d0\"\n\
              network = \"udp\"\n\
              qname = \"unknown.policy.example\"\n\
+             action = \"route\"\n\
              server = \"untyped\"\n",
             upstream_addresses[0],
             upstream_addresses[1],
@@ -1851,7 +1830,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             upstream_addresses[3],
         );
         std::fs::write(&path, source).expect("write v2 DNS policy config");
-        let config = ferrum2_config::load_client(&path).expect("validated v2 DNS policy config");
+        let prepared = prepare_client(&path).expect("prepare v2 DNS policy config");
+        let config = finish_client_v2(prepared, ClientV2Resources::default())
+            .expect("materialize v2 DNS policy config");
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
         let upstream_tasks: Vec<_> = upstreams
@@ -2068,27 +2049,41 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let upstream_target =
             TargetAddr::domain("deferred-dns.example.test", upstream_address.port())
                 .expect("deferred DNS target");
-        let (path, mut config) = client_test_config(socks, shadowsocks);
-        config.udp = None;
-        config.dns = Some(ferrum2_config::DnsConfig {
-            inbounds: vec![ferrum2_config::DnsInboundConfig {
-                listen: SocketAddr::V4(dns),
-            }],
-            servers: vec![ferrum2_config::DnsServerConfig {
-                transport: ferrum2_config::DnsTransport::Udp,
-                target: upstream_target.clone(),
-                resolved_targets: Box::new([]),
-                endpoint_mode: ferrum2_config::DnsEndpointMode::DeferredToDetour,
-                server_name: None,
-                path: None,
-                detour: Some(ferrum2_core::route::EgressPlanHandle::direct(0)),
-            }],
-            route: ferrum2_rule::ActionTable::new(Vec::new(), 0)
-                .expect("detoured DNS final action"),
-            timeout: Duration::from_secs(1),
-            max_inflight: std::num::NonZeroU16::new(1).expect("detoured DNS admission"),
-            runtime: ferrum2_config::DnsRuntimeConfig::default(),
-        });
+        let path = write_client_test_source(&format!(
+            r#"schema_version = 2
+[runtime]
+shutdown_grace_ms = 0
+[udp]
+enabled = false
+[[inbounds]]
+tag = "proxy"
+listen = "{socks}"
+outbound = "proxy-out"
+[[outbounds]]
+tag = "proxy-out"
+type = "shadowsocks"
+server = "{shadowsocks}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[dns]
+timeout_ms = 1000
+max_inflight = 1
+[[dns.inbounds]]
+tag = "dns-in"
+listen = "{dns}"
+[[dns.servers]]
+tag = "upstream"
+transport = "udp"
+address = "deferred-dns.example.test:{}"
+detour = "proxy-out"
+[dns.route]
+final = "upstream"
+"#,
+            upstream_address.port()
+        ));
+        let prepared = prepare_client(&path).expect("prepare detoured DNS config");
+        let config = finish_client_v2(prepared, ClientV2Resources::default())
+            .expect("finish detoured DNS config");
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);
 
@@ -2287,28 +2282,45 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             std::future::pending::<()>().await;
         });
 
-        let (path, mut config) = client_udp_test_config(socks, shadowsocks);
-        config.dns = Some(ferrum2_config::DnsConfig {
-            inbounds: dns
-                .into_iter()
-                .map(|listen| ferrum2_config::DnsInboundConfig {
-                    listen: SocketAddr::V4(listen),
-                })
-                .collect(),
-            servers: vec![ferrum2_config::DnsServerConfig {
-                transport: ferrum2_config::DnsTransport::Udp,
-                target: TargetAddr::ip(upstream_address).expect("numeric DNS target"),
-                resolved_targets: Box::new([]),
-                endpoint_mode: ferrum2_config::DnsEndpointMode::Numeric,
-                server_name: None,
-                path: None,
-                detour: Some(ferrum2_core::route::EgressPlanHandle::direct(0)),
-            }],
-            route: ferrum2_rule::ActionTable::new(Vec::new(), 0).expect("stalled DNS final action"),
-            timeout: Duration::from_secs(5),
-            max_inflight: std::num::NonZeroU16::new(1).expect("one DNS admission"),
-            runtime: ferrum2_config::DnsRuntimeConfig::default(),
-        });
+        let path = write_client_test_source(&format!(
+            r#"schema_version = 2
+[runtime]
+shutdown_grace_ms = 0
+[udp]
+max_sessions = 1
+max_buffered_bytes = 1048576
+[[inbounds]]
+tag = "proxy"
+listen = "{socks}"
+outbound = "proxy-out"
+[[outbounds]]
+tag = "proxy-out"
+type = "shadowsocks"
+server = "{shadowsocks}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[dns]
+timeout_ms = 5000
+max_inflight = 1
+[[dns.inbounds]]
+tag = "dns-a"
+listen = "{}"
+[[dns.inbounds]]
+tag = "dns-b"
+listen = "{}"
+[[dns.servers]]
+tag = "upstream"
+transport = "udp"
+address = "{upstream_address}"
+detour = "proxy-out"
+[dns.route]
+final = "upstream"
+"#,
+            dns[0], dns[1]
+        ));
+        let prepared = prepare_client(&path).expect("prepare saturated DNS config");
+        let config = finish_client_v2(prepared, ClientV2Resources::default())
+            .expect("finish saturated DNS config");
         let registry = OwnerRegistry::new();
         let (observed, resolver) = tokio::sync::oneshot::channel();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -2369,9 +2381,29 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                 .session_count(),
             1
         );
-        let (public_control, public_reply) = socks_command(socks, 3).await;
-        assert_ne!(public_reply[1], 0, "public UDP used a second manager");
-        drop(public_control);
+        let (public_control, public_application, public_relay) = udp_association(socks).await;
+        let public_target =
+            TargetAddr::ip("192.0.2.80:53".parse().expect("public target")).expect("public target");
+        let mut public_request = [0_u8; 64];
+        let public_length = encode_udp_datagram(&public_target, b"busy", &mut public_request)
+            .expect("public UDP request");
+        public_application
+            .send_to(&public_request[..public_length], public_relay)
+            .await
+            .expect("public UDP send");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            context
+                .egress
+                .udp
+                .as_ref()
+                .expect("shared DNS/public UDP manager")
+                .manager
+                .session_count(),
+            1,
+            "public UDP bypassed the saturated shared manager"
+        );
+        drop((public_control, public_application));
         assert_eq!(active(registry.snapshot()), held);
 
         let second = query(0x3302, "busy.detoured.example.");

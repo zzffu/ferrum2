@@ -16,9 +16,8 @@ use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, TargetAddr,
 };
 use ferrum2_crypto::{
-    Aes128Psk, Clock, ClockError, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
-    MonotonicInstant, RandomError, SecureRandom, SinglePskProvider, TcpMethodProfile, TcpOpener,
-    TcpSealer,
+    Clock, ClockError, MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt,
+    MonotonicInstant, RandomError, SecureRandom, TcpOpener, TcpSealer,
 };
 use ferrum2_shadowsocks::{
     BufferObserver, BufferRole, FlowObserver, FlowTerminal, MethodKeyAdapter, PlainDuplex,
@@ -28,21 +27,21 @@ use ferrum2_shadowsocks::{
 
 pub const NOW: u64 = 1_700_000_000;
 
-pub fn provider() -> SinglePskProvider {
-    SinglePskProvider::new(Aes128Psk::from_bytes([
+pub fn provider() -> MethodKeyAdapter<MethodSinglePskProvider> {
+    MethodKeyAdapter::new(MethodSinglePskProvider::new(MethodPsk::aes128([
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f,
-    ]))
+    ])))
 }
 
-pub fn method_provider(profile: TcpMethodProfile) -> MethodKeyAdapter<MethodSinglePskProvider> {
+pub fn method_provider(profile: MethodProfile) -> MethodKeyAdapter<MethodSinglePskProvider> {
     let key = vec![0x42; profile.key_bytes()];
     MethodKeyAdapter::new(MethodSinglePskProvider::new(
         MethodPsk::try_from_slice(profile, &key).expect("method-matched test key"),
     ))
 }
 
-pub fn udp_provider(profile: TcpMethodProfile) -> MethodSinglePskProvider {
+pub fn udp_provider(profile: MethodProfile) -> MethodSinglePskProvider {
     let key = vec![profile as u8 + 1; profile.key_bytes()];
     MethodSinglePskProvider::new(
         MethodPsk::try_from_slice(profile, &key).expect("method-matched UDP test key"),
@@ -71,7 +70,7 @@ impl SecureRandom for FillRandom {
 }
 
 pub struct CountingKeyProvider {
-    inner: SinglePskProvider,
+    inner: MethodKeyAdapter<MethodSinglePskProvider>,
     calls: AtomicUsize,
 }
 
@@ -89,7 +88,7 @@ impl CountingKeyProvider {
 }
 
 impl TcpKeyProvider for CountingKeyProvider {
-    fn tcp_profile(&self) -> TcpMethodProfile {
+    fn tcp_profile(&self) -> MethodProfile {
         self.inner.tcp_profile()
     }
 
@@ -105,7 +104,7 @@ impl TcpKeyProvider for CountingKeyProvider {
 }
 
 pub struct FailAfterKeyProvider {
-    inner: SinglePskProvider,
+    inner: MethodKeyAdapter<MethodSinglePskProvider>,
     successful_calls_remaining: AtomicUsize,
 }
 
@@ -119,13 +118,13 @@ impl FailAfterKeyProvider {
 }
 
 impl TcpKeyProvider for FailAfterKeyProvider {
-    fn tcp_profile(&self) -> TcpMethodProfile {
+    fn tcp_profile(&self) -> MethodProfile {
         self.inner.tcp_profile()
     }
 
     fn tcp_sealer(&self, salt: &MethodTcpSalt) -> Result<TcpSealer, TcpKeyError> {
         self.successful_calls_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .map_err(|_| TcpKeyError)?;
@@ -134,7 +133,7 @@ impl TcpKeyProvider for FailAfterKeyProvider {
 
     fn tcp_opener(&self, salt: &MethodTcpSalt) -> Result<TcpOpener, TcpKeyError> {
         self.successful_calls_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .map_err(|_| TcpKeyError)?;
@@ -156,18 +155,16 @@ pub fn salt_with_last(last: u8) -> MethodTcpSalt {
         0x00,
     ];
     salt[15] = last;
-    MethodTcpSalt::try_from_slice(TcpMethodProfile::Blake3Aes128Gcm2022, &salt)
-        .expect("AES-128 salt")
+    MethodTcpSalt::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &salt).expect("AES-128 salt")
 }
 
 pub fn salt_from_u64(value: u64) -> MethodTcpSalt {
     let mut salt = [0x5a; 16];
     salt[8..].copy_from_slice(&value.to_be_bytes());
-    MethodTcpSalt::try_from_slice(TcpMethodProfile::Blake3Aes128Gcm2022, &salt)
-        .expect("AES-128 salt")
+    MethodTcpSalt::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &salt).expect("AES-128 salt")
 }
 
-pub fn method_salt_from_u64(profile: TcpMethodProfile, value: u64) -> MethodTcpSalt {
+pub fn method_salt_from_u64(profile: MethodProfile, value: u64) -> MethodTcpSalt {
     let width = profile.salt_bytes();
     let mut salt = [0x5a; 32];
     salt[width - 8..width].copy_from_slice(&value.to_be_bytes());
@@ -547,12 +544,12 @@ impl AbortiveClose for RecordingIo {
 }
 
 impl LocalEndpoint for RecordingIo {
-    fn local_endpoint(&self) -> SocketAddrV4 {
+    fn local_socket_addr(&self) -> std::net::SocketAddr {
         self.observation
             .lock()
             .expect("observation lock")
             .endpoint_calls += 1;
-        self.endpoint
+        self.endpoint.into()
     }
 }
 

@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroUsize};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,6 +69,26 @@ fn policy(
     final_route: DnsPolicyRoute,
 ) -> Arc<DnsPolicyProgram> {
     Arc::new(DnsPolicyProgram::try_new(rules, final_route, snapshot).expect("DNS policy"))
+}
+
+fn final_proxy(
+    resolver: Arc<TaggedResolver>,
+    generation: u64,
+    final_route: DnsPolicyRoute,
+    listener_count: usize,
+    ordinary_count: usize,
+) -> DnsProxy {
+    let snapshot = RuleEngineSnapshotBuilder::new(generation)
+        .build()
+        .expect("empty rule snapshot");
+    let program = policy(&snapshot, Vec::new(), final_route);
+    DnsProxy::new(
+        resolver,
+        program,
+        Arc::new(RuleEngineRegistry::new(snapshot)),
+        listener_count,
+        ordinary_count,
+    )
 }
 
 fn udp_server(socket: &UdpSocket) -> DnsUpstreamSpec {
@@ -172,21 +191,16 @@ async fn reject_is_refused_for_wire_and_terminal_for_application_without_upstrea
         LOCAL,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
-    let legacy_calls = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&legacy_calls);
     let observations = Arc::new(Mutex::new(Vec::<DnsPolicyObservation>::new()));
     let observation_sink = Arc::clone(&observations);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), move |_, _, _, _| {
-        observed.fetch_add(1, Ordering::AcqRel);
-        Some(0)
-    })
-    .with_policy(program, registry, 1, 1)
-    .with_policy_observer(Arc::new(move |observation| {
-        observation_sink
-            .lock()
-            .expect("policy observation lock")
-            .push(observation);
-    }));
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 1, 1).with_policy_observer(
+        Arc::new(move |observation| {
+            observation_sink
+                .lock()
+                .expect("policy observation lock")
+                .push(observation);
+        }),
+    );
 
     let request = wire_query(0x6101, "tracker.ads.invalid.", RecordType::A);
     let response = proxy
@@ -223,7 +237,6 @@ async fn reject_is_refused_for_wire_and_terminal_for_application_without_upstrea
             .is_err(),
         "reject reached the upstream"
     );
-    assert_eq!(legacy_calls.load(Ordering::Acquire), 0);
     {
         let observations = observations.lock().expect("policy observations");
         assert_eq!(observations.len(), 2);
@@ -283,10 +296,7 @@ async fn response_is_reused_across_same_server_continuation_and_rebound_to_reque
         .collect();
     let program = policy(&snapshot, rules, LOCAL);
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| {
-        panic!("legacy selector called while policy is bound")
-    })
-    .with_policy(program, registry, 1, 0);
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 1, 0);
 
     let request = wire_query(0x6102, "memo.policy.invalid.", RecordType::A);
     let response = proxy
@@ -364,10 +374,7 @@ async fn response_miss_continues_to_the_final_server_once() {
         REMOTE,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| {
-        panic!("legacy selector called while policy is bound")
-    })
-    .with_policy(program, registry, 1, 0);
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 1, 0);
 
     let request = wire_query(0x6103, "continuation.policy.invalid.", RecordType::A);
     let response = proxy
@@ -399,7 +406,7 @@ async fn response_miss_continues_to_the_final_server_once() {
 }
 
 #[tokio::test]
-async fn application_policy_route_overrides_strategy_and_bypasses_legacy_selector() {
+async fn application_policy_route_overrides_requested_strategy() {
     let _network = TEST_NETWORK.lock().await;
     let unused = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -453,13 +460,7 @@ async fn application_policy_route_overrides_strategy_and_bypasses_legacy_selecto
         LOCAL,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
-    let legacy_calls = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&legacy_calls);
-    let proxy = DnsProxy::new(Arc::clone(&resolver), move |_, _, _, _| {
-        observed.fetch_add(1, Ordering::AcqRel);
-        Some(0)
-    })
-    .with_policy(program, registry, 0, 1);
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 0, 1);
     let domain =
         CanonicalDomain::new("Application.Policy.Invalid.").expect("canonical policy domain");
     let request = ApplicationResolveRequest::new(
@@ -488,9 +489,8 @@ async fn application_policy_route_overrides_strategy_and_bypasses_legacy_selecto
         tokio::time::timeout(Duration::from_millis(30), unused.recv_from(&mut wire))
             .await
             .is_err(),
-        "application query reached the legacy/final server"
+        "application query reached the final server"
     );
-    assert_eq!(legacy_calls.load(Ordering::Acquire), 0);
 
     drop((proxy, resolver, unused));
     assert_eq!(
@@ -531,10 +531,7 @@ async fn application_selected_server_failure_is_terminal_without_final_fallback(
         REMOTE,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| {
-        panic!("legacy selector called while policy is bound")
-    })
-    .with_policy(program, registry, 0, 1);
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 0, 1);
     let domain = CanonicalDomain::new("failure.policy.invalid").expect("failure domain");
     let request = ApplicationResolveRequest::new(
         ApplicationResolveContext::new(0, Network::Udp),
@@ -621,10 +618,9 @@ async fn application_cache_uses_minimum_positive_ttl_and_is_shared_by_transport_
     let resolver = Arc::new(resolver);
     let cache =
         DnsCache::try_new(NonZeroUsize::new(8).expect("cache capacity")).expect("positive cache");
-    let generation_one = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0))
-        .with_cache(cache.clone(), ResolverGeneration::new(1));
-    let generation_two = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0))
-        .with_cache(cache, ResolverGeneration::new(2));
+    let generation_one =
+        final_proxy(Arc::clone(&resolver), 1, LOCAL, 0, 1).with_cache(cache.clone());
+    let generation_two = final_proxy(Arc::clone(&resolver), 2, LOCAL, 0, 1).with_cache(cache);
     let domain = CanonicalDomain::new("positive.policy.invalid").expect("positive cache domain");
     let request = |network| {
         ApplicationResolveRequest::new(
@@ -715,9 +711,8 @@ async fn live_policy_refresh_uses_the_evaluation_generation_for_cache_isolation(
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
     let cache =
         DnsCache::try_new(NonZeroUsize::new(8).expect("cache capacity")).expect("generation cache");
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0))
-        .with_policy(program, Arc::clone(&registry), 0, 1)
-        .with_cache(cache, ResolverGeneration::new(1));
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, Arc::clone(&registry), 0, 1)
+        .with_cache(cache);
     let domain = CanonicalDomain::new("host.generation.invalid").expect("generation domain");
     let request = || {
         ApplicationResolveRequest::new(
@@ -788,8 +783,7 @@ async fn application_negative_cache_requires_soa_ttl() {
     let resolver = Arc::new(resolver);
     let cache =
         DnsCache::try_new(NonZeroUsize::new(4).expect("cache capacity")).expect("negative cache");
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| Some(0))
-        .with_cache(cache.clone(), ResolverGeneration::new(7));
+    let proxy = final_proxy(Arc::clone(&resolver), 7, LOCAL, 0, 1).with_cache(cache.clone());
     let domain = CanonicalDomain::new("negative.policy.invalid").expect("negative cache domain");
     let request = ApplicationResolveRequest::new(
         ApplicationResolveContext::new(0, Network::Tcp),
@@ -900,11 +894,7 @@ async fn policy_response_continuation_reuses_server_scoped_cache_across_transpor
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
     let cache = DnsCache::try_new(NonZeroUsize::new(8).expect("cache capacity"))
         .expect("cached policy cache");
-    let proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| {
-        panic!("legacy selector called while policy is bound")
-    })
-    .with_policy(program, registry, 0, 1)
-    .with_cache(cache, ResolverGeneration::new(3));
+    let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 0, 1).with_cache(cache);
     let domain =
         CanonicalDomain::new("continuation.cache.invalid").expect("cached continuation domain");
     let request = |network| {

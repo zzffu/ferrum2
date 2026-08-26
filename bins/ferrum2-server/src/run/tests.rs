@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 use ferrum2_core::{ConnectError, Connector, TargetAddr};
-use ferrum2_crypto::{Aes128Psk, MethodProfile, MethodTcpSalt, SinglePskProvider};
+use ferrum2_crypto::{MethodProfile, MethodTcpSalt};
 use ferrum2_runtime::OwnerSnapshot;
 use ferrum2_shadowsocks::{ClientTcpOutbound, UdpClientSession, encode_request_first_write};
 use hickory_proto::op::{Message, OpCode};
@@ -13,35 +13,45 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::*;
 use crate::run::test_support::*;
 
+fn finish_server_test_config(path: &std::path::Path) -> ferrum2_config::ValidatedServerConfig {
+    let prepared = ferrum2_config::prepare_server(path).expect("prepare server test config");
+    ferrum2_config::finish_server_v2(
+        prepared,
+        ferrum2_config::ServerV2Resources::new(Vec::new(), Vec::new()),
+    )
+    .expect("finish server test config")
+}
+
 #[test]
-fn rule_and_dns_scratch_failures_keep_closed_runtime_categories() {
+fn dns_policy_and_state_failures_keep_closed_runtime_categories() {
     for error in [
-        RuleCompileError::Allocation,
-        RuleCompileError::IndexOverflow,
+        ferrum2_dns::DnsPolicyCompileError::Allocation,
+        ferrum2_dns::DnsPolicyCompileError::IndexOverflow,
     ] {
-        assert_eq!(run_error_for_rule_compile(error), RunError::RuleAllocation);
         assert_eq!(
-            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::Rule(error)),
+            run_error_for_dns_policy_compile(error),
+            RunError::RuleAllocation
+        );
+        assert_eq!(
+            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::DnsPolicy(error)),
             RunError::RuleAllocation
         );
     }
     for error in [
-        RuleCompileError::EmptyMatcher,
-        RuleCompileError::EmptyField,
-        RuleCompileError::DuplicateField,
-        RuleCompileError::DuplicateValue,
-        RuleCompileError::ConflictingFields,
-        RuleCompileError::InvalidDomain,
-        RuleCompileError::NonCanonicalCidr,
-        RuleCompileError::InvalidId,
-        RuleCompileError::InvalidTag,
-        RuleCompileError::DuplicateRuleSet,
-        RuleCompileError::InvalidGeneration,
-        RuleCompileError::Internal,
+        ferrum2_dns::DnsPolicyCompileError::EmptyRule,
+        ferrum2_dns::DnsPolicyCompileError::InvalidQueryMatchSet,
+        ferrum2_dns::DnsPolicyCompileError::DuplicateConstraint,
+        ferrum2_dns::DnsPolicyCompileError::InvalidPortRange,
+        ferrum2_dns::DnsPolicyCompileError::UnknownRuleSet,
+        ferrum2_dns::DnsPolicyCompileError::ResponseDependentReject,
+        ferrum2_dns::DnsPolicyCompileError::Internal,
     ] {
-        assert_eq!(run_error_for_rule_compile(error), RunError::RuleCompile);
         assert_eq!(
-            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::Rule(error)),
+            run_error_for_dns_policy_compile(error),
+            RunError::RuleCompile
+        );
+        assert_eq!(
+            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::DnsPolicy(error)),
             RunError::RuleCompile
         );
     }
@@ -206,7 +216,7 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_bound(&mut server, listen).await;
 
-    let keys = SinglePskProvider::new(Aes128Psk::from_bytes(PSK_BYTES));
+    let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(Duration::from_secs(5)),
     };
@@ -568,7 +578,7 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_bound(&mut server, listen).await;
 
-    let keys = SinglePskProvider::new(Aes128Psk::from_bytes(PSK_BYTES));
+    let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(Duration::from_secs(5)),
     };
@@ -817,21 +827,20 @@ async fn tagged_udp_is_process_bounded_and_bound_to_its_local_inbound() {
     let routed_address = routed_target.local_addr().expect("routed target address");
     let routed_domain =
         TargetAddr::domain("127.0.0.1", routed_address.port()).expect("domain target");
-    let poison_new = udp_loopback().await;
-    let poison_new_address = TargetAddr::ip(poison_new.local_addr().expect("new poison address"))
-        .expect("new poison target");
-    let poison_existing = udp_loopback().await;
-    let poison_existing_address = TargetAddr::domain(
-        "127.0.0.1",
-        poison_existing
-            .local_addr()
-            .expect("existing poison address")
-            .port(),
-    )
-    .expect("existing poison target");
-    let (path, mut config) = tagged_server_test_config([first_listen, second_listen], true);
+    let source = format!(
+        "schema_version = 2\n\
+         [[inbounds]]\ntag = \"i0\"\nlisten = \"{first_listen}\"\n\
+         [[inbounds]]\ntag = \"i1\"\nlisten = \"{second_listen}\"\n\
+         [[outbounds]]\ntag = \"o0\"\n\
+         [[outbounds]]\ntag = \"o1\"\n\
+         [[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n\
+         [route]\nfinal = \"manual\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+         [runtime]\nmax_connections = 1\nshutdown_grace_ms = 0\n\
+         [udp]\nmax_sessions = 1\n"
+    );
+    let (path, config) = server_test_config_source("tagged-udp", &source);
     let selector = config.selector_control();
-    config.outbounds.truncate(1);
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_bound(&mut server, first_listen).await;
@@ -845,22 +854,7 @@ async fn tagged_udp_is_process_bounded_and_bound_to_its_local_inbound() {
     let roaming_peer = udp_loopback().await;
     let cross_peer = udp_loopback().await;
     let mut second = UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
-    let poison_wire = encoded_udp_request(&mut second, &clock, poison_new_address, b"new-poison");
-    let baseline = registry.snapshot();
-    selector.switch("manual", "o1").expect("select missing B");
-    cross_peer
-        .send_to(&poison_wire, second_listen)
-        .await
-        .expect("new poison send");
     let mut payload = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
-    assert_pending(
-        poison_new.recv_from(&mut payload),
-        "new poison reached target",
-    )
-    .await;
-    assert_eq!(registry.snapshot(), baseline);
-    assert_eq!(selector.selected("manual"), Ok("o1"));
-    selector.switch("manual", "o0").expect("select direct A");
     let first_wire = encoded_udp_request(
         &mut client,
         &clock,
@@ -880,23 +874,6 @@ async fn tagged_udp_is_process_bounded_and_bound_to_its_local_inbound() {
         .expect("first target response");
     let (_, response_source) = recv_udp(&first_peer, &mut payload).await;
     assert_eq!(response_source, SocketAddr::V4(second_listen));
-    let poison_wire = encoded_udp_request(
-        &mut client,
-        &clock,
-        poison_existing_address,
-        b"existing-poison",
-    );
-    let before_poison = registry.snapshot();
-    first_peer
-        .send_to(&poison_wire, second_listen)
-        .await
-        .expect("existing poison send");
-    assert_pending(
-        poison_existing.recv_from(&mut payload),
-        "existing poison reached target",
-    )
-    .await;
-    assert_eq!(registry.snapshot(), before_poison);
     selector.switch("manual", "o0").expect("restore direct A");
     let cross_wire = encoded_udp_request(&mut client, &clock, routed_domain, b"cross-fresh");
     let before_cross = registry.snapshot();
@@ -1217,13 +1194,14 @@ async fn operational_dns_outlives_tcp_quiesce_drain() {
     let target_address = target_listener.local_addr().expect("drain target address");
     let (dns_address, query_observed, release_answer, dns_task) = gated_a_dns("drain.test.").await;
     let source = operational_dns_drain_source(listen, dns_address, false);
-    let (config_path, config) = server_test_config_source("dns-drain", &source);
+    let (config_path, _) = server_test_config_source("dns-drain", &source);
+    let config = finish_server_test_config(&config_path);
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let (shutdown_sender, mut run_task) = spawn_test_server(config, &registry);
     wait_until_bound(&mut run_task, listen).await;
 
-    let keys = SinglePskProvider::new(Aes128Psk::from_bytes(PSK_BYTES));
+    let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(Duration::from_secs(5)),
     };
@@ -1293,7 +1271,8 @@ async fn unresolved_udp_selection_is_cancelled_before_session_admission() {
     let (dns_address, query_observed, release_answer, dns_task) =
         gated_a_dns("udp-drain.test.").await;
     let source = operational_dns_drain_source(listen, dns_address, true);
-    let (config_path, config) = server_test_config_source("udp-dns-drain", &source);
+    let (config_path, _) = server_test_config_source("udp-dns-drain", &source);
+    let config = finish_server_test_config(&config_path);
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let (shutdown_sender, mut run_task) = spawn_test_server(config, &registry);
@@ -1354,7 +1333,7 @@ async fn lifecycle_composition_contract_production_registry_witnesses_live_then_
 
     let target_accept =
         tokio::spawn(async move { target_listener.accept().await.expect("target accept").0 });
-    let keys = SinglePskProvider::new(Aes128Psk::from_bytes(PSK_BYTES));
+    let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(Duration::from_secs(5)),
     };

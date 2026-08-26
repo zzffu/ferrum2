@@ -65,12 +65,6 @@ impl RuleSetDownloadMode {
     }
 }
 
-impl From<RuleSetDownloadResolver> for RuleSetDownloadMode {
-    fn from(resolver: RuleSetDownloadResolver) -> Self {
-        Self::ClientResolved(resolver)
-    }
-}
-
 /// A cache filename component already proven safe against path traversal.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct RuleSetCacheName(Box<str>);
@@ -114,17 +108,13 @@ pub struct RuleSetRemoteSource {
 }
 
 impl RuleSetRemoteSource {
-    pub fn new<M>(
+    pub fn new(
         cache_name: RuleSetCacheName,
         url: &str,
-        mode: M,
+        mode: RuleSetDownloadMode,
         detour: Option<EgressPlanHandle>,
         update_interval: Option<Duration>,
-    ) -> Result<Self, RuleSetLoadError>
-    where
-        M: Into<RuleSetDownloadMode>,
-    {
-        let mode = mode.into();
+    ) -> Result<Self, RuleSetLoadError> {
         if update_interval.is_some_and(|interval| interval.is_zero()) {
             return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
         }

@@ -5,15 +5,14 @@ use std::time::Duration;
 use ferrum2_core::DomainName;
 use ferrum2_rule::{
     EgressPlanHandle, Network, OrderedRouteProgram, OrderedRouteRule, PortRange, RouteMatchField,
-    RouteMatcher, RouteRuleAction, RuleSetId,
+    RouteMatcher, RouteRuleAction, RuleSetId, SelectorControl,
 };
 
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{
-    ClientDnsRoute, CompiledRoute, DnsQueryType, RouteAction, RouteProtocol, RouteSniffConfig,
-    SchemaVersion, ServerDnsRoute, Sniffers,
+    CompiledRoute, RouteAction, RouteProtocol, RouteSniffConfig, SchemaVersion, Sniffers,
 };
-use crate::raw::{RawDns, RawDnsRouteRule, RawRoute, RawRouteRule, ScalarOrList};
+use crate::raw::{RawRoute, RawRouteRule, ScalarOrList};
 
 #[derive(Clone, Copy)]
 pub(super) enum Role {
@@ -72,6 +71,7 @@ impl RouteDraft {
     pub(super) fn finish(
         self,
         handles: Vec<EgressPlanHandle>,
+        selector: SelectorControl,
     ) -> Result<CompiledRoute, ConfigError> {
         if handles.len() != self.roots.len() {
             return Err(ConfigError::semantic(ConfigField::RouteRulesOutbound));
@@ -99,6 +99,7 @@ impl RouteDraft {
         Ok(CompiledRoute {
             program,
             registry: None,
+            selector,
             sniff: self.sniff,
         })
     }
@@ -108,15 +109,54 @@ impl RouteDraft {
 pub(super) fn compile_route_draft(
     raw: Option<&RawRoute>,
     inbounds: &[String],
+    inbound_outbounds: &[Option<String>],
     rule_set_tags: &[&str],
     role: Role,
     tun_inbound: Option<usize>,
     has_dns: bool,
     max_connections: u32,
-) -> Result<Option<RouteDraft>, ConfigError> {
+) -> Result<RouteDraft, ConfigError> {
+    if inbounds.len() != inbound_outbounds.len() || inbounds.is_empty() {
+        return Err(ConfigError::semantic(ConfigField::Inbounds));
+    }
     let Some(raw) = raw else {
-        return Ok(None);
+        let max_bytes = 8_192;
+        let max_aggregate_bytes = usize::try_from(max_connections)
+            .ok()
+            .and_then(|connections| connections.checked_mul(max_bytes))
+            .ok_or_else(|| ConfigError::semantic(ConfigField::RouteSniffMaxBytes))?;
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(inbounds.len())
+            .map_err(|_| ConfigError::rule_allocation(ConfigField::RouteRules))?;
+        let mut rules = Vec::new();
+        rules
+            .try_reserve_exact(inbounds.len())
+            .map_err(|_| ConfigError::rule_allocation(ConfigField::RouteRules))?;
+        for (inbound, outbound) in inbound_outbounds.iter().enumerate() {
+            let outbound = outbound
+                .as_ref()
+                .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))?;
+            roots.push(outbound.clone());
+            let matcher = RouteMatcher::try_new(vec![RouteMatchField::Inbound(vec![inbound])])
+                .map_err(|error| {
+                    ConfigError::from_rule_compile(error, ConfigField::RouteRulesInbound)
+                })?;
+            rules.push((matcher, DraftAction::Route(inbound)));
+        }
+        return Ok(RouteDraft {
+            rules,
+            roots,
+            sniff: RouteSniffConfig {
+                timeout: Duration::from_millis(300),
+                max_bytes,
+                max_aggregate_bytes,
+            },
+        });
     };
+    if inbound_outbounds.iter().any(Option::is_some) {
+        return Err(ConfigError::semantic(ConfigField::Route));
+    }
     let final_outbound = raw
         .final_outbound
         .as_ref()
@@ -156,7 +196,7 @@ pub(super) fn compile_route_draft(
         let action = rule
             .action
             .as_deref()
-            .unwrap_or_else(|| if rule.outbound.is_some() { "route" } else { "" });
+            .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesAction))?;
         let action = match action {
             "route" => {
                 if rule.sniffers.is_some() {
@@ -217,7 +257,7 @@ pub(super) fn compile_route_draft(
         rules.push((matcher, action));
     }
     validate_protocol_coverage(&coverage, role)?;
-    Ok(Some(RouteDraft {
+    Ok(RouteDraft {
         rules,
         roots,
         sniff: RouteSniffConfig {
@@ -225,7 +265,7 @@ pub(super) fn compile_route_draft(
             max_bytes,
             max_aggregate_bytes,
         },
-    }))
+    })
 }
 
 fn compile_route_matcher(
@@ -633,7 +673,7 @@ fn parse_port_range(value: &str, field: ConfigField) -> Result<PortRange, Config
     let last = last
         .parse::<u16>()
         .map_err(|_| ConfigError::semantic(field))?;
-    PortRange::new(first, last).ok_or_else(|| ConfigError::semantic(field))
+    PortRange::try_new(first, last).map_err(|_| ConfigError::semantic(field))
 }
 
 fn parse_values<T, U, F>(
@@ -692,254 +732,5 @@ where
         Err(ConfigError::semantic(field))
     } else {
         Ok(())
-    }
-}
-
-pub(super) fn compile_client_dns(
-    raw: &RawDns,
-    ordinary_inbounds: &[String],
-) -> Result<ClientDnsRoute, ConfigError> {
-    let listeners = raw
-        .inbounds
-        .as_deref()
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsInbounds))?;
-    let servers = raw
-        .servers
-        .as_deref()
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsServers))?;
-    let route = raw
-        .route
-        .as_ref()
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRoute))?;
-    let final_server = resolve_dns_final(route.final_server.as_deref(), servers)?;
-    let mut rules = Vec::new();
-    rules
-        .try_reserve_exact(route.rules.len())
-        .map_err(|_| ConfigError::rule_allocation(ConfigField::DnsRouteRules))?;
-    for rule in &route.rules {
-        if rule.domain.is_some()
-            || rule.domain_suffix.is_some()
-            || rule.port.is_some()
-            || rule.port_range.is_some()
-        {
-            let field = if rule.domain.is_some() {
-                ConfigField::DnsRouteRulesDomain
-            } else if rule.domain_suffix.is_some() {
-                ConfigField::DnsRouteRulesDomainSuffix
-            } else if rule.port.is_some() {
-                ConfigField::DnsRouteRulesPort
-            } else {
-                ConfigField::DnsRouteRulesPortRange
-            };
-            return Err(ConfigError::semantic(field));
-        }
-        let mut fields = Vec::new();
-        if let Some(values) = &rule.inbound {
-            let values = parse_values(values, ConfigField::DnsRouteRulesInbound, |tag| {
-                listeners
-                    .iter()
-                    .position(|candidate| candidate.tag == *tag)
-                    .or_else(|| {
-                        ordinary_inbounds
-                            .iter()
-                            .position(|candidate| candidate == tag)
-                            .map(|index| listeners.len() + index)
-                    })
-                    .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesInbound))
-            })?;
-            fields.push(RouteMatchField::Inbound(values));
-        }
-        if let Some(values) = &rule.network {
-            fields.push(RouteMatchField::Network(parse_values(
-                values,
-                ConfigField::DnsRouteRulesNetwork,
-                |value| parse_network_field(value, ConfigField::DnsRouteRulesNetwork),
-            )?));
-        }
-        push_domains(
-            &mut fields,
-            rule.qname.as_ref(),
-            ConfigField::DnsRouteRulesQname,
-            false,
-        )?;
-        push_domains(
-            &mut fields,
-            rule.qname_suffix.as_ref(),
-            ConfigField::DnsRouteRulesQnameSuffix,
-            true,
-        )?;
-        push_domain_keywords(
-            &mut fields,
-            rule.domain_keyword.as_ref(),
-            ConfigField::DnsRouteRulesDomainKeyword,
-        )?;
-        if let Some(values) = &rule.qtype {
-            fields.push(RouteMatchField::Protocol(parse_values(
-                values,
-                ConfigField::DnsRouteRulesQtype,
-                |value| parse_qtype(value),
-            )?));
-        }
-        let matcher = RouteMatcher::try_new(fields)
-            .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::DnsRouteRules))?;
-        let server = resolve_dns_server(rule, servers)?;
-        rules.push(OrderedRouteRule::new(
-            matcher,
-            RouteRuleAction::Terminal(server),
-        ));
-    }
-    let program = OrderedRouteProgram::try_new(rules, final_server)
-        .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::DnsRouteRules))?;
-    Ok(ClientDnsRoute {
-        compatibility_program: Some(program),
-        listener_count: listeners.len(),
-        ordinary_count: ordinary_inbounds.len(),
-        policy_blueprint: None,
-    })
-}
-
-pub(super) fn compile_server_dns(
-    raw: &RawDns,
-    inbounds: &[String],
-) -> Result<ServerDnsRoute, ConfigError> {
-    let servers = raw
-        .servers
-        .as_deref()
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsServers))?;
-    let route = raw
-        .route
-        .as_ref()
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRoute))?;
-    let final_server = resolve_dns_final(route.final_server.as_deref(), servers)?;
-    let mut rules = Vec::new();
-    rules
-        .try_reserve_exact(route.rules.len())
-        .map_err(|_| ConfigError::rule_allocation(ConfigField::DnsRouteRules))?;
-    for rule in &route.rules {
-        if rule.qname.is_some() || rule.qname_suffix.is_some() || rule.qtype.is_some() {
-            let field = if rule.qname.is_some() {
-                ConfigField::DnsRouteRulesQname
-            } else if rule.qname_suffix.is_some() {
-                ConfigField::DnsRouteRulesQnameSuffix
-            } else {
-                ConfigField::DnsRouteRulesQtype
-            };
-            return Err(ConfigError::semantic(field));
-        }
-        let mut fields = Vec::new();
-        if let Some(values) = &rule.inbound {
-            fields.push(RouteMatchField::Inbound(parse_values(
-                values,
-                ConfigField::DnsRouteRulesInbound,
-                |tag| {
-                    inbounds
-                        .iter()
-                        .position(|candidate| candidate == tag)
-                        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesInbound))
-                },
-            )?));
-        }
-        if let Some(values) = &rule.network {
-            fields.push(RouteMatchField::Network(parse_values(
-                values,
-                ConfigField::DnsRouteRulesNetwork,
-                |value| parse_network_field(value, ConfigField::DnsRouteRulesNetwork),
-            )?));
-        }
-        push_domains(
-            &mut fields,
-            rule.domain.as_ref(),
-            ConfigField::DnsRouteRulesDomain,
-            false,
-        )?;
-        push_domains(
-            &mut fields,
-            rule.domain_suffix.as_ref(),
-            ConfigField::DnsRouteRulesDomainSuffix,
-            true,
-        )?;
-        push_domain_keywords(
-            &mut fields,
-            rule.domain_keyword.as_ref(),
-            ConfigField::DnsRouteRulesDomainKeyword,
-        )?;
-        if let Some(values) = &rule.port {
-            fields.push(RouteMatchField::Port(parse_values(
-                values,
-                ConfigField::DnsRouteRulesPort,
-                |value| {
-                    u16::try_from(*value)
-                        .ok()
-                        .and_then(NonZeroU16::new)
-                        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesPort))
-                },
-            )?));
-        }
-        if let Some(values) = &rule.port_range {
-            fields.push(RouteMatchField::PortRange(parse_values(
-                values,
-                ConfigField::DnsRouteRulesPortRange,
-                |value| parse_port_range(value, ConfigField::DnsRouteRulesPortRange),
-            )?));
-        }
-        let matcher = RouteMatcher::try_new(fields)
-            .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::DnsRouteRules))?;
-        let server = resolve_dns_server(rule, servers)?;
-        rules.push(OrderedRouteRule::new(
-            matcher,
-            RouteRuleAction::Terminal(server),
-        ));
-    }
-    let program = OrderedRouteProgram::try_new(rules, final_server)
-        .map_err(|error| ConfigError::from_rule_compile(error, ConfigField::DnsRouteRules))?;
-    Ok(ServerDnsRoute {
-        compatibility_program: Some(program),
-        ordinary_count: inbounds.len(),
-        policy_blueprint: None,
-    })
-}
-
-fn resolve_dns_final(
-    tag: Option<&str>,
-    servers: &[crate::raw::RawDnsServer],
-) -> Result<usize, ConfigError> {
-    tag.and_then(|tag| servers.iter().position(|server| server.tag == tag))
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteFinal))
-}
-
-fn resolve_dns_server(
-    rule: &RawDnsRouteRule,
-    servers: &[crate::raw::RawDnsServer],
-) -> Result<usize, ConfigError> {
-    rule.server
-        .as_deref()
-        .and_then(|tag| servers.iter().position(|server| server.tag == tag))
-        .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesServer))
-}
-
-fn parse_network_field(value: &str, field: ConfigField) -> Result<Network, ConfigError> {
-    match value {
-        "tcp" => Ok(Network::Tcp),
-        "udp" => Ok(Network::Udp),
-        _ => Err(ConfigError::semantic(field)),
-    }
-}
-
-fn parse_qtype(value: &str) -> Result<DnsQueryType, ConfigError> {
-    match value.to_ascii_uppercase().as_str() {
-        "A" => Ok(DnsQueryType::A),
-        "AAAA" => Ok(DnsQueryType::Aaaa),
-        "CNAME" => Ok(DnsQueryType::Cname),
-        "MX" => Ok(DnsQueryType::Mx),
-        "NS" => Ok(DnsQueryType::Ns),
-        "PTR" => Ok(DnsQueryType::Ptr),
-        "SOA" => Ok(DnsQueryType::Soa),
-        "SRV" => Ok(DnsQueryType::Srv),
-        "TXT" => Ok(DnsQueryType::Txt),
-        "CAA" => Ok(DnsQueryType::Caa),
-        "SVCB" => Ok(DnsQueryType::Svcb),
-        "HTTPS" => Ok(DnsQueryType::Https),
-        "ANY" => Ok(DnsQueryType::Any),
-        _ => Err(ConfigError::semantic(ConfigField::DnsRouteRulesQtype)),
     }
 }

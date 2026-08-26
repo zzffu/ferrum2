@@ -3,10 +3,7 @@ mod common;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use ferrum2_core::{TargetAddr, TargetHostRef};
-use ferrum2_crypto::{
-    Aes128Psk, MethodPsk, MethodSinglePskProvider, MethodTcpSalt, SinglePskProvider,
-    TcpMethodProfile,
-};
+use ferrum2_crypto::{MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt};
 use ferrum2_shadowsocks::{
     ClientTcpOutbound, DetectionReason, MethodKeyAdapter, ShadowsocksError, ShadowsocksTcpInbound,
     TcpReplayStore, encode_request_first_write, encode_response_first_write,
@@ -25,16 +22,16 @@ fn fixture() -> Value {
     .expect("reviewed fixture is valid JSON")
 }
 
-fn provider() -> SinglePskProvider {
-    SinglePskProvider::new(Aes128Psk::from_bytes([
+fn provider() -> MethodKeyAdapter<MethodSinglePskProvider> {
+    MethodKeyAdapter::new(MethodSinglePskProvider::new(MethodPsk::aes128([
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f,
-    ]))
+    ])))
 }
 
 fn request_salt() -> MethodTcpSalt {
     MethodTcpSalt::try_from_slice(
-        TcpMethodProfile::Blake3Aes128Gcm2022,
+        MethodProfile::Blake3Aes128Gcm2022,
         &[
             0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
             0x1e, 0x1f,
@@ -108,7 +105,7 @@ fn unofficial_composite_request_and_response_match_exact_reviewed_wire() {
     );
 
     let response_salt = MethodTcpSalt::try_from_slice(
-        TcpMethodProfile::Blake3Aes128Gcm2022,
+        MethodProfile::Blake3Aes128Gcm2022,
         &[
             0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
             0x2e, 0x2f,
@@ -154,7 +151,7 @@ async fn one_shared_flow_round_trips_all_profiles_and_target_classes() {
         TargetAddr::domain(&"z".repeat(255), 443).expect("255-byte domain"),
     ];
 
-    for (profile_index, profile) in TcpMethodProfile::ALL.into_iter().enumerate() {
+    for (profile_index, profile) in MethodProfile::ALL.into_iter().enumerate() {
         let key = vec![0x20 + profile_index as u8; profile.key_bytes()];
         let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
             MethodPsk::try_from_slice(profile, &key).expect("method PSK"),
@@ -206,7 +203,10 @@ async fn one_shared_flow_round_trips_all_profiles_and_target_classes() {
         let random = ScriptedRandom::new(client_random_bytes(&request_salt));
         let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
         let mut flow = outbound
-            .open_stream(&targets[0])
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&targets[0])
             .await
             .expect("shared client flow");
         let mut payload = [0_u8; 1];
@@ -219,7 +219,7 @@ async fn one_shared_flow_round_trips_all_profiles_and_target_classes() {
 
 #[tokio::test]
 async fn wide_profile_replay_and_response_binding_use_all_32_salt_bytes() {
-    let profile = TcpMethodProfile::Blake3Aes256Gcm2022;
+    let profile = MethodProfile::Blake3Aes256Gcm2022;
     let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(MethodPsk::aes256([0x21; 32])));
     let first_salt = MethodTcpSalt::try_from_slice(profile, &[0x31; 32]).expect("first salt");
     let mut second_bytes = [0x31; 32];
@@ -260,7 +260,13 @@ async fn wide_profile_replay_and_response_binding_use_all_32_salt_bytes() {
     let client_random = ScriptedRandom::new(client_random_bytes(&first_salt));
     let outbound =
         ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random);
-    let mut flow = outbound.open_stream(&target).await.expect("client request");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target)
+        .await
+        .expect("client request");
     let mut payload = [0_u8; 1];
     assert_eq!(
         read_plain(&mut flow, &mut payload).await,

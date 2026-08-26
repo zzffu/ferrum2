@@ -179,7 +179,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
     record_one_of_every_tun_event(&metrics);
     let output = metrics.encode_text().expect("TUN metrics");
 
-    let legacy = [
+    let foundation_metrics = [
         "ferrum2_tun_packets_accepted",
         "ferrum2_tun_packets_foundation_dropped",
     ];
@@ -187,7 +187,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
         .lines()
         .filter_map(|line| line.strip_prefix("# HELP "))
         .filter(|line| line.starts_with("ferrum2_tun_"))
-        .filter(|line| !legacy.iter().any(|name| line.starts_with(name)))
+        .filter(|line| !foundation_metrics.iter().any(|name| line.starts_with(name)))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         help,
@@ -234,7 +234,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
         .lines()
         .filter_map(|line| line.strip_prefix("# TYPE "))
         .filter(|line| line.starts_with("ferrum2_tun_"))
-        .filter(|line| !legacy.iter().any(|name| line.starts_with(name)))
+        .filter(|line| !foundation_metrics.iter().any(|name| line.starts_with(name)))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         types,

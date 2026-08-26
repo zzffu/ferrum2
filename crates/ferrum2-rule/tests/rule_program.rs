@@ -1,10 +1,10 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr};
 
 use ferrum2_core::{DomainName, TargetAddr};
 use ferrum2_rule::{
     MatchSetBuilder, Network, OrderedRouteProgram, OrderedRouteRule, RouteMatchField,
-    RouteMatchSource, RouteMatchType, RouteMatcher, RouteMetadata, RouteProgramAction, RouteRule,
-    RouteRuleAction, RouteTable, RuleCompileError, RuleProgramMode,
+    RouteMatchSource, RouteMatchType, RouteMatcher, RouteMetadata, RouteProgramAction,
+    RouteRuleAction, RuleCompileError, RuleProgramMode,
 };
 
 fn domain(value: &str) -> DomainName {
@@ -88,7 +88,8 @@ fn ordinary_fields_are_anded_while_one_compiled_set_is_ored() {
     )
     .unwrap();
     let target = target();
-    let mut evaluation = program.evaluate(0, Network::Tcp, &target);
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let mut evaluation = program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
     assert_eq!(
         evaluation.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Terminal(&"and"))
@@ -113,7 +114,8 @@ fn ordinary_fields_are_anded_while_one_compiled_set_is_ored() {
         "miss",
     )
     .unwrap();
-    let mut evaluation = program.evaluate(0, Network::Tcp, &target);
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let mut evaluation = program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
     assert_eq!(
         evaluation.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Terminal(&"or"))
@@ -121,7 +123,7 @@ fn ordinary_fields_are_anded_while_one_compiled_set_is_ored() {
 }
 
 #[test]
-fn constructors_report_closed_compile_errors_and_keep_unconditional_explicit() {
+fn constructors_report_closed_compile_errors_and_keep_final_explicit() {
     assert!(matches!(
         RouteMatcher::<()>::try_new(Vec::new()),
         Err(RuleCompileError::EmptyMatcher)
@@ -137,19 +139,13 @@ fn constructors_report_closed_compile_errors_and_keep_unconditional_explicit() {
         ]),
         Err(RuleCompileError::DuplicateField)
     ));
-    let program = OrderedRouteProgram::try_new(
-        vec![OrderedRouteRule::new(
-            RouteMatcher::<()>::unconditional(),
-            RouteRuleAction::Terminal(7),
-        )],
-        9,
-    )
-    .unwrap();
+    let program = OrderedRouteProgram::<(), _>::try_new(Vec::new(), 9).unwrap();
     let target = target();
-    let mut evaluation = program.evaluate(0, Network::Udp, &target);
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let mut evaluation = program.evaluate_with_scratch(0, Network::Udp, &target, &mut scratch);
     assert_eq!(
         evaluation.next(RouteMetadata::new(None, None)),
-        Some(RouteProgramAction::Terminal(&7))
+        Some(RouteProgramAction::Final(&9))
     );
 }
 
@@ -228,17 +224,6 @@ fn reusable_scratch_does_not_grow_on_the_evaluation_hot_path() {
 }
 
 #[test]
-fn compatibility_route_table_has_no_sixty_four_rule_ceiling() {
-    let rules = (0..256)
-        .map(|inbound| RouteRule::new(Some(inbound), None, None, inbound + 1))
-        .collect();
-    let route = RouteTable::try_routed(rules, 999).unwrap();
-    let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443)).unwrap();
-    assert_eq!(route.select(255, Network::Tcp, &target), 256);
-    assert_eq!(route.select(999, Network::Tcp, &target), 999);
-}
-
-#[test]
 fn ip_and_cidr_fields_share_the_compiled_ip_index() {
     let exact: IpAddr = "192.0.2.7".parse().unwrap();
     let matcher = RouteMatcher::<()>::try_new(vec![
@@ -255,7 +240,8 @@ fn ip_and_cidr_fields_share_the_compiled_ip_index() {
     )
     .unwrap();
     let target = TargetAddr::ip("192.0.2.7:443".parse().unwrap()).unwrap();
-    let mut evaluation = program.evaluate(0, Network::Tcp, &target);
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let mut evaluation = program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
     assert_eq!(
         evaluation.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Terminal(&true))

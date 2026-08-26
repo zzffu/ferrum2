@@ -1128,8 +1128,8 @@ pub fn write_two_hop_client_config(
                 String::new(),
                 format!(
                     "[route]\nfinal = \"{fallback}\"\n\
-                     [[route.rules]]\nnetwork = \"{network}\"\nip = \"{}\"\nport = {}\noutbound = \"two-hop\"\n\
-                     [[route.rules]]\nnetwork = \"{network}\"\nip = \"{}\"\nport = {}\noutbound = \"{fallback}\"\n",
+                     [[route.rules]]\nnetwork = \"{network}\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"two-hop\"\n\
+                     [[route.rules]]\nnetwork = \"{network}\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"{fallback}\"\n",
                     target.ip(),
                     target.port(),
                     target.ip(),
@@ -1141,7 +1141,7 @@ pub fn write_two_hop_client_config(
             String::new(),
             format!(
                 "[route]\nfinal = \"two-hop\"\n\
-                 [[route.rules]]\nnetwork = \"{opposite_network}\"\noutbound = \"hop-a\"\n"
+                 [[route.rules]]\nnetwork = \"{opposite_network}\"\naction = \"route\"\noutbound = \"hop-a\"\n"
             ),
         ),
         ChainRoot::SelectorDefault => (
@@ -1156,13 +1156,12 @@ pub fn write_two_hop_client_config(
     let config = format!(
         "schema_version = 2\n\
          [[inbounds]]\ntag = \"socks\"\nlisten = \"{listen}\"\n{inbound_outbound}\
-         [[outbounds]]\ntag = \"hop-a\"\nserver = \"{}\"\n\
-         [[outbounds]]\ntag = \"hop-b\"\nserver = \"{}\"\nmethod = \"{}\"\npsk = \"{}\"\n\
+         [[outbounds]]\ntag = \"hop-a\"\ntype = \"shadowsocks\"\nserver = \"{}\"\nmethod = \"{}\"\npsk = \"{}\"\n\
+         [[outbounds]]\ntag = \"hop-b\"\ntype = \"shadowsocks\"\nserver = \"{}\"\nmethod = \"{}\"\npsk = \"{}\"\n\
          [[chains]]\ntag = \"two-hop\"\nhops = [\"hop-a\", \"hop-b\"]\n\
          {selection}\
-         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\
          {udp}{metrics}",
-        servers[0], servers[1], explicit.0, explicit.1, inherited.0, inherited.1,
+        servers[0], inherited.0, inherited.1, servers[1], explicit.0, explicit.1,
     );
     let path = directory.join("two-hop-client.toml");
     fs::write(&path, config)?;
@@ -1201,7 +1200,7 @@ pub fn write_tagged_client_config(
     let udp = if udp { "\n[udp]\n" } else { "" };
     let outbound_one = if outbound_for_inbound.contains(&1) {
         format!(
-            "\n[[outbounds]]\ntag = \"out-1\"\nserver = \"{}\"\n",
+            "\n[[outbounds]]\ntag = \"out-1\"\ntype = \"shadowsocks\"\nserver = \"{}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n",
             servers[1]
         )
     } else {
@@ -1222,12 +1221,11 @@ pub fn write_tagged_client_config(
          \n\
          [[outbounds]]\n\
          tag = \"out-0\"\n\
+         type = \"shadowsocks\"\n\
          server = \"{}\"\n\
-         {}\n\
-         \n\
-         [shadowsocks]\n\
          method = \"2022-blake3-aes-128-gcm\"\n\
          psk = \"{SYNTHETIC_PSK}\"\n\
+         {}\n\
          {udp}",
         listens[0],
         outbound_for_inbound[0],
@@ -1342,7 +1340,7 @@ pub fn write_tagged_dns_server_matrix_config(
     ));
     for (name, port, server) in rules {
         config.push_str(&format!(
-            "[[route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ndomain = \"{name}\"\nport = {port}\noutbound = \"app-{server}\"\n"
+            "[[route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ndomain = \"{name}\"\nport = {port}\naction = \"route\"\noutbound = \"app-{server}\"\n"
         ));
     }
     config.push_str(&format!(
@@ -1356,7 +1354,7 @@ pub fn write_tagged_dns_server_matrix_config(
     config.push_str(&format!("[dns.route]\nfinal = \"{final_server}\"\n"));
     for (name, port, server) in rules {
         config.push_str(&format!(
-            "[[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ndomain = \"{name}\"\nport = {port}\nserver = \"{server}\"\n"
+            "[[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"{network}\"\ndomain = \"{name}\"\nport = {port}\naction = \"route\"\nserver = \"{server}\"\n"
         ));
     }
     config.push_str(&format!(
@@ -1397,9 +1395,8 @@ pub fn write_client_config_with_psk(
          \n\
          [[outbounds]]\n\
          tag = \"proxy-out\"\n\
+         type = \"shadowsocks\"\n\
          server = \"{server}\"\n\
-         \n\
-         [shadowsocks]\n\
          method = \"2022-blake3-aes-128-gcm\"\n\
          psk = \"{psk}\"\n\
          {metrics}"

@@ -800,83 +800,6 @@ def validate_legacy_threshold_policy(
     return effective_limit
 
 
-def validate_legacy_aa_report(
-    report: Any,
-) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]], float]:
-    scenario_suites, raw_pairs = validate_aa_raw_evidence(
-        report, LEGACY_CONTROL_SCHEMA
-    )
-    observations = summarize_v3(
-        scenario_suites,
-        raw_pairs,
-        True,
-        NOISY_GATE_CEILING_PERCENT,
-    )
-    legacy_gate_passed = validate_legacy_comparisons(
-        report.get("comparisons"), observations
-    )
-    effective_limit = validate_legacy_threshold_policy(
-        report.get("threshold_policy"), observations, legacy_gate_passed
-    )
-    if legacy_gate_passed:
-        raise ControlError("only a failed legacy A/A report may be reclassified")
-    return scenario_suites, raw_pairs, observations, effective_limit
-
-
-def reclassify_legacy_aa(path: Path) -> dict[str, Any]:
-    source_path = path.resolve(strict=True)
-    source_bytes = source_path.read_bytes()
-    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
-    try:
-        source = json.loads(source_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ControlError("legacy A/A report is not valid UTF-8 JSON") from error
-    scenario_suites, raw_pairs, comparisons, effective_limit = (
-        validate_legacy_aa_report(source)
-    )
-    raw_pairs_sha256 = canonical_json_sha256(raw_pairs)
-    source_comparisons = source["comparisons"]
-    result = {
-        "schema": V3_CONTROL_SCHEMA,
-        "generated_unix_millis": time.time_ns() // 1_000_000,
-        "mode": "aa",
-        "pairs": source["pairs"],
-        "parent_runner_sha256": source["parent_runner_sha256"],
-        "candidate_runner_sha256": source["candidate_runner_sha256"],
-        "runner_arguments": source["runner_arguments"],
-        "scenario_ids": sorted(scenario_suites),
-        "execution_policy": source["execution_policy"],
-        "execution_trace": source["execution_trace"],
-        "comparisons": comparisons,
-        "threshold_policy": threshold_policy_v3(
-            comparisons,
-            effective_limit,
-            "reclassified_legacy_aa_raw_pairs",
-            None,
-        ),
-        "provenance": {
-            "derivation": "offline_policy_reclassification",
-            "source_report_sha256": source_sha256,
-            "source_report_artifact": source_path.name,
-            "source_schema": LEGACY_CONTROL_SCHEMA,
-            "source_generated_unix_millis": source.get("generated_unix_millis"),
-            "source_threshold_policy_version": LEGACY_THRESHOLD_POLICY_VERSION,
-            "source_threshold_policy_version_basis": "validated_control_v2_fields",
-            "source_threshold_policy": source["threshold_policy"],
-            "source_gate_passed": False,
-            "source_decision": "failed",
-            "source_comparisons": source_comparisons,
-            "source_comparisons_sha256": canonical_json_sha256(source_comparisons),
-            "raw_pairs_transform": "none",
-            "raw_pairs_canonicalization": "json_sort_keys_compact_utf8",
-            "source_raw_pairs_sha256": raw_pairs_sha256,
-            "reclassified_raw_pairs_sha256": raw_pairs_sha256,
-        },
-        "raw_pairs": raw_pairs,
-    }
-    return result
-
-
 def validate_reclassification_provenance(
     report: dict[str, Any],
     observations: list[dict[str, Any]],
@@ -1034,134 +957,6 @@ def read_json_report(path: Path, label: str) -> tuple[Path, dict[str, Any], str]
     return resolved, report, hashlib.sha256(source_bytes).hexdigest()
 
 
-def validate_v3_ab_report(
-    report: dict[str, Any],
-    source_calibration_path: Path,
-) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]], float]:
-    scenario_suites, raw_pairs = validate_control_raw_evidence(
-        report,
-        V3_CONTROL_SCHEMA,
-        "parent_candidate",
-    )
-    execution_policy = report["execution_policy"]
-    _, effective_limit = load_v3_calibration(
-        source_calibration_path,
-        report["parent_runner_sha256"],
-        scenario_suites,
-        report["runner_arguments"],
-        execution_policy["runner_process_priority"],
-    )
-    policy = report.get("threshold_policy")
-    if not isinstance(policy, dict):
-        raise ControlError("v3 A/B threshold policy is missing")
-    source_calibration_sha256 = sha256_file(source_calibration_path)
-    if policy.get("calibration_sha256") != source_calibration_sha256:
-        raise ControlError("v3 A/B source calibration SHA-256 is inconsistent")
-    comparisons = summarize_v3(
-        scenario_suites,
-        raw_pairs,
-        False,
-        effective_limit,
-    )
-    if report.get("comparisons") != comparisons:
-        raise ControlError("v3 A/B comparisons do not match retained raw pairs")
-    expected_policy = threshold_policy_v3(
-        comparisons,
-        effective_limit,
-        policy.get("calibration_source"),
-        source_calibration_sha256,
-    )
-    if policy != expected_policy:
-        raise ControlError("v3 A/B threshold policy is inconsistent")
-    if policy["gate_passed"] is not False:
-        raise ControlError("only a failed v3 A/B report may be reclassified")
-    return scenario_suites, raw_pairs, comparisons, effective_limit
-
-
-def v4_reclassification_provenance(
-    source_path: Path,
-    source: dict[str, Any],
-    raw_pairs: list[dict[str, Any]],
-    source_calibration_path: Path | None = None,
-) -> dict[str, Any]:
-    source_comparisons = source["comparisons"]
-    failed_ids = sorted(
-        row["id"] for row in source_comparisons if row.get("decision") == "failed"
-    )
-    raw_pairs_sha256 = canonical_json_sha256(raw_pairs)
-    provenance = {
-        "derivation": "offline_scope_reclassification",
-        "source_report_sha256": sha256_file(source_path),
-        "source_report_artifact": source_path.name,
-        "source_schema": V3_CONTROL_SCHEMA,
-        "source_mode": source["mode"],
-        "source_generated_unix_millis": source.get("generated_unix_millis"),
-        "source_threshold_policy_version": V3_THRESHOLD_POLICY_VERSION,
-        "source_threshold_policy": source["threshold_policy"],
-        "source_gate_passed": source["threshold_policy"]["gate_passed"],
-        "source_decision": source["threshold_policy"]["decision"],
-        "source_failed_comparison_count": len(failed_ids),
-        "source_failed_comparison_ids": failed_ids,
-        "source_comparisons": source_comparisons,
-        "source_comparisons_sha256": canonical_json_sha256(source_comparisons),
-        "source_provenance": source.get("provenance"),
-        "raw_pairs_transform": "none",
-        "raw_pairs_canonicalization": "json_sort_keys_compact_utf8",
-        "source_raw_pairs_sha256": raw_pairs_sha256,
-        "reclassified_raw_pairs_sha256": raw_pairs_sha256,
-    }
-    if source_calibration_path is not None:
-        provenance.update(
-            {
-                "source_calibration_artifact": source_calibration_path.name,
-                "source_calibration_sha256": sha256_file(source_calibration_path),
-                "source_calibration_original_reference": source[
-                    "threshold_policy"
-                ]["calibration_source"],
-            }
-        )
-    return provenance
-
-
-def reclassify_v3_aa(path: Path) -> dict[str, Any]:
-    source_path, source, _ = read_json_report(path, "v3 A/A report")
-    scenario_suites, _ = validate_v3_aa_calibration(source, source_path.parent)
-    raw_pairs = source["raw_pairs"]
-    comparisons = summarize(
-        scenario_suites,
-        raw_pairs,
-        True,
-        NOISY_GATE_CEILING_PERCENT,
-    )
-    effective_limit = calibrated_limit(comparisons)
-    return {
-        "schema": CONTROL_SCHEMA,
-        "generated_unix_millis": time.time_ns() // 1_000_000,
-        "mode": "aa",
-        "pairs": source["pairs"],
-        "parent_runner_sha256": source["parent_runner_sha256"],
-        "candidate_runner_sha256": source["candidate_runner_sha256"],
-        "runner_arguments": source["runner_arguments"],
-        "scenario_ids": sorted(scenario_suites),
-        "scenario_suites": dict(sorted(scenario_suites.items())),
-        "execution_policy": source["execution_policy"],
-        "execution_trace": source["execution_trace"],
-        "comparisons": comparisons,
-        "threshold_policy": threshold_policy(
-            comparisons,
-            effective_limit,
-            "reclassified_v3_aa_raw_pairs",
-            None,
-        ),
-        "provenance": v4_reclassification_provenance(
-            source_path,
-            source,
-            raw_pairs,
-        ),
-        "raw_pairs": raw_pairs,
-    }
-
-
 def validate_v4_reclassification_provenance(
     report: dict[str, Any],
     scenario_suites: dict[str, str],
@@ -1246,7 +1041,7 @@ def validate_v4_reclassification_provenance(
     if same_binary:
         if source_limit != calibrated_limit_v3(source_comparisons):
             raise ControlError("reclassified v4 A/A source calibration changed")
-        if failed_ids or not isinstance(provenance.get("source_provenance"), dict):
+        if failed_ids:
             raise ControlError("reclassified v4 A/A source chain is incomplete")
     else:
         if not failed_ids:
@@ -1352,83 +1147,10 @@ def load_calibration(
     return calibration, float(limit)
 
 
-def reclassify_v3_ab(
-    path: Path,
-    calibration_path: Path,
-    source_calibration_path: Path,
-) -> dict[str, Any]:
-    source_path, source, _ = read_json_report(path, "v3 A/B report")
-    source_calibration = source_calibration_path.resolve(strict=True)
-    scenario_suites, raw_pairs, _, _ = validate_v3_ab_report(
-        source,
-        source_calibration,
-    )
-    calibration = calibration_path.resolve(strict=True)
-    execution_policy = source["execution_policy"]
-    _, effective_limit = load_calibration(
-        calibration,
-        source["parent_runner_sha256"],
-        scenario_suites,
-        source["runner_arguments"],
-        execution_policy["runner_process_priority"],
-    )
-    comparisons = summarize(
-        scenario_suites,
-        raw_pairs,
-        False,
-        effective_limit,
-    )
-    return {
-        "schema": CONTROL_SCHEMA,
-        "generated_unix_millis": time.time_ns() // 1_000_000,
-        "mode": "parent_candidate",
-        "pairs": source["pairs"],
-        "parent_runner_sha256": source["parent_runner_sha256"],
-        "candidate_runner_sha256": source["candidate_runner_sha256"],
-        "runner_arguments": source["runner_arguments"],
-        "scenario_ids": sorted(scenario_suites),
-        "scenario_suites": dict(sorted(scenario_suites.items())),
-        "execution_policy": source["execution_policy"],
-        "execution_trace": source["execution_trace"],
-        "comparisons": comparisons,
-        "threshold_policy": threshold_policy(
-            comparisons,
-            effective_limit,
-            str(calibration),
-            sha256_file(calibration),
-        ),
-        "provenance": v4_reclassification_provenance(
-            source_path,
-            source,
-            raw_pairs,
-            source_calibration,
-        ),
-        "raw_pairs": raw_pairs,
-    }
-
-
 def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--parent", type=Path)
-    source.add_argument(
-        "--reclassify-aa",
-        type=Path,
-        help=(
-            "offline conversion of one failed v2 A/A report to the v3 "
-            "median-only outer gate; no runner is executed"
-        ),
-    )
-    source.add_argument(
-        "--reclassify-v3-aa",
-        type=Path,
-        help="offline scope reclassification of one passing v3 A/A report to v4",
-    )
-    source.add_argument(
-        "--reclassify-v3-ab",
-        type=Path,
-        help="offline scope reclassification of one failed v3 A/B report to v4",
-    )
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--pairs", type=int, default=MIN_PAIRS)
     parser.add_argument("--timeout-seconds", type=int, default=900)
@@ -1445,11 +1167,6 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
         "--calibration",
         type=Path,
         help="passing A/A controller JSON; required for parent/candidate gating",
-    )
-    parser.add_argument(
-        "--source-calibration",
-        type=Path,
-        help="archived v3 A/A used by a v3 A/B source report",
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("runner_arguments", nargs=argparse.REMAINDER)
@@ -1470,61 +1187,6 @@ def emit_result(result: dict[str, Any], output: Path | None) -> None:
 
 def control(arguments: list[str] | None = None) -> dict[str, Any]:
     args = parse_arguments(arguments)
-    if args.reclassify_aa is not None:
-        if (
-            args.candidate is not None
-            or args.calibration is not None
-            or args.source_calibration is not None
-            or args.runner_arguments
-            or args.pairs != MIN_PAIRS
-            or args.timeout_seconds != 900
-            or args.runner_priority != RUNNER_PRIORITY_NORMAL
-        ):
-            raise ControlError(
-                "--reclassify-aa accepts only its source report and --output"
-            )
-        result = reclassify_legacy_aa(args.reclassify_aa)
-        emit_result(result, args.output)
-        return result
-    if args.reclassify_v3_aa is not None:
-        if (
-            args.candidate is not None
-            or args.calibration is not None
-            or args.source_calibration is not None
-            or args.runner_arguments
-            or args.pairs != MIN_PAIRS
-            or args.timeout_seconds != 900
-            or args.runner_priority != RUNNER_PRIORITY_NORMAL
-        ):
-            raise ControlError(
-                "--reclassify-v3-aa accepts only its source report and --output"
-            )
-        result = reclassify_v3_aa(args.reclassify_v3_aa)
-        emit_result(result, args.output)
-        return result
-    if args.reclassify_v3_ab is not None:
-        if (
-            args.candidate is not None
-            or args.calibration is None
-            or args.source_calibration is None
-            or args.runner_arguments
-            or args.pairs != MIN_PAIRS
-            or args.timeout_seconds != 900
-            or args.runner_priority != RUNNER_PRIORITY_NORMAL
-        ):
-            raise ControlError(
-                "--reclassify-v3-ab requires --calibration, "
-                "--source-calibration, and optional --output only"
-            )
-        result = reclassify_v3_ab(
-            args.reclassify_v3_ab,
-            args.calibration,
-            args.source_calibration,
-        )
-        emit_result(result, args.output)
-        return result
-    if args.source_calibration is not None:
-        raise ControlError("--source-calibration is only valid with --reclassify-v3-ab")
     validate_pairs(args.pairs)
     if not 1 <= args.timeout_seconds <= 3_600:
         raise ControlError("--timeout-seconds must be in 1..=3600")

@@ -8,29 +8,28 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::BytesMut;
 use ferrum2_config::{
     DirectDomainResolver, DnsRuntimeConfig, DnsServerConfig, DnsTransport, ServerDnsRoute,
 };
-use ferrum2_core::route::{EgressPlanSnapshot, Network};
+use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_dns::{
     ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveOutcome,
     ApplicationResolveRequest, ApplicationResolver, ApplicationResolverMode, BoxedDnsDatagramIo,
-    BoxedDnsTcpIo, DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheError, DnsCacheKey,
-    DnsCacheQtype, DnsDatagramIo, DnsEgress, DnsEgressResourceKind, DnsEgressTaskKind, DnsError,
-    DnsIoFuture, DnsPolicyCompileError, DnsPolicyMatchResult, DnsPolicyMatchSource,
-    DnsPolicyMatchType, DnsPolicyObservation, DnsPolicyObserver, DnsPolicyProgram, DnsPolicyStage,
-    DnsProxy, DnsServerId, DnsStrategy, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
-    FixedEndpointLookup, ResolverGeneration, TaggedResolver, TaggedServerApplicationResolveBackend,
+    BoxedDnsTcpIo, DnsCache, DnsCacheError, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
+    DnsEgressTaskKind, DnsError, DnsIoFuture, DnsPolicyCompileError, DnsPolicyMatchResult,
+    DnsPolicyMatchSource, DnsPolicyMatchType, DnsPolicyObservation, DnsPolicyObserver,
+    DnsPolicyProgram, DnsPolicyStage, DnsProxy, DnsStrategy, DnsTaskRegistrar, DnsUpstreamSpec,
+    DnsUpstreamTransport, TaggedResolver, TaggedServerApplicationResolveBackend,
 };
 use ferrum2_observability::{
     DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics, RuleMatchResult, RuleMatchType,
     RuleProgram, RuleSource,
 };
-use ferrum2_rule::{ActionTable, RuleCompileError, RuleEngineRegistry, RuleEvaluationScratch};
+use ferrum2_rule::RuleEngineRegistry;
 #[cfg(all(not(windows), not(test)))]
 use ferrum2_runtime::RuntimeTcpStream;
 use ferrum2_runtime::{
@@ -98,11 +97,8 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct ServerDnsState {
-    route: ActionTable<usize>,
-    policy: Option<ServerDnsRoute>,
-    policy_scratch: Option<Mutex<RuleEvaluationScratch>>,
     strategy: DnsStrategy,
-    proxy_runtime: Option<ServerProxyRuntime>,
+    proxy_runtime: ServerProxyRuntime,
     policy_observer: Option<Arc<dyn DnsPolicyObserver>>,
     installed: Mutex<Option<InstalledServerDns>>,
 }
@@ -115,15 +111,14 @@ struct ServerProxyPolicy {
 }
 
 struct ServerProxyRuntime {
-    policy: Option<ServerProxyPolicy>,
+    policy: ServerProxyPolicy,
     cache: Option<DnsCache>,
-    generation: ResolverGeneration,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 struct InstalledServerDns {
     resolver: Arc<TaggedResolver>,
-    proxy: Option<Arc<DnsProxy>>,
+    proxy: Arc<DnsProxy>,
 }
 
 /// Closed construction failures for server DNS state. Keeping the rule error
@@ -133,21 +128,13 @@ struct InstalledServerDns {
 pub(super) enum ServerDnsStateBuildError {
     CacheAllocation,
     InvalidRuntime,
-    Rule(RuleCompileError),
     DnsPolicy(DnsPolicyCompileError),
-}
-
-impl From<RuleCompileError> for ServerDnsStateBuildError {
-    fn from(error: RuleCompileError) -> Self {
-        Self::Rule(error)
-    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl ServerDnsState {
     pub(super) fn try_new(
-        route: ActionTable<usize>,
-        policy: Option<ServerDnsRoute>,
+        policy: ServerDnsRoute,
         runtime: DnsRuntimeConfig,
     ) -> Result<Self, ServerDnsStateBuildError> {
         let cache_config = runtime.cache();
@@ -167,12 +154,11 @@ impl ServerDnsState {
         } else {
             None
         };
-        Self::try_new_with_cache(route, policy, runtime, cache)
+        Self::try_new_with_cache(policy, runtime, cache)
     }
 
     pub(super) fn try_new_with_cache(
-        route: ActionTable<usize>,
-        mut policy: Option<ServerDnsRoute>,
+        mut policy: ServerDnsRoute,
         runtime: DnsRuntimeConfig,
         cache: Option<DnsCache>,
     ) -> Result<Self, ServerDnsStateBuildError> {
@@ -180,49 +166,23 @@ impl ServerDnsState {
         if cache_config.enabled != cache.is_some() {
             return Err(ServerDnsStateBuildError::InvalidRuntime);
         }
-        let proxy_policy = policy
-            .as_mut()
-            .and_then(ServerDnsRoute::take_policy_blueprint)
-            .map(|binding| {
-                let (blueprint, registry, listener_count, ordinary_count) = binding.into_parts();
-                let snapshot = registry.snapshot();
-                let program = DnsPolicyProgram::try_from_blueprint(blueprint, &snapshot)
-                    .map_err(ServerDnsStateBuildError::DnsPolicy)?;
-                Ok::<ServerProxyPolicy, ServerDnsStateBuildError>(ServerProxyPolicy {
-                    program: Arc::new(program),
-                    registry,
-                    listener_count,
-                    ordinary_count,
-                })
-            })
-            .transpose()?;
-        if policy
-            .as_ref()
-            .is_some_and(|policy| !policy.has_compatibility_program())
-        {
-            policy = None;
-        }
-        let policy_scratch = policy
-            .as_ref()
-            .map(ServerDnsRoute::evaluation_scratch)
-            .transpose()
-            .map_err(ServerDnsStateBuildError::from)?
-            .map(Mutex::new);
-        let generation = proxy_policy
-            .as_ref()
-            .map_or(ResolverGeneration::new(0), |policy| {
-                ResolverGeneration::new(policy.registry.generation())
-            });
-        let proxy_runtime =
-            (proxy_policy.is_some() || cache.is_some()).then_some(ServerProxyRuntime {
-                policy: proxy_policy,
-                cache,
-                generation,
-            });
+        let binding = policy
+            .take_policy_blueprint()
+            .ok_or(ServerDnsStateBuildError::InvalidRuntime)?;
+        let (blueprint, registry, listener_count, ordinary_count) = binding.into_parts();
+        let snapshot = registry.snapshot();
+        let program = DnsPolicyProgram::try_from_blueprint(blueprint, &snapshot)
+            .map_err(ServerDnsStateBuildError::DnsPolicy)?;
+        let proxy_runtime = ServerProxyRuntime {
+            policy: ServerProxyPolicy {
+                program: Arc::new(program),
+                registry,
+                listener_count,
+                ordinary_count,
+            },
+            cache,
+        };
         Ok(Self {
-            route,
-            policy,
-            policy_scratch,
             strategy: dns_strategy(runtime.strategy()),
             proxy_runtime,
             policy_observer: None,
@@ -235,41 +195,23 @@ impl ServerDnsState {
         self
     }
 
-    pub(super) fn select(
-        &self,
-        inbound: usize,
-        network: Network,
-        target: &TargetAddr,
-    ) -> Option<usize> {
-        let Some(policy) = self.policy.as_ref() else {
-            return Some(self.route.select(inbound, network, target));
-        };
-        let mut scratch = self
-            .policy_scratch
-            .as_ref()?
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(policy.select_with_scratch(inbound, network, target, &mut scratch))
-    }
-
     pub(super) fn install(self: &Arc<Self>, resolver: Arc<TaggedResolver>) -> Result<(), ()> {
-        let proxy = self.proxy_runtime.as_ref().and_then(|runtime| {
-            let policy = runtime.policy.as_ref()?;
-            let mut proxy = DnsProxy::new(Arc::clone(&resolver), |_, _, _, _| None);
-            proxy = proxy.with_policy(
-                Arc::clone(&policy.program),
-                Arc::clone(&policy.registry),
-                policy.listener_count,
-                policy.ordinary_count,
-            );
-            if let Some(observer) = &self.policy_observer {
-                proxy = proxy.with_policy_observer(Arc::clone(observer));
-            }
-            if let Some(cache) = &runtime.cache {
-                proxy = proxy.with_cache(cache.clone(), runtime.generation);
-            }
-            Some(Arc::new(proxy))
-        });
+        let runtime = &self.proxy_runtime;
+        let policy = &runtime.policy;
+        let mut proxy = DnsProxy::new(
+            Arc::clone(&resolver),
+            Arc::clone(&policy.program),
+            Arc::clone(&policy.registry),
+            policy.listener_count,
+            policy.ordinary_count,
+        );
+        if let Some(observer) = &self.policy_observer {
+            proxy = proxy.with_policy_observer(Arc::clone(observer));
+        }
+        if let Some(cache) = &runtime.cache {
+            proxy = proxy.with_cache(cache.clone());
+        }
+        let proxy = Arc::new(proxy);
         let mut current = self.installed.lock().map_err(|_| ())?;
         if current.is_some() {
             return Err(());
@@ -282,72 +224,13 @@ impl ServerDnsState {
         self.installed.lock().ok()?.take().map(|dns| dns.resolver)
     }
 
-    fn resolver(&self) -> io::Result<Arc<TaggedResolver>> {
+    fn proxy(&self) -> io::Result<Arc<DnsProxy>> {
         self.installed
             .lock()
             .map_err(|_| io::Error::other("DNS resolver state unavailable"))?
             .as_ref()
-            .map(|dns| Arc::clone(&dns.resolver))
-            .ok_or_else(|| io::Error::other("DNS resolver is not active"))
-    }
-
-    fn proxy(&self) -> io::Result<Option<Arc<DnsProxy>>> {
-        Ok(self
-            .installed
-            .lock()
-            .map_err(|_| io::Error::other("DNS resolver state unavailable"))?
-            .as_ref()
-            .and_then(|dns| dns.proxy.as_ref().map(Arc::clone)))
-    }
-
-    async fn lookup_application_family(
-        &self,
-        resolver: &TaggedResolver,
-        server: usize,
-        domain: &ferrum2_core::CanonicalDomain,
-        qtype: DnsCacheQtype,
-    ) -> Result<Option<DnsAddressRecords>, DnsError> {
-        let server_id =
-            DnsServerId::new(u32::try_from(server).map_err(|_| DnsError::InvalidServer)?);
-        let cached = self.proxy_runtime.as_ref().and_then(|runtime| {
-            runtime.cache.as_ref().map(|cache| {
-                (
-                    cache,
-                    DnsCacheKey::new(server_id, domain.clone(), qtype, runtime.generation),
-                )
-            })
-        });
-        if let Some((cache, key)) = cached.as_ref() {
-            match cache
-                .get(key, Instant::now())
-                .map_err(|_| DnsError::Runtime)?
-            {
-                Some(DnsCacheAnswer::Positive(records)) => return Ok(Some(records)),
-                Some(DnsCacheAnswer::Negative) => return Ok(None),
-                None => {}
-            }
-        }
-        let lookup = resolver
-            .lookup_fixed_endpoint(server, domain.clone(), qtype)
-            .await?;
-        match lookup {
-            FixedEndpointLookup::Positive { records, ttl } => {
-                if let Some((cache, key)) = cached {
-                    cache
-                        .insert_positive(key, records.clone(), ttl, Instant::now())
-                        .map_err(|_| DnsError::Runtime)?;
-                }
-                Ok(Some(records))
-            }
-            FixedEndpointLookup::Negative { ttl } => {
-                if let Some((cache, key)) = cached {
-                    cache
-                        .insert_negative(key, ttl, Instant::now())
-                        .map_err(|_| DnsError::Runtime)?;
-                }
-                Ok(None)
-            }
-        }
+            .map(|dns| Arc::clone(&dns.proxy))
+            .ok_or_else(|| io::Error::other("DNS proxy is not active"))
     }
 
     const fn strategy(&self) -> DnsStrategy {
@@ -555,42 +438,11 @@ impl ApplicationResolveBackend for ServerConfiguredApplicationBackend {
         request: ApplicationResolveRequest<'a>,
     ) -> ApplicationResolveFuture<'a> {
         Box::pin(async move {
-            if let Some(proxy) = self.state.proxy().map_err(|_| DnsError::Runtime)? {
-                return proxy.resolve_application(request).await;
-            }
-            let context = request.context();
-            let target = TargetAddr::domain(request.domain().as_str(), request.port().get())
-                .map_err(|_| DnsError::Protocol)?;
-            let selected = self
-                .state
-                .select(context.ingress(), context.network(), &target)
-                .ok_or(DnsError::Runtime)?;
-            let resolver = self.state.resolver().map_err(|_| DnsError::Runtime)?;
-            let mut ipv4 = Vec::new();
-            let mut ipv6 = Vec::new();
-            let qtypes: &[DnsCacheQtype] = match request.strategy() {
-                DnsStrategy::PreferIpv4 | DnsStrategy::PreferIpv6 => {
-                    &[DnsCacheQtype::A, DnsCacheQtype::Aaaa]
-                }
-                DnsStrategy::Ipv4Only => &[DnsCacheQtype::A],
-                DnsStrategy::Ipv6Only => &[DnsCacheQtype::Aaaa],
-            };
-            for &qtype in qtypes {
-                let answer = self
-                    .state
-                    .lookup_application_family(&resolver, selected, request.domain(), qtype)
-                    .await?;
-                match answer {
-                    Some(DnsAddressRecords::A(records)) => ipv4.extend(records.iter().copied()),
-                    Some(DnsAddressRecords::Aaaa(records)) => ipv6.extend(records.iter().copied()),
-                    None => {}
-                }
-            }
-            let mut candidates = request
-                .strategy()
-                .socket_candidates(request.port(), &ipv4, &ipv6);
-            candidates.truncate(MAX_RESOLVED_CANDIDATES);
-            Ok(candidates)
+            self.state
+                .proxy()
+                .map_err(|_| DnsError::Runtime)?
+                .resolve_application(request)
+                .await
         })
     }
 }
@@ -1031,13 +883,17 @@ mod tests {
 
     use ferrum2_config::{
         CompiledRuleSetResource, DnsEndpointMode, ServerV2Resources, finish_server_v2,
-        prepare_server_v2,
+        prepare_server,
     };
     use ferrum2_core::route::EgressPlanHandle;
+    use ferrum2_dns::{
+        DnsAddressRecords, DnsCacheKey, DnsCacheQtype, DnsServerId, ResolverGeneration,
+    };
     use ferrum2_rule::MatchSetBuilder;
     use hickory_proto::op::{Message, MessageType, OpCode};
     use hickory_proto::rr::rdata::A;
     use hickory_proto::rr::{DNSClass, RData, Record, RecordType};
+    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1045,17 +901,15 @@ mod tests {
         Ipv4Addr, UdpSocket, assert_pending, recv_udp, reserve_address, server_test_config_source,
     };
 
-    #[test]
-    fn dns_state_constructor_retains_closed_failure_kind() {
-        let route = ActionTable::try_new(Vec::new(), 0).expect("empty compatibility route");
-        assert!(matches!(
-            ServerDnsState::try_new_with_cache(route, None, DnsRuntimeConfig::default(), None,),
-            Err(ServerDnsStateBuildError::InvalidRuntime)
-        ));
-        assert_eq!(
-            ServerDnsStateBuildError::from(RuleCompileError::Allocation),
-            ServerDnsStateBuildError::Rule(RuleCompileError::Allocation)
-        );
+    fn materialized_server_test_config_source(
+        label: &str,
+        source: &str,
+    ) -> (std::path::PathBuf, ferrum2_config::ValidatedServerConfig) {
+        let (path, _) = server_test_config_source(label, source);
+        let prepared = prepare_server(&path).expect("prepare server test config");
+        let config = finish_server_v2(prepared, ServerV2Resources::new(Vec::new(), Vec::new()))
+            .expect("finish server test config");
+        (path, config)
     }
 
     #[tokio::test]
@@ -1109,11 +963,14 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#
         );
-        let (path, mut config) = server_test_config_source("dns-observer", &source);
+        let (path, mut config) = materialized_server_test_config_source("dns-observer", &source);
         let dns = config.dns.take().expect("configured DNS");
         let state = Arc::new(
-            ServerDnsState::try_new(dns.route, config.dns_route.take(), dns.runtime)
-                .expect("configured state"),
+            ServerDnsState::try_new(
+                config.dns_route.take().expect("compiled DNS policy"),
+                dns.runtime,
+            )
+            .expect("configured state"),
         );
         let configured_metrics = Arc::new(Metrics::new());
         let configured =
@@ -1138,7 +995,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
 
     #[tokio::test]
-    async fn caller_owned_cache_is_used_without_a_ruleset_policy() {
+    async fn caller_owned_cache_is_used_with_compiled_final_policy() {
         let listen = reserve_address();
         let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1177,7 +1034,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#,
             upstream.local_addr().expect("upstream address")
         );
-        let (path, mut config) = server_test_config_source("dns-shared-cache", &source);
+        let (path, mut config) =
+            materialized_server_test_config_source("dns-shared-cache", &source);
         let dns = config.dns.take().expect("configured DNS");
         let specs = dns_runtime_specs(&dns.servers);
         let cache =
@@ -1198,8 +1056,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .expect("seed shared cache");
         let state = Arc::new(
             ServerDnsState::try_new_with_cache(
-                dns.route,
-                config.dns_route.take(),
+                config.dns_route.take().expect("compiled DNS policy"),
                 dns.runtime,
                 Some(cache),
             )
@@ -1794,7 +1651,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             listen.port()
         ));
         std::fs::write(&path, source).expect("write V2 server config");
-        let prepared = prepare_server_v2(&path).expect("prepare V2 server config");
+        let prepared = prepare_server(&path).expect("prepare server config");
         let mut ads = MatchSetBuilder::new();
         ads.add_exact_domain("ads.example").unwrap();
         let mut cnip = MatchSetBuilder::new();
@@ -1816,13 +1673,15 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         let dns = config.dns.take().expect("materialized DNS graph");
         let specs = dns_runtime_specs(&dns.servers);
         let state = Arc::new(
-            ServerDnsState::try_new(dns.route, config.dns_route.take(), dns.runtime)
-                .expect("policy DNS state")
-                .with_policy_observer(dns_policy_observer(&metrics)),
+            ServerDnsState::try_new(
+                config.dns_route.take().expect("compiled DNS policy"),
+                dns.runtime,
+            )
+            .expect("policy DNS state")
+            .with_policy_observer(dns_policy_observer(&metrics)),
         );
-        let proxy = state.proxy_runtime.as_ref().expect("policy proxy binding");
-        assert!(proxy.policy.is_some());
-        assert_eq!(proxy.generation, ResolverGeneration::new(17));
+        let proxy = &state.proxy_runtime;
+        assert_eq!(proxy.policy.registry.generation(), 17);
         assert_eq!(proxy.cache.as_ref().unwrap().capacity().unwrap(), 16);
         let (tagged, mut owner) = TaggedResolver::new(
             specs,
@@ -1988,35 +1847,33 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
              network = \"tcp\"\n\
              domain = \"exact.test\"\n\
              port = 53\n\
+             action = \"route\"\n\
              server = \"selected\"\n\
              [[dns.route.rules]]\n\
              inbound = \"i0\"\n\
              network = \"tcp\"\n\
              domain = \"dead.example.com\"\n\
              port = 443\n\
+             action = \"route\"\n\
              server = \"dead\"\n\
              [[dns.route.rules]]\n\
              inbound = \"i0\"\n\
              network = [\"tcp\", \"udp\"]\n\
              domain_suffix = \"example.com\"\n\
              port_range = \"443:8443\"\n\
+             action = \"route\"\n\
              server = \"selected\"\n"
         );
-        let (path, config) = server_test_config_source("dns-policy", &source);
+        let (path, mut config) = materialized_server_test_config_source("dns-policy", &source);
         let dns = config.dns.expect("server DNS config");
         let specs = dns_runtime_specs(&dns.servers);
         let state = Arc::new(
-            ServerDnsState::try_new(dns.route, config.dns_route, dns.runtime)
-                .expect("server DNS state"),
+            ServerDnsState::try_new(
+                config.dns_route.take().expect("compiled DNS policy"),
+                dns.runtime,
+            )
+            .expect("server DNS state"),
         );
-        let exact = TargetAddr::domain("EXACT.TEST.", 53).expect("exact target");
-        let suffix_low = TargetAddr::domain("api.example.com.", 443).expect("range low target");
-        let suffix_high =
-            TargetAddr::domain("deep.api.example.com", 8443).expect("range high target");
-        let dead = TargetAddr::domain("dead.example.com", 443).expect("dead target");
-        let below = TargetAddr::domain("api.example.com", 442).expect("below range target");
-        let above = TargetAddr::domain("api.example.com", 8444).expect("above range target");
-        let other = TargetAddr::domain("other.test", 443).expect("final target");
 
         let selected_task = tokio::spawn(async move {
             let mut wire = [0_u8; 4096];
@@ -2089,23 +1946,20 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         assert_eq!(resolver.mode(), ApplicationResolverMode::Configured);
         assert!(resolver.shares_application_resolver_with(&udp_resolver));
 
-        assert_eq!(
+        assert!(
             TcpResolver::resolve(&resolver, "EXACT.TEST.", 53)
                 .await
-                .expect("exact DNS resolution"),
-            []
+                .is_err()
         );
-        assert_eq!(
+        assert!(
             TcpResolver::resolve(&resolver, "api.example.com.", 443)
                 .await
-                .expect("suffix DNS resolution"),
-            []
+                .is_err()
         );
-        assert_eq!(
+        assert!(
             TcpResolver::resolve(&resolver, "other.test.", 443)
                 .await
-                .expect("final DNS resolution"),
-            []
+                .is_err()
         );
         check_final.send(()).expect("arm no-fallback check");
         assert!(
@@ -2117,15 +1971,6 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
         selected_task.await.expect("selected DNS upstream join");
         final_task.await.expect("final DNS upstream join");
-        assert_eq!(state.select(0, Network::Tcp, &exact), Some(0));
-        assert_eq!(state.select(0, Network::Tcp, &suffix_low), Some(0));
-        assert_eq!(state.select(0, Network::Udp, &suffix_high), Some(0));
-        assert_eq!(state.select(0, Network::Tcp, &dead), Some(1));
-        assert_eq!(state.select(1, Network::Tcp, &exact), Some(2));
-        assert_eq!(state.select(0, Network::Udp, &exact), Some(2));
-        assert_eq!(state.select(0, Network::Tcp, &below), Some(2));
-        assert_eq!(state.select(0, Network::Tcp, &above), Some(2));
-        assert_eq!(state.select(0, Network::Tcp, &other), Some(2));
         drop(resolver);
         drop(state.take());
         assert_eq!(

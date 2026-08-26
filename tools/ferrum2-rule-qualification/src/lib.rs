@@ -2507,56 +2507,58 @@ fn run_route_programs(
                 ));
             }
         }
-        // Production enables category observation for every Route evaluation.
-        // Exercise that selected-rule recheck at qualification-only scales so
-        // the pre-matrix smoke scenario set remains compatible with the pinned
-        // parent runner used by alternating A/A and A/B control runs.
-        if count >= 1_000 {
-            for (case, index) in [("first_observed", 0_usize), ("last_observed", count - 1)] {
-                let target = TargetAddr::domain(&format!("route-{index}.bench.invalid"), 443)
-                    .map_err(|_| QualificationError::new("observed route target is invalid"))?;
-                let actual = evaluate_route_observed(
-                    &mixed.program,
-                    mixed.snapshot.as_ref(),
-                    &target,
-                    index,
-                    &mut mixed_scratch,
-                );
-                if actual.selected != index {
-                    return Err(QualificationError::new(format!(
-                        "observed route {count}/{case} returned {}, expected {index}",
-                        actual.selected
-                    )));
-                }
-                let scenario = format!("indexed/{case}");
-                let result = benchmark(
-                    || {
-                        evaluate_route_observed(
-                            &mixed.program,
-                            mixed.snapshot.as_ref(),
-                            &target,
-                            index,
-                            &mut mixed_scratch,
-                        )
-                        .checksum()
-                    },
-                    samples,
-                    iterations,
-                );
-                measurements.push(measurement(
-                    format!("route_program/mixed_observed/{count}/{scenario}"),
-                    "route_program",
-                    "mixed_observed",
-                    scenario,
-                    count,
-                    None,
-                    Some(expected_mode),
-                    iterations,
-                    mixed.build,
-                    Some(count),
-                    result,
-                ));
+        // Production enables category observation for every Route evaluation,
+        // so every profile exercises the selected-rule category recheck.
+        for (case, index) in [("first_observed", 0_usize), ("last_observed", count - 1)] {
+            let target = TargetAddr::domain(&format!("route-{index}.bench.invalid"), 443)
+                .map_err(|_| QualificationError::new("observed route target is invalid"))?;
+            let actual = evaluate_route_observed(
+                &mixed.program,
+                mixed.snapshot.as_ref(),
+                &target,
+                index,
+                &mut mixed_scratch,
+            );
+            if actual.selected != index {
+                return Err(QualificationError::new(format!(
+                    "observed route {count}/{case} returned {}, expected {index}",
+                    actual.selected
+                )));
             }
+            let scenario = format!(
+                "{}/{case}",
+                match expected_mode {
+                    RuleProgramMode::SmallLinear => "small_linear",
+                    RuleProgramMode::Indexed => "indexed",
+                }
+            );
+            let result = benchmark(
+                || {
+                    evaluate_route_observed(
+                        &mixed.program,
+                        mixed.snapshot.as_ref(),
+                        &target,
+                        index,
+                        &mut mixed_scratch,
+                    )
+                    .checksum()
+                },
+                samples,
+                iterations,
+            );
+            measurements.push(measurement(
+                format!("route_program/mixed_observed/{count}/{scenario}"),
+                "route_program",
+                "mixed_observed",
+                scenario,
+                count,
+                None,
+                Some(expected_mode),
+                iterations,
+                mixed.build,
+                Some(count),
+                result,
+            ));
         }
         if ordinary_scratch.reserved_words() != reserved[0]
             || ruleset_scratch.reserved_words() != reserved[1]
@@ -3466,7 +3468,7 @@ mod tests {
     }
 
     #[test]
-    fn qualification_route_rows_cover_enabled_production_match_observation() {
+    fn every_route_scale_covers_enabled_production_match_observation() {
         let _guard = allocator_test_lock();
         let mut rows = Vec::new();
         run_route_programs(&[64, 1_000], 5, 1, &mut rows).expect("route observation evidence");
@@ -3474,17 +3476,25 @@ mod tests {
             .iter()
             .filter(|row| row.source == "mixed_observed")
             .collect::<Vec<_>>();
-        assert_eq!(observed.len(), 2);
-        assert!(observed.iter().all(|row| {
-            row.scale == 1_000
-                && row.rule_program_mode == Some("indexed")
-                && row.allocation_gate_passed == Some(true)
-                && row.outcome_checksum != 0
-        }));
+        assert_eq!(observed.len(), 4);
         assert!(
-            rows.iter()
-                .filter(|row| row.scale == 64)
-                .all(|row| row.source != "mixed_observed")
+            observed.iter().all(|row| {
+                row.allocation_gate_passed == Some(true) && row.outcome_checksum != 0
+            })
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|row| { row.scale == 64 && row.rule_program_mode == Some("small_linear") })
+                .count(),
+            2
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|row| row.scale == 1_000 && row.rule_program_mode == Some("indexed"))
+                .count(),
+            2
         );
     }
 

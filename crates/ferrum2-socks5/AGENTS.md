@@ -4,7 +4,7 @@ This file refines the repository-level `AGENTS.md` for this crate.
 
 ## Scope and Boundaries
 
-`ferrum2-socks5` owns the bounded SOCKS5 no-authentication handshake, exact request/reply bytes, retained control stream, and UDP datagram codec. It does not open outbound sockets or run the UDP relay. The `Inbound::accept` compatibility path accepts TCP CONNECT only; callers must use `accept_command` to opt into `SocksCommand::UdpAssociate`. Preserve the one-shot, consuming `SessionReply` API and keep UDP association success pending until the caller has completed socket setup.
+`ferrum2-socks5` owns the bounded SOCKS5 no-authentication handshake, exact request/reply bytes, retained control stream, and UDP datagram codec. It does not open outbound sockets or run the UDP relay. Callers use `accept_command` for both TCP CONNECT and `SocksCommand::UdpAssociate`. Preserve the one-shot, consuming `SessionReply` API and keep UDP association success pending until the caller has completed socket setup.
 
 Treat every wire field as hostile. Reads must remain bounded under arbitrary fragmentation, targets must have non-zero ports, and domains must satisfy `TargetAddr` validation. Error values and formatting must not retain targets, payloads, or transport errors. Replies are protocol contracts: retain their exact RFC status mapping and IPv4/IPv6 layout.
 

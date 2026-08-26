@@ -1,7 +1,7 @@
 mod common;
 
 use bytes::BytesMut;
-use ferrum2_crypto::TcpMethodProfile;
+use ferrum2_crypto::MethodProfile;
 use ferrum2_shadowsocks::{
     BufferRole, ClientTcpOutbound, MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN,
     MAX_ENCRYPT_WIRE_LEN, ShadowsocksTcpInbound, TAG_LEN, TcpKeyProvider, TcpReplayStore,
@@ -114,7 +114,10 @@ async fn client_flow_allocates_once_then_admits_0_1_max_and_max_plus_one() {
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
         .with_observers(&observers, &observers);
     let mut flow = outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("request first-write");
 
@@ -170,7 +173,13 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
     let outbound =
         ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random)
             .with_observers(&client_observers, &client_observers);
-    let mut client = outbound.open_stream(&target()).await.expect("client");
+    let mut client = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     let mut destination = [0_u8; 16];
 
     let first = read_plain(&mut client, &mut destination)
@@ -219,9 +228,9 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     for (case, profile) in [
-        TcpMethodProfile::Blake3Aes128Gcm2022,
-        TcpMethodProfile::Blake3Aes256Gcm2022,
-        TcpMethodProfile::Blake3ChaCha20Poly13052022,
+        MethodProfile::Blake3Aes128Gcm2022,
+        MethodProfile::Blake3Aes256Gcm2022,
+        MethodProfile::Blake3ChaCha20Poly13052022,
     ]
     .into_iter()
     .enumerate()
@@ -235,7 +244,13 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
         let outbound =
             ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &client_random)
                 .with_observers(&client_observers, &client_observers);
-        let mut client = outbound.open_stream(&target()).await.expect("client");
+        let mut client = outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .expect("client");
         let mut offset = 0;
         while offset < plaintext.len() {
             let written = write_plain(&mut client, &plaintext[offset..])

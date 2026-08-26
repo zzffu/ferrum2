@@ -22,13 +22,6 @@ impl<S> LocalEndpoint for ClientTcpFlow<'_, S>
 where
     S: LocalEndpoint,
 {
-    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
-        match self {
-            Self::Direct(stream) => stream.local_endpoint(),
-            Self::Proxy(flow) => flow.local_endpoint(),
-        }
-    }
-
     fn local_socket_addr(&self) -> std::net::SocketAddr {
         match self {
             Self::Direct(stream) => stream.local_socket_addr(),
@@ -194,11 +187,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use ferrum2_config::RouteAction;
     use ferrum2_core::route::Network;
     use ferrum2_core::{ConnectErrorKind, TargetAddr};
     use ferrum2_crypto::{
         Clock, MethodProfile, MethodSinglePskProvider, MethodTcpSalt, SystemClock,
     };
+    use ferrum2_rule::{RouteMetadata, RouteProgramAction};
     use ferrum2_shadowsocks::{
         DetectionReason, FlowTerminal, MethodKeyAdapter, ShadowsocksError, ShadowsocksTcpInbound,
         TcpKeyProvider, TcpReplayStore, encode_response_first_write,
@@ -206,6 +201,89 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::run::test_support::*;
+
+    fn selected_plan(
+        route: &ferrum2_config::CompiledRoute,
+        inbound: usize,
+        network: Network,
+        target: &TargetAddr,
+    ) -> ferrum2_core::route::EgressPlanSnapshot {
+        let mut scratch = route.evaluation_scratch().expect("route scratch");
+        let mut evaluation = route.evaluate_with_scratch(inbound, network, target, &mut scratch);
+        loop {
+            match evaluation.next(RouteMetadata::new(None, None)) {
+                Some(RouteProgramAction::Continue(_)) => {}
+                Some(RouteProgramAction::Terminal(RouteAction::Route(plan)))
+                | Some(RouteProgramAction::Final(RouteAction::Route(plan))) => {
+                    return plan.snapshot_owned();
+                }
+                other => panic!("unexpected route action: {other:?}"),
+            }
+        }
+    }
+
+    fn tcp_chain_test_setup(
+        methods: [MethodProfile; 4],
+        first_port: u16,
+    ) -> (
+        Arc<[ClientOutboundContext]>,
+        ferrum2_config::CompiledRoute,
+        ferrum2_rule::SelectorControl,
+    ) {
+        let servers: [SocketAddrV4; 4] = std::array::from_fn(|hop| {
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, first_port + hop as u16)
+        });
+        let outbounds = prepare_client_outbounds(
+            servers
+                .into_iter()
+                .zip(methods)
+                .map(
+                    |(server, method)| ferrum2_config::ClientOutboundConfig::Shadowsocks {
+                        server: server.into(),
+                        psk: Arc::new(psk_for_method(method)),
+                        dial_options: Default::default(),
+                    },
+                )
+                .collect(),
+        )
+        .expect("checked runtime outbounds");
+        let listen = reserve_address();
+        let mut source = format!(
+            "schema_version = 2\n\
+             [[inbounds]]\n\
+             tag = \"entry\"\n\
+             listen = \"{listen}\"\n\
+             outbound = \"manual\"\n"
+        );
+        for (index, server) in servers.into_iter().enumerate() {
+            let tag = ['a', 'b', 'c', 'd'][index];
+            source.push_str(&format!(
+                "[[outbounds]]\n\
+                 tag = \"{tag}\"\n\
+                 type = \"shadowsocks\"\n\
+                 server = \"{server}\"\n\
+                 method = \"2022-blake3-aes-128-gcm\"\n\
+                 psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+            ));
+        }
+        source.push_str(
+            "[[chains]]\n\
+             tag = \"a-b\"\n\
+             hops = [\"a\", \"b\"]\n\
+             [[chains]]\n\
+             tag = \"c-d\"\n\
+             hops = [\"c\", \"d\"]\n\
+             [[selectors]]\n\
+             tag = \"manual\"\n\
+             outbounds = [\"a-b\", \"c-d\"]\n\
+             default = \"a-b\"\n",
+        );
+        let path = write_client_test_source(&source);
+        let config = ferrum2_config::load_client(&path).expect("chain selector");
+        std::fs::remove_file(path).expect("remove chain selector config");
+        let selector = config.selector_control();
+        (outbounds, config.route, selector)
+    }
 
     #[tokio::test]
     async fn direct_tcp_socks_uses_the_numeric_target_and_raw_half_close() {
@@ -234,8 +312,9 @@ mod tests {
             None,
         );
         let opened = engine
-            .open_tcp(
+            .open_tcp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 &target,
                 None,
@@ -275,7 +354,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let (outbounds, route, selector) = chain_test_setup(
+            let (outbounds, route, selector) = tcp_chain_test_setup(
                 [first_method, second_method, second_method, first_method],
                 42_001 + case as u16 * 10,
             );
@@ -284,11 +363,11 @@ mod tests {
                 443 + case as u16,
             ))
             .expect("application target");
-            let snapshot = route.select_plan_snapshot(0, Network::Tcp, &application);
+            let snapshot = selected_plan(&route, 0, Network::Tcp, &application);
             assert_eq!(snapshot.hops(), &[0, 1], "rotation {case}");
             selector.switch("manual", "c-d").expect("switch next flow");
             assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
-            let next_snapshot = route.select_plan_snapshot(0, Network::Tcp, &application);
+            let next_snapshot = selected_plan(&route, 0, Network::Tcp, &application);
             assert_eq!(next_snapshot.hops(), &[2, 3], "next rotation {case}");
             let clock = SystemClock::new();
             let random = FixedRandom;
@@ -317,8 +396,9 @@ mod tests {
                 );
                 let observer = ChainObserver::default();
                 let flow = engine
-                    .open_tcp(
+                    .open_tcp_for_ingress(
                         ClientRequestOrigin::Socks,
+                        0,
                         Some(plan.clone()),
                         &application,
                         None,
@@ -421,7 +501,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn tcp_chain_failure_and_cancellation_drop_every_layer() {
-        let (outbounds, route, selector) = chain_test_setup(
+        let (outbounds, route, selector) = tcp_chain_test_setup(
             [
                 MethodProfile::Blake3Aes256Gcm2022,
                 MethodProfile::Blake3ChaCha20Poly13052022,
@@ -432,7 +512,7 @@ mod tests {
         );
         let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 443))
             .expect("application target");
-        let snapshot = route.select_plan_snapshot(0, Network::Tcp, &application);
+        let snapshot = selected_plan(&route, 0, Network::Tcp, &application);
         assert_eq!(snapshot.hops(), &[0, 1]);
         let clock = SystemClock::new();
         let random = FixedRandom;
@@ -453,8 +533,9 @@ mod tests {
         let unavailable_observer = ChainObserver::default();
         assert!(matches!(
             unavailable_engine
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(snapshot.clone()),
                     &application,
                     None,
@@ -497,8 +578,9 @@ mod tests {
                 None,
                 None,
             );
-            let mut opened = Box::pin(engine.open_tcp(
+            let mut opened = Box::pin(engine.open_tcp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(snapshot.clone()),
                 &application,
                 None,
@@ -566,8 +648,9 @@ mod tests {
         );
         assert!(matches!(
             write_zero
-                .open_tcp(
+                .open_tcp_for_ingress(
                     ClientRequestOrigin::Socks,
+                    0,
                     Some(snapshot.clone()),
                     &application,
                     None,
@@ -627,8 +710,9 @@ mod tests {
             None,
         );
         let partial_flow = partial
-            .open_tcp(
+            .open_tcp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(snapshot.clone()),
                 &application,
                 None,
@@ -720,8 +804,9 @@ mod tests {
             None,
         );
         let detection_flow = detection_engine
-            .open_tcp(
+            .open_tcp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(snapshot.clone()),
                 &application,
                 None,
@@ -824,8 +909,9 @@ mod tests {
             None,
         );
         let valid_flow = valid_engine
-            .open_tcp(
+            .open_tcp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(snapshot.clone()),
                 &application,
                 None,
@@ -908,8 +994,9 @@ mod tests {
             None,
         );
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect(label);
-        let mut opened = Box::pin(engine.open_tcp(
+        let mut opened = Box::pin(engine.open_tcp_for_ingress(
             ClientRequestOrigin::Socks,
+            0,
             Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
             &target,
             timeout_limit,
@@ -1062,8 +1149,9 @@ mod tests {
         );
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)).expect("target");
         let flow = engine
-            .open_tcp(
+            .open_tcp_for_ingress(
                 ClientRequestOrigin::Socks,
+                0,
                 Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
                 &target,
                 None,
@@ -1072,8 +1160,8 @@ mod tests {
             .await
             .expect("first write");
         assert_eq!(
-            flow.local_endpoint(),
-            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152)
+            flow.local_socket_addr(),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152))
         );
         let mut written = [0_u8; 2_048];
         assert!(peer.read(&mut written).await.expect("handshake wire") > 0);
@@ -1096,7 +1184,6 @@ mod tests {
                 SocketAddr::V6(_) => unreachable!("IPv4 upstream"),
             })
             .collect();
-        let target = TargetAddr::ipv4("192.0.2.1:80".parse().expect("target")).expect("target");
         let listens = [reserve_address(), reserve_address()];
         let mappings = [(listens[0], servers[0]), (listens[1], servers[1])];
         let (path, mut config) = tagged_client_test_config(&mappings, false);
@@ -1108,31 +1195,47 @@ mod tests {
                 psk: Arc::new(psk_for_method(MethodProfile::Blake3Aes128Gcm2022)),
                 dial_options: Default::default(),
             });
-        let rule = |inbound, target, outbound| {
-            TaggedRouteRule::new(inbound, Some(Network::Tcp), target, Some(outbound))
-        };
-        let (route, _) = compile_selector_route(
-            &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],
-            &[
-                TaggedOutbound::new("o0", 0),
-                TaggedOutbound::new("o1", 1),
-                TaggedOutbound::new("dead", 2),
-            ],
-            &[SelectorDefinition::new(
-                "manual",
-                vec!["o0", "o1", "dead"],
-                Some("o0"),
-            )],
-            TaggedRoute::Routed {
-                rules: vec![
-                    rule(Some("i1"), None, "manual"),
-                    rule(None, Some(target), "manual"),
-                ],
-                final_outbound: Some("manual"),
-            },
-        )
-        .expect("selector route");
-        config.route = route;
+        let route_source = format!(
+            r#"schema_version = 2
+[[inbounds]]
+tag = "i0"
+listen = "{}"
+[[inbounds]]
+tag = "i1"
+listen = "{}"
+[[outbounds]]
+tag = "o0"
+type = "direct"
+[[outbounds]]
+tag = "o1"
+type = "direct"
+[[outbounds]]
+tag = "dead"
+type = "direct"
+[[selectors]]
+tag = "manual"
+outbounds = ["o0", "o1", "dead"]
+default = "o0"
+[route]
+final = "manual"
+[[route.rules]]
+inbound = "i1"
+network = "tcp"
+action = "route"
+outbound = "manual"
+[[route.rules]]
+network = "tcp"
+ip = "192.0.2.1"
+port = 80
+action = "route"
+outbound = "manual"
+"#,
+            listens[0], listens[1]
+        );
+        let route_path = write_client_test_source(&route_source);
+        let route_config = ferrum2_config::load_client(&route_path).expect("selector route");
+        std::fs::remove_file(route_path).expect("remove selector route config");
+        config.route = route_config.route;
         let selector = config.selector_control();
         let registry = OwnerRegistry::new();
         let (stop, task) = spawn_test_client(config, &registry);

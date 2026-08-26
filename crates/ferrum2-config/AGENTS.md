@@ -15,8 +15,8 @@ cargo test -p ferrum2-config --locked
 cargo test -p ferrum2-config --test config_contract --locked
 ```
 
-The contract test intentionally reads `tests/fixtures/config`. Preserve the schema-v1 compatibility cohort when extending schema v2, and add valid and field-specific invalid cases for new syntax or bounds.
+The contract test intentionally reads `tests/fixtures/config`. Preserve the schema-v1 rejection cohort when extending schema v2, and add valid and field-specific invalid cases for new syntax or bounds.
 
-## Security and Compatibility Contracts
+## Security and Rejection Contracts
 
-Keep the 1 MiB pre-parse limit, UTF-8/TOML rejection, `deny_unknown_fields`, closed `ConfigErrorKind`/`ConfigField` reporting, and fail-closed graph compilation. Never include parser sources, configuration values, endpoints, tags, or keys in errors. Configuration source and decoded/canonical PSK buffers must remain zeroizing; public secret owners and route actions remain redacted. Preserve checks for profile-specific key widths, listener aliasing, loopback-only metrics, authenticated DoT/DoH names and paths, and bounded TUN flow, association, queue, route-row, and lifecycle relationships. TUN configuration does not maintain or validate an aggregate owned-memory budget; compatibility-only legacy byte fields must not enter validated resource calculations.
+Keep the 1 MiB pre-parse limit, UTF-8/TOML rejection, `deny_unknown_fields`, closed `ConfigErrorKind`/`ConfigField` reporting, and fail-closed graph compilation. Never include parser sources, configuration values, endpoints, tags, or keys in errors. Configuration source and decoded/canonical PSK buffers must remain zeroizing; public secret owners and route actions remain redacted. Preserve checks for profile-specific key widths, listener aliasing, loopback-only metrics, authenticated DoT/DoH names and paths, and bounded TUN flow, association, queue, route-row, and lifecycle relationships. TUN configuration does not maintain or validate an aggregate owned-memory budget; removed byte fields must remain rejected and must not enter validated resource calculations.

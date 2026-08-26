@@ -74,7 +74,13 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
         let connector = RecordingConnector::succeeds(io);
         let random = ScriptedRandom::new(client_random_bytes(&request_salt));
         let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-        let mut flow = outbound.open_stream(&target()).await.expect("client");
+        let mut flow = outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .expect("client");
         let mut destination = [0_u8; 32];
 
         let read = read_plain(&mut flow, &mut destination)
@@ -145,7 +151,13 @@ async fn client_subsequent_length_and_payload_accept_one_byte_and_mixed_fragment
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     let mut destination = [0_u8; 32];
 
     let first = read_plain(&mut flow, &mut destination)
@@ -293,7 +305,13 @@ async fn mid_response_first_payload_eof_is_detection_and_terminal_is_frozen() {
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     let mut destination = [0_u8; 16];
 
     assert_eq!(
@@ -367,7 +385,13 @@ async fn short_fixed_response_remains_detection() {
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     let mut destination = [0_u8; 8];
 
     assert_eq!(

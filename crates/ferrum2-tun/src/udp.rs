@@ -21,17 +21,14 @@ const CANDIDATE_TIMEOUT_MILLIS: i64 = 5_000;
 /// Fixed maximum number of address-dependent peers retained by one association.
 pub const UDP_ADF_PEER_CAP: usize = 256;
 
-/// Immutable endpoints for one UDP datagram.
-///
-/// This remains as a compatibility view for the current packet builder. It is
-/// never used as the association-table key; only `source` is indexed.
+/// Immutable validated endpoints for one UDP datagram.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UdpTuple {
+pub(crate) struct UdpDatagramEndpoints {
     source: SocketAddr,
     target: SocketAddr,
 }
 
-impl UdpTuple {
+impl UdpDatagramEndpoints {
     pub(crate) const fn new(source: SocketAddr, target: SocketAddr) -> Self {
         Self { source, target }
     }
@@ -152,11 +149,6 @@ impl UdpDatagram {
     /// Per-datagram target; it is never frozen at association creation.
     pub const fn target(&self) -> SocketAddr {
         self.target
-    }
-
-    /// Compatibility endpoint view for the current client migration.
-    pub const fn tuple(&self) -> UdpTuple {
-        UdpTuple::new(self.source, self.target)
     }
 
     pub fn payload(&self) -> &[u8] {
@@ -613,18 +605,8 @@ impl UdpCandidate {
         self.first_target
     }
 
-    /// Compatibility endpoint view for the current client migration.
-    pub const fn tuple(&self) -> UdpTuple {
-        UdpTuple::new(self.source, self.first_target)
-    }
-
     pub fn first_payload(&self) -> &[u8] {
         &self.first_payload
-    }
-
-    /// Compatibility alias for `first_payload`.
-    pub fn payload(&self) -> &[u8] {
-        self.first_payload()
     }
 
     pub const fn packet_payload_bound(&self) -> usize {
@@ -719,10 +701,6 @@ impl UdpAssociation {
 
     pub const fn first_target(&self) -> SocketAddr {
         self.first_target
-    }
-
-    pub const fn tuple(&self) -> UdpTuple {
-        UdpTuple::new(self.source, self.first_target)
     }
 
     pub fn response_sink(&self) -> UdpResponseSink {
@@ -907,14 +885,14 @@ impl UdpTable {
 
     pub(crate) fn admit(
         &mut self,
-        tuple: UdpTuple,
+        endpoints: UdpDatagramEndpoints,
         payload: &[u8],
         payload_bound: usize,
         now_millis: i64,
         admitting: bool,
     ) -> Admission {
         self.admit_with_ingress_bound(
-            tuple,
+            endpoints,
             payload,
             payload_bound,
             payload_bound,
@@ -925,14 +903,14 @@ impl UdpTable {
 
     pub(crate) fn admit_reassembled(
         &mut self,
-        tuple: UdpTuple,
+        endpoints: UdpDatagramEndpoints,
         payload: &[u8],
         response_payload_bound: usize,
         now_millis: i64,
         admitting: bool,
     ) -> Admission {
         self.admit_with_ingress_bound(
-            tuple,
+            endpoints,
             payload,
             response_payload_bound,
             payload.len(),
@@ -943,7 +921,7 @@ impl UdpTable {
 
     fn admit_with_ingress_bound(
         &mut self,
-        tuple: UdpTuple,
+        endpoints: UdpDatagramEndpoints,
         payload: &[u8],
         response_payload_bound: usize,
         ingress_payload_bound: usize,
@@ -951,7 +929,7 @@ impl UdpTable {
         admitting: bool,
     ) -> Admission {
         self.expire(now_millis);
-        if let Some(reason) = invalid_datagram_endpoint(tuple.source, tuple.target) {
+        if let Some(reason) = invalid_datagram_endpoint(endpoints.source, endpoints.target) {
             self.events.emit(TunEvent::PacketRejected(reason));
             return Admission::Dropped;
         }
@@ -962,7 +940,7 @@ impl UdpTable {
             return Admission::Dropped;
         }
 
-        if let Some(slot) = self.index.get(&tuple.source).copied() {
+        if let Some(slot) = self.index.get(&endpoints.source).copied() {
             let closed = self
                 .slots
                 .get(slot)
@@ -975,7 +953,7 @@ impl UdpTable {
             } else {
                 return self.enqueue_existing(
                     slot,
-                    tuple,
+                    endpoints,
                     payload,
                     ingress_payload_bound,
                     now_millis,
@@ -1005,8 +983,8 @@ impl UdpTable {
         let (sender, receiver) = mpsc::channel(DATAGRAM_QUEUE_PACKETS);
         let first_payload: Arc<[u8]> = Arc::from(payload);
         let first = UdpDatagram {
-            source: tuple.source,
-            target: tuple.target,
+            source: endpoints.source,
+            target: endpoints.target,
             payload: Arc::clone(&first_payload),
         };
         if sender.try_send(first).is_err() {
@@ -1024,24 +1002,24 @@ impl UdpTable {
             self.wake.clone(),
             self.events.clone(),
         ));
-        let peer_policy = Arc::new(PeerPolicy::new(self.filtering, tuple.source.ip()));
+        let peer_policy = Arc::new(PeerPolicy::new(self.filtering, endpoints.source.ip()));
         let deadline_millis = now_millis.saturating_add(CANDIDATE_TIMEOUT_MILLIS);
         self.slots[slot] = Some(Slot::Candidate {
-            source: tuple.source,
+            source: endpoints.source,
             payload_bound: response_payload_bound,
             sender,
             peer_policy: Arc::clone(&peer_policy),
             lease: Arc::clone(&lease),
             deadline_millis,
         });
-        self.index.insert(tuple.source, slot);
+        self.index.insert(endpoints.source, slot);
         self.candidate_count += 1;
         self.events
             .emit(TunEvent::UdpCandidatesActive(self.candidate_count));
         self.schedule_deadline(id, deadline_millis);
         let candidate = UdpCandidate {
-            source: tuple.source,
-            first_target: tuple.target,
+            source: endpoints.source,
+            first_target: endpoints.target,
             first_payload,
             packet_payload_bound: response_payload_bound,
             receiver: Some(receiver),
@@ -1064,7 +1042,7 @@ impl UdpTable {
     fn enqueue_existing(
         &mut self,
         slot: usize,
-        tuple: UdpTuple,
+        endpoints: UdpDatagramEndpoints,
         payload: &[u8],
         ingress_payload_bound: usize,
         now_millis: i64,
@@ -1076,8 +1054,8 @@ impl UdpTable {
             return Admission::Dropped;
         };
         let datagram = UdpDatagram {
-            source: tuple.source,
-            target: tuple.target,
+            source: endpoints.source,
+            target: endpoints.target,
             payload: Arc::from(payload),
         };
         let mut refresh_deadline = None;
@@ -1131,7 +1109,7 @@ impl UdpTable {
         &mut self,
         now_millis: i64,
         admitting: bool,
-        inject: impl FnMut(UdpTuple, &[u8]) -> InjectOutcome,
+        inject: impl FnMut(UdpDatagramEndpoints, &[u8]) -> InjectOutcome,
     ) -> EventOutcome {
         self.expire(now_millis);
         let mut outcome = EventOutcome::default();
@@ -1261,7 +1239,7 @@ impl UdpTable {
     pub(crate) fn process_one_response(
         &mut self,
         now_millis: i64,
-        mut inject: impl FnMut(UdpTuple, &[u8]) -> InjectOutcome,
+        mut inject: impl FnMut(UdpDatagramEndpoints, &[u8]) -> InjectOutcome,
     ) -> ResponseProcessOutcome {
         let (response, was_pending) = match self.pending_response.take() {
             Some(response) => (response, true),
@@ -1351,8 +1329,9 @@ impl UdpTable {
             }
             Ok(true) => {}
         }
-        let tuple = UdpTuple::new(response.association_source, response.response_source);
-        match inject(tuple, &response.payload) {
+        let endpoints =
+            UdpDatagramEndpoints::new(response.association_source, response.response_source);
+        match inject(endpoints, &response.payload) {
             InjectOutcome::Injected => {
                 if was_pending {
                     self.events.emit(TunEvent::UdpPendingResponses(0));
@@ -1632,8 +1611,8 @@ mod tests {
         address.parse().expect("IPv6 socket address")
     }
 
-    fn tuple(source_port: u16, target: &str) -> UdpTuple {
-        UdpTuple::new(v4(&format!("198.18.0.1:{source_port}")), v4(target))
+    fn endpoints(source_port: u16, target: &str) -> UdpDatagramEndpoints {
+        UdpDatagramEndpoints::new(v4(&format!("198.18.0.1:{source_port}")), v4(target))
     }
 
     fn table(
@@ -1682,23 +1661,23 @@ mod tests {
         }));
         let cases = [
             (
-                UdpTuple::new(v4("0.0.0.0:10000"), v4("192.0.2.1:53")),
+                UdpDatagramEndpoints::new(v4("0.0.0.0:10000"), v4("192.0.2.1:53")),
                 TunRejectReason::InvalidSource,
             ),
             (
-                UdpTuple::new(v4("198.18.0.1:0"), v4("192.0.2.1:53")),
+                UdpDatagramEndpoints::new(v4("198.18.0.1:0"), v4("192.0.2.1:53")),
                 TunRejectReason::InvalidSource,
             ),
             (
-                UdpTuple::new(v4("198.18.0.1:10000"), v4("192.0.2.1:0")),
+                UdpDatagramEndpoints::new(v4("198.18.0.1:10000"), v4("192.0.2.1:0")),
                 TunRejectReason::InvalidDestination,
             ),
             (
-                UdpTuple::new(v4("198.18.0.1:10000"), v4("224.0.0.1:53")),
+                UdpDatagramEndpoints::new(v4("198.18.0.1:10000"), v4("224.0.0.1:53")),
                 TunRejectReason::InvalidDestination,
             ),
             (
-                UdpTuple::new(v4("198.18.0.1:10000"), v6("[2001:db8::1]:53")),
+                UdpDatagramEndpoints::new(v4("198.18.0.1:10000"), v6("[2001:db8::1]:53")),
                 TunRejectReason::InvalidDestination,
             ),
         ];
@@ -1718,7 +1697,7 @@ mod tests {
     async fn c2_response_backpressure_preserves_current_event_and_does_not_consume_next() {
         let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::AddressDependent, 1);
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -1780,7 +1759,7 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -1821,7 +1800,7 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -1860,7 +1839,7 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -1889,7 +1868,7 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -1923,7 +1902,7 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -1985,7 +1964,7 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -2037,7 +2016,7 @@ mod tests {
     async fn c8_lifecycle_control_is_reliable_when_data_queues_are_congested() {
         let (mut table, mut candidates, wakes) =
             table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
-        let key = tuple(10_001, "192.0.2.1:53");
+        let key = endpoints(10_001, "192.0.2.1:53");
         assert_eq!(
             table.admit(key, b"first", 1_392, 0, true),
             Admission::Provisional
@@ -2072,7 +2051,7 @@ mod tests {
     async fn c9_candidate_timeout_is_fixed_five_seconds_and_separate_from_idle() {
         let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::AddressDependent, 9);
         assert_eq!(
-            table.admit(tuple(10_002, "192.0.2.1:53"), b"q", 1_392, 10, true),
+            table.admit(endpoints(10_002, "192.0.2.1:53"), b"q", 1_392, 10, true),
             Admission::Provisional
         );
         let candidate = candidates.recv().await.unwrap();
@@ -2092,7 +2071,13 @@ mod tests {
         ));
 
         assert_eq!(
-            table.admit(tuple(10_002, "192.0.2.2:53"), b"new", 1_392, 6_000, true),
+            table.admit(
+                endpoints(10_002, "192.0.2.2:53"),
+                b"new",
+                1_392,
+                6_000,
+                true,
+            ),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 6_001).await;
@@ -2109,7 +2094,7 @@ mod tests {
     #[tokio::test]
     async fn c10_hash_index_free_list_counts_and_generation_deadlines_are_exact() {
         let (mut table, mut candidates, _) = table(1, 10, UdpFiltering::EndpointIndependent, 3);
-        let first = tuple(10_003, "192.0.2.1:53");
+        let first = endpoints(10_003, "192.0.2.1:53");
         assert_eq!(
             table.admit(first, b"one", 1_392, 0, true),
             Admission::Provisional
@@ -2122,7 +2107,7 @@ mod tests {
         assert_eq!(table.active_associations(), 1);
         assert_eq!(table.provisional_candidates(), 0);
         assert_eq!(
-            table.admit(tuple(10_004, "192.0.2.2:53"), b"new", 1_392, 2, true),
+            table.admit(endpoints(10_004, "192.0.2.2:53"), b"new", 1_392, 2, true),
             Admission::Dropped,
             "capacity pressure drops the new source and never evicts live state"
         );
@@ -2158,7 +2143,13 @@ mod tests {
         drop(association);
 
         assert_eq!(
-            table.admit(tuple(10_004, "192.0.2.2:53"), b"reused", 1_392, 19, true),
+            table.admit(
+                endpoints(10_004, "192.0.2.2:53"),
+                b"reused",
+                1_392,
+                19,
+                true,
+            ),
             Admission::Provisional
         );
         assert_eq!(table.active_entries(), 1);
@@ -2173,7 +2164,7 @@ mod tests {
         let (mut table, mut candidates, _) =
             table(capacity, 100, UdpFiltering::EndpointIndependent, 31);
         assert_eq!(
-            table.admit(tuple(10_031, "192.0.2.1:53"), b"q", 1_392, 0, true),
+            table.admit(endpoints(10_031, "192.0.2.1:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -2216,7 +2207,13 @@ mod tests {
             captured.lock().expect("UDP events").push(event);
         }));
         assert_eq!(
-            table.admit(tuple(10_005, "192.0.2.1:53"), b"request", 1_392, 0, true),
+            table.admit(
+                endpoints(10_005, "192.0.2.1:53"),
+                b"request",
+                1_392,
+                0,
+                true,
+            ),
             Admission::Provisional
         );
         let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
@@ -2242,7 +2239,7 @@ mod tests {
     async fn stale_commit_notice_remains_counted_and_fail_closed() {
         let (mut table, mut candidates, _) =
             table(1, 60_000, UdpFiltering::EndpointIndependent, 41);
-        let first = tuple(10_005, "192.0.2.1:53");
+        let first = endpoints(10_005, "192.0.2.1:53");
         let observed = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&observed);
         table.set_event_sink(TunEventSink::new(move |event| {
@@ -2288,7 +2285,7 @@ mod tests {
     async fn c17_stale_generation_handles_cannot_commit_close_or_inject() {
         let (mut table, mut candidates, _) =
             table(1, 60_000, UdpFiltering::EndpointIndependent, 41);
-        let first = tuple(10_005, "192.0.2.1:53");
+        let first = endpoints(10_005, "192.0.2.1:53");
         assert_eq!(
             table.admit(first, b"old", 1_392, 0, true),
             Admission::Provisional
@@ -2344,11 +2341,23 @@ mod tests {
         let first_target = v4("192.0.2.1:53");
         let second_target = v4("198.51.100.2:5353");
         assert_eq!(
-            adf.admit(UdpTuple::new(source, first_target), b"one", 1_392, 0, true),
+            adf.admit(
+                UdpDatagramEndpoints::new(source, first_target),
+                b"one",
+                1_392,
+                0,
+                true,
+            ),
             Admission::Provisional
         );
         assert_eq!(
-            adf.admit(UdpTuple::new(source, second_target), b"two", 1_392, 1, true),
+            adf.admit(
+                UdpDatagramEndpoints::new(source, second_target),
+                b"two",
+                1_392,
+                1,
+                true,
+            ),
             Admission::CandidateQueued,
             "different targets share one source-keyed candidate"
         );
@@ -2363,7 +2372,7 @@ mod tests {
         let v6_source = v6("[2001:db8::10]:10");
         assert_eq!(
             adf.admit(
-                UdpTuple::new(other_v4_source, first_target),
+                UdpDatagramEndpoints::new(other_v4_source, first_target),
                 b"other-port",
                 1_392,
                 2,
@@ -2374,7 +2383,7 @@ mod tests {
         );
         assert_eq!(
             adf.admit(
-                UdpTuple::new(v6_source, v6("[2001:db8::20]:53")),
+                UdpDatagramEndpoints::new(v6_source, v6("[2001:db8::20]:53")),
                 b"v6",
                 1_392,
                 2,
@@ -2429,7 +2438,10 @@ mod tests {
         );
         assert_eq!(
             injected,
-            Some((UdpTuple::new(source, actual_source), b"allowed".to_vec()))
+            Some((
+                UdpDatagramEndpoints::new(source, actual_source),
+                b"allowed".to_vec()
+            ))
         );
 
         for index in 0..(UDP_ADF_PEER_CAP - 1) {
@@ -2456,7 +2468,7 @@ mod tests {
 
         assert_eq!(
             adf.admit(
-                UdpTuple::new(source, v6("[2001:db8::1]:53")),
+                UdpDatagramEndpoints::new(source, v6("[2001:db8::1]:53")),
                 b"mixed",
                 1_392,
                 4,
@@ -2466,7 +2478,7 @@ mod tests {
         );
         assert_eq!(
             adf.admit(
-                UdpTuple::new(source, v4("224.0.0.1:53")),
+                UdpDatagramEndpoints::new(source, v4("224.0.0.1:53")),
                 b"multicast",
                 1_392,
                 4,
@@ -2478,7 +2490,7 @@ mod tests {
         let (mut eif, mut eif_candidates, _) =
             table(1, 60_000, UdpFiltering::EndpointIndependent, 7);
         assert_eq!(
-            eif.admit(tuple(11, "192.0.2.10:53"), b"q", 1_392, 0, true),
+            eif.admit(endpoints(11, "192.0.2.10:53"), b"q", 1_392, 0, true),
             Admission::Provisional
         );
         let eif_association = commit(&mut eif, eif_candidates.recv().await.unwrap(), 1).await;

@@ -10,13 +10,12 @@ use std::time::Duration;
 use ferrum2_config::{
     ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,
     CompiledRuleSetResource, ConfigError, ConfigErrorKind, ConfigField, DialEndpoint,
-    DirectDomainResolver, DnsEndpointMode, DnsIngressId, DnsQueryType, DnsStrategy,
-    PreparedClientOutboundKind, PreparedDependencyNode, PreparedDnsAction, PreparedDnsEndpointMode,
-    PreparedEgressRef, PreparedFixedEndpointTarget, PreparedRuleSetDownloadMode,
-    ResolvedDnsEndpoint, ResolvedOutboundEndpoint, ResolverRef, RouteAction, SchemaVersion,
-    ServerV2MaterializeContext, ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2,
-    finish_server_v2, load_client, materialize_client_v2, materialize_server_v2, prepare_client,
-    prepare_client_v2, prepare_server, prepare_server_v2,
+    DirectDomainResolver, DnsEndpointMode, DnsIngressId, DnsStrategy, PreparedClientOutboundKind,
+    PreparedDependencyNode, PreparedDnsAction, PreparedDnsEndpointMode, PreparedEgressRef,
+    PreparedFixedEndpointTarget, PreparedRuleSetDownloadMode, ResolvedDnsEndpoint,
+    ResolvedOutboundEndpoint, ResolverRef, RouteAction, SchemaVersion, ServerV2MaterializeContext,
+    ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2, load_client,
+    materialize_client_v2, materialize_server_v2, prepare_client, prepare_server,
 };
 use ferrum2_core::{CanonicalDomain, DomainName, TargetAddr};
 use ferrum2_rule::{
@@ -124,6 +123,8 @@ type = "direct"
 tag = "ss-out"
 type = "shadowsocks"
 server = "edge.example.test:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 domain_resolver = "local"
 domain_strategy = "ipv4_only"
 
@@ -197,9 +198,6 @@ strategy = "ipv6_only"
 rule_set = "ads"
 action = "reject"
 
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
 
 const SERVER_V2: &str = r#"
@@ -329,7 +327,7 @@ fn assert_schema_version_error<T>(result: Result<T, ConfigError>) {
 
 fn assert_config_syntax_error<T>(result: Result<T, ConfigError>) {
     let error = match result {
-        Ok(_) => panic!("legacy root shape produced a configuration"),
+        Ok(_) => panic!("removed root shape produced a configuration"),
         Err(error) => error,
     };
     assert_eq!(error.kind(), ConfigErrorKind::Syntax);
@@ -366,7 +364,7 @@ fn load_and_prepare_reject_missing_and_unsupported_schema_versions() {
 #[test]
 fn prepared_and_finished_client_preserve_strict_route_request_and_effective_state() {
     let without_tun = TempConfig::new(CLIENT_V2_MINIMAL);
-    let without_tun = prepare_client_v2(&without_tun.0).expect("prepare client without TUN");
+    let without_tun = prepare_client(&without_tun.0).expect("prepare client without TUN");
     assert!(!without_tun.has_tun());
     assert!(!without_tun.tun_auto_route());
     assert!(!without_tun.tun_strict_route_requested());
@@ -397,7 +395,7 @@ type = "direct"
 "#,
         );
         let file = TempConfig::new(&source);
-        let prepared = prepare_client_v2(&file.0).expect("prepare strict-route combination");
+        let prepared = prepare_client(&file.0).expect("prepare strict-route combination");
         assert!(prepared.has_tun());
         assert_eq!(prepared.tun_auto_route(), auto_route);
         assert_eq!(prepared.tun_strict_route_requested(), strict_route);
@@ -420,7 +418,7 @@ fn route_network_values_survive_client_and_server_prepare_finish() {
         1,
     );
     let client_file = TempConfig::new(&client_source);
-    let client = prepare_client_v2(&client_file.0).expect("prepare client route network");
+    let client = prepare_client(&client_file.0).expect("prepare client route network");
     assert!(client.route_network().auto_detect_interface);
     assert_eq!(
         client.route_network().default_interface(),
@@ -454,7 +452,7 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let server_file = TempConfig::new(server_source);
-    let server = prepare_server_v2(&server_file.0).expect("prepare server route network");
+    let server = prepare_server(&server_file.0).expect("prepare server route network");
     assert!(server.route_network().auto_detect_interface);
     assert_eq!(
         server.route_network().default_interface(),
@@ -489,7 +487,7 @@ inet6_bind_address = "2001:db8::10"
 final = "direct"
 "#;
     let client_file = TempConfig::new(client_source);
-    let client = prepare_client_v2(&client_file.0).expect("prepare client dial options");
+    let client = prepare_client(&client_file.0).expect("prepare client dial options");
     let descriptor = client.outbound(0).expect("client outbound descriptor");
     assert_eq!(
         descriptor.dial_options().bind_interface(),
@@ -534,7 +532,7 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let server_file = TempConfig::new(server_source);
-    let server = prepare_server_v2(&server_file.0).expect("prepare server dial options");
+    let server = prepare_server(&server_file.0).expect("prepare server dial options");
     let descriptor = server.outbound(0).expect("server outbound descriptor");
     assert_eq!(
         descriptor.dial_options().bind_interface(),
@@ -592,7 +590,7 @@ final = "bootstrap"
         "[2001:db8::53]:5353".parse().unwrap(),
     ]
     .into_boxed_slice();
-    let prepared = prepare_client_v2(&file.0).expect("prepare candidate TUN");
+    let prepared = prepare_client(&file.0).expect("prepare candidate TUN");
     let finished = finish_client_v2(
         prepared,
         ClientV2Resources::new(
@@ -611,13 +609,13 @@ final = "bootstrap"
         ]
     );
 
-    let prepared = prepare_client_v2(&file.0).expect("prepare alias candidate TUN");
+    let prepared = prepare_client(&file.0).expect("prepare alias candidate TUN");
     let error = match finish_client_v2(
         prepared,
         ClientV2Resources::new(
-            vec![ResolvedDnsEndpoint::new(
+            vec![ResolvedDnsEndpoint::from_candidates(
                 0,
-                "127.0.0.1:5353".parse().unwrap(),
+                Box::new(["127.0.0.1:5353".parse().unwrap()]),
             )],
             Vec::new(),
             Vec::new(),
@@ -675,7 +673,7 @@ server = "s{server}"
         ));
     }
     let overflow_file = TempConfig::new(&overflow_source);
-    let prepared = prepare_client_v2(&overflow_file.0).expect("prepare physical endpoint overflow");
+    let prepared = prepare_client(&overflow_file.0).expect("prepare physical endpoint overflow");
     let resources = (0_u32..17)
         .map(|server| {
             let candidates = (1_u8..=16)
@@ -729,7 +727,7 @@ fn async_materialize_facade_calls_context_once_and_short_circuits_failure() {
 #[test]
 fn bootstrap_descriptors_follow_dependency_order_without_exposing_values_in_debug() {
     let file = TempConfig::new(CLIENT_V2);
-    let prepared = prepare_client_v2(&file.0).expect("prepare bootstrap descriptors");
+    let prepared = prepare_client(&file.0).expect("prepare bootstrap descriptors");
 
     assert_eq!(prepared.dns_server_count(), 2);
     let doh = prepared.dns_server(1).expect("DoH descriptor");
@@ -796,7 +794,7 @@ fn bootstrap_descriptors_follow_dependency_order_without_exposing_values_in_debu
 #[test]
 fn client_prepare_retains_closed_resources_without_materializing() {
     let file = TempConfig::new(CLIENT_V2);
-    let prepared = prepare_client_v2(&file.0).expect("prepare client V2");
+    let prepared = prepare_client(&file.0).expect("prepare client V2");
 
     assert_eq!(
         prepared.rule_set_loader().cache_dir,
@@ -819,10 +817,6 @@ fn client_prepare_retains_closed_resources_without_materializing() {
         PreparedRuleSetDownloadMode::ClientResolved {
             resolver: ResolverRef::DnsServer(0),
         }
-    );
-    assert_eq!(
-        prepared.rule_sets()[0].download_resolver(),
-        Some(ResolverRef::DnsServer(0))
     );
     assert_eq!(
         prepared.rule_sets()[0].download_detour(),
@@ -897,7 +891,7 @@ fn client_prepare_retains_closed_resources_without_materializing() {
 #[test]
 fn server_prepare_accepts_shared_rulesets_and_selector_detours() {
     let file = TempConfig::new(SERVER_V2);
-    let prepared = prepare_server_v2(&file.0).expect("prepare server V2");
+    let prepared = prepare_server(&file.0).expect("prepare server V2");
     assert_eq!(
         prepared.outbound(0).unwrap().domain_resolver(),
         DirectDomainResolver::System
@@ -934,7 +928,7 @@ fn direct_resolver_metadata_is_preserved_for_client_and_server() {
         1,
     );
     let client_file = TempConfig::new(&client_source);
-    let client = prepare_client_v2(&client_file.0).expect("explicit client Direct resolver");
+    let client = prepare_client(&client_file.0).expect("explicit client Direct resolver");
     assert_eq!(
         client.outbound(0).unwrap().domain_resolver(),
         Some(DirectDomainResolver::DnsServer {
@@ -987,7 +981,7 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let server_file = TempConfig::new(server_source);
-    let server = prepare_server_v2(&server_file.0).expect("explicit server Direct resolver");
+    let server = prepare_server(&server_file.0).expect("explicit server Direct resolver");
     assert_eq!(server.outbound_count(), 1);
     assert_eq!(
         server.outbound(0).unwrap().domain_resolver(),
@@ -1023,7 +1017,7 @@ fn deferred_dns_and_ruleset_modes_keep_domains_and_need_no_resolver_resources() 
         )
         .replace("download_resolver = \"local\"\n", "");
     let file = TempConfig::new(&source);
-    let prepared = prepare_client_v2(&file.0).expect("deferred domain targets");
+    let prepared = prepare_client(&file.0).expect("deferred domain targets");
     assert_eq!(
         prepared.dns_endpoints()[1].mode(),
         PreparedDnsEndpointMode::DeferredToDetour
@@ -1045,7 +1039,6 @@ fn deferred_dns_and_ruleset_modes_keep_domains_and_need_no_resolver_resources() 
         prepared.rule_sets()[0].download_mode(),
         PreparedRuleSetDownloadMode::DeferredToDetour
     );
-    assert_eq!(prepared.rule_sets()[0].download_resolver(), None);
     let finished = finish_client_v2(
         prepared,
         ClientV2Resources::new(
@@ -1084,7 +1077,7 @@ fn direct_resolver_cycles_use_the_unified_dependency_cycle_code() {
             1,
         );
     let file = TempConfig::new(&source);
-    let error = prepare_client_v2(&file.0).expect_err("Direct resolver cycle");
+    let error = prepare_client(&file.0).expect_err("Direct resolver cycle");
     assert_eq!(error.kind(), ConfigErrorKind::DnsDependencyCycle);
     assert_eq!(error.code(), "config.dependency_cycle");
     assert_eq!(
@@ -1128,7 +1121,7 @@ default = "inner"
 final = "outer"
 "#;
     let file = TempConfig::new(source);
-    let prepared = prepare_client_v2(&file.0).expect("nested selectors");
+    let prepared = prepare_client(&file.0).expect("nested selectors");
     assert_eq!(
         prepared.accepts_domain_target(PreparedEgressRef::Selector(0)),
         Some(true)
@@ -1145,7 +1138,7 @@ final = "outer"
         )
         .replace("default = \"direct-a\"", "default = \"outer\"");
     let file = TempConfig::new(&cycle);
-    let error = prepare_client_v2(&file.0).expect_err("nested selector cycle");
+    let error = prepare_client(&file.0).expect_err("nested selector cycle");
     assert_eq!(error.code(), "config.dependency_cycle");
     assert_eq!(
         error.to_string(),
@@ -1183,7 +1176,7 @@ default = "loop-chain"
 final = "loop-selector"
 "#;
     let file = TempConfig::new(source);
-    let error = prepare_client_v2(&file.0).expect_err("selector/chain cycle");
+    let error = prepare_client(&file.0).expect_err("selector/chain cycle");
 
     assert_eq!(error.code(), "config.dependency_cycle");
     assert_eq!(
@@ -1283,7 +1276,7 @@ fn endpoint_and_ruleset_failures_are_field_specific_and_redacted() {
     ];
     for (index, (source, expected_kind, expected_field)) in cases.into_iter().enumerate() {
         let file = TempConfig::new(&source);
-        let error = prepare_client_v2(&file.0).expect_err("invalid prepared config");
+        let error = prepare_client(&file.0).expect_err("invalid prepared config");
         assert_eq!(error.kind(), expected_kind, "case {index}");
         assert_eq!(error.field(), expected_field, "case {index}");
         let display = error.to_string();
@@ -1309,7 +1302,7 @@ download_detour = "main"
         1,
     );
     let file = TempConfig::new(&source);
-    let error = prepare_client_v2(&file.0).expect_err("duplicate RuleSet tag");
+    let error = prepare_client(&file.0).expect_err("duplicate RuleSet tag");
     assert_eq!(error.kind(), ConfigErrorKind::Semantic);
     assert_eq!(error.field(), ConfigField::RouteRuleSetTag);
     let rendered = format!("{error:?} {error}");
@@ -1321,7 +1314,7 @@ download_detour = "main"
 fn system_is_reserved_and_dependency_cycles_fail_before_materialization() {
     let reserved = CLIENT_V2.replace("tag = \"local\"", "tag = \"system\"");
     let file = TempConfig::new(&reserved);
-    let error = prepare_client_v2(&file.0).unwrap_err();
+    let error = prepare_client(&file.0).unwrap_err();
     assert_eq!(error.kind(), ConfigErrorKind::DnsReservedResolverName);
     assert_eq!(error.field(), ConfigField::DnsServersTag);
 
@@ -1330,7 +1323,7 @@ fn system_is_reserved_and_dependency_cycles_fail_before_materialization() {
         "domain_resolver = \"bootstrap\"",
     );
     let file = TempConfig::new(&self_cycle);
-    let error = prepare_client_v2(&file.0).unwrap_err();
+    let error = prepare_client(&file.0).unwrap_err();
     assert_eq!(error.kind(), ConfigErrorKind::DnsDependencyCycle);
     assert_eq!(error.field(), ConfigField::DnsDependencyCycle);
 
@@ -1339,13 +1332,13 @@ fn system_is_reserved_and_dependency_cycles_fail_before_materialization() {
         "address = \"192.0.2.53:53\"\ndetour = \"main\"",
     );
     let file = TempConfig::new(&selector_cycle);
-    let error = prepare_client_v2(&file.0).unwrap_err();
+    let error = prepare_client(&file.0).unwrap_err();
     assert_eq!(error.kind(), ConfigErrorKind::DnsDependencyCycle);
     assert_eq!(error.field(), ConfigField::DnsDependencyCycle);
 }
 
 #[test]
-fn schema_v1_is_rejected_before_legacy_root_fields_are_parsed() {
+fn schema_v1_is_rejected_before_removed_root_fields_are_parsed() {
     let source = r#"
 schema_version = 1
 [client]
@@ -1367,7 +1360,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 
 #[test]
-fn schema_v2_rejects_legacy_client_and_server_root_shapes() {
+fn schema_v2_rejects_removed_client_and_server_root_shapes() {
     let client = TempConfig::new(
         r#"
 schema_version = 2
@@ -1397,132 +1390,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 
 #[test]
-fn inline_domain_keyword_compiles_for_ordinary_and_dns_routes() {
-    let source = r#"
-schema_version = 2
-
-[[inbounds]]
-tag = "proxy"
-listen = "127.0.0.1:1080"
-
-[[outbounds]]
-tag = "fallback"
-type = "direct"
-
-[[outbounds]]
-tag = "keyword"
-type = "direct"
-
-[route]
-final = "fallback"
-
-[[route.rules]]
-domain_keyword = "needle"
-action = "route"
-outbound = "keyword"
-
-[dns]
-
-[[dns.inbounds]]
-tag = "dns-in"
-listen = "127.0.0.1:5353"
-
-[[dns.servers]]
-tag = "fallback-dns"
-transport = "udp"
-address = "192.0.2.1:53"
-
-[[dns.servers]]
-tag = "keyword-dns"
-transport = "udp"
-address = "192.0.2.2:53"
-
-[dns.route]
-final = "fallback-dns"
-
-[[dns.route.rules]]
-domain_keyword = "needle"
-action = "route"
-server = "keyword-dns"
-
-[[dns.route.rules]]
-qname = "exact.example"
-action = "route"
-server = "keyword-dns"
-"#;
-    let file = TempConfig::new(source);
-    let config = ferrum2_config::load_client(&file.0).expect("load inline keyword V2");
-    assert!(
-        config
-            .dns_route
-            .as_ref()
-            .expect("DNS route")
-            .has_compatibility_program()
-    );
-    let target = TargetAddr::domain("has-needle.example", 443).expect("target");
-    let mut route = config
-        .route_program
-        .as_ref()
-        .expect("compiled route")
-        .evaluate(0, Network::Tcp, &target);
-    match route.next(RouteMetadata::new(None, None)) {
-        Some(RouteProgramAction::Terminal(RouteAction::Route(plan))) => {
-            assert_eq!(plan.snapshot().hops(), [1]);
-        }
-        _ => panic!("domain keyword did not select its route"),
-    }
-    assert_eq!(
-        config.dns_route.as_ref().expect("DNS route").select(
-            DnsIngressId::Listener(0),
-            Network::Udp,
-            &target,
-            Some(DnsQueryType::A),
-        ),
-        Some(1)
-    );
-
-    let prepared = prepare_client_v2(&file.0).expect("prepare inline keyword V2");
-    let finished =
-        finish_client_v2(prepared, ClientV2Resources::default()).expect("finish inline keyword V2");
-    let binding = finished
-        .dns_route
-        .as_ref()
-        .and_then(|route| route.policy_blueprint())
-        .expect("inline-only policy blueprint");
-    assert!(
-        !finished
-            .dns_route
-            .as_ref()
-            .expect("materialized DNS route")
-            .has_compatibility_program()
-    );
-    assert_eq!(binding.registry().generation(), 0);
-    let blueprint = binding.blueprint();
-    assert_eq!(blueprint.len(), 2);
-    assert_eq!(blueprint.response_rule_count(), 0);
-    for (rule, domain) in blueprint
-        .rules()
-        .iter()
-        .zip(["has-needle.example", "exact.example"])
-    {
-        assert!(
-            rule.matcher().query_fields()[0]
-                .matches_domain(&CanonicalDomain::new(domain).expect("canonical policy probe"))
-        );
-        assert_eq!(
-            rule.action(),
-            DnsPolicyActionDescriptor::Route(ferrum2_rule::DnsPolicyRouteDescriptor::new(
-                1,
-                DnsPolicyAddressStrategy::PreferIpv4,
-            ))
-        );
-    }
-}
-
-#[test]
 fn finish_client_replaces_domain_endpoints_and_captures_one_registry() {
     let file = TempConfig::new(CLIENT_V2);
-    let prepared = prepare_client_v2(&file.0).expect("prepare client V2");
+    let prepared = prepare_client(&file.0).expect("prepare client V2");
     let config = finish_client_v2(prepared, valid_client_resources()).expect("finish client V2");
 
     assert_eq!(
@@ -1555,13 +1425,13 @@ fn finish_client_replaces_domain_endpoints_and_captures_one_registry() {
     let dns_runtime = config.dns.as_ref().unwrap().runtime;
     assert_eq!(dns_runtime.strategy(), DnsStrategy::PreferIpv6);
     assert_eq!(dns_runtime.cache().max_entries, 8_192);
-    let route = config.route_program.as_ref().expect("compiled route");
+    let route = &config.route;
     let registry = route.rule_registry().expect("RuleSet registry");
     assert_eq!(registry.generation(), 7);
     assert_eq!(registry.snapshot().rule_set_count(), 1);
 
     let dns_route = config.dns_route.as_ref().expect("compiled DNS route");
-    assert!(!dns_route.has_compatibility_program());
+    assert!(dns_route.policy_blueprint().is_some());
     let binding = dns_route
         .policy_blueprint()
         .expect("materialized DNS policy blueprint");
@@ -1595,7 +1465,8 @@ fn finish_client_replaces_domain_endpoints_and_captures_one_registry() {
     );
 
     let target = TargetAddr::domain("blocked.example", 443).unwrap();
-    let mut evaluation = route.evaluate(0, Network::Tcp, &target);
+    let mut scratch = route.evaluation_scratch().expect("route scratch");
+    let mut evaluation = route.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
     assert_eq!(evaluation.snapshot_generation(), Some(7));
     assert!(matches!(
         evaluation.next(RouteMetadata::new(None, None)),
@@ -1604,13 +1475,13 @@ fn finish_client_replaces_domain_endpoints_and_captures_one_registry() {
 }
 
 #[test]
-fn materialized_v2_dns_runtime_uses_compatible_defaults() {
+fn materialized_v2_dns_runtime_uses_configured_defaults() {
     let source = CLIENT_V2
         .replace("strategy = \"prefer_ipv6\"\n", "")
         .replace("\n[dns.cache]\nenabled = true\nmax_entries = 8192\n", "");
     assert!(!source.contains("[dns.cache]"));
     let file = TempConfig::new(&source);
-    let prepared = prepare_client_v2(&file.0).expect("prepare default DNS runtime");
+    let prepared = prepare_client(&file.0).expect("prepare default DNS runtime");
     let prepared_runtime = prepared.dns_runtime().expect("prepared default runtime");
     assert_eq!(prepared_runtime.strategy(), DnsStrategy::PreferIpv4);
     assert_eq!(
@@ -1668,7 +1539,7 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let file = TempConfig::new(source);
-    let prepared = prepare_server_v2(&file.0).expect("prepare server RuleSets");
+    let prepared = prepare_server(&file.0).expect("prepare server RuleSets");
     let config = finish_server_v2(
         prepared,
         ServerV2Resources::new(
@@ -1680,10 +1551,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         ),
     )
     .expect("finish server RuleSets");
-    let route = config.route_program.as_ref().unwrap();
+    let route = &config.route;
     let original = TargetAddr::ip("192.0.2.10:443".parse().unwrap()).unwrap();
     let sniffed = DomainName::new("SNIFFED.EXAMPLE.").unwrap();
-    let mut evaluation = route.evaluate(0, Network::Tcp, &original);
+    let mut scratch = route.evaluation_scratch().expect("route scratch");
+    let mut evaluation = route.evaluate_with_scratch(0, Network::Tcp, &original, &mut scratch);
     assert_eq!(evaluation.snapshot_generation(), Some(9));
     assert!(matches!(
         evaluation.next(RouteMetadata::new(None, None)),
@@ -1695,7 +1567,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     ));
 
     let target = TargetAddr::domain("sniffed.example", 443).unwrap();
-    let mut wrong_network = route.evaluate(0, Network::Udp, &target);
+    let mut wrong_scratch = route.evaluation_scratch().expect("route scratch");
+    let mut wrong_network =
+        route.evaluate_with_scratch(0, Network::Udp, &target, &mut wrong_scratch);
     assert!(matches!(
         wrong_network.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Final(RouteAction::Route(_)))
@@ -1766,7 +1640,7 @@ method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let file = TempConfig::new(source);
-    let prepared = prepare_server_v2(&file.0).expect("prepare server DNS policy");
+    let prepared = prepare_server(&file.0).expect("prepare server DNS policy");
     let config = finish_server_v2(
         prepared,
         ServerV2Resources::new(
@@ -1779,12 +1653,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     )
     .expect("finish server DNS policy");
     let route_registry = config
-        .route_program
-        .as_ref()
-        .and_then(|route| route.rule_registry())
+        .route
+        .rule_registry()
         .expect("ordinary route registry");
     let dns_route = config.dns_route.as_ref().expect("server DNS route");
-    assert!(!dns_route.has_compatibility_program());
+    assert!(dns_route.policy_blueprint().is_some());
     let binding = dns_route
         .policy_blueprint()
         .expect("server DNS policy blueprint");
@@ -1836,8 +1709,14 @@ fn finish_rejects_missing_extra_mistyped_and_misidentified_resources_redacted() 
         ClientV2Resources::default(),
         ClientV2Resources::new(
             vec![
-                ResolvedDnsEndpoint::new(1, "[2001:db8::53]:443".parse().unwrap()),
-                ResolvedDnsEndpoint::new(0, "192.0.2.53:53".parse().unwrap()),
+                ResolvedDnsEndpoint::from_candidates(
+                    1,
+                    Box::new(["[2001:db8::53]:443".parse().unwrap()]),
+                ),
+                ResolvedDnsEndpoint::from_candidates(
+                    0,
+                    Box::new(["192.0.2.53:53".parse().unwrap()]),
+                ),
             ],
             vec![ResolvedOutboundEndpoint::new(
                 1,
@@ -1850,9 +1729,9 @@ fn finish_rejects_missing_extra_mistyped_and_misidentified_resources_redacted() 
             )],
         ),
         ClientV2Resources::new(
-            vec![ResolvedDnsEndpoint::new(
+            vec![ResolvedDnsEndpoint::from_candidates(
                 1,
-                "[2001:db8::53]:443".parse().unwrap(),
+                Box::new(["[2001:db8::53]:443".parse().unwrap()]),
             )],
             vec![ResolvedOutboundEndpoint::new(
                 0,
@@ -1865,9 +1744,9 @@ fn finish_rejects_missing_extra_mistyped_and_misidentified_resources_redacted() 
             )],
         ),
         ClientV2Resources::new(
-            vec![ResolvedDnsEndpoint::new(
+            vec![ResolvedDnsEndpoint::from_candidates(
                 1,
-                "[2001:db8::53]:443".parse().unwrap(),
+                Box::new(["[2001:db8::53]:443".parse().unwrap()]),
             )],
             vec![ResolvedOutboundEndpoint::new(
                 1,
@@ -1880,9 +1759,9 @@ fn finish_rejects_missing_extra_mistyped_and_misidentified_resources_redacted() 
             )],
         ),
         ClientV2Resources::new(
-            vec![ResolvedDnsEndpoint::new(
+            vec![ResolvedDnsEndpoint::from_candidates(
                 1,
-                "[2001:db8::53]:443".parse().unwrap(),
+                Box::new(["[2001:db8::53]:443".parse().unwrap()]),
             )],
             vec![ResolvedOutboundEndpoint::new(
                 1,
@@ -1896,7 +1775,7 @@ fn finish_rejects_missing_extra_mistyped_and_misidentified_resources_redacted() 
         ),
     ];
     for (index, resources) in invalid.into_iter().enumerate() {
-        let prepared = prepare_client_v2(&file.0).expect("prepare invalid resource case");
+        let prepared = prepare_client(&file.0).expect("prepare invalid resource case");
         let error = finish_client_v2(prepared, resources)
             .err()
             .expect("resource mismatch must fail");
@@ -1921,7 +1800,7 @@ download_detour = "main"
 "#;
     let source = CLIENT_V2.replacen("[[route.rules]]", &format!("{second}\n[[route.rules]]"), 1);
     let file = TempConfig::new(&source);
-    let prepared = prepare_client_v2(&file.0).expect("prepare two RuleSets");
+    let prepared = prepare_client(&file.0).expect("prepare two RuleSets");
     assert!(std::ptr::eq(
         prepared.download_detour_plan(0).unwrap(),
         prepared.download_detour_plan(1).unwrap()
@@ -1929,9 +1808,9 @@ download_detour = "main"
     assert_eq!(prepared.download_detour_is_direct(0), Some(true));
     assert_eq!(prepared.download_detour_is_direct(1), Some(true));
     let resources = ClientV2Resources::new(
-        vec![ResolvedDnsEndpoint::new(
+        vec![ResolvedDnsEndpoint::from_candidates(
             1,
-            "[2001:db8::53]:443".parse().unwrap(),
+            Box::new(["[2001:db8::53]:443".parse().unwrap()]),
         )],
         vec![ResolvedOutboundEndpoint::new(
             1,
@@ -1957,7 +1836,7 @@ fn ruleset_tags_reject_cache_path_components() {
         let source = CLIENT_V2.replacen("tag = \"ads\"", &format!("tag = \"{tag}\""), 1);
         let file = TempConfig::new(&source);
         assert_eq!(
-            prepare_client_v2(&file.0).unwrap_err().field(),
+            prepare_client(&file.0).unwrap_err().field(),
             ConfigField::RouteRuleSetTag
         );
     }
@@ -1980,12 +1859,16 @@ type = "direct"
 tag = "download-hop"
 type = "shadowsocks"
 server = "edge.example.test:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 domain_resolver = "bootstrap"
 
 [[outbounds]]
 tag = "download-exit"
 type = "shadowsocks"
 server = "192.0.2.99:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 [[chains]]
 tag = "download-chain"
@@ -2020,12 +1903,9 @@ address = "192.0.2.2:53"
 [dns.route]
 final = "final-dns"
 
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     let file = TempConfig::new(source);
-    let prepared = prepare_client_v2(&file.0).expect("dependency-only roots prepare");
+    let prepared = prepare_client(&file.0).expect("dependency-only roots prepare");
     assert_eq!(
         prepared.accepts_domain_target(PreparedEgressRef::Chain(0)),
         Some(true)
@@ -2082,7 +1962,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 
 #[test]
-fn old_v2_finishes_without_a_registry_or_resources() {
+fn minimal_v2_finishes_without_a_registry_or_resources() {
     let source = r#"
 schema_version = 2
 
@@ -2098,22 +1978,14 @@ type = "direct"
 final = "direct"
 "#;
     let file = TempConfig::new(source);
-    let prepared = prepare_client_v2(&file.0).expect("prepare old V2");
+    let prepared = prepare_client(&file.0).expect("prepare old V2");
     let config = finish_client_v2(prepared, ClientV2Resources::default()).expect("finish old V2");
-    assert!(
-        config
-            .route_program
-            .as_ref()
-            .unwrap()
-            .rule_registry()
-            .is_none()
-    );
+    assert!(config.route.rule_registry().is_none());
     let target = TargetAddr::domain("ordinary.example", 443).unwrap();
+    let mut scratch = config.route.evaluation_scratch().expect("route scratch");
     let mut evaluation = config
-        .route_program
-        .as_ref()
-        .unwrap()
-        .evaluate(0, Network::Tcp, &target);
+        .route
+        .evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
     assert!(matches!(
         evaluation.next(RouteMetadata::new(None, None)),
         Some(RouteProgramAction::Final(RouteAction::Route(_)))
@@ -2124,7 +1996,7 @@ final = "direct"
 fn tracked_dns_ruleset_example_prepares_closed_query_and_response_blueprint() {
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/examples/client-v2-dns-rulesets.toml");
-    let prepared = prepare_client_v2(&example).expect("prepare tracked DNS RuleSet example");
+    let prepared = prepare_client(&example).expect("prepare tracked DNS RuleSet example");
     let config = finish_client_v2(
         prepared,
         ClientV2Resources::new(
@@ -2188,11 +2060,11 @@ fn tracked_dns_ruleset_example_prepares_closed_query_and_response_blueprint() {
 #[test]
 fn response_dependent_ruleset_reject_is_closed_and_field_specific() {
     let file = TempConfig::new(CLIENT_V2);
-    let prepared = prepare_client_v2(&file.0).expect("prepare response reject case");
+    let prepared = prepare_client(&file.0).expect("prepare response reject case");
     let resources = ClientV2Resources::new(
-        vec![ResolvedDnsEndpoint::new(
+        vec![ResolvedDnsEndpoint::from_candidates(
             1,
-            "[2001:db8::53]:443".parse().unwrap(),
+            Box::new(["[2001:db8::53]:443".parse().unwrap()]),
         )],
         vec![ResolvedOutboundEndpoint::new(
             1,

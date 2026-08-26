@@ -10,8 +10,7 @@ pub(in crate::run) use std::time::Duration;
 
 pub(in crate::run) use ferrum2_config::{RuntimeConfig, ValidatedClientConfig};
 pub(in crate::run) use ferrum2_core::{
-    AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, Inbound as _,
-    LocalEndpoint, TargetAddr,
+    AbortiveClose, ConnectError, ConnectErrorKind, Connector, Datagram, LocalEndpoint, TargetAddr,
 };
 pub(in crate::run) use ferrum2_crypto::{
     Clock, MethodProfile, MethodSinglePskProvider, RandomError, SecureRandom, SystemClock,
@@ -19,11 +18,7 @@ pub(in crate::run) use ferrum2_crypto::{
 };
 pub(in crate::run) use ferrum2_dns::{DnsProxy, DnsProxySockets};
 pub(in crate::run) use ferrum2_observability::Metrics;
-pub(in crate::run) use ferrum2_rule::{
-    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedPlan, TaggedRoute, TaggedRouteRule,
-    TaggedStaticBinding, compile_selector_plans, compile_selector_plans_with_roots,
-    compile_selector_route,
-};
+pub(in crate::run) use ferrum2_rule::{TaggedInbound, TaggedOutbound, TaggedPlan};
 pub(in crate::run) use ferrum2_runtime::{
     OwnerRegistry, OwnerSnapshot, ProcessRoot, ProcessSupervisor, SupervisorError, TcpConnector,
     UdpDirection, UdpRuntimeLimits, UdpSessionManager,
@@ -234,8 +229,8 @@ impl AsyncWrite for ScriptedIo {
 }
 
 impl LocalEndpoint for ScriptedIo {
-    fn local_endpoint(&self) -> SocketAddrV4 {
-        self.endpoint
+    fn local_socket_addr(&self) -> SocketAddr {
+        SocketAddr::V4(self.endpoint)
     }
 }
 
@@ -343,7 +338,7 @@ pub(in crate::run) fn chain_test_setup(
     first_port: u16,
 ) -> (
     Arc<[ClientOutboundContext]>,
-    ferrum2_rule::RouteTable,
+    ferrum2_config::CompiledRoute,
     ferrum2_core::selector::SelectorControl,
 ) {
     let servers: [SocketAddrV4; 4] =
@@ -367,27 +362,37 @@ pub(in crate::run) fn chain_test_setup(
             .collect(),
     )
     .expect("checked runtime outbounds");
-    let (route, selector) = compile_selector_plans(
-        &[TaggedInbound::new("entry", 0)],
-        &[
-            TaggedOutbound::new("a", 0),
-            TaggedOutbound::new("b", 1),
-            TaggedOutbound::new("c", 2),
-            TaggedOutbound::new("d", 3),
-        ],
-        &[
-            TaggedPlan::new("a-b", vec![0, 1]),
-            TaggedPlan::new("c-d", vec![2, 3]),
-        ],
-        &[SelectorDefinition::new(
-            "manual",
-            vec!["a-b", "c-d"],
-            Some("a-b"),
-        )],
-        TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "manual")]),
-    )
-    .expect("chain selector");
-    (outbounds, route, selector)
+    let listen = reserve_address();
+    let mut source = format!(
+        r#"schema_version = 2
+[[inbounds]]
+tag = "entry"
+listen = "{listen}"
+outbound = "manual"
+"#,
+    );
+    for (tag, server) in ["a", "b", "c", "d"].into_iter().zip(servers) {
+        source.push_str(&test_shadowsocks_outbound_source(tag, server));
+    }
+    source.push_str(
+        r#"
+[[chains]]
+tag = "a-b"
+hops = ["a", "b"]
+[[chains]]
+tag = "c-d"
+hops = ["c", "d"]
+[[selectors]]
+tag = "manual"
+outbounds = ["a-b", "c-d"]
+default = "a-b"
+"#,
+    );
+    let path = write_client_test_source(&source);
+    let config = ferrum2_config::load_client(&path).expect("chain selector");
+    std::fs::remove_file(path).expect("remove chain selector config");
+    let selector = config.selector_control();
+    (outbounds, config.route, selector)
 }
 
 pub(in crate::run) async fn scripted_input(bytes: &[u8]) -> TokioTransport<ScriptedIo> {
@@ -458,20 +463,31 @@ pub(in crate::run) fn reserve_address() -> SocketAddrV4 {
     panic!("no paired test address available")
 }
 
-pub(in crate::run) fn client_test_config(
-    listen: SocketAddrV4,
-    server: SocketAddrV4,
-) -> (PathBuf, ValidatedClientConfig) {
+pub(in crate::run) fn write_client_test_source(source: &str) -> PathBuf {
     static CONFIG_ID: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "ferrum2-client-composition-{}-{}.toml",
         std::process::id(),
         CONFIG_ID.fetch_add(1, Ordering::SeqCst)
     ));
-    let source = format!(
-        "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{listen}\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"{server}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n"
-    );
     std::fs::write(&path, source).expect("client test config");
+    path
+}
+
+pub(in crate::run) fn test_shadowsocks_outbound_source(tag: &str, server: SocketAddrV4) -> String {
+    format!(
+        "[[outbounds]]\ntag = \"{tag}\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+    )
+}
+
+pub(in crate::run) fn client_test_config(
+    listen: SocketAddrV4,
+    server: SocketAddrV4,
+) -> (PathBuf, ValidatedClientConfig) {
+    let source = format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{listen}\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n"
+    );
+    let path = write_client_test_source(&source);
     let config = ferrum2_config::load_client(&path).expect("validated client test config");
     (path, config)
 }
@@ -493,7 +509,31 @@ pub(in crate::run) fn client_udp_chain_test_config(
     servers: [SocketAddrV4; 2],
     methods: [MethodProfile; 2],
 ) -> (PathBuf, ValidatedClientConfig) {
-    let (path, mut config) = client_udp_test_config(listen, servers[0]);
+    let mut source = format!(
+        r#"schema_version = 2
+[[inbounds]]
+tag = "entry"
+listen = "{listen}"
+outbound = "chain"
+"#,
+    );
+    for (tag, server) in ["outer", "inner"].into_iter().zip(servers) {
+        source.push_str(&test_shadowsocks_outbound_source(tag, server));
+    }
+    source.push_str(
+        r#"
+[[chains]]
+tag = "chain"
+hops = ["outer", "inner"]
+[runtime]
+shutdown_grace_ms = 0
+[udp]
+max_sessions = 1
+max_buffered_bytes = 1048576
+"#,
+    );
+    let path = write_client_test_source(&source);
+    let mut config = ferrum2_config::load_client(&path).expect("validated client chain config");
     config.outbounds = servers
         .into_iter()
         .zip(methods)
@@ -505,18 +545,6 @@ pub(in crate::run) fn client_udp_chain_test_config(
             },
         )
         .collect();
-    config.route = compile_selector_plans(
-        &[TaggedInbound::new("entry", 0)],
-        &[
-            TaggedOutbound::new("outer", 0),
-            TaggedOutbound::new("inner", 1),
-        ],
-        &[TaggedPlan::new("chain", vec![0, 1])],
-        &[],
-        TaggedRoute::Static(vec![TaggedStaticBinding::new("entry", "chain")]),
-    )
-    .expect("static chain")
-    .0;
     (path, config)
 }
 
@@ -524,15 +552,23 @@ pub(in crate::run) fn tagged_client_test_config(
     mappings: &[(SocketAddrV4, SocketAddrV4)],
     udp: bool,
 ) -> (PathBuf, ValidatedClientConfig) {
-    let (path, mut config) = if udp {
-        client_udp_test_config(mappings[0].0, mappings[0].1)
-    } else {
-        client_test_config(mappings[0].0, mappings[0].1)
-    };
-    config.inbounds = mappings
-        .iter()
-        .map(|(listen, _)| ferrum2_config::ClientInboundConfig { listen: *listen })
-        .collect();
+    let mut source = "schema_version = 2\n".to_owned();
+    for (index, (listen, _)) in mappings.iter().enumerate() {
+        source.push_str(&format!(
+            "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"{listen}\"\noutbound = \"o{index}\"\n"
+        ));
+    }
+    for index in 0..mappings.len() {
+        source.push_str(&format!(
+            "[[outbounds]]\ntag = \"o{index}\"\ntype = \"direct\"\n"
+        ));
+    }
+    source.push_str("[runtime]\nshutdown_grace_ms = 0\n");
+    if udp {
+        source.push_str("[udp]\nmax_sessions = 1\nmax_buffered_bytes = 1048576\n");
+    }
+    let path = write_client_test_source(&source);
+    let mut config = ferrum2_config::load_client(&path).expect("validated tagged client config");
     config.outbounds = mappings
         .iter()
         .map(
@@ -543,8 +579,6 @@ pub(in crate::run) fn tagged_client_test_config(
             },
         )
         .collect();
-    config.route = ferrum2_rule::RouteTable::static_bindings((0..mappings.len()).collect())
-        .expect("bounded test mappings");
     (path, config)
 }
 
@@ -556,9 +590,11 @@ pub(in crate::run) fn test_routing(
     server: SocketAddrV4,
     psk: ferrum2_crypto::MethodPsk,
 ) -> ClientRouting {
+    let (path, config) = client_test_config(reserve_address(), server);
+    std::fs::remove_file(path).expect("remove test routing config");
+    let selector = config.selector_control();
     ClientRouting {
-        legacy: ferrum2_rule::RouteTable::static_bindings(vec![0]).expect("test route"),
-        program: None,
+        program: config.route,
         outbounds: vec![ClientOutboundContext::Shadowsocks(
             ClientShadowsocksContext {
                 tcp_server: TargetAddr::ipv4(server).expect("server target"),
@@ -568,7 +604,7 @@ pub(in crate::run) fn test_routing(
             },
         )]
         .into(),
-        selector: ferrum2_rule::SelectorControl::empty(),
+        selector,
     }
 }
 
@@ -702,10 +738,7 @@ pub(in crate::run) fn udp_test_context_for_psk(
     let (path, config) = client_udp_test_config(reserve_address(), server);
     let server_psk = psk.unwrap_or_else(default_test_psk);
     let udp = config.udp.expect("enabled UDP");
-    let server = match config.outbounds[0].server().unwrap() {
-        std::net::SocketAddr::V4(server) => server,
-        std::net::SocketAddr::V6(_) => panic!("IPv4 test server"),
-    };
+    let public_udp_slots = Arc::new(tokio::sync::Semaphore::new(udp.max_sessions));
     let runtime = config.runtime;
     let outbounds = prepare_client_outbounds(config.outbounds).expect("test outbounds");
     let udp = ClientUdpContext {
@@ -734,11 +767,10 @@ pub(in crate::run) fn udp_test_context_for_psk(
         )),
         keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(server_psk)),
         runtime,
-        udp_associate_enabled: true,
+        public_udp_slots: Some(public_udp_slots),
         registry,
         metrics: Arc::new(Metrics::new()),
         dns: None,
-        test_udp_server: server,
     };
     (path, Arc::new(context))
 }

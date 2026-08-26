@@ -645,7 +645,10 @@ ipv4_address = "198.18.0.2/30"
 ipv6_address = "fd00::2/126"
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "192.0.2.10:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [route]
 final = "proxy"
 [route.sniff]
@@ -661,9 +664,6 @@ inbound = "tun-in"
 network = "tcp"
 protocol = "http"
 action = "reject"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#;
     std::fs::write(&path, source).expect("TUN TCP config");
     let config = ferrum2_config::load_client(&path).expect("validated TUN TCP config");
@@ -672,8 +672,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     publish_rule_program_metadata(&config, &metrics);
     let selector = config.selector_control();
     let routing = ClientRouting {
-        legacy: config.route,
-        program: config.route_program,
+        program: config.route,
         outbounds: Arc::from([]),
         selector,
     };
@@ -863,8 +862,7 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
         20_000,
     );
     let routing = ClientRouting {
-        legacy: route,
-        program: None,
+        program: route,
         outbounds,
         selector: selector.clone(),
     };
@@ -1088,7 +1086,12 @@ async fn tagged_udp_uses_static_outbounds_and_no_fallback() {
 #[tokio::test]
 async fn tagged_udp_shares_byte_budget_across_listeners() {
     let listens = [reserve_address(), reserve_address()];
-    let server = reserve_address();
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("upstream");
+    let SocketAddr::V4(server) = upstream.local_addr().expect("upstream address") else {
+        unreachable!("IPv4 upstream")
+    };
     let (path, mut config) =
         tagged_client_test_config(&listens.map(|listen| (listen, server)), true);
     let udp = config.udp.as_mut().expect("UDP config");
@@ -1105,8 +1108,20 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
     let mut controls = Vec::new();
     let mut applications = Vec::new();
     let mut relays = Vec::new();
+    let target = TargetAddr::ipv4("192.0.2.1:53".parse().expect("target")).expect("target");
+    let mut request = [0; 64];
+    let request_len = encode_udp_datagram(&target, b"activate", &mut request).expect("request");
+    let mut upstream_wire = [0; MAX_UDP_WIRE_LEN];
     for _ in 0..5 {
         let (control, application, relay) = udp_association(listens[0]).await;
+        application
+            .send_to(&request[..request_len], relay)
+            .await
+            .expect("activate association");
+        tokio::time::timeout(Duration::from_secs(1), upstream.recv(&mut upstream_wire))
+            .await
+            .expect("activation timeout")
+            .expect("activation request");
         controls.push(control);
         applications.push(application);
         relays.push(relay);
@@ -1117,9 +1132,28 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
         saturated.udp_buffered_bytes,
         baseline.udp_buffered_bytes + 15 * MAX_UDP_WIRE_LEN
     );
-    let (rejected, reply) = socks_command(listens[1], 3).await;
-    assert_eq!(&reply[..2], &[5, 1]);
-    drop(rejected);
+    let (mut rejected, rejected_application, rejected_relay) = udp_association(listens[1]).await;
+    rejected_application
+        .send_to(&request[..request_len], rejected_relay)
+        .await
+        .expect("rejected activation attempt");
+    let mut eof = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), rejected.read(&mut eof))
+            .await
+            .expect("rejected control timeout")
+            .expect("rejected control EOF"),
+        0
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            upstream.recv(&mut upstream_wire)
+        )
+        .await
+        .is_err(),
+        "rejected association reached upstream"
+    );
     assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 5);
 
     drop(controls.remove(0));
@@ -1135,13 +1169,22 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
         tokio::task::yield_now().await;
     }
     let (control, application, relay) = udp_association(listens[1]).await;
+    application
+        .send_to(&request[..request_len], relay)
+        .await
+        .expect("replacement activation");
+    tokio::time::timeout(Duration::from_secs(1), upstream.recv(&mut upstream_wire))
+        .await
+        .expect("replacement timeout")
+        .expect("replacement request");
     controls.push(control);
     applications.push(application);
     relays.push(relay);
 
     stop.send(()).expect("stop byte-budget client");
     assert_eq!(task.await.expect("byte-budget client"), Ok(()));
-    drop((controls, applications));
+    drop((controls, applications, rejected, rejected_application));
+    relays.push(rejected_relay);
     for relay in relays {
         drop(
             UdpSocket::bind(relay)
@@ -1204,13 +1247,13 @@ async fn tagged_udp_shares_live_id_collisions_across_listeners() {
     let third = udp_association(listens[1]).await;
     assert_eq!(
         registry.snapshot().udp_sessions,
-        activated.udp_sessions + 1,
-        "association setup must own its pending session"
+        activated.udp_sessions,
+        "association setup does not activate a session"
     );
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
-        activated.udp_buffered_bytes + 3 * MAX_UDP_WIRE_LEN,
-        "association setup must own its fixed buffers"
+        activated.udp_buffered_bytes,
+        "association setup does not allocate datagram buffers"
     );
     third
         .1
@@ -1299,10 +1342,7 @@ fn client_udp_route_publishes_program_and_match_observations() {
          [[route.rules]]\n\
          network = \"udp\"\n\
          port = 53\n\
-         action = \"reject\"\n\
-         [shadowsocks]\n\
-         method = \"2022-blake3-aes-128-gcm\"\n\
-         psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n"
+         action = \"reject\"\n"
     );
     std::fs::write(&path, source).expect("UDP route metrics config");
     let config = ferrum2_config::load_client(&path).expect("validated UDP route metrics config");
@@ -1311,8 +1351,7 @@ fn client_udp_route_publishes_program_and_match_observations() {
     publish_rule_program_metadata(&config, &metrics);
     let selector = config.selector_control();
     let routing = ClientRouting {
-        legacy: config.route,
-        program: config.route_program,
+        program: config.route,
         outbounds: Arc::from([]),
         selector,
     };
@@ -1321,24 +1360,13 @@ fn client_udp_route_publishes_program_and_match_observations() {
     let mut scratch = routing.route_scratch().expect("route scratch construction");
     let terminal = routing.select_terminal_with_scratch(
         0,
-        Network::Udp,
+        ferrum2_core::route::Network::Udp,
         &target,
         Some(b"payload"),
         &metrics,
-        scratch.as_mut(),
+        &mut scratch,
     );
     assert!(matches!(terminal, Ok(ClientTerminalRoute::Reject)));
-    assert!(matches!(
-        routing.select_terminal_with_scratch(
-            0,
-            Network::Udp,
-            &target,
-            Some(b"payload"),
-            &metrics,
-            None,
-        ),
-        Err(RuleCompileError::Internal)
-    ));
     let encoded = metrics.encode_text().expect("client UDP route metrics");
     for expected in [
         "ferrum2_rule_program_rules{program=\"route\"} 1",
@@ -1681,6 +1709,29 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
     let tcp_registry = registry.clone();
     let tcp_context = Arc::clone(&context);
     let tcp_accept_errors = Arc::clone(&accept_errors);
+    let route_source = format!(
+        "schema_version = 2\n\
+         [[inbounds]]\n\
+         tag = \"i0\"\n\
+         listen = \"{}\"\n\
+         outbound = \"o0\"\n\
+         [[inbounds]]\n\
+         tag = \"i1\"\n\
+         listen = \"{}\"\n\
+         outbound = \"o1\"\n\
+         [[outbounds]]\n\
+         tag = \"o0\"\n\
+         type = \"direct\"\n\
+         [[outbounds]]\n\
+         tag = \"o1\"\n\
+         type = \"direct\"\n",
+        listens[0], listens[1]
+    );
+    let route_path = write_client_test_source(&route_source);
+    let route_config = ferrum2_config::load_client(&route_path).expect("test routes");
+    std::fs::remove_file(route_path).expect("remove test route config");
+    let selector = route_config.selector_control();
+    let program = route_config.route;
     let tcp_root = ProcessRoot::new(move || async move {
         let listeners = listens
             .into_iter()
@@ -1701,8 +1752,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
             supervisor: Some(supervisor),
             context: tcp_context,
             routing: Arc::new(ClientRouting {
-                legacy: ferrum2_rule::RouteTable::static_bindings(vec![0, 1]).expect("test routes"),
-                program: None,
+                program,
                 outbounds: listens
                     .map(|_| {
                         ClientOutboundContext::Shadowsocks(ClientShadowsocksContext {
@@ -1715,7 +1765,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
                         })
                     })
                     .into(),
-                selector: ferrum2_rule::SelectorControl::empty(),
+                selector,
             }),
         })
     });
@@ -1977,26 +2027,4 @@ async fn application_resolver_observer_records_explicit_system_without_fallback(
             "missing `{expected}`\n{encoded}"
         );
     }
-}
-
-#[test]
-fn configured_dns_cache_does_not_require_a_ruleset_policy() {
-    let metrics = Arc::new(Metrics::new());
-    let runtime = ClientDnsProxyRuntime::try_new(
-        None,
-        ferrum2_config::DnsRuntimeConfig::default(),
-        None,
-        &metrics,
-    )
-    .expect("standalone configured DNS cache");
-
-    assert!(runtime.policy.is_none());
-    assert_eq!(
-        runtime
-            .cache
-            .as_ref()
-            .map(|cache| cache.capacity().expect("cache capacity")),
-        Some(8_192)
-    );
-    assert_eq!(runtime.generation, ferrum2_dns::ResolverGeneration::new(0));
 }

@@ -12,10 +12,6 @@ pub(in crate::run) use ferrum2_core::{Datagram, TargetAddr};
 pub(in crate::run) use ferrum2_crypto::{
     Clock, MethodProfile, MethodPsk, MethodSinglePskProvider, SystemClock, SystemRandom,
 };
-pub(in crate::run) use ferrum2_rule::{
-    SelectorDefinition, TaggedInbound, TaggedOutbound, TaggedRoute, TaggedStaticBinding,
-    compile_selector_route,
-};
 pub(in crate::run) use ferrum2_runtime::{
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, OwnerSnapshot, ProcessCause, ProcessRoot,
     ProcessRootExit, ProcessSupervisor, RuntimeTcpStream, TcpConnector,
@@ -157,35 +153,35 @@ pub(in crate::run) fn tagged_server_test_config<const N: usize>(
     listens: [SocketAddrV4; N],
     selector: bool,
 ) -> (PathBuf, ValidatedServerConfig) {
-    let (path, mut config) = server_test_config(listens[0]);
-    config.inbounds.extend(
-        listens[1..]
-            .iter()
-            .map(|listen| ferrum2_config::ServerInboundConfig { listen: *listen }),
-    );
-    config.runtime.max_connections = 1.try_into().expect("one connection");
-    config.udp.max_sessions = 1;
-    if selector {
-        config.outbounds.push(ferrum2_config::ServerOutboundConfig {
-            domain_resolver: ferrum2_config::DirectDomainResolver::System,
-            dial_options: Default::default(),
-        });
-        let (route, _) = compile_selector_route(
-            &[TaggedInbound::new("i0", 0), TaggedInbound::new("i1", 1)],
-            &[TaggedOutbound::new("o0", 0), TaggedOutbound::new("o1", 1)],
-            &[
-                SelectorDefinition::new("manual", vec!["o0", "o1"], Some("o0")),
-                SelectorDefinition::new("nested", vec!["manual"], Some("manual")),
-            ],
-            TaggedRoute::Static(vec![
-                TaggedStaticBinding::new("i0", "manual"),
-                TaggedStaticBinding::new("i1", "nested"),
-            ]),
-        )
-        .expect("selector route");
-        config.route = route;
+    let mut source = "schema_version = 2\n".to_owned();
+    for (index, listen) in listens.into_iter().enumerate() {
+        let outbound = if selector {
+            if index == 1 { "nested" } else { "manual" }
+        } else {
+            "direct"
+        };
+        source.push_str(&format!(
+            "[[inbounds]]\ntag = \"i{index}\"\nlisten = \"{listen}\"\noutbound = \"{outbound}\"\n"
+        ));
     }
-    (path, config)
+    if selector {
+        source.push_str(
+            "[[outbounds]]\ntag = \"o0\"\n\
+             [[outbounds]]\ntag = \"o1\"\n\
+             [[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n\
+             [[selectors]]\ntag = \"nested\"\noutbounds = [\"manual\"]\ndefault = \"manual\"\n",
+        );
+    } else {
+        source.push_str("[[outbounds]]\ntag = \"direct\"\n");
+    }
+    source.push_str(
+        "[shadowsocks]\n\
+         method = \"2022-blake3-aes-128-gcm\"\n\
+         psk = \"AAECAwQFBgcICQoLDA0ODw==\"\n\
+         [runtime]\nmax_connections = 1\nshutdown_grace_ms = 0\n\
+         [udp]\nmax_sessions = 1\n",
+    );
+    server_test_config_source("tagged", &source)
 }
 
 pub(in crate::run) fn active(mut snapshot: OwnerSnapshot) -> OwnerSnapshot {

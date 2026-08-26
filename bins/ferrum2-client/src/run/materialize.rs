@@ -182,8 +182,10 @@ impl ClientV2MaterializeContext {
         let loader_config = runtime_loader_config(prepared)?;
         let needs_tagged = prepared.rule_sets().iter().any(|rule_set| {
             matches!(
-                rule_set.download_resolver(),
-                Some(ResolverRef::DnsServer(_))
+                rule_set.download_mode(),
+                ferrum2_config::PreparedRuleSetDownloadMode::ClientResolved {
+                    resolver: ResolverRef::DnsServer(_)
+                }
             )
         }) || (0..prepared.outbound_count()).any(|index| {
             prepared
@@ -1543,8 +1545,9 @@ impl RuleSetDialer for ClientRuleSetDialer {
                             return;
                         }
                         let flow = attempt_engine
-                            .open_tcp(
+                            .open_tcp_for_ingress(
                                 ClientRequestOrigin::RuleSet,
+                                0,
                                 attempt_detour,
                                 &target,
                                 Some(remaining),
@@ -1759,17 +1762,13 @@ pub(super) async fn prepare_runtime_root(
     let Some(pending) = pending else {
         return Ok(None);
     };
-    let registry = config
-        .route_program
-        .as_ref()
-        .and_then(ferrum2_config::CompiledRoute::rule_registry)
-        .or_else(|| {
-            config
-                .dns_route
-                .as_ref()
-                .and_then(ferrum2_config::ClientDnsRoute::policy_blueprint)
-                .map(ferrum2_config::DnsPolicyBlueprintBinding::registry)
-        });
+    let registry = config.route.rule_registry().or_else(|| {
+        config
+            .dns_route
+            .as_ref()
+            .and_then(ferrum2_config::ClientDnsRoute::policy_blueprint)
+            .map(ferrum2_config::DnsPolicyBlueprintBinding::registry)
+    });
     let Some(registry) = registry else {
         pending.shutdown().await?;
         return Err(RunError::StartupProtocol);
@@ -1938,7 +1937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn old_v2_materializes_without_network_or_background_owner() {
+    async fn minimal_v2_materializes_without_network_or_background_owner() {
         let address = reserve_address();
         let file = TestConfig::new(|_| {
             format!(
@@ -1957,7 +1956,7 @@ final = "direct"
 "#
             )
         });
-        let prepared = ferrum2_config::prepare_client_v2(&file.path).expect("prepare old V2");
+        let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare minimal config");
         let downloader = Arc::new(RecordingDownloader::failure());
         let context = ClientV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -1966,19 +1965,14 @@ final = "direct"
 
         let materialized = materialize_prepared(prepared, &context)
             .await
-            .expect("materialize old V2");
+            .expect("materialize minimal config");
         assert!(downloader.seen().is_empty());
         assert!(materialized.pending.is_none());
         let config = materialized
             .validate_only_shutdown()
             .await
             .expect("validation-only cleanup");
-        assert!(
-            config
-                .route_program
-                .as_ref()
-                .is_some_and(|route| route.rule_registry().is_none())
-        );
+        assert!(config.route.rule_registry().is_none());
     }
 
     #[tokio::test]
@@ -2066,7 +2060,7 @@ final = "resolved"
             )
         });
         let prepared =
-            ferrum2_config::prepare_client_v2(&file.path).expect("prepare domain DNS upstream V2");
+            ferrum2_config::prepare_client(&file.path).expect("prepare domain DNS upstream");
         let order = prepared.materialization_order();
         let bootstrap_position = order
             .iter()
@@ -2265,7 +2259,7 @@ final = "bootstrap"
                 tls_address.port()
             )
         });
-        let prepared = ferrum2_config::prepare_client_v2(&file.path)
+        let prepared = ferrum2_config::prepare_client(&file.path)
             .expect("prepare production tagged RuleSet V2");
         let order = prepared.materialization_order();
         let resolver_position = order
@@ -2385,6 +2379,8 @@ type = "direct"
 tag = "fixed-domain"
 type = "shadowsocks"
 server = "shared-cache.test:8388"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 domain_resolver = "local"
 domain_strategy = "ipv4_only"
 
@@ -2416,15 +2412,11 @@ address = "{upstream_address}"
 
 [dns.route]
 final = "local"
-
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#
             )
         });
         let prepared =
-            ferrum2_config::prepare_client_v2(&file.path).expect("prepare fixed endpoint cache V2");
+            ferrum2_config::prepare_client(&file.path).expect("prepare fixed endpoint cache");
         assert!(prepared.rule_sets().is_empty());
         let metrics = Arc::new(Metrics::new());
         let context = ClientV2MaterializeContext::new(
@@ -2452,22 +2444,21 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             .expect("materialized cache handoff");
         assert!(root.is_none(), "no RuleSet refresh root");
         let cache = cache.expect("materialization cache");
-        assert!(
-            config
-                .route_program
-                .as_ref()
-                .is_some_and(|route| route.rule_registry().is_none())
-        );
+        assert!(config.route.rule_registry().is_none());
         let dns = config.dns.take().expect("materialized DNS graph");
         let runtime = crate::run::ClientDnsProxyRuntime::try_new(
-            config.dns_route.as_mut(),
+            config
+                .dns_route
+                .as_mut()
+                .expect("materialized client DNS policy"),
             dns.runtime,
             Some(cache),
             &metrics,
         )
         .expect("application DNS runtime");
-        assert_eq!(runtime.generation, ResolverGeneration::new(0));
-        assert!(runtime.policy.is_some(), "materialized ordinary DNS policy");
+        assert_eq!(runtime.policy.registry.generation(), 0);
+        assert_eq!(runtime.policy.listener_count, 1);
+        assert_eq!(runtime.policy.ordinary_count, 1);
         let (resolver, mut owner) = TaggedResolver::new(
             crate::run::dns_egress::dns_runtime_specs(&dns.servers),
             dns.timeout,
@@ -2476,10 +2467,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         )
         .expect("application tagged resolver");
         owner.ready().await.expect("application DNS ready");
-        let proxy = Arc::new(runtime.bind(ferrum2_dns::DnsProxy::new(
-            Arc::new(resolver),
-            |_, _, _, _| panic!("ordinary application lookup used legacy DNS selection"),
-        )));
+        let proxy = Arc::new(runtime.bind(Arc::new(resolver)));
         let proxy_slot = Arc::new(OnceLock::new());
         assert!(proxy_slot.set(proxy).is_ok());
         let application = ApplicationResolverAdapter::new(
@@ -2564,7 +2552,7 @@ max_redirects = 0
 "#
             )
         });
-        let prepared = ferrum2_config::prepare_client_v2(&file.path).expect("prepare remote V2");
+        let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare remote config");
         let downloader = Arc::new(RecordingDownloader::failure());
         let context = ClientV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -2626,7 +2614,7 @@ max_redirects = 0
 "#
             )
         });
-        let prepared = ferrum2_config::prepare_client_v2(&file.path).expect("prepare refresh V2");
+        let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare refresh config");
         let downloader = Arc::new(RecordingDownloader::success());
         let context = ClientV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -2673,11 +2661,7 @@ max_redirects = 0
                 },
             ]
         );
-        let registry = config
-            .route_program
-            .as_ref()
-            .and_then(ferrum2_config::CompiledRoute::rule_registry)
-            .expect("route registry");
+        let registry = config.route.rule_registry().expect("route registry");
         assert_eq!(registry.generation(), 2);
         root.cleanup().await.expect("refresh owner cleanup");
         assert!(root.service.is_none());
@@ -2796,7 +2780,7 @@ max_redirects = 0
             )
         });
         let prepared =
-            ferrum2_config::prepare_client_v2(&file.path).expect("prepare four real RuleSets");
+            ferrum2_config::prepare_client(&file.path).expect("prepare four real RuleSets");
         let downloader = Arc::new(RecordingDownloader::fixture_set());
         let context = ClientV2MaterializeContext::with_downloader(
             Arc::new(Metrics::new()),
@@ -2811,9 +2795,8 @@ max_redirects = 0
         }));
         let registry = materialized
             .config()
-            .route_program
-            .as_ref()
-            .and_then(ferrum2_config::CompiledRoute::rule_registry)
+            .route
+            .rule_registry()
             .expect("shared route registry");
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.generation(), INITIAL_RULESET_GENERATION);
@@ -2839,12 +2822,10 @@ max_redirects = 0
         assert!(!match_set("cnip").matches_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
 
         let config = materialized.config();
-        let route = config
-            .route_program
-            .as_ref()
-            .expect("ordinary route program");
+        let route = &config.route;
         let terminal_hops = |target: &TargetAddr| {
-            let mut evaluation = route.evaluate(0, Network::Tcp, target);
+            let mut scratch = route.evaluation_scratch().expect("route scratch");
+            let mut evaluation = route.evaluate_with_scratch(0, Network::Tcp, target, &mut scratch);
             match evaluation.next(RouteMetadata::new(None, None)) {
                 Some(RouteProgramAction::Terminal(RouteAction::Route(plan))) => {
                     Some(plan.snapshot_owned().hops().to_vec())
@@ -2854,7 +2835,9 @@ max_redirects = 0
             }
         };
         let ads_target = TargetAddr::domain("x.0.myikas.com", 443).expect("ads target");
-        let mut ads_route = route.evaluate(0, Network::Tcp, &ads_target);
+        let mut ads_scratch = route.evaluation_scratch().expect("ads route scratch");
+        let mut ads_route =
+            route.evaluate_with_scratch(0, Network::Tcp, &ads_target, &mut ads_scratch);
         assert!(matches!(
             ads_route.next(RouteMetadata::new(None, None)),
             Some(RouteProgramAction::Terminal(RouteAction::Reject))

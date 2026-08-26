@@ -693,14 +693,14 @@ fn run_external_dns_case(case: DnsCaseSpec) {
     let client_config = format!(
         "schema_version = 2\n\
          [[inbounds]]\ntag = \"socks\"\nlisten = \"{socks_address}\"\n\
-         [[outbounds]]\ntag = \"dns-hop\"\nserver = \"{shadowsocks_address}\"\n\
+         [[outbounds]]\ntag = \"dns-hop\"\ntype = \"shadowsocks\"\nserver = \"{shadowsocks_address}\"\nmethod = \"{}\"\npsk = \"{}\"\n\
          [route]\nfinal = \"dns-hop\"\n\
          [dns]\ntimeout_ms = 5000\nmax_inflight = 4\n\
          [[dns.inbounds]]\ntag = \"dns-in\"\nlisten = \"{dns_address}\"\n\
          [[dns.servers]]\ntag = \"core\"\ntransport = \"{transport}\"\naddress = \"{upstream_address}\"\n\
          {encryption}{detour}\
          [dns.route]\nfinal = \"core\"\n\
-         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n[udp]\n",
+         [udp]\n",
         Method::Aes128Gcm.canonical_name(),
         Method::Aes128Gcm.synthetic_psk(),
     );
@@ -1268,8 +1268,7 @@ fn run_tcp_processes(
     let config_path = write_config(directory, "reference-tcp.json", &config);
     let ferrum_config = match case.direction {
         Direction::FerrumClient => format!(
-            "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{proxy}\"\noutbound = \"proxy-out\"\n\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"{shadowsocks}\"\n\n\
-             [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n",
+            "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{proxy}\"\noutbound = \"proxy-out\"\n\n[[outbounds]]\ntag = \"proxy-out\"\ntype = \"shadowsocks\"\nserver = \"{shadowsocks}\"\nmethod = \"{}\"\npsk = \"{}\"\n",
             case.method.canonical_name(),
             case.method.synthetic_psk()
         ),
@@ -1605,8 +1604,7 @@ fn run_udp_ferrum_client_case(
     wait_for_stable_child(&mut reference, deadline, "reference Shadowsocks UDP server");
 
     let ferrum_config = format!(
-        "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{proxy}\"\noutbound = \"proxy-out\"\n\n[[outbounds]]\ntag = \"proxy-out\"\nserver = \"{shadowsocks}\"\n\n\
-         [shadowsocks]\nmethod = \"{}\"\npsk = \"{}\"\n\n\
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{proxy}\"\noutbound = \"proxy-out\"\n\n[[outbounds]]\ntag = \"proxy-out\"\ntype = \"shadowsocks\"\nserver = \"{shadowsocks}\"\nmethod = \"{}\"\npsk = \"{}\"\n\n\
          [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = 1048576\n\
          idle_timeout_ms = 60000\n",
         case.method.canonical_name(),

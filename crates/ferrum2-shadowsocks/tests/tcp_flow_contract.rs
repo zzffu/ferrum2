@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use ferrum2_core::{ConnectErrorKind, TargetAddr};
-use ferrum2_crypto::{MethodPsk, MethodSinglePskProvider, TcpMethodProfile};
+use ferrum2_crypto::{MethodProfile, MethodPsk, MethodSinglePskProvider};
 use ferrum2_shadowsocks::{
     ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_ENCODE_PAYLOAD_LEN, MethodKeyAdapter,
     PlainDuplex, ProtocolReason, ShadowsocksError, ShadowsocksTcpInbound, TcpKeyProvider,
@@ -21,7 +21,7 @@ use common::{
 };
 
 fn distinct_provider(
-    profile: TcpMethodProfile,
+    profile: MethodProfile,
     byte: u8,
 ) -> MethodKeyAdapter<MethodSinglePskProvider> {
     let key = vec![byte; profile.key_bytes()];
@@ -145,7 +145,13 @@ async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_p
     let (io, observation) = RecordingIo::new([]);
     let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 1));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
 
     assert_eq!(write_plain(&mut flow, &[]).await, Ok(0));
     assert_eq!(observation.lock().expect("observation").write_calls, 1);
@@ -187,7 +193,10 @@ async fn response_pending_opposite_direction_failures_keep_protocol_or_transport
         &client_random,
     );
     let mut client = client_outbound
-        .open_stream(&target())
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
         .await
         .expect("client");
     assert_eq!(
@@ -319,7 +328,13 @@ async fn transport_phase_table_is_exact_and_fatal_freezes_all_counts() {
         let random = ScriptedRandom::new(client_random_bytes(&request_salt));
         let connector = RecordingConnector::succeeds(io);
         let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-        let mut flow = outbound.open_stream(&target()).await.expect("client");
+        let mut flow = outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .expect("client");
         assert_eq!(write_plain(&mut flow, b"data").await, Ok(4));
         assert_eq!(
             flush_plain(&mut flow).await,
@@ -333,7 +348,13 @@ async fn transport_phase_table_is_exact_and_fatal_freezes_all_counts() {
     let (io, observation) = RecordingIo::new([]);
     let connector = RecordingConnector::succeeds(io.with_flush_failure());
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     assert_eq!(
         flush_plain(&mut flow).await,
         Err(ShadowsocksError::Transport(TransportPhase::Flush))
@@ -370,7 +391,13 @@ async fn real_transport_source_sentinel_is_erased_from_debug_display_and_source_
     let (io, observation) = RecordingIo::new([]);
     let connector = RecordingConnector::succeeds(io.with_write_failure_after(1));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound.open_stream(&target()).await.expect("client");
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
     assert_eq!(write_plain(&mut flow, b"data").await, Ok(4));
 
     let error = flush_plain(&mut flow)
@@ -489,16 +516,16 @@ async fn nonempty_write_after_shutdown_while_rx_live_installs_transport_write() 
 async fn mixed_method_nested_flows_bind_order_credentials_tamper_and_recursive_ownership() {
     let rotations = [
         (
-            TcpMethodProfile::Blake3Aes128Gcm2022,
-            TcpMethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3Aes256Gcm2022,
         ),
         (
-            TcpMethodProfile::Blake3Aes256Gcm2022,
-            TcpMethodProfile::Blake3ChaCha20Poly13052022,
+            MethodProfile::Blake3Aes256Gcm2022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
         ),
         (
-            TcpMethodProfile::Blake3ChaCha20Poly13052022,
-            TcpMethodProfile::Blake3Aes128Gcm2022,
+            MethodProfile::Blake3ChaCha20Poly13052022,
+            MethodProfile::Blake3Aes128Gcm2022,
         ),
     ];
     for (case, (first_profile, second_profile)) in rotations.into_iter().enumerate() {

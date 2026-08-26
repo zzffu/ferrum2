@@ -65,8 +65,8 @@ impl<T> LocalEndpoint for TokioTransport<T>
 where
     T: LocalEndpoint,
 {
-    fn local_endpoint(&self) -> std::net::SocketAddrV4 {
-        self.inner.local_endpoint()
+    fn local_socket_addr(&self) -> std::net::SocketAddr {
+        self.inner.local_socket_addr()
     }
 }
 
@@ -292,8 +292,8 @@ mod tests {
     }
 
     impl LocalEndpoint for EndpointIo {
-        fn local_endpoint(&self) -> SocketAddrV4 {
-            self.endpoint
+        fn local_socket_addr(&self) -> SocketAddr {
+            SocketAddr::V4(self.endpoint)
         }
     }
 

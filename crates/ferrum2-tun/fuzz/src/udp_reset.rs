@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::runtime::Builder;
 
 use crate::udp::{
-    Admission, InjectOutcome, ResponseProcessOutcome, UdpAssociation, UdpCommitError, UdpFiltering,
-    UdpResponseSendOutcome, UdpTable, UdpTuple,
+    Admission, InjectOutcome, ResponseProcessOutcome, UdpAssociation, UdpCommitError,
+    UdpDatagramEndpoints, UdpFiltering, UdpResponseSendOutcome, UdpTable,
 };
 use crate::{OwnerWake, TunRejectReason, UdpResponseDropReason};
 
@@ -68,10 +68,10 @@ async fn exercise(input: &[u8]) {
 
         match operation % 8 {
             0 => {
-                let tuple = tuple(source_selector, target_selector);
+                let endpoints = endpoints(source_selector, target_selector);
                 let payload = frame;
                 let payload_bound = payload.len().saturating_add(usize::from(policy & 0x1f));
-                let _ = table.admit(tuple, payload, payload_bound, now_millis, true);
+                let _ = table.admit(endpoints, payload, payload_bound, now_millis, true);
             }
             1 => {
                 if let Ok(candidate) = candidates.try_recv() {
@@ -139,9 +139,9 @@ async fn exercise(input: &[u8]) {
                     let payload = frame;
                     let _ = association.send_response(response_source, payload);
                     let injection = policy % 3;
-                    let _ = table.process_one_response(now_millis, |tuple, bytes| {
-                        assert!(tuple.source().port() != 0);
-                        assert!(tuple.target().port() != 0);
+                    let _ = table.process_one_response(now_millis, |endpoints, bytes| {
+                        assert!(endpoints.source().port() != 0);
+                        assert!(endpoints.target().port() != 0);
                         assert!(!bytes.is_empty() && bytes.len() <= 4);
                         match injection {
                             0 => InjectOutcome::Injected,
@@ -161,11 +161,11 @@ async fn exercise(input: &[u8]) {
                 let association_index = usize::from(source_selector) % associations.len().max(1);
                 if let Some(association) = associations.get_mut(association_index) {
                     let first_target = association.first_target();
-                    let tuple = UdpTuple::new(
+                    let endpoints = UdpDatagramEndpoints::new(
                         association.source(),
                         target(source_selector, target_selector),
                     );
-                    let admission = table.admit(tuple, frame, frame.len(), now_millis, true);
+                    let admission = table.admit(endpoints, frame, frame.len(), now_millis, true);
                     if matches!(admission, Admission::Mapped | Admission::CandidateQueued) {
                         let datagram = association
                             .receive()
@@ -238,7 +238,7 @@ async fn exercise(input: &[u8]) {
         let source_selector = u8::try_from(slot).unwrap_or_default();
         assert_eq!(
             table.admit(
-                tuple(source_selector, source_selector),
+                endpoints(source_selector, source_selector),
                 b"fresh",
                 5,
                 now_millis,
@@ -310,8 +310,8 @@ fn next_generation(generation: u64) -> u64 {
     if next == 0 { 1 } else { next }
 }
 
-fn tuple(source_selector: u8, target_selector: u8) -> UdpTuple {
-    UdpTuple::new(
+fn endpoints(source_selector: u8, target_selector: u8) -> UdpDatagramEndpoints {
+    UdpDatagramEndpoints::new(
         source(source_selector),
         target(source_selector, target_selector),
     )

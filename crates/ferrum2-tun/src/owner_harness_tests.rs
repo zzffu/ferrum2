@@ -705,7 +705,7 @@ fn fatal_send_is_classified_separately_from_ring_full() {
     let mut harness = OwnerSessionHarness::new();
     assert_eq!(
         harness.stack.device.inject_udp_response(
-            crate::UdpTuple::new(
+            crate::udp::UdpDatagramEndpoints::new(
                 "198.18.0.1:10000".parse().unwrap(),
                 "192.0.2.1:53".parse().unwrap(),
             ),

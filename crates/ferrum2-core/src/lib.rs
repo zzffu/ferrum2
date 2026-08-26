@@ -362,13 +362,8 @@ pub trait Connector: Send + Sync {
 
 /// Access to a local endpoint captured before a stream is returned.
 pub trait LocalEndpoint {
-    /// Returns the stored legacy IPv4 endpoint without a socket query.
-    fn local_endpoint(&self) -> SocketAddrV4;
-
     /// Returns the complete stored endpoint without a socket query.
-    fn local_socket_addr(&self) -> SocketAddr {
-        SocketAddr::V4(self.local_endpoint())
-    }
+    fn local_socket_addr(&self) -> SocketAddr;
 }
 
 /// A one-shot response to an accepted application session.
@@ -376,27 +371,11 @@ pub trait SessionReply: Sized {
     /// Closed response error.
     type Error;
 
-    /// Consumes the reply owner and reports success using the opened stream's endpoint.
-    fn succeeded(self, bound: SocketAddrV4)
-    -> impl Future<Output = Result<(), Self::Error>> + Send;
-
     /// Consumes the reply owner and reports success for either socket family.
-    ///
-    /// Legacy reply owners retain their IPv4 behavior and fail closed for IPv6.
     fn succeeded_socket(
         self,
         bound: SocketAddr,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send
-    where
-        Self: Send,
-    {
-        async move {
-            match bound {
-                SocketAddr::V4(bound) => self.succeeded(bound).await,
-                SocketAddr::V6(_) => self.failed(ConnectErrorKind::Other).await,
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Consumes the reply owner and reports a pre-success connect failure.
     fn failed(self, kind: ConnectErrorKind)
@@ -545,10 +524,10 @@ mod tests {
         assert!(!rendered.contains("owned payload"));
     }
 
-    struct StoredEndpoint(SocketAddrV4);
+    struct StoredEndpoint(SocketAddr);
 
     impl LocalEndpoint for StoredEndpoint {
-        fn local_endpoint(&self) -> SocketAddrV4 {
+        fn local_socket_addr(&self) -> SocketAddr {
             self.0
         }
     }
@@ -558,9 +537,9 @@ mod tests {
     impl SessionReply for PendingReply {
         type Error = ();
 
-        fn succeeded(
+        fn succeeded_socket(
             self,
-            _bound: SocketAddrV4,
+            _bound: SocketAddr,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             ready(Ok(()))
         }
@@ -583,7 +562,7 @@ mod tests {
             _target: &TargetAddr,
         ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
             let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49152);
-            ready(Ok(StoredEndpoint(endpoint)))
+            ready(Ok(StoredEndpoint(SocketAddr::V4(endpoint))))
         }
     }
 
@@ -602,10 +581,6 @@ mod tests {
         let bound = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 49152, 0, 0));
         struct Ipv6Endpoint(SocketAddr);
         impl LocalEndpoint for Ipv6Endpoint {
-            fn local_endpoint(&self) -> SocketAddrV4 {
-                SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.0.port())
-            }
-
             fn local_socket_addr(&self) -> SocketAddr {
                 self.0
             }

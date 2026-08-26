@@ -2202,7 +2202,10 @@ bind_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
 inet4_bind_address = "{{GUEST_SUPPORT_IPV4}}"
 [[outbounds]]
 tag = "proxy"
+type = "shadowsocks"
 server = "{{SERVER_ADDRESS}}:{{SERVER_PORT}}"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 bind_interface = "{{SUPPORT_INTERFACE_ALIAS}}"
 inet4_bind_address = "{{GUEST_SUPPORT_IPV4}}"
 [route]
@@ -2226,9 +2229,6 @@ shutdown_grace_ms = 30000
 idle_timeout_ms = {{RUNTIME_IDLE_TIMEOUT_MS}}
 [metrics]
 listen = "127.0.0.1:{{METRICS_PORT}}"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 '@
     $clientTemplate = $clientTemplate.Replace(
         "{{RUNTIME_IDLE_TIMEOUT_MS}}",

@@ -297,14 +297,18 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
                 .map(move |dependency| {
                     (
                         package["name"].as_str().expect("package name"),
-                        dependency["target"].as_str().expect("dependency target"),
+                        dependency["target"].as_str(),
                     )
                 })
         })
         .collect();
     assert_eq!(
         wintun_edges,
-        vec![("ferrum2-tun", "cfg(all(windows, target_arch = \"x86_64\"))")]
+        vec![
+            ("ferrum2-client", None),
+            ("ferrum2-server", None),
+            ("ferrum2-tun", None),
+        ]
     );
     let wintun_src = PathBuf::from(
         package(metadata, "ferrum2-wintun")["manifest_path"]

@@ -542,8 +542,23 @@ listen = "127.0.0.1:{listen}"
     outbounds = "\n\n".join(
         f'''[[outbounds]]
 tag = "out-{index}"'''
-        + (f'\nserver = "127.0.0.1:{servers[index]}"' if servers else "")
+        + (
+            f'''\ntype = "shadowsocks"
+server = "127.0.0.1:{servers[index]}"
+method = "2022-blake3-aes-128-gcm"
+psk = "{SYNTHETIC_PSK}"'''
+            if servers
+            else ""
+        )
         for index in range(2)
+    )
+    server_credentials = (
+        ""
+        if spec.role == "client"
+        else f'''[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "{SYNTHETIC_PSK}"
+'''
     )
     path.write_text(
         f'''schema_version = {schema_version}
@@ -557,15 +572,14 @@ final = "out-0"
 [[route.rules]]
 inbound = "in-0"
 network = "tcp"
+action = "route"
 outbound = "out-0"
 [[route.rules]]
 network = "udp"
+action = "route"
 outbound = "out-1"
 
-''' if routed else "") + f'''[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "{SYNTHETIC_PSK}"
-''',
+''' if routed else "") + server_credentials,
         encoding="utf-8",
         newline="\n",
     )
@@ -643,19 +657,24 @@ def reserve_ports(count: int) -> tuple[int, ...]:
 
 def write_runtime_config(path: Path, spec: BinarySpec, listen: int, metrics: int, grace: int) -> None:
     role = (
-        f'[[inbounds]]\ntag = "proxy"\nlisten = "127.0.0.1:{listen}"\noutbound = "proxy-out"\n\n[[outbounds]]\ntag = "proxy-out"\nserver = "127.0.0.1:1"'
+        f'[[inbounds]]\ntag = "proxy"\nlisten = "127.0.0.1:{listen}"\noutbound = "proxy-out"\n\n[[outbounds]]\ntag = "proxy-out"\ntype = "shadowsocks"\nserver = "127.0.0.1:1"\nmethod = "2022-blake3-aes-128-gcm"\npsk = "{SYNTHETIC_PSK}"'
         if spec.role == "client"
         else f'[[inbounds]]\ntag = "proxy"\nlisten = "127.0.0.1:{listen}"\noutbound = "direct"\n\n[[outbounds]]\ntag = "direct"'
+    )
+    server_credentials = (
+        ""
+        if spec.role == "client"
+        else f'''[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "{SYNTHETIC_PSK}"
+'''
     )
     path.write_text(
         f"""schema_version = 2
 
 {role}
 
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "{SYNTHETIC_PSK}"
-
+{server_credentials}
 [metrics]
 listen = "127.0.0.1:{metrics}"
 

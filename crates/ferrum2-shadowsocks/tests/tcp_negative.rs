@@ -1,6 +1,6 @@
 mod common;
 
-use ferrum2_crypto::TcpMethodProfile;
+use ferrum2_crypto::MethodProfile;
 use ferrum2_shadowsocks::{
     DetectionReason, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
 };
@@ -82,7 +82,7 @@ async fn authenticated_semantic_table_all_profiles_fails_before_replay_or_owned_
         ),
     ];
 
-    for profile in TcpMethodProfile::ALL {
+    for profile in MethodProfile::ALL {
         for (index, (reason, message_type, timestamp, variable)) in cases.iter().enumerate() {
             let keys = method_provider(profile);
             let clock = FakeClock::new(NOW, 0);
@@ -107,7 +107,7 @@ async fn authenticated_semantic_table_all_profiles_fails_before_replay_or_owned_
 
 #[tokio::test]
 async fn auth_bit_flips_in_each_authenticated_chunk_are_rejected() {
-    for profile in TcpMethodProfile::ALL {
+    for profile in MethodProfile::ALL {
         let first = profile.initial_request_read_bytes();
         for (index, offset) in [profile.salt_bytes() + 4, first + 2]
             .into_iter()
@@ -133,7 +133,7 @@ async fn auth_bit_flips_in_each_authenticated_chunk_are_rejected() {
 
 #[tokio::test]
 async fn auth_truncation_at_every_initial_chunk_prefix_is_rejected() {
-    for profile in TcpMethodProfile::ALL {
+    for profile in MethodProfile::ALL {
         let keys = method_provider(profile);
         let clock = FakeClock::new(NOW, 0);
         let random = ScriptedRandom::new([]);

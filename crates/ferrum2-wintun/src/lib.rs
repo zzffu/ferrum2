@@ -251,7 +251,7 @@ impl ManagedNetworkConfig {
     /// Requests scoped family and managed-DNS Windows Filtering Platform guards.
     ///
     /// The intent defaults to disabled. Callers should enable it only after resolving any
-    /// higher-level platform and compatibility policy.
+    /// higher-level platform policy.
     pub fn with_strict_route(mut self, enabled: bool) -> Self {
         self.strict_route = enabled;
         self

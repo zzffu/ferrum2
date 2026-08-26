@@ -410,7 +410,7 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
         format!(
             "schema_version = 2\n\
              [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
-             [[outbounds]]\ntag = \"protected\"\nserver = \"{protected_address}\"\n\
+             [[outbounds]]\ntag = \"protected\"\ntype = \"shadowsocks\"\nserver = \"{protected_address}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
              [route]\nfinal = \"protected\"\n\
              [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = 53\naction = \"hijack-dns\"\n\
              [dns]\nmax_inflight = 4\n\
@@ -418,8 +418,7 @@ fn m14_client_tcp_dns_hijack_reuses_policy_and_reaps() {
              [[dns.servers]]\ntag = \"{selected_tag}\"\ntransport = \"udp\"\naddress = \"{}\"\n\
              [[dns.servers]]\ntag = \"{final_tag}\"\ntransport = \"udp\"\naddress = \"{}\"\n\
              [dns.route]\nfinal = \"{final_tag}\"\n\
-             [[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nqname = \"{selected_name}\"\nqtype = \"A\"\nserver = \"{selected_tag}\"\n\
-             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+             [[dns.route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nqname = \"{selected_name}\"\nqtype = \"A\"\naction = \"route\"\nserver = \"{selected_tag}\"\n\
              [udp]\nenabled = false\n\
              [metrics]\nlisten = \"{metrics_address}\"\n",
             dns_addresses[0], dns_addresses[1],
@@ -865,7 +864,7 @@ fn direct_tcp_real_process_preserves_raw_bytes_and_half_close() {
         let root = match form {
             "static" => "outbound = \"exit\"\n".to_owned(),
             "rule" => format!(
-                "[route]\nfinal = \"fallback\"\n[[route.rules]]\ninbound = \"m16-tag-sentinel\"\nnetwork = \"tcp\"\nip = \"{}\"\nport = {}\noutbound = \"exit\"\n",
+                "[route]\nfinal = \"fallback\"\n[[route.rules]]\ninbound = \"m16-tag-sentinel\"\nnetwork = \"tcp\"\nip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"exit\"\n",
                 target.ip(),
                 target.port()
             ),
@@ -875,7 +874,7 @@ fn direct_tcp_real_process_preserves_raw_bytes_and_half_close() {
         };
         let proxy = matches!(form, "rule" | "selector").then(|| {
             format!(
-                "[[outbounds]]\ntag = \"fallback\"\nserver = \"{fallback_address}\"\n[shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"bTE2LXNlY3JldC1rZXkhIQ==\"\n"
+                "[[outbounds]]\ntag = \"fallback\"\ntype = \"shadowsocks\"\nserver = \"{fallback_address}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"bTE2LXNlY3JldC1rZXkhIQ==\"\n"
             )
         });
         let config = directory
@@ -1156,8 +1155,8 @@ fn tagged_two_by_two_tcp_matrix_covers_all_methods_and_exact_rebind() {
             write_tagged_client_config(directory.path(), clients, bridges, [0, 1], false)
                 .expect("tagged client config");
         if routed {
-            route_tagged_config(&client_config, "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"tcp\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-a\"\noutbound = \"out-0\"\n").expect("routed client matrix");
-            route_tagged_config(&server_config, "\n[route]\nfinal = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\noutbound = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\noutbound = \"out-1\"\n").expect("routed server matrix");
+            route_tagged_config(&client_config, "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-a\"\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-a\"\naction = \"route\"\noutbound = \"out-0\"\n").expect("routed client matrix");
+            route_tagged_config(&server_config, "\n[route]\nfinal = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\naction = \"route\"\noutbound = \"out-1\"\n").expect("routed server matrix");
         }
         rewrite_config_method(&server_config, method).expect("tagged server method");
         rewrite_config_method(&client_config, method).expect("tagged client method");
@@ -1281,7 +1280,7 @@ fn tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_vi
     .expect("no-fallback client");
     route_tagged_config(
         &client_config,
-        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\noutbound = \"out-0\"\n[[route.rules]]\nnetwork = \"udp\"\noutbound = \"out-0\"\n",
+        "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\naction = \"route\"\noutbound = \"out-0\"\n[[route.rules]]\nnetwork = \"udp\"\naction = \"route\"\noutbound = \"out-0\"\n",
     )
     .expect("routed no-fallback client");
     let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
