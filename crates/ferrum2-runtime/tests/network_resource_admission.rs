@@ -2,13 +2,15 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ferrum2_runtime::{
+use ferrum2_net::{
     DialOptions, InterfaceBinding, InterfaceResolutionErrorKind, InterfaceSelectionSource,
     NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceObservation,
-    NetworkInterfaceResolver, NetworkResetCoordinator, NetworkResetIntent, NetworkResetLimits,
-    NetworkResetReason, NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
-    NetworkRuntimeResourceAdmissionError, NetworkSnapshot, NetworkSnapshotPublisher, OwnerRegistry,
-    RouteNetworkOptions, SystemBestRoute,
+    NetworkInterfaceResolver, NetworkSnapshot, RouteNetworkOptions, SystemBestRoute,
+};
+use ferrum2_runtime::{
+    NetworkResetCoordinator, NetworkResetIntent, NetworkResetLimits, NetworkResetReason,
+    NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
+    NetworkRuntimeResourceAdmissionError, NetworkSnapshotPublisher, OwnerRegistry,
 };
 
 #[derive(Default)]

@@ -21,29 +21,6 @@ function Assert-ThrowsLike(
         "$Label did not fail with the expected message"
 }
 
-function Get-FunctionSource([string]$Path, [string[]]$Names) {
-    $tokens = $null
-    $errors = $null
-    $ast = [Management.Automation.Language.Parser]::ParseFile(
-        $Path,
-        [ref]$tokens,
-        [ref]$errors
-    )
-    Assert-True ($errors.Count -eq 0) "function source has parser errors: $Path"
-    $rows = [Collections.Generic.List[string]]::new()
-    foreach ($name in $Names) {
-        $matches = @($ast.FindAll({
-            param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -ceq $name
-        }, $true))
-        Assert-True ($matches.Count -eq 1) `
-            "function source is missing or ambiguous: $name"
-        $rows.Add($matches[0].Extent.Text)
-    }
-    return $rows -join "`n`n"
-}
-
 function New-HardKillWfpEvidence {
     $specs = @(
         [pscustomobject]@{ Key = "a158b31d-7a59-40bc-9339-38b5e8701001"; Name = "Ferrum2 app permit IPv4"; Layer = "FWPM_LAYER_ALE_AUTH_CONNECT_V4"; Action = "FWP_ACTION_PERMIT" },
@@ -169,13 +146,27 @@ try {
     ) -ArgumentList $commonPath -ScriptBlock {
         param([string]$Path)
         . $Path -LibraryOnly
+        $root = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) `
+            '..\..') -ErrorAction Stop).Path
+        Import-Module (Join-Path $root `
+            'tools\powershell\Ferrum2.Qualification.Common\Ferrum2.Qualification.Common.psd1') `
+            -Scope Local -Force -ErrorAction Stop
+        foreach ($owner in @(
+            'Paths.ps1', 'Process.ps1', 'Manifest.ps1', 'Artifacts.ps1', 'Evidence.ps1'
+        )) {
+            . (Join-Path $root `
+                "tools\powershell\Ferrum2.Qualification.HostHyperV\private\$owner")
+        }
         Export-ModuleMember -Function @(
-            "Get-EvidenceHashes", "Write-JsonFileNew",
-            "Remove-BoundedWorkerManifestIfPresent", "Invoke-BoundedPwshFile",
+            "Get-EvidenceHashes", "Remove-BoundedWorkerManifestIfPresent",
+            "Invoke-BoundedPwshFile",
             "Assert-BoundedWorkerPassManifestAndTerminal"
         )
     }
     Import-Module $commonModule -Scope Local -Force
+    Import-Module (Join-Path $repositoryRoot `
+        "tools\powershell\Ferrum2.Qualification.Common\Ferrum2.Qualification.Common.psd1") `
+        -Scope Local -Force -ErrorAction Stop
 
     $evidenceRoot = Join-Path $temporaryRoot "evidence"
     New-Item -ItemType Directory -Path $evidenceRoot -ErrorAction Stop | Out-Null
@@ -190,7 +181,8 @@ try {
         "baseline evidence hash set is invalid"
     $pendingPath = Join-Path $evidenceRoot "host-orchestration.pending.json"
     $finalPath = Join-Path $evidenceRoot "host-orchestration.json"
-    Write-JsonFileNew -Path $pendingPath -Value ([ordered]@{ status = "pending" })
+    Write-Ferrum2JsonCreateNew -Path $pendingPath `
+        -Value ([ordered]@{ status = "pending" }) -Depth 8
     Assert-True (
         (@(Get-EvidenceHashes -EvidenceRoot $evidenceRoot) |
             ConvertTo-Json -Compress -Depth 5) -ceq
@@ -228,13 +220,14 @@ try {
         creation_utc = $listenerTimestamp
     }
     $validFailure = [ordered]@{
-        schema = "ferrum2.windows-tun.hard-kill-hyperv-host-run.v2"
+        schema = "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3"
         status = "fail"; mode = "hard-kill"; run_token = $runToken
         vm_name = $vmName; vm_id = $vmId.ToString("D")
         checkpoint_name = "Static checkpoint"; checkpoint_id = $checkpointId.ToString("D")
         topology = $topology; support_listener = $supportListener
         candidate_sha = "5" * 40; identity_sha256 = "6" * 64
-        controller_sha256 = "7" * 64; guest_wrapper_sha256 = $null
+        controller_sha256 = "7" * 64; controller_bundle_sha256 = "b" * 64
+        guest_wrapper_sha256 = $null
         topology_runtime_sha256 = "8" * 64; host_network_path_helper_sha256 = "9" * 64
         guest_network_path_probe_sha256 = "a" * 64; staged_input_sha256 = $null
         rust_version = $null; guest_execution = $null; guest_build = $null
@@ -245,7 +238,7 @@ try {
     }
     $validFailure.guest_execution = "host-built-precompiled-artifacts-only"
     $validFailure.guest_build = "19045"
-    Write-JsonFileNew -Path $finalPath -Value $validFailure
+    Write-Ferrum2JsonCreateNew -Path $finalPath -Value $validFailure -Depth 8
     [IO.File]::WriteAllBytes($pendingPath, [byte[]]::new(0))
     Remove-BoundedWorkerManifestIfPresent -Path $finalPath `
         -ExpectedSchema $validFailure.schema -ExpectedRunToken $runToken `
@@ -260,7 +253,7 @@ try {
         $invalidFailure[$key] = $validFailure[$key]
     }
     $invalidFailure.identity_sha256 = $null
-    Write-JsonFileNew -Path $finalPath -Value $invalidFailure
+    Write-Ferrum2JsonCreateNew -Path $finalPath -Value $invalidFailure -Depth 8
     Remove-BoundedWorkerManifestIfPresent -Path $finalPath `
         -ExpectedSchema $validFailure.schema -ExpectedRunToken $runToken `
         -ExpectedVmId $vmId -ExpectedVmName $vmName
@@ -269,7 +262,7 @@ try {
 
     $invalidPass = [ordered]@{} + $validFailure
     $invalidPass.status = "pass"
-    Write-JsonFileNew -Path $finalPath -Value $invalidPass
+    Write-Ferrum2JsonCreateNew -Path $finalPath -Value $invalidPass -Depth 8
     [IO.File]::WriteAllBytes($pendingPath, [byte[]]::new(0))
     Remove-BoundedWorkerManifestIfPresent -Path $finalPath `
         -ExpectedSchema $validFailure.schema -ExpectedRunToken $runToken `
@@ -320,7 +313,7 @@ try {
     $validPass.host_support_unchanged = $true
     $validPass.final_vm_state = "Off"
     $validPass.evidence_files = @(Get-EvidenceHashes -EvidenceRoot $evidenceRoot)
-    Write-JsonFileNew -Path $finalPath -Value $validPass
+    Write-Ferrum2JsonCreateNew -Path $finalPath -Value $validPass -Depth 8
     $validTerminal =
         "hyperv_windows_tun_hard_kill status=PASS mode=hard-kill " +
         "run_token=$runToken candidate_sha=$($validPass.candidate_sha) " +
@@ -342,7 +335,7 @@ try {
         $invalidContractPass[$key] = $validPass[$key]
     }
     $invalidContractPass.staged_input_sha256 = $null
-    Write-JsonFileNew -Path $finalPath -Value $invalidContractPass
+    Write-Ferrum2JsonCreateNew -Path $finalPath -Value $invalidContractPass -Depth 8
     Assert-ThrowsLike {
         Assert-BoundedWorkerPassManifestAndTerminal -ManifestPath $finalPath `
             -Terminal $validTerminal -WorkerContract "HardKill" `
@@ -404,26 +397,23 @@ try {
     } "could not enter the kill-on-close job" `
         "bounded child primary failure preservation"
 
-    $guestSource = Get-FunctionSource $guestWrapperPath @(
-        "Assert-True", "Assert-OrdinaryLeaf", "Assert-RoundTripUtcTimestamp",
-        "Assert-HardKillWfpEvidence", "Assert-HardKillEvidence"
-    )
     $guestModule = New-Module -Name (
         "Ferrum2GuestEvidenceStatic_" + [Guid]::NewGuid().ToString("N")
-    ) -ScriptBlock ([scriptblock]::Create(
-        $guestSource + "`nExport-ModuleMember -Function Assert-HardKillEvidence"
-    ))
+    ) -ArgumentList $guestWrapperPath -ScriptBlock {
+        param([string]$Path)
+        . $Path -LibraryOnly
+        Export-ModuleMember -Function Assert-HardKillEvidence
+    }
     Import-Module $guestModule -Scope Local -Prefix Guest -Force
 
-    $hostSource = Get-FunctionSource $hardKillHostPath @(
-        "Assert-True", "Assert-RoundTripUtcTimestamp",
-        "Assert-HardKillWfpEvidence", "Assert-HardKillEvidenceRows"
-    )
     $hostModule = New-Module -Name (
         "Ferrum2HostEvidenceStatic_" + [Guid]::NewGuid().ToString("N")
-    ) -ScriptBlock ([scriptblock]::Create(
-        $hostSource + "`nExport-ModuleMember -Function Assert-HardKillEvidenceRows"
-    ))
+    ) -ArgumentList $hardKillHostPath -ScriptBlock {
+        param([string]$Path)
+        . $Path -LibraryOnly
+        . (Join-Path (Split-Path -Parent $Path) 'Hard.HostContract.ps1')
+        Export-ModuleMember -Function Assert-HardKillEvidenceRows
+    }
     Import-Module $hostModule -Scope Local -Prefix Host -Force
 
     $validEvidencePath = Join-Path $temporaryRoot "hard-kill-valid.jsonl"
@@ -449,56 +439,62 @@ try {
         [Threading.Thread]::CurrentThread.CurrentUICulture = $originalUiCulture
     }
 
-    $supervisorSource = Get-FunctionSource $commonPath @(
-        "Invoke-BoundedHyperVWorkerSupervisor"
-    )
-    $supervisorStubs = @'
-$script:Scenario = "pass"
-$script:ExpectedVmId = [Guid]::Empty
-$script:ExpectedFinalState = "Running"
-$script:CleanupCalls = 0
-function Set-SupervisorScenario([string]$Scenario, [Guid]$VmId, [string]$FinalState) {
-    $script:Scenario = $Scenario
-    $script:ExpectedVmId = $VmId
-    $script:ExpectedFinalState = $FinalState
-    $script:CleanupCalls = 0
-}
-function Get-SupervisorCleanupCalls { return $script:CleanupCalls }
-function Assert-ApprovedVmCleanupAuthority { param([object]$Authority) }
-function New-BoundedPwshFileArguments { param($ScriptPath,$BoundParameters,$ForwardedParameterNames,$InternalWorkerToken); return @("stub") }
-function Invoke-BoundedPwshFile {
-    param($Arguments,$TimeoutSeconds,$Label,$Environment,$StartGate)
-    if ($script:Scenario -ceq "primary" -or $script:Scenario -ceq "primary-recovery") {
-        throw "synthetic primary failure"
-    }
-    $stdout = [ordered]@{
-        schema = "ferrum2.windows-tun.hyperv-probe.v2"
-        status = "pass"
-        vm_id = $script:ExpectedVmId.ToString("D")
-        initial_vm_state = $script:ExpectedFinalState.ToLowerInvariant()
-        final_vm_state = $script:ExpectedFinalState
-        checkpoint_restored = $false
-        host_network_mutations = [long]0
-    } | ConvertTo-Json -Compress
-    if ($script:Scenario -ceq "bad-terminal") { $stdout = "not-json" }
-    return [pscustomobject]@{ ExitCode = 0; Stdout = $stdout; Stderr = "" }
-}
-function Invoke-BoundedHyperVMutation { param($Action,$VmId,$ExpectedVmName,$TimeoutSeconds); return $script:ExpectedFinalState }
-function Invoke-ApprovedVmWorkerEmergencyCleanup {
-    param($Authority,$ShutdownTimeoutSeconds,$Mode)
-    $script:CleanupCalls++
-    if ($script:Scenario -ceq "primary-recovery") { throw "synthetic recovery failure" }
-}
-function Remove-BoundedWorkerManifestIfPresent { param($Path,$ExpectedSchema,$ExpectedRunToken,$ExpectedVmId,$ExpectedVmName) }
-'@
     $supervisorModule = New-Module -Name (
         "Ferrum2SupervisorStatic_" + [Guid]::NewGuid().ToString("N")
-    ) -ScriptBlock ([scriptblock]::Create(
-        $supervisorStubs + "`n" + $supervisorSource + @'
-
-Export-ModuleMember -Function Invoke-BoundedHyperVWorkerSupervisor,Set-SupervisorScenario,Get-SupervisorCleanupCalls
-'@
-    ))
+    ) -ArgumentList $commonPath -ScriptBlock {
+        param([string]$Path)
+        $root = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) `
+            '..\..') -ErrorAction Stop).Path
+        . (Join-Path $root `
+            'tools\powershell\Ferrum2.Qualification.HostHyperV\private\Manifest.ps1')
+        $script:Scenario = "pass"
+        $script:ExpectedVmId = [Guid]::Empty
+        $script:ExpectedFinalState = "Running"
+        $script:CleanupCalls = 0
+        function Set-SupervisorScenario([string]$Scenario, [Guid]$VmId, [string]$FinalState) {
+            $script:Scenario = $Scenario
+            $script:ExpectedVmId = $VmId
+            $script:ExpectedFinalState = $FinalState
+            $script:CleanupCalls = 0
+        }
+        function Get-SupervisorCleanupCalls { return $script:CleanupCalls }
+        function Assert-ApprovedVmCleanupAuthority { param([object]$Authority) }
+        function New-BoundedPwshFileArguments {
+            param($ScriptPath,$BoundParameters,$ForwardedParameterNames,$InternalWorkerToken)
+            return @("stub")
+        }
+        function Invoke-BoundedPwshFile {
+            param($Arguments,$TimeoutSeconds,$Label,$Environment,$StartGate)
+            if ($script:Scenario -ceq "primary" -or $script:Scenario -ceq "primary-recovery") {
+                throw "synthetic primary failure"
+            }
+            $stdout = [ordered]@{
+                schema = "ferrum2.windows-tun.hyperv-probe.v2"
+                status = "pass"
+                vm_id = $script:ExpectedVmId.ToString("D")
+                initial_vm_state = $script:ExpectedFinalState.ToLowerInvariant()
+                final_vm_state = $script:ExpectedFinalState
+                checkpoint_restored = $false
+                host_network_mutations = [long]0
+            } | ConvertTo-Json -Compress
+            if ($script:Scenario -ceq "bad-terminal") { $stdout = "not-json" }
+            return [pscustomobject]@{ ExitCode = 0; Stdout = $stdout; Stderr = "" }
+        }
+        function Invoke-BoundedHyperVMutation {
+            param($Action,$VmId,$ExpectedVmName,$TimeoutSeconds)
+            return $script:ExpectedFinalState
+        }
+        function Invoke-ApprovedVmWorkerEmergencyCleanup {
+            param($Authority,$ShutdownTimeoutSeconds,$Mode)
+            $script:CleanupCalls++
+            if ($script:Scenario -ceq "primary-recovery") { throw "synthetic recovery failure" }
+        }
+        function Remove-BoundedWorkerManifestIfPresent {
+            param($Path,$ExpectedSchema,$ExpectedRunToken,$ExpectedVmId,$ExpectedVmName)
+        }
+        Export-ModuleMember -Function `
+            Invoke-BoundedHyperVWorkerSupervisor,Set-SupervisorScenario,Get-SupervisorCleanupCalls
+    }
     Import-Module $supervisorModule -Scope Local -Force
     $supervisorVmId = [Guid]::NewGuid()
     $supervisorVmName = "Static Supervisor VM"
@@ -567,25 +563,6 @@ public sealed class Ferrum2ThrowingTextWriter : TextWriter
         $consoleFailure.Exception.Message -match "synthetic console failure" -and
         (Get-SupervisorCleanupCalls) -eq 1) `
         "terminal emission failure bypassed supervisor recovery"
-
-    foreach ($path in @($commonPath, $hardKillHostPath)) {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile(
-            $path,
-            [ref]$tokens,
-            [ref]$errors
-        )
-        Assert-True ($errors.Count -eq 0) "caller binding source did not parse"
-        $calls = @($ast.FindAll({
-            param($node)
-            $node -is [Management.Automation.Language.CommandAst] -and
-                $node.GetCommandName() -ceq "Invoke-BoundedHyperVWorkerSupervisor"
-        }, $true))
-        Assert-True ($calls.Count -eq 1 -and
-            ($calls[0].Extent.Text -match '(?m)-ExpectedVmName\s+\$approvedVmName')) `
-            "supervisor caller is missing the mandatory VM-name binding: $path"
-    }
 
     Write-Output "Windows TUN Hyper-V static contract: PASS"
 } finally {

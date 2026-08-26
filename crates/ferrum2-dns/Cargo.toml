@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-exclude = ["tests/fixtures/*.der", "tests/fixtures/*.pk8"]
 
 [lib]
 path = "src/lib.rs"
@@ -16,6 +15,7 @@ __interop-test-root = ["dep:rustls"]
 
 [dependencies]
 ferrum2-core.workspace = true
+ferrum2-net.workspace = true
 ferrum2-rule.workspace = true
 futures-util.workspace = true
 hickory-proto.workspace = true

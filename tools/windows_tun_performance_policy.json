@@ -1,5 +1,5 @@
 {
-  "policy_id": "windows-tun-network-model-calibration-required-v3",
+  "policy_id": "windows-tun-network-model-calibration-required-v5",
   "scenarios": {
     "fragment-reassembly-throughput": {
       "metrics": {
@@ -324,6 +324,6 @@
       }
     }
   },
-  "schema_version": 2,
+  "schema_version": 4,
   "selection": "windows-tun-m17"
 }

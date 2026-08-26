@@ -4,7 +4,7 @@ This file supplements the repository-level `AGENTS.md` for changes under this cr
 
 ## Responsibility and Boundaries
 
-This crate composes tagged upstreams into Hickory resolvers, paired UDP/TCP proxy listeners, and an exclusively owned Tokio runtime. `ferrum2-config` owns schema validation and selection policy; this crate accepts numeric addresses, authenticated transport parameters, and optional egress-plan snapshots. Keep relay and detour implementation behind `DnsEgress`.
+This crate owns DNS execution without a configuration back-edge. `runtime_owner` owns the resolver handle, commands, and joined command loop; `runtime_provider` owns egress capability, admission/tracking, and the Hickory adapter; `policy` owns the runtime-neutral model compiler, evaluation, and reusable scratch; and `proxy` owns construction, policy-cache adaptation, and the paired UDP/TCP loops. `ferrum2-config` validates schema and emits rule blueprints, while this crate consumes numeric addresses, authenticated transport parameters, rule snapshots, and optional egress plans. Keep relay and detour implementation behind `DnsEgress`.
 
 ## Verification
 
@@ -17,7 +17,9 @@ cargo test -p ferrum2-dns --test proxy_contract --locked
 cargo test -p ferrum2-dns --test resource_lifecycle --locked
 ```
 
-The DER/PKCS#8 fixtures are synthetic local-server credentials. Preserve their hashes, `resolver.test` identity, provenance, and test-only status; never use `__interop-test-root` as production trust policy.
+The shared `tests/fixtures/dns-tls` DER/PKCS#8 fixtures are synthetic local-server credentials.
+Preserve their hashes, `resolver.test` identity, provenance, and test-only status; never use
+`__interop-test-root` as production trust policy.
 
 ## Security and Lifecycle Contracts
 

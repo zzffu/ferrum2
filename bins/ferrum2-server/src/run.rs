@@ -5,11 +5,12 @@ use std::sync::{Arc, OnceLock};
 use ferrum2_config::{DnsConfig, PreparedServerV2, ValidatedServerConfig};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_dns::{DnsCache, TaggedResolver};
+use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_observability::{Metrics, RuleProgram, RuleProgramMode, json_subscriber};
 use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
-    BoundedSupervisor, DialOptions, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
-    ProcessRootExit, ProcessSupervisor, RouteNetworkOptions, UdpSessionManager,
+    BoundedSupervisor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit,
+    ProcessSupervisor, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
 use tokio::net::UdpSocket;
@@ -18,21 +19,23 @@ mod dns;
 #[path = "dns_egress.rs"]
 mod dns_egress;
 mod materialize;
+mod network;
 mod observation;
+mod routing;
 mod tcp;
 #[path = "run/io.rs"]
 mod tokio_io;
 mod udp;
 
 use dns::{ServerDnsDependentRoot, ServerDnsDrain, ServerDnsRoot};
-use observation::{ServerMetricsRoot, log_level};
+use network::ServerNetworkSocketService;
 #[cfg(all(windows, not(test)))]
-use tcp::prepare_server_network_runtime;
+use network::prepare_server_network_runtime;
 #[cfg(any(not(windows), test))]
-use tcp::prepare_server_network_socket_service;
-use tcp::{
-    ServerContext, ServerNetworkSocketService, ServerRouting, ServerTcpListeners, ServerTcpRoot,
-};
+use network::prepare_server_network_socket_service;
+use observation::{ServerMetricsRoot, log_level};
+use routing::ServerRouting;
+use tcp::{ServerContext, ServerTcpListeners, ServerTcpRoot};
 use tokio_io::{bind_listener, shutdown_signal};
 #[cfg(all(windows, not(test)))]
 use udp::ServerUdpNetworkReset;
@@ -185,21 +188,24 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
         #[cfg(any(not(windows), test))]
         let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
         let result = async {
-            let context = materialize::ServerV2MaterializeContext::with_network_sockets(
+            let materializer = materialize::ServerV2Materializer::with_network_sockets(
                 Arc::clone(&metrics),
                 Arc::clone(&network_sockets),
             );
-            let materialized = materialize::materialize_prepared(prepared, &context).await?;
+            let materialized = materializer.materialize(prepared).await?;
             let subscriber = json_subscriber(
                 std::io::stderr,
                 log_level(materialized.config().logging.level),
             );
             if tracing::subscriber::set_global_default(subscriber).is_err() {
-                materialized.validate_only_shutdown().await?;
+                materialized.validate_only()?;
                 return Err(RunError::StartupObservability);
             }
-            let (config, materialization_root, materialized_cache) =
-                materialized.into_run_parts().await?;
+            let materialize::MaterializedRunParts {
+                config,
+                materialization_root,
+                cache: materialized_cache,
+            } = materialized.into_run_parts().await?;
             let dns_specs = config
                 .dns
                 .as_ref()
@@ -226,7 +232,7 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
         .await;
         #[cfg(all(windows, not(test)))]
         if let Some(monitor) = network_change_monitor {
-            tcp::close_server_network_change_monitor(monitor)?;
+            network::close_server_network_change_monitor(monitor)?;
         }
         result
     })
@@ -247,14 +253,14 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
             prepare_server_network_runtime(&registry, &metrics)?;
         #[cfg(any(not(windows), test))]
         let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
-        let context =
-            materialize::ServerV2MaterializeContext::with_network_sockets(metrics, network_sockets);
-        let result = match materialize::materialize_prepared(prepared, &context).await {
-            Ok(materialized) => materialized.validate_only_shutdown().await.map(drop),
+        let materializer =
+            materialize::ServerV2Materializer::with_network_sockets(metrics, network_sockets);
+        let result = match materializer.materialize(prepared).await {
+            Ok(materialized) => materialized.validate_only().map(drop),
             Err(error) => Err(error),
         };
         #[cfg(all(windows, not(test)))]
-        tcp::close_server_network_change_monitor(network_change_monitor)?;
+        network::close_server_network_change_monitor(network_change_monitor)?;
         result
     })
 }
@@ -266,7 +272,7 @@ struct ServerRunResources {
     materialized: bool,
     network_sockets: Option<Arc<ServerNetworkSocketService>>,
     #[cfg(all(windows, not(test)))]
-    network_change_monitor: ferrum2_wintun::WindowsNetworkChangeMonitor,
+    network_change_monitor: ferrum2_platform_windows::WindowsNetworkChangeMonitor,
 }
 
 impl ServerRunResources {
@@ -597,7 +603,7 @@ where
         #[cfg(all(windows, not(test)))]
         roots.insert(
             0,
-            tcp::network_change_process_root(
+            network::network_change_process_root(
                 network_change_monitor
                     .take()
                     .ok_or(RunError::StartupRuntime)?,
@@ -618,7 +624,7 @@ where
     };
     #[cfg(all(windows, not(test)))]
     if let Some(monitor) = network_change_monitor {
-        tcp::close_server_network_change_monitor(monitor)?;
+        network::close_server_network_change_monitor(monitor)?;
     }
     result
 }

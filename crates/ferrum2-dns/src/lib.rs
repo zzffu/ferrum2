@@ -3,7 +3,9 @@
 //! Bounded tagged DNS composition backed by Hickory.
 
 mod application;
+mod application_adapter;
 mod cache;
+mod channel_datagram;
 mod endpoint;
 mod error;
 mod policy;
@@ -20,10 +22,12 @@ pub use application::{
     MAX_APPLICATION_RESOLVED_CANDIDATES, SystemApplicationResolveBackend,
     TaggedServerApplicationResolveBackend,
 };
+pub use application_adapter::ApplicationResolverAdapter;
 pub use cache::{
     DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheError, DnsCacheKey, DnsCacheLookup,
     DnsCacheObserver, DnsCacheQtype, DnsServerId, ResolverGeneration,
 };
+pub use channel_datagram::ChannelDnsDatagram;
 pub use endpoint::{
     FixedEndpointKind, FixedEndpointLookup, FixedEndpointMaterializeError, FixedEndpointPlanEntry,
     FixedEndpointResolveBackend, FixedEndpointResolveFuture, FixedEndpointResolveRequest,

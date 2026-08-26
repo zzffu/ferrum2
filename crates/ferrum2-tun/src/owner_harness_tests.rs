@@ -7,6 +7,7 @@ use std::time::Duration;
 use ferrum2_runtime::OwnerRegistry;
 use tokio::sync::mpsc;
 
+use crate::lifecycle::{bounded_network_wait, owner_wait_after_budget};
 use crate::packet::test_support::{ipv4_tcp_with_options, ipv4_udp, repair_ipv4_header};
 use crate::scheduler::{BudgetOutcome, FairScheduler, StepOutcome, WorkStage};
 use crate::supervisor::{NETWORK_DEBOUNCE, NetworkDebounce};
@@ -14,7 +15,7 @@ use crate::udp::ResponseProcessOutcome;
 use crate::{
     OutputFlushOutcome, OutputSendOutcome, OwnerWake, Stack, TcpFlow, TunEvent, TunEventSink,
     TunRejectReason, UdpCandidate, UdpFiltering, UdpInjectOutcome, UdpResponseDropReason,
-    UdpResponseSendOutcome, bounded_network_wait, owner_wait_after_budget,
+    UdpResponseSendOutcome,
 };
 
 const TEST_WORK_BUDGET: usize = 64;

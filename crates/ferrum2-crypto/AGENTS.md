@@ -4,7 +4,7 @@ This file supplements the repository-level `AGENTS.md` for changes under this cr
 
 ## Responsibility and Boundaries
 
-This crate owns SIP022 method profiles, exact-width secret and salt types, scoped key-provider capabilities, subkey derivation, TCP AEAD owners, nonce and entropy seams, and the cryptographic portion of UDP envelopes. Semantic packet layout and TCP framing remain in `ferrum2-shadowsocks`; configuration decoding remains in `ferrum2-config`. Keep primitive access behind typed, method-bound owners rather than exporting raw PSK or subkey bytes.
+This crate owns SIP022 method profiles, exact-width secret and salt types, scoped key-provider capabilities, subkey derivation, TCP AEAD owners, nonce and entropy seams, and the cryptographic portion of UDP envelopes. `method`, `clock`, and `random` own their typed capabilities; `udp/{session,aead}` owns session identity and packet cryptography; `tcp/{key,nonce,aead}` keeps subkey derivation beside `TcpSubkey` and owns exhaustion-safe stream state. Semantic packet layout and TCP framing remain in `ferrum2-shadowsocks`; configuration decoding remains in `ferrum2-config`. Keep primitive access behind typed, method-bound owners rather than exporting raw PSK or subkey bytes.
 
 ## Verification
 

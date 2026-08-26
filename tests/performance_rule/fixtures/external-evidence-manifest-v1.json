@@ -1,0 +1,50 @@
+{
+  "artifacts": [
+    {
+      "bytes": 62032851,
+      "file": "release-aa-v2-p99-diagnostic.json",
+      "role": "archived_v2_aa_diagnostic",
+      "sha256": "2b8f08988112c2142294a4266a24c8d7672d89f2387a91f4b460b52daaf7d4e9"
+    },
+    {
+      "bytes": 62164238,
+      "file": "release-aa-v3-all-suite-median.json",
+      "role": "archived_v3_aa_calibration",
+      "sha256": "8e795edfc61c2328cb1f84fe0fd65f8ec0236d210078fb23c11e221cba87d394"
+    },
+    {
+      "bytes": 62319911,
+      "file": "release-aa.json",
+      "role": "archived_v4_aa_calibration",
+      "sha256": "a69f361ec981e7c923f889db9e6e0dd5714883df4a66902729c40fb53c2ae8b0"
+    },
+    {
+      "bytes": 62089853,
+      "file": "release-ab-v3-all-suite-median-diagnostic.json",
+      "role": "archived_v3_ab_diagnostic",
+      "sha256": "679a85722049e5dc0ea9fa601807623defc267be064d9bb4694aae0bf59719f3"
+    },
+    {
+      "bytes": 62238238,
+      "file": "release-ab.json",
+      "role": "archived_v4_ab_comparison",
+      "sha256": "e870c59b4d9e33cd667dbf8881af3d74dae9c5a649d726de57ae47206e66f200"
+    },
+    {
+      "bytes": 3908233,
+      "file": "release-qualification.json",
+      "role": "current_runner_qualification",
+      "sha256": "b5e31f32556aa914843c965dcfad62bbcdf9f1dbb8a13987f5d1d0b4d4848e7b"
+    },
+    {
+      "bytes": 972496,
+      "file": "release-smoke.json",
+      "role": "current_runner_smoke",
+      "sha256": "671bdcc5cf98b0b9354a2520c5405e2f4151f553eb587c6df5e6fb704c866413"
+    }
+  ],
+  "kind": "ferrum2_rule_external_evidence_manifest",
+  "schema_version": 1,
+  "storage": "external_immutable_artifact",
+  "total_bytes": 315725820
+}

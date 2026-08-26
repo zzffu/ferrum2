@@ -4,20 +4,33 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 
-MODULE_PATH = pathlib.Path(__file__).with_name("windows_tun_network_model.py")
-SPEC = importlib.util.spec_from_file_location("windows_tun_network_model", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-MODEL = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODEL)
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.performance_candidate.windows_tun import network_model as MODEL
+from tools.performance_candidate.windows_tun import network_model_identity as MODEL_IDENTITY
+from tools.performance_candidate.windows_tun import network_model_lifecycle as MODEL_LIFECYCLE
+from tools.performance_candidate.windows_tun import network_model_route as MODEL_ROUTE
 
 
-def observation_identity(*, trial_sequence: int = 90) -> dict[str, object]:
+ROUTE_TRIAL_SEQUENCE = (
+    MODEL_IDENTITY.TRIAL_COUNT - MODEL_IDENTITY.PAIR_COUNT * 4 + 1
+)
+LIFECYCLE_TRIAL_SEQUENCE = (
+    MODEL_IDENTITY.TRIAL_COUNT - MODEL_IDENTITY.PAIR_COUNT * 2 + 1
+)
+
+
+def observation_identity(
+    *, trial_sequence: int = ROUTE_TRIAL_SEQUENCE
+) -> dict[str, object]:
     return {
         "run_kind": "comparison",
         "member": "candidate",
@@ -43,27 +56,27 @@ def observation_identity(*, trial_sequence: int = 90) -> dict[str, object]:
 
 def route_once_observation(*, elapsed_nanoseconds: int = 1_000_000_000) -> dict[str, object]:
     generations = []
-    for generation in range(1, MODEL.ROUTE_GENERATIONS + 1):
+    for generation in range(1, MODEL_ROUTE.ROUTE_GENERATIONS + 1):
         associations = []
-        for source_slot in range(MODEL.ROUTE_SOURCE_SLOTS):
+        for source_slot in range(MODEL_ROUTE.ROUTE_SOURCE_SLOTS):
             associations.append(
                 {
                     "source_slot": source_slot,
-                    "target_slots": list(range(MODEL.ROUTE_TARGET_SLOTS)),
+                    "target_slots": list(range(MODEL_ROUTE.ROUTE_TARGET_SLOTS)),
                     "first_target_slot": 0 if source_slot % 2 == 0 else 1,
                     "datagrams_sent": (
-                        MODEL.ROUTE_TARGET_SLOTS * MODEL.ROUTE_DATAGRAMS_PER_TARGET
+                        MODEL_ROUTE.ROUTE_TARGET_SLOTS * MODEL_ROUTE.ROUTE_DATAGRAMS_PER_TARGET
                     ),
                     "replies_received": (
-                        MODEL.ROUTE_TARGET_SLOTS * MODEL.ROUTE_DATAGRAMS_PER_TARGET
+                        MODEL_ROUTE.ROUTE_TARGET_SLOTS * MODEL_ROUTE.ROUTE_DATAGRAMS_PER_TARGET
                     ),
                 }
             )
         path_datagrams = (
-            MODEL.ROUTE_SOURCE_SLOTS
+            MODEL_ROUTE.ROUTE_SOURCE_SLOTS
             // 2
-            * MODEL.ROUTE_TARGET_SLOTS
-            * MODEL.ROUTE_DATAGRAMS_PER_TARGET
+            * MODEL_ROUTE.ROUTE_TARGET_SLOTS
+            * MODEL_ROUTE.ROUTE_DATAGRAMS_PER_TARGET
         )
         generations.append(
             {
@@ -77,10 +90,10 @@ def route_once_observation(*, elapsed_nanoseconds: int = 1_000_000_000) -> dict[
                 "associations": associations,
             }
         )
-    expected_associations = MODEL.ROUTE_GENERATIONS * MODEL.ROUTE_SOURCE_SLOTS
+    expected_associations = MODEL_ROUTE.ROUTE_GENERATIONS * MODEL_ROUTE.ROUTE_SOURCE_SLOTS
     return {
-        "schema_version": MODEL.SCHEMA_VERSION,
-        "workload": MODEL.ROUTE_ONCE_WORKLOAD,
+        "schema_version": MODEL_IDENTITY.SCHEMA_VERSION,
+        "workload": MODEL_ROUTE.ROUTE_ONCE_WORKLOAD,
         "identity": observation_identity(),
         "elapsed_nanoseconds": elapsed_nanoseconds,
         "association_creation_elapsed_nanoseconds": elapsed_nanoseconds // 2,
@@ -125,7 +138,7 @@ def lifecycle_observation() -> dict[str, object]:
     route_metric_states = (26, 27, route_metric_baseline)
     resource_warmup_cycles = []
     route_metric_before = route_metric_baseline
-    for sequence in range(1, MODEL.RESOURCE_WARMUP_RESET_CYCLES + 1):
+    for sequence in range(1, MODEL_LIFECYCLE.RESOURCE_WARMUP_RESET_CYCLES + 1):
         metrics_before = lifecycle_metrics(
             generation=sequence,
             reset_cycles=sequence - 1,
@@ -150,7 +163,7 @@ def lifecycle_observation() -> dict[str, object]:
                 cold_start_resources["process_threads"] + sequence,
             ),
         }
-        if sequence == MODEL.RESOURCE_WARMUP_RESET_CYCLES:
+        if sequence == MODEL_LIFECYCLE.RESOURCE_WARMUP_RESET_CYCLES:
             warmup_resources["process_handles"] += 1
         resource_warmup_cycles.append(
             {
@@ -175,36 +188,36 @@ def lifecycle_observation() -> dict[str, object]:
         route_metric_before = route_metric_after
 
     cycles = []
-    total_cycles = MODEL.RESET_CYCLES + MODEL.FULL_REBUILD_CYCLES
+    total_cycles = MODEL_LIFECYCLE.RESET_CYCLES + MODEL_LIFECYCLE.FULL_REBUILD_CYCLES
     for sequence in range(1, total_cycles + 1):
-        completed_resets = MODEL.RESOURCE_WARMUP_RESET_CYCLES + min(
-            sequence - 1, MODEL.RESET_CYCLES
+        completed_resets = MODEL_LIFECYCLE.RESOURCE_WARMUP_RESET_CYCLES + min(
+            sequence - 1, MODEL_LIFECYCLE.RESET_CYCLES
         )
-        completed_rebuilds = max(0, sequence - MODEL.RESET_CYCLES - 1)
+        completed_rebuilds = max(0, sequence - MODEL_LIFECYCLE.RESET_CYCLES - 1)
         metrics_before = lifecycle_metrics(
-            generation=MODEL.RESOURCE_WARMUP_RESET_CYCLES + sequence,
+            generation=MODEL_LIFECYCLE.RESOURCE_WARMUP_RESET_CYCLES + sequence,
             reset_cycles=completed_resets,
             rebuild_cycles=completed_rebuilds,
         )
-        if sequence <= MODEL.RESET_CYCLES:
+        if sequence <= MODEL_LIFECYCLE.RESET_CYCLES:
             operation = "reset_network"
             reason = (
                 "interface_change"
-                if sequence == MODEL.INTERFACE_SWITCH_SEQUENCE
+                if sequence == MODEL_LIFECYCLE.INTERFACE_SWITCH_SEQUENCE
                 else "route_change"
             )
             elapsed = sequence * 1_000
             identity_after = identity
             completed_resets += 1
         else:
-            rebuild_index = sequence - MODEL.RESET_CYCLES - 1
+            rebuild_index = sequence - MODEL_LIFECYCLE.RESET_CYCLES - 1
             operation = "full_rebuild"
-            reason = MODEL.FULL_REBUILD_DAMAGE_REASON
+            reason = MODEL_LIFECYCLE.FULL_REBUILD_DAMAGE_REASON
             elapsed = (11 + rebuild_index) * 1_000_000
             identity_after = f"{rebuild_index + 1:064x}"
             completed_rebuilds += 1
         metrics_after = lifecycle_metrics(
-            generation=MODEL.RESOURCE_WARMUP_RESET_CYCLES + sequence + 1,
+            generation=MODEL_LIFECYCLE.RESOURCE_WARMUP_RESET_CYCLES + sequence + 1,
             reset_cycles=completed_resets,
             rebuild_cycles=completed_rebuilds,
         )
@@ -231,13 +244,13 @@ def lifecycle_observation() -> dict[str, object]:
         )
         identity = identity_after
     return {
-        "schema_version": MODEL.SCHEMA_VERSION,
-        "workload": MODEL.LIFECYCLE_WORKLOAD,
-        "identity": observation_identity(trial_sequence=80),
+        "schema_version": MODEL_IDENTITY.SCHEMA_VERSION,
+        "workload": MODEL_LIFECYCLE.LIFECYCLE_WORKLOAD,
+        "identity": observation_identity(trial_sequence=LIFECYCLE_TRIAL_SEQUENCE),
         "resource_warmup": {
-            "reset_network_cycles": MODEL.RESOURCE_WARMUP_RESET_CYCLES,
+            "reset_network_cycles": MODEL_LIFECYCLE.RESOURCE_WARMUP_RESET_CYCLES,
             "route_metric_baseline": route_metric_baseline,
-            "quiescence_seconds": MODEL.RESOURCE_QUIESCENCE_SECONDS,
+            "quiescence_seconds": MODEL_LIFECYCLE.RESOURCE_QUIESCENCE_SECONDS,
             "cold_start_resources": cold_start_resources,
             "cycles": resource_warmup_cycles,
             "baseline_resource_samples": [dict(resources) for _ in range(3)],
@@ -245,9 +258,9 @@ def lifecycle_observation() -> dict[str, object]:
         "baseline_resources": dict(resources),
         "cycles": cycles,
         "interface_resolver": {
-            "probes": MODEL.INTERFACE_RESOLVER_PROBES,
-            "resolutions": MODEL.INTERFACE_RESOLVER_PROBES * 2,
-            "cache_hits": MODEL.INTERFACE_RESOLVER_PROBES * 2 - 2,
+            "probes": MODEL_LIFECYCLE.INTERFACE_RESOLVER_PROBES,
+            "resolutions": MODEL_LIFECYCLE.INTERFACE_RESOLVER_PROBES * 2,
+            "cache_hits": MODEL_LIFECYCLE.INTERFACE_RESOLVER_PROBES * 2 - 2,
             "interface_switch_probe_attempts": 1,
             "interface_switch_resolution_failures": 0,
         },
@@ -262,9 +275,9 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
         self.assertEqual(plan["host_network_mutation"], "forbidden")
         self.assertEqual(
             set(plan["workloads"]),
-            {MODEL.ROUTE_ONCE_WORKLOAD, MODEL.LIFECYCLE_WORKLOAD},
+            {MODEL_ROUTE.ROUTE_ONCE_WORKLOAD, MODEL_LIFECYCLE.LIFECYCLE_WORKLOAD},
         )
-        route = plan["workloads"][MODEL.ROUTE_ONCE_WORKLOAD]
+        route = plan["workloads"][MODEL_ROUTE.ROUTE_ONCE_WORKLOAD]
         self.assertEqual(
             (
                 route["generations"],
@@ -274,7 +287,7 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
             ),
             (2, 64, 4, 32),
         )
-        lifecycle = plan["workloads"][MODEL.LIFECYCLE_WORKLOAD]
+        lifecycle = plan["workloads"][MODEL_LIFECYCLE.LIFECYCLE_WORKLOAD]
         self.assertEqual(lifecycle["resource_warmup_reset_cycles"], 12)
         self.assertEqual(lifecycle["resource_warmup_route_metric_states"], 3)
         self.assertEqual(lifecycle["resource_quiescence_seconds"], 30)
@@ -289,7 +302,7 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
         self.assertEqual(lifecycle["interface_switch_recovery_timeout_seconds"], 30)
         self.assertEqual(lifecycle["interface_switch_probe_retry_milliseconds"], 250)
         self.assertEqual(
-            lifecycle["full_rebuild_cycles"], MODEL.FULL_REBUILD_CYCLES
+            lifecycle["full_rebuild_cycles"], MODEL_LIFECYCLE.FULL_REBUILD_CYCLES
         )
         self.assertEqual(lifecycle["latency_percentiles"], [50, 95, 99])
         self.assertTrue(
@@ -328,12 +341,12 @@ class LocalHypervPerformancePlanTests(unittest.TestCase):
 
 class RouteOnceWorkloadTests(unittest.TestCase):
     def test_multi_target_sources_route_once_and_reroute_once_after_reset(self) -> None:
-        summary = MODEL.summarize_route_once_observation(route_once_observation())
-        expected_associations = MODEL.ROUTE_GENERATIONS * MODEL.ROUTE_SOURCE_SLOTS
+        summary = MODEL_ROUTE.summarize_route_once_observation(route_once_observation())
+        expected_associations = MODEL_ROUTE.ROUTE_GENERATIONS * MODEL_ROUTE.ROUTE_SOURCE_SLOTS
         expected_datagrams = (
             expected_associations
-            * MODEL.ROUTE_TARGET_SLOTS
-            * MODEL.ROUTE_DATAGRAMS_PER_TARGET
+            * MODEL_ROUTE.ROUTE_TARGET_SLOTS
+            * MODEL_ROUTE.ROUTE_DATAGRAMS_PER_TARGET
         )
         self.assertEqual(summary["associations_created"], expected_associations)
         self.assertEqual(summary["datagrams_sent"], expected_datagrams)
@@ -343,7 +356,7 @@ class RouteOnceWorkloadTests(unittest.TestCase):
         self.assertTrue(summary["direct_and_proxy_verified"])
         self.assertEqual(
             summary["router_invocations_avoided"],
-            expected_associations * (MODEL.ROUTE_TARGET_SLOTS - 1),
+            expected_associations * (MODEL_ROUTE.ROUTE_TARGET_SLOTS - 1),
         )
         self.assertTrue(summary["route_once_verified"])
         self.assertTrue(summary["post_reset_reroute_verified"])
@@ -370,8 +383,8 @@ class RouteOnceWorkloadTests(unittest.TestCase):
         cases.append((stale_generation, "advance the generation exactly once"))
         for observation, message in cases:
             with self.subTest(message=message):
-                with self.assertRaisesRegex(MODEL.NetworkModelError, message):
-                    MODEL.summarize_route_once_observation(observation)
+                with self.assertRaisesRegex(MODEL_IDENTITY.NetworkModelError, message):
+                    MODEL_ROUTE.summarize_route_once_observation(observation)
 
     def test_summary_cli_recomputes_raw_route_once_measurements(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -391,12 +404,12 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
     def test_reset_and_rebuild_latency_and_resources_are_accounted_separately(
         self,
     ) -> None:
-        summary = MODEL.summarize_lifecycle_observation(lifecycle_observation())
+        summary = MODEL_LIFECYCLE.summarize_lifecycle_observation(lifecycle_observation())
         self.assertEqual(
             summary["cycles"],
             {
                 "reset_network": 1_000,
-                "full_rebuild": MODEL.FULL_REBUILD_CYCLES,
+                "full_rebuild": MODEL_LIFECYCLE.FULL_REBUILD_CYCLES,
             },
         )
         self.assertEqual(summary["resource_warmup"]["reset_network_cycles"], 12)
@@ -453,11 +466,11 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
             with self.subTest(operation=operation):
                 resources = summary["resources"][operation]
                 self.assertEqual(
-                    resources["growth"], {field: 0 for field in MODEL.RESOURCE_FIELDS}
+                    resources["growth"], {field: 0 for field in MODEL_LIFECYCLE.RESOURCE_FIELDS}
                 )
                 self.assertEqual(
                     resources["peak_growth"],
-                    {field: 0 for field in MODEL.RESOURCE_FIELDS},
+                    {field: 0 for field in MODEL_LIFECYCLE.RESOURCE_FIELDS},
                 )
                 self.assertEqual(
                     resources["retained_growth_enforced"],
@@ -469,7 +482,7 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         self.assertTrue(summary["reset_and_full_rebuild_metrics_are_exact"])
         self.assertEqual(
             summary["interface_switch_recovery_nanoseconds"],
-            MODEL.INTERFACE_SWITCH_SEQUENCE * 1_000,
+            MODEL_LIFECYCLE.INTERFACE_SWITCH_SEQUENCE * 1_000,
         )
         self.assertEqual(
             summary["interface_resolver"]["cache_hits_per_million_resolutions"],
@@ -525,7 +538,7 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         connection_open["cycles"][0]["udp_associations_closed"] -= 1
         cases.append((connection_open, "did not close every UDP association"))
         ordinary_rebuild = lifecycle_observation()
-        ordinary_rebuild["cycles"][MODEL.RESET_CYCLES]["reason"] = "route_change"
+        ordinary_rebuild["cycles"][MODEL_LIFECYCLE.RESET_CYCLES]["reason"] = "route_change"
         cases.append((ordinary_rebuild, "managed-damage rebuild schedule"))
         bad_identity = lifecycle_observation()
         bad_identity["identity"]["recipe_sha256"] = "not-a-digest"
@@ -539,9 +552,9 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         ] = 2
         cases.append((inconsistent_probe_attempts, "probe attempt accounting"))
         late_interface_recovery = lifecycle_observation()
-        late_interface_recovery["cycles"][MODEL.INTERFACE_SWITCH_SEQUENCE - 1][
+        late_interface_recovery["cycles"][MODEL_LIFECYCLE.INTERFACE_SWITCH_SEQUENCE - 1][
             "elapsed_nanoseconds"
-        ] = MODEL.INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS * 1_000_000_000 + 1
+        ] = MODEL_LIFECYCLE.INTERFACE_SWITCH_RECOVERY_TIMEOUT_SECONDS * 1_000_000_000 + 1
         cases.append((late_interface_recovery, "bounded timeout"))
         missing_warmup_cycle = lifecycle_observation()
         missing_warmup_cycle["resource_warmup"]["cycles"].pop()
@@ -578,19 +591,19 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         cases.append((warmup_formal_discontinuity, "do not continue the prior cycle"))
         for observation, message in cases:
             with self.subTest(message=message):
-                with self.assertRaisesRegex(MODEL.NetworkModelError, message):
-                    MODEL.summarize_lifecycle_observation(observation)
+                with self.assertRaisesRegex(MODEL_IDENTITY.NetworkModelError, message):
+                    MODEL_LIFECYCLE.summarize_lifecycle_observation(observation)
 
     def test_nearest_rank_quantiles_do_not_interpolate_latency_samples(self) -> None:
-        self.assertEqual(MODEL._nearest_rank(list(range(1, 1_001)), 50), 500)
-        self.assertEqual(MODEL._nearest_rank(list(range(1, 1_001)), 95), 950)
-        self.assertEqual(MODEL._nearest_rank(list(range(1, 1_001)), 99), 990)
-        self.assertEqual(MODEL._nearest_rank(list(range(1, 8)), 95), 7)
+        self.assertEqual(MODEL_LIFECYCLE._nearest_rank(list(range(1, 1_001)), 50), 500)
+        self.assertEqual(MODEL_LIFECYCLE._nearest_rank(list(range(1, 1_001)), 95), 950)
+        self.assertEqual(MODEL_LIFECYCLE._nearest_rank(list(range(1, 1_001)), 99), 990)
+        self.assertEqual(MODEL_LIFECYCLE._nearest_rank(list(range(1, 8)), 95), 7)
 
     def test_transient_resource_peak_is_reported_without_being_called_a_leak(self) -> None:
         observation = lifecycle_observation()
         observation["cycles"][0]["resources_after"]["process_handles"] += 5
-        summary = MODEL.summarize_lifecycle_observation(observation)
+        summary = MODEL_LIFECYCLE.summarize_lifecycle_observation(observation)
         self.assertEqual(
             summary["resources"]["reset_network"]["peak_growth"]["process_handles"],
             5,
@@ -606,7 +619,7 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
         final_resources["process_handles"] += 2
         final_resources["process_threads"] += 1
 
-        summary = MODEL.summarize_lifecycle_observation(observation)
+        summary = MODEL_LIFECYCLE.summarize_lifecycle_observation(observation)
         resources = summary["resources"]["full_rebuild"]
         self.assertFalse(resources["retained_growth_enforced"])
         self.assertEqual(
@@ -630,12 +643,12 @@ class NetworkLifecycleWorkloadTests(unittest.TestCase):
 
     def test_reset_final_resource_growth_remains_rejected(self) -> None:
         observation = lifecycle_observation()
-        observation["cycles"][MODEL.RESET_CYCLES - 1]["resources_after"][
+        observation["cycles"][MODEL_LIFECYCLE.RESET_CYCLES - 1]["resources_after"][
             "process_handles"
         ] += 1
 
-        with self.assertRaisesRegex(MODEL.NetworkModelError, "retained resource growth"):
-            MODEL.summarize_lifecycle_observation(observation)
+        with self.assertRaisesRegex(MODEL_IDENTITY.NetworkModelError, "retained resource growth"):
+            MODEL_LIFECYCLE.summarize_lifecycle_observation(observation)
 
 
 class ObservationInputTests(unittest.TestCase):
@@ -647,12 +660,12 @@ class ObservationInputTests(unittest.TestCase):
                 '{"workload":"udp-route-once","workload":"network-lifecycle"}',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(MODEL.NetworkModelError, "duplicate JSON key"):
+            with self.assertRaisesRegex(MODEL_IDENTITY.NetworkModelError, "duplicate JSON key"):
                 MODEL.load_observation(duplicate)
 
             oversized = root / "oversized.json"
             oversized.write_bytes(b" " * (MODEL.MAX_ARTIFACT_BYTES + 1))
-            with self.assertRaisesRegex(MODEL.NetworkModelError, "exceeds"):
+            with self.assertRaisesRegex(MODEL_IDENTITY.NetworkModelError, "exceeds"):
                 MODEL.load_observation(oversized)
 
 

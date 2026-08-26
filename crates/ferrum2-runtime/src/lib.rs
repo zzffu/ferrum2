@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-mod application_resolver;
 mod connector;
 mod deadline;
 mod metrics;
@@ -10,17 +9,13 @@ mod owner;
 mod process;
 mod relay;
 mod reset;
-mod ruleset;
-mod ruleset_https;
 mod sniff;
 mod supervisor;
 mod udp;
 
-pub use application_resolver::ApplicationResolverAdapter;
 pub use connector::{
     DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream, SocketInspector,
     SystemSocketInspector, SystemTcpDialer, SystemTcpResolver, TcpConnector, TcpDialer,
-    TcpResolver,
 };
 pub use deadline::{DeadlineError, with_deadline};
 pub use metrics::{
@@ -28,18 +23,12 @@ pub use metrics::{
     MetricsEndpointError, serve_metrics_connection,
 };
 pub use network::{
-    DialOptions, InterfaceBinding, InterfaceBindingError, InterfaceResolutionError,
-    InterfaceResolutionErrorKind, InterfaceSelectionSource,
-    NETWORK_INTERFACE_RESOLUTION_CACHE_CAPACITY, NamedInterfaceResolution, NetworkFamily,
-    NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
-    NetworkInterfaceObservation, NetworkInterfaceObservationError, NetworkInterfaceResolver,
-    NetworkResetError, NetworkResetFuture, NetworkSnapshot, NetworkSnapshotCaptureError,
-    NetworkSnapshotError, NetworkSnapshotPublishError, NetworkSnapshotPublisher, ResetNetwork,
-    ResolvedInterface, RouteNetworkOptions, SystemBestRoute, SystemBestRouteError,
+    NetworkResetError, NetworkResetFuture, NetworkSnapshotPublishError, NetworkSnapshotPublisher,
+    ResetNetwork,
 };
 pub use network_socket::{
     GenerationBoundSocketError, GenerationBoundTcpStream, GenerationBoundUdpSocket,
-    NetworkSocketOperations, NetworkSocketService, NetworkSocketServiceError, ResolvedSocketBinder,
+    NetworkSocketOperations, NetworkSocketService, NetworkSocketServiceError,
     SystemNetworkSocketError, SystemNetworkSocketOperations,
 };
 pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
@@ -65,20 +54,6 @@ pub use reset::{
     NetworkRuntimeOwnerCancellation, NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
     NetworkRuntimeResourceAdmissionError,
 };
-pub use ruleset::{
-    BoxedRuleSetBody, LoadedRuleSet, PreparedRuleSetRefreshRoot, RuleSetBody, RuleSetCacheName,
-    RuleSetDownloadError, RuleSetDownloadErrorKind, RuleSetDownloadFuture, RuleSetDownloadMode,
-    RuleSetDownloadRequest, RuleSetDownloadResolver, RuleSetDownloadResponse,
-    RuleSetDownloadStatus, RuleSetDownloader, RuleSetLoadDisposition, RuleSetLoadError,
-    RuleSetLoadErrorKind, RuleSetLoader, RuleSetLoaderConfig, RuleSetRefreshObserver,
-    RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRemoteSource,
-    RuleSetSnapshotMaterialization, RuleSetSnapshotParts, materialize_rule_set_snapshot,
-};
-pub use ruleset_https::{
-    ExplicitRuleSetHostResolver, HttpsRuleSetDownloader, RuleSetDialTargets, RuleSetDialer,
-    RuleSetHostResolveObserver, RuleSetHostResolveOutcome, RuleSetHostResolver,
-    RuleSetHostResolverKind, SystemRuleSetDialer, SystemRuleSetHostResolver,
-};
 pub use sniff::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
 pub use supervisor::{
     AcceptListener, BoundedSupervisor, CancellationToken, SupervisorConfigError, SupervisorError,
@@ -91,8 +66,7 @@ pub use udp::{
     MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_MAX_SESSIONS, PendingUdpDatagram,
     PendingUdpSession, SystemDirectUdpSocket, SystemDirectUdpSocketFactory, SystemUdpResolver,
     UDP_SESSION_QUEUE_DEPTH, UdpBufferBudget, UdpBufferReservation, UdpCommitError, UdpDirection,
-    UdpLimitError, UdpResolver, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
-    UdpSessionManager,
+    UdpLimitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
 
 /// Default first-handshake deadline.

@@ -1,9 +1,19 @@
 use std::sync::Arc;
 
-use ferrum2_dns::{DnsProxyListeners, TaggedResolver, TaggedResolverOwner};
+use ferrum2_config::{ClientOutboundConfig, DirectDomainResolver};
+use ferrum2_dns::{
+    ApplicationResolveOutcome, ApplicationResolver, ApplicationResolverAdapter,
+    ApplicationResolverMode, DnsCache, DnsPolicyCompileError, DnsPolicyObserver, DnsPolicyProgram,
+    DnsProxy, DnsProxyListeners, DnsStrategy, TaggedResolver, TaggedResolverOwner,
+    TaggedServerApplicationResolveBackend,
+};
+use ferrum2_observability::Metrics;
+use ferrum2_rule::RuleEngineRegistry;
 use ferrum2_runtime::{PreparedProcessRoot, ProcessCancellation, ProcessFuture};
 
 use super::RunError;
+use super::dns_strategy;
+use super::observation::dns_policy_observer;
 
 pub(super) struct ClientDnsRoot {
     pub(super) listeners: Option<DnsProxyListeners>,
@@ -74,6 +84,163 @@ impl PreparedProcessRoot<RunError> for ClientDnsRoot {
 
     fn rollback(mut self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
         Box::pin(async move { self.close_resolver().await })
+    }
+}
+
+pub(super) fn run_error_for_dns_policy_compile(error: DnsPolicyCompileError) -> RunError {
+    match error {
+        DnsPolicyCompileError::Allocation | DnsPolicyCompileError::IndexOverflow => {
+            RunError::RuleAllocation
+        }
+        DnsPolicyCompileError::EmptyRule
+        | DnsPolicyCompileError::InvalidQueryMatchSet
+        | DnsPolicyCompileError::DuplicateConstraint
+        | DnsPolicyCompileError::InvalidPortRange
+        | DnsPolicyCompileError::UnknownRuleSet
+        | DnsPolicyCompileError::ResponseDependentReject
+        | DnsPolicyCompileError::Internal => RunError::RuleCompile,
+    }
+}
+
+pub(super) fn client_direct_resolvers(
+    outbounds: &[ClientOutboundConfig],
+    tagged: Arc<std::sync::OnceLock<std::sync::Weak<TaggedResolver>>>,
+    metrics: &Arc<Metrics>,
+) -> Arc<[Option<ApplicationResolverAdapter>]> {
+    let system = Arc::new(observed_application_resolver(
+        ApplicationResolver::system_default(),
+        metrics,
+    ));
+    outbounds
+        .iter()
+        .map(|outbound| {
+            let mode = outbound.direct_domain_resolver()?;
+            let (resolver, strategy) = match mode {
+                DirectDomainResolver::System => (Arc::clone(&system), DnsStrategy::PreferIpv4),
+                DirectDomainResolver::DnsServer { server, strategy } => {
+                    let resolver = ApplicationResolver::configured(Arc::new(
+                        TaggedServerApplicationResolveBackend::new(Arc::clone(&tagged), server),
+                    ));
+                    (
+                        Arc::new(observed_application_resolver(resolver, metrics)),
+                        dns_strategy(strategy),
+                    )
+                }
+            };
+            Some(ApplicationResolverAdapter::new(resolver, 0, strategy))
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+pub(super) fn observed_application_resolver(
+    resolver: ApplicationResolver,
+    metrics: &Arc<Metrics>,
+) -> ApplicationResolver {
+    let metrics = Arc::clone(metrics);
+    resolver.with_observer(Arc::new(move |mode, outcome| {
+        let resolver = match mode {
+            ApplicationResolverMode::System => {
+                metrics.dns_explicit_system_resolve(
+                    ferrum2_observability::DnsResolvePurpose::Application,
+                );
+                ferrum2_observability::DnsResolverKind::System
+            }
+            ApplicationResolverMode::Configured => {
+                ferrum2_observability::DnsResolverKind::Configured
+            }
+        };
+        let result = match outcome {
+            ApplicationResolveOutcome::Success => ferrum2_observability::DnsResolveResult::Success,
+            ApplicationResolveOutcome::Failure => ferrum2_observability::DnsResolveResult::Failure,
+        };
+        metrics.dns_resolve(
+            resolver,
+            ferrum2_observability::DnsResolvePurpose::Application,
+            result,
+        );
+    }))
+}
+
+struct ClientDnsProxyPolicy {
+    program: Arc<DnsPolicyProgram>,
+    registry: Arc<RuleEngineRegistry>,
+    listener_count: usize,
+    ordinary_count: usize,
+}
+
+pub(super) struct ClientDnsProxyRuntime {
+    policy: ClientDnsProxyPolicy,
+    observer: Arc<dyn DnsPolicyObserver>,
+    cache: Option<DnsCache>,
+}
+
+impl ClientDnsProxyRuntime {
+    pub(super) fn try_new(
+        route: &mut ferrum2_config::ClientDnsRoute,
+        runtime: ferrum2_config::DnsRuntimeConfig,
+        materialized_cache: Option<DnsCache>,
+        metrics: &Arc<Metrics>,
+    ) -> Result<Self, RunError> {
+        let binding = route
+            .take_policy_blueprint()
+            .ok_or(RunError::StartupProtocol)?;
+        let (blueprint, registry, listener_count, ordinary_count) = binding.into_parts();
+        let snapshot = registry.snapshot();
+        let program = DnsPolicyProgram::try_from_blueprint(blueprint, &snapshot)
+            .map_err(run_error_for_dns_policy_compile)?;
+        let policy = ClientDnsProxyPolicy {
+            program: Arc::new(program),
+            registry,
+            listener_count,
+            ordinary_count,
+        };
+        let cache_config = runtime.cache();
+        let cache = if cache_config.enabled {
+            match materialized_cache {
+                Some(cache) => Some(cache),
+                None => Some(
+                    DnsCache::try_new(
+                        std::num::NonZeroUsize::new(cache_config.max_entries)
+                            .ok_or(RunError::StartupProtocol)?,
+                    )
+                    .map_err(|_| RunError::StartupProtocol)?,
+                ),
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            policy,
+            observer: dns_policy_observer(metrics),
+            cache,
+        })
+    }
+
+    pub(super) fn bind(self, resolver: Arc<TaggedResolver>) -> DnsProxy {
+        let policy = self.policy;
+        let mut proxy = DnsProxy::new(
+            resolver,
+            policy.program,
+            policy.registry,
+            policy.listener_count,
+            policy.ordinary_count,
+        )
+        .with_policy_observer(self.observer);
+        if let Some(cache) = self.cache {
+            proxy = proxy.with_cache(cache);
+        }
+        proxy
+    }
+
+    #[cfg(test)]
+    pub(in crate::run) fn contract_snapshot(&self) -> (u64, usize, usize, Option<usize>) {
+        (
+            self.policy.registry.generation(),
+            self.policy.listener_count,
+            self.policy.ordinary_count,
+            self.cache.as_ref().and_then(|cache| cache.capacity().ok()),
+        )
     }
 }
 

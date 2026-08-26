@@ -51,11 +51,11 @@ on:
         default: "30"
         options: ["15", "30", "60"]
       pairs:
-        description: "Alternating parent/candidate pairs"
+        description: "Pre-registered six-pair ABBA schedule"
         required: true
         type: choice
-        default: "3"
-        options: ["3", "5"]
+        default: "6"
+        options: ["6"]
 
 permissions:
   contents: read
@@ -114,7 +114,7 @@ jobs:
           rustc +1.97.1 -Vv
           test ! -e "$PARENT_DIR"
           if [ "$SELECTION" = tcp-scale-10k ]; then
-            test "$MODE/$WARMUP_SECONDS/$ACTIVE_SECONDS/$PAIRS" = "qualification/10/30/5"
+            test "$MODE/$WARMUP_SECONDS/$ACTIVE_SECONDS/$PAIRS" = "qualification/10/30/6"
             H_SHA="$REQUESTED_PARENT_SHA"
             test "$(git rev-parse "$H_SHA^{commit}")" = "$H_SHA"
             CANDIDATE_SHA="$(git rev-parse HEAD)"
@@ -124,7 +124,7 @@ jobs:
             test "$(git rev-list --parents -n 1 "$CANDIDATE_SHA" | wc -w)" -eq 2
             test "$(git rev-parse "$CANDIDATE_SHA^{tree}")" = \
               "$(git rev-parse "$H_SHA^{tree}")"
-            python3 -B tools/performance_candidate.py scale-source-lineage \
+            python3 -B -m tools.performance_candidate scale-source-lineage \
               --repository "$GITHUB_WORKSPACE" \
               --head-sha "$H_SHA" \
               --parent-sha "$PARENT_SHA" \
@@ -134,7 +134,7 @@ jobs:
             H_SHA="$GITHUB_SHA"
             PARENT_SHA="$REQUESTED_PARENT_SHA"
             CANDIDATE_SHA="$GITHUB_SHA"
-            python3 -B tools/performance_candidate.py validate-git \
+            python3 -B -m tools.performance_candidate validate-git \
               --repository "$GITHUB_WORKSPACE" \
               --parent-sha "$PARENT_SHA" \
               --candidate-sha "$CANDIDATE_SHA"
@@ -161,13 +161,13 @@ jobs:
               cargo +1.97.1 test --workspace \
                 --exclude ferrum2-client \
                 --exclude ferrum2-tun \
-                --exclude ferrum2-wintun \
+                --exclude ferrum2-platform-windows \
                 --exclude ferrum2-m0-harness \
                 --locked
               cargo +1.97.1 test \
                 -p ferrum2-client \
                 -p ferrum2-tun \
-                -p ferrum2-wintun \
+                -p ferrum2-platform-windows \
                 --all-features --no-run --locked
               cargo +1.97.1 test \
                 -p ferrum2-m0-harness --no-run --locked
@@ -183,7 +183,7 @@ jobs:
           )
           plan_scale_arguments=()
           if [ "$SELECTION" = tcp-scale-10k ]; then
-            python3 -B tools/performance_candidate.py scale-lineage \
+            python3 -B -m tools.performance_candidate scale-lineage \
               --repository "$GITHUB_WORKSPACE" \
               --head-sha "$H_SHA" \
               --parent-sha "$PARENT_SHA" \
@@ -199,7 +199,7 @@ jobs:
               --scale-lineage "$SCALE_LINEAGE"
             )
           fi
-          python3 -B tools/performance_candidate.py plan \
+          python3 -B -m tools.performance_candidate plan \
             --mode "$MODE" \
             --selection "$SELECTION" \
             --warmup-seconds "$WARMUP_SECONDS" \
@@ -208,7 +208,7 @@ jobs:
             --policy "$PERFORMANCE_POLICY" \
             "${plan_scale_arguments[@]}" \
             --output "$PERFORMANCE_PLAN"
-      - name: Run alternating parent and candidate pairs
+      - name: Run pre-registered six-pair ABBA schedule
         shell: bash
         run: |
           set -euo pipefail
@@ -240,7 +240,13 @@ jobs:
                 --member "$member" \
                 --pair "$pair" \
                 --order "$order" \
-                --build-profile current
+                --build-profile current \
+                --unit "$TRIAL_UNIT" \
+                --runner-image "$TRIAL_RUNNER_IMAGE" \
+                --producer-source-sha256 "$TRIAL_PRODUCER_SHA256" \
+                --controller-source-sha256 "$TRIAL_CONTROLLER_SHA256" \
+                --semantic-recipe-sha256 "$TRIAL_RECIPE_SHA256" \
+                --evidence-bundle-sha256 "$TRIAL_BUNDLE_SHA256"
             )
           }
           scenario_scale_arguments=()
@@ -248,13 +254,32 @@ jobs:
             scenario_scale_arguments=(--scale-policy "$PERFORMANCE_SCALE_POLICY")
           fi
           mapfile -t scenarios < <(
-            python3 -B tools/performance_candidate.py scenarios \
+            python3 -B -m tools.performance_candidate scenarios \
               --plan "$PERFORMANCE_PLAN" \
               --policy "$PERFORMANCE_POLICY" \
               "${scenario_scale_arguments[@]}"
           )
           test "${#scenarios[@]}" -gt 0
           for scenario in "${scenarios[@]}"; do
+            trial_contract="$(
+              python3 -B -m tools.performance_candidate linux-trial-contract \
+                --plan "$PERFORMANCE_PLAN" \
+                --policy "$PERFORMANCE_POLICY" \
+                "${scenario_scale_arguments[@]}" \
+                --scenario "$scenario" \
+                --output-format tsv
+            )"
+            IFS=$'\t' read -r TRIAL_UNIT TRIAL_RUNNER_IMAGE \
+              TRIAL_PRODUCER_SHA256 TRIAL_CONTROLLER_SHA256 \
+              TRIAL_RECIPE_SHA256 TRIAL_BUNDLE_SHA256 <<<"$trial_contract"
+            export TRIAL_UNIT TRIAL_RUNNER_IMAGE TRIAL_PRODUCER_SHA256 \
+              TRIAL_CONTROLLER_SHA256 TRIAL_RECIPE_SHA256 TRIAL_BUNDLE_SHA256
+            test -n "$TRIAL_UNIT"
+            test -n "$TRIAL_RUNNER_IMAGE"
+            test -n "$TRIAL_PRODUCER_SHA256"
+            test -n "$TRIAL_CONTROLLER_SHA256"
+            test -n "$TRIAL_RECIPE_SHA256"
+            test -n "$TRIAL_BUNDLE_SHA256"
             for pair in $(seq 1 "$PAIRS"); do
               if ((pair % 2 == 1)); then
                 run_member "$scenario" parent "$pair" 1
@@ -278,7 +303,7 @@ jobs:
               --repository "$GITHUB_WORKSPACE"
             )
           fi
-          python3 -B tools/performance_candidate.py summarize \
+          python3 -B -m tools.performance_candidate summarize \
             --plan "$PERFORMANCE_PLAN" \
             --parent-root "$PARENT_DIR/profiles/paired" \
             --candidate-root "$CANDIDATE_DIR/profiles/paired" \

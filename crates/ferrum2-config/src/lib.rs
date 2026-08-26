@@ -35,7 +35,6 @@ mod validation;
 pub use error::{ConfigError, ConfigErrorKind, ConfigField};
 #[cfg(feature = "fuzzing")]
 pub use load::{fuzz_parse_client, fuzz_parse_server};
-pub use load::{load_client, load_server};
 pub use model::{
     ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DirectDomainResolver,
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsIngressId,
@@ -46,14 +45,12 @@ pub use model::{
     UdpConfig, UdpFiltering, ValidatedClientConfig, ValidatedServerConfig,
 };
 pub use prepared::{
-    ClientV2MaterializeContext, ClientV2MaterializeFuture, ClientV2Resources,
-    CompiledRuleSetResource, DialEndpoint, PreparedClientOutboundDescriptor,
+    ClientV2Resources, CompiledRuleSetResource, DialEndpoint, PreparedClientOutboundDescriptor,
     PreparedClientOutboundKind, PreparedClientV2, PreparedDependencyNode, PreparedDnsAction,
     PreparedDnsEndpoint, PreparedDnsEndpointMode, PreparedDnsRule, PreparedDnsServerDescriptor,
     PreparedEgressRef, PreparedFixedEndpointDescriptor, PreparedFixedEndpointTarget,
     PreparedRouteRuleSets, PreparedRuleSet, PreparedRuleSetDownloadMode,
     PreparedServerOutboundDescriptor, PreparedServerV2, ResolvedDnsEndpoint,
-    ResolvedOutboundEndpoint, RuleSetLoaderConfig, ServerV2MaterializeContext,
-    ServerV2MaterializeFuture, ServerV2Resources, finish_client_v2, finish_server_v2,
-    materialize_client_v2, materialize_server_v2, prepare_client, prepare_server,
+    ResolvedOutboundEndpoint, RuleSetLoaderConfig, ServerV2Resources, finish_client_v2,
+    finish_server_v2, prepare_client, prepare_server,
 };

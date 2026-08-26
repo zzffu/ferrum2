@@ -7,3 +7,4 @@ __pycache__/
 
 # Local performance-rule evidence
 /tests/performance_rule/release-*.json
+/tests/performance_rule/reviewed-*.json

@@ -9,11 +9,16 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+tokio = ["dep:tokio"]
+
 [dependencies]
 ferrum2-core.workspace = true
 ferrum2-crypto.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex.workspace = true

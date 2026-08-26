@@ -1,0 +1,288 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use bytes::BytesMut;
+use ferrum2_config::UdpConfig;
+use ferrum2_core::{TargetAddr, TargetHostRef};
+use ferrum2_crypto::{Clock as _, SystemClock};
+use ferrum2_net::{DialOptions, RouteNetworkOptions, UdpResolver};
+use ferrum2_observability::Metrics;
+use ferrum2_rule::RuleEvaluationScratch;
+use ferrum2_runtime::{
+    DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSocketFactory, MAX_UDP_RESOLVED_CANDIDATES,
+    MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, UdpBufferReservation, UdpRuntimeError,
+    UdpRuntimeLimits, UdpSessionManager,
+};
+use ferrum2_shadowsocks::{UdpPacketError, UdpPacketScratch, UdpServer};
+
+use crate::run::network::ServerNetworkSocketService;
+use crate::run::routing::ServerRouting;
+use crate::run::{RunError, dns_egress, run_error_for_rule_compile};
+
+use super::identity::UdpMappings;
+use super::listener::{
+    ServerUdpListener, ServerUdpResponseHandler, ServerUdpRuntime, UDP_RECONCILE_INTERVAL,
+};
+#[cfg(test)]
+use super::physical::ServerSystemUdpSocketFactory;
+use super::physical::{ServerNetworkUdpSocketFactory, ServerUdpNetworkPolicy};
+use super::response_codec::ResponseCodecPool;
+
+pub(in crate::run) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
+    UdpRuntimeLimits::new(
+        config.max_sessions,
+        config.max_buffered_bytes,
+        config.idle_timeout,
+    )
+    .ok()
+}
+
+#[derive(Clone)]
+pub(super) struct ServerUdpNetworkPolicies {
+    pub(super) outbound_dial_options: Arc<[DialOptions]>,
+    pub(super) route_network: Arc<RouteNetworkOptions>,
+}
+
+pub(in crate::run) struct PreparedUdpServer<L, F>
+where
+    L: ServerUdpListener,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
+{
+    pub(super) inbound: usize,
+    pub(super) routing: Arc<ServerRouting>,
+    pub(super) listener: Arc<L>,
+    pub(super) protocol: Arc<UdpServer>,
+    pub(super) clock: Arc<SystemClock>,
+    pub(super) config: UdpConfig,
+    pub(super) registry: OwnerRegistry,
+    pub(super) metrics: Arc<Metrics>,
+    pub(super) direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
+    pub(super) connect_timeout: std::time::Duration,
+    pub(super) network_policies: Option<ServerUdpNetworkPolicies>,
+    pub(super) runtime: ServerUdpRuntime<L, F>,
+    pub(super) mappings: Arc<UdpMappings>,
+    pub(super) admission: Arc<tokio::sync::Mutex<()>>,
+    pub(super) route_scratch: RuleEvaluationScratch,
+    pub(super) scratch: UdpPacketScratch,
+    pub(super) wire: BytesMut,
+    pub(super) maintenance: tokio::time::Interval,
+    pub(super) _receive_scratch: UdpBufferReservation,
+    pub(super) _receive_wire: UdpBufferReservation,
+}
+
+#[derive(Clone)]
+pub(in crate::run) struct ServerUdpShared {
+    pub(in crate::run) routing: Arc<ServerRouting>,
+    pub(in crate::run) protocol: Arc<UdpServer>,
+    pub(in crate::run) clock: Arc<SystemClock>,
+    pub(in crate::run) config: UdpConfig,
+    pub(in crate::run) sessions: UdpSessionManager,
+    pub(in crate::run) mappings: Arc<UdpMappings>,
+    pub(in crate::run) admission: Arc<tokio::sync::Mutex<()>>,
+    pub(in crate::run) connect_timeout: std::time::Duration,
+    pub(in crate::run) direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
+    pub(in crate::run) registry: OwnerRegistry,
+    pub(in crate::run) metrics: Arc<Metrics>,
+}
+
+#[cfg(test)]
+pub(super) fn prepare_udp_server<L>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+) -> Result<PreparedUdpServer<L, ServerSystemUdpSocketFactory>, RunError>
+where
+    L: ServerUdpListener,
+{
+    prepare_udp_server_with_socket_factory(inbound, listener, shared, ServerSystemUdpSocketFactory)
+}
+
+pub(in crate::run) fn prepare_udp_server_with_network<L>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+    sockets: Arc<ServerNetworkSocketService>,
+    outbound_dial_options: Arc<[DialOptions]>,
+    route_network: Arc<RouteNetworkOptions>,
+) -> Result<PreparedUdpServer<L, ServerNetworkUdpSocketFactory>, RunError>
+where
+    L: ServerUdpListener,
+{
+    let metrics = Arc::clone(&shared.metrics);
+    prepare_udp_server_with_socket_factory_and_policies(
+        inbound,
+        listener,
+        shared,
+        ServerNetworkUdpSocketFactory { sockets, metrics },
+        Some(ServerUdpNetworkPolicies {
+            outbound_dial_options,
+            route_network,
+        }),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn prepare_udp_server_with_socket_factory<L, F>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+    socket_factory: F,
+) -> Result<PreparedUdpServer<L, F>, RunError>
+where
+    L: ServerUdpListener,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
+{
+    prepare_udp_server_with_socket_factory_and_policies(
+        inbound,
+        listener,
+        shared,
+        socket_factory,
+        None,
+    )
+}
+
+fn prepare_udp_server_with_socket_factory_and_policies<L, F>(
+    inbound: usize,
+    listener: Arc<L>,
+    shared: ServerUdpShared,
+    socket_factory: F,
+    network_policies: Option<ServerUdpNetworkPolicies>,
+) -> Result<PreparedUdpServer<L, F>, RunError>
+where
+    L: ServerUdpListener,
+    F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
+{
+    let ServerUdpShared {
+        routing,
+        protocol,
+        clock,
+        config,
+        sessions,
+        mappings,
+        admission,
+        connect_timeout,
+        direct_resolvers,
+        registry,
+        metrics,
+    } = shared;
+    let budget = sessions.buffer_budget();
+    let response_codec =
+        Arc::new(ResponseCodecPool::new(budget.clone()).map_err(|_| RunError::StartupProtocol)?);
+    let handler = ServerUdpResponseHandler {
+        listener: Arc::clone(&listener),
+        protocol: Arc::clone(&protocol),
+        mappings: Arc::clone(&mappings),
+        clock: Arc::clone(&clock),
+        codec: Arc::clone(&response_codec),
+        metrics: Arc::clone(&metrics),
+    };
+    let default_resolver = direct_resolvers
+        .first()
+        .cloned()
+        .ok_or(RunError::StartupProtocol)?;
+    let runtime = DirectUdpRuntime::with_shared_adapters(
+        sessions,
+        connect_timeout,
+        default_resolver.for_inbound(inbound),
+        socket_factory,
+        handler,
+        registry.clone(),
+    );
+    let receive_scratch = budget
+        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+        .map_err(|_| RunError::StartupProtocol)?;
+    let receive_wire = budget
+        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+        .map_err(|_| RunError::StartupProtocol)?;
+    let wire = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
+    if wire.capacity() != receive_wire.capacity() {
+        return Err(RunError::StartupProtocol);
+    }
+    let mut maintenance = tokio::time::interval(UDP_RECONCILE_INTERVAL);
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let route_scratch = routing
+        .route_scratch()
+        .map_err(run_error_for_rule_compile)?;
+    Ok(PreparedUdpServer {
+        inbound,
+        routing,
+        listener,
+        protocol,
+        clock,
+        config,
+        registry,
+        metrics,
+        direct_resolvers,
+        connect_timeout,
+        network_policies,
+        runtime,
+        mappings,
+        admission,
+        route_scratch,
+        scratch: UdpPacketScratch::new(),
+        wire,
+        maintenance,
+        _receive_scratch: receive_scratch,
+        _receive_wire: receive_wire,
+    })
+}
+
+pub(super) fn reconcile_udp_generations<R, F, H>(
+    runtime: &DirectUdpRuntime<R, F, H>,
+    mappings: &UdpMappings,
+) where
+    R: ferrum2_net::UdpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
+    F: ferrum2_runtime::DirectUdpSocketFactory,
+    H: DirectUdpPacketHandler,
+{
+    mappings.reconcile_runtime(runtime.sessions());
+}
+
+pub(super) fn protocol_identity_has_capacity<R, F, H>(
+    runtime: &DirectUdpRuntime<R, F, H>,
+    mappings: &UdpMappings,
+    protocol: &UdpServer,
+    clock: &SystemClock,
+    max_sessions: usize,
+) -> Result<bool, UdpPacketError>
+where
+    R: ferrum2_net::UdpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
+    F: ferrum2_runtime::DirectUdpSocketFactory,
+    H: DirectUdpPacketHandler,
+{
+    reconcile_udp_generations(runtime, mappings);
+    mappings.prune_protocol(protocol, clock.monotonic_now());
+    Ok(protocol.session_count()? < max_sessions)
+}
+
+pub(super) async fn resolve_udp_selection_candidates<R>(
+    resolver: &R,
+    target: &TargetAddr,
+    timeout: std::time::Duration,
+) -> Result<Vec<SocketAddr>, UdpRuntimeError>
+where
+    R: UdpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
+{
+    if let Some(destination) = target.as_socket_addr() {
+        return Ok(vec![destination]);
+    }
+    let TargetHostRef::Domain(host) = target.host() else {
+        return Err(UdpRuntimeError::Resolve);
+    };
+    let candidates = tokio::time::timeout(timeout, resolver.resolve(host, target.port().get()))
+        .await
+        .map_err(|_| UdpRuntimeError::Resolve)?
+        .map_err(|_| UdpRuntimeError::Resolve)?;
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .take(MAX_UDP_RESOLVED_CANDIDATES)
+        .collect();
+    if candidates.is_empty() {
+        Err(UdpRuntimeError::Resolve)
+    } else {
+        Ok(candidates)
+    }
+}

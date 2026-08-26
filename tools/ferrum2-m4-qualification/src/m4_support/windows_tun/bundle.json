@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "kind": "ferrum2.m4-windows-tun-source-bundle.v1",
+  "entrypoint": "mod.rs",
+  "files": [
+    {
+      "path": "contract.rs",
+      "bytes": 17983,
+      "sha256": "6f76b863f3c2f865514f12965bc1399ed1dae320cf82e3e957f84b7d8e2ae981"
+    },
+    {
+      "path": "diagnostic.rs",
+      "bytes": 26112,
+      "sha256": "b454e6f00976bc7011d71442e01ccbde28889ba6245b5d2971709c95f1705e2a"
+    },
+    {
+      "path": "mod.rs",
+      "bytes": 276,
+      "sha256": "8694cf1eab5016976512376f7143c91ea6f5319de8be67e1fbfc66949d3739ac"
+    },
+    {
+      "path": "scenarios.rs",
+      "bytes": 17297,
+      "sha256": "b547f09aadca1695299290cc24d9359bb4a86ccbfc11930cab3206109d6c1ce8"
+    },
+    {
+      "path": "self_check.rs",
+      "bytes": 44495,
+      "sha256": "2b88caafff25359f4f188170166ac3b0b1bf3a79c51145cb43c4cebc0a8c979c"
+    },
+    {
+      "path": "support.rs",
+      "bytes": 13189,
+      "sha256": "a0babb6714c4b21866c13cf391c08ed71747d37be32ad0b0b4ed4078dcd5b2cb"
+    },
+    {
+      "path": "workload_diagnostic.rs",
+      "bytes": 16409,
+      "sha256": "24282670edf31888392e38dd02f81547f6694eee5b7a7c375a083c0ae21f6260"
+    },
+    {
+      "path": "workload.rs",
+      "bytes": 29137,
+      "sha256": "1b410c66eb5c60a9b91db117b11780810fa7b869fc44389be264f583ac9a98a3"
+    }
+  ]
+}

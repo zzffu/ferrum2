@@ -4,7 +4,13 @@
 
 This package is the workspace's black-box integration and qualification harness. Keep it independent of concrete `ferrum2-*` Cargo dependencies: tests should exercise built client/server binaries, public configuration, sockets, process state, and qualification seams. Do not include production source files or assert private function names, module layout, call order, or source-text fragments. `workspace_policy.rs` is reserved for structured dependency, toolchain, supply-chain, and unsafe-boundary checks.
 
-Use `src/local_support`, `src/qualification`, and `src/external_support` for shared process and provider mechanics. Tests must allocate isolated loopback resources, use bounded waits, reap children on every path, and leave ports reusable after failure or panic.
+Use the `src/local_support` façade for black-box process, readiness, loopback, DNS, and config
+fixtures; keep those owners in their named submodules. Use the `src/external_support` façade for
+qualification process guards, provider artifacts, DNS/TCP/UDP cases, configs, and pin/hash
+verification. Split integration-test targets only by observable behavior, sharing test-only support
+through an adjacent façade; do not split the cohesive lifecycle or qualification state machines.
+Tests must allocate isolated loopback resources, use bounded waits, reap children on every path, and
+leave ports reusable after failure or panic.
 
 ## Running Tests
 

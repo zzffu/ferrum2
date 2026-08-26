@@ -24,9 +24,8 @@ pub(in crate::run) use ferrum2_runtime::{
     UdpDirection, UdpRuntimeLimits, UdpSessionManager,
 };
 pub(in crate::run) use ferrum2_shadowsocks::{
-    BufferObserver, BufferRole, DetectionReason, FlowObserver, FlowTerminal, MAX_UDP_WIRE_LEN,
-    MethodKeyAdapter, ProtocolReason, ShadowsocksTcpInbound, TcpReplayStore, UdpServer,
-    max_udp_payload_len,
+    BufferObserver, BufferRole, FlowObserver, FlowTerminal, MAX_UDP_WIRE_LEN, MethodKeyAdapter,
+    ShadowsocksTcpInbound, TcpReplayStore, UdpServer, max_udp_payload_len,
 };
 pub(in crate::run) use ferrum2_socks5::{
     Socks5Inbound, SocksCommand, SocksUdpAssociate, encode_udp_datagram,
@@ -38,7 +37,6 @@ pub(in crate::run) use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf,
 };
 pub(in crate::run) use tokio::net::{TcpListener, UdpSocket};
-pub(in crate::run) use tokio::sync::Notify;
 pub(in crate::run) use tokio::time::Instant;
 
 pub(in crate::run) use super::RunError;
@@ -47,10 +45,10 @@ pub(in crate::run) use super::egress::{
     ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, ClientShadowsocksContext,
     ClientUdpContext, prepare_client_outbounds,
 };
-pub(in crate::run) use super::tokio_io::{TokioConnector, TokioFramed, TokioTransport};
 use super::{
     ClientRunResources, dns_egress, run_with_registry, run_with_registry_and_metrics_inner,
 };
+pub(in crate::run) use ferrum2_shadowsocks::tokio::{TokioConnector, TokioFramed, TokioTransport};
 
 enum ScriptedMode {
     Duplex(tokio::io::DuplexStream),
@@ -245,32 +243,6 @@ impl AbortiveClose for ScriptedIo {
 static ISSUED_TEST_PORTS: std::sync::LazyLock<Mutex<HashSet<u16>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
-pub(in crate::run) struct GateConnector {
-    pub(in crate::run) gate: Arc<Notify>,
-    pub(in crate::run) calls: Arc<AtomicUsize>,
-    pub(in crate::run) targets: Arc<Mutex<Vec<TargetAddr>>>,
-    pub(in crate::run) stream: Mutex<Option<ScriptedIo>>,
-}
-
-impl Connector for GateConnector {
-    type Stream = ScriptedIo;
-
-    async fn connect(&self, target: &TargetAddr) -> Result<Self::Stream, ConnectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.targets
-            .lock()
-            .expect("connector targets")
-            .push(target.clone());
-        self.gate.notified().await;
-        Ok(self
-            .stream
-            .lock()
-            .expect("connector stream")
-            .take()
-            .expect("one connect"))
-    }
-}
-
 pub(in crate::run) struct DeadlineConnector {
     pub(in crate::run) delay: Duration,
     pub(in crate::run) targets: Mutex<Vec<TargetAddr>>,
@@ -389,7 +361,10 @@ default = "a-b"
 "#,
     );
     let path = write_client_test_source(&source);
-    let config = ferrum2_config::load_client(&path).expect("chain selector");
+    let prepared = ferrum2_config::prepare_client(&path).expect("prepare chain selector");
+    let config =
+        ferrum2_config::finish_client_v2(prepared, ferrum2_config::ClientV2Resources::default())
+            .expect("finish chain selector");
     std::fs::remove_file(path).expect("remove chain selector config");
     let selector = config.selector_control();
     (outbounds, config.route, selector)
@@ -488,7 +463,10 @@ pub(in crate::run) fn client_test_config(
         "schema_version = 2\n[[inbounds]]\ntag = \"proxy\"\nlisten = \"{listen}\"\noutbound = \"proxy-out\"\n[[outbounds]]\ntag = \"proxy-out\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"AAECAwQFBgcICQoLDA0ODw==\"\n[runtime]\nshutdown_grace_ms = 0\n"
     );
     let path = write_client_test_source(&source);
-    let config = ferrum2_config::load_client(&path).expect("validated client test config");
+    let prepared = ferrum2_config::prepare_client(&path).expect("prepare client test config");
+    let config =
+        ferrum2_config::finish_client_v2(prepared, ferrum2_config::ClientV2Resources::default())
+            .expect("finish client test config");
     (path, config)
 }
 
@@ -500,7 +478,10 @@ pub(in crate::run) fn client_udp_test_config(
     let mut source = std::fs::read_to_string(&path).expect("client test config");
     source.push_str("[udp]\nmax_sessions = 1\nmax_buffered_bytes = 1048576\n");
     std::fs::write(&path, source).expect("client UDP test config");
-    let config = ferrum2_config::load_client(&path).expect("validated client UDP config");
+    let prepared = ferrum2_config::prepare_client(&path).expect("prepare client UDP config");
+    let config =
+        ferrum2_config::finish_client_v2(prepared, ferrum2_config::ClientV2Resources::default())
+            .expect("finish client UDP config");
     (path, config)
 }
 
@@ -533,7 +514,10 @@ max_buffered_bytes = 1048576
 "#,
     );
     let path = write_client_test_source(&source);
-    let mut config = ferrum2_config::load_client(&path).expect("validated client chain config");
+    let prepared = ferrum2_config::prepare_client(&path).expect("prepare client chain config");
+    let mut config =
+        ferrum2_config::finish_client_v2(prepared, ferrum2_config::ClientV2Resources::default())
+            .expect("finish client chain config");
     config.outbounds = servers
         .into_iter()
         .zip(methods)
@@ -568,7 +552,10 @@ pub(in crate::run) fn tagged_client_test_config(
         source.push_str("[udp]\nmax_sessions = 1\nmax_buffered_bytes = 1048576\n");
     }
     let path = write_client_test_source(&source);
-    let mut config = ferrum2_config::load_client(&path).expect("validated tagged client config");
+    let prepared = ferrum2_config::prepare_client(&path).expect("prepare tagged client config");
+    let mut config =
+        ferrum2_config::finish_client_v2(prepared, ferrum2_config::ClientV2Resources::default())
+            .expect("finish tagged client config");
     config.outbounds = mappings
         .iter()
         .map(
@@ -600,7 +587,7 @@ pub(in crate::run) fn test_routing(
                 tcp_server: TargetAddr::ipv4(server).expect("server target"),
                 udp_server: server.into(),
                 keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(psk)),
-                dial_options: ferrum2_runtime::DialOptions::default(),
+                dial_options: ferrum2_net::DialOptions::default(),
             },
         )]
         .into(),

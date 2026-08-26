@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[path = "workspace_policy/r0_policy.rs"]
+mod r0_policy;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -94,7 +97,7 @@ fn workspace_members_share_the_declared_release_policy() {
         "ferrum2-shadowsocks",
         "ferrum2-socks5",
         "ferrum2-tun",
-        "ferrum2-wintun",
+        "ferrum2-platform-windows",
         "ferrum2-m0-harness",
         "ferrum2-m4-qualification",
     ] {
@@ -156,7 +159,7 @@ fn workspace_members_share_the_declared_release_policy() {
         .replace("\r\n", "\n");
         let manifest: toml::Value =
             toml::from_str(&manifest_source).expect("structured package manifest");
-        if package["name"] == "ferrum2-wintun" {
+        if package["name"] == "ferrum2-platform-windows" {
             assert_eq!(
                 manifest["lints"]["rust"]["unsafe_code"].as_str(),
                 Some("deny"),
@@ -284,7 +287,7 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         "the external qualification harness must stay black-box"
     );
 
-    let wintun_edges: Vec<_> = metadata["packages"]
+    let platform_windows_edges: Vec<_> = metadata["packages"]
         .as_array()
         .expect("metadata packages")
         .iter()
@@ -293,7 +296,7 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
                 .as_array()
                 .expect("package dependencies")
                 .iter()
-                .filter(|dependency| dependency["name"] == "ferrum2-wintun")
+                .filter(|dependency| dependency["name"] == "ferrum2-platform-windows")
                 .map(move |dependency| {
                     (
                         package["name"].as_str().expect("package name"),
@@ -303,51 +306,54 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         })
         .collect();
     assert_eq!(
-        wintun_edges,
+        platform_windows_edges,
         vec![
             ("ferrum2-client", None),
             ("ferrum2-server", None),
             ("ferrum2-tun", None),
         ]
     );
-    let wintun_src = PathBuf::from(
-        package(metadata, "ferrum2-wintun")["manifest_path"]
+    let platform_windows_src = PathBuf::from(
+        package(metadata, "ferrum2-platform-windows")["manifest_path"]
             .as_str()
-            .expect("Wintun manifest path"),
+            .expect("Windows platform manifest path"),
     )
     .parent()
-    .expect("Wintun package directory")
+    .expect("Windows platform package directory")
     .join("src")
     .canonicalize()
-    .expect("Wintun source directory");
-    let unsafe_owner = wintun_src
-        .join("windows.rs")
+    .expect("Windows platform source directory");
+    let unsafe_root = platform_windows_src
+        .join("windows/ffi")
         .canonicalize()
-        .expect("Windows ABI owner");
-    let mut wintun_sources = Vec::new();
-    rust_sources(&wintun_src, &mut wintun_sources);
-    let mut unsafe_owner_count = 0;
-    for source in wintun_sources {
-        let source = source.canonicalize().expect("canonical Wintun source");
+        .expect("Windows FFI subtree");
+    let mut platform_windows_sources = Vec::new();
+    rust_sources(&platform_windows_src, &mut platform_windows_sources);
+    let mut unsafe_source_count = 0;
+    for source in platform_windows_sources {
+        let source = source
+            .canonicalize()
+            .expect("canonical Windows platform source");
         let tokens = fs::read_to_string(&source)
-            .expect("Wintun Rust source")
+            .expect("Windows platform Rust source")
             .parse::<TokenStream>()
-            .expect("valid Wintun Rust tokens");
-        if source == unsafe_owner {
-            unsafe_owner_count += 1;
-            assert!(
-                has_unsafe_token(tokens),
-                "the declared Windows ABI owner disappeared"
-            );
+            .expect("valid Windows platform Rust tokens");
+        if source.starts_with(&unsafe_root) {
+            if has_unsafe_token(tokens) {
+                unsafe_source_count += 1;
+            }
         } else {
             assert!(
                 !has_unsafe_token(tokens),
-                "unsafe Rust escaped the Windows ABI owner into {}",
+                "unsafe Rust escaped the Windows FFI subtree into {}",
                 source.display()
             );
         }
     }
-    assert_eq!(unsafe_owner_count, 1, "there must be one Windows ABI owner");
+    assert!(
+        unsafe_source_count > 0,
+        "the declared Windows FFI boundary disappeared"
+    );
 
     for (package_name, target_name) in [
         ("ferrum2-m0-harness", "m0-qualification"),
@@ -738,196 +744,4 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
             actual.parse().expect("unsafe Rust tokens")
         ));
     }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn profiling_wrapper_enforces_bounds_and_records_stage_results() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = workspace_root();
-    let fake = tempfile::tempdir().expect("fake tool directory");
-    let log = fake.path().join("calls.log");
-    let tool = r#"#!/usr/bin/env bash
-set -u
-tool=${0##*/}
-case "$tool:$1" in
-  perf:--version) printf '%s\n' 'perf version fake' ;;
-  perf:list) printf '  %s\n' "$2" ;;
-  perf:stat)
-    output=
-    while (($#)); do
-      if [[ $1 == -o ]]; then output=$2; shift 2; else shift; fi
-    done
-    if [[ -n $output ]]; then
-      printf '%s\n' perf_stat >>"$PROFILE_FAKE_LOG"
-      if [[ ${PROFILE_FAKE_UNSUPPORTED:-0} == 1 ]]; then printf '%s\n' '<not supported>;cycles:u' >"$output"; else printf '%s\n' '1;task-clock' >"$output"; fi
-    else
-      printf '%s\n' perf_preflight >>"$PROFILE_FAKE_LOG"
-    fi ;;
-  samply:--version) printf '%s\n' 'samply 0.13.1' ;;
-  samply:record)
-    if [[ ${2:-} == --help ]]; then printf '%s\n' '--pid --duration --rate --save-only --output'; exit 0; fi
-    output=
-    while (($#)); do
-      if [[ $1 == --output ]]; then output=$2; shift 2; else shift; fi
-    done
-    printf '%s\n' samply >>"$PROFILE_FAKE_LOG"
-    trap 'printf "%s\n" fake-profile >"$output"; printf "%s\n" samply_int >>"$PROFILE_FAKE_LOG"; exit 0' INT
-    while true; do sleep 0.05; done ;;
-  readlink:*) printf '%s\n' /fake/ferrum2-client ;;
-  readelf:*) printf '%s\n' '    Build ID: 0123456789abcdef' ;;
-  git:-C)
-    if [[ $3 == status ]]; then
-      [[ ! -e ${PROFILE_EXPECT_OUTPUT:?} ]] || exit 98
-      exit 0
-    fi
-    if [[ ${5:-} == 'HEAD^{tree}' || ${4:-} == 'HEAD^{tree}' ]]; then printf '%040d\n' 2; else printf '%040d\n' 1; fi ;;
-  *) exit 97 ;;
-esac
-"#;
-    for name in ["perf", "samply", "readlink", "readelf", "git"] {
-        let path = fake.path().join(name);
-        fs::write(&path, tool).expect("fake tool");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("fake tool mode");
-    }
-    let mut path = vec![fake.path().to_path_buf()];
-    path.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    let path = std::env::join_paths(path).expect("test PATH");
-    let profiles = root.join("profiles");
-    fs::create_dir_all(&profiles).expect("profiles directory");
-    let reserve = tempfile::NamedTempFile::new_in(&profiles).expect("output reservation");
-    let output = reserve.path().to_path_buf();
-    reserve.close().expect("remove output reservation");
-    let run = |output: &Path, unsupported: bool, duration: &str, frequency: &str| {
-        let mut command = Command::new(root.join("tools/profile-cpu.sh"));
-        command
-            .args([
-                "--scenario",
-                "tcp-bulk",
-                "--role",
-                "client",
-                "--pid",
-                &std::process::id().to_string(),
-                "--duration",
-                duration,
-                "--frequency",
-                frequency,
-                "--output",
-            ])
-            .arg(output)
-            .env("PATH", &path)
-            .env("PROFILE_FAKE_LOG", &log)
-            .env("PROFILE_EXPECT_OUTPUT", output);
-        if unsupported {
-            command.env("PROFILE_FAKE_UNSUPPORTED", "1");
-        }
-        command.output().expect("profiling wrapper must start")
-    };
-
-    let success = run(&output, false, "1", "1");
-    assert!(
-        success.status.success(),
-        "{}",
-        String::from_utf8_lossy(&success.stderr)
-    );
-    let calls: Vec<_> = fs::read_to_string(&log)
-        .expect("fake call log")
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(calls.len(), 4);
-    assert_eq!(
-        calls.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "perf_preflight".to_owned(),
-            "perf_stat".to_owned(),
-            "samply".to_owned(),
-            "samply_int".to_owned(),
-        ])
-    );
-    let stages = fs::read_to_string(output.join("stage-status.txt")).expect("stage results");
-    assert!(
-        stages
-            .lines()
-            .any(|line| line == "stage=samply status=PASS")
-    );
-    assert!(stages.lines().any(|line| line == "result=PASS exit_code=0"));
-    assert!(
-        fs::read_to_string(output.join("metadata.txt"))
-            .expect("profile metadata")
-            .lines()
-            .any(|line| line == "worktree_clean=true")
-    );
-
-    let calls_before_overflow = fs::read(&log).expect("fake call log");
-    for (duration, frequency) in [("18446744073709551616", "1"), ("1", "18446744073709551616")] {
-        let reserve = tempfile::NamedTempFile::new_in(&profiles).expect("overflow reservation");
-        let overflow_output = reserve.path().to_path_buf();
-        reserve.close().expect("remove overflow reservation");
-        let overflow = run(&overflow_output, false, duration, frequency);
-        assert_eq!(overflow.status.code(), Some(2));
-        assert!(!overflow_output.exists());
-    }
-    assert_eq!(
-        fs::read(&log).expect("fake call log"),
-        calls_before_overflow
-    );
-
-    for artifact in [
-        "metadata.txt",
-        "perf-stat.txt",
-        "samply.json.gz",
-        "stage-status.txt",
-    ] {
-        assert!(output.join(artifact).is_file(), "missing {artifact}");
-    }
-    assert_eq!(
-        fs::metadata(&output)
-            .expect("output mode")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
-    assert_eq!(
-        fs::metadata(output.join("metadata.txt"))
-            .expect("metadata mode")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    let metadata_before = fs::read(output.join("metadata.txt")).expect("metadata");
-    assert!(!run(&output, false, "1", "1").status.success());
-    assert_eq!(
-        fs::read(output.join("metadata.txt")).expect("metadata"),
-        metadata_before
-    );
-
-    let reserve = tempfile::NamedTempFile::new_in(&profiles).expect("failed output reservation");
-    let failed = reserve.path().to_path_buf();
-    reserve.close().expect("remove failed output reservation");
-    let failure = run(&failed, true, "1", "1");
-    assert!(!failure.status.success());
-    assert!(
-        fs::read_to_string(failed.join("perf-stat.txt"))
-            .expect("partial perf evidence")
-            .contains("<not supported>")
-    );
-    assert!(!failed.join("samply.json.gz").exists());
-    assert!(
-        fs::read_to_string(failed.join("stage-status.txt"))
-            .expect("failed stages")
-            .lines()
-            .any(|line| line == "stage=perf_stat status=FAIL")
-    );
-
-    let outside = fake.path().join("outside-profiles");
-    assert!(!run(&outside, false, "1", "1").status.success());
-    assert!(!outside.exists());
-    fs::remove_dir_all(output).expect("remove successful evidence");
-    fs::remove_dir_all(failed).expect("remove failed evidence");
 }

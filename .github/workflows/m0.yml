@@ -57,32 +57,68 @@ jobs:
           cargo -V
           cc --version
           ld --version
-      - name: Build binaries and run authoritative full gate
+      - name: Enforce architecture policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-m0-harness --test workspace_policy --locked
+      - name: Build workspace binaries and protocol example
         shell: bash
         run: |
           set -euo pipefail
           cargo build --workspace --bins --locked
           cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-          # Windows TUN performance is privileged and is executed only by the
-          # approved local Hyper-V runner. CI exercises the network-free control plane.
-          python3 -B tests/performance_candidate/test_control.py -v
-          # Executable client/TUN/Wintun tests are reserved for the approved
-          # local Hyper-V guest. Hosted CI compiles those harnesses only.
-          cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-wintun --locked
-          cargo test -p ferrum2-client --all-features --no-run --locked
-          cargo test -p ferrum2-tun --all-features --no-run --locked
-          cargo test -p ferrum2-wintun --all-features --no-run --locked
-          cargo test -p ferrum2-dns --features __interop-test-root --locked
-          target/debug/m4-qualification self-check
-          cargo doc --workspace --all-features --no-deps --locked
-      - name: Record authoritative full-gate completion
+      - name: Check Rust formatting
         shell: bash
         run: |
           set -euo pipefail
-          printf 'm3_full_completion status=PASS full=PASS security=PASS process=PASS sha=%s run_id=%s run_attempt=%s\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          cargo fmt --all -- --check
+      - name: Lint all Rust targets and features
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test candidate controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Windows TUN performance is privileged and is executed only by the
+          # approved local Hyper-V runner. CI exercises the network-free control plane.
+          python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
+      - name: Test Rule ordinary controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
+      - name: Run ordinary Rust tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Executable client/TUN/Windows-platform tests are reserved for the approved
+          # local Hyper-V guest. Hosted CI compiles those harnesses only.
+          cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked
+      - name: Compile client TUN and Windows platform tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-client --all-features --no-run --locked
+          cargo test -p ferrum2-tun --all-features --no-run --locked
+          cargo test -p ferrum2-platform-windows --all-features --no-run --locked
+      - name: Test DNS interop root
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-dns --features __interop-test-root --locked
+      - name: Run M4 qualification self-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          target/debug/m4-qualification self-check
+      - name: Build workspace documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo doc --workspace --all-features --no-deps --locked
       - name: Prove focused IPv6 UDP real-process path
         shell: bash
         run: |
@@ -91,6 +127,12 @@ jobs:
             cargo test -p ferrum2-m0-harness --test udp_local_e2e \
               ipv4_ingress_ipv6_direct_target_round_trips_three_datagrams_and_reaps \
               --locked -- --ignored --exact --nocapture
+      - name: Record authoritative full-gate completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'm3_full_completion status=PASS full=PASS security=PASS process=PASS sha=%s run_id=%s run_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
   platform:
     name: platform / ${{ matrix.profile }}
@@ -191,6 +233,12 @@ jobs:
           cargo +1.97.1 -V
           cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --release --locked --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { throw "MSVC release build failed" }
+          cargo +1.97.1 test -p ferrum2-client --all-features --no-run --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "MSVC client test compilation failed" }
+          cargo +1.97.1 test -p ferrum2-tun --all-features --no-run --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "MSVC TUN test compilation failed" }
+          cargo +1.97.1 test -p ferrum2-platform-windows --all-features --no-run --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "MSVC Windows platform test compilation failed" }
           $client = "target\${{ matrix.target }}\release\ferrum2-client.exe"
           $server = "target\${{ matrix.target }}\release\ferrum2-server.exe"
           $qualificationOutput = & python -X utf8 tests\platform\qualify_native.py `
@@ -229,6 +277,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "native detection binary build failed" }
           cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
           if ($LASTEXITCODE -ne 0) { throw "native detection evidence failed" }
+      - name: Validate Windows qualification static contracts
+        if: matrix.profile == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & pwsh -NoProfile -File tests\platform\test_qualification_modules.ps1
+          if ($LASTEXITCODE -ne 0) { throw "qualification module contract failed" }
+          & pwsh -NoProfile -File tests\platform\test_windows_tun_hyperv_static_contract.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Hyper-V static contract failed" }
       - name: Build and run native GNU artifacts
         if: matrix.profile == 'linux-gnu'
         shell: bash
@@ -720,3 +777,25 @@ jobs:
             cleanup_status=1
           fi
           test "$cleanup_status" -eq 0
+
+  required:
+    name: required
+    if: ${{ always() }}
+    needs:
+      - quality
+      - platform
+      - interop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every ordinary main gate
+        shell: bash
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          PLATFORM_RESULT: ${{ needs.platform.result }}
+          INTEROP_RESULT: ${{ needs.interop.result }}
+        run: |
+          set -euo pipefail
+          test "$QUALITY_RESULT" = success
+          test "$PLATFORM_RESULT" = success
+          test "$INTEROP_RESULT" = success

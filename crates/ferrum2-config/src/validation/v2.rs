@@ -105,18 +105,32 @@ impl RouteDraft {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn compile_route_draft(
-    raw: Option<&RawRoute>,
-    inbounds: &[String],
-    inbound_outbounds: &[Option<String>],
-    rule_set_tags: &[&str],
-    role: Role,
-    tun_inbound: Option<usize>,
-    has_dns: bool,
-    max_connections: u32,
-) -> Result<RouteDraft, ConfigError> {
-    if inbounds.len() != inbound_outbounds.len() || inbounds.is_empty() {
+pub(super) struct RouteInboundDraft {
+    pub(super) tag: String,
+    pub(super) outbound: Option<String>,
+}
+
+pub(super) struct RouteDraftInput<'a> {
+    pub(super) raw: Option<&'a RawRoute>,
+    pub(super) inbounds: &'a [RouteInboundDraft],
+    pub(super) rule_set_tags: &'a [&'a str],
+    pub(super) role: Role,
+    pub(super) tun_inbound: Option<usize>,
+    pub(super) has_dns: bool,
+    pub(super) max_connections: u32,
+}
+
+pub(super) fn compile_route_draft(input: RouteDraftInput<'_>) -> Result<RouteDraft, ConfigError> {
+    let RouteDraftInput {
+        raw,
+        inbounds,
+        rule_set_tags,
+        role,
+        tun_inbound,
+        has_dns,
+        max_connections,
+    } = input;
+    if inbounds.is_empty() {
         return Err(ConfigError::semantic(ConfigField::Inbounds));
     }
     let Some(raw) = raw else {
@@ -133,8 +147,9 @@ pub(super) fn compile_route_draft(
         rules
             .try_reserve_exact(inbounds.len())
             .map_err(|_| ConfigError::rule_allocation(ConfigField::RouteRules))?;
-        for (inbound, outbound) in inbound_outbounds.iter().enumerate() {
-            let outbound = outbound
+        for (inbound, declaration) in inbounds.iter().enumerate() {
+            let outbound = declaration
+                .outbound
                 .as_ref()
                 .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsOutbound))?;
             roots.push(outbound.clone());
@@ -154,7 +169,7 @@ pub(super) fn compile_route_draft(
             },
         });
     };
-    if inbound_outbounds.iter().any(Option::is_some) {
+    if inbounds.iter().any(|inbound| inbound.outbound.is_some()) {
         return Err(ConfigError::semantic(ConfigField::Route));
     }
     let final_outbound = raw
@@ -270,7 +285,7 @@ pub(super) fn compile_route_draft(
 
 fn compile_route_matcher(
     raw: &RawRouteRule,
-    inbounds: &[String],
+    inbounds: &[RouteInboundDraft],
     rule_set_tags: &[&str],
 ) -> Result<(RouteMatcher<RouteProtocol>, Coverage), ConfigError> {
     let mut fields = Vec::new();
@@ -281,7 +296,7 @@ fn compile_route_matcher(
             parse_values(values, ConfigField::RouteRulesInbound, |tag| {
                 inbounds
                     .iter()
-                    .position(|candidate| candidate == tag)
+                    .position(|candidate| candidate.tag == *tag)
                     .ok_or_else(|| ConfigError::semantic(ConfigField::RouteRulesInbound))
             })
         })

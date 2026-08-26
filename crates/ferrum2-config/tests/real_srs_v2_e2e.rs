@@ -8,7 +8,8 @@ use ferrum2_config::{
 use ferrum2_core::TargetAddr;
 use ferrum2_rule::srs::decode_srs;
 use ferrum2_rule::{
-    DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, Network, RouteMetadata, RouteProgramAction,
+    DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, Network, RouteMetadata,
+    RouteProgramAction, RuleEngineRegistry, RuleEngineSnapshotBuilder,
 };
 
 const ADS_SRS: &[u8] = include_bytes!("../../../tests/fixtures/srs/ads.srs");
@@ -17,24 +18,36 @@ const CN_SRS: &[u8] = include_bytes!("../../../tests/fixtures/srs/cn.srs");
 const CNIP_SRS: &[u8] = include_bytes!("../../../tests/fixtures/srs/cnip.srs");
 
 fn resources() -> ClientV2Resources {
-    let rule_sets = [ADS_SRS, AI_SRS, CN_SRS, CNIP_SRS]
+    let mut builder = RuleEngineSnapshotBuilder::new(41);
+    let mut rule_set_ids = Vec::new();
+    for (tag, bytes) in ["ads", "ai", "cn", "cnip"]
         .into_iter()
-        .enumerate()
-        .map(|(index, bytes)| {
-            let compiled = decode_srs(bytes)
-                .expect("decode pinned SRS")
-                .compile()
-                .expect("compile pinned SRS");
-            CompiledRuleSetResource::new(index as u32, Arc::new(compiled), 41)
-        })
-        .collect();
+        .zip([ADS_SRS, AI_SRS, CN_SRS, CNIP_SRS])
+    {
+        let compiled = decode_srs(bytes)
+            .expect("decode pinned SRS")
+            .compile()
+            .expect("compile pinned SRS");
+        let match_set = builder.add_match_set(compiled).expect("add pinned SRS");
+        rule_set_ids.push(
+            builder
+                .add_rule_set(tag, match_set)
+                .expect("identify pinned SRS"),
+        );
+    }
+    let rule_sets = CompiledRuleSetResource::new(
+        Arc::new(RuleEngineRegistry::new(
+            builder.build().expect("build pinned SRS registry"),
+        )),
+        rule_set_ids.into_boxed_slice(),
+    );
     ClientV2Resources::new(
         vec![],
         vec![ResolvedOutboundEndpoint::new(
             2,
             "198.51.100.10:8388".parse().expect("outbound endpoint"),
         )],
-        rule_sets,
+        Some(rule_sets),
     )
 }
 

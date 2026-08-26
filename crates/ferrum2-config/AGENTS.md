@@ -4,7 +4,16 @@ This file supplements the repository-level `AGENTS.md` for changes under this cr
 
 ## Responsibility and Boundaries
 
-This crate reads bounded TOML and compiles it into fully validated client/server models, routing and selector programs, DNS policy, and TUN resource plans. Keep `load_client` and `load_server` free of runtime side effects: they may read the named file, but must not bind sockets, spawn tasks, or retain source text. `raw.rs` owns Serde shapes and defaults, `validation.rs` and `validation/v2.rs` own cross-field and version rules, and `model.rs` exposes only validated state. Runtime behavior belongs in the consuming crates.
+This crate reads bounded TOML into side-effect-free `PreparedClientV2` and `PreparedServerV2` plans. Callers must use `prepare_client` or `prepare_server`, materialize the declared DNS/endpoint/RuleSet resources in the owning binary, then consume the plan exactly once with `finish_client_v2` or `finish_server_v2`. The crate must not bind sockets, spawn tasks, or retain source text. `raw.rs` owns Serde shapes and defaults; `prepared/prepare` owns schema preparation and dependency plans; `prepared/resources` and `prepared/finish` own the typed resource handoff; `validation/{common,client,server,graph,tun,v2}` own cross-field and version rules; and `model.rs` exposes only validated state. Runtime behavior belongs in the consuming crates.
+
+Keep these owner dependencies explicit. Do not reintroduce a wildcard vocabulary/prelude across
+prepared or validation modules, and keep client/server validation result types in their named
+owners. `prepare/{dns,dns_policy,rule_egress,graph}` return focused phase results; `core` alone
+orchestrates those phases into the public prepared plans. Bind each raw outbound to its prepared
+endpoint and Direct resolver inside `ClientPreparationDraft` or `ServerPreparationDraft`; derive
+that resolver exactly once. Dependency construction consumes one `DependencyGraphInput` and
+returns one `DependencyGraphPlan`; validation returns named graph results rather than parallel
+slices or positional tuples.
 
 ## Verification
 

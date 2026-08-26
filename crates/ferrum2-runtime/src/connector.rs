@@ -6,6 +6,7 @@ use std::task::{Context, Poll};
 use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Outbound, TargetAddr,
 };
+use ferrum2_net::TcpResolver;
 use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -43,19 +44,6 @@ impl TcpDialer for SystemTcpDialer {
     async fn connect(&self, address: SocketAddr) -> io::Result<TcpStream> {
         TcpStream::connect(address).await
     }
-}
-
-/// Resolves a bounded ordered sequence of TCP socket candidates.
-pub trait TcpResolver: Send + Sync {
-    /// Bounded candidate storage or iterator returned by this resolver.
-    type Candidates: IntoIterator<Item = SocketAddr> + Send;
-
-    /// Resolves a validated ASCII domain and non-zero port.
-    fn resolve(
-        &self,
-        host: &str,
-        port: u16,
-    ) -> impl std::future::Future<Output = io::Result<Self::Candidates>> + Send;
 }
 
 /// Production system resolver.

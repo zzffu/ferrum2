@@ -3,8 +3,7 @@ pub(in crate::run) use std::io;
 pub(in crate::run) use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 pub(in crate::run) use std::path::PathBuf;
 pub(in crate::run) use std::sync::atomic::{AtomicUsize, Ordering};
-pub(in crate::run) use std::sync::{Arc, Mutex, OnceLock};
-pub(in crate::run) use std::task::Context;
+pub(in crate::run) use std::sync::{Mutex, OnceLock};
 pub(in crate::run) use std::time::Duration;
 
 pub(in crate::run) use ferrum2_config::ValidatedServerConfig;
@@ -17,13 +16,13 @@ pub(in crate::run) use ferrum2_runtime::{
     ProcessRootExit, ProcessSupervisor, RuntimeTcpStream, TcpConnector,
 };
 pub(in crate::run) use ferrum2_shadowsocks::{
-    DetectionReason, MethodKeyAdapter, ProtocolReason, UdpClientSession, UdpPacketScratch,
+    MethodKeyAdapter, UdpClientSession, UdpPacketScratch,
 };
 pub(in crate::run) use tokio::net::{TcpListener, UdpSocket};
 
 pub(in crate::run) use super::RunError;
 use super::run_with_registry;
-pub(in crate::run) use super::tokio_io::{TokioFramed, TokioTransport};
+pub(in crate::run) use ferrum2_shadowsocks::tokio::{TokioFramed, TokioTransport};
 
 pub(in crate::run) const PSK_BYTES: [u8; 16] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
@@ -145,7 +144,10 @@ pub(in crate::run) fn server_test_config_source(
         CONFIG_ID.fetch_add(1, Ordering::SeqCst)
     ));
     std::fs::write(&path, source).expect("server test config");
-    let config = ferrum2_config::load_server(&path).expect("validated server test config");
+    let prepared = ferrum2_config::prepare_server(&path).expect("prepare server test config");
+    let config =
+        ferrum2_config::finish_server_v2(prepared, ferrum2_config::ServerV2Resources::default())
+            .expect("finish server test config");
     (path, config)
 }
 

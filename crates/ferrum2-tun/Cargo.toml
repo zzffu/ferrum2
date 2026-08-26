@@ -9,9 +9,14 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+fuzzing = []
+
 [dependencies]
+ferrum2-net.workspace = true
 ferrum2-runtime.workspace = true
-ferrum2-wintun.workspace = true
+ferrum2-platform-windows.workspace = true
 smoltcp.workspace = true
 tokio.workspace = true
 

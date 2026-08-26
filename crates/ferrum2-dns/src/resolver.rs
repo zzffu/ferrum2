@@ -327,7 +327,7 @@ fn interop_test_tls() -> Result<rustls::ClientConfig, DnsError> {
     use rustls::RootCertStore;
     use rustls::pki_types::CertificateDer;
 
-    const ROOT: &[u8] = include_bytes!("../tests/fixtures/m12-test-ca.der");
+    const ROOT: &[u8] = include_bytes!("../../../tests/fixtures/dns-tls/m12-test-ca.der");
     let mut roots = RootCertStore::empty();
     roots
         .add(CertificateDer::from(ROOT.to_vec()))

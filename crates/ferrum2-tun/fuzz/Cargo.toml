@@ -21,7 +21,8 @@ libfuzzer = ["dep:libfuzzer-sys"]
 
 [dependencies]
 ferrum2-config = { path = "../../ferrum2-config", features = ["fuzzing"] }
-ferrum2-wintun = { path = "../../ferrum2-wintun", features = ["fuzzing"] }
+ferrum2-platform-windows = { path = "../../ferrum2-platform-windows", features = ["fuzzing"] }
+ferrum2-tun = { path = "..", features = ["fuzzing"] }
 libfuzzer-sys = { version = "=0.4.12", optional = true }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt", "sync"] }
 

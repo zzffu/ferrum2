@@ -4,13 +4,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use ferrum2_net::NetworkSnapshot;
 use ferrum2_runtime::{
     ManagedNetworkDamage, NetworkResetCoordinator, NetworkResetCoordinatorError, NetworkResetError,
     NetworkResetFuture, NetworkResetHookRegistrationError, NetworkResetHookStage,
     NetworkResetIntent, NetworkResetLimits, NetworkResetOutcome, NetworkResetReason,
     NetworkResetState, NetworkRuntimeOwnerCancellation, NetworkRuntimeOwnerKind,
-    NetworkRuntimeOwnerRegistrationError, NetworkSnapshot, NetworkSnapshotPublisher, OwnerRegistry,
-    ResetNetwork,
+    NetworkRuntimeOwnerRegistrationError, NetworkSnapshotPublisher, OwnerRegistry, ResetNetwork,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
 

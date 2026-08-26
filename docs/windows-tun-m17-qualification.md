@@ -3,9 +3,11 @@
 M17 is the privileged acceptance gate for the managed Windows TUN. This runbook also includes the
 separate durable M16 hard-kill release gate and the deterministic TUN fuzz-smoke gate; neither is an
 M17 mode. The
-authoritative controller is
+authoritative M17 controller is
 [`tests/platform/qualify_windows_tun.ps1`](../tests/platform/qualify_windows_tun.ps1), and the
-only approved M17 and fuzz-smoke entry point is the local
+hard-kill gate has its own
+[`tests/platform/qualify_windows_tun_hard_kill.ps1`](../tests/platform/qualify_windows_tun_hard_kill.ps1)
+controller. The only approved M17 and fuzz-smoke entry point is the local
 [`run_windows_tun_hyperv.ps1`](../tests/platform/run_windows_tun_hyperv.ps1) orchestrator. This
 runbook governs its host build, bounded staging, identity evidence, artifact readback, cleanup, and
 final checkpoint restoration around the tracked
@@ -109,7 +111,7 @@ rustup toolchain install 1.97.1 --profile minimal
 cargo +1.97.1 build -p ferrum2-client -p ferrum2-server --bins --locked
 cargo +1.97.1 test -p ferrum2-client --bin ferrum2-client --no-run --locked
 cargo +1.97.1 test -p ferrum2-tun --lib --no-run --locked
-cargo +1.97.1 test -p ferrum2-wintun --lib --no-run --locked
+cargo +1.97.1 test -p ferrum2-platform-windows --lib --no-run --locked
 cargo +1.97.1 build --manifest-path crates/ferrum2-tun/fuzz/Cargo.toml `
     --bin smoke --no-default-features --locked --target x86_64-pc-windows-msvc
 ```
@@ -128,14 +130,19 @@ Its properties must appear in this order:
 ```text
 schema, vm_name, vm_id, checkpoint_name, checkpoint_id,
 guest_product, guest_edition, guest_architecture, guest_version, guest_build,
-candidate_sha, probe_sha256, client_sha256, server_sha256, support_listener,
-topology, test_binaries
+candidate_sha, probe_sha256, controller_bundle_sha256, client_sha256,
+server_sha256, support_listener, topology, test_binaries
 ```
 
-`schema` is integer `2`; VM and checkpoint values must exactly match the manifest and table above;
+`schema` is integer `3`; VM and checkpoint values must exactly match the manifest and table above;
 `guest_architecture` is `AMD64`. `probe_sha256` is the lowercase SHA-256 of the exact staged
-`qualify_windows_tun.ps1`; the client and server fields are the lowercase SHA-256 values of the exact
-staged executables. Guest product, edition, version, and build must match live OS readback. The
+`qualify_windows_tun.ps1`. `controller_bundle_sha256` is the canonical root SHA-256 of that
+entrypoint, the 25 staged guest implementation owners, and the seven Common, Evidence, and
+GuestController module/bootstrap files. The
+bundle manifest schema is `ferrum2.qualification-controller-bundle.v1`; it records the entrypoint and
+the ordinally sorted relative path, byte length, and lowercase SHA-256 of all 33 source files. The
+client and server fields are the lowercase SHA-256 values of the exact staged executables. Guest
+product, edition, version, and build must match live OS readback. The
 `topology` object has exactly these properties in order:
 
 ```text
@@ -162,7 +169,7 @@ PowerShell 7.4 JSON round trip.
 lowercase SHA-256 values in that order. The host runner repeats the locked `--no-run` builds, stages
 the three harnesses under fixed names, and compares every hash with the ledger before starting the
 VM. The smoke executable is not added to this already-issued ledger schema: its exact SHA-256 and
-size are instead bound to the clean `candidate_sha` by staged-input schema v3, read back by the guest,
+size are instead bound to the clean `candidate_sha` by staged-input schema v4, read back by the guest,
 and copied into guest/host result evidence. The host only compiles and stages this executable; it
 never runs it. The approved guest runs the prebuilt executable without Git, Cargo, rustup, or a Rust
 compiler.
@@ -199,7 +206,7 @@ twelve local release-evidence invocations in total.
 | M17 | `udp-policy` | `-Mode udp-policy` | Source-keyed EIM and route-once association policy; ADF/EIF; parsed DNS, QUIC Initial, STUN/WebRTC, and game-style payloads; multi-target and v4/v6 source coverage; capacity, queue-pressure, and restart-stale-state contracts; directed-broadcast isolation; journaled firewall masking control | 18 | 9 |
 | M17 | `scheduler-ring-full` | `-Mode scheduler-ring-full` | Exact TCP 8/16/64 capacity-aware rotation, live UDP sequences totaling 8/16/64 in bounded eight-packet batches, a 256-packet 1,200-byte live egress pressure stage with closed sent/drop accounting, fair work rotation, lossless response backpressure, explicit nonfatal ring-full drop, and closed Wintun owner error dispositions | 8 | 8 |
 | TUN fuzz smoke | `fuzz-smoke` | guest executes staged `ferrum2-tun-fuzz-smoke.exe` | Four packet-reassembly, three UDP-reset race, eight removed-config, and eight strict-route rule-plan seeds plus bounded empty/malformed/oversized inputs and exact terminal/hash evidence | 23 | 0 |
-| M16 hard-kill | `hard-kill` | `-Mode hard-kill` | Managed auto-route, auto-DNS, and mixed live-traffic processes are forcibly terminated; the two DNS cases bind the live strict-route WFP session, sublayer, owner PID, and eight filters before termination and prove their absence afterward, in addition to exact process, adapter, address, route, and DNS absence | 3 | 0 |
+| M16 hard-kill | `hard-kill` | dedicated hard-kill controller | Managed auto-route, auto-DNS, and mixed live-traffic processes are forcibly terminated; the two DNS cases bind the live strict-route WFP session, sublayer, owner PID, and eight filters before termination and prove their absence afterward, in addition to exact process, adapter, address, route, and DNS absence | 3 | 0 |
 
 Each network-reset profile creates one journaled guest-underlay `/32` notification route and then
 alternates its metric. This is an ordinary route/interface notification, not damage to Ferrum2-owned
@@ -250,11 +257,11 @@ record that any live VM row has passed. Do not mark this gate complete until all
 artifact sets, token/identity-bound readbacks, applicable cleanup results, and the final checkpoint restore have
 been accepted. Performance calibration is a separate gate and remains `CALIBRATION_REQUIRED`; M17
 correctness evidence cannot be used as performance acceptance. Its distinct entry point is
-[`run_windows_tun_performance_hyperv.ps1`](../tools/run_windows_tun_performance_hyperv.ps1), governed by
+[`run_windows_tun_performance_hyperv.ps1`](../tools/windows-tun/run_windows_tun_performance_hyperv.ps1), governed by
 [`windows_tun_performance_policy.json`](../tools/windows_tun_performance_policy.json); the current
 policy's calibration and threshold fields are all `null`. The closed plan has nine scenarios and
-90 alternating trials. Ten `udp-route-once` raw sidecars bind the real two-generation, 64-source,
-four-target guest traffic and product association/router counter deltas; ten lifecycle sidecars
+108 alternating trials. Twelve `udp-route-once` raw sidecars bind the real two-generation, 64-source,
+four-target guest traffic and product association/router counter deltas; twelve lifecycle sidecars
 remain separate. The Wintun egress-pressure trial samples
 `ferrum2_tun_pending_udp_responses` while the guest workload is running and records the observed
 peak, not a configured or fabricated constant. It also records the raw workload-attempt,
@@ -397,12 +404,32 @@ building artifacts, inspecting a VM, or starting guest execution:
 pwsh -NoProfile -File tests/platform/run_windows_tun_hard_kill_hyperv.ps1 -DescribeContract
 ```
 
+The exact controller-bundle identity can also be computed without VM or guest access:
+
+```powershell
+$root = (Resolve-Path -LiteralPath .).Path
+Import-Module "$root\tools\powershell\Ferrum2.Qualification.Evidence\Ferrum2.Qualification.Evidence.psd1" -Force
+$files = @(Get-Ferrum2MainControllerBundleFileMap -RepositoryRoot $root)
+New-Ferrum2ControllerBundleManifest -FileMap $files -EntryPoint 'qualify_windows_tun.ps1' |
+    ConvertTo-Json -Depth 8
+```
+
+The two host entrypoints are separately hash-bound before any qualification module is imported.
+The main host source bundle contains 21 files and the hard-kill host source bundle contains 18;
+each binds its public entrypoint, one closed controller extension, its transaction owners, and the
+exact Common, Evidence, GuestController where applicable, and HostHyperV module sources. After
+bootstrap verification, the entrypoint passes one closed context through
+`Invoke-Ferrum2HostControllerExtension`; it does not inject or re-export private HostHyperV
+operations into script scope. Performance qualification consumes the same HostHyperV input,
+VM-identity, lifecycle, and PowerShell Direct interfaces.
+
 Before any VM mutation, the orchestrator verifies the exact candidate commit, repeats the locked
 host builds, compares the client/server/test hashes with the ledger, compiles but does not execute the
 Windows fuzz-smoke binary, verifies and stages the pinned PowerShell 7.4.19 archive, and stages
 bounded Visual C++ runtime libraries. It then restores the exact approved checkpoint, starts the
 exact VM, and copies
-only the controller, identity ledger, exact topology manifest, guest path probe, Wintun archive,
+only the 33-file controller bundle and its canonical manifest, identity ledger, exact topology
+manifest, guest path probe, Wintun archive,
 precompiled executables, portable PowerShell archive, runtime libraries, and a hash-bound staging
 manifest. Before the first guest TUN is created, the probe proves that the support address selects
 the exact direct `/30` route, source address, support interface identity, MAC, and MTU, with no
@@ -453,9 +480,10 @@ candidate SHA, manual run token, mode, cycle count, and UTC collection
 time. Network-reset runs must additionally preserve `network-reset-cycles.jsonl`.
 
 The local wrapper also preserves staged-input schema
-`ferrum2.windows-tun.hyperv-staged-input.v3`, guest-run schema
-`ferrum2.windows-tun.hyperv-guest-run.v4`, and
-`host-orchestration.json` schema `ferrum2.windows-tun.hyperv-host-run.v4`. Together they bind every
+`ferrum2.windows-tun.hyperv-staged-input.v4`, guest-run schema
+`ferrum2.windows-tun.hyperv-guest-run.v5`, and
+`host-orchestration.json` schema `ferrum2.windows-tun.hyperv-host-run.v5`. Together they bind the
+canonical controller-bundle root, every
 staged executable/runtime archive—including fuzz smoke—the exact profile/mode and both nullable cycle
 fields, the staging-manifest hash, exported file hashes, exact topology manifest, live support
 listener and guest support path, VM/checkpoint identities, unchanged host TUN, zero host-network
@@ -472,16 +500,17 @@ remain for diagnosis. Other token-scoped failure evidence is retained.
 
 Accept a run only when all of the following are true:
 
-1. `m17-contract.json` has schema `ferrum2.windows-tun.m17-contract.v2`, status
+1. `m17-contract.json` has schema `ferrum2.windows-tun.m17-contract.v3`, status
    `preflight_pass`, the requested mode/cycle count, exact approved VM/checkpoint names and IDs,
    guest build, exact topology and guest support-path preflight, pinned Wintun hashes, and hashes
    matching the embedded identity ledger. Its
-   `controller_sha256` equals the ledger `probe_sha256`; optional test-binary hashes match it too.
-2. `m17-result.json` has schema `ferrum2.windows-tun.m17-result.v2`, status `pass`, the requested
+   `controller_sha256` equals the ledger `probe_sha256`, `controller_bundle_sha256` equals the
+   canonical 33-file bundle root; optional test-binary hashes match it too.
+2. `m17-result.json` has schema `ferrum2.windows-tun.m17-result.v3`, status `pass`, the requested
    mode, unique run token, expected `network_reset_cycles` or `restart_cycles` value with the other
    cycle field `null` (both are `null` for non-cycle modes), exact approved
    VM/checkpoint identity and guest build, and the same identity, candidate, client, server,
-   controller, Wintun, and test-binary hashes as the contract.
+    controller, controller-bundle, Wintun, and test-binary hashes as the contract.
 3. Every fixture reports `offline_check: pass`, and fixture names and hashes match the preflight
    contract. Every deterministic test reports `status: pass`, executed exactly one test, and the
    count matches the table.
@@ -525,11 +554,19 @@ also contains the byte-identical input ledger and topology manifest, the staged-
 `host-orchestration.json`. A failed run may publish it with `status: fail` for diagnosis; `status:
 pass` is valid only after the exact checkpoint is restored and the approved VM is confirmed `Off`.
 `-DescribeContract` reports
-`ferrum2.windows-tun.hard-kill-static-contract.v2`; the staged input, guest bootstrap, and host-run
-schemas are respectively `ferrum2.windows-tun.hard-kill-staged-input.v2`,
-`ferrum2.windows-tun.hard-kill-guest-bootstrap.v2`, and
-`ferrum2.windows-tun.hard-kill-hyperv-host-run.v2`; it also reports evidence-row schema `2` and
+`ferrum2.windows-tun.hard-kill-static-contract.v3`; the staged input, guest bootstrap, and host-run
+schemas are respectively `ferrum2.windows-tun.hard-kill-staged-input.v3`,
+`ferrum2.windows-tun.hard-kill-guest-bootstrap.v3`, and
+`ferrum2.windows-tun.hard-kill-hyperv-host-run.v3`; it also reports the controller-bundle schema,
+the 20-file count, the committed host-source canonical root, evidence-row schema `2`, and
 exactly two strict-route cases.
+The independent hard-kill staging bundle contains 20 hash-bound files: its dedicated controller
+entrypoint, nine mode-free shared guest primitives, five hard-kill controller/wrapper owners, and
+five Common and Evidence module/bootstrap files. No main-profile dispatcher, main-only profile,
+unused GuestController contract module, or host-only source is staged into the guest; changing a
+`Main.*` profile cannot change the hard-kill file map or canonical root.
+The wrapper verifies the staged-input hash, bundle-manifest hash, every bundle member, and the
+canonical bundle root before sourcing a hard-kill guest owner.
 
 1. Controller exit is zero and stdout contains exactly one full
    `m16_windows_hard_kill status=PASS cases=3/3 ... strict_route_wfp=ABSENT cleanup=PASS ...`
@@ -546,9 +583,10 @@ exactly two strict-route cases.
     LUID, the AppId SHA-256 independently derived from the exact staged client executable, eight
     fixed-key/nonzero-UInt64-ID pairs, and a recomputable lowercase SHA-256. `after_kill` records
     session, sublayer, and filters as `absent`.
-3. `hard-kill-result.json` has schema `ferrum2.windows-tun.hard-kill-result.v2`, status `pass`, mode
+3. `hard-kill-result.json` has schema `ferrum2.windows-tun.hard-kill-result.v3`, status `pass`, mode
    `hard-kill`, the exact token plus identity, candidate, client, server, and controller hashes,
-   exact topology manifest/switch/listener identities, exact guest support path, integer `cases: 3`,
+    the canonical controller-bundle root, exact topology manifest/switch/listener identities, exact
+    guest support path, integer `cases: 3`,
    five true residue-absence booleans, `strict_route_cases: 2`, true
    `strict_route_wfp_identity_verified` and `strict_route_wfp_absent`, `inner_cleanup: pass`, and
    hashes matching the three captured controller files.

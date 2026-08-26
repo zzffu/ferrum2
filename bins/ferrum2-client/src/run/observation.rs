@@ -1,11 +1,16 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use ferrum2_config::LoggingLevel;
+use ferrum2_config::{LoggingLevel, ValidatedClientConfig};
 use ferrum2_core::ConnectErrorKind;
+use ferrum2_dns::{
+    DnsPolicyMatchResult, DnsPolicyMatchSource, DnsPolicyMatchType, DnsPolicyObservation,
+    DnsPolicyObserver, DnsPolicyStage,
+};
 use ferrum2_observability::{
-    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, SniffOutcome,
-    SniffProtocol, Stage, TraceRecord, Transport, emit,
+    Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, RuleMatchResult,
+    RuleMatchType, RuleProgram, RuleProgramMode, RuleSource, SniffOutcome, SniffProtocol, Stage,
+    TraceRecord, Transport, emit,
 };
 use ferrum2_runtime::{
     MetricsEndpoint, MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
@@ -19,7 +24,7 @@ use tokio::net::TcpListener;
 
 use super::RunError;
 use super::context::ClientContext;
-use super::tokio_io::TokioFramed;
+use ferrum2_shadowsocks::tokio::TokioFramed;
 
 pub(super) fn record_forced_udp_sessions(context: &ClientContext) {
     for _ in 0..context.registry.snapshot().udp_sessions {
@@ -447,6 +452,99 @@ fn reason_for_connect(kind: ConnectErrorKind) -> Reason {
         ConnectErrorKind::PolicyDenied => Reason::RelayIo,
         ConnectErrorKind::Timeout => Reason::ConnectTimeout,
         ConnectErrorKind::Other => Reason::RelayIo,
+    }
+}
+
+pub(super) fn publish_rule_program_metadata(config: &ValidatedClientConfig, metrics: &Metrics) {
+    metrics.set_rule_program_mode(
+        RuleProgram::Route,
+        rule_program_mode(config.route.program_mode()),
+    );
+    metrics.set_rule_program_rules(RuleProgram::Route, config.route.rule_count());
+    let Some(dns) = config.dns_route.as_ref() else {
+        return;
+    };
+    if let Some(binding) = dns.policy_blueprint() {
+        let blueprint = binding.blueprint();
+        metrics.set_rule_program_mode(RuleProgram::DnsQuery, rule_program_mode(dns.program_mode()));
+        metrics.set_rule_program_rules(RuleProgram::DnsQuery, blueprint.len());
+        metrics.set_rule_program_mode(
+            RuleProgram::DnsResponse,
+            rule_program_mode(dns.program_mode()),
+        );
+        metrics.set_rule_program_rules(RuleProgram::DnsResponse, blueprint.response_rule_count());
+    } else {
+        metrics.set_rule_program_mode(RuleProgram::DnsQuery, rule_program_mode(dns.program_mode()));
+        metrics.set_rule_program_rules(RuleProgram::DnsQuery, dns.rule_count());
+        metrics.set_rule_program_mode(RuleProgram::DnsResponse, RuleProgramMode::SmallLinear);
+        metrics.set_rule_program_rules(RuleProgram::DnsResponse, 0);
+    }
+}
+
+const fn rule_program_mode(mode: ferrum2_rule::RuleProgramMode) -> RuleProgramMode {
+    match mode {
+        ferrum2_rule::RuleProgramMode::SmallLinear => RuleProgramMode::SmallLinear,
+        ferrum2_rule::RuleProgramMode::Indexed => RuleProgramMode::Indexed,
+    }
+}
+
+pub(super) fn dns_policy_observer(metrics: &Arc<Metrics>) -> Arc<dyn DnsPolicyObserver> {
+    let metrics = Arc::clone(metrics);
+    Arc::new(move |observation| observe_dns_policy(&metrics, observation))
+}
+
+fn observe_dns_policy(metrics: &Metrics, observation: DnsPolicyObservation) {
+    if observation.query_evaluated() {
+        metrics.observe_rule_program_candidate_count(
+            RuleProgram::DnsQuery,
+            observation.query_candidates(),
+        );
+        metrics.observe_rule_program_match_ns(RuleProgram::DnsQuery, observation.query_match_ns());
+    }
+    if observation.response_evaluated() {
+        metrics.observe_rule_program_candidate_count(
+            RuleProgram::DnsResponse,
+            observation.response_candidates(),
+        );
+        metrics.observe_rule_program_match_ns(
+            RuleProgram::DnsResponse,
+            observation.response_match_ns(),
+        );
+    }
+    for stage in DnsPolicyStage::ALL {
+        for source in DnsPolicyMatchSource::ALL {
+            for r#type in DnsPolicyMatchType::ALL {
+                for result in DnsPolicyMatchResult::ALL {
+                    let count = observation.match_count(stage, source, r#type, result);
+                    if count == 0 {
+                        continue;
+                    }
+                    let source = match source {
+                        DnsPolicyMatchSource::Inline => RuleSource::Inline,
+                        DnsPolicyMatchSource::RuleSet => RuleSource::RuleSet,
+                    };
+                    let r#type = match r#type {
+                        DnsPolicyMatchType::Domain => RuleMatchType::Domain,
+                        DnsPolicyMatchType::DomainSuffix => RuleMatchType::DomainSuffix,
+                        DnsPolicyMatchType::DomainKeyword => RuleMatchType::DomainKeyword,
+                        DnsPolicyMatchType::IpCidr => RuleMatchType::IpCidr,
+                        DnsPolicyMatchType::Scalar => RuleMatchType::Scalar,
+                    };
+                    let result = match result {
+                        DnsPolicyMatchResult::Matched => RuleMatchResult::Matched,
+                        DnsPolicyMatchResult::Missed => RuleMatchResult::Missed,
+                    };
+                    match stage {
+                        DnsPolicyStage::Query => {
+                            metrics.dns_rule_query_matches(source, r#type, result, count);
+                        }
+                        DnsPolicyStage::Response => {
+                            metrics.dns_rule_response_matches(source, r#type, result, count);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

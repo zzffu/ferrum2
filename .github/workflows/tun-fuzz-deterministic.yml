@@ -2,68 +2,10 @@ name: tun-fuzz-static
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/tun-fuzz-deterministic.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/ferrum2-tun/fuzz/**"
-      - "crates/ferrum2-tun/src/packet.rs"
-      - "crates/ferrum2-tun/src/reassembly.rs"
-      - "crates/ferrum2-tun/src/udp.rs"
-      - "crates/ferrum2-tun/src/wake.rs"
-      - "crates/ferrum2-tun/tests/fixtures/packets/**"
-      - "crates/ferrum2-config/Cargo.toml"
-      - "crates/ferrum2-config/src/**"
-      - "crates/ferrum2-core/Cargo.toml"
-      - "crates/ferrum2-core/src/**"
-      - "crates/ferrum2-crypto/Cargo.toml"
-      - "crates/ferrum2-crypto/src/**"
-      - "crates/ferrum2-dns/Cargo.toml"
-      - "crates/ferrum2-dns/src/**"
-      - "crates/ferrum2-rule/Cargo.toml"
-      - "crates/ferrum2-rule/src/**"
-      - "crates/ferrum2-runtime/Cargo.toml"
-      - "crates/ferrum2-runtime/src/**"
-      - "crates/ferrum2-wintun/Cargo.toml"
-      - "crates/ferrum2-wintun/src/lib.rs"
-      - "crates/ferrum2-wintun/src/strict_route.rs"
-      - "crates/ferrum2-wintun/src/unsupported.rs"
-      - "crates/ferrum2-wintun/src/windows.rs"
-      - "tests/platform/run_windows_tun_hyperv.ps1"
-      - "vendor/shadowsocks-crypto/**"
   push:
     branches:
       - master
       - "codex/integration/**"
-    paths:
-      - ".github/workflows/tun-fuzz-deterministic.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/ferrum2-tun/fuzz/**"
-      - "crates/ferrum2-tun/src/packet.rs"
-      - "crates/ferrum2-tun/src/reassembly.rs"
-      - "crates/ferrum2-tun/src/udp.rs"
-      - "crates/ferrum2-tun/src/wake.rs"
-      - "crates/ferrum2-tun/tests/fixtures/packets/**"
-      - "crates/ferrum2-config/Cargo.toml"
-      - "crates/ferrum2-config/src/**"
-      - "crates/ferrum2-core/Cargo.toml"
-      - "crates/ferrum2-core/src/**"
-      - "crates/ferrum2-crypto/Cargo.toml"
-      - "crates/ferrum2-crypto/src/**"
-      - "crates/ferrum2-dns/Cargo.toml"
-      - "crates/ferrum2-dns/src/**"
-      - "crates/ferrum2-rule/Cargo.toml"
-      - "crates/ferrum2-rule/src/**"
-      - "crates/ferrum2-runtime/Cargo.toml"
-      - "crates/ferrum2-runtime/src/**"
-      - "crates/ferrum2-wintun/Cargo.toml"
-      - "crates/ferrum2-wintun/src/lib.rs"
-      - "crates/ferrum2-wintun/src/strict_route.rs"
-      - "crates/ferrum2-wintun/src/unsupported.rs"
-      - "crates/ferrum2-wintun/src/windows.rs"
-      - "tests/platform/run_windows_tun_hyperv.ps1"
-      - "vendor/shadowsocks-crypto/**"
   workflow_dispatch:
 
 permissions:
@@ -157,3 +99,22 @@ jobs:
           set -euo pipefail
           git diff --check
           test "$(git status --porcelain --untracked-files=no)" = ""
+
+  required:
+    name: required
+    if: ${{ always() }}
+    needs:
+      - deterministic-build
+      - libfuzzer-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every fuzz compile gate
+        shell: bash
+        env:
+          DETERMINISTIC_RESULT: ${{ needs.deterministic-build.result }}
+          LIBFUZZER_RESULT: ${{ needs.libfuzzer-build.result }}
+        run: |
+          set -euo pipefail
+          test "$DETERMINISTIC_RESULT" = success
+          test "$LIBFUZZER_RESULT" = success

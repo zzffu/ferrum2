@@ -95,7 +95,9 @@ The top-level `thresholds_passed` is true only when every applicable latency and
 allocation gate passes. The runner emits complete JSON before returning
 failure, so a failed qualification retains its evidence.
 
-Checked-in evidence is generated with:
+External release evidence is generated with the following command, then
+retained in the approved immutable evidence store and recorded by
+`tests/performance_rule/fixtures/external-evidence-manifest-v1.json`:
 
 ```text
 cargo run --release -p ferrum2-rule-qualification --locked -- \
@@ -105,75 +107,55 @@ cargo run --release -p ferrum2-rule-qualification --locked -- \
 
 ## Alternating A/A and parent/candidate runs
 
-`tools/performance_rule.py` enforces at least five pairs. Release evidence uses
-six pairs so process order is exactly balanced. The controller alternates run
-order (`parent,candidate`, then `candidate,parent`), verifies the SHA-256
-reported inside every run against the executable actually invoked, requires an
-identical scenario-ID set, and retains all raw reports. Its v4 outer gate uses
-only process-level p50 medians and derives a fail-closed suite catalog from
-every raw measurement's explicit `suite` field. Only `match_set`
-uses that outer median gate: A/A requires its median absolute paired noise at
-or below 10%, and that observation calibrates its A/B limit between the 5%
-local target and 10% noisy ceiling. Route-program and DNS-policy p50/p99 remain
-complete observations because plan sections 17.2 and 17.3 specify coverage,
-correctness, and scaling behavior without a universal percentage threshold.
-Their counts and maxima are retained in the top-level policy summary.
+The only controller entry point is `python -B -m tools.performance_rule`.
+The `run` command enforces exactly six pairs so parent/candidate process order
+is one closed, balanced ABBA schedule. It validates every runner-reported
+SHA-256 and scenario suite, retains all raw reports, and applies the outer median
+gate only to `match_set`. Route/DNS medians and all cross-process p99 values
+remain observations.
 
-Cross-process p99 for every suite is `observed_cross_process`, not a hard outer
-gate. The final candidate's same-process paired qualification observations own
-section 5.7's 5% median and 15% p99 MatchSet gates.
+Production accepts only controller v6 and reviewed-calibration v2. A current A/A
+run always returns `CALIBRATION_REQUIRED`; it cannot approve itself. Historical
+v2/v3/v4 reports are immutable provenance and are understood only by the
+test-owned archive verifier after complete-file hash verification.
 
-The release protocol retains 501 samples per scenario and uses Windows
-`HIGH_PRIORITY_CLASS` (not realtime); the controller records that policy and
-requires an exact argument and priority match between A/A and A/B. No raw
-value is removed and the p99 estimator remains nearest-rank.
-
-The checked-in history preserves the original v2 A/A diagnostic, the passing
-v3 all-suite A/A, and the failed v3 all-suite A/B with all 19 route/DNS failed
-comparisons. Canonical v4 A/A and A/B are deterministic offline scope
-reclassifications. They record the source files' SHA-256, policies, decisions,
-comparisons, failure IDs, and canonical raw-pair hashes. These archived files
-are immutable provenance inputs: the controller verifies their source hashes
-and unmodified raw pairs but exposes no v2/v3 conversion path. Generate fresh
-canonical evidence with the current controller commands below.
-
-Use the same binary for A/A calibration:
+Collect a current A/A calibration candidate:
 
 ```text
-python3 -B tools/performance_rule.py \
+python3 -B -m tools.performance_rule run \
   --parent target/performance-rule-parent/ferrum2-rule-qualification.exe \
   --pairs 6 --runner-priority high \
-  --output tests/performance_rule/release-aa.json \
+  --output tests/performance_rule/release-aa-v6.json \
   -- --profile smoke --samples 501 --workspace-root .
 ```
 
-Use separate binaries for a parent/candidate observation with exactly the same
-runner arguments and scenario set as the calibration:
+After explicit review, create a separate source-hash-bound calibration artifact:
 
 ```text
-python3 -B tools/performance_rule.py \
+python3 -B -m tools.performance_rule review-calibration \
+  --source-report tests/performance_rule/release-aa-v6.json \
+  --reviewed-by REVIEWER_ID --reviewed-utc YYYY-MM-DDTHH:MM:SSZ \
+  --output tests/performance_rule/reviewed-aa-v2.json
+```
+
+Then run A/B with the same parent runner, arguments, priority, and scenario suite:
+
+```text
+python3 -B -m tools.performance_rule run \
   --parent /path/to/parent/ferrum2-rule-qualification \
   --candidate /path/to/candidate/ferrum2-rule-qualification \
-  --calibration tests/performance_rule/release-aa.json \
+  --calibration tests/performance_rule/reviewed-aa-v2.json \
   --pairs 6 --runner-priority high \
-  --output tests/performance_rule/release-ab.json \
+  --output tests/performance_rule/release-ab-v6.json \
   -- --profile smoke --samples 501 --workspace-root .
 ```
 
-Parent/candidate gating refuses to run without a passing A/A report from the
-same parent runner SHA-256 and exact scenario/suite catalog. The MatchSet median
-limit never exceeds 10%. A/B route/DNS medians and all cross-process p99 remain
-diagnostic observations. For reclassified evidence, the controller re-reads
-the named v2/v3 artifacts beside it and verifies every recorded complete-file
-SHA-256.
+Without a reviewed current-schema calibration, A/B stops before runner execution.
+The MatchSet median limit remains bounded by 10%; route/DNS and cross-process p99
+remain diagnostic observations. The candidate-only qualification matrix remains
+a separate runner invocation and must not be mixed with smoke calibration.
 
-The controller smoke is the bounded five-pair A/A and Parent/Candidate
-MatchSet gate plus complete Route/DNS observations.
-The candidate-only `--profile qualification --include-100k` command above is
-the separate full matcher/Route/DNS matrix; do not mix its larger scenario set
-with a smoke calibration.
-
-Run controller contract tests with:
+Run ordinary controller and compact evidence-contract tests with:
 
 ```text
 python3 -B -m unittest discover -s tests/performance_rule -v

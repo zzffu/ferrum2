@@ -11,9 +11,10 @@ use std::time::Duration;
 use ferrum2_core::{
     ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Outbound, TargetAddr,
 };
+use ferrum2_net::TcpResolver;
 use ferrum2_runtime::{
     AcceptListener, DEFAULT_CONNECT_TIMEOUT, DirectOutbound, MAX_RESOLVED_CANDIDATES,
-    RuntimeTcpStream, SocketInspector, SystemSocketInspector, TcpConnector, TcpDialer, TcpResolver,
+    RuntimeTcpStream, SocketInspector, SystemSocketInspector, TcpConnector, TcpDialer,
 };
 use tokio::net::{TcpListener, TcpStream};
 

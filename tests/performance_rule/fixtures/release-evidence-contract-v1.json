@@ -1,0 +1,255 @@
+{
+  "ab": {
+    "candidate_runner_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "comparisons": [],
+    "decision_reason": "a reviewed current-schema A/A calibration is required",
+    "execution_policy": {
+      "pair_order": "alternating_parent_candidate",
+      "raw_reports_retained": true,
+      "runner_process_priority": "high"
+    },
+    "execution_trace": [],
+    "generated_unix_millis": 1,
+    "mode": "parent_candidate",
+    "pairs": 6,
+    "parent_runner_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runner_arguments": [
+      "--profile",
+      "smoke",
+      "--samples",
+      "501",
+      "--workspace-root",
+      "."
+    ],
+    "raw_pairs": [],
+    "scenario_ids": [],
+    "scenario_suites": {},
+    "schema": "ferrum2.rule-qualification-control.v6",
+    "status": "CALIBRATION_REQUIRED",
+    "threshold_policy": {
+      "decision": "calibration_required",
+      "enforced": false,
+      "gate_passed": false,
+      "reviewed": false,
+      "status": "CALIBRATION_REQUIRED",
+      "version": "section-5.7-match-set-median-gates.v5"
+    }
+  },
+  "kind": "ferrum2_rule_release_evidence_contract_fixture",
+  "qualification": {
+    "allocation_gate_passed": true,
+    "configuration": {
+      "base_iterations_per_sample": 10,
+      "dns_rule_sizes": [1],
+      "includes_100k": true,
+      "match_sizes": [100],
+      "route_sizes": [1],
+      "samples": 5
+    },
+    "correctness_passed": true,
+    "environment": {
+      "architecture": "x86_64",
+      "build_profile": "release",
+      "cpu_model": "synthetic-contract-fixture",
+      "family": "windows",
+      "logical_cpus": 1,
+      "os": "windows",
+      "rustc_version": "rustc 1.97.1 (synthetic)",
+      "timer": "std::time::Instant"
+    },
+    "fixtures": [
+      {
+        "capabilities": {
+          "domain_keyword": false,
+          "domain_suffix": false,
+          "exact_domain": true,
+          "ip_cidr": false
+        },
+        "bytes": 32,
+        "name": "generated-exact-100.srs",
+        "provenance": "deterministic_runner_generated_canonical_srs_v2",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "srs_version": 2,
+        "statistics": {
+          "domain_keywords": 0,
+          "domain_suffixes": 0,
+          "exact_domains": 100,
+          "ip_cidrs": 0,
+          "rules": 1
+        }
+      },
+      {
+        "bytes": 32,
+        "capabilities": {
+          "domain_keyword": false,
+          "domain_suffix": false,
+          "exact_domain": true,
+          "ip_cidr": false
+        },
+        "name": "ads.srs",
+        "provenance": "pinned_repository_fixture",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "srs_version": 2,
+        "statistics": {
+          "domain_keywords": 0,
+          "domain_suffixes": 0,
+          "exact_domains": 1,
+          "ip_cidrs": 0,
+          "rules": 1
+        }
+      }
+    ],
+    "generated_unix_millis": 1,
+    "measurement_policy": {
+      "allocation_gate_scope": "synthetic",
+      "allocation_measurement": "synthetic",
+      "calibration": "synthetic",
+      "compiled_memory_measurement": "synthetic",
+      "latency_source": "synthetic",
+      "local_parity_target_percent": 5.0,
+      "minimum_reported_batch_nanoseconds": 250000,
+      "noisy_gate_ceiling_percent": 10.0,
+      "note": "synthetic contract fixture",
+      "paired_observation_scope": "synthetic",
+      "paired_order": "synthetic",
+      "parity_gate_scope": "synthetic",
+      "p99_parity_target_percent": 15.0,
+      "retained_samples": true,
+      "thresholds_enforced_by_runner": true,
+      "warmup_batches": 5
+    },
+    "measurements": [
+      {
+        "allocation_gate_applicable": true,
+        "allocation_gate_passed": true,
+        "allocation_samples": [{
+          "allocations": 0,
+          "bytes_allocated": 0,
+          "bytes_deallocated": 0,
+          "deallocations": 0,
+          "iterations": 1,
+          "reallocations": 0
+        }],
+        "allocation_status": "measured",
+        "allocations_per_op": 0.0,
+        "actual_iterations_per_sample": [10, 10, 10, 10, 10],
+        "build_nanoseconds": 1,
+        "bytes_allocated_per_op": 0.0,
+        "bytes_deallocated_per_op": 0.0,
+        "compiled_allocations": 0,
+        "compiled_bytes_per_entry": 1.28,
+        "compiled_entries": 100,
+        "compiled_memory_bytes": 128,
+        "compiled_memory_status": "measured",
+        "compiled_reallocations": 0,
+        "correctness": "PASS",
+        "fixture": "generated-exact-100.srs",
+        "id": "match_set/synthetic_srs/generated-exact-100.srs/exact/hit",
+        "outcome_checksum": 1,
+        "paired_sample_order": [
+          "baseline_first",
+          "candidate_first",
+          "baseline_first",
+          "candidate_first",
+          "baseline_first"
+        ],
+        "p50_ns_per_op": 100.0,
+        "p99_ns_per_op": 100.0,
+        "queries_per_second_from_p50": null,
+        "query_candidate_visits": null,
+        "reallocations_per_op": 0.0,
+        "requested_min_iterations_per_sample": 10,
+        "rule_program_mode": null,
+        "sample_batch_nanoseconds": [250000, 250000, 250000, 250000, 250000],
+        "samples_ns_per_op": [100.0, 100.0, 100.0, 100.0, 100.0],
+        "scale": 100,
+        "scenario": "generated-exact-100/exact-hit",
+        "source": "synthetic_srs",
+        "suite": "match_set",
+        "timing_pair_id": "match_set/generated-exact-100/exact-hit"
+      },
+      {
+        "allocation_gate_applicable": true,
+        "allocation_gate_passed": true,
+        "allocation_samples": [{
+          "allocations": 0,
+          "bytes_allocated": 0,
+          "bytes_deallocated": 0,
+          "deallocations": 0,
+          "iterations": 1,
+          "reallocations": 0
+        }],
+        "allocation_status": "measured",
+        "allocations_per_op": 0.0,
+        "actual_iterations_per_sample": [10, 10, 10, 10, 10],
+        "build_nanoseconds": 1,
+        "bytes_allocated_per_op": 0.0,
+        "bytes_deallocated_per_op": 0.0,
+        "compiled_allocations": 0,
+        "compiled_bytes_per_entry": 1.28,
+        "compiled_entries": 100,
+        "compiled_memory_bytes": 128,
+        "compiled_memory_status": "measured",
+        "compiled_reallocations": 0,
+        "correctness": "PASS",
+        "fixture": "generated-exact-100.srs",
+        "id": "match_set/binary_srs/generated-exact-100.srs/exact/hit",
+        "outcome_checksum": 1,
+        "paired_sample_order": [
+          "baseline_first",
+          "candidate_first",
+          "baseline_first",
+          "candidate_first",
+          "baseline_first"
+        ],
+        "p50_ns_per_op": 100.0,
+        "p99_ns_per_op": 100.0,
+        "queries_per_second_from_p50": null,
+        "query_candidate_visits": null,
+        "reallocations_per_op": 0.0,
+        "requested_min_iterations_per_sample": 10,
+        "rule_program_mode": null,
+        "sample_batch_nanoseconds": [250000, 250000, 250000, 250000, 250000],
+        "samples_ns_per_op": [100.0, 100.0, 100.0, 100.0, 100.0],
+        "scale": 100,
+        "scenario": "generated-exact-100/exact-hit",
+        "source": "binary_srs",
+        "suite": "match_set",
+        "timing_pair_id": "match_set/generated-exact-100/exact-hit"
+      }
+    ],
+    "parity_gate_passed": true,
+    "parity_observations": [
+      {
+        "baseline_id": "match_set/synthetic_srs/generated-exact-100.srs/exact/hit",
+        "candidate_id": "match_set/binary_srs/generated-exact-100.srs/exact/hit",
+        "decision": "passed",
+        "median_delta_percent": 0.0,
+        "median_limit_percent": 5.0,
+        "p99_delta_percent": 0.0,
+        "p99_limit_percent": 15.0,
+        "performance_gate_applicable": true,
+        "scale": 100,
+        "scenario": "generated-exact-100/exact-hit",
+        "suite": "match_set"
+      }
+    ],
+    "profile": "qualification",
+    "repository": {
+      "changed_entries": 0,
+      "git_head": "dddddddddddddddddddddddddddddddddddddddd",
+      "git_tree": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "status_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "tree_state": "clean"
+    },
+    "runner": {
+      "bytes": 1,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "scenario_count": 2,
+    "schema": "ferrum2.rule-qualification.v1",
+    "thresholds_passed": true
+  },
+  "schema_version": 1,
+  "synthetic": true
+}

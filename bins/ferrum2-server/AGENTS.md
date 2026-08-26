@@ -4,7 +4,28 @@
 
 This package composes the Shadowsocks server. Keep `main.rs` and `cli.rs` limited to argument handling, configuration validation, diagnostics setup, and delegation. Runtime ownership belongs under `run/`: TCP and UDP listeners, DNS egress, observation, I/O, shutdown, and rollback. Move reusable cipher, framing, resolver, routing, or relay behavior into the appropriate `crates/ferrum2-*` package.
 
-`--check-config` is an offline contract. It must accept schema version 2 only, reject older or missing schema versions, and never open listeners, resolve peers, or create runtime resources. Preserve fail-closed startup: if one listener or worker fails, previously acquired resources must be released before exit.
+Within `run/`, `network.rs` owns the shared physical socket service, generation/reset lifecycle, and
+interface-resolution mapping used by TCP, UDP, DNS, and materialization. `routing.rs` owns the
+shared server route program and sniff metadata mapping. TCP keeps listener/root, outbound,
+selection, connection, and prefix behavior in its named submodules. UDP keeps preparation and
+capacity admission, frozen identity state, routing, atomic commit, and the listener run loop in
+their named owners; response encoding, listener adaptation, and physical socket policy remain
+bounded support modules. Keep each move-only protocol commit token inside the commit owner next to
+the identity state it publishes, and do not replace the concrete protocol/runtime sequence with a
+generic transaction framework.
+
+Plain `--check-config` is an offline contract. It must accept schema version 2 only, reject older or
+missing schema versions, and never open listeners, resolve peers, or create runtime resources. The
+explicit `--check-config --materialize` mode may resolve fixed endpoints and load RuleSets, but it
+must not bind listeners or transfer any network, DNS, or refresh owner to the process supervisor.
+Every temporary owner must be joined, the owner registry must return to its baseline, and a
+materialization failure must retain exit code 2. Preserve fail-closed startup: if one listener or
+worker fails, previously acquired resources must be released before exit.
+
+The materialization handoff uses closed phases: RuleSets are either absent or own one pending
+construction plan, run parts are named, and a refresh root is either prepared or cleaned. Keep the
+tagged resolver and its owner in one closed transport state; do not reintroduce paired `Option`
+fields, positional run tuples, no-await async validation, or a nullable refresh service.
 
 ## Testing and Local Commands
 

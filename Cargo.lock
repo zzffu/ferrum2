@@ -470,14 +470,16 @@ dependencies = [
  "ferrum2-core",
  "ferrum2-crypto",
  "ferrum2-dns",
+ "ferrum2-net",
  "ferrum2-observability",
+ "ferrum2-platform-windows",
  "ferrum2-rule",
+ "ferrum2-ruleset",
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
  "ferrum2-socks5",
  "ferrum2-tun",
- "ferrum2-wintun",
  "hickory-proto",
  "serde_json",
  "tokio",
@@ -528,6 +530,7 @@ name = "ferrum2-dns"
 version = "0.1.0"
 dependencies = [
  "ferrum2-core",
+ "ferrum2-net",
  "ferrum2-rule",
  "futures-util",
  "h2",
@@ -550,6 +553,7 @@ dependencies = [
  "hickory-proto",
  "proc-macro2",
  "serde_json",
+ "sha2",
  "socket2",
  "tempfile",
  "toml",
@@ -573,6 +577,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum2-net"
+version = "0.1.0"
+dependencies = [
+ "socket2",
+]
+
+[[package]]
 name = "ferrum2-observability"
 version = "0.1.0"
 dependencies = [
@@ -581,6 +592,15 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ferrum2-platform-windows"
+version = "0.1.0"
+dependencies = [
+ "ferrum2-net",
+ "socket2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -613,7 +633,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrum2-runtime"
+name = "ferrum2-ruleset"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -621,6 +641,7 @@ dependencies = [
  "ferrum2-dns",
  "ferrum2-rule",
  "futures-util",
+ "h2",
  "hex",
  "http-body-util",
  "hyper",
@@ -629,14 +650,25 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "socket2",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-util",
  "url",
  "webpki-roots",
+]
+
+[[package]]
+name = "ferrum2-runtime"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ferrum2-core",
+ "ferrum2-net",
+ "futures-util",
+ "socket2",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -649,12 +681,14 @@ dependencies = [
  "ferrum2-core",
  "ferrum2-crypto",
  "ferrum2-dns",
+ "ferrum2-net",
  "ferrum2-observability",
+ "ferrum2-platform-windows",
  "ferrum2-rule",
+ "ferrum2-ruleset",
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
- "ferrum2-wintun",
  "hickory-proto",
  "tokio",
  "tracing",
@@ -696,19 +730,11 @@ dependencies = [
 name = "ferrum2-tun"
 version = "0.1.0"
 dependencies = [
+ "ferrum2-net",
+ "ferrum2-platform-windows",
  "ferrum2-runtime",
- "ferrum2-wintun",
  "smoltcp",
  "tokio",
-]
-
-[[package]]
-name = "ferrum2-wintun"
-version = "0.1.0"
-dependencies = [
- "ferrum2-runtime",
- "socket2",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

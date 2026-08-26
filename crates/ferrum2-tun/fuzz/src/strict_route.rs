@@ -1,4 +1,4 @@
-use ferrum2_wintun::{ErrorKind, FUZZ_MAX_WFP_APP_ID_BYTES, fuzz_strict_route_rule_plan};
+use ferrum2_platform_windows::{ErrorKind, FUZZ_MAX_WFP_APP_ID_BYTES, fuzz_strict_route_rule_plan};
 
 /// Hard input bound for strict-route semantic rule-plan generation.
 pub const MAX_STRICT_ROUTE_FUZZ_INPUT_BYTES: usize = 4 * 1024;

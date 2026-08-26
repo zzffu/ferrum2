@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 
 use crate::MAX_CONFIG_BYTES;
 use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
-use crate::model::{ValidatedClientConfig, ValidatedServerConfig};
+#[cfg(feature = "fuzzing")]
 use crate::prepared::{validate_client_source, validate_server_source};
 use crate::validation::validate_version;
 
@@ -16,23 +16,13 @@ struct RawSchemaRoot {
     schema_version: Option<u32>,
 }
 
-/// Reads and fully validates a client configuration without creating runtime resources.
-pub fn load_client(path: impl AsRef<Path>) -> Result<ValidatedClientConfig, ConfigError> {
-    let source = read_bounded_utf8(path.as_ref())?;
-    parse_client_source(&source)
-}
-
-/// Reads and fully validates a server configuration without creating runtime resources.
-pub fn load_server(path: impl AsRef<Path>) -> Result<ValidatedServerConfig, ConfigError> {
-    let source = read_bounded_utf8(path.as_ref())?;
-    parse_server_source(&source)
-}
-
-fn parse_client_source(source: &str) -> Result<ValidatedClientConfig, ConfigError> {
+#[cfg(feature = "fuzzing")]
+fn parse_client_source(source: &str) -> Result<crate::model::ValidatedClientConfig, ConfigError> {
     validate_client_source(source)
 }
 
-fn parse_server_source(source: &str) -> Result<ValidatedServerConfig, ConfigError> {
+#[cfg(feature = "fuzzing")]
+fn parse_server_source(source: &str) -> Result<crate::model::ValidatedServerConfig, ConfigError> {
     validate_server_source(source)
 }
 

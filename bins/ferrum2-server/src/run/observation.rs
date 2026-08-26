@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 
 use super::RunError;
 use super::tcp::ServerContext;
-use super::tokio_io::TokioFramed;
+use ferrum2_shadowsocks::tokio::TokioFramed;
 
 pub(super) struct ServerMetricsRoot {
     pub(super) listener: Option<TcpListener>,

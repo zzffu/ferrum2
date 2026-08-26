@@ -1,18 +1,37 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
+use ferrum2_net::{
+    DialOptions, NetworkInterfaceCatalog, NetworkInterfaceResolver, NetworkSnapshot,
+    ResolvedInterface, RouteNetworkOptions,
+};
 use futures_util::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
-use crate::network::{
-    DialOptions, InterfaceResolutionError, InterfaceSelectionSource, NetworkInterfaceCatalog,
-    NetworkInterfaceResolver, NetworkSnapshot, NetworkSnapshotPublishError,
-    NetworkSnapshotPublisher, ResetNetwork, ResolvedInterface, RouteNetworkOptions,
+use crate::network::{NetworkSnapshotPublisher, ResetNetwork};
+use crate::owner::OwnerRegistry;
+
+mod admission;
+mod report;
+mod transition;
+
+pub use admission::{
+    AdmittedNetworkRuntimeResource, NetworkResetHookRegistration, NetworkResetSignal,
+    NetworkRuntimeCancellation, NetworkRuntimeOwner, NetworkRuntimeOwnerCancellation,
+    NetworkRuntimeResourceAdmissionError,
 };
-use crate::owner::{OwnerGuard, OwnerRegistry};
+pub use report::{
+    NetworkResetCoordinatorError, NetworkResetHookRegistrationError, NetworkResetOutcome,
+    NetworkResetReport, NetworkResetRequestDisposition, NetworkResetState, NetworkResetStatus,
+    NetworkRuntimeOwnerRegistrationError,
+};
+use transition::{
+    ActiveReset, CoordinatorInner, CoordinatorState, HookEntry, PendingReset, ResetAttemptGuard,
+    RuntimeOwnerEntry, lock_unpoisoned, merge_pending, owner_is_stale, publish_snapshot,
+    queue_pending,
+};
 
 /// Default maximum number of registered reset hooks.
 pub const DEFAULT_NETWORK_RESET_HOOKS: usize = 16;
@@ -161,314 +180,6 @@ const POST_PUBLISH_HOOK_ORDER: [NetworkResetHookStage; 3] = [
     NetworkResetHookStage::Inbound,
 ];
 
-/// Public coordinator phase. The coordinator begins after managed-plane startup.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkResetState {
-    Active,
-    ResetPending,
-    Resetting,
-    RetryReset,
-    ManagedDamaged,
-}
-
-/// Read-only, redacted state of one coordinator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NetworkResetStatus {
-    state: NetworkResetState,
-    admission_open: bool,
-    published_generation: u64,
-    active_generation: Option<u64>,
-    pending_generation: Option<u64>,
-    registered_hooks: usize,
-    registered_runtime_owners: usize,
-}
-
-impl NetworkResetStatus {
-    pub const fn state(self) -> NetworkResetState {
-        self.state
-    }
-
-    pub const fn admission_open(self) -> bool {
-        self.admission_open
-    }
-
-    pub const fn published_generation(self) -> u64 {
-        self.published_generation
-    }
-
-    pub const fn active_generation(self) -> Option<u64> {
-        self.active_generation
-    }
-
-    pub const fn pending_generation(self) -> Option<u64> {
-        self.pending_generation
-    }
-
-    pub const fn registered_hooks(self) -> usize {
-        self.registered_hooks
-    }
-
-    pub const fn registered_runtime_owners(self) -> usize {
-        self.registered_runtime_owners
-    }
-}
-
-/// Closed reset result classification.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkResetOutcome {
-    Noop,
-    ResetCompleted,
-    FullRebuildRequired(ManagedNetworkDamage),
-    FullRebuildAcknowledged,
-}
-
-/// Result of placing one notification into the coordinator's single pending slot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkResetRequestDisposition {
-    /// The same snapshot is already active and no reset is required.
-    Noop,
-    /// The notification created the pending reset slot.
-    Queued,
-    /// The notification was absorbed by active, pending, or full-rebuild work.
-    Coalesced,
-}
-
-/// Bounded summary of work completed by one serialized driver.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NetworkResetReport {
-    outcome: NetworkResetOutcome,
-    published_generation: u64,
-    completed_resets: usize,
-    cancelled_runtime_owners: usize,
-}
-
-impl NetworkResetReport {
-    pub const fn outcome(self) -> NetworkResetOutcome {
-        self.outcome
-    }
-
-    pub const fn published_generation(self) -> u64 {
-        self.published_generation
-    }
-
-    pub const fn completed_resets(self) -> usize {
-        self.completed_resets
-    }
-
-    pub const fn cancelled_runtime_owners(self) -> usize {
-        self.cancelled_runtime_owners
-    }
-}
-
-/// Closed reset coordination failure. No injected hook or platform error is retained.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkResetCoordinatorError {
-    StaleRequestGeneration,
-    ConflictingGenerationSnapshot,
-    HookFailed(NetworkResetHookStage),
-    HookPanicked(NetworkResetHookStage),
-    SnapshotPublicationStale,
-    SnapshotPublicationNonMonotonic,
-    FullRebuildNotPending,
-    FullRebuildGenerationTooOld,
-    FullRebuildOwnersRemain,
-}
-
-/// Closed reset-hook registration failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkResetHookRegistrationError {
-    AdmissionClosed,
-    CapacityExhausted,
-    IdentifierExhausted,
-}
-
-/// Closed generation-bound owner admission failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkRuntimeOwnerRegistrationError {
-    AdmissionClosed,
-    StaleGeneration,
-    CapacityExhausted,
-    IdentifierExhausted,
-}
-
-/// One prepared resource admitted under an exact network generation.
-#[must_use = "the runtime owner must be retained for the admitted resource lifetime"]
-pub struct AdmittedNetworkRuntimeResource<T> {
-    resource: T,
-    resolved_interface: ResolvedInterface,
-    owner: NetworkRuntimeOwner,
-}
-
-impl<T> AdmittedNetworkRuntimeResource<T> {
-    /// Returns the prepared resource.
-    pub const fn resource(&self) -> &T {
-        &self.resource
-    }
-
-    /// Returns mutable access to the prepared resource.
-    pub const fn resource_mut(&mut self) -> &mut T {
-        &mut self.resource
-    }
-
-    /// Returns the interface decision used while preparing the resource.
-    pub const fn resolved_interface(&self) -> &ResolvedInterface {
-        &self.resolved_interface
-    }
-
-    /// Returns the generation owner that must remain alive with the resource.
-    pub const fn owner(&self) -> &NetworkRuntimeOwner {
-        &self.owner
-    }
-
-    /// Returns mutable access to the owner for cancellation waits.
-    pub const fn owner_mut(&mut self) -> &mut NetworkRuntimeOwner {
-        &mut self.owner
-    }
-
-    /// Splits the admitted value into its resource, interface decision, and exclusive owner.
-    pub fn into_parts(self) -> (T, ResolvedInterface, NetworkRuntimeOwner) {
-        (self.resource, self.resolved_interface, self.owner)
-    }
-}
-
-impl<T> fmt::Debug for AdmittedNetworkRuntimeResource<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AdmittedNetworkRuntimeResource")
-            .field("resource", &"[closed]")
-            .field("resolved_interface", &self.resolved_interface)
-            .field("owner", &self.owner)
-            .finish()
-    }
-}
-
-/// Closed failure from preparing and admitting one generation-bound runtime resource.
-#[derive(Eq, PartialEq)]
-pub enum NetworkRuntimeResourceAdmissionError<E> {
-    InterfaceResolution(InterfaceResolutionError),
-    Preparation {
-        attempted_source: InterfaceSelectionSource,
-        error: E,
-    },
-    NetworkGenerationChanged {
-        attempted_source: InterfaceSelectionSource,
-    },
-    RuntimeOwnerRegistration {
-        attempted_source: InterfaceSelectionSource,
-        error: NetworkRuntimeOwnerRegistrationError,
-    },
-}
-
-impl<E> fmt::Debug for NetworkRuntimeResourceAdmissionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InterfaceResolution(error) => formatter
-                .debug_tuple("InterfaceResolution")
-                .field(error)
-                .finish(),
-            Self::Preparation {
-                attempted_source, ..
-            } => formatter
-                .debug_struct("Preparation")
-                .field("attempted_source", attempted_source)
-                .field("error", &"[closed]")
-                .finish(),
-            Self::NetworkGenerationChanged { attempted_source } => formatter
-                .debug_struct("NetworkGenerationChanged")
-                .field("attempted_source", attempted_source)
-                .finish(),
-            Self::RuntimeOwnerRegistration {
-                attempted_source,
-                error,
-            } => formatter
-                .debug_struct("RuntimeOwnerRegistration")
-                .field("attempted_source", attempted_source)
-                .field("error", error)
-                .finish(),
-        }
-    }
-}
-
-impl<E> NetworkRuntimeResourceAdmissionError<E> {
-    /// Returns the low-cardinality interface source attempted by the failed operation.
-    pub const fn attempted_source(&self) -> InterfaceSelectionSource {
-        match self {
-            Self::InterfaceResolution(error) => error.attempted_source(),
-            Self::Preparation {
-                attempted_source, ..
-            }
-            | Self::NetworkGenerationChanged { attempted_source }
-            | Self::RuntimeOwnerRegistration {
-                attempted_source, ..
-            } => *attempted_source,
-        }
-    }
-}
-
-/// Cancellation delivered to one generation-bound owner.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NetworkResetSignal {
-    target_generation: u64,
-    intent: NetworkResetIntent,
-}
-
-impl NetworkResetSignal {
-    pub const fn target_generation(self) -> u64 {
-        self.target_generation
-    }
-
-    pub const fn intent(self) -> NetworkResetIntent {
-        self.intent
-    }
-}
-
-/// Terminal result from waiting for a runtime-owner cancellation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NetworkRuntimeOwnerCancellation {
-    Reset(NetworkResetSignal),
-    CoordinatorDropped,
-}
-
-/// Cloneable reset-cancellation observer that does not acknowledge owner completion.
-///
-/// The exclusive [`NetworkRuntimeOwner`] must still be retained until its resource is closed.
-#[derive(Clone)]
-pub struct NetworkRuntimeCancellation {
-    cancellation: watch::Receiver<Option<NetworkResetSignal>>,
-}
-
-impl NetworkRuntimeCancellation {
-    /// Returns an already-delivered reset without registering an async waiter.
-    pub fn cancellation_now(&self) -> Option<NetworkResetSignal> {
-        *self.cancellation.borrow()
-    }
-
-    /// Returns an already-observable terminal state without registering an async waiter.
-    pub fn terminal_now(&self) -> Option<NetworkRuntimeOwnerCancellation> {
-        if let Some(signal) = self.cancellation_now() {
-            Some(NetworkRuntimeOwnerCancellation::Reset(signal))
-        } else if self.cancellation.has_changed().is_err() {
-            Some(NetworkRuntimeOwnerCancellation::CoordinatorDropped)
-        } else {
-            None
-        }
-    }
-
-    /// Waits for reset cancellation or coordinator destruction without acknowledging it.
-    pub async fn cancelled(&mut self) -> NetworkRuntimeOwnerCancellation {
-        wait_for_runtime_owner_cancellation(&mut self.cancellation).await
-    }
-}
-
-impl fmt::Debug for NetworkRuntimeCancellation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NetworkRuntimeCancellation")
-            .field("cancelled", &self.cancellation_now().is_some())
-            .finish()
-    }
-}
-
 #[derive(Clone)]
 pub struct NetworkResetCoordinator {
     inner: Arc<CoordinatorInner>,
@@ -513,7 +224,7 @@ impl NetworkResetCoordinator {
         let state = lock_unpoisoned(&self.inner.state);
         NetworkResetStatus {
             state: state.phase,
-            admission_open: state.admission_open,
+            admission_open: state.admission_open(),
             published_generation: self.inner.snapshots.generation(),
             active_generation: state
                 .active
@@ -536,7 +247,7 @@ impl NetworkResetCoordinator {
         hook: Arc<dyn ResetNetwork>,
     ) -> Result<NetworkResetHookRegistration, NetworkResetHookRegistrationError> {
         let mut state = lock_unpoisoned(&self.inner.state);
-        if !state.admission_open {
+        if !state.admission_open() {
             return Err(NetworkResetHookRegistrationError::AdmissionClosed);
         }
         if state.hooks.len() >= self.inner.limits.max_hooks {
@@ -565,7 +276,7 @@ impl NetworkResetCoordinator {
         kind: NetworkRuntimeOwnerKind,
     ) -> Result<NetworkRuntimeOwner, NetworkRuntimeOwnerRegistrationError> {
         let mut state = lock_unpoisoned(&self.inner.state);
-        if !state.admission_open {
+        if !state.admission_open() {
             return Err(NetworkRuntimeOwnerRegistrationError::AdmissionClosed);
         }
         if generation != self.inner.snapshots.generation() {
@@ -870,7 +581,6 @@ impl NetworkResetCoordinator {
         state.pending = None;
         state.active = None;
         state.phase = NetworkResetState::Active;
-        state.admission_open = true;
         Ok(NetworkResetReport {
             outcome: NetworkResetOutcome::FullRebuildAcknowledged,
             published_generation: snapshot.generation(),
@@ -979,7 +689,6 @@ impl NetworkResetCoordinator {
                     continue;
                 }
                 state.phase = NetworkResetState::Active;
-                state.admission_open = true;
                 return Ok(NetworkResetReport {
                     outcome: if completed_resets == 0 {
                         NetworkResetOutcome::Noop
@@ -1012,7 +721,6 @@ impl NetworkResetCoordinator {
                 );
                 state.full_rebuild = Some(rebuild);
                 state.phase = NetworkResetState::ManagedDamaged;
-                state.admission_open = false;
                 return Ok(NetworkResetReport {
                     outcome: NetworkResetOutcome::FullRebuildRequired(damage),
                     published_generation: self.inner.snapshots.generation(),
@@ -1042,7 +750,6 @@ impl NetworkResetCoordinator {
                 state.phase = NetworkResetState::ResetPending;
             } else {
                 state.phase = NetworkResetState::Active;
-                state.admission_open = true;
             }
         }
     }
@@ -1138,314 +845,4 @@ impl NetworkResetCoordinator {
             }
         }
     }
-}
-
-fn owner_is_stale(owner: &RuntimeOwnerEntry, signal: NetworkResetSignal) -> bool {
-    owner.generation < signal.target_generation
-        || (owner.generation == signal.target_generation
-            && matches!(signal.intent, NetworkResetIntent::FullRebuild(_)))
-}
-
-fn publish_snapshot(
-    publisher: &NetworkSnapshotPublisher,
-    snapshot: &Arc<NetworkSnapshot>,
-) -> Result<(), NetworkResetCoordinatorError> {
-    let current = publisher.snapshot();
-    match snapshot.generation().cmp(&current.generation()) {
-        std::cmp::Ordering::Less => Err(NetworkResetCoordinatorError::SnapshotPublicationStale),
-        std::cmp::Ordering::Equal => {
-            if **snapshot == *current {
-                Ok(())
-            } else {
-                Err(NetworkResetCoordinatorError::ConflictingGenerationSnapshot)
-            }
-        }
-        std::cmp::Ordering::Greater => publisher
-            .publish_if_current(current.generation(), Arc::clone(snapshot))
-            .map(|_| ())
-            .map_err(|error| match error {
-                NetworkSnapshotPublishError::StaleExpectedGeneration => {
-                    NetworkResetCoordinatorError::SnapshotPublicationStale
-                }
-                NetworkSnapshotPublishError::NonMonotonicGeneration => {
-                    NetworkResetCoordinatorError::SnapshotPublicationNonMonotonic
-                }
-            }),
-    }
-}
-
-fn queue_pending(
-    state: &mut CoordinatorState,
-    incoming: PendingReset,
-) -> Result<NetworkResetRequestDisposition, NetworkResetCoordinatorError> {
-    let disposition = if state.pending.is_some() {
-        NetworkResetRequestDisposition::Coalesced
-    } else {
-        NetworkResetRequestDisposition::Queued
-    };
-    if let Some(pending) = state.pending.as_mut() {
-        merge_pending(pending, incoming)?;
-    } else {
-        state.pending = Some(incoming);
-    }
-    state.admission_open = false;
-    state.phase = NetworkResetState::ResetPending;
-    Ok(disposition)
-}
-
-fn merge_pending(
-    pending: &mut PendingReset,
-    incoming: PendingReset,
-) -> Result<(), NetworkResetCoordinatorError> {
-    let existing_damage = pending.intent.full_rebuild_damage();
-    let incoming_damage = incoming.intent.full_rebuild_damage();
-    match incoming
-        .snapshot
-        .generation()
-        .cmp(&pending.snapshot.generation())
-    {
-        std::cmp::Ordering::Less => {}
-        std::cmp::Ordering::Equal => {
-            if *incoming.snapshot != *pending.snapshot {
-                return Err(NetworkResetCoordinatorError::ConflictingGenerationSnapshot);
-            }
-            if existing_damage.is_none() {
-                pending.intent = incoming.intent;
-            }
-        }
-        std::cmp::Ordering::Greater => {
-            pending.snapshot = incoming.snapshot;
-            pending.intent = incoming.intent;
-        }
-    }
-    if let Some(damage) = existing_damage.or(incoming_damage) {
-        pending.intent = NetworkResetIntent::FullRebuild(damage);
-    }
-    Ok(())
-}
-
-struct CoordinatorInner {
-    snapshots: NetworkSnapshotPublisher,
-    limits: NetworkResetLimits,
-    owners: OwnerRegistry,
-    state: Mutex<CoordinatorState>,
-    owner_changes: watch::Sender<u64>,
-    driver: AsyncMutex<()>,
-}
-
-struct CoordinatorState {
-    phase: NetworkResetState,
-    admission_open: bool,
-    hooks: BTreeMap<u64, HookEntry>,
-    runtime_owners: BTreeMap<u64, RuntimeOwnerEntry>,
-    next_hook_id: u64,
-    next_runtime_owner_id: u64,
-    pending: Option<PendingReset>,
-    active: Option<ActiveReset>,
-    full_rebuild: Option<PendingReset>,
-}
-
-impl CoordinatorState {
-    fn new() -> Self {
-        Self {
-            phase: NetworkResetState::Active,
-            admission_open: true,
-            hooks: BTreeMap::new(),
-            runtime_owners: BTreeMap::new(),
-            next_hook_id: 1,
-            next_runtime_owner_id: 1,
-            pending: None,
-            active: None,
-            full_rebuild: None,
-        }
-    }
-}
-
-struct HookEntry {
-    stage: NetworkResetHookStage,
-    hook: Arc<dyn ResetNetwork>,
-}
-
-struct RuntimeOwnerEntry {
-    generation: u64,
-    kind: NetworkRuntimeOwnerKind,
-    cancellation: watch::Sender<Option<NetworkResetSignal>>,
-}
-
-#[derive(Clone)]
-struct PendingReset {
-    snapshot: Arc<NetworkSnapshot>,
-    intent: NetworkResetIntent,
-}
-
-#[derive(Clone)]
-struct ActiveReset {
-    snapshot: Arc<NetworkSnapshot>,
-}
-
-struct ResetAttemptGuard {
-    coordinator: Arc<CoordinatorInner>,
-    target: Option<PendingReset>,
-}
-
-impl ResetAttemptGuard {
-    fn new(coordinator: Arc<CoordinatorInner>, target: PendingReset) -> Self {
-        Self {
-            coordinator,
-            target: Some(target),
-        }
-    }
-
-    fn target(&self) -> &PendingReset {
-        self.target.as_ref().expect("active reset target")
-    }
-
-    fn complete(&mut self) -> PendingReset {
-        self.target.take().expect("active reset target")
-    }
-}
-
-impl Drop for ResetAttemptGuard {
-    fn drop(&mut self) {
-        let Some(target) = self.target.take() else {
-            return;
-        };
-        let mut state = lock_unpoisoned(&self.coordinator.state);
-        state.active = None;
-        if let Some(pending) = state.pending.as_mut() {
-            if merge_pending(pending, target).is_err() {
-                debug_assert!(
-                    false,
-                    "validated reset targets cannot conflict during retry"
-                );
-            }
-        } else {
-            state.pending = Some(target);
-        }
-        state.phase = NetworkResetState::RetryReset;
-        state.admission_open = false;
-    }
-}
-
-/// RAII registration for one reset hook.
-#[must_use = "dropping the registration removes the reset hook"]
-pub struct NetworkResetHookRegistration {
-    coordinator: Weak<CoordinatorInner>,
-    id: u64,
-    stage: NetworkResetHookStage,
-    _owner: OwnerGuard,
-}
-
-impl NetworkResetHookRegistration {
-    pub const fn stage(&self) -> NetworkResetHookStage {
-        self.stage
-    }
-}
-
-impl fmt::Debug for NetworkResetHookRegistration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NetworkResetHookRegistration")
-            .field("stage", &self.stage)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for NetworkResetHookRegistration {
-    fn drop(&mut self) {
-        let Some(coordinator) = self.coordinator.upgrade() else {
-            return;
-        };
-        lock_unpoisoned(&coordinator.state).hooks.remove(&self.id);
-    }
-}
-
-/// Exclusive acknowledgement owner for one generation-bound task or connection.
-#[must_use = "dropping the owner acknowledges completion to the reset coordinator"]
-pub struct NetworkRuntimeOwner {
-    coordinator: Weak<CoordinatorInner>,
-    id: u64,
-    generation: u64,
-    kind: NetworkRuntimeOwnerKind,
-    cancellation: watch::Receiver<Option<NetworkResetSignal>>,
-    _owner: OwnerGuard,
-}
-
-impl NetworkRuntimeOwner {
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    pub const fn kind(&self) -> NetworkRuntimeOwnerKind {
-        self.kind
-    }
-
-    /// Returns an already-delivered reset without registering an async waiter.
-    pub fn cancellation_now(&self) -> Option<NetworkResetSignal> {
-        *self.cancellation.borrow()
-    }
-
-    /// Returns a cloneable cancellation observer without transferring acknowledgement ownership.
-    pub fn cancellation(&self) -> NetworkRuntimeCancellation {
-        NetworkRuntimeCancellation {
-            cancellation: self.cancellation.clone(),
-        }
-    }
-
-    /// Returns an already-observable terminal state without registering an async waiter.
-    pub fn cancellation_status_now(&self) -> Option<NetworkRuntimeOwnerCancellation> {
-        self.cancellation().terminal_now()
-    }
-
-    /// Waits for reset cancellation or coordinator destruction.
-    pub async fn cancelled(&mut self) -> NetworkRuntimeOwnerCancellation {
-        wait_for_runtime_owner_cancellation(&mut self.cancellation).await
-    }
-}
-
-async fn wait_for_runtime_owner_cancellation(
-    cancellation: &mut watch::Receiver<Option<NetworkResetSignal>>,
-) -> NetworkRuntimeOwnerCancellation {
-    loop {
-        if let Some(signal) = *cancellation.borrow_and_update() {
-            return NetworkRuntimeOwnerCancellation::Reset(signal);
-        }
-        if cancellation.changed().await.is_err() {
-            return NetworkRuntimeOwnerCancellation::CoordinatorDropped;
-        }
-    }
-}
-
-impl fmt::Debug for NetworkRuntimeOwner {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NetworkRuntimeOwner")
-            .field("generation", &self.generation)
-            .field("kind", &self.kind)
-            .field("cancelled", &self.cancellation_now().is_some())
-            .finish()
-    }
-}
-
-impl Drop for NetworkRuntimeOwner {
-    fn drop(&mut self) {
-        let Some(coordinator) = self.coordinator.upgrade() else {
-            return;
-        };
-        let removed = lock_unpoisoned(&coordinator.state)
-            .runtime_owners
-            .remove(&self.id)
-            .is_some();
-        if removed {
-            coordinator
-                .owner_changes
-                .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
-        }
-    }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
