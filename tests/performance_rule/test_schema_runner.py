@@ -58,7 +58,7 @@ class SchemaAndRunnerTests(unittest.TestCase):
             (b'{"value":NaN}', "non-finite"),
             (b'{"value":1e999}', "non-finite"),
             (b'{"value":' + b"1" * 5_000 + b"}", "integer"),
-            (b"[" * 2_000 + b"]" * 2_000, "one valid"),
+            (b"[" * 2_000 + b"]" * 2_000, "nesting"),
             (b"{}", "byte bound"),
         ):
             with self.subTest(message=message):

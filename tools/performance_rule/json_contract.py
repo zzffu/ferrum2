@@ -9,9 +9,38 @@ from typing import Any
 from tools.performance_rule.schema import ControlError
 
 
+MAXIMUM_JSON_NESTING = 128
+
+
+def _reject_excessive_nesting(raw: bytes, *, label: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > MAXIMUM_JSON_NESTING:
+                raise ControlError(
+                    f"{label} exceeds the bounded JSON nesting envelope"
+                )
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+
+
 def closed_json_bytes(raw: bytes, *, label: str, maximum_bytes: int) -> Any:
     if len(raw) > maximum_bytes:
         raise ControlError(f"{label} exceeds the {maximum_bytes}-byte bound")
+    _reject_excessive_nesting(raw, label=label)
 
     def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
