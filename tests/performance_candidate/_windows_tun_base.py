@@ -30,6 +30,9 @@ class WindowsTunBase(unittest.TestCase):
             return policy
         environment = {
             **windows_recipe.WINDOWS_TUN_GUEST,
+            "vm_name": "Configurable Test VM",
+            "vm_id": "80000000-0000-4000-8000-000000000001",
+            "checkpoint_name": "Configurable checkpoint",
             **self.topology_environment(),
             "recipe_sha256": windows_recipe.recipe_sha256(
                 self.CONTROLLER_BUNDLE_SHA256
@@ -65,6 +68,9 @@ class WindowsTunBase(unittest.TestCase):
     def environment(self) -> dict[str, object]:
         return {
             **windows_recipe.WINDOWS_TUN_GUEST,
+            "vm_name": "Configurable Test VM",
+            "vm_id": "80000000-0000-4000-8000-000000000001",
+            "checkpoint_name": "Configurable checkpoint",
             **self.topology_environment(),
             "guest_build": "19045.6216",
             "cpu_model": "Synthetic CPU",

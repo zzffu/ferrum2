@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory, DontShow)]
     [ValidatePattern('^[0-9a-f]{64}$')]
     [string]$InternalWorkerToken,
+    [Parameter(Mandatory)] [string]$TopologyPlanPath,
     [Parameter(Mandatory)] [string]$TopologyManifestPath,
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{64}$')]
@@ -64,6 +65,7 @@ Import-Module (Join-Path $repositoryRoot `
 $context = [ordered]@{
     repository_root = $repositoryRoot
     internal_worker_token = $InternalWorkerToken
+    topology_plan_path = $TopologyPlanPath
     topology_manifest_path = $TopologyManifestPath
     topology_manifest_sha256 = $TopologyManifestSha256
     support_tcp_port = $SupportTcpPort

@@ -11,14 +11,14 @@
     {
       "role": "driver",
       "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology.ps1",
-      "bytes": 9947,
-      "sha256": "302b8c977b99153870963a0a3c7b6f79b53afd7ae108998c17e48117eea84151"
+      "bytes": 10015,
+      "sha256": "e7721c76ddb10dbab7b25b0d5c819c19de510c146ed6bfd33a43e5b960b3b84d"
     },
     {
       "role": "readonly",
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
-      "bytes": 34634,
-      "sha256": "07a70176093c9c55a09c46a43b3cb8e70eb65fb37812f6afc61280827c6c2769"
+      "bytes": 35002,
+      "sha256": "016642b525eb4ddfa88b9ed7093e0183653f3e1c423b70ea572b9f05a28b38b4"
     },
     {
       "role": "primary",
@@ -47,8 +47,8 @@
     {
       "role": "transaction",
       "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology_transaction.ps1",
-      "bytes": 37277,
-      "sha256": "0c269a3cd06415d5ae7e1cceea3caa3ef4b950ddef04a4b3c85aebec0dcb8c7d"
+      "bytes": 37339,
+      "sha256": "a093407e1ce86be44b4c5065615bfbafde3390edea6c407e514eb6a13f54d634"
     },
     {
       "role": "lab_manifest",
@@ -81,5 +81,5 @@
       "sha256": "0e5671a332569d455ddfc0d4d21adedba75cb878a917d1a1932bfc7b483889e3"
     }
   ],
-  "source_bundle_sha256": "c209661d772b8309f0c62130cdcd193fd9d817735a1908717713d1227d06ea30"
+  "source_bundle_sha256": "91756d8fb007ff22856cb6338700228618dd5db0aeb1dba48a8f736bc4c67f84"
 }

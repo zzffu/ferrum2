@@ -4,13 +4,13 @@
   "files": [
     {
       "path": "tests/platform/Main.CampaignController.ps1",
-      "bytes": 14067,
-      "sha256": "5dd23c41a2aea1bebd2d3f703b7bbb9b0e6701bcc222971bd8ef037d962ad5cf"
+      "bytes": 14274,
+      "sha256": "5539fb15cd2f76077ef5b47de5f4f6d9b17eda0444e2de543d34c80303736c0b"
     },
     {
       "path": "tests/platform/Main.HostController.ps1",
-      "bytes": 26133,
-      "sha256": "55ed7e3bbaf95b61bc98a802f13b0a0dd827ba4531562cdd0bd8d8ae16d60464"
+      "bytes": 26253,
+      "sha256": "56a6fb06bc2f1321eebab5e4042d6f095f77aae1dcee9103e3767bf9eaa35497"
     },
     {
       "path": "tests/platform/Main.HostGuestTransaction.ps1",
@@ -29,33 +29,33 @@
     },
     {
       "path": "tests/platform/Main.ProbeController.ps1",
-      "bytes": 3549,
-      "sha256": "578881efcb4c43837ecc77277f53fd45548a8cebb470d28ff3a3860b1131768b"
+      "bytes": 3740,
+      "sha256": "d0dbbc7e941934e77551dc0d7b060267a4a51c4ebb38d81ec24f7d4855aaeb1d"
     },
     {
       "path": "tests/platform/Main.ProbeWorkerController.ps1",
-      "bytes": 6598,
-      "sha256": "f998f13fd5ed8b4b55ebc88b94251b308a6f02b20a07315186f4be1fb5ac7cfb"
+      "bytes": 6718,
+      "sha256": "8b10d453b52ccd212fbeed29ef22db0780390137520b1011d1d90d7e2cae6748"
     },
     {
       "path": "tests/platform/invoke_windows_tun_hyperv_probe_worker.ps1",
-      "bytes": 3578,
-      "sha256": "73608e361f61e22bfe7f5b4cf7ac7a7123a5155043a2210bd27e264e366b636a"
+      "bytes": 3675,
+      "sha256": "4ea4173b181cf4c36546258fe355c4b3d53f8193309d9709832d8478c35a4376"
     },
     {
       "path": "tests/platform/invoke_windows_tun_hyperv_worker.ps1",
-      "bytes": 4377,
-      "sha256": "180ab281e65291a525290447756a594e73bacb8a771e563aea072d1fa088df02"
+      "bytes": 4474,
+      "sha256": "47998e276c203ef029e4c3451a8ff7dcd1290cfa162c75aa40d4b70cbff837e3"
     },
     {
       "path": "tests/platform/probe_windows_tun_hyperv.ps1",
-      "bytes": 3254,
-      "sha256": "461efbe45e3f48c956e7c037af8048a1a2bd62f2cff7095dbb87f33f3d8bf87f"
+      "bytes": 3351,
+      "sha256": "0c3d45652af0dec5e4f32068610eabf905758af2252d8f16c7d1e1e71c5471ea"
     },
     {
       "path": "tests/platform/run_windows_tun_hyperv.ps1",
-      "bytes": 3873,
-      "sha256": "d89904e00fe2213f978401217335934d4274b2d5621626cc9a26623c9157d08f"
+      "bytes": 3970,
+      "sha256": "896eb50578926e7c882f676d4b55aae2650e6964ebb572682e73e04f83c3eb03"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psd1",
@@ -114,8 +114,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/VmTransaction.ps1",
-      "bytes": 14440,
-      "sha256": "cf969e96e61328031dad5f997c29138353263b1cb2366b5b10f7f1f72654b3ee"
+      "bytes": 14551,
+      "sha256": "d95d99bf1cb64449951768cd06b3572c21997a425df52927ebd9b976a490e754"
     },
     {
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
@@ -159,14 +159,14 @@
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
-      "bytes": 34634,
-      "sha256": "07a70176093c9c55a09c46a43b3cb8e70eb65fb37812f6afc61280827c6c2769"
+      "bytes": 35002,
+      "sha256": "016642b525eb4ddfa88b9ed7093e0183653f3e1c423b70ea572b9f05a28b38b4"
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
-      "bytes": 37689,
-      "sha256": "c4e5396c9718d6307981175b6278b65293d0fc79854b1ad219a16db37ecd072f"
+      "bytes": 37786,
+      "sha256": "f8ded02c67aa30a72d75abeff410c3d965bc5c1482167a26eed1653f8c8a8fc1"
     }
   ],
-  "controller_bundle_sha256": "87d06487ab60a57010013556346024c81466a7a2fab32061fa244d8195e45ac8"
+  "controller_bundle_sha256": "5a918fdff3b91d946d67e3fc8fd95de44c3cb6309ea5c318804895fcad18b6e3"
 }

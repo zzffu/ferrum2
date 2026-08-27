@@ -46,6 +46,9 @@ param(
     [string]$CandidateArtifactManifest,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+    [string]$TopologyPlanPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [string]$TopologyManifestPath,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
@@ -190,6 +193,7 @@ $context = [ordered]@{
     run_token = [string]$RunToken
     identity_ledger = [string]$IdentityLedger
     candidate_artifact_manifest = [string]$CandidateArtifactManifest
+    topology_plan_path = [string]$TopologyPlanPath
     topology_manifest_path = [string]$TopologyManifestPath
     topology_manifest_sha256 = [string]$TopologyManifestSha256
     support_tcp_port = [int]$SupportTcpPort

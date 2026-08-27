@@ -2,7 +2,7 @@ param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 $expectedFields = @(
     'entrypoint_path', 'repository_root', 'internal_worker', 'internal_worker_token',
     'run_token', 'identity_ledger', 'candidate_artifact_manifest',
-    'topology_manifest_path', 'topology_manifest_sha256',
+    'topology_plan_path', 'topology_manifest_path', 'topology_manifest_sha256',
     'support_tcp_port', 'support_udp_port', 'support_pid', 'support_owner', 'wintun_zip',
     'powershell_zip', 'evidence_directory', 'credential_path',
     'readiness_timeout_seconds', 'shutdown_timeout_seconds'
@@ -15,6 +15,7 @@ $InternalWorkerToken = [string]$Context.internal_worker_token
 $RunToken = [string]$Context.run_token
 $IdentityLedger = [string]$Context.identity_ledger
 $CandidateArtifactManifest = [string]$Context.candidate_artifact_manifest
+$TopologyPlanPath = [string]$Context.topology_plan_path
 $TopologyManifestPath = [string]$Context.topology_manifest_path
 $TopologyManifestSha256 = [string]$Context.topology_manifest_sha256
 $SupportTcpPort = [int]$Context.support_tcp_port
@@ -65,6 +66,7 @@ if ($InternalWorker) {
     throw "bounded Hyper-V worker token is not valid outside the internal worker"
 }
 $topologyInitialization = Initialize-ApprovedHyperVTopology `
+    -TopologyPlanPath $TopologyPlanPath `
     -ManifestPath $TopologyManifestPath `
     -ExpectedSha256 $TopologyManifestSha256
 $topologyDocument = $topologyInitialization.Document
@@ -203,6 +205,7 @@ if (-not $InternalWorker) {
             RunToken = $RunToken
             IdentityLedger = $IdentityLedger
             CandidateArtifactManifest = $preparedArtifacts.ManifestPath
+            TopologyPlanPath = $topologyDocument.PlanDocument.Path
             TopologyManifestPath = $TopologyManifestPath
             TopologyManifestSha256 = $TopologyManifestSha256
             SupportTcpPort = $SupportTcpPort
@@ -227,7 +230,7 @@ if (-not $InternalWorker) {
             -BoundParameters $workerParameters `
             -ForwardedParameterNames @(
                 "RunToken", "IdentityLedger", "CandidateArtifactManifest",
-                "TopologyManifestPath", "TopologyManifestSha256", "SupportTcpPort",
+                "TopologyPlanPath", "TopologyManifestPath", "TopologyManifestSha256", "SupportTcpPort",
                 "SupportUdpPort", "SupportPid", "SupportOwner", "WintunZip",
                 "PowerShellZip", "EvidenceDirectory", "CredentialPath",
                 "ReadinessTimeoutSeconds", "ShutdownTimeoutSeconds"

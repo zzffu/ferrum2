@@ -1,5 +1,6 @@
 function Initialize-ApprovedHyperVTopology {
     param(
+        [Parameter(Mandatory = $true)][string]$TopologyPlanPath,
         [Parameter(Mandatory = $true)][string]$ManifestPath,
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[0-9a-f]{64}$')]
@@ -11,7 +12,8 @@ function Initialize-ApprovedHyperVTopology {
     }
     Import-ApprovedTopologyRuntime
     $document = Read-Ferrum2SupportTopologyManifest `
-        -Path $ManifestPath -ExpectedSha256 $ExpectedSha256 `
+        -Path $ManifestPath -TopologyPlanPath $TopologyPlanPath `
+        -ExpectedSha256 $ExpectedSha256 `
         -RepositoryRoot $script:repositoryRoot
     $script:topologyManifestDocument = $document
     $script:approvedVmName = [string]$document.Value.vm.name

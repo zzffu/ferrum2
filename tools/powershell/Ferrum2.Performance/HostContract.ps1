@@ -101,7 +101,6 @@ function New-CanonicalPlan {
     }
     foreach ($binding in @(
         @("performance_source_bundle_sha256", [string]$script:runnerSourceSha256),
-        @("topology_plan_source_sha256", [string]$script:topologyPlanDocument.Sha256),
         @("topology_runtime_source_sha256", [string]$script:topologyRuntimeSha256),
         @("host_network_path_source_sha256", [string]$script:hostNetworkPathHelperSha256),
         @("guest_network_path_source_sha256", [string]$script:guestNetworkPathProbeSourceSha256),
@@ -197,9 +196,14 @@ function Resolve-CanonicalDiagnosticProfileTrial {
 
 function New-NetworkModelPlan {
     param([string]$Python, [string]$Output, [string]$ExpectedSha256)
+    $networkModelRoot = (Resolve-Path -LiteralPath (Join-Path `
+        (Split-Path -Parent $script:networkModelControllerPath) '..\..\..') `
+        -ErrorAction Stop).Path
     Invoke-NativeChecked -Executable $Python -Label "Windows TUN network-model plan" `
+        -WorkingDirectory $networkModelRoot `
         -Arguments @(
-            "-B", $script:networkModelControllerPath, "plan", "--output", $Output
+            "-B", "-m", "tools.performance_candidate.windows_tun.network_model",
+            "plan", "--output", $Output
         )
     $digest = (Get-FileHash -LiteralPath $Output -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($digest -cne $ExpectedSha256) {

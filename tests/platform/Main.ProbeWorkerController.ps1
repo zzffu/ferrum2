@@ -1,7 +1,7 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 
 $expectedFields = @(
-    'repository_root', 'internal_worker_token', 'topology_manifest_path',
+    'repository_root', 'internal_worker_token', 'topology_plan_path', 'topology_manifest_path',
     'topology_manifest_sha256', 'support_tcp_port', 'support_udp_port',
     'support_pid', 'support_owner', 'credential_path',
     'readiness_timeout_seconds', 'shutdown_timeout_seconds'
@@ -9,6 +9,7 @@ $expectedFields = @(
 Assert-Ferrum2ClosedProperties $Context $expectedFields 'main probe worker context'
 $repositoryRoot = [string]$Context.repository_root
 $internalWorkerToken = [string]$Context.internal_worker_token
+$topologyPlanPath = [string]$Context.topology_plan_path
 $topologyManifestPath = [string]$Context.topology_manifest_path
 $topologyManifestSha256 = [string]$Context.topology_manifest_sha256
 $supportTcpPort = [int]$Context.support_tcp_port
@@ -29,6 +30,7 @@ if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     throw 'the Hyper-V probe worker requires 64-bit Windows AMD64'
 }
 $topology = Initialize-ApprovedHyperVTopology `
+    -TopologyPlanPath $topologyPlanPath `
     -ManifestPath $topologyManifestPath -ExpectedSha256 $topologyManifestSha256
 $document = $topology.Document
 $vmName = [string]$document.Value.vm.name

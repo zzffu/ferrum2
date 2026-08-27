@@ -38,6 +38,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ManifestPath,
 
+    [Parameter(Mandatory = $true)]
+    [string]$TopologyPlanPath,
+
     [string]$CredentialPath,
 
     [ValidateRange(30, 900)]
@@ -147,7 +150,7 @@ Import-Module $verifiedLabModule -Global -Force -ErrorAction Stop
 
 . ([scriptblock]::Create(
     [string]$script:provisioningSourceIdentity.Sources['readonly'].Text
-)) -LibraryOnly -LabRoot $PSScriptRoot
+)) -LibraryOnly
 . ([scriptblock]::Create(
     [string]$script:provisioningSourceIdentity.Sources['host'].Text
 )) -LibraryOnly
@@ -169,7 +172,7 @@ if (-not $Apply -or $AuthorizationToken -cne 'CREATE-FERRUM2-INTERNAL-SUPPORT-V1
     throw 'the explicit topology authorization contract is invalid'
 }
 
-$planDocument = Read-TopologyPlan
+$planDocument = Read-TopologyPlan -Path $TopologyPlanPath
 $plan = $planDocument.Value
 $initialContext = Get-Ferrum2PinnedVmContext `
     -Identity (New-Ferrum2PinnedVmIdentity -Plan $plan)

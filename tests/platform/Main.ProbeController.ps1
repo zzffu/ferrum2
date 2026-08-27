@@ -1,12 +1,13 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 
 $expectedFields = @(
-    'repository_root', 'topology_manifest_path', 'topology_manifest_sha256',
+    'repository_root', 'topology_plan_path', 'topology_manifest_path', 'topology_manifest_sha256',
     'support_tcp_port', 'support_udp_port', 'support_pid', 'support_owner',
     'credential_path', 'readiness_timeout_seconds', 'shutdown_timeout_seconds'
 )
 Assert-Ferrum2ClosedProperties $Context $expectedFields 'main probe context'
 $repositoryRoot = [string]$Context.repository_root
+$topologyPlanPath = [string]$Context.topology_plan_path
 $topologyManifestPath = [string]$Context.topology_manifest_path
 $topologyManifestSha256 = [string]$Context.topology_manifest_sha256
 $supportTcpPort = [int]$Context.support_tcp_port
@@ -26,6 +27,7 @@ if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
 }
 [void](Initialize-Ferrum2HostHyperVModule -RepositoryRoot $repositoryRoot)
 $topology = Initialize-ApprovedHyperVTopology `
+    -TopologyPlanPath $topologyPlanPath `
     -ManifestPath $topologyManifestPath -ExpectedSha256 $topologyManifestSha256
 $document = $topology.Document
 $vmName = [string]$document.Value.vm.name
@@ -44,6 +46,7 @@ $cleanupAuthority = if ($initialState -ceq 'Off') {
     New-ApprovedVmCleanupAuthority -Context $initialContext
 } else { $null }
 $workerParameters = [ordered]@{
+    TopologyPlanPath = $document.PlanDocument.Path
     TopologyManifestPath = $document.Path
     TopologyManifestSha256 = $document.Sha256
     SupportTcpPort = $supportTcpPort
@@ -61,7 +64,7 @@ $terminal = Invoke-BoundedHyperVWorkerSupervisor `
         'tests/platform/invoke_windows_tun_hyperv_probe_worker.ps1') `
     -BoundParameters $workerParameters `
     -ForwardedParameterNames @(
-        'TopologyManifestPath', 'TopologyManifestSha256', 'SupportTcpPort',
+        'TopologyPlanPath', 'TopologyManifestPath', 'TopologyManifestSha256', 'SupportTcpPort',
         'SupportUdpPort', 'SupportPid', 'SupportOwner', 'CredentialPath',
         'ReadinessTimeoutSeconds', 'ShutdownTimeoutSeconds'
     ) `

@@ -1,5 +1,4 @@
 #requires -Version 7.4
-#requires -RunAsAdministrator
 #requires -Modules Hyper-V
 
 <#
@@ -8,7 +7,7 @@ Defines read-only runtime checks for the provisioned Windows TUN Hyper-V support
 
 .DESCRIPTION
 This dot-source-only library validates the external provisioning manifest and its closed source
-bundle, binds generated switch, adapter, and checkpoint identities to the repository topology plan,
+bundle, binds generated switch, adapter, and checkpoint identities to the configured topology plan,
 and validates the live
 Hyper-V and host-network state. It never starts or stops a VM and never changes an adapter, address,
 route, DNS setting, firewall rule, switch, checkpoint, or TUN session.
@@ -48,14 +47,16 @@ $script:ferrum2ExpectedProvisioningFiles = @(
 $labManifestPath = Join-Path $script:ferrum2RepositoryRoot `
     'tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1'
 Import-Module $labManifestPath -Force -ErrorAction Stop
-. $script:ferrum2TopologyReadonlyPath -LibraryOnly -LabRoot $PSScriptRoot
+. $script:ferrum2TopologyReadonlyPath -LibraryOnly
 
 if (-not $LibraryOnly) {
     throw "support topology runtime helpers are dot-source-only"
 }
 
 function Read-Ferrum2SupportTopologyPlanDocument {
-    Read-TopologyPlan
+    param([Parameter(Mandatory)] [string]$Path)
+
+    Read-TopologyPlan -Path $Path
 }
 
 function Get-Ferrum2ProvisioningSourceIdentity {
@@ -375,6 +376,7 @@ function Assert-Ferrum2SupportTopologyManifestShape {
 function Read-Ferrum2SupportTopologyManifest {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$TopologyPlanPath,
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[0-9a-f]{64}$')]
         [string]$ExpectedSha256,
@@ -387,7 +389,7 @@ function Read-Ferrum2SupportTopologyManifest {
     if ($document.Sha256 -cne $ExpectedSha256) {
         throw 'support topology manifest hash mismatch'
     }
-    $planDocument = Read-Ferrum2SupportTopologyPlanDocument
+    $planDocument = Read-Ferrum2SupportTopologyPlanDocument -Path $TopologyPlanPath
     Assert-Ferrum2SupportTopologyManifestShape -Manifest $document.Value `
         -PlanDocument $planDocument
     [pscustomobject][ordered]@{

@@ -4,13 +4,15 @@
 
 <#
 .SYNOPSIS
-Performs the read-only preflight for the pinned Windows TUN Hyper-V support topology.
+Performs the read-only preflight for a configured Windows TUN Hyper-V support topology.
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Inspect')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Library', DontShow = $true)]
-    [switch]$LibraryOnly
+    [switch]$LibraryOnly,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Inspect')]
+    [string]$TopologyPlanPath
 )
 
 Set-StrictMode -Version Latest
@@ -24,13 +26,13 @@ $labManifestPath = Join-Path $repositoryRoot `
 Import-Module $labManifestPath -Force -ErrorAction Stop
 $readonlyOwnerPath = Join-Path $PSScriptRoot `
     'windows_tun_hyperv_support_topology_readonly.ps1'
-. $readonlyOwnerPath -LibraryOnly -LabRoot $PSScriptRoot
+. $readonlyOwnerPath -LibraryOnly
 
 if ($LibraryOnly) {
     return
 }
 
-$planDocument = Read-TopologyPlan
+$planDocument = Read-TopologyPlan -Path $TopologyPlanPath
 $context = Get-Ferrum2PinnedVmContext `
     -Identity (New-Ferrum2PinnedVmIdentity -Plan $planDocument.Value)
 $preflight = Get-ReadOnlyPreflight -Context $context -Plan $planDocument.Value

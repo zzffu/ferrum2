@@ -101,10 +101,6 @@ if ($MetricsPort -eq $ServerMetricsPort) {
     throw "client and server metrics ports must be distinct"
 }
 
-$ExpectedVmName = "Windows 10 MSIX packaging environment"
-$ExpectedVmId = "82e20295-1d30-48e7-a751-e21d35d872d4"
-$ExpectedCheckpointName = "Ferrum2-WindowsTun-InternalSupport-v1"
-$ExpectedSupportSwitchName = "Ferrum2 TUN Support"
 $ExpectedRunnerLabel = "ferrum2-hyperv-guest"
 $ExpectedUdpAssociationSourceIpv4 = "198.18.0.2"
 $ExpectedUdpAssociationSourcePortFirst = 20000
@@ -265,19 +261,26 @@ $requiredLedger = @(
     "client_sha256", "server_sha256", "support_listener"
 )
 Assert-ExactProperties $ledger $requiredLedger "identity ledger"
+$ExpectedVmName = [string]$ledger.vm_name
+$ExpectedVmId = [string]$ledger.vm_id
+$ExpectedCheckpointName = [string]$ledger.checkpoint_name
 $clientHash = Get-LowerSha256 $script:ClientPath
 $serverHash = Get-LowerSha256 $script:ServerPath
 $harnessHash = Get-LowerSha256 $script:HarnessPath
 $collectorHash = Get-LowerSha256 $PSCommandPath
 Assert-Condition (
     $ledger.schema -eq 3 -and
-    $ledger.vm_name -ceq $ExpectedVmName -and
-    $ledger.vm_id -ceq $ExpectedVmId -and
-    $ledger.checkpoint_name -ceq $ExpectedCheckpointName -and
+    -not [string]::IsNullOrWhiteSpace($ExpectedVmName) -and
+    $ExpectedVmName.Length -le 128 -and
+    $ExpectedVmId -cmatch `
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -and
+    $ExpectedVmId -cne '00000000-0000-0000-0000-000000000000' -and
+    -not [string]::IsNullOrWhiteSpace($ExpectedCheckpointName) -and
+    $ExpectedCheckpointName.Length -le 128 -and
     $ledger.checkpoint_id -ceq $ExpectedCheckpointId -and
     $ledger.topology_manifest_sha256 -ceq $ExpectedTopologyManifestSha256 -and
     $ledger.topology_plan_sha256 -ceq $ExpectedTopologyPlanSha256 -and
-    $ledger.support_switch_name -ceq $ExpectedSupportSwitchName -and
+    -not [string]::IsNullOrWhiteSpace([string]$ledger.support_switch_name) -and
     $ledger.support_switch_id -ceq $ExpectedSupportSwitchId -and
     $ledger.guest_architecture -ceq "AMD64" -and
     $ledger.candidate_sha -ceq $memberSha -and

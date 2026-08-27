@@ -128,7 +128,7 @@ function Enter-ProvisioningTransaction {
     $State.Credential = Resolve-Ferrum2HostInput -RepositoryRoot $script:repositoryRoot `
         -Path $State.CredentialPath -Label 'guest credential' -Kind GuestCredential `
         -MaximumBytes 1048576
-    $freshPlanDocument = Read-TopologyPlan
+    $freshPlanDocument = Read-TopologyPlan -Path $State.PlanDocument.Path
     if ($freshPlanDocument.Sha256 -cne $State.PlanDocument.Sha256) {
         throw 'topology plan changed after the initial preflight'
     }
@@ -638,7 +638,7 @@ function New-ProvisioningTerminalEvidence {
         -SupportVmAdapter $supportVmAdapter `
         -SupportSnapshotAdapter $supportSnapshotAdapter -HostState $hostState `
         -Tun $finalTun
-    $terminalPlanDocument = Read-TopologyPlan
+    $terminalPlanDocument = Read-TopologyPlan -Path $State.PlanDocument.Path
     if ($terminalPlanDocument.Sha256 -cne $State.PlanDocument.Sha256) {
         throw "topology plan changed during the topology transaction"
     }

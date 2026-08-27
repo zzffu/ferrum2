@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from tools.performance_candidate.windows_tun.recipe import recipe_sha256, scenario_catalog
 from tools.performance_candidate.json_contract import CandidateControlError, SHA256, _exact_fields, _policy_percent, read_bounded_closed_json
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_GUEST, WINDOWS_TUN_PAIR_COUNT, WINDOWS_TUN_SELECTION, WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS, _validate_windows_tun_topology_environment
+from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_GUEST, WINDOWS_TUN_GUEST_IDENTITY_FIELDS, WINDOWS_TUN_PAIR_COUNT, WINDOWS_TUN_SELECTION, WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS, _validate_windows_tun_topology_environment
 
 WINDOWS_TUN_POLICY_SCHEMA_VERSION = 4
 WINDOWS_TUN_POLICY_MAX_BYTES = 1024 * 1024
@@ -47,6 +47,7 @@ WINDOWS_TUN_POLICY_METRIC_FIELDS = frozenset(
 WINDOWS_TUN_CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
     {
         *WINDOWS_TUN_GUEST,
+        *WINDOWS_TUN_GUEST_IDENTITY_FIELDS,
         *WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS,
         "recipe_sha256",
         "controller_bundle_sha256",

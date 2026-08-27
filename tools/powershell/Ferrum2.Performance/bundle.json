@@ -5,8 +5,8 @@
   "files": [
     {
       "path": "tools/windows-tun/performance/collect_windows_tun_performance_trial.ps1",
-      "bytes": 31461,
-      "sha256": "cb9a1e820a09bde728ef638813e85c804fad7d41b8cc667ae2e70570900634f0"
+      "bytes": 31619,
+      "sha256": "7898adaad70dfcd23df6cbde1d74b803f0d13bf5f40e77a7d82e0e5c4f3ec883"
     },
     {
       "path": "tools/windows-tun/performance/collect_windows_tun_udp_boundary_diagnostic.ps1",
@@ -50,8 +50,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostContract.ps1",
-      "bytes": 15245,
-      "sha256": "152e198acd1dd0b7d227962804b0736d47ae3d52cff4d820a1a630f755b650e7"
+      "bytes": 15417,
+      "sha256": "666815075f6a6a6dc3b32db7d80d7c04ddc1eff884443ac04079f6889ca7f13c"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostUdpEvidence.ps1",
@@ -180,18 +180,18 @@
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
-      "bytes": 37689,
-      "sha256": "c4e5396c9718d6307981175b6278b65293d0fc79854b1ad219a16db37ecd072f"
+      "bytes": 37786,
+      "sha256": "f8ded02c67aa30a72d75abeff410c3d965bc5c1482167a26eed1653f8c8a8fc1"
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
-      "bytes": 34634,
-      "sha256": "07a70176093c9c55a09c46a43b3cb8e70eb65fb37812f6afc61280827c6c2769"
+      "bytes": 35002,
+      "sha256": "016642b525eb4ddfa88b9ed7093e0183653f3e1c423b70ea572b9f05a28b38b4"
     },
     {
       "path": "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
-      "bytes": 36210,
-      "sha256": "53901678f51df80d9468a77a5d11379d4dee20f5dd6181d29fabd7c2ca65749b"
+      "bytes": 36174,
+      "sha256": "e26fb3b52556a1520707a64e5945aa1f41559aafd7f85ec27459d107f7b2ff31"
     }
   ]
 }

@@ -674,6 +674,7 @@ $mainRunnerParameters = @($mainRunnerAst.ParamBlock.Parameters |
     ForEach-Object { $_.Name.VariablePath.UserPath })
 Assert-True ('Suite' -cin $mainRunnerParameters -and
     'CampaignToken' -cin $mainRunnerParameters -and
+    'TopologyPlanPath' -cin $mainRunnerParameters -and
     @('Profile', 'ProbeOnly', 'InternalWorker', 'CandidateArtifactManifest' |
         Where-Object { $_ -cin $mainRunnerParameters }).Count -eq 0) `
     'public main runner exposes a non-campaign operation'
@@ -682,9 +683,38 @@ $workerAst = Get-ScriptAst (Join-Path $PSScriptRoot `
 $workerParameters = @($workerAst.ParamBlock.Parameters |
     ForEach-Object { $_.Name.VariablePath.UserPath })
 Assert-True (@('InternalWorker', 'InternalWorkerToken', 'Profile',
-        'CandidateArtifactManifest' | Where-Object {
+        'CandidateArtifactManifest', 'TopologyPlanPath' | Where-Object {
             $_ -cnotin $workerParameters
         }).Count -eq 0) 'main capability worker contract is incomplete'
+
+foreach ($configuredEntrypoint in @(
+    'probe_windows_tun_hyperv.ps1',
+    'invoke_windows_tun_hyperv_probe_worker.ps1',
+    'run_windows_tun_hard_kill_hyperv.ps1'
+)) {
+    $configuredAst = Get-ScriptAst (Join-Path $PSScriptRoot $configuredEntrypoint)
+    $configuredParameters = @($configuredAst.ParamBlock.Parameters |
+        ForEach-Object { $_.Name.VariablePath.UserPath })
+    Assert-True ('TopologyPlanPath' -cin $configuredParameters) `
+        "configured topology plan parameter is absent: $configuredEntrypoint"
+}
+$performanceRunnerInterfaceAst = Get-ScriptAst (Join-Path $repositoryRoot `
+    'tools\windows-tun\performance\run_windows_tun_performance_hyperv.ps1')
+$performanceRunnerInterfaceParameters = @(
+    $performanceRunnerInterfaceAst.ParamBlock.Parameters |
+        ForEach-Object { $_.Name.VariablePath.UserPath }
+)
+Assert-True ('TopologyPlanPath' -cin $performanceRunnerInterfaceParameters) `
+    'performance runner does not expose the configured topology plan'
+$topologyReadonlyValues = @(Get-AstStringValue (Get-ScriptAst (Join-Path $repositoryRoot `
+    'tools\windows-tun\lab\windows_tun_hyperv_support_topology_readonly.ps1')))
+Assert-True (@(
+    '82e20295-1d30-48e7-a751-e21d35d872d4',
+    '1e570209-faf7-4248-8167-aa0687cdb8cf',
+    'c08cb7b8-9b3c-408e-8e30-5e16a3aeb444',
+    '192.168.250.0/30', '192.168.250.1', '192.168.250.2'
+    | Where-Object { $_ -cin $topologyReadonlyValues }
+).Count -eq 0) 'topology plan reader still pins one host identity or subnet'
 $mainHostControllerAst = Get-ScriptAst (Join-Path $PSScriptRoot `
     'Main.HostController.ps1')
 Assert-True (@(Get-AstCommandName $mainHostControllerAst | Where-Object {

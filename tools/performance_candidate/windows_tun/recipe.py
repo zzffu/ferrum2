@@ -54,13 +54,15 @@ WINDOWS_TUN_GUEST = {
     "runner_os": "Windows",
     "runner_arch": "X64",
     "runner_label": "ferrum2-hyperv-guest",
-    "vm_name": "Windows 10 MSIX packaging environment",
-    "vm_id": "82e20295-1d30-48e7-a751-e21d35d872d4",
-    "checkpoint_name": "Ferrum2-WindowsTun-InternalSupport-v1",
     "rust_toolchain": "1.97.1",
     "cargo_profile": "profiling",
     "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
 }
+
+
+WINDOWS_TUN_GUEST_IDENTITY_FIELDS = frozenset(
+    {"vm_name", "vm_id", "checkpoint_name"}
+)
 
 
 WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS = frozenset(
@@ -76,6 +78,7 @@ WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS = frozenset(
 WINDOWS_TUN_ENVIRONMENT_FIELDS = frozenset(
     {
         *WINDOWS_TUN_GUEST,
+        *WINDOWS_TUN_GUEST_IDENTITY_FIELDS,
         *WINDOWS_TUN_TOPOLOGY_ENVIRONMENT_FIELDS,
         "guest_build",
         "cpu_model",
@@ -92,13 +95,17 @@ def _validate_windows_tun_topology_environment(
     guid = re.compile(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     )
-    for field in ("checkpoint_id", "support_switch_id"):
+    for field in ("vm_id", "checkpoint_id", "support_switch_id"):
         value = environment[field]
         if (
             type(value) is not str
             or guid.fullmatch(value) is None
             or value == "00000000-0000-0000-0000-000000000000"
         ):
+            raise CandidateControlError(f"{label} {field} is invalid")
+    for field in ("vm_name", "checkpoint_name"):
+        value = environment[field]
+        if type(value) is not str or not value.strip() or len(value) > 128:
             raise CandidateControlError(f"{label} {field} is invalid")
     for field in ("topology_manifest_sha256", "topology_plan_sha256"):
         value = environment[field]
@@ -173,7 +180,6 @@ def source_paths() -> dict[str, pathlib.Path]:
         / "powershell"
         / "Ferrum2.Performance"
         / "bundle.json",
-        "topology_plan": root / "tools" / "windows_tun_hyperv_support_topology_plan.json",
         "topology_runtime": root
         / "tools"
         / "windows-tun"
@@ -451,7 +457,6 @@ def source_identities() -> dict[str, str]:
     return {
         "runner_source_sha256": performance_source_bundle_sha256(),
         "performance_source_bundle_sha256": performance_source_bundle_sha256(),
-        "topology_plan_source_sha256": _sha256(paths["topology_plan"]),
         "topology_runtime_source_sha256": _sha256(paths["topology_runtime"]),
         "host_network_path_source_sha256": _sha256(paths["host_network_path"]),
         "guest_network_path_source_sha256": _sha256(paths["guest_network_path"]),
@@ -479,7 +484,6 @@ def runtime_recipe() -> dict[str, object]:
     return {
     "runner_source_sha256": sources["runner_source_sha256"],
     "performance_source_bundle_sha256": sources["performance_source_bundle_sha256"],
-    "topology_plan_source_sha256": sources["topology_plan_source_sha256"],
     "topology_runtime_source_sha256": sources["topology_runtime_source_sha256"],
     "host_network_path_source_sha256": sources["host_network_path_source_sha256"],
     "guest_network_path_source_sha256": sources["guest_network_path_source_sha256"],

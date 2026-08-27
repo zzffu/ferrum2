@@ -3,6 +3,7 @@
 
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory)] [string]$TopologyPlanPath,
     [Parameter(Mandatory)] [string]$TopologyManifestPath,
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{64}$')]
@@ -58,6 +59,7 @@ Import-Module (Join-Path $repositoryRoot `
     -Scope Local -Force -ErrorAction Stop
 $context = [ordered]@{
     repository_root = $repositoryRoot
+    topology_plan_path = $TopologyPlanPath
     topology_manifest_path = $TopologyManifestPath
     topology_manifest_sha256 = $TopologyManifestSha256
     support_tcp_port = $SupportTcpPort

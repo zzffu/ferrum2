@@ -2,7 +2,7 @@ param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 
 $expectedFields = @(
     'repository_root', 'suite', 'campaign_token', 'identity_ledger',
-    'topology_manifest_path', 'topology_manifest_sha256', 'support_tcp_port',
+    'topology_plan_path', 'topology_manifest_path', 'topology_manifest_sha256', 'support_tcp_port',
     'support_udp_port', 'support_pid', 'support_owner', 'wintun_zip', 'powershell_zip',
     'evidence_directory', 'credential_path', 'readiness_timeout_seconds',
     'shutdown_timeout_seconds'
@@ -13,6 +13,7 @@ $repositoryRoot = [string]$Context.repository_root
 $suite = [string]$Context.suite
 $campaignToken = [string]$Context.campaign_token
 $identityLedger = [string]$Context.identity_ledger
+$topologyPlanPath = [string]$Context.topology_plan_path
 $topologyManifestPath = [string]$Context.topology_manifest_path
 $topologyManifestSha256 = [string]$Context.topology_manifest_sha256
 $supportTcpPort = [int]$Context.support_tcp_port
@@ -51,6 +52,7 @@ if ((@($tokenSuffixes.Keys | Sort-Object) -join '|') -cne
 
 [void](Initialize-Ferrum2HostHyperVModule -RepositoryRoot $repositoryRoot)
 $topologyInitialization = Initialize-ApprovedHyperVTopology `
+    -TopologyPlanPath $topologyPlanPath `
     -ManifestPath $topologyManifestPath `
     -ExpectedSha256 $topologyManifestSha256
 $topologyDocument = $topologyInitialization.Document
@@ -136,6 +138,7 @@ try {
             RunToken = $runToken
             IdentityLedger = $ledgerIdentity.Path
             CandidateArtifactManifest = $candidateArtifacts.ManifestPath
+            TopologyPlanPath = $topologyDocument.PlanDocument.Path
             TopologyManifestPath = $topologyDocument.Path
             TopologyManifestSha256 = $topologyDocument.Sha256
             SupportTcpPort = $supportTcpPort
@@ -167,7 +170,7 @@ try {
             -BoundParameters $workerParameters `
             -ForwardedParameterNames @(
                 'Profile', 'RunToken', 'IdentityLedger', 'CandidateArtifactManifest',
-                'TopologyManifestPath', 'TopologyManifestSha256', 'SupportTcpPort',
+                'TopologyPlanPath', 'TopologyManifestPath', 'TopologyManifestSha256', 'SupportTcpPort',
                 'SupportUdpPort', 'SupportPid', 'SupportOwner', 'WintunZip',
                 'PowerShellZip', 'EvidenceDirectory', 'CredentialPath',
                 'ReadinessTimeoutSeconds', 'ShutdownTimeoutSeconds'

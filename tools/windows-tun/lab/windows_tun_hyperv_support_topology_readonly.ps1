@@ -1,5 +1,4 @@
 #requires -Version 7.4
-#requires -RunAsAdministrator
 #requires -Modules Hyper-V
 
 <#
@@ -8,29 +7,18 @@ Defines pure plan parsing and live readback for Windows TUN Hyper-V support topo
 
 .DESCRIPTION
 This dot-source-only owner contains no mutation commands. Provisioning and runtime validation share
-its exact plan parser, pinned VM inventory, host TUN, switch, route, DNS, and adapter readback.
+its exact plan parser, configured VM inventory, host TUN, switch, route, DNS, and adapter readback.
 #>
 
 [CmdletBinding(DefaultParameterSetName = "Inspect")]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = "Library", DontShow = $true)]
-    [switch]$LibraryOnly,
-    [Parameter(Mandatory = $true, ParameterSetName = "Library", DontShow = $true)]
-    [string]$LabRoot
+    [switch]$LibraryOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-
-$resolvedLabRoot = (Resolve-Path -LiteralPath $LabRoot -ErrorAction Stop).Path
-$windowsTunRoot = (Resolve-Path -LiteralPath (Join-Path $resolvedLabRoot "..") `
-    -ErrorAction Stop).Path
-$toolsRoot = (Resolve-Path -LiteralPath (Join-Path $windowsTunRoot "..") `
-    -ErrorAction Stop).Path
-$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $toolsRoot "..") `
-    -ErrorAction Stop).Path
-$planPath = Join-Path $toolsRoot 'windows_tun_hyperv_support_topology_plan.json'
 
 function Assert-TopologyPlanPropertiesAndTypes {
     param([Parameter(Mandatory)] [object]$Plan)
@@ -85,34 +73,56 @@ function Assert-TopologyPlanIsolationContract {
     param([Parameter(Mandatory)] [object]$Plan)
 
     if ($Plan.schema -ne 1 -or $Plan.vm.automatic_checkpoints_enabled -ne $false -or
-        [string]$Plan.vm.name -cne 'Windows 10 MSIX packaging environment' -or
-        (ConvertTo-Ferrum2CanonicalGuid -Value $Plan.vm.id -Label 'VM') -cne
-            '82e20295-1d30-48e7-a751-e21d35d872d4' -or
-        (ConvertTo-Ferrum2CanonicalGuid -Value $Plan.source_checkpoint.id `
-            -Label 'source checkpoint') -cne '1e570209-faf7-4248-8167-aa0687cdb8cf' -or
         [string]$Plan.source_checkpoint.type -cne 'Standard' -or
-        [string]$Plan.management_adapter.switch_name -cne 'Default Switch' -or
-        (ConvertTo-Ferrum2CanonicalGuid -Value $Plan.management_adapter.switch_id `
-            -Label 'management switch') -cne 'c08cb7b8-9b3c-408e-8e30-5e16a3aeb444' -or
-        $Plan.management_adapter.dynamic_mac_address -ne $true -or
         [string]$Plan.support.switch_type -cne 'Internal' -or
-        [string]$Plan.support.network -cne '192.168.250.0/30' -or
-        [string]$Plan.support.host_ipv4 -cne '192.168.250.1' -or
-        [string]$Plan.support.guest_ipv4 -cne '192.168.250.2' -or
         [int]$Plan.support.prefix_length -ne 30 -or
         $null -ne $Plan.support.gateway -or @($Plan.support.dns_servers).Count -ne 0 -or
         [string]$Plan.lab_checkpoint.type -cne 'Standard') {
-        throw 'topology plan violates the approved isolated /30 contract'
+        throw 'topology plan violates the isolated /30 policy'
+    }
+    foreach ($field in @(
+        @([string]$Plan.vm.name, 'VM name'),
+        @([string]$Plan.source_checkpoint.name, 'source checkpoint name'),
+        @([string]$Plan.management_adapter.name, 'management adapter name'),
+        @([string]$Plan.management_adapter.switch_name, 'management switch name'),
+        @([string]$Plan.support.switch_name, 'support switch name'),
+        @([string]$Plan.support.vm_adapter_name, 'support VM adapter name'),
+        @([string]$Plan.support.guest_interface_alias, 'guest support interface alias'),
+        @([string]$Plan.lab_checkpoint.name, 'lab checkpoint name')
+    )) {
+        if ([string]::IsNullOrWhiteSpace([string]$field[0]) -or
+            ([string]$field[0]).Length -gt 128) {
+            throw "topology plan $($field[1]) is invalid"
+        }
+    }
+    $vmId = ConvertTo-Ferrum2CanonicalGuid -Value $Plan.vm.id -Label 'VM'
+    $null = ConvertTo-Ferrum2CanonicalGuid -Value $Plan.source_checkpoint.id `
+        -Label 'source checkpoint'
+    $null = ConvertTo-Ferrum2CanonicalGuid -Value $Plan.management_adapter.switch_id `
+        -Label 'management switch'
+    if ([string]$Plan.management_adapter.switch_name -ieq
+            [string]$Plan.support.switch_name -or
+        [string]$Plan.management_adapter.name -ieq
+            [string]$Plan.support.vm_adapter_name -or
+        [string]$Plan.source_checkpoint.name -ieq
+            [string]$Plan.lab_checkpoint.name) {
+        throw 'topology plan management and support identities are not isolated'
     }
     $network = [Net.IPNetwork]::Parse([string]$Plan.support.network)
     $hostAddress = [Net.IPAddress]::Parse([string]$Plan.support.host_ipv4)
     $guestAddress = [Net.IPAddress]::Parse([string]$Plan.support.guest_ipv4)
+    $baseBytes = $network.BaseAddress.GetAddressBytes()
+    $firstHostBytes = [byte[]]$baseBytes.Clone()
+    $secondHostBytes = [byte[]]$baseBytes.Clone()
+    $firstHostBytes[3] = [byte]([int]$firstHostBytes[3] + 1)
+    $secondHostBytes[3] = [byte]([int]$secondHostBytes[3] + 2)
+    $firstHost = [Net.IPAddress]::new($firstHostBytes)
+    $secondHost = [Net.IPAddress]::new($secondHostBytes)
     if ($network.BaseAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
-        $network.PrefixLength -ne 30 -or -not $network.Contains($hostAddress) -or
-        -not $network.Contains($guestAddress) -or
-        [string]$hostAddress -ceq [string]$network.BaseAddress -or
-        [string]$guestAddress -ceq [string]$network.BaseAddress -or
-        [string]$hostAddress -ceq [string]$guestAddress) {
+        $network.PrefixLength -ne 30 -or
+        [string]$network -cne [string]$Plan.support.network -or
+        [string]$hostAddress -cne [string]$firstHost -or
+        [string]$guestAddress -cne [string]$secondHost) {
         throw 'support endpoints are not the two usable IPv4 addresses in the planned /30'
     }
     $managementMac = ConvertTo-Ferrum2CanonicalMacAddress `
@@ -124,15 +134,17 @@ function Assert-TopologyPlanIsolationContract {
     }
     $null = Get-Ferrum2VmAdapterInstanceGuid `
         -AdapterId ([string]$Plan.management_adapter.id) `
-        -ExpectedOwnerId ([string]$Plan.vm.id) -Label 'planned management'
+        -ExpectedOwnerId $vmId -Label 'planned management'
 }
 
 function Read-TopologyPlan {
-    $document = Read-Ferrum2JsonDocument -Path $script:planPath -MaximumBytes 131072
-    if (-not (Test-Ferrum2PathWithinRoot -Path $document.Path `
-            -Root $script:repositoryRoot)) {
-        throw 'topology plan escaped the repository'
-    }
+    param([Parameter(Mandatory)] [string]$Path)
+
+    Assert-Ferrum2NoReparsePointInExistingPath -Path $Path `
+        -Label 'support topology plan'
+    $resolved = Resolve-Ferrum2OrdinaryFile -Path $Path `
+        -Label 'support topology plan' -MaximumBytes 131072
+    $document = Read-Ferrum2JsonDocument -Path $resolved -MaximumBytes 131072
     $plan = $document.Value
 
     Assert-TopologyPlanPropertiesAndTypes -Plan $plan

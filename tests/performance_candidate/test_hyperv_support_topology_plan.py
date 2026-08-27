@@ -1,7 +1,9 @@
 import ipaddress
 import json
 from pathlib import Path
+import re
 import unittest
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,17 +47,14 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
         self.assertIs(type(plan["schema"]), int)
         self.assertEqual(plan["schema"], 1)
         self.assertEqual(
-            plan["vm"],
-            {
-                "name": "Windows 10 MSIX packaging environment",
-                "id": "82e20295-1d30-48e7-a751-e21d35d872d4",
-                "automatic_checkpoints_enabled": False,
-            },
-        )
-        self.assertEqual(
             list(plan["vm"]),
             ["name", "id", "automatic_checkpoints_enabled"],
         )
+        self.assertIs(type(plan["vm"]["name"]), str)
+        self.assertTrue(plan["vm"]["name"].strip())
+        vm_id = uuid.UUID(plan["vm"]["id"])
+        self.assertNotEqual(vm_id.int, 0)
+        self.assertIs(plan["vm"]["automatic_checkpoints_enabled"], False)
         self.assertEqual(
             list(plan["source_checkpoint"]),
             ["name", "id", "type"],
@@ -91,38 +90,29 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
             list(plan["lab_checkpoint"]),
             ["name", "type"],
         )
-        self.assertEqual(
-            plan["source_checkpoint"],
-            {
-                "name": "Ferrum2-TCP08-min-runtime-20260817T172815Z-581D60045FB9",
-                "id": "1e570209-faf7-4248-8167-aa0687cdb8cf",
-                "type": "Standard",
-            },
+        source_checkpoint = plan["source_checkpoint"]
+        self.assertTrue(source_checkpoint["name"].strip())
+        self.assertNotEqual(uuid.UUID(source_checkpoint["id"]).int, 0)
+        self.assertEqual(source_checkpoint["type"], "Standard")
+        self.assertTrue(plan["lab_checkpoint"]["name"].strip())
+        self.assertEqual(plan["lab_checkpoint"]["type"], "Standard")
+        self.assertNotEqual(
+            source_checkpoint["name"], plan["lab_checkpoint"]["name"]
         )
-        self.assertEqual(
-            plan["management_adapter"],
-            {
-                "name": "网络适配器",
-                "id": (
-                    "Microsoft:82E20295-1D30-48E7-A751-E21D35D872D4"
-                    "\\B2D7D8B9-2373-40EE-83C6-CFBBE747CE2A"
-                ),
-                "switch_name": "Default Switch",
-                "switch_id": "c08cb7b8-9b3c-408e-8e30-5e16a3aeb444",
-                "mac_address": "00155D000101",
-                "dynamic_mac_address": True,
-            },
-        )
-        self.assertEqual(
-            plan["lab_checkpoint"],
-            {
-                "name": "Ferrum2-WindowsTun-InternalSupport-v1",
-                "type": "Standard",
-            },
+
+        management = plan["management_adapter"]
+        for field in ("name", "id", "switch_name", "mac_address"):
+            self.assertIs(type(management[field]), str)
+            self.assertTrue(management[field].strip())
+        self.assertNotEqual(uuid.UUID(management["switch_id"]).int, 0)
+        self.assertRegex(management["mac_address"], r"^[0-9A-F]{12}$")
+        self.assertIs(type(management["dynamic_mac_address"]), bool)
+        self.assertTrue(
+            management["id"].upper().startswith(f"MICROSOFT:{str(vm_id).upper()}\\")
         )
 
         network = ipaddress.ip_network(plan["support"]["network"], strict=True)
-        self.assertEqual(network, ipaddress.ip_network("192.168.250.0/30"))
+        self.assertEqual(network.prefixlen, 30)
         self.assertIs(type(plan["support"]["prefix_length"]), int)
         self.assertEqual(plan["support"]["prefix_length"], network.prefixlen)
         self.assertEqual(
@@ -137,17 +127,28 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
         self.assertIs(type(plan["support"]["dns_servers"]), list)
         self.assertEqual(plan["support"]["dns_servers"], [])
         self.assertEqual(plan["support"]["switch_type"], "Internal")
-        self.assertEqual(plan["support"]["switch_name"], "Ferrum2 TUN Support")
-        self.assertEqual(plan["support"]["vm_adapter_name"], "Ferrum2 Support")
-        self.assertEqual(plan["support"]["guest_interface_alias"], "Ferrum2Support")
-        self.assertEqual(plan["support"]["vm_mac_address"], "00155DFA2502")
-        self.assertEqual(plan["management_adapter"]["switch_name"], "Default Switch")
+        for field in (
+            "switch_name",
+            "vm_adapter_name",
+            "guest_interface_alias",
+        ):
+            self.assertTrue(plan["support"][field].strip())
+        self.assertNotEqual(
+            plan["support"]["switch_name"], management["switch_name"]
+        )
+        self.assertNotEqual(
+            plan["support"]["vm_adapter_name"], management["name"]
+        )
+        self.assertTrue(
+            re.fullmatch(
+                r"00155D[0-9A-F]{6}", plan["support"]["vm_mac_address"]
+            )
+        )
 
         support_mac = int(plan["support"]["vm_mac_address"], 16)
         management_mac = int(plan["management_adapter"]["mac_address"], 16)
         self.assertNotEqual(support_mac, management_mac)
         self.assertTrue(plan["support"]["vm_mac_address"].startswith("00155D"))
-        self.assertIs(plan["management_adapter"]["dynamic_mac_address"], True)
         self.assertIs(plan["vm"]["automatic_checkpoints_enabled"], False)
 
     def test_plan_is_utf8_lf_terminated_without_a_bom(self):

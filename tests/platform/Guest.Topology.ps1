@@ -290,14 +290,22 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
         Assert-True ([Guid]::TryParseExact([string]$topology.$name, "D", [ref]$topologyGuid) -and
             $topologyGuid -ne [Guid]::Empty) "identity ledger topology GUID is invalid: $name"
     }
-    Assert-True ([string]$topology.support_host_ipv4 -ceq "192.168.250.1" -and
-        [string]$topology.support_network -ceq "192.168.250.0/30" -and
-        $topology.support_prefix_length -is [long] -and [long]$topology.support_prefix_length -eq 30 -and
-        [string]$topology.guest_interface_alias -ceq "Ferrum2Support" -and
+    $supportNetwork = [Net.IPNetwork]::Parse([string]$topology.support_network)
+    $supportHostAddress = [Net.IPAddress]::Parse([string]$topology.support_host_ipv4)
+    $supportGuestAddress = [Net.IPAddress]::Parse([string]$topology.guest_ipv4)
+    Assert-True ($supportNetwork.BaseAddress.AddressFamily -eq
+            [Net.Sockets.AddressFamily]::InterNetwork -and
+        $supportNetwork.PrefixLength -eq 30 -and
+        $supportNetwork.Contains($supportHostAddress) -and
+        $supportNetwork.Contains($supportGuestAddress) -and
+        [string]$supportHostAddress -cne [string]$supportGuestAddress -and
+        $topology.support_prefix_length -is [long] -and
+        [long]$topology.support_prefix_length -eq 30 -and
+        -not [string]::IsNullOrWhiteSpace([string]$topology.guest_interface_alias) -and
         $topology.guest_interface_index -is [long] -and [long]$topology.guest_interface_index -gt 0 -and
         [string]$topology.guest_mac_address -cmatch '^[0-9A-F]{12}$' -and
-        [string]$topology.guest_ipv4 -ceq "192.168.250.2" -and
-        $topology.guest_mtu_bytes -is [long] -and [long]$topology.guest_mtu_bytes -eq 1500 -and
+        $topology.guest_mtu_bytes -is [long] -and
+        [long]$topology.guest_mtu_bytes -ge 1468 -and
         [string]$topology.protected_host_tun_name -ceq "tun0" -and
         $topology.protected_host_tun_index -is [long] -and [long]$topology.protected_host_tun_index -gt 0 -and
         [string]$topology.protected_host_tun_status -ceq "Up" -and

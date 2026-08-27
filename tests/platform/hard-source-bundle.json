@@ -9,8 +9,8 @@
     },
     {
       "path": "tests/platform/Hard.HostController.ps1",
-      "bytes": 23417,
-      "sha256": "948c4307e02a5aa0b4083f3f6c7b66633c16fa805f95b036ba38dfea46d6a37a"
+      "bytes": 23624,
+      "sha256": "b6e5babc8a6c300a9e0be56e739f3c339eb2fb43c1ca6e463b0f8f52ad794033"
     },
     {
       "path": "tests/platform/Hard.HostTransaction.ps1",
@@ -24,8 +24,8 @@
     },
     {
       "path": "tests/platform/run_windows_tun_hard_kill_hyperv.ps1",
-      "bytes": 8499,
-      "sha256": "d8b5a32386cf210cc1249d767fb97bb29aee0596c88f0bc70d8668382c3c60c9"
+      "bytes": 8643,
+      "sha256": "7239ebf8e321d227ce2f38e534d61d3863566bc6452dfe702a5874650ce530a4"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psd1",
@@ -74,8 +74,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/VmTransaction.ps1",
-      "bytes": 14440,
-      "sha256": "cf969e96e61328031dad5f997c29138353263b1cb2366b5b10f7f1f72654b3ee"
+      "bytes": 14551,
+      "sha256": "d95d99bf1cb64449951768cd06b3572c21997a425df52927ebd9b976a490e754"
     },
     {
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
@@ -119,14 +119,14 @@
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
-      "bytes": 34634,
-      "sha256": "07a70176093c9c55a09c46a43b3cb8e70eb65fb37812f6afc61280827c6c2769"
+      "bytes": 35002,
+      "sha256": "016642b525eb4ddfa88b9ed7093e0183653f3e1c423b70ea572b9f05a28b38b4"
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
-      "bytes": 37689,
-      "sha256": "c4e5396c9718d6307981175b6278b65293d0fc79854b1ad219a16db37ecd072f"
+      "bytes": 37786,
+      "sha256": "f8ded02c67aa30a72d75abeff410c3d965bc5c1482167a26eed1653f8c8a8fc1"
     }
   ],
-  "controller_bundle_sha256": "58fba0f15c63adbb090508d598ff721c4ce86128701d76aa173997c6571524ca"
+  "controller_bundle_sha256": "00e145042345b8bfd02ae41f4d13495e8ac8cfca83ec8d390983e6505c172011"
 }

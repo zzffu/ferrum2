@@ -18,6 +18,7 @@ param(
     [string]$RunToken,
     [Parameter(Mandatory)] [string]$IdentityLedger,
     [Parameter(Mandatory)] [string]$CandidateArtifactManifest,
+    [Parameter(Mandatory)] [string]$TopologyPlanPath,
     [Parameter(Mandatory)] [string]$TopologyManifestPath,
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{64}$')]
@@ -84,6 +85,7 @@ $context = [ordered]@{
     profile = $Profile
     run_token = $RunToken
     identity_ledger = $IdentityLedger
+    topology_plan_path = $TopologyPlanPath
     topology_manifest_path = $TopologyManifestPath
     topology_manifest_sha256 = $TopologyManifestSha256
     support_tcp_port = $SupportTcpPort

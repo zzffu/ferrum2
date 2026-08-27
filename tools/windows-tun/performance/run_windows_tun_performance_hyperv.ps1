@@ -58,6 +58,10 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$CandidateSha,
 
+    [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+    [string]$TopologyPlanPath,
+
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [string]$EvidenceDirectory,
 
@@ -273,12 +277,8 @@ $performanceSourceBundle = $verifiedPerformanceSource.Manifest
 $runnerSourceSha256 = [string]$verifiedPerformanceSource.ManifestSha256
 $performanceSourceBundleRelative = `
     'tools/powershell/Ferrum2.Performance/bundle.json'
-$runtimePlanRelative = 'tools/windows_tun_hyperv_support_topology_plan.json'
 $provisioningManifestRelative = `
     'tools/windows-tun/lab/provisioning-source-bundle.json'
-Add-Ferrum2BootstrapSourceDependency -Closure $verifiedPerformanceSource `
-    -RepositoryRoot $repositoryRoot -RequiredRoot $repositoryRoot `
-    -RelativePath $runtimePlanRelative | Out-Null
 $provisioningManifestMember = Add-Ferrum2BootstrapSourceDependency `
     -Closure $verifiedPerformanceSource `
     -RepositoryRoot $repositoryRoot -RequiredRoot $repositoryRoot `
@@ -379,7 +379,7 @@ $topologyRuntimeSha256 = (Get-FileHash -LiteralPath $topologyRuntimePath `
     -Algorithm SHA256).Hash.ToLowerInvariant()
 $guestNetworkPathProbeSourceSha256 = (Get-FileHash `
     -LiteralPath $guestNetworkPathProbePath -Algorithm SHA256).Hash.ToLowerInvariant()
-$topologyPlanDocument = Read-Ferrum2SupportTopologyPlanDocument
+$topologyPlanDocument = Read-Ferrum2SupportTopologyPlanDocument -Path $TopologyPlanPath
 $approvedVmName = [string]$topologyPlanDocument.Value.vm.name
 $approvedVmId = [Guid][string]$topologyPlanDocument.Value.vm.id
 $approvedCheckpointName = [string]$topologyPlanDocument.Value.lab_checkpoint.name
@@ -396,7 +396,8 @@ $supportGuestInterfaceGuid = [Guid]::Empty
 $supportGuestMtuBytes = 0
 if (-not $PlanOnly) {
     $topologyManifestDocument = Read-Ferrum2SupportTopologyManifest `
-        -Path $TopologyManifestPath -ExpectedSha256 $TopologyManifestSha256 `
+        -Path $TopologyManifestPath -TopologyPlanPath $topologyPlanDocument.Path `
+        -ExpectedSha256 $TopologyManifestSha256 `
         -RepositoryRoot $repositoryRoot
     $approvedCheckpointId = [Guid][string]$topologyManifestDocument.Value.lab_checkpoint.id
     $supportGuestInterfaceGuid = [Guid][string]$topologyManifestDocument.Value.support.guest.

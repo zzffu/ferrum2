@@ -1,7 +1,7 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 $expectedFields = @(
     'repository_root', 'internal_worker_token', 'candidate_artifact_manifest',
-    'profile', 'run_token', 'identity_ledger', 'topology_manifest_path',
+    'profile', 'run_token', 'identity_ledger', 'topology_plan_path', 'topology_manifest_path',
     'topology_manifest_sha256', 'support_tcp_port', 'support_udp_port',
     'support_pid', 'support_owner', 'wintun_zip', 'powershell_zip',
     'evidence_directory', 'credential_path', 'readiness_timeout_seconds',
@@ -14,6 +14,7 @@ $candidateArtifactManifest = [string]$Context.candidate_artifact_manifest
 $qualificationProfile = [string]$Context.profile
 $RunToken = [string]$Context.run_token
 $IdentityLedger = [string]$Context.identity_ledger
+$TopologyPlanPath = [string]$Context.topology_plan_path
 $TopologyManifestPath = [string]$Context.topology_manifest_path
 $TopologyManifestSha256 = [string]$Context.topology_manifest_sha256
 $SupportTcpPort = [int]$Context.support_tcp_port
@@ -45,6 +46,7 @@ $hostNetworkPathHelperSha256 = [string]$hostRuntime.host_network_path_helper_sha
 $guestNetworkPathProbeSha256 = [string]$hostRuntime.guest_network_path_probe_sha256
 $guestNetworkPathProbePath = [string]$hostRuntime.guest_network_path_probe
 $topologyInitialization = Initialize-ApprovedHyperVTopology `
+    -TopologyPlanPath $TopologyPlanPath `
     -ManifestPath $TopologyManifestPath -ExpectedSha256 $TopologyManifestSha256
 $topologyDocument = $topologyInitialization.Document
 $approvedVmName = [string]$topologyDocument.Value.vm.name
