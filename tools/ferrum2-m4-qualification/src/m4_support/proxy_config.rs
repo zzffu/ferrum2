@@ -11,6 +11,13 @@ fn render_client_shadowsocks_outbound(tag: &str, server: SocketAddrV4) -> String
     )
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum M14TcpProfile {
+    Rules64,
+    HttpSniff,
+    TlsSniff,
+}
+
 pub(super) fn ferrum_client_config(
     listen: SocketAddrV4,
     server: SocketAddrV4,
@@ -159,6 +166,44 @@ pub(super) fn m14_udp_server_config(listen: SocketAddrV4, max_buffered_bytes: us
          [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
          [logging]\nlevel = \"error\"\n"
     )
+}
+
+pub(super) fn m14_tcp_server_config(listen: SocketAddrV4, profile: M14TcpProfile) -> String {
+    match profile {
+        M14TcpProfile::Rules64 => {
+            let mut rules = String::new();
+            for port in 1..=64 {
+                rules.push_str(&format!(
+                    "[[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = {port}\n\
+                     action = \"route\"\noutbound = \"direct\"\n"
+                ));
+            }
+            format!(
+                "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
+                 [[outbounds]]\ntag = \"direct\"\n[route]\nfinal = \"direct\"\n{rules}\
+                 [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+                 [udp]\nenabled = false\n[logging]\nlevel = \"error\"\n"
+            )
+        }
+        M14TcpProfile::HttpSniff | M14TcpProfile::TlsSniff => {
+            let protocol = match profile {
+                M14TcpProfile::HttpSniff => "http",
+                M14TcpProfile::TlsSniff => "tls",
+                M14TcpProfile::Rules64 => unreachable!(),
+            };
+            format!(
+                "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
+                 [[outbounds]]\ntag = \"direct\"\n[route]\nfinal = \"direct\"\n\
+                 [route.sniff]\ntimeout_ms = 300\nmax_bytes = 8192\n\
+                 [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\naction = \"sniff\"\n\
+                 sniffers = \"{protocol}\"\n\
+                 [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nprotocol = \"{protocol}\"\n\
+                 action = \"reject\"\n\
+                 [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+                 [udp]\nenabled = false\n[logging]\nlevel = \"error\"\n"
+            )
+        }
+    }
 }
 
 pub(super) fn ferrum_dns_resource_server_config(

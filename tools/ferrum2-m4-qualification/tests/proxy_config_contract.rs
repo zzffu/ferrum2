@@ -116,11 +116,20 @@ fn generated_server_configs_keep_the_real_v2_server_contract() {
     let dns_resource =
         proxy_config::ferrum_dns_resource_server_config(server, address(5_355), address(9_091));
     let m14_udp = proxy_config::m14_udp_server_config(server, 1_048_576);
+    let m14_rules =
+        proxy_config::m14_tcp_server_config(server, proxy_config::M14TcpProfile::Rules64);
+    let m14_http =
+        proxy_config::m14_tcp_server_config(server, proxy_config::M14TcpProfile::HttpSniff);
+    let m14_tls =
+        proxy_config::m14_tcp_server_config(server, proxy_config::M14TcpProfile::TlsSniff);
 
     for (name, source) in [
         ("ordinary", ordinary),
         ("DNS resource", dns_resource),
         ("M14 UDP", m14_udp),
+        ("M14 TCP 64 rules", m14_rules),
+        ("M14 TCP HTTP sniff", m14_http),
+        ("M14 TCP TLS sniff", m14_tls),
     ] {
         let file = write_config(&source);
         let prepared = prepare_server(file.path())

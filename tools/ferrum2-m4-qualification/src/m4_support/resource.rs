@@ -29,8 +29,8 @@ use super::process_support::{
 };
 use super::profile_contract::{HostedArgs, PROFILE_SOCKS_IPV4_HEADER_BYTES, Topology};
 use super::proxy_config::{
-    ferrum_client_config, ferrum_server_config, m14_dns_hijack_client_config,
-    m14_udp_client_config, m14_udp_server_config,
+    M14TcpProfile, ferrum_client_config, ferrum_server_config, m14_dns_hijack_client_config,
+    m14_tcp_server_config, m14_udp_client_config, m14_udp_server_config,
 };
 use super::resource_sampling::{
     establish_sessions, sample_pair, validate_drain, validate_owner_tuple, validate_samples,
@@ -222,13 +222,6 @@ pub(super) fn run_resource(arguments: HostedArgs) -> Result<String, String> {
          drain=PASS sha={} run_id={} run_attempt={}",
         identity.sha, identity.run_id, identity.run_attempt
     ))
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum M14TcpProfile {
-    Rules64,
-    HttpSniff,
-    TlsSniff,
 }
 
 pub(super) fn run_m14_measurements(output: &mut Evidence, work: &Path) -> Result<(), String> {
@@ -453,44 +446,6 @@ pub(super) fn run_m14_tcp_measurement(
         elapsed.as_nanos(),
         json(&config_hash),
     ))
-}
-
-pub(super) fn m14_tcp_server_config(listen: SocketAddrV4, profile: M14TcpProfile) -> String {
-    match profile {
-        M14TcpProfile::Rules64 => {
-            let mut rules = String::new();
-            for port in 1..=64 {
-                rules.push_str(&format!(
-                    "[[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = {port}\n\
-                     action = \"route\"\noutbound = \"direct\"\n"
-                ));
-            }
-            format!(
-                "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
-                 [[outbounds]]\ntag = \"direct\"\n[route]\nfinal = \"direct\"\n{rules}\
-                 [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-                 [udp]\nenabled = false\n[logging]\nlevel = \"error\"\n"
-            )
-        }
-        M14TcpProfile::HttpSniff | M14TcpProfile::TlsSniff => {
-            let protocol = match profile {
-                M14TcpProfile::HttpSniff => "http",
-                M14TcpProfile::TlsSniff => "tls",
-                _ => unreachable!(),
-            };
-            format!(
-                "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
-             [[outbounds]]\ntag = \"direct\"\n[route]\nfinal = \"direct\"\n\
-             [route.sniff]\ntimeout_ms = 300\nmax_bytes = 8192\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\naction = \"sniff\"\n\
-             sniffers = \"{protocol}\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nprotocol = \"{protocol}\"\n\
-             action = \"reject\"\n\
-             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-             [udp]\nenabled = false\n[logging]\nlevel = \"error\"\n"
-            )
-        }
-    }
 }
 
 pub(super) fn run_m14_udp_measurement(output: &mut Evidence, work: &Path) -> Result<(), String> {
