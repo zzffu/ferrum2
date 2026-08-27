@@ -66,6 +66,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
       REQUESTED_PARENT_SHA: ${{ inputs.parent_sha }}
       MODE: ${{ inputs.mode }}
       SELECTION: ${{ inputs.selection }}

@@ -20,7 +20,7 @@ from tools.performance_candidate.linux.scale_lineage import validate_scale_linea
 from tools.performance_candidate.linux.trial import _read_trial, _validate_trial
 from tools.performance_candidate.output import _atomic_text
 from tools.performance_candidate.pairing import _display_decimal, _improvement, _median, _observed_direction, _stability_warnings
-from tools.performance_candidate.status import CALIBRATION_REQUIRED, CANDIDATE_WIN, INCONCLUSIVE, INVALID, REGRESSION, WITHIN_CALIBRATED_BAND, qualification_exit_code
+from tools.performance_candidate.status import CALIBRATION_REQUIRED, CANDIDATE_WIN, INCONCLUSIVE, INVALID, REGRESSION, WITHIN_CALIBRATED_BAND, summary_exit_code
 
 def _scenario_threshold_decision(
     *,
@@ -714,7 +714,7 @@ def run_summary_command(parsed: argparse.Namespace) -> int:
         print(f"performance-candidate: {error}", file=sys.stderr)
         return 2
     write_summary_outputs(summary, output=parsed.output, markdown=parsed.markdown)
-    exit_code = qualification_exit_code(summary["status"])
+    exit_code = summary_exit_code(mode=plan["mode"], status=summary["status"])
     if exit_code:
         print(
             f"performance-candidate: qualification status={summary['status']}",

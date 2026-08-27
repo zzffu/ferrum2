@@ -695,7 +695,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                 "markdown": markdown,
             },
         )()
-        self.assertEqual(linux_decision.run_summary_command(arguments), 4)
+        self.assertEqual(linux_decision.run_summary_command(arguments), 0)
         summary = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(summary["schema_version"], linux_catalog.SUMMARY_SCHEMA_VERSION)
         self.assertEqual(summary["status"], "INCONCLUSIVE")
