@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use local_support::{
     ChildExit, ChildGuard, LoopbackReservation, MetricsReadinessFailure, TCP_METHOD_CONFIGS,
-    active_child_count, bind_loopback_listener, force_outbound_policy_denial, reserve_loopback,
-    reserve_unused_loopback, rewrite_config_method, wait_for_metrics_ready, write_client_config,
+    active_child_count, bind_loopback_listener, reserve_loopback, reserve_unused_loopback,
+    rewrite_config_method, wait_for_metrics_ready, write_client_config,
     write_tcp_only_server_config,
 };
 
@@ -565,7 +565,6 @@ fn connect_failure_cycle(
     let config = write_client_config(directory.path(), proxy, unavailable_server, Some(metrics))
         .expect("client config");
     rewrite_config_method(&config, method).expect("client method");
-    force_outbound_policy_denial(&config, "proxy-out").expect("deny client outbound policy");
     let addresses = [proxy, metrics, unavailable_server, target];
     let child = match spawn_reserved_child(
         "ferrum2-client",
@@ -587,7 +586,7 @@ fn connect_failure_cycle(
         }
     };
     let (_stream, reply) = socks_request(proxy, target);
-    assert_eq!(reply, [5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
     drop(target_listener);
     finish_cycle(directory, vec![child], &addresses, baseline_children);
     Ok(())

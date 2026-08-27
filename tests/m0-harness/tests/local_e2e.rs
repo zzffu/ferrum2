@@ -270,11 +270,10 @@ fn failures_pre_success_connect_and_post_success_target_refusal() {
     let client_config =
         write_client_config(directory.path(), client_address, unavailable_server, None)
             .expect("client config");
-    force_outbound_policy_denial(&client_config, "proxy-out").expect("deny client outbound policy");
     let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
     wait_for_listener(&mut client, client_address);
     let (_socks, reply) = socks_connect(client_address, unused_loopback());
-    assert_eq!(reply, [5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
     drop(client);
 
     let server_address = unused_loopback();

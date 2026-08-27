@@ -152,8 +152,6 @@ fn tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_vi
         "\n[route]\nfinal = \"out-0\"\n[[route.rules]]\ninbound = \"in-b\"\nnetwork = \"tcp\"\naction = \"route\"\noutbound = \"out-1\"\n[[route.rules]]\ninbound = \"in-b\"\naction = \"route\"\noutbound = \"out-0\"\n[[route.rules]]\nnetwork = \"udp\"\naction = \"route\"\noutbound = \"out-0\"\n",
     )
     .expect("routed no-fallback client");
-    force_outbound_policy_denial(&client_config, "out-1")
-        .expect("deny no-fallback outbound policy");
     let mut server = ChildGuard::spawn("ferrum2-server", &server_config);
     wait_for_listener(&mut server, live_server);
     let mut client = ChildGuard::spawn("ferrum2-client", &client_config);
@@ -161,7 +159,7 @@ fn tagged_tcp_shared_outbound_no_fallback_and_aggregate_admission_are_process_vi
         wait_for_listener(&mut client, address);
     }
     let (_socks, reply) = socks_connect(clients[1], unused_loopback());
-    assert_eq!(reply, [5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
     let (target, echo) = start_echo();
     let (mut socks, reply) = socks_connect(clients[0], target);
     assert_eq!(&reply[..4], &[5, 0, 0, 1]);
@@ -439,10 +437,6 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
             Some(metrics[0]),
         )
         .expect("client config");
-        if matches!(failure, Failure::FirstUnavailable) {
-            force_outbound_policy_denial(&client_config, "hop-a")
-                .expect("deny first-hop outbound policy");
-        }
         let a_psk = if matches!(failure, Failure::FirstWrong) {
             explicit.1
         } else {
@@ -493,7 +487,7 @@ fn fixed_two_hop_tcp_chain_uses_distinct_credentials_and_reaps() {
         drop(unavailable_server_reservation);
         let (mut socks, reply) = socks_connect(client_address, target_address);
         if matches!(failure, Failure::FirstUnavailable) {
-            assert_eq!(reply, [5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(reply, [5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
         } else if reply[1] == 0 {
             socks.shutdown(Shutdown::Write).expect("failure half close");
             let mut byte = [0_u8; 1];

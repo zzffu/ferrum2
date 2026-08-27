@@ -287,21 +287,6 @@ pub fn route_tagged_config(path: &Path, route: &str) -> io::Result<()> {
     fs::write(path, config + route)
 }
 
-pub fn force_outbound_policy_denial(path: &Path, outbound_tag: &str) -> io::Result<()> {
-    const MISSING_INTERFACE: &str = "ferrum2-m0-missing-interface-7f43c4d8";
-
-    let config = fs::read_to_string(path)?;
-    let header = format!("[[outbounds]]\ntag = \"{outbound_tag}\"\n");
-    if config.matches(&header).count() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "outbound tag is not unique in test config",
-        ));
-    }
-    let replacement = format!("{header}bind_interface = \"{MISSING_INTERFACE}\"\n");
-    fs::write(path, config.replacen(&header, &replacement, 1))
-}
-
 pub fn write_client_config_with_psk(
     directory: &Path,
     listen: SocketAddrV4,

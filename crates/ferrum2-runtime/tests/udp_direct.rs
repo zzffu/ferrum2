@@ -141,8 +141,8 @@ async fn initial_candidates_select_socket_and_send_first_domain_datagram_without
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
 
     assert!(runtime.remove_session(handle));
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
     wait_for_zero_udp_owners(&registry).await;
-    runtime.shutdown(Duration::ZERO).await;
 }
 
 #[tokio::test]

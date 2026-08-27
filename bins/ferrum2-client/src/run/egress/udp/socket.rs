@@ -2,6 +2,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
+#[cfg(any(windows, test))]
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;

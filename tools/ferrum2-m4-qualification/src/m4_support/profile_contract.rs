@@ -1,6 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
 

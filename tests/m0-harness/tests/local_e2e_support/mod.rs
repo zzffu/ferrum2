@@ -15,11 +15,10 @@ pub(super) use hickory_proto::op::{Message, MessageType, OpCode, Query};
 pub(super) use hickory_proto::rr::{Name, RData, RecordType};
 pub(super) use local_support::{
     ChainRoot, ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, TCP_METHOD_CONFIGS,
-    active_child_count, bind_loopback_listener, force_outbound_policy_denial,
-    rewrite_config_method, route_tagged_config, start_dns_answer, start_dns_script,
-    unused_loopback, unused_tcp_udp_loopback, wait_for_bound, wait_for_listener, wait_for_metrics,
-    wait_for_metrics_sample, wait_for_tcp_udp_bound, write_client_config,
-    write_client_config_with_psk, write_tagged_client_config,
+    active_child_count, bind_loopback_listener, rewrite_config_method, route_tagged_config,
+    start_dns_answer, start_dns_script, unused_loopback, unused_tcp_udp_loopback, wait_for_bound,
+    wait_for_listener, wait_for_metrics, wait_for_metrics_sample, wait_for_tcp_udp_bound,
+    write_client_config, write_client_config_with_psk, write_tagged_client_config,
     write_tagged_dns_server_matrix_config, write_tagged_server_config,
     write_tcp_only_server_config, write_tcp_only_server_config_with_psk,
     write_two_hop_client_config,

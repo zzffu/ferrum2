@@ -7,6 +7,9 @@ use ferrum2_observability::Metrics;
 use ferrum2_runtime::DirectUdpSocketFactory;
 #[cfg(any(windows, test))]
 use ferrum2_runtime::GenerationBoundUdpSocket;
+#[cfg(any(not(windows), test))]
+use ferrum2_runtime::{SystemDirectUdpSocket, SystemDirectUdpSocketFactory};
+#[cfg(any(windows, test))]
 use tokio::net::UdpSocket;
 
 use crate::run::network::ServerNetworkSocketService;
@@ -14,9 +17,6 @@ use crate::run::network::ServerNetworkSocketService;
 use crate::run::network::{
     interface_resolution_result, interface_resolution_source, record_interface_resolution_success,
 };
-#[cfg(test)]
-use ferrum2_runtime::{SystemDirectUdpSocket, SystemDirectUdpSocketFactory};
-
 #[derive(Clone)]
 pub(in crate::run) struct ServerUdpNetworkPolicy {
     pub(super) outbound: DialOptions,
@@ -32,7 +32,7 @@ pub(in crate::run) struct ServerNetworkUdpSocketFactory {
 #[cfg(any(windows, test))]
 pub(super) type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
 #[cfg(all(not(windows), not(test)))]
-pub(super) type ServerPhysicalUdpSocket = UdpSocket;
+pub(super) type ServerPhysicalUdpSocket = SystemDirectUdpSocket;
 
 impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
     type Socket = ServerPhysicalUdpSocket;
@@ -52,11 +52,9 @@ impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
                 &policy.outbound,
                 &policy.route,
             );
-            let local = match selection_destination {
-                SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
-                SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
-            };
-            UdpSocket::bind(local).await
+            SystemDirectUdpSocketFactory
+                .open((), selection_destination)
+                .await
         }
 
         #[cfg(any(windows, test))]

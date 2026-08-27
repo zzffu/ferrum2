@@ -39,9 +39,9 @@ mod readiness;
 
 #[allow(unused_imports)]
 pub use config::{
-    ChainRoot, force_outbound_policy_denial, rewrite_config_method, route_tagged_config,
-    write_client_config, write_client_config_with_psk, write_server_config,
-    write_server_config_with_psk, write_tagged_client_config, write_tagged_dns_server_config,
+    ChainRoot, rewrite_config_method, route_tagged_config, write_client_config,
+    write_client_config_with_psk, write_server_config, write_server_config_with_psk,
+    write_tagged_client_config, write_tagged_dns_server_config,
     write_tagged_dns_server_matrix_config, write_tagged_server_config,
     write_tcp_only_server_config, write_tcp_only_server_config_with_psk,
     write_two_hop_client_config, write_udp_client_config,

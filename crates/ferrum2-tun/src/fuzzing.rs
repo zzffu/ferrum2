@@ -498,15 +498,40 @@ async fn exercise(input: &[u8]) {
                         association.source(),
                         target(source_selector, target_selector),
                     );
+                    let queued_candidate_owners = candidates.len();
                     let admission = table.admit(endpoints, frame, frame.len(), now_millis, true);
-                    if matches!(admission, Admission::Mapped | Admission::CandidateQueued) {
-                        let datagram = association
-                            .receive()
-                            .await
-                            .expect("accepted mapped datagram remains queued");
-                        assert_eq!(datagram.source(), association.source());
-                        assert_ne!(datagram.target().port(), 0);
-                        assert_eq!(association.first_target(), first_target);
+                    match admission {
+                        Admission::Mapped => {
+                            assert_eq!(candidates.len(), queued_candidate_owners);
+                            let datagram = association
+                                .receive()
+                                .await
+                                .expect("accepted mapped datagram remains queued");
+                            assert_eq!(datagram.source(), association.source());
+                            assert_ne!(datagram.target().port(), 0);
+                            assert_eq!(association.first_target(), first_target);
+                        }
+                        Admission::Provisional => {
+                            assert_eq!(
+                                candidates.len(),
+                                queued_candidate_owners + 1,
+                                "provisional admission publishes one candidate owner"
+                            );
+                        }
+                        Admission::CandidateQueued => {
+                            assert_ne!(
+                                queued_candidate_owners, 0,
+                                "candidate admission retains a queued candidate owner"
+                            );
+                            assert_eq!(
+                                candidates.len(),
+                                queued_candidate_owners,
+                                "candidate datagram queues behind its existing owner"
+                            );
+                        }
+                        Admission::Dropped => {
+                            assert_eq!(candidates.len(), queued_candidate_owners);
+                        }
                     }
                 }
             }
@@ -664,6 +689,17 @@ fn target(source_selector: u8, target_selector: u8) -> SocketAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_queued_after_mapping_expiry_uses_candidate_owner_queue() {
+        const CI_CRASH_E218132E: &[u8] = &[
+            0xab, 0xab, 0xab, 0x92, 0x70, 0x2d, 0x72, 0x65, 0x41, 0xff, 0x73, 0x01, 0x01, 0x20,
+            0x02, 0xfe, 0xff, 0xff, 0x7a, 0x02, 0xff, 0xff, 0xff, 0x65, 0x74, 0x0a, 0x04, 0x04,
+            0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+        ];
+
+        fuzz_udp_reset_races(CI_CRASH_E218132E);
+    }
 
     #[test]
     fn bounded_sequences_cover_reset_before_and_after_commit() {

@@ -42,6 +42,9 @@ SERVER_INVALID_STDERR = (
 STARTUP_BIND_STDERR = (
     b"error[startup.bind] process: unable to prepare required endpoint\n"
 )
+PORTABLE_NATIVE_CLIENT_ROOTS = ("socks", "metrics")
+# Windows no-TUN clients retain the network-change owner used by physical egress.
+WINDOWS_NATIVE_CLIENT_ROOTS = ("network", *PORTABLE_NATIVE_CLIENT_ROOTS)
 STARTUP_BIND_REPORT_FIELDS = frozenset(
     {
         "actual_grace_deadline_elapsed_ns",
@@ -269,10 +272,20 @@ def assert_client_startup_bind_report(
     )
 
 
+def native_client_root(name: str) -> tuple[str, int]:
+    roots = (
+        WINDOWS_NATIVE_CLIENT_ROOTS
+        if sys.platform == "win32"
+        else PORTABLE_NATIVE_CLIENT_ROOTS
+    )
+    require(name in roots, "startup-bind-root-name")
+    return name, roots.index(name)
+
+
 def assert_startup_bind_stderr(
     spec: BinarySpec,
     stderr: bytes,
-    expected_client_root: tuple[str, int],
+    expected_client_root: str,
     expected_shutdown_grace_ns: int,
 ) -> None:
     if spec.role == "server":
@@ -286,7 +299,7 @@ def assert_startup_bind_stderr(
         "client-startup-bind-stderr",
     )
     assert_client_startup_bind_report(
-        lines[0][:-1], expected_client_root, expected_shutdown_grace_ns
+        lines[0][:-1], native_client_root(expected_client_root), expected_shutdown_grace_ns
     )
 
 
@@ -718,7 +731,7 @@ def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
             and result.stdout == b"",
             "occupied-listen-startup-rollback",
         )
-        assert_startup_bind_stderr(spec, result.stderr, ("socks", 0), 1_000_000_000)
+        assert_startup_bind_stderr(spec, result.stderr, "socks", 1_000_000_000)
         probes.append(tcp_listener(metrics))
         if spec.role == "server":
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -741,7 +754,7 @@ def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
             and result.stdout == b"",
             "occupied-startup-rollback",
         )
-        assert_startup_bind_stderr(spec, result.stderr, ("metrics", 1), 1_000_000_000)
+        assert_startup_bind_stderr(spec, result.stderr, "metrics", 1_000_000_000)
         assert_rebindable(spec, listen, None)
     finally:
         occupied_metrics.close()
@@ -785,7 +798,7 @@ def assert_tagged_startup_rollback_once(spec: BinarySpec, directory: Path) -> No
             and result.stdout == b"",
             "tagged-second-listener-rollback",
         )
-        assert_startup_bind_stderr(spec, result.stderr, ("socks", 0), 30_000_000_000)
+        assert_startup_bind_stderr(spec, result.stderr, "socks", 30_000_000_000)
         assert_no_connections(server_traps)
         assert_tagged_rebindable(spec, (listens[0],))
     finally:

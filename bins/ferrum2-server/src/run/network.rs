@@ -3,7 +3,9 @@ use std::sync::Arc;
 #[cfg(all(windows, not(test)))]
 use std::time::Duration;
 
-use ferrum2_core::{ConnectError, ConnectErrorKind};
+#[cfg(any(windows, test))]
+use ferrum2_core::ConnectError;
+use ferrum2_core::ConnectErrorKind;
 #[cfg(any(windows, test))]
 use ferrum2_net::{
     InterfaceResolutionErrorKind, InterfaceSelectionSource, NetworkInterfaceResolver,

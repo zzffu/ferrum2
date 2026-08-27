@@ -96,6 +96,46 @@ class ArtifactTests(unittest.TestCase):
         )
 
 
+class ProviderVersionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.pins = subject.parse_manifest(MANIFEST.read_bytes())
+
+    def test_coredns_accepts_exact_version_and_reviewed_platform_metadata(self) -> None:
+        subject.verify_coredns_version(
+            self.pins[2],
+            "CoreDNS-1.14.6\nlinux/amd64, go1.26.5, 424d125\n",
+        )
+
+    def test_coredns_rejects_unreviewed_version_output_shapes(self) -> None:
+        invalid = {
+            "missing platform metadata": "CoreDNS-1.14.6\n",
+            "wrong version": "CoreDNS-1.14.5\nlinux/amd64, go1.26.5, 424d125\n",
+            "wrong platform": "CoreDNS-1.14.6\nlinux/arm64, go1.26.5, 424d125\n",
+            "unbounded Go version": "CoreDNS-1.14.6\nlinux/amd64, devel, 424d125\n",
+            "wrong revision": "CoreDNS-1.14.6\nlinux/amd64, go1.26.5, deadbee\n",
+            "extra line": (
+                "CoreDNS-1.14.6\nlinux/amd64, go1.26.5, 424d125\nunreviewed\n"
+            ),
+        }
+
+        for case, output in invalid.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(RuntimeError, "CoreDNS version mismatch"):
+                    subject.verify_coredns_version(self.pins[2], output)
+
+    def test_shadowsocks_version_remains_an_exact_single_line_contract(self) -> None:
+        with mock.patch.object(subject, "require_executable"):
+            with mock.patch.object(
+                subject,
+                "run",
+                return_value="shadowsocks 1.24.0\nlinux/amd64\n",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "sslocal version mismatch"):
+                    subject.verify_shadowsocks_rust(
+                        self.pins[1], Path("unused"), subject.Deadline.after(60)
+                    )
+
+
 class ExtractionTests(unittest.TestCase):
     def test_extraction_is_atomic_and_preserves_executable_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

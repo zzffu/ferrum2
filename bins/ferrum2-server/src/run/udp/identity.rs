@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+#[cfg(any(windows, test))]
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ferrum2_runtime::{UdpSessionHandle, UdpSessionManager};
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpServer};

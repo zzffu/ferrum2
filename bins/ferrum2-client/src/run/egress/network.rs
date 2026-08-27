@@ -1,9 +1,12 @@
+#[cfg(any(windows, test))]
 use std::io;
 #[cfg(all(windows, not(test)))]
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ferrum2_core::{ConnectError, ConnectErrorKind, Connector, LocalEndpoint, TargetAddr};
+#[cfg(any(windows, test))]
+use ferrum2_core::ConnectErrorKind;
+use ferrum2_core::{ConnectError, Connector, LocalEndpoint, TargetAddr};
 #[cfg(any(not(windows), test))]
 use ferrum2_dns::ApplicationResolverAdapter;
 #[cfg(test)]

@@ -23,6 +23,8 @@ from typing import Mapping, NoReturn
 REVIEW_BOUNDARY = "execute only as an independent test process; do not redistribute"
 HEX_256 = re.compile(r"[0-9a-f]{64}\Z")
 SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+COREDNS_GO_VERSION = re.compile(r"go[1-9][0-9]*\.[0-9]+\.[0-9]+\Z")
+COREDNS_SHORT_REVISION_LENGTH = 7
 
 
 class Provider(str, Enum):
@@ -356,6 +358,20 @@ def verify_shadowsocks_rust(pin: ProviderPin, root: Path, deadline: Deadline) ->
             raise RuntimeError(f"{name} version mismatch")
 
 
+def verify_coredns_version(pin: ProviderPin, output: str) -> None:
+    lines = output.splitlines()
+    platform = lines[1].split(", ") if len(lines) == 2 else []
+    if (
+        len(lines) != 2
+        or lines[0] != pin.expected_version
+        or len(platform) != 3
+        or platform[0] != "linux/amd64"
+        or COREDNS_GO_VERSION.fullmatch(platform[1]) is None
+        or platform[2] != pin.source_commit[:COREDNS_SHORT_REVISION_LENGTH]
+    ):
+        raise RuntimeError("CoreDNS version mismatch")
+
+
 def verify_coredns(pin: ProviderPin, root: Path, work_root: Path, deadline: Deadline) -> None:
     binary = root / "coredns"
     require_executable(binary)
@@ -365,8 +381,7 @@ def verify_coredns(pin: ProviderPin, root: Path, work_root: Path, deadline: Dead
     download_atomic(pin.license, cached_license, deadline)
     shutil.copyfile(cached_license, root / "LICENSE")
     verify_artifact(root / "LICENSE", pin.license)
-    if run([str(binary), "-version"], deadline).strip() != pin.expected_version:
-        raise RuntimeError("CoreDNS version mismatch")
+    verify_coredns_version(pin, run([str(binary), "-version"], deadline))
 
 
 def build_and_verify_bind(pin: ProviderPin, root: Path, deadline: Deadline) -> None:

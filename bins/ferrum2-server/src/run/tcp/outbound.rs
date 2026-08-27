@@ -16,12 +16,11 @@ use super::prefix::{PrefixFailure, forward_initial_payload};
 use crate::run::dns_egress;
 #[cfg(all(not(windows), not(test)))]
 use crate::run::network::connect_error_kind_from_io;
-use crate::run::network::{
-    ServerNetworkSocketService, ServerPhysicalTcpStream, connect_error_from_network_service,
-};
+use crate::run::network::{ServerNetworkSocketService, ServerPhysicalTcpStream};
 #[cfg(any(windows, test))]
 use crate::run::network::{
-    interface_resolution_result, interface_resolution_source, record_interface_resolution_success,
+    connect_error_from_network_service, interface_resolution_result, interface_resolution_source,
+    record_interface_resolution_success,
 };
 use crate::run::routing::ServerRouting;
 
