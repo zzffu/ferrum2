@@ -18,7 +18,6 @@ class QualificationGroup:
     name: str
     cargo_arguments: tuple[str, ...]
     qualification_arguments: tuple[str, ...]
-    github_status: str
 
 
 @dataclass(frozen=True)
@@ -37,13 +36,11 @@ GROUPS = (
         name="transport",
         cargo_arguments=(),
         qualification_arguments=(),
-        github_status="M3_INTEROP_TRANSPORT_STATUS",
     ),
     QualificationGroup(
         name="dns",
         cargo_arguments=("--features", "ferrum2-dns/__interop-test-root"),
         qualification_arguments=("--dns-only",),
-        github_status="M3_INTEROP_DNS_STATUS",
     ),
 )
 
@@ -75,6 +72,8 @@ def run_group(group: QualificationGroup, target_root: Path | None) -> Qualificat
         (
             "cargo",
             "build",
+            "--target-dir",
+            str(target_root),
             "-p",
             "ferrum2-client",
             "-p",
@@ -111,27 +110,13 @@ def run_all(target_root: Path | None) -> tuple[QualificationResult, ...]:
     return tuple(run_group(group, target_root) for group in GROUPS)
 
 
-def write_github_environment(
-    path: Path, results: tuple[QualificationResult, ...]
-) -> None:
-    if tuple(result.group for result in results) != GROUPS:
-        raise ValueError("interop results must cover the canonical groups in order")
-    rendered = "".join(
-        f"{result.group.github_status}={result.status}\n" for result in results
-    )
-    with path.open("a", encoding="utf-8", newline="\n") as output:
-        output.write(rendered)
-
-
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-root", default="")
-    parser.add_argument("--github-env", type=Path, required=True)
     args = parser.parse_args(arguments)
     target_root = Path(args.target_root) if args.target_root else None
     results = run_all(target_root)
-    write_github_environment(args.github_env, results)
-    return 0
+    return int(any(result.status != 0 for result in results))
 
 
 if __name__ == "__main__":

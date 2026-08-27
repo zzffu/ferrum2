@@ -218,8 +218,9 @@ reset-failure, strict-route reinstall, and full-rebuild counters remain at basel
 at most 1 MiB. The runner revalidates every row and takes 11/12/12 total WFP snapshots respectively,
 including the baseline, without retaining the temporary XML state dumps.
 
-The `fuzz-smoke` row is a separate in-memory deterministic gate. Hosted CI may compile fuzz targets
-but does not execute them. The local host builds `smoke.exe` for
+The `fuzz-smoke` row is a separate in-memory deterministic gate. Hosted CI builds and executes the
+four pure in-memory sanitizer targets in its required fuzz campaign, but it does not execute the
+deterministic Windows `fuzz-smoke` binary. The local host builds `smoke.exe` for
 `x86_64-pc-windows-msvc`, stages it under the same candidate/manifest/hash trust chain as the M17
 artifacts, and never executes it. Only the exact approved guest runs it. Acceptance requires exit
 zero, empty stderr, the exact `TUN state smoke corpora: 4 packet, 3 UDP reset, 8 config legacy, and 8 strict-route seeds passed`

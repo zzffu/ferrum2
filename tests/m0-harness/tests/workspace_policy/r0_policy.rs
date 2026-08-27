@@ -512,8 +512,8 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
         "the independently required fuzz workflow must run on every PR and protected push"
     );
     assert!(
-        fuzz.contains("cancel-in-progress: false"),
-        "an affected fuzz campaign must finish before a later unaffected push can be accepted"
+        fuzz.contains("  cancel-in-progress: false\n  queue: max\n"),
+        "affected fuzz campaigns must use the complete bounded queue so later pushes cannot replace pending coverage"
     );
     let owner_paths = strings(&policy()["fuzz_impact"]["owner_paths"]);
     assert_eq!(

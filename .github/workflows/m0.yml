@@ -514,14 +514,13 @@ jobs:
           set -euo pipefail
           target_root="$(mktemp -d "$RUNNER_TEMP/interop-qualification-target.XXXXXX")"
           printf 'CARGO_TARGET_DIR=%s\n' "$target_root" >> "$GITHUB_ENV"
-      - name: Run every hosted interop qualification group
+      - name: Run and require every hosted interop qualification group
         if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
           python3 -B -m tools.ci.interop_run \
-            --target-root "${CARGO_TARGET_DIR:-}" \
-            --github-env "$GITHUB_ENV"
+            --target-root "${CARGO_TARGET_DIR:-}"
       - name: Delete isolated interop build root
         if: ${{ always() }}
         shell: bash
@@ -547,31 +546,6 @@ jobs:
             echo "m3_interop_cleanup status=$cleanup_status"
           fi
           test "$cleanup_status" -eq 0
-      - name: Require both interop qualification groups
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -u
-          aggregate_status=0
-          for entry in \
-            "transport:${M3_INTEROP_TRANSPORT_STATUS:-}" \
-            "dns:${M3_INTEROP_DNS_STATUS:-}"
-          do
-            name="${entry%%:*}"
-            value="${entry#*:}"
-            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-              printf 'm3_interop_aggregate group=%s status=FAIL reason=missing-or-non-integer value=%q\n' \
-                "$name" "$value" >&2
-              aggregate_status=1
-            elif [ "$value" -ne 0 ]; then
-              printf 'm3_interop_aggregate group=%s status=FAIL qualification=%s\n' "$name" "$value" >&2
-              aggregate_status=1
-            else
-              printf 'm3_interop_aggregate group=%s status=PASS qualification=0\n' "$name"
-            fi
-          done
-          test "$aggregate_status" -eq 0
-
   performance:
     name: performance
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.dispatch_target == 'performance' }}
