@@ -12,8 +12,10 @@ use bytes::BytesMut;
 use ferrum2_crypto::SecureRandom;
 #[cfg(all(windows, not(test)))]
 use ferrum2_net::{DialOptions, RouteNetworkOptions};
+#[cfg(any(windows, test))]
+use ferrum2_runtime::DirectUdpSocket;
 use ferrum2_runtime::{
-    DirectUdpSocket, DirectUdpSocketFactory, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
+    DirectUdpSocketFactory, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 use tokio::net::UdpSocket;
@@ -85,6 +87,7 @@ pub(super) enum ClientDirectUdpSocket {
 pub(super) enum ClientProxyUdpSocket {
     #[cfg(any(not(windows), test))]
     Connected(UdpSocket),
+    #[cfg(any(windows, test))]
     Addressed {
         socket: ClientDirectUdpSocket,
         peer: SocketAddr,
@@ -264,6 +267,7 @@ impl ClientProxyUdpSocket {
         match self {
             #[cfg(any(not(windows), test))]
             Self::Connected(socket) => socket.send(payload).await,
+            #[cfg(any(windows, test))]
             Self::Addressed { socket, peer } => socket.send_to(payload, *peer).await,
         }
     }
@@ -276,6 +280,7 @@ impl ClientProxyUdpSocket {
                 let length = socket.recv_buf(payload).await?;
                 validate_response_length(length, payload)
             }
+            #[cfg(any(windows, test))]
             Self::Addressed { socket, peer } => loop {
                 payload.clear();
                 let (length, source) = socket.recv_buf_from(payload).await?;
