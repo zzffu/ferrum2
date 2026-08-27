@@ -257,6 +257,9 @@ def m4_windows_tun_bundle_sha256() -> str:
         "mod.rs",
         "scenarios.rs",
         "self_check.rs",
+        "self_check/cli_contract.rs",
+        "self_check/diagnostic.rs",
+        "self_check/workload.rs",
         "support.rs",
         "workload.rs",
         "workload_diagnostic.rs",
@@ -274,9 +277,15 @@ def m4_windows_tun_bundle_sha256() -> str:
             raise CandidateControlError("M4 Windows TUN bundle file must be an object")
         _exact_fields(entry, {"bytes", "path", "sha256"}, "M4 Windows TUN bundle file")
         relative = entry["path"]
-        if type(relative) is not str or pathlib.Path(relative).name != relative:
+        relative_path = pathlib.PurePosixPath(relative) if type(relative) is str else None
+        if (
+            relative_path is None
+            or relative_path.is_absolute()
+            or relative_path.as_posix() != relative
+            or any(part in ("", ".", "..") for part in relative_path.parts)
+        ):
             raise CandidateControlError("M4 Windows TUN bundle file path is unsafe")
-        source = manifest_path.parent / relative
+        source = manifest_path.parent.joinpath(*relative_path.parts)
         if relative in observed_files or not source.is_file() or source.is_symlink():
             raise CandidateControlError("M4 Windows TUN bundle file set is invalid")
         if (

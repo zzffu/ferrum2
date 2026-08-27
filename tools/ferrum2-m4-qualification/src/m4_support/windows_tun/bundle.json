@@ -25,8 +25,23 @@
     },
     {
       "path": "self_check.rs",
-      "bytes": 46108,
-      "sha256": "68ca73ae9f325ad2e4a67c90ccf28fee3a7b26971f2f0ccce5b497f8087c43a7"
+      "bytes": 381,
+      "sha256": "e91266bba1768ecd29bda36e0213c34227f7b47cb081825154ef3653811dcf81"
+    },
+    {
+      "path": "self_check/cli_contract.rs",
+      "bytes": 15207,
+      "sha256": "28d6d5118563d0845b4c5d052e37aea3b66bc54127a119028b72142c1d5d2869"
+    },
+    {
+      "path": "self_check/diagnostic.rs",
+      "bytes": 22416,
+      "sha256": "9333d979496b5b4517ff1d80dd3f86663501603080640b83bf7e189584c47fa1"
+    },
+    {
+      "path": "self_check/workload.rs",
+      "bytes": 9305,
+      "sha256": "80996d2c63531f30be22c73268ca51a2eca61deeaf12ed56f97d8717d504331e"
     },
     {
       "path": "support.rs",
