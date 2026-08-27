@@ -34,8 +34,9 @@ external repository setting; unknown values stay marked as gaps rather than bein
 - The root ordinary test gate excludes `ferrum2-client`, `ferrum2-tun`, and the Windows platform
   crate, then compiles their test binaries with `--no-run`. Hosted Linux additionally executes only
   the exact unsupported-target TUN preparation test, which cannot open an adapter.
-- `qualify_native.py --local-contract` runs the same unprivileged native behavior checks locally;
-  hosted mode still requires the exact GitHub runner, SHA, clean checkout, and evidence identity.
+- `native_contract.py` owns the unprivileged native behavior checks.
+  `qualify_native.py --local-contract` runs them locally; hosted mode still requires the exact
+  GitHub runner, SHA, clean checkout, and evidence identity.
 - Root CI and fuzz-static expose separate `required` jobs. Branch protection must require both stable
   contexts; because repository settings are external, that readback remains a gap.
 - Hosted Linux may execute only the four pure in-memory sanitizer fuzz targets and the exact

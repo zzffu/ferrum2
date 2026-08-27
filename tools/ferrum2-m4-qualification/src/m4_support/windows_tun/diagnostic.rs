@@ -58,7 +58,6 @@ pub(crate) const UDP_DIAGNOSTIC_VERSION: u8 = 1;
 pub(crate) const UDP_DIAGNOSTIC_MAX_EVENTS: usize = 65_536;
 pub(crate) const UDP_DIAGNOSTIC_MAX_EVENT_BYTES: usize = 4 * 1024;
 pub(crate) const UDP_DIAGNOSTIC_SCOPE: &str = "bootstrap";
-pub(crate) const UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE: u16 = 37;
 pub(crate) const UDP_ASSOCIATION_SOURCE_IPV4: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
 pub(crate) const UDP_ASSOCIATION_SOURCE_PORT_FIRST: u16 = 20_000;
 pub(crate) const UDP_ASSOCIATION_SOURCE_PORT_LAST: u16 = 28_191;
@@ -144,22 +143,30 @@ impl UdpDiagnosticPayload {
     }
 }
 
-pub(crate) fn udp_diagnostic_finalize_marker(run_nonce: u64) -> UdpDiagnosticPayload {
-    UdpDiagnosticPayload {
+pub(crate) fn udp_diagnostic_finalize_marker(
+    run_nonce: u64,
+    trial_sequence: u16,
+) -> Result<UdpDiagnosticPayload, String> {
+    if run_nonce == 0 || trial_sequence == 0 {
+        return Err("Windows TUN UDP diagnostic finalize identity must be nonzero".to_owned());
+    }
+    Ok(UdpDiagnosticPayload {
         phase: UdpDiagnosticPhase::Finalize,
-        trial_sequence: UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE,
+        trial_sequence,
         association_index: u32::MAX,
         round: u32::MAX,
         run_nonce,
         packet_nonce: u64::MAX,
-    }
+    })
 }
 
 pub(crate) fn is_udp_diagnostic_finalize_marker(
     identity: UdpDiagnosticPayload,
     run_nonce: u64,
+    trial_sequence: u16,
 ) -> bool {
-    identity == udp_diagnostic_finalize_marker(run_nonce)
+    udp_diagnostic_finalize_marker(run_nonce, trial_sequence)
+        .is_ok_and(|expected| identity == expected)
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +194,7 @@ pub(crate) struct UdpDiagnosticFinalizeArgs {
     pub(crate) target_ip: IpAddr,
     pub(crate) udp_port: u16,
     pub(crate) run_nonce: u64,
+    pub(crate) trial_sequence: u16,
 }
 
 pub(crate) struct BoundedUdpDiagnosticLedger {
@@ -462,14 +470,22 @@ impl BoundedUdpDiagnosticLedger {
 
 pub(crate) struct SupportUdpDiagnostic {
     pub(crate) ledger: BoundedUdpDiagnosticLedger,
-    pub(crate) finalize_slots: Mutex<[bool; ROUTE_TARGET_SLOTS]>,
+    finalize_state: Mutex<UdpDiagnosticFinalizeState>,
+}
+
+struct UdpDiagnosticFinalizeState {
+    trial_sequence: Option<u16>,
+    slots: [bool; ROUTE_TARGET_SLOTS],
 }
 
 impl SupportUdpDiagnostic {
     pub(crate) fn new(ledger: BoundedUdpDiagnosticLedger) -> Self {
         Self {
             ledger,
-            finalize_slots: Mutex::new([false; ROUTE_TARGET_SLOTS]),
+            finalize_state: Mutex::new(UdpDiagnosticFinalizeState {
+                trial_sequence: None,
+                slots: [false; ROUTE_TARGET_SLOTS],
+            }),
         }
     }
 
@@ -486,15 +502,24 @@ impl SupportUdpDiagnostic {
         let Some(identity) = UdpDiagnosticPayload::parse(request) else {
             return;
         };
-        if !is_udp_diagnostic_finalize_marker(identity, self.ledger.run_nonce) {
+        if !is_udp_diagnostic_finalize_marker(
+            identity,
+            self.ledger.run_nonce,
+            identity.trial_sequence,
+        ) {
             return;
         }
-        let mut finalize_slots = self
-            .finalize_slots
+        let mut finalize_state = self
+            .finalize_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        finalize_slots[slot] = true;
-        if finalize_slots.iter().all(|observed| *observed) {
+        match finalize_state.trial_sequence {
+            Some(expected) if expected != identity.trial_sequence => return,
+            None => finalize_state.trial_sequence = Some(identity.trial_sequence),
+            Some(_) => {}
+        }
+        finalize_state.slots[slot] = true;
+        if finalize_state.slots.iter().all(|observed| *observed) {
             self.ledger.close();
         }
     }

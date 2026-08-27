@@ -405,7 +405,8 @@ pub(crate) fn finalize_udp_diagnostic(arguments: UdpDiagnosticFinalizeArgs) -> R
     if local.ip() != arguments.target_ip {
         return Err("Windows TUN UDP diagnostic finalize socket IP mismatch".to_owned());
     }
-    let marker = udp_diagnostic_finalize_marker(arguments.run_nonce).encode();
+    let marker =
+        udp_diagnostic_finalize_marker(arguments.run_nonce, arguments.trial_sequence)?.encode();
     let mut reply = [0_u8; UDP_DIAGNOSTIC_PAYLOAD_LEN];
     for target in targets {
         let sent = socket.send_to(&marker, target).map_err(|error| {
@@ -432,7 +433,7 @@ pub(crate) fn run_udp_diagnostic_finalize(arguments: &[OsString]) -> Result<Stri
         .checked_add((ROUTE_TARGET_SLOTS - 1) as u16)
         .expect("validated Windows TUN UDP diagnostic finalize port range");
     Ok(format!(
-        "windows_tun_udp_diagnostic_finalize status=PASS target={} udp_ports={}..{}",
-        arguments.target_ip, arguments.udp_port, last_port
+        "windows_tun_udp_diagnostic_finalize status=PASS target={} udp_ports={}..{} trial_sequence={}",
+        arguments.target_ip, arguments.udp_port, last_port, arguments.trial_sequence
     ))
 }

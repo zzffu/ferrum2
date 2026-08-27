@@ -1,7 +1,5 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
-#[cfg(any(not(windows), test))]
-use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -26,14 +24,14 @@ use crate::run::egress::network::ClientPhysicalConnector;
 
 use super::direct::{
     DirectUdpCandidateHints, DirectUdpFamily, DirectUdpResponseMatch, DirectUdpResponsePolicy,
-    receive_direct_response, receive_proxy_response, send_direct_target_lazy, send_proxy_request,
+    receive_direct_response, send_direct_target_lazy,
 };
 use super::request::{composed_udp_plan_limit, register_udp_plan};
 use super::response::{
     UdpPlanResponseError, commit_final_udp_response, dns_response_target_matches,
     invalid_dns_target, runtime_error,
 };
-use super::socket::{ClientDirectUdpSocket, ClientUdpSocketFactory};
+use super::socket::{ClientDirectUdpSocket, ClientProxyUdpSocket, ClientUdpSocketFactory};
 #[cfg(test)]
 use super::socket::{UdpIoFaultPlan, UdpIoOperation};
 
@@ -76,10 +74,7 @@ pub(in crate::run) struct ClientUdpAssociation {
 }
 
 enum ClientUdpUpstream {
-    Shadowsocks {
-        socket: ClientDirectUdpSocket,
-        peer: SocketAddr,
-    },
+    Shadowsocks(ClientProxyUdpSocket),
     Direct {
         socket: Option<ClientDirectUdpSocket>,
         factory: ClientUdpSocketFactory,
@@ -576,12 +571,12 @@ impl ClientUdpAssociation {
             return Err(io::Error::other("injected upstream send failure"));
         }
         match &mut self.upstream {
-            ClientUdpUpstream::Shadowsocks { socket, peer } => {
+            ClientUdpUpstream::Shadowsocks(socket) => {
                 let upstream_wire = self
                     .upstream_wire
                     .as_ref()
                     .expect("proxy UDP association owns its upstream wire buffer");
-                send_proxy_request(socket, *peer, &upstream_wire[..wire_len]).await
+                socket.send(&upstream_wire[..wire_len]).await
             }
             ClientUdpUpstream::Direct { socket, factory } => {
                 let tracks_outstanding =
@@ -628,12 +623,12 @@ impl ClientUdpAssociation {
             return Err(io::Error::other("injected upstream receive failure"));
         }
         match &self.upstream {
-            ClientUdpUpstream::Shadowsocks { socket, peer } => {
+            ClientUdpUpstream::Shadowsocks(socket) => {
                 let upstream_wire = self
                     .upstream_wire
                     .as_mut()
                     .expect("proxy UDP association owns its upstream wire buffer");
-                receive_proxy_response(socket, *peer, upstream_wire).await
+                socket.receive(upstream_wire).await
             }
             ClientUdpUpstream::Direct {
                 socket: Some(socket),
@@ -672,13 +667,8 @@ impl ClientUdpAssociation {
     #[cfg(test)]
     pub(in crate::run) fn upstream_local_addr(&self) -> io::Result<SocketAddr> {
         match &self.upstream {
-            ClientUdpUpstream::Shadowsocks {
-                socket: ClientDirectUdpSocket::Raw(socket),
-                ..
-            } => socket.local_addr(),
-            ClientUdpUpstream::Shadowsocks { .. } | ClientUdpUpstream::Direct { .. } => {
-                Err(io::Error::other("UDP socket is opaque"))
-            }
+            ClientUdpUpstream::Shadowsocks(socket) => socket.local_addr(),
+            ClientUdpUpstream::Direct { .. } => Err(io::Error::other("UDP socket is opaque")),
         }
     }
 
@@ -765,17 +755,13 @@ pub(in crate::run) async fn prepare<C, T, R, F, Fut>(
     plan: Option<EgressPlanSnapshot>,
     selected: SelectedEgress,
     target: Option<&TargetAddr>,
-    bind: F,
+    mut bind: F,
 ) -> Result<ClientUdpAssociation, ()>
 where
     C: ClientPhysicalConnector,
     F: FnMut(SocketAddr) -> Fut,
     Fut: std::future::Future<Output = io::Result<UdpSocket>>,
 {
-    #[cfg(any(not(windows), test))]
-    let mut bind = bind;
-    #[cfg(all(windows, not(test)))]
-    let _ = bind;
     let expected_network_generation = egress.connector.network_generation();
     let udp = egress.udp.as_ref().ok_or(())?;
     let direct_resolver = match selected {
@@ -851,40 +837,12 @@ where
                 dial_options,
                 &egress.route_network,
             );
-            #[cfg(all(windows, not(test)))]
-            let socket = factory.open(first_server).await.map_err(|_| ())?;
-            #[cfg(all(not(windows), not(test)))]
-            let socket = {
-                let _ = factory;
-                let bind_address = if first_server.is_ipv4() {
-                    SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
-                } else {
-                    SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
-                };
-                let socket = bind(bind_address).await.map_err(|_| ())?;
-                socket.connect(first_server).await.map_err(|_| ())?;
-                ClientDirectUdpSocket::Raw(socket)
-            };
-            #[cfg(test)]
-            let socket = match &factory {
-                ClientUdpSocketFactory::Injected { .. } => {
-                    factory.open(first_server).await.map_err(|_| ())?
-                }
-                ClientUdpSocketFactory::System => {
-                    let bind_address = if first_server.is_ipv4() {
-                        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
-                    } else {
-                        SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
-                    };
-                    let socket = bind(bind_address).await.map_err(|_| ())?;
-                    socket.connect(first_server).await.map_err(|_| ())?;
-                    ClientDirectUdpSocket::Raw(socket)
-                }
-            };
-            ClientUdpUpstream::Shadowsocks {
-                socket,
-                peer: first_server,
-            }
+            ClientUdpUpstream::Shadowsocks(
+                factory
+                    .open_proxy(first_server, &mut bind)
+                    .await
+                    .map_err(|_| ())?,
+            )
         }
         SelectedEgress::Direct { outbound } => {
             let default_dial_options = DialOptions::default();

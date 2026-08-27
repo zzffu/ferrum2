@@ -36,24 +36,20 @@ try {
         tun_ring_capacity_bytes
     [void](New-NetworkModelPlan -Python $python -Output $hostNetworkModelPlanPath `
         -ExpectedSha256 ([string]$plan.scenarios."network-lifecycle".recipe.network_model_plan_sha256))
-    $executionTrials = @(if ($diagnosticMode) {
-        $plan.trials | Where-Object {
-            [int]$_.sequence -eq $DiagnosticTrialSequence
-        } | Sort-Object sequence
+    $diagnosticTrial = if ($instrumentedDiagnosticMode) {
+        Resolve-CanonicalDiagnosticProfileTrial `
+            -Plan $plan -Profile $DiagnosticProfile
+    } else {
+        $null
+    }
+    $executionTrials = @(if ($instrumentedDiagnosticMode) {
+        $diagnosticTrial
     } else {
         $plan.trials | Sort-Object sequence
     })
-    if (($diagnosticMode -and $executionTrials.Count -ne 1) -or
-        (-not $diagnosticMode -and $executionTrials.Count -ne 108)) {
+    if (($instrumentedDiagnosticMode -and $executionTrials.Count -ne 1) -or
+        (-not $instrumentedDiagnosticMode -and $executionTrials.Count -ne 108)) {
         throw "canonical Windows TUN execution selection is invalid"
-    }
-    if ($instrumentedDiagnosticMode -and (
-        [int]$executionTrials[0].sequence -ne 37 -or
-        [string]$executionTrials[0].scenario -cne
-            "udp-8192-association-lookup-expiry" -or
-        [string]$executionTrials[0].member -cne "parent"
-    )) {
-        throw "UdpFlowBoundary trial identity is not canonical sequence 37 parent"
     }
     $expectedTrialCount = if ($instrumentedDiagnosticMode) {
         0
@@ -69,8 +65,9 @@ try {
     }
     $expectedProcessLogCount = 4 * $expectedTrialCount
     $expectedDiagnosticProcessLogCount = if ($instrumentedDiagnosticMode) { 4 } else { 0 }
-    $diagnosticTrial = if ($diagnosticMode) { $executionTrials[0] } else { $null }
-    $diagnosticSequenceValue = if ($diagnosticMode) { $DiagnosticTrialSequence } else { 0 }
+    $diagnosticSequenceValue = if ($instrumentedDiagnosticMode) {
+        [int]$diagnosticTrial.sequence
+    } else { 0 }
     $scheduleLines = @($plan.trials | ForEach-Object {
         "$($_.sequence)`t$($_.scenario)`t$($_.member)`t$($_.pair)`t$($_.order)"
     })

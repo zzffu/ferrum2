@@ -80,7 +80,7 @@ function New-CanonicalPlan {
         "--output", $Output
     )
     $plan = Get-Content -LiteralPath $Output -Raw -Encoding utf8 | ConvertFrom-Json -Depth 30
-    if ($plan.schema_version -ne 4 -or
+    if ($plan.schema_version -ne 5 -or
         $plan.kind -cne "windows_tun_performance_plan" -or
         $plan.run_kind -cne $RunKindValue -or
         [string]$plan.controller_bundle_sha256 -cne
@@ -88,7 +88,8 @@ function New-CanonicalPlan {
         @($plan.trials).Count -ne 108 -or
         $null -eq $plan.scenarios."udp-route-once" -or
         $null -eq $plan.scenarios."udp-8192-association-lookup-expiry" -or
-        $null -eq $plan.scenarios."network-lifecycle") {
+        $null -eq $plan.scenarios."network-lifecycle" -or
+        $null -eq $plan.diagnostic_profiles.UdpFlowBoundary) {
         throw "canonical Windows TUN plan shape is invalid"
     }
     $plannedRunnerHashes = @($plan.scenarios.PSObject.Properties | ForEach-Object {
@@ -162,6 +163,36 @@ function New-CanonicalPlan {
         throw "canonical Windows TUN UDP source-port contract is invalid"
     }
     return $plan
+}
+
+function Resolve-CanonicalDiagnosticProfileTrial {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)][string]$Profile
+    )
+    $profileProperty = @($Plan.diagnostic_profiles.PSObject.Properties | Where-Object {
+        $_.Name -ceq $Profile
+    })
+    if ($profileProperty.Count -ne 1 -or $null -eq $profileProperty[0].Value) {
+        throw "Windows TUN diagnostic profile is unsupported"
+    }
+    $selector = $profileProperty[0].Value
+    $selectorFields = @($selector.PSObject.Properties.Name | Sort-Object)
+    if (($selectorFields -join "`n") -cne ((@(
+        "member", "order", "pair", "scenario"
+    ) | Sort-Object) -join "`n")) {
+        throw "Windows TUN diagnostic profile selector is invalid"
+    }
+    $matches = @($Plan.trials | Where-Object {
+        [string]$_.scenario -ceq [string]$selector.scenario -and
+        [string]$_.member -ceq [string]$selector.member -and
+        [int]$_.pair -eq [int]$selector.pair -and
+        [int]$_.order -eq [int]$selector.order
+    })
+    if ($matches.Count -ne 1) {
+        throw "Windows TUN diagnostic profile does not resolve to one canonical trial"
+    }
+    return $matches[0]
 }
 
 function New-NetworkModelPlan {

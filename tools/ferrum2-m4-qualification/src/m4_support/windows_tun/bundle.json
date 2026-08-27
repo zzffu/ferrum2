@@ -5,13 +5,13 @@
   "files": [
     {
       "path": "contract.rs",
-      "bytes": 17983,
-      "sha256": "6f76b863f3c2f865514f12965bc1399ed1dae320cf82e3e957f84b7d8e2ae981"
+      "bytes": 18063,
+      "sha256": "6b1b8c6d8ef3c94f339719c47544dc1a9ae979c1583de5c12a508c2b6c567859"
     },
     {
       "path": "diagnostic.rs",
-      "bytes": 26112,
-      "sha256": "98c7eec4ef0ac55fa23fa3d104869847e468e5319527fa43af93232dd5c6a1ac"
+      "bytes": 26853,
+      "sha256": "7242addbcaafff004614756af635b0290d6384273105c00fa8bd8286b55e42e7"
     },
     {
       "path": "mod.rs",
@@ -20,13 +20,13 @@
     },
     {
       "path": "scenarios.rs",
-      "bytes": 17297,
-      "sha256": "b547f09aadca1695299290cc24d9359bb4a86ccbfc11930cab3206109d6c1ce8"
+      "bytes": 17376,
+      "sha256": "682b5d12d2bca7a2b8658cf89276c9c3ab0c61691af573a10e36612332c86fb8"
     },
     {
       "path": "self_check.rs",
-      "bytes": 44673,
-      "sha256": "79b9b37851163fc6f311181de397ac03595d3fc1a84e9a098cbe66bc8b0bed7e"
+      "bytes": 46108,
+      "sha256": "68ca73ae9f325ad2e4a67c90ccf28fee3a7b26971f2f0ccce5b497f8087c43a7"
     },
     {
       "path": "support.rs",

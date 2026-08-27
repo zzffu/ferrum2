@@ -23,7 +23,8 @@ if ($instrumentedDiagnosticMode) {
     Complete-UdpSupportDiagnosticLedger `
         -Executable ([string]$supportFinalContext.executable) `
         -TargetIpv4 $SupportIpv4 -FirstUdpPort $SupportUdpPort `
-        -RunNonce $SupportDiagnosticRunNonce
+        -RunNonce $SupportDiagnosticRunNonce `
+        -TrialSequence ([int]$diagnosticTrial.sequence)
 
     $supportLedgerCopy = Join-Path $hostDiagnosticSupportRoot `
         "udp-support-ledger.ndjson"
@@ -95,7 +96,7 @@ if ($instrumentedDiagnosticMode) {
         [string]$workloadLedgerSummary.Header.closure -cne
             "workload_process_exit" -or
         [int]$workloadLedgerSummary.Header.trial_sequence -ne
-            $DiagnosticTrialSequence -or
+            [int]$diagnosticTrial.sequence -or
         [string]$workloadLedgerSummary.Header.source_ip -cne
             [string]$diagnosticSourcePlan.Ipv4 -or
         [int]$workloadLedgerSummary.Header.source_port_first -ne

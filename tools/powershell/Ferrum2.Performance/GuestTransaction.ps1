@@ -115,7 +115,8 @@ if ([string]$controllerBundleManifest.controller_bundle_sha256 -cne
 }
 if ($InstrumentedDiagnostic) {
     if ($DiagnosticProfileValue -cne "UdpFlowBoundary" -or
-        $DiagnosticTrialSequenceValue -ne 37 -or
+        $DiagnosticTrialSequenceValue -lt 1 -or
+        $DiagnosticTrialSequenceValue -gt 65535 -or
         $RunKindValue -cne "calibration-aa" -or
         $ParentCommit -cne $CandidateCommit -or
         $DiagnosticRunNonce -cnotmatch '^[1-9][0-9]{0,19}$' -or
@@ -250,11 +251,12 @@ if ($InstrumentedDiagnostic -and (
 }
 $plan = Get-Content -LiteralPath (Join-Path $InputRoot "plan.json") -Raw -Encoding utf8 |
     ConvertFrom-Json
-if ($plan.schema_version -ne 4 -or
+if ($plan.schema_version -ne 5 -or
     @($plan.trials).Count -ne 108 -or
     $plan.recipe_sha256 -cne $RecipeSha256 -or
     [string]$plan.controller_bundle_sha256 -cne $ControllerBundleSha256 -or
     $null -eq $plan.scenarios."udp-8192-association-lookup-expiry" -or
+    $null -eq $plan.diagnostic_profiles.UdpFlowBoundary -or
     $plan.scenarios."network-lifecycle".recipe.collector_source_sha256 `
         -cne $collectorHash -or
     $plan.scenarios."network-lifecycle".recipe.performance_source_bundle_sha256 `
@@ -297,28 +299,43 @@ if ($InstrumentedDiagnostic -and (
         $UdpBoundaryCollectorSha256)) {
     throw "guest UDP diagnostic source-port plan changed during staging"
 }
-if ($DiagnosticTrialSequenceValue -lt 0 -or
-    $DiagnosticTrialSequenceValue -gt 108 -or
-    ($DiagnosticTrialSequenceValue -gt 0 -and $RunKindValue -cne "calibration-aa")) {
-    throw "guest diagnostic trial selection is invalid"
+$diagnosticTrial = $null
+if ($InstrumentedDiagnostic) {
+    $profileProperty = @($plan.diagnostic_profiles.PSObject.Properties | Where-Object {
+        $_.Name -ceq $DiagnosticProfileValue
+    })
+    if ($profileProperty.Count -ne 1 -or $null -eq $profileProperty[0].Value) {
+        throw "guest diagnostic profile is unsupported"
+    }
+    $profileSelector = $profileProperty[0].Value
+    $selectorFields = @($profileSelector.PSObject.Properties.Name | Sort-Object)
+    if (($selectorFields -join "`n") -cne ((@(
+        "member", "order", "pair", "scenario"
+    ) | Sort-Object) -join "`n")) {
+        throw "guest diagnostic profile selector is invalid"
+    }
+    $profileTrials = @($plan.trials | Where-Object {
+        [string]$_.scenario -ceq [string]$profileSelector.scenario -and
+        [string]$_.member -ceq [string]$profileSelector.member -and
+        [int]$_.pair -eq [int]$profileSelector.pair -and
+        [int]$_.order -eq [int]$profileSelector.order
+    })
+    if ($profileTrials.Count -ne 1 -or
+        [int]$profileTrials[0].sequence -ne $DiagnosticTrialSequenceValue) {
+        throw "guest diagnostic profile trial does not match the plan"
+    }
+    $diagnosticTrial = $profileTrials[0]
+} elseif ($DiagnosticTrialSequenceValue -ne 0) {
+    throw "guest diagnostic trial sequence requires a diagnostic profile"
 }
-$executionTrials = @(if ($DiagnosticTrialSequenceValue -gt 0) {
-    $plan.trials | Where-Object {
-        [int]$_.sequence -eq $DiagnosticTrialSequenceValue
-    } | Sort-Object sequence
+$executionTrials = @(if ($InstrumentedDiagnostic) {
+    $diagnosticTrial
 } else {
     $plan.trials | Sort-Object sequence
 })
-if (($DiagnosticTrialSequenceValue -gt 0 -and $executionTrials.Count -ne 1) -or
-    ($DiagnosticTrialSequenceValue -eq 0 -and $executionTrials.Count -ne 108)) {
+if (($InstrumentedDiagnostic -and $executionTrials.Count -ne 1) -or
+    (-not $InstrumentedDiagnostic -and $executionTrials.Count -ne 108)) {
     throw "guest canonical trial execution selection is invalid"
-}
-if ($InstrumentedDiagnostic -and (
-    [string]$executionTrials[0].scenario -cne
-        "udp-8192-association-lookup-expiry" -or
-    [string]$executionTrials[0].member -cne "parent"
-)) {
-    throw "guest UdpFlowBoundary trial identity mismatch"
 }
 $expectedTrialCount = if ($InstrumentedDiagnostic) { 0 } else {
     $executionTrials.Count

@@ -28,13 +28,9 @@ host and guest interfaces. The path and generated identities are retained as evi
 PlanOnly validates repository lineage and emits the closed 108-trial plan without building, starting
 the VM, loading a credential, staging files, or executing traffic.
 
-DiagnosticTrialSequence runs exactly one canonical A/A trial while retaining the complete plan and
-the ordinary evidence-export and VM-restore boundaries. Diagnostic evidence is explicitly not a
-qualification result and cannot be used for comparison or calibration adoption.
-
-DiagnosticProfile UdpFlowBoundary is restricted to calibration-aa sequence 37. It writes an
-independent bounded guest/host flow diagnostic under udp-diagnostic and preserves the canonical
-performance and diagnostic evidence paths unchanged.
+DiagnosticProfile UdpFlowBoundary resolves its canonical A/A trial from the plan's stable
+scenario/member/pair/order selector. It writes an independent bounded guest/host flow diagnostic
+under udp-diagnostic and preserves the canonical performance and diagnostic evidence paths unchanged.
 #>
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -98,10 +94,6 @@ param(
     [string]$CredentialPath,
 
     [Parameter(ParameterSetName = "Run")]
-    [ValidateRange(1, 108)]
-    [int]$DiagnosticTrialSequence,
-
-    [Parameter(ParameterSetName = "Run")]
     [ValidateSet("UdpFlowBoundary")]
     [string]$DiagnosticProfile,
 
@@ -128,11 +120,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$diagnosticMode = $PSBoundParameters.ContainsKey("DiagnosticTrialSequence")
 $instrumentedDiagnosticMode = $PSBoundParameters.ContainsKey("DiagnosticProfile")
-if ($diagnosticMode -and $RunKind -cne "calibration-aa") {
-    throw "DiagnosticTrialSequence is restricted to calibration-aa runs"
-}
 $supportDiagnosticParameterNames = @(
     "SupportDiagnosticLedger",
     "SupportDiagnosticRunNonce",
@@ -142,9 +130,8 @@ $supportDiagnosticParametersSupplied = @($supportDiagnosticParameterNames | Wher
     $PSBoundParameters.ContainsKey($_)
 })
 if ($instrumentedDiagnosticMode) {
-    if (-not $diagnosticMode -or $DiagnosticTrialSequence -ne 37 -or
-        $RunKind -cne "calibration-aa") {
-        throw "UdpFlowBoundary requires calibration-aa and DiagnosticTrialSequence 37"
+    if ($RunKind -cne "calibration-aa") {
+        throw "UdpFlowBoundary requires calibration-aa"
     }
     if ($supportDiagnosticParametersSupplied.Count -ne
         $supportDiagnosticParameterNames.Count) {
@@ -628,102 +615,6 @@ if (-not (Test-Path -LiteralPath $hostNetworkPathPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $rawProcessLogs -PathType Container) -or
     $rawProcessLogFiles.Count -ne $expectedProcessLogCount) {
     throw "exported raw evidence is incomplete"
-}
-if ($diagnosticMode) {
-    $diagnosticFileName = "{0:D3}-{1}-{2}-pair-{3}.json" -f @(
-        [int]$diagnosticTrial.sequence,
-        [string]$diagnosticTrial.scenario,
-        [string]$diagnosticTrial.member,
-        [int]$diagnosticTrial.pair
-    )
-    $diagnosticTrialPath = Join-Path $rawEvidence $diagnosticFileName
-    $diagnosticTrialItem = Get-Item -LiteralPath $diagnosticTrialPath `
-        -ErrorAction SilentlyContinue
-    if ($rawTrialFiles.Count -ne 1 -or
-        $null -eq $diagnosticTrialItem -or $diagnosticTrialItem.PSIsContainer -or
-        -not $rawTrialFiles[0].FullName.Equals(
-            $diagnosticTrialItem.FullName,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-        throw "diagnostic trial evidence identity is invalid"
-    }
-    Push-Location $repositoryRoot
-    try {
-        $validatorRows = @(& $python -B -m $controlModule `
-            "windows-tun-validate-trial" `
-            "--plan" $hostPlanPath `
-            "--trial" $diagnosticTrialPath `
-            "--parent-sha" $ParentSha `
-            "--candidate-sha" $CandidateSha `
-            "--controller-bundle-sha256" `
-                $performanceControllerBundleManifest.controller_bundle_sha256 `
-            "--policy" $policyPath 2>&1)
-        $validatorExit = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
-    $validatorLines = @($validatorRows | ForEach-Object {
-        if ($_ -is [Management.Automation.ErrorRecord]) {
-            [string]$_.Exception.Message
-        } else {
-            [string]$_
-        }
-    })
-    $expectedValidatorLine = "{0}`t{1}`t{2}`t{3}" -f @(
-        [string]$diagnosticTrial.scenario,
-        [string]$diagnosticTrial.member,
-        [int]$diagnosticTrial.pair,
-        [int]$diagnosticTrial.order
-    )
-    if ($validatorExit -ne 0 -or $validatorLines.Count -ne 1 -or
-        [string]$validatorLines[0] -cne $expectedValidatorLine) {
-        $validatorDetail = ($validatorLines -join " | ")
-        if ($validatorDetail.Length -gt 2048) {
-            $validatorDetail = $validatorDetail.Substring(0, 2048)
-        }
-        throw "diagnostic trial validation failed: exit=$validatorExit detail=$validatorDetail"
-    }
-    $diagnosticFinalVmState = [string](
-        Get-Ferrum2HostVmContext -Identity $hostHyperVIdentity
-    ).Vm.State
-    if ($diagnosticFinalVmState -cne "Off") {
-        throw "approved VM final diagnostic state is not Off"
-    }
-    [pscustomobject]@{
-        schema = "ferrum2.windows-tun.hyperv-performance-diagnostic-result.v2"
-        status = "PASS"
-        qualification = $false
-        run_kind = $RunKind
-        diagnostic_trial_sequence = [int]$diagnosticTrial.sequence
-        scenario = [string]$diagnosticTrial.scenario
-        member = [string]$diagnosticTrial.member
-        pair = [int]$diagnosticTrial.pair
-        order = [int]$diagnosticTrial.order
-        validator_status = "PASS"
-        reducer_invoked = $false
-        evidence_directory = $hostEvidenceRoot
-        controller_bundle_sha256 = [string]$performanceControllerBundleManifest.
-            controller_bundle_sha256
-        raw_trials = $rawTrialFiles.Count
-        raw_network_model_observations = $rawNetworkModelFiles.Count
-        process_logs = $rawProcessLogFiles.Count
-        host_network_path = $hostNetworkPathPath
-        host_network_path_sha256 = (Get-FileHash -LiteralPath $hostNetworkPathPath `
-            -Algorithm SHA256).Hash.ToLowerInvariant()
-        topology_manifest = $hostTopologyManifestPath
-        topology_manifest_sha256 = [string]$topologyManifestDocument.Sha256
-        topology_plan_sha256 = [string]$topologyPlanDocument.Sha256
-        support_switch_id = [string]$topologyManifestDocument.Value.support.switch.switch_id
-        vm_name = $approvedVmName
-        vm_id = $approvedVmId.ToString("D")
-        checkpoint_name = $approvedCheckpointName
-        checkpoint_id = $approvedCheckpointId.ToString("D")
-        final_vm_state = $diagnosticFinalVmState
-        checkpoint_restored = $true
-        host_tun_bypassed = $true
-        host_network_mutations = 0
-    } | ConvertTo-Json -Depth 4
-    exit 0
 }
 $summaryArguments = @(
     "-B", "-m", $controlModule, "windows-tun-summarize",

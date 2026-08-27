@@ -6,7 +6,6 @@ use bytes::BytesMut;
 use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_net::UdpResolver;
 use ferrum2_runtime::{DirectUdpSocket, MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES};
-use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 use tokio::time::Instant;
 
 use super::socket::{ClientDirectUdpSocket, ClientUdpSocketFactory};
@@ -109,8 +108,6 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         match self {
             Self::System(socket) => socket.send_to(payload, target).await,
-            #[cfg(any(not(windows), test))]
-            Self::Raw(socket) => socket.send_to(payload, target).await,
             #[cfg(all(windows, not(test)))]
             Self::Network(socket) => socket.send_to(payload, target).await,
             #[cfg(test)]
@@ -124,8 +121,6 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     async fn readable(&self) -> io::Result<()> {
         match self {
             Self::System(socket) => socket.readable().await,
-            #[cfg(any(not(windows), test))]
-            Self::Raw(socket) => socket.readable().await,
             #[cfg(all(windows, not(test)))]
             Self::Network(socket) => socket.readable().await,
             #[cfg(test)]
@@ -136,8 +131,6 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.recv_buf_from(payload).await,
-            #[cfg(any(not(windows), test))]
-            Self::Raw(socket) => socket.recv_buf_from(payload).await,
             #[cfg(all(windows, not(test)))]
             Self::Network(socket) => socket.recv_buf_from(payload).await,
             #[cfg(test)]
@@ -148,8 +141,6 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.try_recv_buf_from(payload),
-            #[cfg(any(not(windows), test))]
-            Self::Raw(socket) => socket.try_recv_buf_from(payload),
             #[cfg(all(windows, not(test)))]
             Self::Network(socket) => socket.try_recv_buf_from(payload),
             #[cfg(test)]
@@ -241,51 +232,6 @@ pub(in crate::run::egress) async fn send_direct_target(
         send_direct_candidates(socket, payload, &candidates, first_index, deadline).await?;
     candidate_hints.record_success(host, port, last_successful_index);
     Ok((length, peer))
-}
-
-pub(in crate::run::egress) async fn receive_proxy_response(
-    socket: &ClientDirectUdpSocket,
-    expected_peer: SocketAddr,
-    payload: &mut BytesMut,
-) -> io::Result<usize> {
-    #[cfg(any(not(windows), test))]
-    if let ClientDirectUdpSocket::Raw(socket) = socket {
-        payload.clear();
-        let length = socket.recv_buf(payload).await?;
-        return validate_proxy_response_length(length, payload);
-    }
-
-    loop {
-        payload.clear();
-        let (length, source) = socket.recv_buf_from(payload).await?;
-        let length = validate_proxy_response_length(length, payload)?;
-        if source == expected_peer {
-            return Ok(length);
-        }
-    }
-}
-
-pub(in crate::run::egress) async fn send_proxy_request(
-    socket: &ClientDirectUdpSocket,
-    expected_peer: SocketAddr,
-    payload: &[u8],
-) -> io::Result<usize> {
-    #[cfg(any(not(windows), test))]
-    if let ClientDirectUdpSocket::Raw(socket) = socket {
-        return socket.send(payload).await;
-    }
-
-    socket.send_to(payload, expected_peer).await
-}
-
-fn validate_proxy_response_length(length: usize, payload: &BytesMut) -> io::Result<usize> {
-    if length != payload.len() || length > MAX_UDP_WIRE_LEN {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid proxy UDP receive length",
-        ));
-    }
-    Ok(length)
 }
 
 pub(in crate::run::egress) async fn send_direct_candidates(

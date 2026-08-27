@@ -10,8 +10,17 @@ from tools.performance_candidate.json_contract import CandidateControlError, _ca
 from tools.performance_candidate.windows_tun.policy import validate_windows_tun_policy, windows_tun_policy_is_calibrated
 from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_PAIR_COUNT, WINDOWS_TUN_PAIR_SCHEDULE, WINDOWS_TUN_RUN_KINDS, WINDOWS_TUN_SELECTION
 
-WINDOWS_TUN_PLAN_SCHEMA_VERSION = 4
+WINDOWS_TUN_PLAN_SCHEMA_VERSION = 5
 WINDOWS_TUN_PLAN_MAX_BYTES = 4 * 1024 * 1024
+
+WINDOWS_TUN_DIAGNOSTIC_PROFILES = {
+    "UdpFlowBoundary": {
+        "scenario": "udp-8192-association-lookup-expiry",
+        "member": "parent",
+        "pair": 1,
+        "order": 1,
+    }
+}
 
 
 WINDOWS_TUN_PLAN_FIELDS = frozenset(
@@ -26,6 +35,7 @@ WINDOWS_TUN_PLAN_FIELDS = frozenset(
         "controller_bundle_sha256",
         "scenarios",
         "trials",
+        "diagnostic_profiles",
         "decision_policy",
         "calibration_complete",
         "adoption_eligible",
@@ -81,6 +91,7 @@ def create_windows_tun_plan(
         "controller_bundle_sha256": controller_bundle_sha256,
         "scenarios": contracts,
         "trials": trials,
+        "diagnostic_profiles": copy.deepcopy(WINDOWS_TUN_DIAGNOSTIC_PROFILES),
         "decision_policy": policy,
         "calibration_complete": calibrated,
         # A plan can enable a calibrated decision, but evidence is the only
@@ -116,3 +127,39 @@ def load_windows_tun_plan(
             "Windows TUN performance plan does not match the canonical recipe or policy"
         )
     return plan
+
+
+def resolve_windows_tun_diagnostic_profile(
+    plan: dict[str, object], profile: str
+) -> dict[str, object]:
+    """Resolve a stable diagnostic profile to its canonical scheduled trial."""
+
+    try:
+        profiles = plan["diagnostic_profiles"]
+        if type(profiles) is not dict or profile not in profiles:
+            raise CandidateControlError("Windows TUN diagnostic profile is unsupported")
+        selector = profiles[profile]
+        if type(selector) is not dict:
+            raise CandidateControlError("Windows TUN diagnostic profile must be an object")
+        selector_fields = {"scenario", "member", "pair", "order"}
+        _exact_fields(
+            selector,
+            selector_fields,
+            f"Windows TUN diagnostic profile {profile}",
+        )
+        trials = plan["trials"]
+        if type(trials) is not list:
+            raise CandidateControlError("Windows TUN plan trials must be an array")
+        matching = [
+            trial
+            for trial in trials
+            if type(trial) is dict
+            and all(trial.get(field) == selector[field] for field in selector_fields)
+        ]
+    except (KeyError, TypeError) as error:
+        raise CandidateControlError("Windows TUN diagnostic profile is invalid") from error
+    if len(matching) != 1:
+        raise CandidateControlError(
+            "Windows TUN diagnostic profile does not resolve to one canonical trial"
+        )
+    return matching[0]

@@ -7,8 +7,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +19,7 @@ from tools.ci import interop_provision as subject
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = REPOSITORY_ROOT / "tests/interop/versions.toml"
+SPECS = {spec.provider_id: spec for spec in subject.PROVIDER_SPECS}
 
 
 def tar_with_members(path: Path, members: tuple[tuple[str, bytes | None], ...]) -> None:
@@ -37,7 +40,10 @@ class ManifestTests(unittest.TestCase):
     def test_repository_manifest_is_complete_and_typed(self) -> None:
         pins = subject.parse_manifest(MANIFEST.read_bytes())
 
-        self.assertEqual(tuple(pin.provider for pin in pins), tuple(subject.Provider))
+        self.assertEqual(
+            tuple(pin.provider_id for pin in pins),
+            ("sing_box", "shadowsocks_rust", "coredns", "bind"),
+        )
         self.assertEqual(pins[0].linux.asset, "sing-box-1.13.14-linux-amd64-glibc.tar.gz")
         self.assertEqual(pins[2].license.asset, "coredns-1.14.6-LICENSE")
         self.assertEqual(pins[3].expected_version, "DiG 9.20.26")
@@ -61,6 +67,51 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "end with the asset name"):
             subject.parse_manifest(contents.encode())
 
+    def test_ordered_provider_registry_owns_all_provider_policy(self) -> None:
+        self.assertEqual(
+            tuple(
+                (
+                    spec.provider_id,
+                    spec.timeout_seconds,
+                    spec.github_status_name,
+                    spec.license_marker,
+                    spec.root_template,
+                )
+                for spec in subject.PROVIDER_SPECS
+            ),
+            (
+                (
+                    "sing_box",
+                    300,
+                    "M2_SING_BOX_SETUP_STATUS",
+                    "NOASSERTION",
+                    "sing-box-{version}",
+                ),
+                (
+                    "shadowsocks_rust",
+                    300,
+                    "M2_SHADOWSOCKS_RUST_SETUP_STATUS",
+                    "MIT",
+                    "shadowsocks-rust-{version}",
+                ),
+                (
+                    "coredns",
+                    300,
+                    "M12_COREDNS_SETUP_STATUS",
+                    "Apache-2.0",
+                    "coredns-{version}",
+                ),
+                (
+                    "bind",
+                    900,
+                    "M12_BIND_SETUP_STATUS",
+                    "MPL-2.0",
+                    "bind-{version}",
+                ),
+            ),
+        )
+        self.assertTrue(all(callable(spec.verifier) for spec in subject.PROVIDER_SPECS))
+
 
 class ArtifactTests(unittest.TestCase):
     def test_exact_size_and_digest_are_required(self) -> None:
@@ -83,7 +134,7 @@ class ArtifactTests(unittest.TestCase):
         pins = subject.parse_manifest(MANIFEST.read_bytes())
 
         self.assertEqual(
-            subject.expected_archive_names(pins[0]),
+            subject.expected_archive_names(SPECS["sing_box"], pins[0]),
             (
                 "sing-box-1.13.14-linux-amd64-glibc",
                 "sing-box-1.13.14-linux-amd64-glibc/LICENSE",
@@ -91,7 +142,7 @@ class ArtifactTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            subject.expected_archive_names(pins[1]),
+            subject.expected_archive_names(SPECS["shadowsocks_rust"], pins[1]),
             ("sslocal", "ssserver", "ssurl", "ssmanager", "ssservice"),
         )
 
@@ -132,7 +183,10 @@ class ProviderVersionTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "sslocal version mismatch"):
                     subject.verify_shadowsocks_rust(
-                        self.pins[1], Path("unused"), subject.Deadline.after(60)
+                        self.pins[1],
+                        Path("unused"),
+                        Path("unused"),
+                        subject.Deadline.after(60),
                     )
 
 
@@ -190,10 +244,10 @@ class GithubEnvironmentTests(unittest.TestCase):
             subject.write_github_environment(
                 environment,
                 {
-                    subject.Provider.SING_BOX: 0,
-                    subject.Provider.SHADOWSOCKS_RUST: 1,
-                    subject.Provider.COREDNS: 1,
-                    subject.Provider.BIND: 0,
+                    "sing_box": 0,
+                    "shadowsocks_rust": 1,
+                    "coredns": 1,
+                    "bind": 0,
                 },
             )
 
@@ -216,36 +270,72 @@ class GithubEnvironmentTests(unittest.TestCase):
 
 
 class ProvisioningTests(unittest.TestCase):
+    def test_provision_dispatches_an_unrecognized_id_through_its_spec(self) -> None:
+        verifier = mock.Mock()
+        pin = replace(
+            subject.parse_manifest(MANIFEST.read_bytes())[0],
+            provider_id="future_provider",
+        )
+        spec = replace(
+            SPECS["sing_box"],
+            provider_id="future_provider",
+            root_template="future-provider-{version}",
+            verifier=verifier,
+        )
+
+        with mock.patch.object(subject, "download_atomic"):
+            with mock.patch.object(subject, "verify_archive_members"):
+                with mock.patch.object(subject, "extract_atomic"):
+                    subject.provision(spec, pin, Path("work"))
+
+        verifier.assert_called_once()
+        _, root, work_root, deadline = verifier.call_args.args
+        self.assertEqual(root, Path("work") / "future-provider-1.13.14")
+        self.assertEqual(work_root, Path("work"))
+        self.assertIsInstance(deadline, subject.Deadline)
+
+    def test_provision_rejects_a_pin_from_a_different_strategy(self) -> None:
+        pin = subject.parse_manifest(MANIFEST.read_bytes())[0]
+
+        with self.assertRaisesRegex(ValueError, "pin and strategy do not match"):
+            subject.provision(SPECS["bind"], pin, Path("unused"))
+
     def test_one_provider_failure_does_not_skip_later_providers(self) -> None:
         document = subject.parse_document(MANIFEST.read_bytes())
-        attempted: list[subject.Provider] = []
+        attempted: list[str] = []
 
-        def provision(pin: subject.ProviderPin, _work_root: Path) -> None:
-            attempted.append(pin.provider)
-            if pin.provider in {subject.Provider.SHADOWSOCKS_RUST, subject.Provider.COREDNS}:
+        def provision(
+            _spec: subject.ProviderSpec,
+            pin: subject.ProviderPin,
+            _work_root: Path,
+        ) -> None:
+            attempted.append(pin.provider_id)
+            if pin.provider_id in {"shadowsocks_rust", "coredns"}:
                 raise RuntimeError("offline failure")
 
         with mock.patch.object(subject, "provision", side_effect=provision):
             with redirect_stderr(io.StringIO()):
                 statuses = subject.provision_document(document, Path("unused"))
 
-        self.assertEqual(attempted, list(subject.Provider))
+        self.assertEqual(
+            attempted, ["sing_box", "shadowsocks_rust", "coredns", "bind"]
+        )
         self.assertEqual(
             statuses,
             {
-                subject.Provider.SING_BOX: 0,
-                subject.Provider.SHADOWSOCKS_RUST: 1,
-                subject.Provider.COREDNS: 1,
-                subject.Provider.BIND: 0,
+                "sing_box": 0,
+                "shadowsocks_rust": 1,
+                "coredns": 1,
+                "bind": 0,
             },
         )
 
     def test_mixed_provider_result_exports_rows_without_failing_controller(self) -> None:
         statuses = {
-            subject.Provider.SING_BOX: 0,
-            subject.Provider.SHADOWSOCKS_RUST: 1,
-            subject.Provider.COREDNS: 1,
-            subject.Provider.BIND: 0,
+            "sing_box": 0,
+            "shadowsocks_rust": 1,
+            "coredns": 1,
+            "bind": 0,
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -260,8 +350,12 @@ class ProvisioningTests(unittest.TestCase):
                 str(environment),
             ]
 
-            def provision(pin: subject.ProviderPin, _work_root: Path) -> None:
-                if statuses[pin.provider] != 0:
+            def provision(
+                _spec: subject.ProviderSpec,
+                pin: subject.ProviderPin,
+                _work_root: Path,
+            ) -> None:
+                if statuses[pin.provider_id] != 0:
                     raise RuntimeError("offline failure")
 
             with mock.patch.object(sys, "argv", arguments):
@@ -297,10 +391,14 @@ class ProvisioningTests(unittest.TestCase):
                 manifest = root / "versions.toml"
                 environment = root / "github-env"
                 manifest.write_text(contents, encoding="utf-8")
-                attempted: list[subject.Provider] = []
+                attempted: list[str] = []
 
-                def provision(pin: subject.ProviderPin, _work_root: Path) -> None:
-                    attempted.append(pin.provider)
+                def provision(
+                    _spec: subject.ProviderSpec,
+                    pin: subject.ProviderPin,
+                    _work_root: Path,
+                ) -> None:
+                    attempted.append(pin.provider_id)
 
                 arguments = [
                     "interop_provision.py",
@@ -319,11 +417,7 @@ class ProvisioningTests(unittest.TestCase):
                 self.assertEqual(result, 0)
                 self.assertEqual(
                     attempted,
-                    [
-                        subject.Provider.SING_BOX,
-                        subject.Provider.SHADOWSOCKS_RUST,
-                        subject.Provider.COREDNS,
-                    ],
+                    ["sing_box", "shadowsocks_rust", "coredns"],
                 )
                 self.assertEqual(
                     environment.read_text(encoding="utf-8").splitlines(),
@@ -363,7 +457,7 @@ class ProvisioningTests(unittest.TestCase):
                 with mock.patch.object(sys, "argv", arguments):
                     with mock.patch.object(subject, "provision") as provision:
                         with self.assertRaises(
-                            (ValueError, subject.tomllib.TOMLDecodeError)
+                            (ValueError, tomllib.TOMLDecodeError)
                         ):
                             subject.main()
 

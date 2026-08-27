@@ -10,8 +10,8 @@
     },
     {
       "path": "tools/windows-tun/collect_windows_tun_udp_boundary_diagnostic.ps1",
-      "bytes": 22995,
-      "sha256": "4e24ad1c4223d0a667187aba55f7af4b8fd5351f1d030b01fa261b97d8de48d9"
+      "bytes": 22997,
+      "sha256": "00111881b8eb8656f95a687a02d34c285d7c298afd0eb094d42a4451deea2746"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/CollectorCore.ps1",
@@ -45,28 +45,28 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/GuestTransaction.ps1",
-      "bytes": 37808,
-      "sha256": "255c1d6baeb743d522f4b213074996069ab56315c454a617c777744ac0970f05"
+      "bytes": 38639,
+      "sha256": "7e903271cc4870a7c0dde1a0f6e9225ecb26a518f2ea8fcf2cbdf4b3e851432a"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostContract.ps1",
-      "bytes": 13986,
-      "sha256": "4ccbaa47fef3ca8e5a7e16295f52de2fc159499ca2d93a12997a0d498df759b5"
+      "bytes": 15245,
+      "sha256": "152e198acd1dd0b7d227962804b0736d47ae3d52cff4d820a1a630f755b650e7"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostUdpEvidence.ps1",
-      "bytes": 36377,
-      "sha256": "a4e81611e0f8240ca1ca5954708852756031943cb46443b007979bc5cd35becd"
+      "bytes": 36580,
+      "sha256": "0554ba5bb3e6a65f539a66d483da67bb1922cd654d778211ee283b3b411bc1f0"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostUdpResult.ps1",
-      "bytes": 30431,
-      "sha256": "460dbe9ecbc2508fafe0497465136b273760c553b8b446a9f3629546395c6e42"
+      "bytes": 30495,
+      "sha256": "a7ec7e5950971ab0bb330890f262c3cb0a82fda270b220c8be26c9d322bc1096"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostVmTransaction.ps1",
-      "bytes": 36240,
-      "sha256": "bd7ead8a92afc9fc8b9b3883ad9bc506eb19b8aac82eb4e686e54c949dfcf39d"
+      "bytes": 35958,
+      "sha256": "eeccb9002d9c0f6ca7dcae568860305a35e186f52904389f5ceccd14786dacc8"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
@@ -210,8 +210,8 @@
     },
     {
       "path": "tools/windows-tun/run_windows_tun_performance_hyperv.ps1",
-      "bytes": 38621,
-      "sha256": "2f65d4ae31c999a52988ff436ea5c9920e352bc7d721231f154923e02823329d"
+      "bytes": 33864,
+      "sha256": "05c66b2c6af6ce5b89a9a99697738972ad5d2ebc3f7da67e4bcb9b40f8c13bc7"
     }
   ]
 }

@@ -654,7 +654,7 @@ class WindowsTunUdpTests(WindowsTunTrialSupport):
                 validated = self.validate_udp_diagnostic(root, plan, plan_sha256)
                 self.assertEqual(validated["evidence_status"], "PARTIAL")
 
-    def test_udp_diagnostic_requires_reviewed_aa_sequence_and_plan_identity(self) -> None:
+    def test_udp_diagnostic_requires_profile_selected_aa_trial_and_plan_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             plan, row, plan_sha256 = self.udp_diagnostic_evidence(root)
@@ -678,9 +678,7 @@ class WindowsTunUdpTests(WindowsTunTrialSupport):
                     parent_sha=self.PARENT_SHA,
                     candidate_sha=self.CANDIDATE_SHA,
                 )
-            row["trial"]["sequence"] = (
-                udp_diagnostic.WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE + 1
-            )
+            row["trial"]["sequence"] += 1
             self.write_udp_diagnostic_document(root, row)
             with self.assertRaises(json_contract.CandidateControlError):
                 self.validate_udp_diagnostic(root, plan, plan_sha256)

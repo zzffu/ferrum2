@@ -7,13 +7,15 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 
+use bytes::BytesMut;
 #[cfg(test)]
 use ferrum2_crypto::SecureRandom;
 #[cfg(all(windows, not(test)))]
 use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_runtime::{
-    DirectUdpSocketFactory, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
+    DirectUdpSocket, DirectUdpSocketFactory, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
 };
+use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 use tokio::net::UdpSocket;
 
 #[cfg(test)]
@@ -74,12 +76,19 @@ impl UdpIoFaultPlan {
 
 pub(super) enum ClientDirectUdpSocket {
     System(SystemDirectUdpSocket),
-    #[cfg(any(not(windows), test))]
-    Raw(UdpSocket),
     #[cfg(all(windows, not(test)))]
     Network(ferrum2_runtime::GenerationBoundUdpSocket<UdpSocket>),
     #[cfg(test)]
     Injected(InjectedDirectUdpSocket),
+}
+
+pub(super) enum ClientProxyUdpSocket {
+    #[cfg(any(not(windows), test))]
+    Connected(UdpSocket),
+    Addressed {
+        socket: ClientDirectUdpSocket,
+        peer: SocketAddr,
+    },
 }
 
 pub(in crate::run) enum ClientUdpSocketFactory {
@@ -192,4 +201,107 @@ impl ClientUdpSocketFactory {
             }
         }
     }
+
+    pub(super) async fn open_proxy<F, Fut>(
+        &self,
+        peer: SocketAddr,
+        bind: &mut F,
+    ) -> io::Result<ClientProxyUdpSocket>
+    where
+        F: FnMut(SocketAddr) -> Fut,
+        Fut: std::future::Future<Output = io::Result<UdpSocket>>,
+    {
+        #[cfg(all(windows, not(test)))]
+        {
+            let _ = bind;
+            return self
+                .open(peer)
+                .await
+                .map(|socket| ClientProxyUdpSocket::Addressed { socket, peer });
+        }
+
+        #[cfg(all(not(windows), not(test)))]
+        {
+            let Self::System = self;
+            return open_connected_proxy(peer, bind).await;
+        }
+
+        #[cfg(test)]
+        match self {
+            Self::System => open_connected_proxy(peer, bind).await,
+            Self::Injected { .. } => self
+                .open(peer)
+                .await
+                .map(|socket| ClientProxyUdpSocket::Addressed { socket, peer }),
+        }
+    }
+}
+
+#[cfg(any(not(windows), test))]
+async fn open_connected_proxy<F, Fut>(
+    peer: SocketAddr,
+    bind: &mut F,
+) -> io::Result<ClientProxyUdpSocket>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<UdpSocket>>,
+{
+    let bind_address = SocketAddr::new(
+        if peer.is_ipv4() {
+            std::net::Ipv4Addr::UNSPECIFIED.into()
+        } else {
+            std::net::Ipv6Addr::UNSPECIFIED.into()
+        },
+        0,
+    );
+    let socket = bind(bind_address).await?;
+    socket.connect(peer).await?;
+    Ok(ClientProxyUdpSocket::Connected(socket))
+}
+
+impl ClientProxyUdpSocket {
+    pub(super) async fn send(&self, payload: &[u8]) -> io::Result<usize> {
+        match self {
+            #[cfg(any(not(windows), test))]
+            Self::Connected(socket) => socket.send(payload).await,
+            Self::Addressed { socket, peer } => socket.send_to(payload, *peer).await,
+        }
+    }
+
+    pub(super) async fn receive(&self, payload: &mut BytesMut) -> io::Result<usize> {
+        match self {
+            #[cfg(any(not(windows), test))]
+            Self::Connected(socket) => {
+                payload.clear();
+                let length = socket.recv_buf(payload).await?;
+                validate_response_length(length, payload)
+            }
+            Self::Addressed { socket, peer } => loop {
+                payload.clear();
+                let (length, source) = socket.recv_buf_from(payload).await?;
+                let length = validate_response_length(length, payload)?;
+                if source == *peer {
+                    return Ok(length);
+                }
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Self::Connected(socket) => socket.local_addr(),
+            Self::Addressed { .. } => Err(io::Error::other("UDP socket is opaque")),
+        }
+    }
+}
+
+fn validate_response_length(length: usize, payload: &BytesMut) -> io::Result<usize> {
+    if length != payload.len() || length > MAX_UDP_WIRE_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid proxy UDP receive length",
+        ));
+    }
+    Ok(length)
 }

@@ -12,67 +12,29 @@ import subprocess
 import sys
 import tarfile
 import time
-import tomllib
 import urllib.request
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Mapping, NoReturn
+from typing import Callable, Mapping
 
+from .interop_manifest import (
+    ArchiveStrategy,
+    Artifact,
+    ProviderPin,
+    SupplementalArtifactContract,
+    parse_document,
+    parse_provider,
+)
 
-REVIEW_BOUNDARY = "execute only as an independent test process; do not redistribute"
-HEX_256 = re.compile(r"[0-9a-f]{64}\Z")
-SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 COREDNS_GO_VERSION = re.compile(r"go[1-9][0-9]*\.[0-9]+\.[0-9]+\Z")
 COREDNS_SHORT_REVISION_LENGTH = 7
 
-
-class Provider(str, Enum):
-    SING_BOX = "sing_box"
-    SHADOWSOCKS_RUST = "shadowsocks_rust"
-    COREDNS = "coredns"
-    BIND = "bind"
+def parse_manifest(contents: bytes) -> tuple[ProviderPin, ...]:
+    document = parse_document(contents)
+    return tuple(parse_provider(document, spec) for spec in PROVIDER_SPECS)
 
 
-@dataclass(frozen=True)
-class Artifact:
-    asset: str
-    url: str
-    size: int
-    sha256: str
-
-
-@dataclass(frozen=True)
-class ProviderPin:
-    provider: Provider
-    version: str
-    source_commit: str
-    expected_version: str
-    license_review: str
-    linux: Artifact
-    license: Artifact | None = None
-
-
-@dataclass(frozen=True)
-class ProviderDefinition:
-    timeout_seconds: int
-    license_marker: str
-
-
-DEFINITIONS = {
-    Provider.SING_BOX: ProviderDefinition(5 * 60, "NOASSERTION"),
-    Provider.SHADOWSOCKS_RUST: ProviderDefinition(5 * 60, "MIT"),
-    Provider.COREDNS: ProviderDefinition(5 * 60, "Apache-2.0"),
-    Provider.BIND: ProviderDefinition(15 * 60, "MPL-2.0"),
-}
-
-GITHUB_STATUS_NAMES = {
-    Provider.SING_BOX: "M2_SING_BOX_SETUP_STATUS",
-    Provider.SHADOWSOCKS_RUST: "M2_SHADOWSOCKS_RUST_SETUP_STATUS",
-    Provider.COREDNS: "M12_COREDNS_SETUP_STATUS",
-    Provider.BIND: "M12_BIND_SETUP_STATUS",
-}
-
+# Download, archive, filesystem, and process effects.
 
 @dataclass
 class Deadline:
@@ -87,105 +49,6 @@ class Deadline:
         if seconds <= 0:
             raise TimeoutError(f"provider timeout during {operation}")
         return seconds
-
-
-def fail(message: str) -> NoReturn:
-    raise ValueError(message)
-
-
-def table(value: object, context: str) -> Mapping[str, object]:
-    if not isinstance(value, dict):
-        fail(f"{context} must be a TOML table")
-    return value
-
-
-def text(values: Mapping[str, object], key: str, context: str) -> str:
-    value = values.get(key)
-    if not isinstance(value, str) or not value:
-        fail(f"{context}.{key} must be a non-empty string")
-    return value
-
-
-def positive_integer(values: Mapping[str, object], key: str, context: str) -> int:
-    value = values.get(key)
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        fail(f"{context}.{key} must be a positive integer")
-    return value
-
-
-def parse_artifact(values: Mapping[str, object], prefix: str, context: str) -> Artifact:
-    artifact = Artifact(
-        asset=text(values, f"{prefix}asset", context),
-        url=text(values, f"{prefix}url", context),
-        size=positive_integer(values, f"{prefix}size", context),
-        sha256=text(values, f"{prefix}sha256", context),
-    )
-    if Path(artifact.asset).name != artifact.asset:
-        fail(f"{context}.{prefix}asset must be a basename")
-    if not artifact.url.startswith("https://") or not artifact.url.endswith("/" + artifact.asset):
-        fail(f"{context}.{prefix}url must be HTTPS and end with the asset name")
-    if not HEX_256.fullmatch(artifact.sha256):
-        fail(f"{context}.{prefix}sha256 must be lowercase SHA-256")
-    return artifact
-
-
-def parse_coredns_license(values: Mapping[str, object], version: str) -> Artifact:
-    context = "coredns"
-    artifact = Artifact(
-        asset=f"coredns-{version}-LICENSE",
-        url=text(values, "license_url", context),
-        size=positive_integer(values, "license_size", context),
-        sha256=text(values, "license_sha256", context),
-    )
-    if not artifact.url.startswith("https://"):
-        fail("coredns.license_url must use HTTPS")
-    if not HEX_256.fullmatch(artifact.sha256):
-        fail("coredns.license_sha256 must be lowercase SHA-256")
-    return artifact
-
-
-def parse_document(contents: bytes) -> Mapping[str, object]:
-    document = tomllib.loads(contents.decode("utf-8"))
-    if document.get("schema_version") != 1:
-        fail("versions.toml schema_version must be 1")
-    return document
-
-
-def parse_provider(document: Mapping[str, object], provider: Provider) -> ProviderPin:
-    values = table(document.get(provider.value), provider.value)
-    version = text(values, "version", provider.value)
-    source_commit = text(values, "source_commit", provider.value)
-    expected_version = text(values, "expected_version", provider.value)
-    license_review = text(values, "license_review", provider.value)
-    definition = DEFINITIONS[provider]
-    if not SOURCE_COMMIT.fullmatch(source_commit):
-        fail(f"{provider.value}.source_commit must be a lowercase Git commit")
-    if version not in expected_version:
-        fail(f"{provider.value}.expected_version must identify its version")
-    if definition.license_marker not in license_review or REVIEW_BOUNDARY not in license_review:
-        fail(f"{provider.value}.license_review does not preserve the reviewed boundary")
-    linux = parse_artifact(values, "linux_", provider.value)
-    if version not in linux.asset:
-        fail(f"{provider.value}.linux_asset must identify its version")
-    license_artifact = None
-    if provider is Provider.COREDNS:
-        license_artifact = parse_coredns_license(values, version)
-        if source_commit not in license_artifact.url:
-            fail("coredns.license_url must be pinned to source_commit")
-    return ProviderPin(
-        provider,
-        version,
-        source_commit,
-        expected_version,
-        license_review,
-        linux,
-        license_artifact,
-    )
-
-
-def parse_manifest(contents: bytes) -> tuple[ProviderPin, ...]:
-    document = parse_document(contents)
-    return tuple(parse_provider(document, provider) for provider in Provider)
 
 
 def sha256(path: Path) -> str:
@@ -234,7 +97,10 @@ def download_atomic(artifact: Artifact, destination: Path, deadline: Deadline) -
         except Exception as error:  # urllib exposes several unrelated transport errors.
             last_error = error
             partial.unlink(missing_ok=True)
-            print(f"download attempt {attempt}/3 failed for {artifact.asset}: {error}", file=sys.stderr)
+            print(
+                f"download attempt {attempt}/3 failed for {artifact.asset}: {error}",
+                file=sys.stderr,
+            )
     raise RuntimeError(f"download failed for {artifact.asset}") from last_error
 
 
@@ -243,28 +109,40 @@ def archive_names(path: Path) -> tuple[str, ...]:
         return tuple(member.name for member in archive.getmembers())
 
 
-def expected_archive_names(pin: ProviderPin) -> tuple[str, ...] | None:
-    if pin.provider is Provider.SING_BOX:
-        root = f"sing-box-{pin.version}-linux-amd64-glibc"
-        return (root, f"{root}/LICENSE", f"{root}/sing-box")
-    if pin.provider is Provider.SHADOWSOCKS_RUST:
-        return ("sslocal", "ssserver", "ssurl", "ssmanager", "ssservice")
-    if pin.provider is Provider.COREDNS:
-        return ("coredns",)
-    return None
+def render_version_template(template: str, pin: ProviderPin) -> str:
+    return template.format(version=pin.version)
 
 
-def verify_archive_members(pin: ProviderPin, path: Path) -> None:
+def expected_archive_names(
+    spec: "ProviderSpec", pin: ProviderPin
+) -> tuple[str, ...] | None:
+    templates = spec.archive.exact_member_templates
+    if templates is None:
+        return None
+    return tuple(render_version_template(template, pin) for template in templates)
+
+
+def archive_tree_root(spec: "ProviderSpec", pin: ProviderPin) -> str | None:
+    template = spec.archive.rooted_tree_template
+    return render_version_template(template, pin) if template is not None else None
+
+
+def verify_archive_members(spec: "ProviderSpec", pin: ProviderPin, path: Path) -> None:
     names = archive_names(path)
-    expected = expected_archive_names(pin)
+    expected = expected_archive_names(spec, pin)
     if expected is not None and names != expected:
-        raise RuntimeError(f"{pin.provider.value} archive members changed: {names!r}")
-    if pin.provider is Provider.BIND:
-        root = f"bind-{pin.version}"
+        raise RuntimeError(f"{pin.provider_id} archive members changed: {names!r}")
+    root = archive_tree_root(spec, pin)
+    if root is not None:
         if not names or names[0].rstrip("/") != root:
-            raise RuntimeError("BIND archive root changed")
-        if any(name.rstrip("/") != root and not name.startswith(root + "/") for name in names):
-            raise RuntimeError("BIND archive contains a member outside its pinned root")
+            raise RuntimeError(f"{pin.provider_id} archive root changed")
+        if any(
+            name.rstrip("/") != root and not name.startswith(root + "/")
+            for name in names
+        ):
+            raise RuntimeError(
+                f"{pin.provider_id} archive contains a member outside its pinned root"
+            )
 
 
 def extract_atomic(archive_path: Path, destination: Path, strip_prefix: str | None = None) -> None:
@@ -330,17 +208,13 @@ def require_reviewed_license(path: Path) -> None:
         raise RuntimeError(f"reviewed license bounds changed: {path}")
 
 
-def provider_root(pin: ProviderPin, work_root: Path) -> Path:
-    name = {
-        Provider.SING_BOX: f"sing-box-{pin.version}",
-        Provider.SHADOWSOCKS_RUST: f"shadowsocks-rust-{pin.version}",
-        Provider.COREDNS: f"coredns-{pin.version}",
-        Provider.BIND: f"bind-{pin.version}",
-    }[pin.provider]
-    return work_root / name
+def provider_root(spec: "ProviderSpec", pin: ProviderPin, work_root: Path) -> Path:
+    return work_root / render_version_template(spec.root_template, pin)
 
 
-def verify_sing_box(pin: ProviderPin, root: Path, deadline: Deadline) -> None:
+def verify_sing_box(
+    pin: ProviderPin, root: Path, _work_root: Path, deadline: Deadline
+) -> None:
     packaged_root = root / f"sing-box-{pin.version}-linux-amd64-glibc"
     binary = packaged_root / "sing-box"
     require_executable(binary)
@@ -350,7 +224,9 @@ def verify_sing_box(pin: ProviderPin, root: Path, deadline: Deadline) -> None:
         raise RuntimeError("sing-box version or revision mismatch")
 
 
-def verify_shadowsocks_rust(pin: ProviderPin, root: Path, deadline: Deadline) -> None:
+def verify_shadowsocks_rust(
+    pin: ProviderPin, root: Path, _work_root: Path, deadline: Deadline
+) -> None:
     for name in ("sslocal", "ssserver"):
         binary = root / name
         require_executable(binary)
@@ -384,7 +260,9 @@ def verify_coredns(pin: ProviderPin, root: Path, work_root: Path, deadline: Dead
     verify_coredns_version(pin, run([str(binary), "-version"], deadline))
 
 
-def build_and_verify_bind(pin: ProviderPin, root: Path, deadline: Deadline) -> None:
+def verify_bind(
+    pin: ProviderPin, root: Path, _work_root: Path, deadline: Deadline
+) -> None:
     require_reviewed_license(root / "LICENSE")
     run(["sudo", "apt-get", "update"], deadline)
     run(
@@ -420,48 +298,148 @@ def build_and_verify_bind(pin: ProviderPin, root: Path, deadline: Deadline) -> N
         raise RuntimeError("BIND dig version mismatch")
 
 
-def provision(pin: ProviderPin, work_root: Path) -> None:
-    deadline = Deadline.after(DEFINITIONS[pin.provider].timeout_seconds)
+@dataclass(frozen=True)
+class ProviderSpec:
+    provider_id: str
+    timeout_seconds: int
+    github_status_name: str
+    license_marker: str
+    root_template: str
+    archive: ArchiveStrategy
+    verifier: Callable[[ProviderPin, Path, Path, Deadline], None]
+    supplemental_artifact: SupplementalArtifactContract | None = None
+
+
+PROVIDER_SPECS = (
+    ProviderSpec(
+        provider_id="sing_box",
+        timeout_seconds=5 * 60,
+        github_status_name="M2_SING_BOX_SETUP_STATUS",
+        license_marker="NOASSERTION",
+        root_template="sing-box-{version}",
+        archive=ArchiveStrategy(
+            exact_member_templates=(
+                "sing-box-{version}-linux-amd64-glibc",
+                "sing-box-{version}-linux-amd64-glibc/LICENSE",
+                "sing-box-{version}-linux-amd64-glibc/sing-box",
+            )
+        ),
+        verifier=verify_sing_box,
+    ),
+    ProviderSpec(
+        provider_id="shadowsocks_rust",
+        timeout_seconds=5 * 60,
+        github_status_name="M2_SHADOWSOCKS_RUST_SETUP_STATUS",
+        license_marker="MIT",
+        root_template="shadowsocks-rust-{version}",
+        archive=ArchiveStrategy(
+            exact_member_templates=(
+                "sslocal",
+                "ssserver",
+                "ssurl",
+                "ssmanager",
+                "ssservice",
+            )
+        ),
+        verifier=verify_shadowsocks_rust,
+    ),
+    ProviderSpec(
+        provider_id="coredns",
+        timeout_seconds=5 * 60,
+        github_status_name="M12_COREDNS_SETUP_STATUS",
+        license_marker="Apache-2.0",
+        root_template="coredns-{version}",
+        archive=ArchiveStrategy(exact_member_templates=("coredns",)),
+        verifier=verify_coredns,
+        supplemental_artifact=SupplementalArtifactContract(
+            asset_template="coredns-{version}-LICENSE",
+            url_field="license_url",
+            size_field="license_size",
+            sha256_field="license_sha256",
+            require_source_commit_in_url=True,
+        ),
+    ),
+    ProviderSpec(
+        provider_id="bind",
+        timeout_seconds=15 * 60,
+        github_status_name="M12_BIND_SETUP_STATUS",
+        license_marker="MPL-2.0",
+        root_template="bind-{version}",
+        archive=ArchiveStrategy(
+            rooted_tree_template="bind-{version}",
+            strip_root=True,
+        ),
+        verifier=verify_bind,
+    ),
+)
+
+
+def validate_provider_specs(specs: tuple[ProviderSpec, ...]) -> None:
+    provider_ids = [spec.provider_id for spec in specs]
+    github_status_names = [spec.github_status_name for spec in specs]
+    if len(set(provider_ids)) != len(provider_ids):
+        raise AssertionError("provider IDs must be unique")
+    if len(set(github_status_names)) != len(github_status_names):
+        raise AssertionError("provider GitHub status names must be unique")
+    for spec in specs:
+        archive = spec.archive
+        if (archive.exact_member_templates is None) == (
+            archive.rooted_tree_template is None
+        ):
+            raise AssertionError(
+                f"{spec.provider_id} must select exactly one archive member strategy"
+            )
+        if archive.strip_root and archive.rooted_tree_template is None:
+            raise AssertionError(
+                f"{spec.provider_id} cannot strip an archive without a rooted tree"
+            )
+
+
+validate_provider_specs(PROVIDER_SPECS)
+
+
+# Ordered orchestration. Every provider dispatches through its registered strategy.
+
+def provision(spec: ProviderSpec, pin: ProviderPin, work_root: Path) -> None:
+    if pin.provider_id != spec.provider_id:
+        raise ValueError("provider pin and strategy do not match")
+    deadline = Deadline.after(spec.timeout_seconds)
     artifact_path = work_root / pin.linux.asset
-    root = provider_root(pin, work_root)
+    root = provider_root(spec, pin, work_root)
     download_atomic(pin.linux, artifact_path, deadline)
-    verify_archive_members(pin, artifact_path)
-    strip_prefix = f"bind-{pin.version}" if pin.provider is Provider.BIND else None
+    verify_archive_members(spec, pin, artifact_path)
+    strip_prefix = archive_tree_root(spec, pin) if spec.archive.strip_root else None
     extract_atomic(artifact_path, root, strip_prefix)
-    if pin.provider is Provider.SING_BOX:
-        verify_sing_box(pin, root, deadline)
-    elif pin.provider is Provider.SHADOWSOCKS_RUST:
-        verify_shadowsocks_rust(pin, root, deadline)
-    elif pin.provider is Provider.COREDNS:
-        verify_coredns(pin, root, work_root, deadline)
-    else:
-        build_and_verify_bind(pin, root, deadline)
+    spec.verifier(pin, root, work_root, deadline)
 
 
 def provision_document(
     document: Mapping[str, object], work_root: Path
-) -> dict[Provider, int]:
-    statuses: dict[Provider, int] = {}
-    for provider in Provider:
+) -> dict[str, int]:
+    statuses: dict[str, int] = {}
+    for spec in PROVIDER_SPECS:
         try:
-            pin = parse_provider(document, provider)
-            provision(pin, work_root)
-            statuses[provider] = 0
+            pin = parse_provider(document, spec)
+            provision(spec, pin, work_root)
+            statuses[spec.provider_id] = 0
         except Exception as error:
-            statuses[provider] = 1
-            print(f"{provider.value} provider setup failed: {error}", file=sys.stderr)
+            statuses[spec.provider_id] = 1
+            print(f"{spec.provider_id} provider setup failed: {error}", file=sys.stderr)
     return statuses
 
 
-def write_github_environment(path: Path, statuses: Mapping[Provider, int]) -> None:
-    if set(statuses) != set(Provider):
+def write_github_environment(path: Path, statuses: Mapping[str, int]) -> None:
+    expected_provider_ids = {spec.provider_id for spec in PROVIDER_SPECS}
+    if set(statuses) != expected_provider_ids:
         raise ValueError("provider statuses must cover every provider exactly once")
     rendered: list[str] = []
-    for provider in Provider:
-        status = statuses[provider]
+    for spec in PROVIDER_SPECS:
+        status = statuses[spec.provider_id]
         if not isinstance(status, int) or isinstance(status, bool) or status < 0:
-            raise ValueError(f"{provider.value} provider status must be a non-negative integer")
-        rendered.append(f"{GITHUB_STATUS_NAMES[provider]}={status}\n")
+            raise ValueError(
+                f"{spec.provider_id} provider status must be a non-negative integer"
+            )
+        rendered.append(f"{spec.github_status_name}={status}\n")
     with path.open("a", encoding="utf-8", newline="\n") as output:
         output.writelines(rendered)
 
@@ -476,7 +454,9 @@ def main() -> int:
     args.work_root.mkdir(parents=True, exist_ok=True)
     statuses = provision_document(document, args.work_root)
     write_github_environment(args.github_env, statuses)
-    rendered = " ".join(f"{provider.value}={statuses[provider]}" for provider in Provider)
+    rendered = " ".join(
+        f"{spec.provider_id}={statuses[spec.provider_id]}" for spec in PROVIDER_SPECS
+    )
     print(f"provider_setup {rendered}")
     return 0
 

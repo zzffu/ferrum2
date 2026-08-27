@@ -5,6 +5,7 @@ from __future__ import annotations
 from tools.performance_candidate.identity import _file_sha256
 from tools.performance_candidate.json_contract import CandidateControlError, _exact_fields, _strict_json
 from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4, WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_FIRST, WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_LAST, WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_STRATEGY, source_identities, validate_environment
+from tools.performance_candidate.windows_tun.plan import resolve_windows_tun_diagnostic_profile
 
 import pathlib
 
@@ -12,9 +13,6 @@ from tools.performance_candidate.windows_tun.udp_capture import _validate_window
 from tools.performance_candidate.windows_tun.udp_ledger import _read_windows_tun_udp_ledger, _validate_windows_tun_udp_workload_source_coverage, _windows_tun_udp_first_failed_flow
 from tools.performance_candidate.windows_tun.udp_schema import WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_ROLES, WINDOWS_TUN_UDP_DIAGNOSTIC_BOUND_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_IDENTITY_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS, WINDOWS_TUN_UDP_DIAGNOSTIC_MAX_BYTES, WINDOWS_TUN_UDP_DIAGNOSTIC_SCHEMA, WINDOWS_TUN_UDP_DIAGNOSTIC_SUPPORT_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_TOPOLOGY_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_FIELDS, WINDOWS_TUN_UDP_FAILURE_REFERENCE_FIELDS, WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA, WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
 from tools.performance_candidate.windows_tun.udp_values import _read_windows_tun_udp_document, _validate_windows_tun_udp_support_endpoints, _windows_tun_required_digest, _windows_tun_udp_artifact_path, _windows_tun_udp_decimal_u64, _windows_tun_udp_ipv4, _windows_tun_udp_u64, _windows_tun_utc
-
-WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE = 37
-
 
 def validate_windows_tun_udp_diagnostic(
     *,
@@ -74,23 +72,14 @@ def validate_windows_tun_udp_diagnostic(
     _exact_fields(trial, WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_FIELDS, "Windows TUN UDP trial")
     for field in ("sequence", "pair", "order"):
         _windows_tun_udp_u64(trial[field], f"trial.{field}", positive=True)
-    planned = [candidate for candidate in plan["trials"] if candidate["sequence"] == trial["sequence"]]
+    planned = resolve_windows_tun_diagnostic_profile(plan, row["profile"])
     planned_identity_fields = {"sequence", "scenario", "member", "pair", "order"}
     if (
-        len(planned) != 1
-        or trial["selection"] != plan["selection"]
+        trial["selection"] != plan["selection"]
         or trial["run_kind"] != plan["run_kind"]
-        or any(trial[field] != planned[0][field] for field in planned_identity_fields)
+        or any(trial[field] != planned[field] for field in planned_identity_fields)
     ):
         raise CandidateControlError("Windows TUN UDP diagnostic trial is not plan-bound")
-    if (
-        trial["sequence"] != WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE
-        or trial["scenario"] != "udp-8192-association-lookup-expiry"
-    ):
-        raise CandidateControlError(
-            "Windows TUN UDP diagnostic must be the reviewed sequence "
-            f"{WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE} scenario"
-        )
     expected_sha = parent_sha if trial["member"] == "parent" else candidate_sha
     if identity["sha"] != expected_sha:
         raise CandidateControlError("Windows TUN UDP diagnostic member SHA mismatch")

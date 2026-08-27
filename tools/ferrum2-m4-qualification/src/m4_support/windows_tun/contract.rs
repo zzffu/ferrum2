@@ -1,8 +1,7 @@
 use super::diagnostic::{
     ROUTE_TARGET_SLOTS, UDP_ASSOCIATION_SOURCE_IPV4, UDP_ASSOCIATION_SOURCE_PORT_FIRST,
-    UDP_ASSOCIATION_SOURCE_PORT_LAST, UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE,
-    UDP_DIAGNOSTIC_MAX_EVENTS, UdpAssociationSourceArgs, UdpDiagnosticFinalizeArgs,
-    UdpDiagnosticLedgerArgs, UdpWorkloadDiagnosticArgs,
+    UDP_ASSOCIATION_SOURCE_PORT_LAST, UDP_DIAGNOSTIC_MAX_EVENTS, UdpAssociationSourceArgs,
+    UdpDiagnosticFinalizeArgs, UdpDiagnosticLedgerArgs, UdpWorkloadDiagnosticArgs,
 };
 use std::ffi::OsString;
 use std::net::IpAddr;
@@ -300,11 +299,6 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
         (None, None) => None,
         (Some(ledger), Some(trial_sequence)) => {
             let trial_sequence = parse_diagnostic_trial_sequence(trial_sequence)?;
-            if trial_sequence != UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE {
-                return Err(format!(
-                    "--diagnostic-trial-sequence must be exactly {UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE}"
-                ));
-            }
             Some(UdpWorkloadDiagnosticArgs {
                 ledger,
                 trial_sequence,
@@ -424,11 +418,15 @@ pub(crate) fn parse_udp_diagnostic_finalize(
     let mut target_ip = None;
     let mut udp_port = None;
     let mut diagnostic_run_nonce = None;
+    let mut diagnostic_trial_sequence = None;
     for (flag, value) in parse_pairs(arguments)? {
         match flag.as_str() {
             "--target-ip" => take_unique(&mut target_ip, value, &flag)?,
             "--udp-port" => take_unique(&mut udp_port, value, &flag)?,
             "--diagnostic-run-nonce" => take_unique(&mut diagnostic_run_nonce, value, &flag)?,
+            "--diagnostic-trial-sequence" => {
+                take_unique(&mut diagnostic_trial_sequence, value, &flag)?
+            }
             _ => {
                 return Err(format!(
                     "unsupported Windows TUN UDP diagnostic finalize option: {flag}"
@@ -455,5 +453,8 @@ pub(crate) fn parse_udp_diagnostic_finalize(
                 .ok_or_else(|| "missing Windows TUN option: --diagnostic-run-nonce".to_owned())?,
             "--diagnostic-run-nonce",
         )?,
+        trial_sequence: parse_diagnostic_trial_sequence(diagnostic_trial_sequence.ok_or_else(
+            || "missing Windows TUN option: --diagnostic-trial-sequence".to_owned(),
+        )?)?,
     })
 }

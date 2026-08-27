@@ -122,7 +122,9 @@ function Complete-UdpSupportDiagnosticLedger {
         [Parameter(Mandatory = $true)][string]$TargetIpv4,
         [ValidateRange(1, 65532)]
         [Parameter(Mandatory = $true)][int]$FirstUdpPort,
-        [Parameter(Mandatory = $true)][string]$RunNonce
+        [Parameter(Mandatory = $true)][string]$RunNonce,
+        [ValidateRange(1, 65535)]
+        [Parameter(Mandatory = $true)][int]$TrialSequence
     )
     $result = Invoke-BoundedNativeText `
         -Executable $Executable `
@@ -130,12 +132,14 @@ function Complete-UdpSupportDiagnosticLedger {
             "windows-tun-udp-diagnostic-finalize",
             "--target-ip", $TargetIpv4,
             "--udp-port", [string]$FirstUdpPort,
-            "--diagnostic-run-nonce", $RunNonce
+            "--diagnostic-run-nonce", $RunNonce,
+            "--diagnostic-trial-sequence", [string]$TrialSequence
         ) `
         -Label "Windows TUN UDP diagnostic support ledger finalize" `
         -MaximumLines 1 -MaximumBytes 4096 -TimeoutSeconds 60
     $expected = "windows_tun_udp_diagnostic_finalize status=PASS " +
-        "target=$TargetIpv4 udp_ports=$FirstUdpPort..$($FirstUdpPort + 3)"
+        "target=$TargetIpv4 udp_ports=$FirstUdpPort..$($FirstUdpPort + 3) " +
+        "trial_sequence=$TrialSequence"
     if ($result.ExitCode -ne 0 -or $result.Lines.Count -ne 1 -or
         [string]$result.Lines[0] -cne $expected) {
         throw "Windows TUN UDP diagnostic support ledger finalize result is invalid"

@@ -504,7 +504,7 @@ jobs:
         shell: bash
         run: >-
           timeout --signal=TERM --kill-after=10s 35m
-          python3 -B tools/ci/interop_provision.py
+          python3 -B -m tools.ci.interop_provision
           --manifest tests/interop/versions.toml
           --work-root "$RUNNER_TEMP"
           --github-env "$GITHUB_ENV"
@@ -514,61 +514,14 @@ jobs:
           set -euo pipefail
           target_root="$(mktemp -d "$RUNNER_TEMP/interop-qualification-target.XXXXXX")"
           printf 'CARGO_TARGET_DIR=%s\n' "$target_root" >> "$GITHUB_ENV"
-      - name: Run hosted M1 TCP and M2 UDP qualification
+      - name: Run every hosted interop qualification group
         if: ${{ always() }}
         shell: bash
         run: |
-          set -uo pipefail
-          build_status=125
-          qualification_status=125
-          if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-            echo "interop build root was not prepared" >&2
-          else
-            build_status=0
-            build_output="$(cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked 2>&1)" || build_status=$?
-            printf '%s\n' "$build_output"
-            if [ "$build_status" -eq 0 ]; then
-              qualification_status=0
-              qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" 2>&1)" || qualification_status=$?
-              printf '%s\n' "$qualification_output"
-            fi
-          fi
-          transport_status="$build_status"
-          if [ "$transport_status" -eq 0 ]; then
-            transport_status="$qualification_status"
-          fi
-          printf 'm3_interop_transport status=%s build=%s qualification=%s\n' \
-            "$([ "$transport_status" -eq 0 ] && printf PASS || printf FAIL)" \
-            "$build_status" "$qualification_status"
-          printf 'M3_INTEROP_TRANSPORT_STATUS=%s\n' "$transport_status" >> "$GITHUB_ENV"
-      - name: Run hosted M12 DNS qualification
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -uo pipefail
-          build_status=125
-          qualification_status=125
-          if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-            echo "interop build root was not prepared" >&2
-          else
-            build_status=0
-            build_output="$(cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked \
-              --features ferrum2-dns/__interop-test-root 2>&1)" || build_status=$?
-            printf '%s\n' "$build_output"
-            if [ "$build_status" -eq 0 ]; then
-              qualification_status=0
-              qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" --dns-only 2>&1)" || qualification_status=$?
-              printf '%s\n' "$qualification_output"
-            fi
-          fi
-          dns_status="$build_status"
-          if [ "$dns_status" -eq 0 ]; then
-            dns_status="$qualification_status"
-          fi
-          printf 'm3_interop_dns status=%s build=%s qualification=%s\n' \
-            "$([ "$dns_status" -eq 0 ] && printf PASS || printf FAIL)" \
-            "$build_status" "$qualification_status"
-          printf 'M3_INTEROP_DNS_STATUS=%s\n' "$dns_status" >> "$GITHUB_ENV"
+          set -euo pipefail
+          python3 -B -m tools.ci.interop_run \
+            --target-root "${CARGO_TARGET_DIR:-}" \
+            --github-env "$GITHUB_ENV"
       - name: Delete isolated interop build root
         if: ${{ always() }}
         shell: bash

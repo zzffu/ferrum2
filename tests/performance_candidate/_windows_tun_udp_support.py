@@ -81,11 +81,8 @@ class WindowsTunUdpSupport(WindowsTunBase):
             run_kind="calibration-aa", decision_policy=self.policy(),
             controller_bundle_sha256=self.CONTROLLER_BUNDLE_SHA256,
         )
-        planned = next(
-            trial
-            for trial in plan["trials"]
-            if trial["sequence"]
-            == udp_diagnostic.WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE
+        planned = windows_plan.resolve_windows_tun_diagnostic_profile(
+            plan, "UdpFlowBoundary"
         )
         plan_sha256 = "a" * 64
         run_nonce = "18446744073709551615"

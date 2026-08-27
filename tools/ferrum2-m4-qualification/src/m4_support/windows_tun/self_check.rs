@@ -7,9 +7,8 @@ use super::diagnostic::{
     FragmentWorkloadAccounting, IPV4_HEADER_LEN, PERFORMANCE_TUN_MTU, ROUTE_TARGET_SLOTS,
     SUPPORT_UNDERLAY_IPV4_MTU, SupportUdpDiagnostic, UDP_ASSOCIATION_SOURCE_IPV4,
     UDP_ASSOCIATION_SOURCE_PORT_FIRST, UDP_ASSOCIATION_SOURCE_PORT_LAST, UDP_BATCH,
-    UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE, UDP_DIAGNOSTIC_MAX_EVENT_BYTES,
-    UDP_DIAGNOSTIC_MAX_EVENTS, UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_DIAGNOSTIC_SCOPE,
-    UDP_DIAGNOSTIC_VERSION, UDP_HEADER_LEN, UDP_SUPPORT_DIAGNOSTIC_CLOSURE,
+    UDP_DIAGNOSTIC_MAX_EVENT_BYTES, UDP_DIAGNOSTIC_MAX_EVENTS, UDP_DIAGNOSTIC_PAYLOAD_LEN,
+    UDP_DIAGNOSTIC_SCOPE, UDP_DIAGNOSTIC_VERSION, UDP_HEADER_LEN, UDP_SUPPORT_DIAGNOSTIC_CLOSURE,
     UDP_SUPPORT_LEDGER_SCHEMA, UDP_WORKLOAD_DIAGNOSTIC_CLOSURE, UDP_WORKLOAD_LEDGER_SCHEMA,
     UdpAssociationSourceArgs, UdpDiagnosticFinalizeArgs, UdpDiagnosticLedgerArgs,
     UdpDiagnosticPayload, UdpDiagnosticPhase, UdpWorkloadDiagnosticArgs,
@@ -32,6 +31,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
 pub(crate) fn run_self_check() -> Result<(), String> {
+    const DIAGNOSTIC_TRIAL_SEQUENCE: u16 = 43;
     let directory = tempfile::tempdir()
         .map_err(|error| format!("create Windows TUN self-check directory failed: {error}"))?;
     let output = directory.path().join("observation.json");
@@ -180,7 +180,7 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         OsString::from("--diagnostic-max-events"),
         OsString::from("16384"),
         OsString::from("--diagnostic-trial-sequence"),
-        OsString::from(UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE.to_string()),
+        OsString::from(DIAGNOSTIC_TRIAL_SEQUENCE.to_string()),
     ]);
     let diagnostic_parsed = parse_workload(&diagnostic_arguments)?;
     let diagnostic = diagnostic_parsed
@@ -191,7 +191,7 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         || diagnostic.ledger.path != workload_ledger_path
         || diagnostic.ledger.run_nonce != 0x0102_0304_0506_0708
         || diagnostic.ledger.max_events != 16_384
-        || diagnostic.trial_sequence != UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE
+        || diagnostic.trial_sequence != DIAGNOSTIC_TRIAL_SEQUENCE
     {
         return Err("Windows TUN workload diagnostic arguments were not preserved".to_owned());
     }
@@ -214,15 +214,14 @@ pub(crate) fn run_self_check() -> Result<(), String> {
     oversized_events_diagnostic[21] = OsString::from((UDP_DIAGNOSTIC_MAX_EVENTS + 1).to_string());
     let mut zero_trial_diagnostic = diagnostic_arguments.clone();
     zero_trial_diagnostic[23] = OsString::from("0");
-    let mut wrong_trial_diagnostic = diagnostic_arguments.clone();
-    wrong_trial_diagnostic[23] =
-        OsString::from((UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE - 1).to_string());
+    let mut oversized_trial_diagnostic = diagnostic_arguments.clone();
+    oversized_trial_diagnostic[23] = OsString::from("65536");
     if parse_workload(&wrong_scenario_diagnostic).is_ok()
         || parse_workload(&zero_nonce_diagnostic).is_ok()
         || parse_workload(&noncanonical_nonce_diagnostic).is_ok()
         || parse_workload(&oversized_events_diagnostic).is_ok()
         || parse_workload(&zero_trial_diagnostic).is_ok()
-        || parse_workload(&wrong_trial_diagnostic).is_ok()
+        || parse_workload(&oversized_trial_diagnostic).is_ok()
     {
         return Err("invalid Windows TUN workload diagnostic bounds were accepted".to_owned());
     }
@@ -286,6 +285,8 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         "53",
         "--diagnostic-run-nonce",
         "72623859790382856",
+        "--diagnostic-trial-sequence",
+        "43",
     ]
     .into_iter()
     .map(OsString::from)
@@ -296,12 +297,15 @@ pub(crate) fn run_self_check() -> Result<(), String> {
             target_ip: "192.0.2.10".parse().expect("literal"),
             udp_port: 53,
             run_nonce: 0x0102_0304_0506_0708,
+            trial_sequence: DIAGNOSTIC_TRIAL_SEQUENCE,
         })
     {
         return Err("Windows TUN UDP diagnostic finalize arguments were not preserved".to_owned());
     }
     let mut partial_finalize = finalize_arguments.clone();
     partial_finalize.truncate(partial_finalize.len() - 2);
+    let mut missing_nonce_finalize = finalize_arguments.clone();
+    missing_nonce_finalize.drain(4..6);
     let mut duplicate_finalize = finalize_arguments.clone();
     duplicate_finalize.extend([OsString::from("--udp-port"), OsString::from("54")]);
     let mut extra_finalize = finalize_arguments.clone();
@@ -310,13 +314,20 @@ pub(crate) fn run_self_check() -> Result<(), String> {
     zero_nonce_finalize[5] = OsString::from("0");
     let mut noncanonical_nonce_finalize = finalize_arguments.clone();
     noncanonical_nonce_finalize[5] = OsString::from("01");
+    let mut zero_trial_finalize = finalize_arguments.clone();
+    zero_trial_finalize[7] = OsString::from("0");
+    let mut oversized_trial_finalize = finalize_arguments.clone();
+    oversized_trial_finalize[7] = OsString::from("65536");
     let mut overflowing_port_finalize = finalize_arguments.clone();
     overflowing_port_finalize[3] = OsString::from("65535");
     if parse_udp_diagnostic_finalize(&partial_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&missing_nonce_finalize).is_ok()
         || parse_udp_diagnostic_finalize(&duplicate_finalize).is_ok()
         || parse_udp_diagnostic_finalize(&extra_finalize).is_ok()
         || parse_udp_diagnostic_finalize(&zero_nonce_finalize).is_ok()
         || parse_udp_diagnostic_finalize(&noncanonical_nonce_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&zero_trial_finalize).is_ok()
+        || parse_udp_diagnostic_finalize(&oversized_trial_finalize).is_ok()
         || parse_udp_diagnostic_finalize(&overflowing_port_finalize).is_ok()
     {
         return Err("Windows TUN UDP diagnostic finalize argument boundary is open".to_owned());
@@ -332,7 +343,7 @@ pub(crate) fn run_self_check() -> Result<(), String> {
     }
     let diagnostic_identity = UdpDiagnosticPayload {
         phase: UdpDiagnosticPhase::Bootstrap,
-        trial_sequence: UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE,
+        trial_sequence: DIAGNOSTIC_TRIAL_SEQUENCE,
         association_index: 85,
         round: 0,
         run_nonce: 0x0102_0304_0506_0708,
@@ -344,18 +355,31 @@ pub(crate) fn run_self_check() -> Result<(), String> {
     {
         return Err("Windows TUN tagged UDP diagnostic payload did not round-trip".to_owned());
     }
-    let finalize_identity = udp_diagnostic_finalize_marker(diagnostic_identity.run_nonce);
+    let finalize_identity = udp_diagnostic_finalize_marker(
+        diagnostic_identity.run_nonce,
+        diagnostic_identity.trial_sequence,
+    )?;
     let finalize_payload = finalize_identity.encode();
     if finalize_identity.phase != UdpDiagnosticPhase::Finalize
-        || finalize_identity.trial_sequence != UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE
+        || finalize_identity.trial_sequence != DIAGNOSTIC_TRIAL_SEQUENCE
         || finalize_identity.association_index != u32::MAX
         || finalize_identity.round != u32::MAX
         || finalize_identity.packet_nonce != u64::MAX
         || UdpDiagnosticPayload::parse(&finalize_payload) != Some(finalize_identity)
-        || !is_udp_diagnostic_finalize_marker(finalize_identity, diagnostic_identity.run_nonce)
+        || !is_udp_diagnostic_finalize_marker(
+            finalize_identity,
+            diagnostic_identity.run_nonce,
+            diagnostic_identity.trial_sequence,
+        )
         || is_udp_diagnostic_finalize_marker(
             finalize_identity,
             diagnostic_identity.run_nonce.wrapping_add(1),
+            diagnostic_identity.trial_sequence,
+        )
+        || is_udp_diagnostic_finalize_marker(
+            finalize_identity,
+            diagnostic_identity.run_nonce,
+            diagnostic_identity.trial_sequence + 1,
         )
     {
         return Err("Windows TUN UDP diagnostic finalize marker identity is invalid".to_owned());
@@ -503,6 +527,11 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         ..diagnostic_identity
     }
     .encode();
+    let other_finalize_payload = udp_diagnostic_finalize_marker(
+        diagnostic_identity.run_nonce,
+        diagnostic_identity.trial_sequence + 1,
+    )?
+    .encode();
     for request in [
         &warmup_payload[..],
         &foreign_payload[..],
@@ -536,6 +565,15 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         barrier_diagnostic.observe_finalize_marker(slot, listen, barrier_peer, &finalize_payload);
     }
     barrier_diagnostic.observe_finalize_marker(0, barrier_listen, barrier_peer, &finalize_payload);
+    barrier_diagnostic.observe_finalize_marker(
+        ROUTE_TARGET_SLOTS - 1,
+        SocketAddr::new(
+            barrier_listen.ip(),
+            barrier_listen.port() + u16::try_from(ROUTE_TARGET_SLOTS - 1).expect("slot fits u16"),
+        ),
+        barrier_peer,
+        &other_finalize_payload,
+    );
     if barrier_diagnostic.ledger.is_closed() || barrier_diagnostic.ledger.counters() != (2, 2, 0, 0)
     {
         return Err(

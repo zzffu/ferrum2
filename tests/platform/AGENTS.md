@@ -4,9 +4,10 @@ This directory owns privileged and hosted qualification orchestration. Keep Main
 bundles independently enumerated and hash-verified before importing any script; the hard-kill workflow
 must not depend on Main runtime functions.
 
-Static contract scripts may run on a development host. The loopback-only, unprivileged native binary
-contract may run locally through `qualify_native.py --local-contract`; hosted evidence mode must bind
-the exact GitHub SHA, runner identity, clean checkout, and artifact paths. Hyper-V guest execution,
+Static contract scripts may run on a development host. `native_contract.py` owns the loopback-only,
+unprivileged binary behavior checks; `qualify_native.py` is the thin local/hosted entrypoint. Local
+execution uses `qualify_native.py --local-contract`, while hosted evidence mode must bind the exact
+GitHub SHA, runner identity, clean checkout, and artifact paths. Hyper-V guest execution,
 TUN smoke, and adapter or underlay cases run only in their designated environment and must preserve
 bounded cleanup and structured evidence.
 
