@@ -133,6 +133,8 @@ class FuzzContractTests(unittest.TestCase):
             "crates/ferrum2-rule/src/lib.rs",
             "crates/ferrum2-runtime/src/lib.rs",
             "tools/windows-tun/controller.ps1",
+            "tools/windows_tun_hyperv_support_topology_plan.json",
+            "tools/windows_tun_performance_policy.json",
         ]:
             with self.subTest(relative=relative):
                 head = repository.commit_file(relative, f"changed {relative}\n")

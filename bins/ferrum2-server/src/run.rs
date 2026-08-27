@@ -501,31 +501,10 @@ where
             });
             tcp_contexts.push(context);
         }
-        let tcp_registry = registry.clone();
-        let tcp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
-        roots.push(ProcessRoot::new(move || async move {
-            let mut listeners = Vec::with_capacity(tcp_listens.len());
-            for listen in tcp_listens {
-                listeners.push(bind_listener(listen, listen_backlog)?);
-            }
-            let supervisor = BoundedSupervisor::new(
-                ServerTcpListeners {
-                    listeners,
-                    next: AtomicUsize::new(0),
-                },
-                max_connections,
-                shutdown_grace,
-                tcp_registry,
-            )
-            .map_err(|_| RunError::StartupProtocol)?;
-            Ok(ServerDnsDependentRoot::new(
-                ServerTcpRoot {
-                    supervisor: Some(supervisor),
-                    contexts: Arc::new(tcp_contexts),
-                },
-                tcp_dns_lease,
-            ))
-        }));
+        // ProcessSupervisor prepares roots in insertion order. Acquire every UDP
+        // listener before the TCP root exposes its kernel listen backlog so a
+        // successful external TCP-connect readiness probe also orders after all
+        // required UDP binds.
         if let Some(protocol) = udp_protocol {
             let limits = udp_runtime_limits(&udp_config).ok_or(RunError::StartupProtocol)?;
             let sessions = UdpSessionManager::new(limits, registry.clone());
@@ -581,6 +560,31 @@ where
                 }));
             }
         }
+        let tcp_registry = registry.clone();
+        let tcp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
+        roots.push(ProcessRoot::new(move || async move {
+            let mut listeners = Vec::with_capacity(tcp_listens.len());
+            for listen in tcp_listens {
+                listeners.push(bind_listener(listen, listen_backlog)?);
+            }
+            let supervisor = BoundedSupervisor::new(
+                ServerTcpListeners {
+                    listeners,
+                    next: AtomicUsize::new(0),
+                },
+                max_connections,
+                shutdown_grace,
+                tcp_registry,
+            )
+            .map_err(|_| RunError::StartupProtocol)?;
+            Ok(ServerDnsDependentRoot::new(
+                ServerTcpRoot {
+                    supervisor: Some(supervisor),
+                    contexts: Arc::new(tcp_contexts),
+                },
+                tcp_dns_lease,
+            ))
+        }));
         if let Some(metrics_config) = config.metrics {
             let metrics_registry = registry.clone();
             roots.push(ProcessRoot::new(move || async move {

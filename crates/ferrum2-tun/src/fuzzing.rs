@@ -388,7 +388,9 @@ async fn exercise(input: &[u8]) {
         generation,
         wake,
     );
-    let mut associations = Vec::<UdpAssociation>::with_capacity(capacity);
+    // Closed owner handles may outlive expired and recycled table slots. Keep the
+    // harness ledger bounded by the input model, independently of live capacity.
+    let mut associations = Vec::<UdpAssociation>::with_capacity(MAX_STEPS);
     let mut stale_sinks = VecDeque::with_capacity(MAX_RETAINED_STALE_SINKS);
     let mut now_millis = 0_i64;
 
@@ -456,9 +458,16 @@ async fn exercise(input: &[u8]) {
                                 .expect("committed candidate retains its first datagram");
                             assert_eq!(first.source(), source);
                             assert_eq!(first.target(), first_target);
+                            associations.retain(|existing| {
+                                if existing.source() == source {
+                                    retain_stale_sink(&mut stale_sinks, existing.response_sink());
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
                             retain_stale_sink(&mut stale_sinks, association.response_sink());
                             associations.push(association);
-                            assert!(associations.len() <= capacity);
                         }
                         Err(UdpCommitError::Rejected | UdpCommitError::Unavailable) => {}
                     }
@@ -576,7 +585,7 @@ async fn exercise(input: &[u8]) {
         }
 
         assert!(table.active_associations() <= capacity);
-        assert!(associations.len() <= capacity);
+        assert!(associations.len() <= ordinal + 1);
         assert!(ordinal < MAX_STEPS);
         assert!(
             wake_count.load(Ordering::Relaxed) <= (ordinal + 1).saturating_mul(8).saturating_add(8)
@@ -689,6 +698,17 @@ fn target(source_selector: u8, target_selector: u8) -> SocketAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_owner_handle_can_outlive_a_reused_capacity_slot() {
+        const CI_CRASH_46F86E2F: &[u8] = &[
+            0x08, 0x15, 0x31, 0x00, 0x6c, 0x63, 0xc3, 0x2d, 0x01, 0x06, 0x00, 0x00, 0x00, 0xe9,
+            0x16, 0x16, 0xff, 0x00, 0xf9, 0x04, 0x16, 0x16, 0x16, 0x2b, 0x16, 0x7d, 0xef, 0x00,
+            0x00, 0x00, 0x22, 0x01, 0xf9, 0x04,
+        ];
+
+        fuzz_udp_reset_races(CI_CRASH_46F86E2F);
+    }
 
     #[test]
     fn candidate_queued_after_mapping_expiry_uses_candidate_owner_queue() {

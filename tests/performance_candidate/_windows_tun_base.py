@@ -11,6 +11,8 @@ class WindowsTunBase(unittest.TestCase):
     AA_SHA = "1" * 40
     PARENT_SHA = "2" * 40
     CANDIDATE_SHA = "3" * 40
+
+    @staticmethod
     def topology_environment() -> dict[str, object]:
         return {
             "checkpoint_id": "81000000-0000-4000-8000-000000000001",

@@ -32,7 +32,7 @@ DiagnosticTrialSequence runs exactly one canonical A/A trial while retaining the
 the ordinary evidence-export and VM-restore boundaries. Diagnostic evidence is explicitly not a
 qualification result and cannot be used for comparison or calibration adoption.
 
-DiagnosticProfile UdpFlowBoundary is restricted to calibration-aa sequence 31. It writes an
+DiagnosticProfile UdpFlowBoundary is restricted to calibration-aa sequence 37. It writes an
 independent bounded guest/host flow diagnostic under udp-diagnostic and preserves the canonical
 performance and diagnostic evidence paths unchanged.
 #>
@@ -142,9 +142,9 @@ $supportDiagnosticParametersSupplied = @($supportDiagnosticParameterNames | Wher
     $PSBoundParameters.ContainsKey($_)
 })
 if ($instrumentedDiagnosticMode) {
-    if (-not $diagnosticMode -or $DiagnosticTrialSequence -ne 31 -or
+    if (-not $diagnosticMode -or $DiagnosticTrialSequence -ne 37 -or
         $RunKind -cne "calibration-aa") {
-        throw "UdpFlowBoundary requires calibration-aa and DiagnosticTrialSequence 31"
+        throw "UdpFlowBoundary requires calibration-aa and DiagnosticTrialSequence 37"
     }
     if ($supportDiagnosticParametersSupplied.Count -ne
         $supportDiagnosticParameterNames.Count) {

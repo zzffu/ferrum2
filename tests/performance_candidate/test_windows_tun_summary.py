@@ -15,6 +15,8 @@ from tools.performance_candidate.windows_tun import policy as windows_policy
 from tools.performance_candidate.windows_tun import recipe as windows_recipe
 from tools.performance_candidate.windows_tun import summary as windows_summary
 from tools.performance_candidate.windows_tun import trial as windows_trial
+from tools.performance_candidate.windows_tun import udp_diagnostic
+
 
 class WindowsTunSummaryTests(WindowsTunTrialSupport):
     def test_repository_policy_and_plan_are_closed_and_uncalibrated(self) -> None:
@@ -63,6 +65,66 @@ class WindowsTunSummaryTests(WindowsTunTrialSupport):
         )
         self.assertTrue(identities)
         self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in identities.values()))
+
+    def test_udp_diagnostic_trial_sequence_is_cross_language_bound(self) -> None:
+        sequence = udp_diagnostic.WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE
+        plan = windows_plan.create_windows_tun_plan(
+            run_kind="calibration-aa",
+            decision_policy=self.policy(),
+            controller_bundle_sha256=self.CONTROLLER_BUNDLE_SHA256,
+        )
+        matching_trials = [
+            trial
+            for trial in plan["trials"]
+            if trial["sequence"] == sequence
+        ]
+        self.assertEqual(len(matching_trials), 1)
+        self.assertEqual(
+            {
+                field: matching_trials[0][field]
+                for field in ("scenario", "member", "pair", "order")
+            },
+            {
+                "scenario": "udp-8192-association-lookup-expiry",
+                "member": "parent",
+                "pair": 1,
+                "order": 1,
+            },
+        )
+
+        root = windows_recipe.repository_root()
+        consumers = {
+            "Rust M4": (
+                root
+                / "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/diagnostic.rs",
+                r"UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE: u16 = (\d+);",
+                [str(sequence)],
+            ),
+            "PowerShell entrypoint": (
+                root / "tools/windows-tun/run_windows_tun_performance_hyperv.ps1",
+                r"\$DiagnosticTrialSequence -ne (\d+)",
+                [str(sequence)],
+            ),
+            "PowerShell collector": (
+                root / "tools/windows-tun/collect_windows_tun_udp_boundary_diagnostic.ps1",
+                r"\[ValidateRange\((\d+), (\d+)\)\]\s*\[int\]\$TrialSequence",
+                [(str(sequence), str(sequence))],
+            ),
+            "PowerShell guest": (
+                root / "tools/powershell/Ferrum2.Performance/GuestTransaction.ps1",
+                r"\$DiagnosticTrialSequenceValue -ne (\d+)",
+                [str(sequence)],
+            ),
+            "PowerShell host": (
+                root / "tools/powershell/Ferrum2.Performance/HostVmTransaction.ps1",
+                r"\[int\]\$executionTrials\[0\]\.sequence -ne (\d+)",
+                [str(sequence)],
+            ),
+        }
+        for label, (path, pattern, expected_matches) in consumers.items():
+            with self.subTest(consumer=label):
+                matches = re.findall(pattern, path.read_text(encoding="utf-8"))
+                self.assertEqual(matches, expected_matches)
 
     def test_serialized_windows_tun_plan_preserves_the_trial_schedule(self) -> None:
         policy = self.policy()
@@ -142,9 +204,9 @@ class WindowsTunSummaryTests(WindowsTunTrialSupport):
                             controller_bundle_sha256=self.CONTROLLER_BUNDLE_SHA256,
                         )
         self.assertEqual(loaded["trials"], plan["trials"])
-        self.assertEqual(loaded["trials"][40]["sequence"], 41)
+        self.assertEqual(loaded["trials"][48]["sequence"], 49)
         self.assertEqual(
-            loaded["trials"][40]["scenario"],
+            loaded["trials"][48]["scenario"],
             "fragment-reassembly-throughput",
         )
 
@@ -214,7 +276,7 @@ class WindowsTunSummaryTests(WindowsTunTrialSupport):
         self.assertFalse(artifact["thresholds_reviewed"])
         self.assertRegex(artifact["content_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(set(artifact["observations"]), set(windows_recipe.scenario_catalog()))
-        self.assertEqual(len(artifact["evidence_files"]), 110)
+        self.assertEqual(len(artifact["evidence_files"]), 132)
         self.assertEqual(
             artifact["network_model"]["raw_observations"],
             windows_recipe.WINDOWS_TUN_PAIR_COUNT * 2 * 2,

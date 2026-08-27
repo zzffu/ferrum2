@@ -397,7 +397,7 @@ class ScaleControlTests(unittest.TestCase):
         def fairness_candidates(
             low: int, high: int, low_count: int
         ) -> list[dict[str, object]]:
-            rows = candidates([101] * 5)
+            rows = candidates([101] * 6)
             for row in rows:
                 rewrite_scale_full_completions(
                     row, [low] * low_count + [high] * (10_000 - low_count)

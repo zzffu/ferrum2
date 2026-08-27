@@ -115,7 +115,7 @@ if ([string]$controllerBundleManifest.controller_bundle_sha256 -cne
 }
 if ($InstrumentedDiagnostic) {
     if ($DiagnosticProfileValue -cne "UdpFlowBoundary" -or
-        $DiagnosticTrialSequenceValue -ne 31 -or
+        $DiagnosticTrialSequenceValue -ne 37 -or
         $RunKindValue -cne "calibration-aa" -or
         $ParentCommit -cne $CandidateCommit -or
         $DiagnosticRunNonce -cnotmatch '^[1-9][0-9]{0,19}$' -or

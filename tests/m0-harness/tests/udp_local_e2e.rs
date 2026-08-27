@@ -828,7 +828,7 @@ fn default_startup_owns_same_tcp_udp_port_and_shutdown_rebinds_both() {
 }
 
 #[test]
-fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
+fn either_bind_failure_leaves_the_other_protocol_rebindable_before_any_loop_runs() {
     let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
     let directory = tempfile::tempdir().expect("temporary directory");
 
@@ -841,8 +841,8 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
         &["--config", udp_config.to_str().expect("UTF-8 config")],
     );
     assert_startup_bind_failure(&output, udp_address);
-    let rolled_back_tcp = bind_loopback_listener(udp_address).expect("TCP bind rolled back");
-    drop(rolled_back_tcp);
+    let never_owned_tcp = bind_loopback_listener(udp_address).expect("TCP remained unbound");
+    drop(never_owned_tcp);
     drop(udp_incumbent);
 
     let tcp_address = unused_tcp_udp_loopback();
@@ -854,8 +854,8 @@ fn either_bind_failure_rolls_back_the_other_before_any_loop_runs() {
         &["--config", tcp_config.to_str().expect("UTF-8 config")],
     );
     assert_startup_bind_failure(&output, tcp_address);
-    let never_owned_udp = UdpSocket::bind(tcp_address).expect("UDP was never retained");
-    drop(never_owned_udp);
+    let rolled_back_udp = UdpSocket::bind(tcp_address).expect("UDP bind rolled back");
+    drop(rolled_back_udp);
     drop(tcp_incumbent);
 }
 

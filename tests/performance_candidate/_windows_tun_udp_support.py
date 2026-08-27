@@ -15,6 +15,8 @@ class WindowsTunUdpSupport(WindowsTunBase):
         (root / "udp-diagnostic.json").write_text(
             json.dumps(row, sort_keys=True, allow_nan=False), encoding="utf-8"
         )
+
+    @staticmethod
     def refresh_udp_artifact(
         root: pathlib.Path,
         row: dict[str, object],
@@ -79,7 +81,12 @@ class WindowsTunUdpSupport(WindowsTunBase):
             run_kind="calibration-aa", decision_policy=self.policy(),
             controller_bundle_sha256=self.CONTROLLER_BUNDLE_SHA256,
         )
-        planned = next(trial for trial in plan["trials"] if trial["sequence"] == 31)
+        planned = next(
+            trial
+            for trial in plan["trials"]
+            if trial["sequence"]
+            == udp_diagnostic.WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE
+        )
         plan_sha256 = "a" * 64
         run_nonce = "18446744073709551615"
         support_ip = "192.0.2.10"
@@ -164,7 +171,7 @@ class WindowsTunUdpSupport(WindowsTunBase):
                 "write_failures": 0,
             },
             "run_nonce": run_nonce,
-            "trial_sequence": 31,
+            "trial_sequence": trial["sequence"],
             "phase": "bootstrap",
             "association_index": 0,
             "round": 0,
@@ -186,7 +193,7 @@ class WindowsTunUdpSupport(WindowsTunBase):
         workload_records = [
             ledger_header(
                 workload_schema,
-                trial_sequence=31,
+                trial_sequence=trial["sequence"],
                 source_ip=windows_recipe.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_IPV4,
                 source_port_first=(
                     windows_recipe.WINDOWS_TUN_UDP_ASSOCIATION_SOURCE_PORT_FIRST

@@ -11,7 +11,7 @@
     {
       "path": "tools/windows-tun/collect_windows_tun_udp_boundary_diagnostic.ps1",
       "bytes": 22995,
-      "sha256": "13975c6ecffc9dd81feced0d5c1b569b801c92b1e65c9a0b69c7ba0ca4cc8690"
+      "sha256": "4e24ad1c4223d0a667187aba55f7af4b8fd5351f1d030b01fa261b97d8de48d9"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/CollectorCore.ps1",
@@ -46,7 +46,7 @@
     {
       "path": "tools/powershell/Ferrum2.Performance/GuestTransaction.ps1",
       "bytes": 37808,
-      "sha256": "cb1a915c8bf54694e388b504056e70d1f16c9201996a4385672ab351da6a49b7"
+      "sha256": "255c1d6baeb743d522f4b213074996069ab56315c454a617c777744ac0970f05"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostContract.ps1",
@@ -65,8 +65,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostVmTransaction.ps1",
-      "bytes": 36187,
-      "sha256": "90a6b97a87e2dadf20386332c7d92b75bc27f53a305bed082f5b498e50b22991"
+      "bytes": 36240,
+      "sha256": "bd7ead8a92afc9fc8b9b3883ad9bc506eb19b8aac82eb4e686e54c949dfcf39d"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
@@ -211,7 +211,7 @@
     {
       "path": "tools/windows-tun/run_windows_tun_performance_hyperv.ps1",
       "bytes": 38621,
-      "sha256": "dbb230c17b5c2ca79d4f72abaf0f4fca97bd20db774468f468c296dacdf14343"
+      "sha256": "2f65d4ae31c999a52988ff436ea5c9920e352bc7d721231f154923e02823329d"
     }
   ]
 }

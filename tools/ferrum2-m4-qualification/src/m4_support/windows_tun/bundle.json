@@ -11,7 +11,7 @@
     {
       "path": "diagnostic.rs",
       "bytes": 26112,
-      "sha256": "b454e6f00976bc7011d71442e01ccbde28889ba6245b5d2971709c95f1705e2a"
+      "sha256": "98c7eec4ef0ac55fa23fa3d104869847e468e5319527fa43af93232dd5c6a1ac"
     },
     {
       "path": "mod.rs",
@@ -25,8 +25,8 @@
     },
     {
       "path": "self_check.rs",
-      "bytes": 44495,
-      "sha256": "2b88caafff25359f4f188170166ac3b0b1bf3a79c51145cb43c4cebc0a8c979c"
+      "bytes": 44673,
+      "sha256": "79b9b37851163fc6f311181de397ac03595d3fc1a84e9a098cbe66bc8b0bed7e"
     },
     {
       "path": "support.rs",

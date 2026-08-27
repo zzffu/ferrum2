@@ -28,7 +28,7 @@ param(
     [string]$Member,
 
     [Parameter(Mandatory = $true)]
-    [ValidateRange(31, 31)]
+    [ValidateRange(37, 37)]
     [int]$TrialSequence,
 
     [Parameter(Mandatory = $true)]

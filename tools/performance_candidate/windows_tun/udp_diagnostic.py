@@ -13,6 +13,9 @@ from tools.performance_candidate.windows_tun.udp_ledger import _read_windows_tun
 from tools.performance_candidate.windows_tun.udp_schema import WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_ARTIFACT_ROLES, WINDOWS_TUN_UDP_DIAGNOSTIC_BOUND_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_IDENTITY_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_LIMITS, WINDOWS_TUN_UDP_DIAGNOSTIC_MAX_BYTES, WINDOWS_TUN_UDP_DIAGNOSTIC_SCHEMA, WINDOWS_TUN_UDP_DIAGNOSTIC_SUPPORT_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_TOPOLOGY_FIELDS, WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_FIELDS, WINDOWS_TUN_UDP_FAILURE_REFERENCE_FIELDS, WINDOWS_TUN_UDP_SUPPORT_LEDGER_SCHEMA, WINDOWS_TUN_UDP_WORKLOAD_LEDGER_SCHEMA
 from tools.performance_candidate.windows_tun.udp_values import _read_windows_tun_udp_document, _validate_windows_tun_udp_support_endpoints, _windows_tun_required_digest, _windows_tun_udp_artifact_path, _windows_tun_udp_decimal_u64, _windows_tun_udp_ipv4, _windows_tun_udp_u64, _windows_tun_utc
 
+WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE = 37
+
+
 def validate_windows_tun_udp_diagnostic(
     *,
     plan: dict[str, object],
@@ -81,11 +84,12 @@ def validate_windows_tun_udp_diagnostic(
     ):
         raise CandidateControlError("Windows TUN UDP diagnostic trial is not plan-bound")
     if (
-        trial["sequence"] != 31
+        trial["sequence"] != WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE
         or trial["scenario"] != "udp-8192-association-lookup-expiry"
     ):
         raise CandidateControlError(
-            "Windows TUN UDP diagnostic must be the reviewed sequence 31 scenario"
+            "Windows TUN UDP diagnostic must be the reviewed sequence "
+            f"{WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE} scenario"
         )
     expected_sha = parent_sha if trial["member"] == "parent" else candidate_sha
     if identity["sha"] != expected_sha:

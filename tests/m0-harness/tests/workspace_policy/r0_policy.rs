@@ -535,6 +535,8 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
             "tools/ci/git_changes.py".to_owned(),
             "tools/powershell/**".to_owned(),
             "tools/windows-tun/**".to_owned(),
+            "tools/windows_tun_hyperv_support_topology_plan.json".to_owned(),
+            "tools/windows_tun_performance_policy.json".to_owned(),
             "vendor/shadowsocks-crypto/**".to_owned(),
         ]),
         "the fuzz owner-impact ledger drifted"

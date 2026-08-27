@@ -48,11 +48,12 @@ try {
         throw "canonical Windows TUN execution selection is invalid"
     }
     if ($instrumentedDiagnosticMode -and (
+        [int]$executionTrials[0].sequence -ne 37 -or
         [string]$executionTrials[0].scenario -cne
             "udp-8192-association-lookup-expiry" -or
         [string]$executionTrials[0].member -cne "parent"
     )) {
-        throw "UdpFlowBoundary trial identity is not canonical sequence 31 parent"
+        throw "UdpFlowBoundary trial identity is not canonical sequence 37 parent"
     }
     $expectedTrialCount = if ($instrumentedDiagnosticMode) {
         0

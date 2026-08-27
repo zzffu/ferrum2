@@ -431,7 +431,7 @@ class WindowsTunUdpTests(WindowsTunTrialSupport):
                 "remote_port": 55_000,
                 "payload_run_nonce": row["run_nonce"],
                 "payload_run_nonce_match": True,
-                "trial_sequence": 31,
+                "trial_sequence": row["trial"]["sequence"],
                 "phase": "bootstrap",
                 "association_index": 0,
                 "round": 0,
@@ -678,7 +678,9 @@ class WindowsTunUdpTests(WindowsTunTrialSupport):
                     parent_sha=self.PARENT_SHA,
                     candidate_sha=self.CANDIDATE_SHA,
                 )
-            row["trial"]["sequence"] = 32
+            row["trial"]["sequence"] = (
+                udp_diagnostic.WINDOWS_TUN_UDP_DIAGNOSTIC_TRIAL_SEQUENCE + 1
+            )
             self.write_udp_diagnostic_document(root, row)
             with self.assertRaises(json_contract.CandidateControlError):
                 self.validate_udp_diagnostic(root, plan, plan_sha256)

@@ -180,7 +180,7 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         OsString::from("--diagnostic-max-events"),
         OsString::from("16384"),
         OsString::from("--diagnostic-trial-sequence"),
-        OsString::from("31"),
+        OsString::from(UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE.to_string()),
     ]);
     let diagnostic_parsed = parse_workload(&diagnostic_arguments)?;
     let diagnostic = diagnostic_parsed
@@ -191,7 +191,7 @@ pub(crate) fn run_self_check() -> Result<(), String> {
         || diagnostic.ledger.path != workload_ledger_path
         || diagnostic.ledger.run_nonce != 0x0102_0304_0506_0708
         || diagnostic.ledger.max_events != 16_384
-        || diagnostic.trial_sequence != 31
+        || diagnostic.trial_sequence != UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE
     {
         return Err("Windows TUN workload diagnostic arguments were not preserved".to_owned());
     }
@@ -215,7 +215,8 @@ pub(crate) fn run_self_check() -> Result<(), String> {
     let mut zero_trial_diagnostic = diagnostic_arguments.clone();
     zero_trial_diagnostic[23] = OsString::from("0");
     let mut wrong_trial_diagnostic = diagnostic_arguments.clone();
-    wrong_trial_diagnostic[23] = OsString::from("30");
+    wrong_trial_diagnostic[23] =
+        OsString::from((UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE - 1).to_string());
     if parse_workload(&wrong_scenario_diagnostic).is_ok()
         || parse_workload(&zero_nonce_diagnostic).is_ok()
         || parse_workload(&noncanonical_nonce_diagnostic).is_ok()
@@ -331,7 +332,7 @@ pub(crate) fn run_self_check() -> Result<(), String> {
     }
     let diagnostic_identity = UdpDiagnosticPayload {
         phase: UdpDiagnosticPhase::Bootstrap,
-        trial_sequence: 31,
+        trial_sequence: UDP_DIAGNOSTIC_FINALIZE_TRIAL_SEQUENCE,
         association_index: 85,
         round: 0,
         run_nonce: 0x0102_0304_0506_0708,

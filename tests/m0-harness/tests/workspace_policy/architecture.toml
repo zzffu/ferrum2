@@ -160,6 +160,8 @@ owner_paths = [
     "tests/platform/**",
     "tools/powershell/**",
     "tools/windows-tun/**",
+    "tools/windows_tun_hyperv_support_topology_plan.json",
+    "tools/windows_tun_performance_policy.json",
     "tools/ci/__init__.py",
     "tools/ci/git_changes.py",
     "tools/ci/fuzz_contract.py",
