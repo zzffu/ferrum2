@@ -57,7 +57,7 @@ class SchemaAndRunnerTests(unittest.TestCase):
             (b'{"value":1,"value":2}', "duplicate"),
             (b'{"value":NaN}', "non-finite"),
             (b'{"value":1e999}', "non-finite"),
-            (b'{"value":' + b"1" * 5_000 + b"}", "one valid"),
+            (b'{"value":' + b"1" * 5_000 + b"}", "integer"),
             (b"[" * 2_000 + b"]" * 2_000, "one valid"),
             (b"{}", "byte bound"),
         ):

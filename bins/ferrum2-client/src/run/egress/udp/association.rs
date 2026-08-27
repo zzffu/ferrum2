@@ -12,9 +12,9 @@ use ferrum2_crypto::Clock;
 use ferrum2_crypto::{SecureRandom, UdpSessionId};
 use ferrum2_net::DialOptions;
 use ferrum2_runtime::{
-    AccountedDatagram, DirectUdpSocket as _, MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram,
-    PendingUdpSession, UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation, UdpDirection,
-    UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
+    AccountedDatagram, MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram, PendingUdpSession,
+    UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation, UdpDirection, UdpRuntimeError, UdpSessionHandle,
+    UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketError, UdpPacketScratch};
 use tokio::net::UdpSocket;
@@ -26,7 +26,7 @@ use crate::run::egress::network::ClientPhysicalConnector;
 
 use super::direct::{
     DirectUdpCandidateHints, DirectUdpFamily, DirectUdpResponseMatch, DirectUdpResponsePolicy,
-    receive_direct_response, receive_proxy_response, send_direct_target_lazy,
+    receive_direct_response, receive_proxy_response, send_direct_target_lazy, send_proxy_request,
 };
 use super::request::{composed_udp_plan_limit, register_udp_plan};
 use super::response::{
@@ -581,7 +581,7 @@ impl ClientUdpAssociation {
                     .upstream_wire
                     .as_ref()
                     .expect("proxy UDP association owns its upstream wire buffer");
-                socket.send_to(&upstream_wire[..wire_len], *peer).await
+                send_proxy_request(socket, *peer, &upstream_wire[..wire_len]).await
             }
             ClientUdpUpstream::Direct { socket, factory } => {
                 let tracks_outstanding =
@@ -861,7 +861,9 @@ where
                 } else {
                     SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
                 };
-                ClientDirectUdpSocket::Raw(bind(bind_address).await.map_err(|_| ())?)
+                let socket = bind(bind_address).await.map_err(|_| ())?;
+                socket.connect(first_server).await.map_err(|_| ())?;
+                ClientDirectUdpSocket::Raw(socket)
             };
             #[cfg(test)]
             let socket = match &factory {
@@ -874,7 +876,9 @@ where
                     } else {
                         SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
                     };
-                    ClientDirectUdpSocket::Raw(bind(bind_address).await.map_err(|_| ())?)
+                    let socket = bind(bind_address).await.map_err(|_| ())?;
+                    socket.connect(first_server).await.map_err(|_| ())?;
+                    ClientDirectUdpSocket::Raw(socket)
                 }
             };
             ClientUdpUpstream::Shadowsocks {

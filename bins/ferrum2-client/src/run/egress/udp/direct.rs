@@ -244,23 +244,48 @@ pub(in crate::run::egress) async fn send_direct_target(
 }
 
 pub(in crate::run::egress) async fn receive_proxy_response(
-    socket: &impl DirectUdpSocket,
+    socket: &ClientDirectUdpSocket,
     expected_peer: SocketAddr,
     payload: &mut BytesMut,
 ) -> io::Result<usize> {
+    #[cfg(any(not(windows), test))]
+    if let ClientDirectUdpSocket::Raw(socket) = socket {
+        payload.clear();
+        let length = socket.recv_buf(payload).await?;
+        return validate_proxy_response_length(length, payload);
+    }
+
     loop {
         payload.clear();
         let (length, source) = socket.recv_buf_from(payload).await?;
-        if length != payload.len() || length > MAX_UDP_WIRE_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid proxy UDP receive length",
-            ));
-        }
+        let length = validate_proxy_response_length(length, payload)?;
         if source == expected_peer {
             return Ok(length);
         }
     }
+}
+
+pub(in crate::run::egress) async fn send_proxy_request(
+    socket: &ClientDirectUdpSocket,
+    expected_peer: SocketAddr,
+    payload: &[u8],
+) -> io::Result<usize> {
+    #[cfg(any(not(windows), test))]
+    if let ClientDirectUdpSocket::Raw(socket) = socket {
+        return socket.send(payload).await;
+    }
+
+    socket.send_to(payload, expected_peer).await
+}
+
+fn validate_proxy_response_length(length: usize, payload: &BytesMut) -> io::Result<usize> {
+    if length != payload.len() || length > MAX_UDP_WIRE_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid proxy UDP receive length",
+        ));
+    }
+    Ok(length)
 }
 
 pub(in crate::run::egress) async fn send_direct_candidates(
