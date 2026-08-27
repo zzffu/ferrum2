@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use crate::{Config, OwnerControl, SessionCancellation, SessionItem};
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn build_adapter_config(
     config: &Config,
 ) -> Result<ferrum2_platform_windows::AdapterConfig, ferrum2_platform_windows::Error> {
@@ -54,7 +53,6 @@ pub(crate) fn build_adapter_config(
     adapter.with_managed_network(managed)
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn wait_owner_delay(control: &OwnerControl, delay: Duration) -> bool {
     let deadline = std::time::Instant::now()
         .checked_add(delay)
@@ -71,7 +69,6 @@ pub(crate) fn wait_owner_delay(control: &OwnerControl, delay: Duration) -> bool 
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn forward_session_item<T>(
     input: &mut tokio::sync::mpsc::Receiver<T>,
     pending: &mut Option<T>,

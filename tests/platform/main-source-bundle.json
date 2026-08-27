@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "tests/platform/Main.HostController.ps1",
-      "bytes": 36948,
-      "sha256": "2a87d16707c6fa1a375dad4c5025921fbfffaf17981aceb4ca3a1a220cce241a"
+      "bytes": 36229,
+      "sha256": "7c52c28ea8a1a581b23d8cc367fddfa04cebb0a51cbf2b3a13949c44edb32f5f"
     },
     {
       "path": "tests/platform/Main.HostGuestTransaction.ps1",
@@ -24,8 +24,8 @@
     },
     {
       "path": "tests/platform/run_windows_tun_hyperv.ps1",
-      "bytes": 7946,
-      "sha256": "837a52c2d54b301cb3f843788fd5f24171278e375343fc02b0f8189bb194ed1c"
+      "bytes": 7795,
+      "sha256": "332f687c90f0a49366f6412d0cc9f4d21d472c52783ee6cecf2e63a738d40a64"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Common/BundleBootstrap.ps1",
@@ -108,5 +108,5 @@
       "sha256": "575ebe2436321b111c3b6dd642cc8701780bb5dee0ece52cc126e0b7498d91a6"
     }
   ],
-  "controller_bundle_sha256": "060d6496a295311941c64c48b855d80a7762831d9ce4700f81ec140c68134309"
+  "controller_bundle_sha256": "5948b5de6c132c38f2b480cbfdfd23aaedfc260fc292c2e87c9e4a3ebef9ab75"
 }

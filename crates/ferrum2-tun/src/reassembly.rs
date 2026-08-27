@@ -473,7 +473,6 @@ fn reconstruct_atomic_ipv6(packet: &[u8], fragment: ParsedFragment) -> Option<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::initial_tcp_tuple;
     use crate::packet::test_support::{
         ipv4_tcp_with_options, ipv4_udp, ipv6_udp, repair_ipv4_header, repair_transport_checksum,
     };
@@ -890,12 +889,10 @@ mod tests {
             let TransportMetadata::Tcp(tcp) = parsed.transport else {
                 panic!("TCP metadata expected")
             };
-            assert!(tcp.is_initial_syn());
-            assert!(
-                initial_tcp_tuple(parsed)
-                    .expect("initial SYN flags are valid")
-                    .is_some(),
-                "post-reassembly admission sees exactly one initial tuple"
+            assert_eq!(
+                tcp.flags & 0x17,
+                0x02,
+                "reassembled packet remains an initial SYN"
             );
         }
     }

@@ -11,9 +11,50 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  impact:
+    name: impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      affected: ${{ steps.classify.outputs.affected }}
+      targets_json: ${{ steps.classify.outputs.targets_json }}
+      seconds_per_target: ${{ steps.classify.outputs.seconds_per_target }}
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Classify fuzz impact from the reviewed ledger
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.ci.fuzz_contract \
+            --policy tests/m0-harness/tests/workspace_policy/architecture.toml \
+            --repository . \
+            --event-name "$EVENT_NAME" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-summary "$GITHUB_STEP_SUMMARY"
+
   deterministic-build:
     name: deterministic-build
+    needs:
+      - impact
+    if: ${{ needs.impact.outputs.affected == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -55,8 +96,11 @@ jobs:
 
   libfuzzer-build:
     name: libfuzzer-build
+    needs:
+      - impact
+    if: ${{ needs.impact.outputs.affected == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout exact current SHA
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -73,27 +117,157 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Install pinned fuzz toolchain
         shell: bash
+        run: rustup toolchain install nightly-2026-07-10 --profile minimal
+      - name: Restore pinned cargo-fuzz binary
+        id: cargo-fuzz-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-nightly-2026-07-10-0.13.2-${{ hashFiles('.github/workflows/tun-fuzz-deterministic.yml') }}
+      - name: Install pinned cargo-fuzz
+        if: ${{ steps.cargo-fuzz-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: cargo +nightly-2026-07-10 install cargo-fuzz --version 0.13.2 --locked
+      - name: Verify pinned cargo-fuzz
+        shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install nightly-2026-07-10 --profile minimal
-          cargo +nightly-2026-07-10 install cargo-fuzz --version 0.13.2 --locked
           test "$(cargo +nightly-2026-07-10 fuzz --version)" = "cargo-fuzz 0.13.2"
       - name: Fetch locked fuzz dependencies
         shell: bash
         working-directory: crates/ferrum2-tun/fuzz
         run: cargo +nightly-2026-07-10 fetch --locked
+      - name: Verify independent fuzz lock
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: |
+          set -euo pipefail
+          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/fuzz-metadata.json"
+          git diff --exit-code -- Cargo.lock
+      - name: Load planned fuzz target set
+        shell: bash
+        env:
+          TARGETS_JSON: ${{ needs.impact.outputs.targets_json }}
+        run: |
+          set -euo pipefail
+          targets="$(jq -er 'join(" ")' <<<"$TARGETS_JSON")"
+          test -n "$targets"
+          printf 'FUZZ_TARGETS=%s\n' "$targets" >> "$GITHUB_ENV"
       - name: Compile TUN fuzz targets without execution
         shell: bash
         working-directory: crates/ferrum2-tun/fuzz
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer packet_reassembly
-          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer udp_reset_races
-          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer config_legacy_fields
-          CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer strict_route_rules
+          read -r -a targets <<<"$FUZZ_TARGETS"
+          for target in "${targets[@]}"; do
+            CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer "$target"
+          done
+      - name: Stage exact fuzz executables
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/tun-fuzz-binaries"
+          mkdir -p "$destination"
+          read -r -a targets <<<"$FUZZ_TARGETS"
+          for target in "${targets[@]}"; do
+            mapfile -t matches < <(find target -type f -path "*/release/$target" -perm -u+x -print)
+            test "${#matches[@]}" -eq 1
+            install -m 755 "${matches[0]}" "$destination/$target"
+          done
+      - name: Publish exact fuzz executables
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tun-fuzz-binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tun-fuzz-binaries
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       - name: Verify no generated diff
         if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git status --porcelain --untracked-files=no)" = ""
+
+  fuzz-campaign:
+    name: fuzz-campaign (${{ matrix.target }})
+    needs:
+      - impact
+      - libfuzzer-build
+    if: ${{ needs.impact.outputs.affected == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.impact.outputs.targets_json) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FUZZ_TARGET: ${{ matrix.target }}
+      FUZZ_SECONDS_PER_TARGET: ${{ needs.impact.outputs.seconds_per_target }}
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Verify clean current SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Download exact fuzz executables
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tun-fuzz-binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tun-fuzz-binaries
+      - name: Prepare isolated campaign corpora
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: |
+          set -euo pipefail
+          campaign_root="$RUNNER_TEMP/tun-fuzz-campaign"
+          chmod 755 "$RUNNER_TEMP/tun-fuzz-binaries/$FUZZ_TARGET"
+          mkdir -p \
+            "$campaign_root/artifacts/$FUZZ_TARGET" \
+            "$campaign_root/corpus/$FUZZ_TARGET" \
+            "$campaign_root/logs"
+          cp -a "corpus/$FUZZ_TARGET/." "$campaign_root/corpus/$FUZZ_TARGET/"
+      - name: Run target sanitizer fuzz campaign
+        shell: bash
+        timeout-minutes: 17
+        run: |
+          set -euo pipefail
+          campaign_root="$RUNNER_TEMP/tun-fuzz-campaign"
+          outer_timeout_seconds=$((FUZZ_SECONDS_PER_TARGET + 60))
+          timeout --signal=TERM --kill-after=30s "${outer_timeout_seconds}s" \
+            "$RUNNER_TEMP/tun-fuzz-binaries/$FUZZ_TARGET" \
+            "$campaign_root/corpus/$FUZZ_TARGET" \
+            -artifact_prefix="$campaign_root/artifacts/$FUZZ_TARGET/" \
+            -max_total_time="$FUZZ_SECONDS_PER_TARGET" \
+            -timeout=15 \
+            -rss_limit_mb=4096 \
+            -print_final_stats=1 \
+            2>&1 | tee "$campaign_root/logs/$FUZZ_TARGET.log"
+      - name: Publish campaign corpus, logs, and crash artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tun-fuzz-campaign-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tun-fuzz-campaign/artifacts
+            ${{ runner.temp }}/tun-fuzz-campaign/corpus
+            ${{ runner.temp }}/tun-fuzz-campaign/logs
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Verify campaign did not mutate tracked inputs
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -104,17 +278,37 @@ jobs:
     name: required
     if: ${{ always() }}
     needs:
+      - impact
       - deterministic-build
       - libfuzzer-build
+      - fuzz-campaign
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every fuzz compile gate
+      - name: Require impact decision and applicable fuzz gates
         shell: bash
         env:
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          FUZZ_AFFECTED: ${{ needs.impact.outputs.affected }}
           DETERMINISTIC_RESULT: ${{ needs.deterministic-build.result }}
           LIBFUZZER_RESULT: ${{ needs.libfuzzer-build.result }}
+          CAMPAIGN_RESULT: ${{ needs.fuzz-campaign.result }}
         run: |
           set -euo pipefail
-          test "$DETERMINISTIC_RESULT" = success
-          test "$LIBFUZZER_RESULT" = success
+          test "$IMPACT_RESULT" = success
+          case "$FUZZ_AFFECTED" in
+            true)
+              test "$DETERMINISTIC_RESULT" = success
+              test "$LIBFUZZER_RESULT" = success
+              test "$CAMPAIGN_RESULT" = success
+              ;;
+            false)
+              test "$DETERMINISTIC_RESULT" = skipped
+              test "$LIBFUZZER_RESULT" = skipped
+              test "$CAMPAIGN_RESULT" = skipped
+              ;;
+            *)
+              echo "invalid fuzz impact decision: $FUZZ_AFFECTED" >&2
+              exit 1
+              ;;
+          esac

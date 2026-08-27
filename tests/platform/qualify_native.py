@@ -2,9 +2,10 @@
 """Direct native qualification for ferrum2 release binaries.
 
 This driver is intentionally limited to committed synthetic configuration and
-the two release artifacts built by the current GitHub Actions platform row. It
-does not synthesize a report: every PASS field follows a bounded observation of
-the supplied native binaries.
+the two release artifacts for one native platform row. Hosted mode emits only
+GitHub-bound evidence; ``--local-contract`` runs the same behavior checks while
+emitting a deliberately non-hosted result. Every PASS field follows a bounded
+observation of the supplied native binaries.
 """
 
 from __future__ import annotations
@@ -32,7 +33,10 @@ READINESS_TIMEOUT_SECONDS = 10
 OUTPUT_LIMIT = 64 * 1024
 POLL_SECONDS = 0.05
 SYNTHETIC_PSK = "AAECAwQFBgcICQoLDA0ODw=="
-INVALID_STDERR = (
+CLIENT_INVALID_STDERR = (
+    b"error[config.semantic] outbounds.psk: configuration value is invalid\n"
+)
+SERVER_INVALID_STDERR = (
     b"error[config.semantic] shadowsocks.psk: configuration value is invalid\n"
 )
 STARTUP_BIND_STDERR = (
@@ -136,6 +140,7 @@ class BinarySpec:
     path: Path
     valid_config: Path
     invalid_config: Path
+    invalid_stderr: bytes
     role: str
 
 
@@ -290,7 +295,7 @@ def environment_field(value: str | None) -> str:
     return re.sub(r"[^A-Za-z0-9_.:/-]", "_", value)
 
 
-def hosted_context(arguments: argparse.Namespace) -> HostedContext:
+def native_runner_os(arguments: argparse.Namespace, require_runner: bool) -> str:
     profiles = {
         "windows-msvc": ("x86_64-pc-windows-msvc", "Windows"),
         "linux-gnu": ("x86_64-unknown-linux-gnu", "Linux"),
@@ -299,15 +304,21 @@ def hosted_context(arguments: argparse.Namespace) -> HostedContext:
     require(arguments.profile in profiles, "unknown-platform-profile")
     target, runner_os = profiles[arguments.profile]
     require(arguments.target == target, "profile-target-mismatch")
-    require(os.environ.get("GITHUB_ACTIONS") == "true", "not-github-actions")
-    require(os.environ.get("RUNNER_OS") == runner_os, "wrong-runner-os")
-    require(os.environ.get("RUNNER_ARCH") == "X64", "wrong-runner-architecture")
+    if require_runner:
+        require(os.environ.get("RUNNER_OS") == runner_os, "wrong-runner-os")
+        require(os.environ.get("RUNNER_ARCH") == "X64", "wrong-runner-architecture")
     machine = platform.machine().lower()
     require(machine in {"amd64", "x86_64"}, "non-native-architecture")
     if runner_os == "Windows":
         require(sys.platform == "win32", "non-native-operating-system")
     else:
         require(sys.platform.startswith("linux"), "non-native-operating-system")
+    return runner_os
+
+
+def hosted_context(arguments: argparse.Namespace) -> HostedContext:
+    require(os.environ.get("GITHUB_ACTIONS") == "true", "not-github-actions")
+    native_runner_os(arguments, require_runner=True)
 
     sha = os.environ.get("GITHUB_SHA", "")
     run_id = os.environ.get("GITHUB_RUN_ID", "")
@@ -379,6 +390,7 @@ def binary_specs(arguments: argparse.Namespace, root: Path) -> tuple[BinarySpec,
             client,
             config / "client-valid.toml",
             config / "client-invalid-key-length.toml",
+            CLIENT_INVALID_STDERR,
             "client",
         ),
         BinarySpec(
@@ -386,6 +398,7 @@ def binary_specs(arguments: argparse.Namespace, root: Path) -> tuple[BinarySpec,
             server,
             config / "server-valid.toml",
             config / "server-invalid-key-length.toml",
+            SERVER_INVALID_STDERR,
             "server",
         ),
     )
@@ -474,6 +487,17 @@ def write_offline_config(
     destination.write_text(text, encoding="utf-8", newline="\n")
 
 
+def assert_invalid_config_result(
+    spec: BinarySpec, result: subprocess.CompletedProcess[bytes]
+) -> None:
+    require(
+        result.returncode == 2
+        and result.stdout == b""
+        and result.stderr == spec.invalid_stderr,
+        "invalid-offline-config",
+    )
+
+
 def assert_cli_contract(spec: BinarySpec, directory: Path) -> None:
     help_result = bounded_run([str(spec.path), "--help"])
     require(help_result.returncode == 0, "help-exit")
@@ -511,12 +535,7 @@ def assert_cli_contract(spec: BinarySpec, directory: Path) -> None:
         invalid = bounded_run(
             [str(spec.path), "--config", str(invalid_config), "--check-config"]
         )
-        require(
-            invalid.returncode == 2
-            and invalid.stdout == b""
-            and invalid.stderr == INVALID_STDERR,
-            "invalid-offline-config",
-        )
+        assert_invalid_config_result(spec, invalid)
         assert_no_connections(traps)
     finally:
         for trap in traps:
@@ -998,27 +1017,59 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--target", required=True)
     parser.add_argument("--client", required=True)
     parser.add_argument("--server", required=True)
+    parser.add_argument(
+        "--local-contract",
+        action="store_true",
+        help="run native behavior checks locally without emitting hosted CI evidence",
+    )
     return parser.parse_args()
+
+
+def assert_native_contract(
+    specs: tuple[BinarySpec, BinarySpec], directory: Path
+) -> None:
+    for spec in specs:
+        assert_cli_contract(spec, directory)
+        assert_tagged_offline_config(spec, directory)
+        assert_startup_rollback(spec, directory)
+        assert_tagged_startup_rollback(spec, directory)
+        assert_signal_lifecycle(spec, directory, forced=False)
+        assert_signal_lifecycle(spec, directory, forced=True)
+    assert_routed_smoke(specs, directory)
+
+
+def require_local_contract_environment() -> None:
+    require(
+        os.environ.get("GITHUB_ACTIONS") != "true",
+        "local-contract-in-github-actions",
+    )
 
 
 def main() -> int:
     try:
         arguments = parse_arguments()
         root = Path.cwd().resolve()
-        context = hosted_context(arguments)
+        if arguments.local_contract:
+            require_local_contract_environment()
+            native_runner_os(arguments, require_runner=False)
+            context = None
+        else:
+            context = hosted_context(arguments)
         specs = binary_specs(arguments, root)
-        lines: list[str] = []
         with tempfile.TemporaryDirectory(prefix="ferrum2-m3-platform-") as temporary:
-            directory = Path(temporary)
-            for spec in specs:
-                assert_cli_contract(spec, directory)
-                assert_tagged_offline_config(spec, directory)
-                assert_startup_rollback(spec, directory)
-                assert_tagged_startup_rollback(spec, directory)
-                assert_signal_lifecycle(spec, directory, forced=False)
-                assert_signal_lifecycle(spec, directory, forced=True)
-                lines.extend((artifact_line(context, spec), lifecycle_line(context, spec)))
-            assert_routed_smoke(specs, directory)
+            assert_native_contract(specs, Path(temporary))
+        if context is None:
+            print(
+                "m3_local_native_contract status=PASS "
+                f"profile={arguments.profile} target={arguments.target}",
+                flush=True,
+            )
+            return 0
+        lines = [
+            line
+            for spec in specs
+            for line in (artifact_line(context, spec), lifecycle_line(context, spec))
+        ]
         require(len(lines) == 4 and len(set(lines)) == 4, "duplicate-platform-evidence")
         for line in lines:
             print(line, flush=True)

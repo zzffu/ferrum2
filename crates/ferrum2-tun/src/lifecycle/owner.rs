@@ -22,7 +22,6 @@ use crate::{
     OwnerWake, TunEvent, TunNetworkLifecycle, TunNetworkResetReason, UdpResponseDropReason,
 };
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn owner_main(
     config: Config,
     initial_network_generation: u64,
@@ -838,14 +837,12 @@ pub(crate) fn owner_main(
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 fn clear_owner_work(current_work: &std::sync::Mutex<Option<ferrum2_platform_windows::WorkSignal>>) {
     if let Ok(mut work) = current_work.lock() {
         *work = None;
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 fn finish_adapter(
     current_work: &std::sync::Mutex<Option<ferrum2_platform_windows::WorkSignal>>,
     adapter: ferrum2_platform_windows::Adapter,

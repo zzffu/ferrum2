@@ -48,13 +48,14 @@ of runtime/config/platform back-edges, and observability free of all Ferrum2 dep
 
 ### Reviewed size exceptions
 
-`crates/ferrum2-tun/src/packet.rs` and `crates/ferrum2-tun/src/reassembly.rs` are the only production
-Rust files above 1,000 physical lines. They remain explicit protocol-owner exceptions: `packet.rs`
-keeps the canonical IPv4/IPv6 validation and checksum vocabulary together, while `reassembly.rs`
-keeps fragment interval accounting, overlap rejection, expiry, and completed-packet reconstruction
-inside one bounded state machine. Their reviewed packet corpus and fuzz seeds exercise those coupled
-invariants. Any further growth, duplicated parser, second reassembly owner, or independent policy
-branch ends the exception and requires an owner-preserving split.
+`crates/ferrum2-tun/src/reassembly.rs` is the only production Rust file above 1,000 physical lines.
+It remains an explicit protocol-owner exception because fragment interval accounting, overlap
+rejection, expiry, and completed-packet reconstruction form one bounded state machine. The packet
+owner is already split: `packet.rs` owns target-neutral parsing and validation,
+`packet/control.rs` owns local ICMP/control generation, and `packet/{test_support,tests}.rs` own
+packet-only fixtures and cases. The reviewed packet corpus and fuzz seeds exercise the coupled
+invariants. Any further reassembly growth, duplicated parser, second reassembly owner, or independent
+policy branch ends the exception and requires an owner-preserving split.
 
 ## Configuration and lifecycle
 
@@ -65,7 +66,7 @@ branch ends the exception and requires an owner-preserving split.
 | CFG-03B/04 | bins + role-local materializers | Materialized check is bounded, starts no steady-state root, joins resources, and retains client/server failure codes 1/2 | `tests/m0-harness/tests/config_materialize.rs` | No shared bootstrap crate: private egress/platform capabilities stay in each binary | ordinary m0 | architecture stabilization |
 | CFG-05/06 | config + role-local materializers | Dependency plan is complete, deterministic and dependency-first; prepare/finish hide no I/O and reject incomplete resources | `crates/ferrum2-config/tests/v2_prepare_contract.rs`; bin `run/materialize` tests | None known | ordinary Rust | current |
 | CFG-07 | config + TUN | Removed aggregate TUN byte-budget fields remain unknown; no aggregate memory formula returns | config contract + TUN fuzz `config_legacy_fields` | Preserve seed provenance | ordinary + fuzz compile; guest smoke | baseline |
-| LIFE-01/02/03 | runtime + bins | Prepare-before-activate, reverse rollback, admission/drain/cancel/join order, owner baseline, exactly-once reap and rebind | runtime `lifecycle_{transaction,root_events,accept,relay}.rs` and `shutdown.rs`; m0 `lifecycle_cycles.rs` | Cross-bin rollback matrix remains a characterization task | ordinary; scheduled stress | current |
+| LIFE-01/02/03 | runtime + bins | Prepare-before-activate, reverse rollback, admission/drain/cancel/join order, owner baseline, exactly-once reap and rebind | runtime `lifecycle_{transaction,root_events,accept,relay}.rs` and `shutdown.rs`; m0 `lifecycle_cycles.rs` | Cross-bin rollback matrix remains a characterization task | ordinary; every-push lifecycle stress | current |
 | LIFE-04/05 | bins + runtime | Readiness cannot be spoofed; shared TCP/UDP bind ownership rolls back atomically | bin root/readiness tests; m0 local/UDP lifecycle cohorts | None known | ordinary m0 | current |
 | TCP-01 | runtime | Relay preserves raw bytes, half-close/backpressure and the real opened local endpoint | runtime `half_close.rs`, `backpressure.rs`, `local_endpoint.rs`, `abortive_close.rs` | None known | ordinary Rust | baseline |
 
@@ -78,7 +79,7 @@ branch ends the exception and requires an owner-preserving split.
 | WIN-02..06 | Windows platform crate | DLL identity/export/System32 rules, typed handles, immediate LastError, exact managed rollback, callback/WFP/session cleanup | Wintun unit cohorts enumerated in `refactor-consumers.md`; M17 runbook | Hosted execution forbidden; rename/split must update exact IDs | Windows no-run + approved Hyper-V | pending live |
 | WIN-07 | platform + TUN | Ring full is one counted drop with no retry/reset/rebuild | exact Wintun/TUN tests + scheduler-ring-full profile | Retain exact counter witness | approved Hyper-V | pending live |
 | TUN-01..05 | TUN owner | Lightweight reset versus full rebuild, debounce/audit, transition ordering, same-logical-reset settle and exactly-once events | TUN unit binary; network-reset/restart profiles | Ordinary host may compile only | approved Hyper-V | pending live |
-| TUN-06/07 | TUN data plane | Canonical packet validation and strict bounded reassembly; reviewed corpus remains separate from fuzz seeds | `reassembly-v1.hex` + provenance; four fuzz targets | Hosted fuzz is compile-only | ordinary compile + guest smoke/fuzz | baseline |
+| TUN-06/07 | TUN data plane | Canonical packet validation and strict bounded reassembly; reviewed corpus remains separate from fuzz seeds | `reassembly-v1.hex` + provenance; four fuzz targets | Hosted execution is limited to the four pure in-memory sanitizer targets; deterministic smoke and real TUN remain guest-only | ordinary compile + hosted fuzz + guest smoke | baseline |
 | TUN-08..10 | TUN data plane | Initial-SYN admission, TCP cleanup/backpressure, UDP EIM/EIF/ADF, no live eviction, unmetered exception remains narrow | TUN test binary and fuzz race corpus | Exact test IDs remain in Consumer Ledger | approved Hyper-V | pending live |
 | ROUTE-01..04 | bins + TUN/runtime/SS | First-valid routing freeze, authenticated server commit, unique concurrent winner, no tagged fallback and fixed admission bounds | m0 UDP/SOCKS cohorts; client/TUN and SS tests | Cross-refresh/reset live coverage remains platform-bound | ordinary protocol + approved guest | pending live |
 
@@ -102,8 +103,8 @@ branch ends the exception and requires an owner-preserving split.
 |---|---|---|---|---|---|---|
 | TEST-01/02 | m0 harness | No production crate dependency; observable black-box assertions; every child/wait bounded and reaped | `workspace_policy`; m0 support/tests | Keep policy separate from tooling behavior tests | ordinary m0 | baseline |
 | FIX-01 | fixture owners | Hash/provenance/oracle separation remains exact | `fixtures-and-evidence.md` and provenance files | Changes require standalone provenance PR | ordinary contract | baseline |
-| FUZZ-01 | TUN fuzz workspace | Independent lock/nightly, empty defaults; hosted only compiles | fuzz manifest/toolchain/workflow | Main required context remains separate | fuzz-static + guest execution | baseline |
+| FUZZ-01 | TUN fuzz workspace | Independent lock/nightly, empty defaults; hosted Linux executes only the four pure in-memory targets for a one-hour total campaign | fuzz manifest/toolchain/workflow | Main required context remains separate; deterministic smoke remains guest-only | fuzz-static + hosted campaign + guest smoke | baseline |
 | VENDOR-01 | crypto + policy | Normal refactors do not edit vendor; intentional changes replay archive/diff and update both locks | FERRUM_PATCH + workspace policy | No automated archive download in ordinary gate | ordinary policy + explicit qualification | baseline |
-| CI-01/02 | root workflows | Root Actions use immutable SHAs, read-only permissions, exact clean checkout; named gates feed explicit main and fuzz `required` jobs; the independently required fuzz workflow runs on every PR/protected push | root workflows + workspace policy | Branch-protection must require both contexts; external settings readback pending | hosted CI | pending external |
+| CI-01/02 | root workflows | Root Actions use immutable SHAs, read-only permissions, exact clean checkout; named gates feed explicit main and fuzz `required` jobs; the fuzz workflow always emits its required context and runs its one-hour pure in-memory campaign when reviewed owner paths change | root workflows + workspace policy | Branch-protection must require both contexts; external settings readback pending | hosted CI | pending external |
 | PLAT-01/02 | platform scripts | Privileged execution only in approved guest; every imported controller source is bound by the canonical bundle root; restore exact checkpoint, finish Off; hard-kill stays independent and cleanup failure cannot pass | M17 runbook, module/static tests and versioned schemas | Live evidence intentionally unavailable in ordinary R0 | ordinary static + approved Hyper-V live | pending live |
 | PERF-01..04 | qualification/controller | Producer correctness separated from reviewed adoption policy; calibration identities closed; inconclusive states never pass; raw evidence recoverable by digest | performance policy/controller tests and Gate Ledger | 30-day workflow artifact is not durable provenance | manual performance only | pending retention |

@@ -145,35 +145,41 @@ milestone = "RT-04"
 
 [fuzz_impact]
 owner_paths = [
-    ".cargo/config.toml",
+    ".gitattributes",
+    ".cargo/**",
     "Cargo.toml",
     "Cargo.lock",
-    "crates/ferrum2-tun/Cargo.toml",
-    "crates/ferrum2-tun/src/**",
-    "crates/ferrum2-tun/tests/fixtures/packets/**",
-    "crates/ferrum2-tun/fuzz/**",
-    "crates/ferrum2-config/Cargo.toml",
-    "crates/ferrum2-config/src/**",
-    "crates/ferrum2-core/Cargo.toml",
-    "crates/ferrum2-core/src/**",
-    "crates/ferrum2-crypto/Cargo.toml",
-    "crates/ferrum2-crypto/src/**",
+    "crates/ferrum2-tun/**",
+    "crates/ferrum2-config/**",
+    "crates/ferrum2-core/**",
+    "crates/ferrum2-crypto/**",
     "crates/ferrum2-net/**",
-    "crates/ferrum2-rule/Cargo.toml",
-    "crates/ferrum2-rule/src/**",
-    "crates/ferrum2-runtime/Cargo.toml",
-    "crates/ferrum2-runtime/src/**",
-    "crates/ferrum2-platform-windows/Cargo.toml",
-    "crates/ferrum2-platform-windows/src/**",
+    "crates/ferrum2-rule/**",
+    "crates/ferrum2-runtime/**",
+    "crates/ferrum2-platform-windows/**",
     "tests/platform/**",
     "tools/powershell/**",
     "tools/windows-tun/**",
+    "tools/ci/__init__.py",
+    "tools/ci/git_changes.py",
+    "tools/ci/fuzz_contract.py",
     ".github/workflows/tun-fuzz-deterministic.yml",
+    "tests/m0-harness/tests/workspace_policy/**",
     "vendor/shadowsocks-crypto/**",
 ]
 
 [ci_required]
 main_workflow = ".github/workflows/m0.yml"
-main_needs = ["quality", "platform", "interop"]
+main_needs = ["changes", "quality", "platform", "interop"]
 fuzz_workflow = ".github/workflows/tun-fuzz-deterministic.yml"
-fuzz_needs = ["deterministic-build", "libfuzzer-build"]
+fuzz_needs = ["impact", "deterministic-build", "libfuzzer-build", "fuzz-campaign"]
+
+[fuzz_campaign]
+targets = [
+    "packet_reassembly",
+    "udp_reset_races",
+    "config_legacy_fields",
+    "strict_route_rules",
+]
+seconds_per_target = 900
+total_seconds = 3600

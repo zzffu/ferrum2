@@ -5,7 +5,8 @@ and performance evidence contracts. Product implementation and crate-owned unit 
 their owning package.
 
 Choose the narrowest test layer that observes the contract: stable shared inputs under `fixtures`,
-portable process behavior in `m0-harness`, hosted interoperability metadata in `interop`, controller
-contracts in `performance_*`, and privileged workflows in `platform`.
+portable process behavior in `m0-harness`, hosted interoperability metadata in `interop`, offline
+workflow-controller behavior in `ci`, performance-controller contracts in `performance_*`, and
+privileged workflows in `platform`.
 
 Do not make ordinary test discovery execute privileged, hosted-provider, or performance workloads.

@@ -20,8 +20,41 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: change classification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run_expensive: ${{ steps.classify.outputs.run_expensive }}
+    steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Classify ordinary gate changes
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.ci.change_contract \
+            --repository . \
+            --event-name "$EVENT_NAME" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-summary "$GITHUB_STEP_SUMMARY"
+
   quality:
     name: quality
+    needs: changes
+    if: ${{ needs.changes.outputs.run_expensive == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -46,6 +79,13 @@ jobs:
             exit 1
           fi
           test "$head_sha" = "$GITHUB_SHA"
+      - name: Install exact Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
       - name: Record provider and toolchain evidence
         shell: bash
         run: |
@@ -90,12 +130,22 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
+      - name: Test native qualification controller contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s tests/platform -p 'test_qualify_native.py' -v
+      - name: Test declarative CI controllers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s tests/ci -p 'test_*.py' -v
       - name: Run ordinary Rust tests
         shell: bash
         run: |
           set -euo pipefail
           # Executable client/TUN/Windows-platform tests are reserved for the approved
-          # local Hyper-V guest. Hosted CI compiles those harnesses only.
+          # local Hyper-V guest, except for the exact unsupported-target contract below.
           cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked
       - name: Compile client TUN and Windows platform tests
         shell: bash
@@ -104,6 +154,13 @@ jobs:
           cargo test -p ferrum2-client --all-features --no-run --locked
           cargo test -p ferrum2-tun --all-features --no-run --locked
           cargo test -p ferrum2-platform-windows --all-features --no-run --locked
+      - name: Prove unsupported TUN target fails closed during preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-tun --lib --locked \
+            process::unsupported_target_tests::unsupported_target_fails_during_preparation \
+            -- --exact --nocapture
       - name: Test DNS interop root
         shell: bash
         run: |
@@ -136,6 +193,8 @@ jobs:
 
   platform:
     name: platform / ${{ matrix.profile }}
+    needs: changes
+    if: ${{ needs.changes.outputs.run_expensive == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -397,6 +456,8 @@ jobs:
 
   interop:
     name: interop
+    needs: changes
+    if: ${{ needs.changes.outputs.run_expensive == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -421,6 +482,13 @@ jobs:
             exit 1
           fi
           test "$head_sha" = "$GITHUB_SHA"
+      - name: Install exact Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
       - name: Record provider and toolchain evidence
         shell: bash
         run: |
@@ -432,171 +500,124 @@ jobs:
           cargo -V
           cc --version
           ld --version
-      - name: Provision pinned references independently
+      - name: Provision and verify pinned references independently
+        shell: bash
+        run: >-
+          timeout --signal=TERM --kill-after=10s 35m
+          python3 -B tools/ci/interop_provision.py
+          --manifest tests/interop/versions.toml
+          --work-root "$RUNNER_TEMP"
+          --github-env "$GITHUB_ENV"
+      - name: Prepare isolated interop build root
         shell: bash
         run: |
           set -euo pipefail
-          sing_box_status=0
-          timeout --signal=TERM --kill-after=10s 5m \
-            bash -euo pipefail <<'SING_BOX_SETUP' || sing_box_status=$?
-          archive="$RUNNER_TEMP/sing-box-1.13.14-linux-amd64-glibc.tar.gz"
-          directory="$RUNNER_TEMP/sing-box-1.13.14"
-          curl --fail --location --retry 3 --output "$archive" \
-            https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64-glibc.tar.gz
-          test "$(stat --format='%s' "$archive")" = "24614103"
-          echo "aae9172317c61760aae3dafcde889b2e51b7ea590c40d2b3c7ccdeae14b361b6  $archive" | sha256sum -c -
-          diff -u <(printf '%s\n' \
-            'sing-box-1.13.14-linux-amd64-glibc/' \
-            'sing-box-1.13.14-linux-amd64-glibc/LICENSE' \
-            'sing-box-1.13.14-linux-amd64-glibc/sing-box') <(tar -tzf "$archive")
-          mkdir "$directory"
-          tar -xzf "$archive" -C "$directory"
-          binary="$directory/sing-box-1.13.14-linux-amd64-glibc/sing-box"
-          license="$directory/sing-box-1.13.14-linux-amd64-glibc/LICENSE"
-          test -x "$binary"
-          test -s "$license"
-          test "$(stat --format='%s' "$license")" -le 262144
-          version_output="$("$binary" version)"
-          grep -F 'sing-box version 1.13.14' <<<"$version_output"
-          grep -F 'Revision: 25a600db24f7680ad9806ce5427bd0ab8afe1114' <<<"$version_output"
-          grep -F 'source_commit = "25a600db24f7680ad9806ce5427bd0ab8afe1114"' tests/interop/versions.toml
-          grep -F 'license_review = "GPL-3.0-or-later with additional name terms; GitHub SPDX NOASSERTION; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
-          SING_BOX_SETUP
-
-          shadowsocks_rust_status=0
-          timeout --signal=TERM --kill-after=10s 5m \
-            bash -euo pipefail <<'SHADOWSOCKS_RUST_SETUP' || shadowsocks_rust_status=$?
-          archive="$RUNNER_TEMP/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz"
-          directory="$RUNNER_TEMP/shadowsocks-rust-1.24.0"
-          curl --fail --location --retry 3 --output "$archive" \
-            https://github.com/shadowsocks/shadowsocks-rust/releases/download/v1.24.0/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz
-          test "$(stat --format='%s' "$archive")" = "11635096"
-          echo "5f528efb4e51e732352f5c69538dcc76e8cf8f6d1a240dfb5b748a67f0b05f65  $archive" | sha256sum -c -
-          diff -u <(printf '%s\n' sslocal ssserver ssurl ssmanager ssservice) <(tar -tJf "$archive")
-          mkdir "$directory"
-          tar -xJf "$archive" -C "$directory"
-          test -x "$directory/sslocal"
-          test -x "$directory/ssserver"
-          "$directory/sslocal" --version | grep -Fx 'shadowsocks 1.24.0'
-          "$directory/ssserver" --version | grep -Fx 'shadowsocks 1.24.0'
-          grep -F 'source_commit = "7ee1aa9223ed8f4d34734aac919036c8ad4502c2"' tests/interop/versions.toml
-          grep -F 'license_review = "MIT; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
-          SHADOWSOCKS_RUST_SETUP
-
-          coredns_status=0
-          timeout --signal=TERM --kill-after=10s 5m \
-            bash -euo pipefail <<'COREDNS_SETUP' || coredns_status=$?
-          archive="$RUNNER_TEMP/coredns_1.14.6_linux_amd64.tgz"
-          directory="$RUNNER_TEMP/coredns-1.14.6"
-          license="$directory/LICENSE"
-          curl --fail --location --retry 3 --output "$archive" \
-            https://github.com/coredns/coredns/releases/download/v1.14.6/coredns_1.14.6_linux_amd64.tgz
-          test "$(stat --format='%s' "$archive")" = "22574279"
-          echo "4402578c8f7b95dac1d8258bfd13e7a9d30f70d7a53f396b02a6d6ca78d56152  $archive" | sha256sum -c -
-          test "$(tar -tzf "$archive")" = "coredns"
-          mkdir "$directory"
-          tar -xzf "$archive" -C "$directory"
-          curl --fail --location --retry 3 --output "$license" \
-            https://raw.githubusercontent.com/coredns/coredns/424d125775cd70fa90dfc80bf0e52cc9a9aeb574/LICENSE
-          test "$(stat --format='%s' "$license")" = "11371"
-          echo "f0530760b1e2ffcf23df322db638ee06d06fc07fead0ed3ddd710f2e224698a9  $license" | sha256sum -c -
-          test -x "$directory/coredns"
-          "$directory/coredns" -version | grep -Fx 'CoreDNS-1.14.6'
-          grep -F 'source_commit = "424d125775cd70fa90dfc80bf0e52cc9a9aeb574"' tests/interop/versions.toml
-          grep -F 'license_review = "Apache-2.0; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
-          COREDNS_SETUP
-
-          bind_status=0
-          timeout --signal=TERM --kill-after=10s 15m \
-            bash -euo pipefail <<'BIND_SETUP' || bind_status=$?
-          archive="$RUNNER_TEMP/bind-9.20.26.tar.xz"
-          directory="$RUNNER_TEMP/bind-9.20.26"
-          curl --fail --location --retry 3 --output "$archive" \
-            https://downloads.isc.org/isc/bind9/9.20.26/bind-9.20.26.tar.xz
-          test "$(stat --format='%s' "$archive")" = "5918032"
-          echo "55248def0f870c4c46b3de72978ea972615131516663188a4564dca1d20bf350  $archive" | sha256sum -c -
-          test "$(tar -tJf "$archive" | head -n 1)" = "bind-9.20.26/"
-          tar -xJf "$archive" -C "$RUNNER_TEMP"
-          test -s "$directory/LICENSE"
-          test "$(stat --format='%s' "$directory/LICENSE")" -le 262144
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libcap-dev libssl-dev liburcu-dev libuv1-dev pkg-config
-          (
-            cd "$directory"
-            ./configure --disable-doh --without-json-c --without-libidn2 --without-libxml2
-            make -j2
-          )
-          test -x "$directory/bin/dig/dig"
-          "$directory/bin/dig/dig" -v | grep -F 'DiG 9.20.26'
-          grep -F 'source_commit = "7e228e3ba7c2ca945b1c2a22ed2ef0aa9d7cab10"' tests/interop/versions.toml
-          grep -F 'license_review = "MPL-2.0; execute only as an independent test process; do not redistribute"' tests/interop/versions.toml
-          BIND_SETUP
-
-          if [ "$sing_box_status" -ne 0 ]; then
-            echo "sing-box provider setup failed; qualification will report its provision root" >&2
-          fi
-          if [ "$shadowsocks_rust_status" -ne 0 ]; then
-            echo "shadowsocks-rust provider setup failed; qualification will report its provision root" >&2
-          fi
-          if [ "$coredns_status" -ne 0 ]; then
-            echo "CoreDNS provider setup failed; qualification will report its provision root" >&2
-          fi
-          if [ "$bind_status" -ne 0 ]; then
-            echo "BIND provider setup failed; qualification will report its provision root" >&2
-          fi
-          echo "provider_setup sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status coredns=$coredns_status bind=$bind_status"
-          {
-            printf 'M2_SING_BOX_SETUP_STATUS=%s\n' "$sing_box_status"
-            printf 'M2_SHADOWSOCKS_RUST_SETUP_STATUS=%s\n' "$shadowsocks_rust_status"
-            printf 'M12_COREDNS_SETUP_STATUS=%s\n' "$coredns_status"
-            printf 'M12_BIND_SETUP_STATUS=%s\n' "$bind_status"
-          } >> "$GITHUB_ENV"
+          target_root="$(mktemp -d "$RUNNER_TEMP/interop-qualification-target.XXXXXX")"
+          printf 'CARGO_TARGET_DIR=%s\n' "$target_root" >> "$GITHUB_ENV"
       - name: Run hosted M1 TCP and M2 UDP qualification
+        if: ${{ always() }}
         shell: bash
         run: |
-          set -euo pipefail
-          export CARGO_TARGET_DIR
-          CARGO_TARGET_DIR="$(mktemp -d "$RUNNER_TEMP/interop-qualification-target.XXXXXX")"
-          cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked
-          qualification_status=0
-          qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" 2>&1)" || qualification_status=$?
-          printf '%s\n' "$qualification_output"
-
-          cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked \
-            --features ferrum2-dns/__interop-test-root
-          dns_status=0
-          dns_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" --dns-only 2>&1)" || dns_status=$?
-          printf '%s\n' "$dns_output"
-
-          sing_box_status="${M2_SING_BOX_SETUP_STATUS:-}"
-          shadowsocks_rust_status="${M2_SHADOWSOCKS_RUST_SETUP_STATUS:-}"
-          coredns_status="${M12_COREDNS_SETUP_STATUS:-}"
-          bind_status="${M12_BIND_SETUP_STATUS:-}"
-          case "$sing_box_status" in
-            ''|*[!0-9]*) echo "invalid persisted sing-box setup status" >&2; exit 1 ;;
-          esac
-          case "$shadowsocks_rust_status" in
-            ''|*[!0-9]*) echo "invalid persisted shadowsocks-rust setup status" >&2; exit 1 ;;
-          esac
-          case "$coredns_status" in
-            ''|*[!0-9]*) echo "invalid persisted CoreDNS setup status" >&2; exit 1 ;;
-          esac
-          case "$bind_status" in
-            ''|*[!0-9]*) echo "invalid persisted BIND setup status" >&2; exit 1 ;;
-          esac
+          set -uo pipefail
+          build_status=125
+          qualification_status=125
+          if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+            echo "interop build root was not prepared" >&2
+          else
+            build_status=0
+            build_output="$(cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked 2>&1)" || build_status=$?
+            printf '%s\n' "$build_output"
+            if [ "$build_status" -eq 0 ]; then
+              qualification_status=0
+              qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" 2>&1)" || qualification_status=$?
+              printf '%s\n' "$qualification_output"
+            fi
+          fi
+          transport_status="$build_status"
+          if [ "$transport_status" -eq 0 ]; then
+            transport_status="$qualification_status"
+          fi
+          printf 'm3_interop_transport status=%s build=%s qualification=%s\n' \
+            "$([ "$transport_status" -eq 0 ] && printf PASS || printf FAIL)" \
+            "$build_status" "$qualification_status"
+          printf 'M3_INTEROP_TRANSPORT_STATUS=%s\n' "$transport_status" >> "$GITHUB_ENV"
+      - name: Run hosted M12 DNS qualification
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          build_status=125
+          qualification_status=125
+          if [ -z "${CARGO_TARGET_DIR:-}" ]; then
+            echo "interop build root was not prepared" >&2
+          else
+            build_status=0
+            build_output="$(cargo build -p ferrum2-client -p ferrum2-server -p ferrum2-m0-harness --bins --locked \
+              --features ferrum2-dns/__interop-test-root 2>&1)" || build_status=$?
+            printf '%s\n' "$build_output"
+            if [ "$build_status" -eq 0 ]; then
+              qualification_status=0
+              qualification_output="$("$CARGO_TARGET_DIR/debug/m0-qualification" --dns-only 2>&1)" || qualification_status=$?
+              printf '%s\n' "$qualification_output"
+            fi
+          fi
+          dns_status="$build_status"
+          if [ "$dns_status" -eq 0 ]; then
+            dns_status="$qualification_status"
+          fi
+          printf 'm3_interop_dns status=%s build=%s qualification=%s\n' \
+            "$([ "$dns_status" -eq 0 ] && printf PASS || printf FAIL)" \
+            "$build_status" "$qualification_status"
+          printf 'M3_INTEROP_DNS_STATUS=%s\n' "$dns_status" >> "$GITHUB_ENV"
+      - name: Delete isolated interop build root
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
           cleanup_status=0
-          rm -rf -- "$CARGO_TARGET_DIR" || cleanup_status=$?
-          if [ -e "$CARGO_TARGET_DIR" ]; then
+          case "${CARGO_TARGET_DIR:-}" in
+            '')
+              echo "m3_interop_cleanup status=SKIPPED reason=build-root-not-created"
+              ;;
+            "$RUNNER_TEMP"/interop-qualification-target.*)
+              rm -rf -- "$CARGO_TARGET_DIR" || cleanup_status=$?
+              ;;
+            *)
+              echo "invalid or missing interop build root" >&2
+              cleanup_status=1
+              ;;
+          esac
+          if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -e "$CARGO_TARGET_DIR" ]; then
             cleanup_status=1
           fi
-          echo "final_status sing_box=$sing_box_status shadowsocks_rust=$shadowsocks_rust_status coredns=$coredns_status bind=$bind_status qualification=$qualification_status dns=$dns_status cleanup=$cleanup_status"
-          test "$sing_box_status" -eq 0
-          test "$shadowsocks_rust_status" -eq 0
-          test "$coredns_status" -eq 0
-          test "$bind_status" -eq 0
-          test "$qualification_status" -eq 0
-          test "$dns_status" -eq 0
+          if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+            echo "m3_interop_cleanup status=$cleanup_status"
+          fi
           test "$cleanup_status" -eq 0
+      - name: Require both interop qualification groups
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
+          aggregate_status=0
+          for entry in \
+            "transport:${M3_INTEROP_TRANSPORT_STATUS:-}" \
+            "dns:${M3_INTEROP_DNS_STATUS:-}"
+          do
+            name="${entry%%:*}"
+            value="${entry#*:}"
+            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+              printf 'm3_interop_aggregate group=%s status=FAIL reason=missing-or-non-integer value=%q\n' \
+                "$name" "$value" >&2
+              aggregate_status=1
+            elif [ "$value" -ne 0 ]; then
+              printf 'm3_interop_aggregate group=%s status=FAIL qualification=%s\n' "$name" "$value" >&2
+              aggregate_status=1
+            else
+              printf 'm3_interop_aggregate group=%s status=PASS qualification=0\n' "$name"
+            fi
+          done
+          test "$aggregate_status" -eq 0
 
   performance:
     name: performance
@@ -782,6 +803,7 @@ jobs:
     name: required
     if: ${{ always() }}
     needs:
+      - changes
       - quality
       - platform
       - interop
@@ -791,11 +813,29 @@ jobs:
       - name: Require every ordinary main gate
         shell: bash
         env:
+          CHANGE_RESULT: ${{ needs.changes.result }}
+          RUN_EXPENSIVE: ${{ needs.changes.outputs.run_expensive }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
         run: |
           set -euo pipefail
-          test "$QUALITY_RESULT" = success
-          test "$PLATFORM_RESULT" = success
-          test "$INTEROP_RESULT" = success
+          printf 'm3_required_inputs changes=%s run_expensive=%s quality=%s platform=%s interop=%s\n' \
+            "$CHANGE_RESULT" "$RUN_EXPENSIVE" "$QUALITY_RESULT" "$PLATFORM_RESULT" "$INTEROP_RESULT"
+          test "$CHANGE_RESULT" = success
+          case "$RUN_EXPENSIVE" in
+            true)
+              test "$QUALITY_RESULT" = success
+              test "$PLATFORM_RESULT" = success
+              test "$INTEROP_RESULT" = success
+              ;;
+            false)
+              test "$QUALITY_RESULT" = skipped
+              test "$PLATFORM_RESULT" = skipped
+              test "$INTEROP_RESULT" = skipped
+              ;;
+            *)
+              echo "invalid change classification: $RUN_EXPENSIVE" >&2
+              exit 1
+              ;;
+          esac

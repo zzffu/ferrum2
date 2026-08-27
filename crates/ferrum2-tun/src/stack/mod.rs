@@ -5,7 +5,8 @@ mod udp;
 pub(crate) use device::{MemoryDevice, OutputFlushOutcome, OutputSendOutcome};
 #[cfg(test)]
 pub(crate) use device::{MemoryTx, OutputSlot, PacketValidator, udp_datagram};
-pub(crate) use tcp::{TcpFlowEntry, TcpTuple, initial_tcp_tuple};
+use tcp::initial_tcp_tuple;
+pub(crate) use tcp::{TcpFlowEntry, TcpTuple};
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -24,7 +25,8 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address
 use crate::PACKET_QUANTUM;
 use crate::packet::{
     ControlContext, ControlRateLimiter, Families, LocalControlKind, PacketRejectReason,
-    ParsedIpPacket, ParsedPacket, ipv4_directed_broadcast, oversized_ingress_control,
+    ParsedIpPacket, ParsedPacket, control_context, ipv4_directed_broadcast,
+    oversized_ingress_control,
 };
 use crate::process::map_packet_reject;
 use crate::reassembly::{ReassemblyDropReason, ReassemblyOutcome, ReassemblyTable};
@@ -357,7 +359,7 @@ impl Stack {
             if admitted == UdpAdmission::Dropped {
                 self.emit_local_control(
                     packet,
-                    parsed.control_context(),
+                    control_context(parsed),
                     LocalControlKind::PortUnreachable,
                     now_millis,
                 );
@@ -368,7 +370,7 @@ impl Stack {
         if self.device.ingress_len == INGRESS_SLOTS {
             self.emit_local_control(
                 packet,
-                parsed.control_context(),
+                control_context(parsed),
                 LocalControlKind::AdministrativelyProhibited,
                 now_millis,
             );
@@ -379,7 +381,7 @@ impl Stack {
             Ok(Some(tuple)) if !self.admit_tcp(tuple, admitting) => {
                 self.emit_local_control(
                     packet,
-                    parsed.control_context(),
+                    control_context(parsed),
                     LocalControlKind::AdministrativelyProhibited,
                     now_millis,
                 );
@@ -388,7 +390,7 @@ impl Stack {
             Err(()) => {
                 self.emit_local_control(
                     packet,
-                    parsed.control_context(),
+                    control_context(parsed),
                     LocalControlKind::AdministrativelyProhibited,
                     now_millis,
                 );

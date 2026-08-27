@@ -14,8 +14,49 @@ function Assert-Throws([scriptblock]$Action, [string]$Label) {
     Assert-True ($null -ne $failure) "$Label did not fail closed"
 }
 
+function Get-GitObjectId(
+    [string]$GitPath,
+    [string]$RepositoryRoot,
+    [string[]]$Command,
+    [string]$Label
+) {
+    $output = @(& $GitPath -C $RepositoryRoot @Command 2>&1)
+    $exitCode = $LASTEXITCODE
+    Assert-True ($exitCode -eq 0 -and $output.Count -eq 1 -and
+        [string]$output[0] -cmatch '^[0-9a-f]{40,64}$') `
+        "$Label Git object identity is unavailable"
+    ([string]$output[0]).Trim()
+}
+
+function Assert-CanonicalSourceIdentity(
+    [string]$RepositoryRoot,
+    [string[]]$MemberPaths,
+    [string[]]$ManifestPaths
+) {
+    $git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0]
+    $canonicalPaths = @($MemberPaths) + @($ManifestPaths)
+    foreach ($relativePath in @($canonicalPaths | Sort-Object -Unique)) {
+        $path = Join-Path $RepositoryRoot `
+            $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
+        $bytes = [IO.File]::ReadAllBytes($path)
+        Assert-True (-not ($bytes -contains [byte]13)) `
+            "identity-bound source is not canonical LF: $relativePath"
+    }
+    foreach ($relativePath in @($MemberPaths | Sort-Object -Unique)) {
+        $workingObject = Get-GitObjectId $git.Source $RepositoryRoot `
+            @('hash-object', '--no-filters', '--', $relativePath) `
+            "identity-bound worktree source $relativePath"
+        $indexObject = Get-GitObjectId $git.Source $RepositoryRoot `
+            @('rev-parse', '--verify', ":$relativePath") `
+            "identity-bound index source $relativePath"
+        Assert-True ($workingObject -ceq $indexObject) `
+            "identity-bound source differs between worktree and index: $relativePath"
+    }
+}
+
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction Stop).Path
 $moduleRoot = Join-Path $repositoryRoot 'tools\powershell'
+. (Join-Path $moduleRoot 'Ferrum2.Qualification.Common\BundleBootstrap.ps1')
 $contracts = [ordered]@{
     'Ferrum2.Qualification.Common' = @(
         'Assert-Ferrum2ClosedProperties', 'Get-Ferrum2LowerSha256',
@@ -197,8 +238,9 @@ Assert-True ($sourceAssignments.Count -eq 1) `
 $expectedPerformancePaths = @($sourceAssignments[0].Right.FindAll({
     param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst]
 }, $true) | ForEach-Object { $_.Value })
-$performanceSourceBundle = Get-Content -LiteralPath (Join-Path $repositoryRoot `
-    'tools\powershell\Ferrum2.Performance\bundle.json') -Raw -Encoding utf8 |
+$performanceSourceBundlePath = Join-Path $repositoryRoot `
+    'tools\powershell\Ferrum2.Performance\bundle.json'
+$performanceSourceBundle = Get-Content -LiteralPath $performanceSourceBundlePath -Raw -Encoding utf8 |
     ConvertFrom-Json -Depth 8 -ErrorAction Stop
 $actualPerformancePaths = @($performanceSourceBundle.files.path)
 Assert-True ($expectedPerformancePaths.Count -eq 42 -and
@@ -207,6 +249,22 @@ Assert-True ($expectedPerformancePaths.Count -eq 42 -and
     }).Count -eq 0 -and @($actualPerformancePaths | Where-Object {
         $_ -cnotin $expectedPerformancePaths
     }).Count -eq 0) 'performance source bundle is not the exact 42-file set'
+$performanceSourceBundleHash = Assert-Ferrum2BootstrapSourceManifest `
+    -ManifestPath $performanceSourceBundlePath -RepositoryRoot $repositoryRoot `
+    -ExpectedKind 'ferrum2.windows-tun-performance-source-bundle.v1' `
+    -ExpectedEntrypoint 'tools/windows-tun/run_windows_tun_performance_hyperv.ps1' `
+    -ExpectedPaths $expectedPerformancePaths
+Assert-True ($performanceSourceBundleHash -cmatch '^[0-9a-f]{64}$') `
+    'performance source-bundle identity is invalid'
+
+$identityMemberPaths = @($mainSourceBundle.files.path) +
+    @($hardSourceBundle.files.path) + @($performanceSourceBundle.files.path)
+Assert-CanonicalSourceIdentity -RepositoryRoot $repositoryRoot `
+    -MemberPaths $identityMemberPaths -ManifestPaths @(
+        'tests/platform/main-source-bundle.json'
+        'tests/platform/hard-source-bundle.json'
+        'tools/powershell/Ferrum2.Performance/bundle.json'
+    )
 
 $hardFileMap = @(
     Get-Ferrum2HardKillControllerBundleFileMap -RepositoryRoot $repositoryRoot

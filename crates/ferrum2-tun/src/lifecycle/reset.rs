@@ -1,13 +1,19 @@
+#[cfg(all(windows, target_arch = "x86_64"))]
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 use super::prepare::wait_owner_delay;
+#[cfg(all(windows, target_arch = "x86_64"))]
 use super::rebuild::adapter_underlay_is_current;
+use crate::TunNetworkFullRebuildReason;
 use crate::scheduler::BudgetOutcome;
+#[cfg(all(windows, target_arch = "x86_64"))]
 use crate::supervisor::RestartBackoff;
+#[cfg(all(windows, target_arch = "x86_64"))]
 use crate::{
     AdapterErrorDisposition, OwnerControl, TunEvent, TunEventSink, TunIpFamily,
-    TunNetworkFullRebuildReason, TunNetworkResetReason,
+    TunNetworkResetReason,
 };
 
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -25,7 +31,6 @@ pub(crate) const MANAGED_DNS_AUDIT_MILLIS: i64 = 5_000;
 #[cfg(all(windows, target_arch = "x86_64"))]
 const TRANSIENT_UNDERLAY_SETTLE: Duration = Duration::from_secs(5);
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NetworkChangeTransition {
     Unchanged,
@@ -33,7 +38,6 @@ pub(crate) enum NetworkChangeTransition {
     FullRebuild(TunNetworkFullRebuildReason),
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NetworkResetHealthDisposition {
     Healthy,
@@ -43,7 +47,6 @@ pub(crate) enum NetworkResetHealthDisposition {
     CleanupFailed,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NetworkChangeErrorDisposition {
     ResetNetwork { settle_underlay: bool },
@@ -51,7 +54,6 @@ pub(crate) enum NetworkChangeErrorDisposition {
     CleanupFailed,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) const fn classify_network_reset_health(
     health: Result<ferrum2_platform_windows::ManagedTunHealth, ferrum2_platform_windows::Error>,
 ) -> NetworkResetHealthDisposition {
@@ -77,7 +79,6 @@ pub(crate) const fn classify_network_reset_health(
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) const fn classify_network_reset_refresh_error(
     error: ferrum2_platform_windows::Error,
 ) -> NetworkResetHealthDisposition {
@@ -95,7 +96,6 @@ pub(crate) const fn classify_network_reset_refresh_error(
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) const fn classify_network_change_error(
     error: ferrum2_platform_windows::Error,
 ) -> NetworkChangeErrorDisposition {
@@ -115,7 +115,6 @@ pub(crate) const fn classify_network_change_error(
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) const fn classify_network_change(
     outcome: ferrum2_platform_windows::NetworkChangeOutcome,
 ) -> NetworkChangeTransition {
@@ -134,7 +133,6 @@ pub(crate) const fn classify_network_change(
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) const fn map_managed_state_damage(
     damage: ferrum2_platform_windows::ManagedStateDamage,
 ) -> TunNetworkFullRebuildReason {
@@ -161,7 +159,6 @@ pub(crate) const fn map_managed_state_damage(
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) fn bounded_network_wait(
     base: Duration,
     now_millis: i64,
@@ -179,7 +176,6 @@ pub(crate) fn bounded_network_wait(
     base.min(Duration::from_millis(millis))
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) fn owner_wait_after_budget(budget: BudgetOutcome, bounded_wait: Duration) -> Duration {
     if budget.budget_exhausted {
         Duration::ZERO

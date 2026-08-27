@@ -8,9 +8,13 @@ use smoltcp::socket::tcp::{
 use smoltcp::wire::IpEndpoint;
 
 use super::{Stack, ip_address};
-use crate::packet::{ParsedIpPacket, ParsedPacket, TransportMetadata};
+use crate::packet::{ParsedIpPacket, ParsedPacket, TcpMetadata, TransportMetadata};
 use crate::udp::GenerationId;
 use crate::{TCP_REAP_QUANTUM, TcpFlow, TunEvent, TunRejectReason};
+
+const fn is_initial_syn(metadata: TcpMetadata) -> bool {
+    metadata.flags & 0x17 == 0x02
+}
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -347,14 +351,14 @@ impl Stack {
 }
 
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
-pub(crate) fn initial_tcp_tuple(parsed: ParsedIpPacket) -> Result<Option<TcpTuple>, ()> {
+pub(super) fn initial_tcp_tuple(parsed: ParsedIpPacket) -> Result<Option<TcpTuple>, ()> {
     let TransportMetadata::Tcp(tcp) = parsed.transport else {
         return Ok(None);
     };
     if tcp.flags & 0x02 == 0 {
         return Ok(None);
     }
-    if !tcp.is_initial_syn() {
+    if !is_initial_syn(tcp) {
         return Err(());
     }
     Ok(Some(TcpTuple {

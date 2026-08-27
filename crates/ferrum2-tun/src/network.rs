@@ -1,6 +1,9 @@
+#[cfg(all(windows, target_arch = "x86_64"))]
 use std::net::SocketAddr;
+#[cfg(all(windows, target_arch = "x86_64"))]
 use std::sync::Arc;
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 use crate::{TunEvent, TunEventSink, TunRejectReason};
 
 /// Generation-aware bridge from the current private Wintun session to client egress.

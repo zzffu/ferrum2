@@ -1,5 +1,7 @@
+#[cfg(all(windows, target_arch = "x86_64"))]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+#[cfg(all(windows, target_arch = "x86_64"))]
 use std::time::Duration;
 
 use ferrum2_net::NetworkSnapshot;
@@ -26,7 +28,7 @@ use crate::{
     map_owner_spawn,
 };
 
-/// Builds one required process root around the private owner-thread implementation.
+/// Builds one required TUN process root.
 ///
 /// Error values are supplied by the binary so this deep module does not depend on
 /// configuration, policy, DNS, protocol, or observability crates.
@@ -34,7 +36,6 @@ use crate::{
 /// replacement stack before ordinary-reset admission, and brackets managed-plane rebuilds around
 /// teardown and readback. Returning an error keeps admission closed and retries only the affected
 /// lifecycle transition.
-#[cfg(all(windows, target_arch = "x86_64"))]
 #[allow(clippy::too_many_arguments)]
 pub fn process_root<E, H, U, R, M>(
     config: Config,
@@ -69,72 +70,53 @@ where
         + 'static,
     M: Fn(TunEvent) + Send + Sync + 'static,
 {
-    ProcessRoot::new_cancellable(move |cancellation| async move {
-        if !config_is_exact(&config) {
-            return Err(startup);
-        }
-        let events = TunEventSink::new(events);
-        underlay.set_event_sink(events.clone());
-        prepare(
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        ProcessRoot::new_cancellable(move |cancellation| async move {
+            if !config_is_exact(&config) {
+                return Err(startup);
+            }
+            let events = TunEventSink::new(events);
+            underlay.set_event_sink(events.clone());
+            prepare(
+                config,
+                initial_network_generation,
+                underlay,
+                RootErrors {
+                    startup,
+                    runtime,
+                    cleanup,
+                },
+                cancellation,
+                RootServices {
+                    registry,
+                    network_catalog,
+                    handle_tcp: Arc::new(handle_tcp),
+                    handle_udp: Arc::new(handle_udp),
+                    handle_network_lifecycle: Arc::new(handle_network_lifecycle),
+                    events,
+                },
+            )
+            .await
+        })
+    }
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    {
+        let _ = (
             config,
             initial_network_generation,
             underlay,
-            RootErrors {
-                startup,
-                runtime,
-                cleanup,
-            },
-            cancellation,
-            RootServices {
-                registry,
-                network_catalog,
-                handle_tcp: Arc::new(handle_tcp),
-                handle_udp: Arc::new(handle_udp),
-                handle_network_lifecycle: Arc::new(handle_network_lifecycle),
-                events,
-            },
-        )
-        .await
-    })
-}
-
-#[cfg(not(all(windows, target_arch = "x86_64")))]
-/// Builds a required root that fails during preparation on unsupported targets.
-#[allow(clippy::too_many_arguments)]
-pub fn process_root<E, H, U, R, M>(
-    _config: Config,
-    _initial_network_generation: u64,
-    _underlay: UnderlayPublisher,
-    _network_catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
-    startup: E,
-    _runtime: E,
-    _cleanup: E,
-    _registry: OwnerRegistry,
-    _handle_tcp: H,
-    _handle_udp: U,
-    _handle_network_lifecycle: R,
-    _events: M,
-) -> ProcessRoot<E>
-where
-    E: Copy + Send + 'static,
-    H: Fn(TcpFlow, ProcessCancellation, SessionCancellation) -> ProcessFuture<()>
-        + Send
-        + Sync
-        + 'static,
-    U: Fn(UdpCandidate, ProcessCancellation, SessionCancellation) -> ProcessFuture<()>
-        + Send
-        + Sync
-        + 'static,
-    R: Fn(
-            Arc<NetworkSnapshot>,
-            TunNetworkLifecycle,
-        ) -> ProcessFuture<Result<(), TunNetworkResetError>>
-        + Send
-        + Sync
-        + 'static,
-    M: Fn(TunEvent) + Send + Sync + 'static,
-{
-    ProcessRoot::new(move || async move { Err::<UnsupportedTargetRoot, _>(startup) })
+            network_catalog,
+            runtime,
+            cleanup,
+            registry,
+            handle_tcp,
+            handle_udp,
+            handle_network_lifecycle,
+            events,
+        );
+        ProcessRoot::new(move || async move { Err::<UnsupportedTargetRoot, _>(startup) })
+    }
 }
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
@@ -484,5 +466,65 @@ where
         cleanup
     } else {
         startup
+    }
+}
+
+#[cfg(all(test, not(all(windows, target_arch = "x86_64"))))]
+mod unsupported_target_tests {
+    use std::time::Duration;
+
+    use ferrum2_runtime::{OwnerRegistry, ProcessCause, ProcessSupervisor};
+
+    use super::*;
+    use crate::UdpFiltering;
+
+    #[tokio::test]
+    async fn unsupported_target_fails_during_preparation() {
+        let registry = OwnerRegistry::new();
+        let root = process_root(
+            Config {
+                adapter_name: "unsupported".into(),
+                ipv4: None,
+                ipv6: None,
+                mtu: 1_500,
+                ring_capacity: 1 << 20,
+                ready_timeout: Duration::from_secs(1),
+                max_tcp_flows: 1,
+                tcp_buffer_bytes: 4_096,
+                tcp_timeout: Duration::from_secs(1),
+                udp_timeout: Duration::from_secs(1),
+                max_udp_mappings: 1,
+                udp_filtering: UdpFiltering::EndpointIndependent,
+                capture_routes: Vec::new(),
+                physical_endpoints: Vec::new(),
+                default_binder: false,
+                ipv4_dns_address: None,
+                ipv6_dns_address: None,
+                strict_route: false,
+            },
+            0,
+            UnderlayPublisher::new(),
+            ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system(),
+            "startup",
+            "runtime",
+            "cleanup",
+            registry.clone(),
+            |_: TcpFlow, _, _| Box::pin(async {}),
+            |_: UdpCandidate, _, _| Box::pin(async {}),
+            |_, _| Box::pin(async { Ok(()) }),
+            |_| {},
+        );
+        let supervisor = ProcessSupervisor::new(vec![root], Duration::from_secs(1), registry)
+            .expect("one unsupported TUN root");
+
+        let report = supervisor.run_until(std::future::pending::<()>()).await;
+
+        match report.cause() {
+            ProcessCause::PreparationFailed { root, error } => {
+                assert_eq!(root.get(), 0);
+                assert_eq!(*error, "startup");
+            }
+            other => panic!("unsupported target did not fail closed during preparation: {other:?}"),
+        }
     }
 }

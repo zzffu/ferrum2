@@ -730,6 +730,7 @@ impl Drop for UdpAssociation {
 
 mod table;
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test, feature = "fuzzing"))]
 pub(crate) use table::{Admission, ResponseProcessOutcome, UdpTable};
 #[cfg(test)]
 pub(crate) use table::{EventOutcome, ExpireOutcome};

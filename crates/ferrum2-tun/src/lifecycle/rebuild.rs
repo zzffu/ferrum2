@@ -9,14 +9,12 @@ use crate::{
     TunEventSink, TunNetworkFullRebuildReason, TunNetworkLifecycle, TunNetworkResetReason,
 };
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn adapter_underlay_is_current(adapter: &ferrum2_platform_windows::Adapter) -> bool {
     adapter
         .underlay_policy()
         .is_none_or(|policy| policy.generation_is_current())
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn request_client_network_lifecycle(
     output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
     snapshot: Arc<NetworkSnapshot>,
@@ -38,7 +36,6 @@ pub(crate) fn request_client_network_lifecycle(
         .unwrap_or(NetworkResetBridgeOutcome::Stopped)
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 #[derive(Clone, Copy)]
 pub(crate) struct PendingFullRebuild {
     pub(crate) reason: TunNetworkFullRebuildReason,
@@ -47,7 +44,6 @@ pub(crate) struct PendingFullRebuild {
     pub(crate) udp_associations: usize,
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 impl PendingFullRebuild {
     pub(crate) fn new(
         reason: TunNetworkFullRebuildReason,
@@ -98,7 +94,6 @@ impl PendingFullRebuild {
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) enum OwnerAttempt {
     Starting,
     Reset {
@@ -112,7 +107,6 @@ pub(crate) enum OwnerAttempt {
     },
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 impl OwnerAttempt {
     pub(crate) fn reset(
         adapter: ferrum2_platform_windows::Adapter,
@@ -174,7 +168,6 @@ impl OwnerAttempt {
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 #[derive(Clone, Copy)]
 pub(crate) enum AttemptMode {
     Starting,
@@ -185,7 +178,6 @@ pub(crate) enum AttemptMode {
     Rebuild(PendingFullRebuild),
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 impl AttemptMode {
     pub(crate) const fn is_starting(self) -> bool {
         matches!(self, Self::Starting)
@@ -254,7 +246,6 @@ impl AttemptMode {
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn request_full_rebuild_transition(
     output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
     snapshot: Arc<NetworkSnapshot>,
@@ -273,7 +264,6 @@ pub(crate) fn request_full_rebuild_transition(
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(crate) fn start_full_rebuild(
     rebuild: Result<PendingFullRebuild, OwnerExit>,
     output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,

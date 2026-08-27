@@ -1,6 +1,8 @@
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod owner;
+#[cfg(all(windows, target_arch = "x86_64"))]
 mod prepare;
+#[cfg(all(windows, target_arch = "x86_64"))]
 mod rebuild;
 mod reducer;
 mod reset;

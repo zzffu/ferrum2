@@ -512,20 +512,60 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
         "the independently required fuzz workflow must run on every PR and protected push"
     );
     let owner_paths = strings(&policy()["fuzz_impact"]["owner_paths"]);
-    for required in [
-        "crates/ferrum2-tun/fuzz/**",
-        "crates/ferrum2-platform-windows/src/**",
-        "tests/platform/**",
-        "tools/powershell/**",
-        ".github/workflows/tun-fuzz-deterministic.yml",
-        "vendor/shadowsocks-crypto/**",
-    ] {
-        assert!(
-            owner_paths.contains(required),
-            "fuzz owner-impact ledger is missing {required}"
-        );
-    }
-
+    assert_eq!(
+        owner_paths,
+        BTreeSet::from([
+            ".gitattributes".to_owned(),
+            ".cargo/**".to_owned(),
+            ".github/workflows/tun-fuzz-deterministic.yml".to_owned(),
+            "Cargo.lock".to_owned(),
+            "Cargo.toml".to_owned(),
+            "crates/ferrum2-config/**".to_owned(),
+            "crates/ferrum2-core/**".to_owned(),
+            "crates/ferrum2-crypto/**".to_owned(),
+            "crates/ferrum2-net/**".to_owned(),
+            "crates/ferrum2-platform-windows/**".to_owned(),
+            "crates/ferrum2-rule/**".to_owned(),
+            "crates/ferrum2-runtime/**".to_owned(),
+            "crates/ferrum2-tun/**".to_owned(),
+            "tests/m0-harness/tests/workspace_policy/**".to_owned(),
+            "tests/platform/**".to_owned(),
+            "tools/ci/__init__.py".to_owned(),
+            "tools/ci/fuzz_contract.py".to_owned(),
+            "tools/ci/git_changes.py".to_owned(),
+            "tools/powershell/**".to_owned(),
+            "tools/windows-tun/**".to_owned(),
+            "vendor/shadowsocks-crypto/**".to_owned(),
+        ]),
+        "the fuzz owner-impact ledger drifted"
+    );
+    let campaign = &policy()["fuzz_campaign"];
+    let campaign_targets = strings(&campaign["targets"]);
+    assert_eq!(
+        campaign_targets,
+        BTreeSet::from([
+            "config_legacy_fields".to_owned(),
+            "packet_reassembly".to_owned(),
+            "strict_route_rules".to_owned(),
+            "udp_reset_races".to_owned(),
+        ]),
+        "the hosted fuzz campaign target set drifted"
+    );
+    let seconds_per_target = campaign["seconds_per_target"]
+        .as_integer()
+        .expect("fuzz seconds per target");
+    let total_seconds = campaign["total_seconds"]
+        .as_integer()
+        .expect("total fuzz seconds");
+    assert_eq!(
+        seconds_per_target * campaign_targets.len() as i64,
+        total_seconds,
+        "the declared fuzz target budgets do not add up to the total campaign budget"
+    );
+    assert_eq!(
+        total_seconds, 3_600,
+        "the required fuzz campaign is one hour"
+    );
     let policy = policy();
     let required = &policy["ci_required"];
     for (workflow_key, needs_key) in [

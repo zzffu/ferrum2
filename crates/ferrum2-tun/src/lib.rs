@@ -2,6 +2,7 @@
 
 #[cfg(feature = "fuzzing")]
 mod fuzzing;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 mod lifecycle;
 mod model;
 mod network;
@@ -49,19 +50,20 @@ pub use udp::{
 };
 pub use wake::OwnerWake;
 
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use ferrum2_net::NetworkSnapshot;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use ferrum2_runtime::{OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture};
 #[cfg(test)]
 use packet::{Families, PacketParser, ParsedPacket};
 #[cfg(test)]
 use scheduler::{FairScheduler, WorkStage};
 #[cfg(test)]
-pub(crate) use stack::initial_tcp_tuple;
-#[cfg(test)]
 use stack::{
     MemoryDevice, MemoryTx, OutputFlushOutcome, OutputSendOutcome, OutputSlot, PacketValidator,
     Stack, TcpTuple, udp_datagram,
 };
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::sync::Arc;
 #[cfg(any(all(windows, target_arch = "x86_64"), test))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
