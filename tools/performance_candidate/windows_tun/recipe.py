@@ -239,19 +239,8 @@ def network_model_bundle_sha256() -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-@lru_cache(maxsize=1)
-def m4_windows_tun_bundle_sha256() -> str:
-    manifest_path = source_paths()["harness"]
-    raw = manifest_path.read_bytes()
-    manifest = _strict_json(raw.decode("utf-8"), source="M4 Windows TUN bundle")
-    if type(manifest) is not dict:
-        raise CandidateControlError("M4 Windows TUN bundle must be an object")
-    _exact_fields(
-        manifest,
-        {"entrypoint", "files", "kind", "schema_version"},
-        "M4 Windows TUN bundle",
-    )
-    expected_files = {
+_M4_WINDOWS_TUN_BUNDLE_FILES = frozenset(
+    {
         "contract.rs",
         "diagnostic.rs",
         "mod.rs",
@@ -264,6 +253,19 @@ def m4_windows_tun_bundle_sha256() -> str:
         "workload.rs",
         "workload_diagnostic.rs",
     }
+)
+
+
+def _m4_windows_tun_bundle_sha256(manifest_path: pathlib.Path) -> str:
+    raw = manifest_path.read_bytes()
+    manifest = _strict_json(raw.decode("utf-8"), source="M4 Windows TUN bundle")
+    if type(manifest) is not dict:
+        raise CandidateControlError("M4 Windows TUN bundle must be an object")
+    _exact_fields(
+        manifest,
+        {"entrypoint", "files", "kind", "schema_version"},
+        "M4 Windows TUN bundle",
+    )
     if (
         manifest["schema_version"] != 1
         or manifest["kind"] != "ferrum2.m4-windows-tun-source-bundle.v1"
@@ -271,38 +273,73 @@ def m4_windows_tun_bundle_sha256() -> str:
         or type(manifest["files"]) is not list
     ):
         raise CandidateControlError("M4 Windows TUN bundle identity is invalid")
-    observed_files = set()
+    entries: dict[str, tuple[dict[str, object], tuple[str, ...]]] = {}
     for entry in manifest["files"]:
         if type(entry) is not dict:
             raise CandidateControlError("M4 Windows TUN bundle file must be an object")
         _exact_fields(entry, {"bytes", "path", "sha256"}, "M4 Windows TUN bundle file")
         relative = entry["path"]
         relative_path = pathlib.PurePosixPath(relative) if type(relative) is str else None
+        windows_path = pathlib.PureWindowsPath(relative) if type(relative) is str else None
         if (
             relative_path is None
+            or windows_path is None
+            or "\\" in relative
             or relative_path.is_absolute()
+            or bool(windows_path.drive)
+            or bool(windows_path.root)
             or relative_path.as_posix() != relative
             or any(part in ("", ".", "..") for part in relative_path.parts)
         ):
             raise CandidateControlError("M4 Windows TUN bundle file path is unsafe")
-        source = manifest_path.parent.joinpath(*relative_path.parts)
-        if relative in observed_files or not source.is_file() or source.is_symlink():
+        if relative not in _M4_WINDOWS_TUN_BUNDLE_FILES or relative in entries:
             raise CandidateControlError("M4 Windows TUN bundle file set is invalid")
         if (
             type(entry["bytes"]) is not int
             or entry["bytes"] <= 0
-            or source.stat().st_size != entry["bytes"]
             or type(entry["sha256"]) is not str
             or SHA256.fullmatch(entry["sha256"]) is None
+        ):
+            raise CandidateControlError(
+                f"M4 Windows TUN bundle file identity changed: {relative}"
+            )
+        entries[relative] = (entry, relative_path.parts)
+    if entries.keys() != _M4_WINDOWS_TUN_BUNDLE_FILES:
+        raise CandidateControlError("M4 Windows TUN bundle file set is incomplete")
+
+    bundle_root = manifest_path.parent.resolve(strict=True)
+    resolved_sources: dict[str, pathlib.Path] = {}
+    for relative, (_, parts) in entries.items():
+        source = bundle_root
+        for part in parts:
+            source /= part
+            if source.is_symlink():
+                raise CandidateControlError("M4 Windows TUN bundle file path is unsafe")
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(bundle_root)
+        except (OSError, ValueError):
+            raise CandidateControlError(
+                "M4 Windows TUN bundle file path is unsafe"
+            ) from None
+        resolved_sources[relative] = resolved
+
+    for relative, (entry, _) in entries.items():
+        source = resolved_sources[relative]
+        if (
+            not source.is_file()
+            or source.stat().st_size != entry["bytes"]
             or _sha256(source) != entry["sha256"]
         ):
             raise CandidateControlError(
                 f"M4 Windows TUN bundle file identity changed: {relative}"
             )
-        observed_files.add(relative)
-    if observed_files != expected_files:
-        raise CandidateControlError("M4 Windows TUN bundle file set is incomplete")
     return hashlib.sha256(raw).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def m4_windows_tun_bundle_sha256() -> str:
+    return _m4_windows_tun_bundle_sha256(source_paths()["harness"])
 
 
 @lru_cache(maxsize=1)

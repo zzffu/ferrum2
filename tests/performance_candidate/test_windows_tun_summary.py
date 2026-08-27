@@ -4,6 +4,7 @@ import json
 import pathlib
 import re
 import tempfile
+from unittest import mock
 
 from tests.performance_candidate._shared_fixture import WINDOWS_TUN_POLICY_PATH
 from tests.performance_candidate._windows_tun_trial_support import WindowsTunTrialSupport
@@ -17,7 +18,117 @@ from tools.performance_candidate.windows_tun import summary as windows_summary
 from tools.performance_candidate.windows_tun import trial as windows_trial
 
 
+def _write_m4_bundle(directory: pathlib.Path) -> pathlib.Path:
+    files = []
+    for relative in sorted(windows_recipe._M4_WINDOWS_TUN_BUNDLE_FILES):
+        source = directory.joinpath(*pathlib.PurePosixPath(relative).parts)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        payload = f"self-check fixture: {relative}\n".encode()
+        source.write_bytes(payload)
+        files.append(
+            {
+                "path": relative,
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    manifest = directory / "bundle.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "ferrum2.m4-windows-tun-source-bundle.v1",
+                "entrypoint": "mod.rs",
+                "files": files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
 class WindowsTunSummaryTests(WindowsTunTrialSupport):
+    def test_m4_bundle_rejects_unsafe_paths_before_source_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = _write_m4_bundle(pathlib.Path(directory))
+            valid = json.loads(manifest.read_text(encoding="utf-8"))
+            for relative in (
+                r"..\outside.rs",
+                r"C:\outside.rs",
+                r"\\server\share\outside.rs",
+                "/outside.rs",
+                "./contract.rs",
+                "self_check/../contract.rs",
+            ):
+                with self.subTest(relative=relative):
+                    mutated = copy.deepcopy(valid)
+                    mutated["files"][0]["path"] = relative
+                    manifest.write_text(json.dumps(mutated), encoding="utf-8")
+                    with (
+                        mock.patch.object(
+                            pathlib.Path,
+                            "stat",
+                            side_effect=AssertionError("source stat must not run"),
+                        ),
+                        mock.patch.object(
+                            windows_recipe,
+                            "_sha256",
+                            side_effect=AssertionError("source hash must not run"),
+                        ),
+                        self.assertRaisesRegex(
+                            json_contract.CandidateControlError, "path is unsafe"
+                        ),
+                    ):
+                        windows_recipe._m4_windows_tun_bundle_sha256(manifest)
+
+            mutated = copy.deepcopy(valid)
+            mutated["files"][0]["path"] = "unexpected.rs"
+            manifest.write_text(json.dumps(mutated), encoding="utf-8")
+            with (
+                mock.patch.object(
+                    pathlib.Path,
+                    "stat",
+                    side_effect=AssertionError("source stat must not run"),
+                ),
+                mock.patch.object(
+                    windows_recipe,
+                    "_sha256",
+                    side_effect=AssertionError("source hash must not run"),
+                ),
+                self.assertRaisesRegex(
+                    json_contract.CandidateControlError, "file set is invalid"
+                ),
+            ):
+                windows_recipe._m4_windows_tun_bundle_sha256(manifest)
+
+    def test_m4_bundle_rejects_intermediate_symlink_before_hashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = _write_m4_bundle(root)
+            intermediate = root / "self_check"
+            real_is_symlink = pathlib.Path.is_symlink
+
+            def injected_is_symlink(path: pathlib.Path) -> bool:
+                return path == intermediate or real_is_symlink(path)
+
+            with (
+                mock.patch.object(
+                    pathlib.Path,
+                    "is_symlink",
+                    autospec=True,
+                    side_effect=injected_is_symlink,
+                ),
+                mock.patch.object(
+                    windows_recipe,
+                    "_sha256",
+                    side_effect=AssertionError("source hash must not run"),
+                ),
+                self.assertRaisesRegex(
+                    json_contract.CandidateControlError, "path is unsafe"
+                ),
+            ):
+                windows_recipe._m4_windows_tun_bundle_sha256(manifest)
+
     def test_repository_policy_and_plan_are_closed_and_uncalibrated(self) -> None:
         policy = self.policy()
         self.assertEqual(policy["schema_version"], 4)
