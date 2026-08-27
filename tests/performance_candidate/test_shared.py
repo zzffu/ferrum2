@@ -6,11 +6,40 @@ import unittest
 
 from tests.performance_candidate._shared_fixture import WORKFLOW_PATH
 from tools.performance_candidate import json_contract
+from tools.performance_candidate import status as performance_status
 from tools.performance_candidate.linux import catalog as linux_catalog
 from tools.performance_candidate.linux import plan as linux_plan
 from tools.performance_candidate.linux import policy as linux_policy
 from tools.performance_candidate.linux import scale as linux_scale
 from tools.performance_candidate.windows_tun import recipe as windows_recipe
+
+
+class SummaryExitCodeTests(unittest.TestCase):
+    def test_diagnostic_measurement_success_does_not_weaken_qualification(self) -> None:
+        self.assertEqual(
+            performance_status.summary_exit_code(
+                mode="diagnostic", status=performance_status.INCONCLUSIVE
+            ),
+            0,
+        )
+        self.assertEqual(
+            performance_status.summary_exit_code(
+                mode="qualification", status=performance_status.INCONCLUSIVE
+            ),
+            4,
+        )
+        self.assertEqual(
+            performance_status.summary_exit_code(
+                mode="diagnostic", status=performance_status.INVALID
+            ),
+            2,
+        )
+        self.assertEqual(
+            performance_status.summary_exit_code(
+                mode="diagnostic", status=performance_status.CANDIDATE_WIN
+            ),
+            4,
+        )
 
 
 class MeasurementInputTests(unittest.TestCase):

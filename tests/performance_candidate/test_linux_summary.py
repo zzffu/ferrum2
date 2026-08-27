@@ -17,6 +17,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         summary = self.summarize(plan, parent, candidate)
         self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertFalse(summary["adoption_claim"])
+        self.assertIsNone(summary["workflow_failure_reason"])
         self.assertEqual(summary["scenarios"][0]["median_improvement_percent"], 10.0)
 
     def test_diagnostic_regression_is_reported_as_measurement_not_adoption_decision(

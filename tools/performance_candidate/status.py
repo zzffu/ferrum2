@@ -1,4 +1,4 @@
-"""Closed performance qualification states and process exit semantics."""
+"""Closed performance states and process exit semantics."""
 
 from __future__ import annotations
 

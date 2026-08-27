@@ -453,7 +453,9 @@ def summarize_evidence(
         "adoption_claim": status == CANDIDATE_WIN,
         "status": status,
         "workflow_failure_reason": (
-            decision_reason if status not in {CANDIDATE_WIN, WITHIN_CALIBRATED_BAND} else None
+            decision_reason
+            if summary_exit_code(mode=plan["mode"], status=status)
+            else None
         ),
         "mandatory_scenarios": list(planned),
         "missing_scenarios": [],
