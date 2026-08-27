@@ -20,8 +20,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 use super::dns_resource::{prove_tcp_rebind, prove_tcp_udp_rebind, prove_udp_rebind};
 use super::evidence_support::{
-    DnsResponder, Evidence, PortReservation, TcpUdpReservation, ferrum_binary,
-    ferrum_client_config, ferrum_server_config, spawn_proxy,
+    DnsResponder, Evidence, PortReservation, TcpUdpReservation, ferrum_binary, spawn_proxy,
 };
 use super::host_identity::HostedIdentity;
 use super::process_support::{
@@ -31,6 +30,7 @@ use super::process_support::{
 use super::profile_contract::{
     HostedArgs, PROFILE_SOCKS_IPV4_HEADER_BYTES, PROFILE_UDP_MAX_BUFFERED_BYTES, Topology,
 };
+use super::proxy_config::{ferrum_client_config, ferrum_server_config};
 use super::resource_sampling::{
     establish_sessions, sample_pair, validate_drain, validate_owner_tuple, validate_samples,
     validate_thp_profile, wait_for_sessions,

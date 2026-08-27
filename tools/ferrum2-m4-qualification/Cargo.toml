@@ -24,5 +24,8 @@ socket2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+ferrum2-config.workspace = true
+
 [lints]
 workspace = true

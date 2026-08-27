@@ -6,9 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::dns_resource::prove_tcp_rebind;
-use super::evidence_support::{
-    PortReservation, ferrum_client_config, ferrum_server_config, profile_binary, spawn_proxy,
-};
+use super::evidence_support::{PortReservation, profile_binary, spawn_proxy};
 use super::process_support::{
     STARTUP_TIMEOUT, StartGate, TargetWorker, clean_io, join_worker, spawn_worker, v4,
     wait_for_listener,
@@ -20,6 +18,7 @@ use super::profile_contract::{
 use super::profile_output::{
     ProfileTcpWorkerResult, ensure_profile_workers_running, wait_for_profile_phase,
 };
+use super::proxy_config::{ferrum_client_config, ferrum_server_config};
 use super::throughput::{
     load_stream, load_tcp_request_response, load_tcp_stream, percentile_99, rate_per_second,
 };

@@ -10,14 +10,13 @@ use super::setup::{
     ScaleTargetAcceptor, establish_scale_sessions, memory_available_kib, profile_nofile_soft,
 };
 use crate::m4_support::dns_resource::prove_tcp_rebind;
-use crate::m4_support::evidence_support::{
-    PortReservation, ferrum_client_config, ferrum_server_config, profile_binary, spawn_proxy,
-};
+use crate::m4_support::evidence_support::{PortReservation, profile_binary, spawn_proxy};
 use crate::m4_support::host_identity::linux_capacity;
 use crate::m4_support::process_support::{REAP_TIMEOUT, clean_io, remaining, v4, wait_for_metrics};
 use crate::m4_support::profile_contract::{
     ProfileArgs, ProfileOutcome, TCP_SCALE_EVIDENCE_LINE_MAX_BYTES, Topology,
 };
+use crate::m4_support::proxy_config::{ferrum_client_config, ferrum_server_config};
 use crate::m4_support::resource_sampling::{
     PairSample, proc_sample, sample_pair, validate_drain, wait_for_sessions,
 };

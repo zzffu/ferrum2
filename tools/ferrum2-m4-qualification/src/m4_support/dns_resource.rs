@@ -5,8 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::evidence_support::{
-    DnsLoad, DnsResponder, Evidence, PortReservation, TcpUdpReservation, ferrum_binary,
-    ferrum_dns_resource_client_config, ferrum_dns_resource_server_config, spawn_proxy,
+    DnsLoad, DnsResponder, Evidence, PortReservation, TcpUdpReservation, ferrum_binary, spawn_proxy,
 };
 use super::host_identity::HostedIdentity;
 use super::process_support::{
@@ -14,6 +13,7 @@ use super::process_support::{
     wait_for_metrics, wait_for_sample_slot,
 };
 use super::profile_contract::{HostedArgs, Topology};
+use super::proxy_config::{ferrum_dns_resource_client_config, ferrum_dns_resource_server_config};
 use super::resource_sampling::{
     PairSample, proc_sample, validate_dns_samples, validate_thp_profile,
 };

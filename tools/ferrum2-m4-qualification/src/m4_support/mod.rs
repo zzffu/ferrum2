@@ -80,6 +80,7 @@ mod profile_contract;
 mod profile_output;
 mod profile_tcp;
 mod profile_udp;
+mod proxy_config;
 mod resource;
 mod resource_sampling;
 mod self_check;

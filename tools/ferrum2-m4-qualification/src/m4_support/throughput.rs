@@ -6,10 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::evidence_support::{
-    Evidence, PortReservation, ferrum_binary, ferrum_client_config, ferrum_server_config,
-    reference_client_config, reference_server_config, spawn_proxy,
-};
+use super::evidence_support::{Evidence, PortReservation, ferrum_binary, spawn_proxy};
 use super::host_identity::HostedIdentity;
 use super::process_support::{
     IO_TIMEOUT, PROBE_TIMEOUT, STARTUP_TIMEOUT, StartGate, TargetWorker, clean_io, join_worker,
@@ -17,6 +14,9 @@ use super::process_support::{
 };
 use super::profile_contract::{
     HostedArgs, PROFILE_TCP_LATENCY_SAMPLE_CAP, PROFILE_TCP_STREAM_BATCH, Topology,
+};
+use super::proxy_config::{
+    ferrum_client_config, ferrum_server_config, reference_client_config, reference_server_config,
 };
 use super::self_check::{assert_no_owners, validate_reference_identity};
 use super::{MEASURE, PAYLOAD_BYTES, REFERENCE_SHA256, STREAMS, TRIALS, WARMUP};
