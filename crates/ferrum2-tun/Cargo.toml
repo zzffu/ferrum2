@@ -10,13 +10,14 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["live-backend"]
 fuzzing = []
+live-backend = ["ferrum2-platform-windows/live-backend"]
 
 [dependencies]
 ferrum2-net.workspace = true
 ferrum2-runtime.workspace = true
-ferrum2-platform-windows.workspace = true
+ferrum2-platform-windows = { workspace = true, default-features = false }
 smoltcp.workspace = true
 tokio.workspace = true
 

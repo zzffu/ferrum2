@@ -88,6 +88,12 @@ jobs:
           cargo +nightly-2026-07-10 check --all-targets --no-default-features --locked --offline
           cargo +nightly-2026-07-10 test --no-default-features --no-run --locked --offline
           cargo +nightly-2026-07-10 build --bin smoke --no-default-features --locked --offline
+      - name: Run deterministic TUN smoke corpus
+        shell: bash
+        working-directory: crates/ferrum2-tun/fuzz
+        run: |
+          set -euo pipefail
+          ./target/debug/smoke
       - name: Verify no generated diff
         shell: bash
         run: |
@@ -286,6 +292,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
       - name: Require impact decision and applicable fuzz gates
         shell: bash
         env:
@@ -294,22 +307,4 @@ jobs:
           DETERMINISTIC_RESULT: ${{ needs.deterministic-build.result }}
           LIBFUZZER_RESULT: ${{ needs.libfuzzer-build.result }}
           CAMPAIGN_RESULT: ${{ needs.fuzz-campaign.result }}
-        run: |
-          set -euo pipefail
-          test "$IMPACT_RESULT" = success
-          case "$FUZZ_AFFECTED" in
-            true)
-              test "$DETERMINISTIC_RESULT" = success
-              test "$LIBFUZZER_RESULT" = success
-              test "$CAMPAIGN_RESULT" = success
-              ;;
-            false)
-              test "$DETERMINISTIC_RESULT" = skipped
-              test "$LIBFUZZER_RESULT" = skipped
-              test "$CAMPAIGN_RESULT" = skipped
-              ;;
-            *)
-              echo "invalid fuzz impact decision: $FUZZ_AFFECTED" >&2
-              exit 1
-              ;;
-          esac
+        run: python3 -B -m tools.ci.required_gate --mode fuzz --decision "$FUZZ_AFFECTED" --dependency "impact=$IMPACT_RESULT" --dependency "deterministic-build=$DETERMINISTIC_RESULT" --dependency "libfuzzer-build=$LIBFUZZER_RESULT" --dependency "fuzz-campaign=$CAMPAIGN_RESULT"

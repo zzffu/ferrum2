@@ -129,6 +129,40 @@ class WindowsTunSummaryTests(WindowsTunTrialSupport):
             ):
                 windows_recipe._m4_windows_tun_bundle_sha256(manifest)
 
+    def test_performance_source_rejects_intermediate_symlink_before_hashing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            intermediate = root / "tools"
+            source = intermediate / "owner.ps1"
+            source.parent.mkdir(parents=True)
+            source.write_text("# owner\n", encoding="utf-8")
+            real_is_symlink = pathlib.Path.is_symlink
+
+            def injected_is_symlink(path: pathlib.Path) -> bool:
+                return path == intermediate or real_is_symlink(path)
+
+            with (
+                mock.patch.object(
+                    pathlib.Path,
+                    "is_symlink",
+                    autospec=True,
+                    side_effect=injected_is_symlink,
+                ),
+                mock.patch.object(
+                    windows_recipe,
+                    "_sha256",
+                    side_effect=AssertionError("source hash must not run"),
+                ),
+                self.assertRaisesRegex(
+                    json_contract.CandidateControlError, "path is unsafe"
+                ),
+            ):
+                windows_recipe._resolve_closed_member(
+                    root,
+                    ("tools", "owner.ps1"),
+                    label="performance source bundle file",
+                )
+
     def test_repository_policy_and_plan_are_closed_and_uncalibrated(self) -> None:
         policy = self.policy()
         self.assertEqual(policy["schema_version"], 4)
@@ -160,12 +194,19 @@ class WindowsTunSummaryTests(WindowsTunTrialSupport):
         performance_bundle = json.loads(
             windows_recipe.source_paths()["performance_bundle"].read_text(encoding="utf-8")
         )
-        self.assertEqual(len(performance_bundle["files"]), 42)
+        self.assertEqual(len(performance_bundle["files"]), 38)
         self.assertTrue(
             {
-                "tools/powershell/Ferrum2.Qualification.Common/Ferrum2.Qualification.Common.psd1",
-                "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psd1",
-                "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Facade.ps1",
+                "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
+                "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1",
+                "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psm1",
+                "tools/powershell/Ferrum2.WindowsTun.Lab/private/BundleFileSystem.ps1",
+                "tools/powershell/Ferrum2.WindowsTun.Lab/private/JsonSource.ps1",
+                "tools/powershell/Ferrum2.WindowsTun.Lab/private/VmSession.ps1",
+                "tools/windows-tun/lab/get_windows_tun_guest_network_path.ps1",
+                "tools/windows-tun/lab/windows_tun_host_network_path.ps1",
+                "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
+                "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
             }.issubset({row["path"] for row in performance_bundle["files"]})
         )
         identities = windows_recipe.source_identities()

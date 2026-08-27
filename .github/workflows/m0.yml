@@ -144,23 +144,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Executable client/TUN/Windows-platform tests are reserved for the approved
-          # local Hyper-V guest, except for the exact unsupported-target contract below.
+          # The client remains compile-only because its test root is process/platform
+          # coupled. TUN and Windows-platform libraries have a separately enforced
+          # hosted-safe unit-test contract below.
           cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked
-      - name: Compile client TUN and Windows platform tests
+      - name: Run portable TUN and Windows platform unit tests
         shell: bash
         run: |
           set -euo pipefail
           cargo test -p ferrum2-client --all-features --no-run --locked
-          cargo test -p ferrum2-tun --all-features --no-run --locked
-          cargo test -p ferrum2-platform-windows --all-features --no-run --locked
-      - name: Prove unsupported TUN target fails closed during preparation
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test -p ferrum2-tun --lib --locked \
-            process::unsupported_target_tests::unsupported_target_fails_during_preparation \
-            -- --exact --nocapture
+          cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
+          cargo test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
       - name: Test DNS interop root
         shell: bash
         run: |
@@ -294,10 +288,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "MSVC release build failed" }
           cargo +1.97.1 test -p ferrum2-client --all-features --no-run --locked --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { throw "MSVC client test compilation failed" }
-          cargo +1.97.1 test -p ferrum2-tun --all-features --no-run --locked --target ${{ matrix.target }}
-          if ($LASTEXITCODE -ne 0) { throw "MSVC TUN test compilation failed" }
-          cargo +1.97.1 test -p ferrum2-platform-windows --all-features --no-run --locked --target ${{ matrix.target }}
-          if ($LASTEXITCODE -ne 0) { throw "MSVC Windows platform test compilation failed" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing" }
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw "VS 2022 C++ tools not found" }
+          $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $dumpbin = Join-Path $tools.FullName "bin\Hostx64\x64\dumpbin.exe"
+          if (-not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw "dumpbin is missing" }
+
           $client = "target\${{ matrix.target }}\release\ferrum2-client.exe"
           $server = "target\${{ matrix.target }}\release\ferrum2-server.exe"
           $qualificationOutput = & python -X utf8 tests\platform\qualify_native.py `
@@ -307,13 +305,6 @@ jobs:
           Write-Output $qualificationOutput.TrimEnd()
           if ($qualificationStatus -ne 0) { throw "MSVC native qualification failed" }
 
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing" }
-          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw "VS 2022 C++ tools not found" }
-          $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          $dumpbin = Join-Path $tools.FullName "bin\Hostx64\x64\dumpbin.exe"
-          if (-not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw "dumpbin is missing" }
           foreach ($entry in @(
             @{ Name = "ferrum2-client"; Path = $client },
             @{ Name = "ferrum2-server"; Path = $server }
@@ -336,6 +327,116 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "native detection binary build failed" }
           cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
           if ($LASTEXITCODE -ne 0) { throw "native detection evidence failed" }
+      - name: Run hosted-safe Windows TUN unit tests
+        if: matrix.profile == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo +1.97.1 test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked --target ${{ matrix.target }}
+      - name: Run hosted-safe Windows platform unit tests
+        if: matrix.profile == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo +1.97.1 test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked --target ${{ matrix.target }}
+      - name: Prove hosted-safe Windows test imports
+        if: matrix.profile == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing" }
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw "VS 2022 C++ tools not found" }
+          $tools = Get-ChildItem "$installation\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $dumpbin = Join-Path $tools.FullName "bin\Hostx64\x64\dumpbin.exe"
+          if (-not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw "dumpbin is missing" }
+
+          function Resolve-HostedTestExecutable {
+            param(
+              [Parameter(Mandatory = $true)][string] $Package,
+              [Parameter(Mandatory = $true)][string] $TargetName
+            )
+            $events = & cargo +1.97.1 test -p $Package --lib --no-default-features --features fuzzing --locked `
+              --no-run --message-format=json --target '${{ matrix.target }}' 2>&1
+            $status = $LASTEXITCODE
+            if ($status -ne 0) {
+              $events | ForEach-Object { Write-Output ([string] $_) }
+              throw "failed to resolve the $Package hosted test executable"
+            }
+            $executables = @(
+              @(
+                foreach ($line in $events) {
+                  try {
+                    $event = ([string] $line) | ConvertFrom-Json -ErrorAction Stop
+                  } catch {
+                    continue
+                  }
+                  if ($event.reason -eq 'compiler-artifact' -and
+                      $event.target.name -eq $TargetName -and
+                      $event.profile.test -eq $true -and
+                      $event.executable) {
+                    [string] $event.executable
+                  }
+                }
+              ) | Sort-Object -Unique
+            )
+            if ($executables.Count -ne 1) {
+              throw "$Package produced $($executables.Count) hosted test executable candidates"
+            }
+            $executable = [IO.Path]::GetFullPath($executables[0])
+            $depsRoot = [IO.Path]::GetFullPath("target\${{ matrix.target }}\debug\deps")
+            if (-not $executable.StartsWith(
+              $depsRoot + [IO.Path]::DirectorySeparatorChar,
+              [StringComparison]::OrdinalIgnoreCase
+            )) {
+              throw "$Package hosted test executable escaped the target deps directory"
+            }
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+              throw "$Package hosted test executable is missing"
+            }
+            return $executable
+          }
+
+          $hostedTests = @(
+            @{
+              Name = 'ferrum2-tun'
+              Path = Resolve-HostedTestExecutable -Package 'ferrum2-tun' -TargetName 'ferrum2_tun'
+            },
+            @{
+              Name = 'ferrum2-platform-windows'
+              Path = Resolve-HostedTestExecutable -Package 'ferrum2-platform-windows' -TargetName 'ferrum2_platform_windows'
+            }
+          )
+          $forbiddenHostedImports = @(
+            '(?i)\biphlpapi\.dll\b',
+            '(?i)\bfwpuclnt\.dll\b',
+            '(?i)\bwintun\.dll\b',
+            '(?i)\b(?:Create|Delete|Set)IpForwardEntry2\b',
+            '(?i)\b(?:Create|Delete|Set)UnicastIpAddressEntry\b',
+            '(?i)\bSetInterfaceDnsSettings\b',
+            '(?i)\bSetIpInterfaceEntry\b',
+            '(?i)\bFwpm[A-Za-z0-9_]*\b',
+            '(?i)\bWintun[A-Za-z0-9_]*\b'
+          )
+          foreach ($entry in $hostedTests) {
+            $imports = & $dumpbin /imports $entry.Path 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0 -or $imports -notmatch 'Dump of file') {
+              throw "$($entry.Name) hosted test PE import readback failed"
+            }
+            $violations = @(
+              $forbiddenHostedImports | Where-Object { $imports -match $_ }
+            )
+            if ($violations.Count -ne 0) {
+              Write-Output $imports.TrimEnd()
+              throw "$($entry.Name) hosted test PE imports a live Windows backend symbol or DLL"
+            }
+            Write-Output $imports.TrimEnd()
+            Write-Output "hosted_test_pe_imports status=PASS package=$($entry.Name) live_backend_imports=0"
+          }
       - name: Validate Windows qualification static contracts
         if: matrix.profile == 'windows-msvc'
         shell: pwsh
@@ -737,6 +838,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Checkout exact current SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
       - name: Require every ordinary main gate
         shell: bash
         env:
@@ -745,24 +853,4 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality.result }}
           PLATFORM_RESULT: ${{ needs.platform.result }}
           INTEROP_RESULT: ${{ needs.interop.result }}
-        run: |
-          set -euo pipefail
-          printf 'm3_required_inputs changes=%s run_expensive=%s quality=%s platform=%s interop=%s\n' \
-            "$CHANGE_RESULT" "$RUN_EXPENSIVE" "$QUALITY_RESULT" "$PLATFORM_RESULT" "$INTEROP_RESULT"
-          test "$CHANGE_RESULT" = success
-          case "$RUN_EXPENSIVE" in
-            true)
-              test "$QUALITY_RESULT" = success
-              test "$PLATFORM_RESULT" = success
-              test "$INTEROP_RESULT" = success
-              ;;
-            false)
-              test "$QUALITY_RESULT" = skipped
-              test "$PLATFORM_RESULT" = skipped
-              test "$INTEROP_RESULT" = skipped
-              ;;
-            *)
-              echo "invalid change classification: $RUN_EXPENSIVE" >&2
-              exit 1
-              ;;
-          esac
+        run: python3 -B -m tools.ci.required_gate --mode ordinary --decision "$RUN_EXPENSIVE" --dependency "changes=$CHANGE_RESULT" --dependency "quality=$QUALITY_RESULT" --dependency "platform=$PLATFORM_RESULT" --dependency "interop=$INTEROP_RESULT"

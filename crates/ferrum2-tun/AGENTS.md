@@ -28,17 +28,21 @@ explicitly counted packet drop: do not retry it and do not reset or rebuild for 
 Run:
 
 ```text
-cargo test -p ferrum2-tun --locked --no-run
+cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
+cargo check -p ferrum2-tun --all-features --locked
 ```
 
-Hosted Linux CI may additionally execute only the exact unsupported-target preparation test:
+The library suite is hosted-safe and runs on ordinary Linux and hosted Windows. Keep it target-neutral:
+tests may exercise unsupported-target stubs, pure packet/state logic, and injected owner/adapter
+operations. The default `live-backend` feature is additive and forwards the platform production
+backend; hosted test commands must disable default features so that backend is not compiled into the
+test dependency graph. Tests must never create a real adapter or mutate route, DNS, WFP, interface, or Hyper-V
+state. Such behavior belongs in the pinned local Hyper-V qualification runner.
 
-```text
-cargo test -p ferrum2-tun --lib --locked process::unsupported_target_tests::unsupported_target_fails_during_preparation -- --exact --nocapture
-```
+Keep `live-backend` selection at module boundaries. `process` and `network` each choose one live or
+hosted implementation; owner-only lifecycle, supervisor, TCP, and runtime code belongs in their
+focused runtime/live submodules. Shared packet, stack, cancellation, and bridge state must not grow
+per-item feature predicates. Platform configuration validity belongs to the platform constructors;
+the TUN process layer validates only its own flow, buffer, timeout, and mapping resource limits.
 
-Execute the compiled TUN test binary and all adapter/underlay qualification only in the pinned local
-Hyper-V guest. Apart from the exact non-Windows fail-closed test above, an ordinary host may compile
-with `--no-run` only; it must not execute TUN tests or mutate host network state.
-
-The reviewed static packet contract lives in `tests/fixtures/packets/reassembly-v1.hex` with exact provenance in `tests/fixtures/packets/PROVENANCE.toml`. Keep it distinct from the seed sets under `fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}/`; the reviewed synthetic config and strict-route seeds are recorded in `fuzz/corpus/PROVENANCE.toml`. The fuzz crate has empty default features. Hosted Linux CI may format, check, compile, and run sanitizer-backed libFuzzer campaigns only against these four pure in-memory targets. The required campaign budget is one hour total, divided equally across the targets, with evolved corpora, logs, and crash artifacts retained as workflow evidence. It must never open a real TUN adapter, invoke Hyper-V, mutate host networking, or qualify the unsupported Linux adapter path. Deterministic properties and the smoke corpus continue to run only as prebuilt binaries inside the approved local Hyper-V guest.
+The reviewed static packet contract lives in `tests/fixtures/packets/reassembly-v1.hex` with exact provenance in `tests/fixtures/packets/PROVENANCE.toml`. Keep it distinct from the seed sets under `fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}/`; the reviewed synthetic config and strict-route seeds are recorded in `fuzz/corpus/PROVENANCE.toml`. The fuzz crate has empty default features. Hosted Linux CI may format, check, compile, run the deterministic smoke corpus, and run sanitizer-backed libFuzzer campaigns only against these four pure in-memory targets. The required campaign budget is one hour total, divided equally across the targets, with evolved corpora, logs, and crash artifacts retained as workflow evidence. It must never open a real TUN adapter, invoke Hyper-V, mutate host networking, or qualify the unsupported Linux adapter path.

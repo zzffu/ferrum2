@@ -160,6 +160,18 @@ final = "resolver"
             $evidenceBytes += $lineBytes
             Assert-True ($evidenceBytes -le 1048576) "M17 network-reset cycle evidence exceeded its 1 MiB boundary"
             $writer.WriteLine($line)
+            if ($cycle -in $script:releaseMilestones) {
+                Add-M17LiveRow ("network-reset-milestone-{0:D4}" -f $cycle) ([ordered]@{
+                    cycle = $cycle
+                    status = "pass"
+                    process_id = $candidatePid
+                    session_generation = $state.SessionGeneration
+                    network_generation = $state.NetworkGeneration
+                    reset_succeeded = $state.ResetSucceeded
+                    managed_plane_sha256 = $managed.Sha256
+                    strict_route_wfp_sha256 = $wfpBaseline.Sha256
+                })
+            }
         }
     } finally { $writer.Dispose() }
 
@@ -337,7 +349,7 @@ final = "resolver"
     foreach ($cycle in 1..$script:RestartCycles) {
         Remove-M17ManagedRouteForRestart $script:ownedInterfaceIndex "$supportAddress/32"
         $expectedGeneration = $generation + 1
-        $state = Wait-M17Session $script:m17MetricsPort $expectedGeneration 1 45
+        [void](Wait-M17Session $script:m17MetricsPort $expectedGeneration 1 45)
         Start-Sleep -Milliseconds 500
         $stableState = Wait-M17Session $script:m17MetricsPort $expectedGeneration 1 10
         Assert-True ($stableState.Generation -eq $expectedGeneration -and
@@ -385,6 +397,17 @@ final = "resolver"
             tcp_health = "pass"
             udp_health = "pass"
         })
+        if ($cycle -in $script:releaseMilestones) {
+            Add-M17LiveRow ("restart-stress-milestone-{0:D4}" -f $cycle) ([ordered]@{
+                cycle = $cycle
+                status = "pass"
+                process_id = $candidatePid
+                generation = $cycleBaseline.Generation
+                interface_index = $script:ownedInterfaceIndex
+                tcp_health = "pass"
+                udp_health = "pass"
+            })
+        }
         $generation = $expectedGeneration
     }
     Invoke-TunProductTcp $supportAddress $script:capabilityIdentity.TcpPort $script:ownedInterfaceIndex ([Text.Encoding]::ASCII.GetBytes("m17-restart-after"))

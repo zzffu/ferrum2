@@ -121,7 +121,6 @@ fn reset_retries_transient_readback_errors_without_tearing_down_managed_state() 
     );
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
 #[test]
 fn wintun_error_kinds_have_exact_owner_dispositions() {
     for (kind, expected) in [
@@ -218,9 +217,7 @@ async fn owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join() {
                 shutdown: Arc::new(AtomicBool::new(false)),
                 active,
                 admitting: Arc::new(AtomicBool::new(false)),
-                #[cfg(all(windows, target_arch = "x86_64"))]
                 flow_count: Arc::new(AtomicUsize::new(0)),
-                #[cfg(all(windows, target_arch = "x86_64"))]
                 association_count: Arc::new(AtomicUsize::new(0)),
             },
             work: OwnerWake::default(),
@@ -240,9 +237,7 @@ async fn owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join() {
             shutdown: Arc::new(AtomicBool::new(false)),
             active: Arc::new(AtomicBool::new(false)),
             admitting: Arc::new(AtomicBool::new(false)),
-            #[cfg(all(windows, target_arch = "x86_64"))]
             flow_count: Arc::new(AtomicUsize::new(0)),
-            #[cfg(all(windows, target_arch = "x86_64"))]
             association_count: Arc::new(AtomicUsize::new(0)),
         },
         work: OwnerWake::default(),
@@ -295,6 +290,8 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
     let (network_reset_sender, network_resets) = tokio::sync::mpsc::channel(1);
     let control = OwnerControl::new();
     let active = Arc::clone(&control.active);
+    let flow_count = Arc::clone(&control.flow_count);
+    let association_count = Arc::clone(&control.association_count);
     let owner_control = control.clone();
     let (done_sender, done) = tokio::sync::oneshot::channel();
     let thread = std::thread::spawn(move || {
@@ -321,8 +318,8 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
             flows,
             datagrams,
             network_resets,
-            flow_count: Arc::new(AtomicUsize::new(0)),
-            association_count: Arc::new(AtomicUsize::new(0)),
+            flow_count,
+            association_count,
             registry: root_registry,
             handle_tcp: Arc::new(|_, _, _| Box::pin(async {})),
             handle_udp: Arc::new(|_, _, _| Box::pin(async {})),
@@ -376,7 +373,7 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
     use ferrum2_runtime::{OwnerRegistry, ProcessCause, ProcessRootExit, ProcessSupervisor};
 
     let (_session_handle, session) =
-        crate::supervisor::session_cancellation(1, OwnerWake::default());
+        crate::supervisor::runtime::session_cancellation(1, OwnerWake::default());
     let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
     let (_udp, datagram_receiver) =
         tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
@@ -384,6 +381,8 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
         tokio::sync::mpsc::channel::<crate::NetworkResetRequest>(1);
     let control = OwnerControl::new();
     let active = Arc::clone(&control.active);
+    let flow_count = Arc::clone(&control.flow_count);
+    let association_count = Arc::clone(&control.association_count);
     let owner_control = control.clone();
     let (done_sender, done_receiver) = tokio::sync::oneshot::channel();
     let thread = std::thread::spawn(move || {
@@ -410,8 +409,8 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
             flows: flow_receiver,
             datagrams: datagram_receiver,
             network_resets,
-            flow_count: Arc::new(AtomicUsize::new(0)),
-            association_count: Arc::new(AtomicUsize::new(0)),
+            flow_count,
+            association_count,
             registry: root_registry,
             handle_tcp: Arc::new(move |flow, _, _| {
                 let calls = Arc::clone(&handler_calls);
@@ -483,7 +482,7 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         let owner_registry = registry.clone();
         let root_registry = registry.clone();
         let (session_handle, session) =
-            crate::supervisor::session_cancellation(1, OwnerWake::default());
+            crate::supervisor::runtime::session_cancellation(1, OwnerWake::default());
         let owner_session = session.clone();
         let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
         let (_datagram_sender, datagram_receiver) =
@@ -494,8 +493,8 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         let control = OwnerControl::new();
         let active = Arc::clone(&control.active);
         let admitting = Arc::clone(&control.admitting);
+        let flow_count = Arc::clone(&control.flow_count);
         let owner_control = control.clone();
-        let flow_count = Arc::new(AtomicUsize::new(0));
         let owner_count = Arc::new(AtomicUsize::new(1));
         let owner_saw_aborted_flow = Arc::new(AtomicBool::new(false));
         let owner_flow_count = Arc::clone(&flow_count);

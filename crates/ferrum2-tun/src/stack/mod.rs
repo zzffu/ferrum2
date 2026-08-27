@@ -23,12 +23,12 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address
 
 #[cfg(test)]
 use crate::PACKET_QUANTUM;
+use crate::packet::map_packet_reject;
 use crate::packet::{
     ControlContext, ControlRateLimiter, Families, LocalControlKind, PacketRejectReason,
     ParsedIpPacket, ParsedPacket, control_context, ipv4_directed_broadcast,
     oversized_ingress_control,
 };
-use crate::process::map_packet_reject;
 use crate::reassembly::{ReassemblyDropReason, ReassemblyOutcome, ReassemblyTable};
 use crate::udp::{Admission as UdpAdmission, GenerationId, GenerationTable, UdpTable};
 use crate::{
@@ -37,7 +37,6 @@ use crate::{
 };
 use device::udp_datagram_from_parsed;
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct Stack {
     pub(crate) interface: Interface,
     pub(crate) sockets: SocketSet<'static>,
@@ -67,24 +66,20 @@ pub(crate) struct Stack {
     pub(crate) events: TunEventSink,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) type StackReady = (
     Stack,
     tokio::sync::mpsc::Receiver<TcpFlow>,
     tokio::sync::mpsc::Receiver<UdpCandidate>,
 );
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) type InterfaceAddresses = (Option<(Ipv4Addr, u8)>, Option<(Ipv6Addr, u8)>);
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StackPollOutcome {
     pub(crate) worked: bool,
     pub(crate) foundation_dropped: usize,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Stack {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_udp(
@@ -618,7 +613,6 @@ impl Stack {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) fn ip_address(address: std::net::IpAddr) -> IpAddress {
     match address {
         std::net::IpAddr::V4(address) => IpAddress::Ipv4(Ipv4Address::from(address.octets())),

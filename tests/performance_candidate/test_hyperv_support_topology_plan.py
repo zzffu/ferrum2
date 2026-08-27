@@ -39,7 +39,7 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
                 "source_checkpoint",
                 "management_adapter",
                 "support",
-                "qualification_checkpoint",
+                "lab_checkpoint",
             ],
         )
         self.assertIs(type(plan["schema"]), int)
@@ -88,7 +88,7 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            list(plan["qualification_checkpoint"]),
+            list(plan["lab_checkpoint"]),
             ["name", "type"],
         )
         self.assertEqual(
@@ -114,7 +114,7 @@ class HyperVSupportTopologyPlanTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            plan["qualification_checkpoint"],
+            plan["lab_checkpoint"],
             {
                 "name": "Ferrum2-WindowsTun-InternalSupport-v1",
                 "type": "Standard",

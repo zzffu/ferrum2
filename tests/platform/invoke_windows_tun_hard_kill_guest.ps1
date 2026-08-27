@@ -71,7 +71,7 @@ if (-not $LibraryOnly) {
         -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
     $hardGuestSourceRoot = Join-Path $RunRoot "input\controller"
     $bootstrapRelative = `
-        'modules/Ferrum2.Qualification.Common/BundleBootstrap.ps1'
+        'modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1'
     $bootstrapEntry = @($preflightBundle.files | Where-Object {
         [string]$_.path -ceq $bootstrapRelative
     })
@@ -91,9 +91,9 @@ if (-not $LibraryOnly) {
         'qualify_windows_tun_hard_kill.ps1') {
         throw 'hard-kill controller bundle entrypoint changed'
     }
-    $evidenceManifestPath = Join-Path $hardGuestSourceRoot `
-        'modules/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psd1'
-    Import-Module $evidenceManifestPath -Scope Local -Force -ErrorAction Stop
+    $labManifestPath = Join-Path $hardGuestSourceRoot `
+        'modules/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1'
+    Import-Module $labManifestPath -Scope Local -Force -ErrorAction Stop
     foreach ($name in $hardGuestSourceNames) {
         $entry = @($preflightBundle.files | Where-Object {
             [string]$_.path -ceq $name
@@ -152,7 +152,8 @@ Assert-True ((Get-LowerSha256 $manifestPath) -ceq $ExpectedManifestSha256) `
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 |
     ConvertFrom-Json -Depth 12 -ErrorAction Stop
 Assert-ClosedProperties $manifest @(
-    "schema", "mode", "run_token", "candidate_sha", "identity_sha256",
+    "schema", "mode", "run_token", "candidate_sha",
+    "candidate_artifact_manifest_sha256", "identity_sha256",
     "controller_bundle", "vm_name", "vm_id",
     "checkpoint_name", "checkpoint_id", "guest_product", "guest_edition", "guest_architecture",
     "guest_version", "guest_build", "topology", "files", "runtime"
@@ -168,11 +169,12 @@ Assert-ClosedProperties $manifest.runtime @(
     "powershell_file_count", "powershell_expanded_bytes"
 ) "staged runtime"
 Assert-True (
-    $manifest.schema -ceq "ferrum2.windows-tun.hard-kill-staged-input.v3" -and
+    $manifest.schema -ceq "ferrum2.windows-tun.hard-kill-staged-input.v4" -and
     $manifest.mode -ceq "hard-kill" -and
     [string]$manifest.run_token -cmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$' -and
     [IO.Path]::GetFileName($runRootPath) -ceq [string]$manifest.run_token -and
     [string]$manifest.candidate_sha -cmatch '^[0-9a-f]{40}$' -and
+    [string]$manifest.candidate_artifact_manifest_sha256 -cmatch '^[0-9a-f]{64}$' -and
     [string]$manifest.identity_sha256 -cmatch '^[0-9a-f]{64}$' -and
     $manifest.vm_name -is [string] -and
     -not [string]::IsNullOrWhiteSpace([string]$manifest.vm_name) -and
@@ -191,7 +193,7 @@ Assert-True (
     [long]$manifest.runtime.powershell_expanded_bytes -le 1073741824
 ) "staged hard-kill identity is invalid"
 Assert-CanonicalGuid $manifest.vm_id "staged VM"
-Assert-CanonicalGuid $manifest.checkpoint_id "staged qualification checkpoint"
+Assert-CanonicalGuid $manifest.checkpoint_id "staged lab checkpoint"
 Assert-TopologyContract $manifest.topology "staged topology"
 $runToken = [string]$manifest.run_token
 $controller = Join-Path $inputRoot `
@@ -220,9 +222,9 @@ $bundleManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
 Assert-True (($bundleManifest | ConvertTo-Json -Compress -Depth 8) -ceq
     ($manifest.controller_bundle | ConvertTo-Json -Compress -Depth 8)) `
     "controller bundle manifests disagree"
-$evidenceModule = Join-Path $inputRoot `
-    "controller\modules\Ferrum2.Qualification.Evidence\Ferrum2.Qualification.Evidence.psd1"
-Import-Module $evidenceModule -Scope Local -Force -ErrorAction Stop
+$labModule = Join-Path $inputRoot `
+    "controller\modules\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1"
+Import-Module $labModule -Scope Local -Force -ErrorAction Stop
 [void](Assert-Ferrum2ControllerBundleManifest `
     -Manifest $bundleManifest `
     -BundleRoot (Join-Path $inputRoot "controller"))
@@ -281,8 +283,7 @@ $expectedInputDirectories = @(
     $inputRoot,
     (Join-Path $inputRoot "controller"),
     (Join-Path $inputRoot "controller\modules"),
-    (Join-Path $inputRoot "controller\modules\Ferrum2.Qualification.Common"),
-    (Join-Path $inputRoot "controller\modules\Ferrum2.Qualification.Evidence"),
+    (Join-Path $inputRoot "controller\modules\Ferrum2.WindowsTun.Lab"),
     (Join-Path $inputRoot "artifacts"),
     (Join-Path $inputRoot "runtime"),
     $runtimeLibraries
@@ -467,7 +468,7 @@ try {
         $cleanup = [ordered]@{
             schema = "ferrum2.windows-tun.hard-kill-cleanup.v2"
             status = "pass"
-            source_mode = "hard-kill"
+            source_profile = "hard-kill"
             run_token = $runToken
             identity_sha256 = [string]$manifest.identity_sha256
             topology = $manifest.topology

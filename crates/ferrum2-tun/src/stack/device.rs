@@ -3,23 +3,21 @@ use std::net::{IpAddr, SocketAddr};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 
+use crate::packet::map_packet_reject;
 use crate::packet::{
     self, ControlContext, ControlRateLimiter, Families, IpFamily, LocalControlKind, PacketParser,
     ParsedIpPacket, ParsedPacket, TransportMetadata, internet_checksum as checksum,
     write_local_control_error,
 };
-use crate::process::map_packet_reject;
 use crate::udp::{InjectOutcome as UdpInjectOutcome, UdpDatagramEndpoints};
 use crate::{INGRESS_SLOTS, TunRejectReason};
 
 #[derive(Clone, Copy)]
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct PacketValidator {
     pub(crate) mtu: usize,
     pub(crate) parser: PacketParser,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl PacketValidator {
     #[cfg(test)]
     pub(crate) const fn new(mtu: usize) -> Self {
@@ -47,7 +45,6 @@ impl PacketValidator {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[cfg(test)]
 pub(crate) fn udp_datagram(
     packet: &[u8],
@@ -60,7 +57,6 @@ pub(crate) fn udp_datagram(
     udp_datagram_from_parsed(packet, parsed, mtu)
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) fn udp_datagram_from_parsed(
     packet: &[u8],
     parsed: ParsedIpPacket,
@@ -83,13 +79,11 @@ pub(crate) fn udp_datagram_from_parsed(
     ))
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct OutputSlot {
     pub(crate) len: usize,
     pub(crate) bytes: Vec<u8>,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct MemoryDevice {
     ingress: [PacketSlot; INGRESS_SLOTS],
     ingress_head: usize,
@@ -103,7 +97,6 @@ pub(crate) struct MemoryDevice {
     pub(crate) foundation_input: usize,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl MemoryDevice {
     #[cfg(test)]
     pub(crate) fn new(mtu: usize, families: Families) -> Self {
@@ -306,7 +299,6 @@ impl MemoryDevice {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) fn write_udp_response(
     output: &mut [u8],
     endpoints: UdpDatagramEndpoints,
@@ -404,7 +396,6 @@ pub(crate) fn write_udp_response(
     Ok(header + udp_len)
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutputSendOutcome {
     Sent,
@@ -412,7 +403,6 @@ pub(crate) enum OutputSendOutcome {
     Fatal,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutputFlushOutcome {
     Empty,
@@ -421,7 +411,6 @@ pub(crate) enum OutputFlushOutcome {
     Fatal,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 struct PacketSlot {
     len: usize,
     foundation: bool,
@@ -429,10 +418,8 @@ struct PacketSlot {
     bytes: Vec<u8>,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct MemoryRx<'a>(&'a PacketSlot);
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl RxToken for MemoryRx<'_> {
     fn consume<R, F>(self, f: F) -> R
     where
@@ -442,7 +429,6 @@ impl RxToken for MemoryRx<'_> {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct MemoryTx<'a> {
     pub(crate) validator: PacketValidator,
     pub(crate) validated_output: &'a mut usize,
@@ -451,7 +437,6 @@ pub(crate) struct MemoryTx<'a> {
     pub(crate) output_count: &'a mut usize,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl TxToken for MemoryTx<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
@@ -475,7 +460,6 @@ impl TxToken for MemoryTx<'_> {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 impl Device for MemoryDevice {
     type RxToken<'a> = MemoryRx<'a>;
     type TxToken<'a> = MemoryTx<'a>;

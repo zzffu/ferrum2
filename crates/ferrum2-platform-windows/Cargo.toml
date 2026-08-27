@@ -7,8 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = []
+default = ["live-backend"]
 fuzzing = []
+live-backend = []
 
 [lib]
 path = "src/lib.rs"

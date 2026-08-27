@@ -2,63 +2,28 @@
         throw "guest execution did not return one result"
     }
     $guestResult = $guestResults[0]
-    $expectedGuestMode = $requestedMode
-    $expectedRestartCycles = if ($null -eq $requestedRestartCycles) {
+    $expectedCycleLimit = if ($null -eq $requestedCycleLimit) {
         $null
-    } else { [long]$requestedRestartCycles }
-    $expectedNetworkResetCycles = if ($null -eq $requestedNetworkResetCycles) {
-        $null
-    } else { [long]$requestedNetworkResetCycles }
+    } else { [long]$requestedCycleLimit }
     $guestResultKeys = @(
-        "schema", "status", "profile", "mode", "restart_cycles", "network_reset_cycles",
+        "schema", "status", "profile", "cycle_limit", "release_milestones",
         "run_token", "candidate_sha", "identity_sha256", "controller_bundle_sha256",
         "staged_input_sha256",
         "topology_manifest_sha256", "guest_network_path_sha256", "topology",
         "guest_network_path",
-        "qualification_exit", "cleanup_exit", "fuzz_smoke", "failure_phase", "finished_utc"
+        "qualification_exit", "cleanup_exit", "failure_phase", "finished_utc"
     )
     if ((@($guestResult.PSObject.Properties.Name) -join "|") -cne ($guestResultKeys -join "|")) {
         throw "guest qualification result property set is invalid"
     }
-    $fuzzSmokeMatches = if ($expectedGuestMode -ceq "fuzz-smoke") {
-        $fuzzResultKeys = @(
-            "schema", "status", "run_token", "candidate_sha", "identity_sha256", "staged_input_sha256",
-            "binary_sha256", "binary_bytes", "packet_seed_count", "udp_reset_seed_count",
-            "config_legacy_seed_count", "strict_route_seed_count",
-            "terminal", "stdout_sha256", "stderr_sha256", "finished_utc"
-        )
-        $null -ne $guestResult.fuzz_smoke -and
-            (@($guestResult.fuzz_smoke.PSObject.Properties.Name) -join "|") -ceq ($fuzzResultKeys -join "|") -and
-            $guestResult.fuzz_smoke.schema -ceq "ferrum2.windows-tun.fuzz-smoke-result.v2" -and
-            $guestResult.fuzz_smoke.status -ceq "pass" -and
-            $guestResult.fuzz_smoke.run_token -ceq $RunToken -and
-            $guestResult.fuzz_smoke.candidate_sha -ceq $candidate.Sha -and
-            $guestResult.fuzz_smoke.identity_sha256 -ceq $ledgerIdentity.Sha256 -and
-            $guestResult.fuzz_smoke.staged_input_sha256 -ceq $stagedInputSha256 -and
-            $guestResult.fuzz_smoke.binary_sha256 -ceq $candidateArtifacts.FuzzSmoke.Sha256 -and
-            [long]$guestResult.fuzz_smoke.binary_bytes -eq [long]$candidateArtifacts.FuzzSmoke.Bytes -and
-            [long]$guestResult.fuzz_smoke.packet_seed_count -eq 4 -and
-            [long]$guestResult.fuzz_smoke.udp_reset_seed_count -eq 3 -and
-            [long]$guestResult.fuzz_smoke.config_legacy_seed_count -eq 8 -and
-            [long]$guestResult.fuzz_smoke.strict_route_seed_count -eq 8 -and
-            $guestResult.fuzz_smoke.terminal -ceq "TUN state smoke corpora: 4 packet, 3 UDP reset, 8 config legacy, and 8 strict-route seeds passed" -and
-            [string]$guestResult.fuzz_smoke.stdout_sha256 -cmatch '^[0-9a-f]{64}$' -and
-            [string]$guestResult.fuzz_smoke.stderr_sha256 -cmatch '^[0-9a-f]{64}$'
-    } else {
-        $null -eq $guestResult.fuzz_smoke
-    }
-    $cleanupExitMatches = if ($expectedGuestMode -ceq "fuzz-smoke") {
-        $null -eq $guestResult.cleanup_exit
-    } else {
-        $null -ne $guestResult.cleanup_exit -and [long]$guestResult.cleanup_exit -eq 0
-    }
+    $cleanupExitMatches = $null -ne $guestResult.cleanup_exit -and
+        [long]$guestResult.cleanup_exit -eq 0
     $guestTopologyMatches = ($guestResult.topology | ConvertTo-Json -Compress -Depth 5) -ceq
         ($ledgerIdentity.Ledger.topology | ConvertTo-Json -Compress -Depth 5)
     $guestPathMatches = ($guestResult.guest_network_path | ConvertTo-Json -Compress -Depth 5) -ceq
         ($guestNetworkPath | ConvertTo-Json -Compress -Depth 5)
-    if ($guestResult.schema -cne "ferrum2.windows-tun.hyperv-guest-run.v5" -or
-        $guestResult.profile -cne $Profile -or
-        $guestResult.mode -cne $expectedGuestMode -or
+    if ($guestResult.schema -cne "ferrum2.windows-tun.hyperv-guest-run.v6" -or
+        $guestResult.profile -cne $qualificationProfile -or
         $guestResult.run_token -cne $RunToken -or
         $guestResult.candidate_sha -cne $candidate.Sha -or
         $guestResult.identity_sha256 -cne $ledgerIdentity.Sha256 -or
@@ -69,14 +34,13 @@
         $guestResult.guest_network_path_sha256 -cne $guestNetworkPathSha256 -or
         -not $guestTopologyMatches -or -not $guestPathMatches -or
         $null -eq $guestResult.qualification_exit -or [long]$guestResult.qualification_exit -ne 0 -or
-        -not $cleanupExitMatches -or -not $fuzzSmokeMatches -or
+        -not $cleanupExitMatches -or
         $null -ne $guestResult.failure_phase -or
-        ($null -eq $expectedRestartCycles -and $null -ne $guestResult.restart_cycles) -or
-        ($null -ne $expectedRestartCycles -and
-            [long]$guestResult.restart_cycles -ne $expectedRestartCycles) -or
-        ($null -eq $expectedNetworkResetCycles -and $null -ne $guestResult.network_reset_cycles) -or
-        ($null -ne $expectedNetworkResetCycles -and
-            [long]$guestResult.network_reset_cycles -ne $expectedNetworkResetCycles)) {
+        ($null -eq $expectedCycleLimit -and $null -ne $guestResult.cycle_limit) -or
+        ($null -ne $expectedCycleLimit -and
+            [long]$guestResult.cycle_limit -ne $expectedCycleLimit) -or
+        (@($guestResult.release_milestones | ForEach-Object { [long]$_ }) -join '|') -cne
+            ($requestedReleaseMilestones -join '|')) {
         throw "guest qualification result binding is invalid"
     }
     if ($guestResult.status -cne "pass") {

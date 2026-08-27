@@ -391,6 +391,8 @@ ready_timeout_ms = 15000
         completed_delta = (Get-M17MetricValue $fragmentMetrics "ferrum2_tun_reassembly_completed") - $completedBefore
         active_entries = Get-M17MetricValue $fragmentMetrics "ferrum2_tun_reassembly_entries_active"
     })
+    Add-M17Witness "large_ipv4_and_ipv6_udp_reassembles" "live-product" `
+        "8 KiB IPv4 and IPv6 UDP datagrams crossed the 1,280-byte TUN MTU, reassembled, and round-tripped without active reassembly residue"
     Stop-M17Candidate $script:activeProcess "fragments"
 
     $resolverAddress = "127.0.0.1"

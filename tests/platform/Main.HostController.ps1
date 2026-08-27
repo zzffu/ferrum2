@@ -1,18 +1,17 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 $expectedFields = @(
-    'entrypoint_path', 'repository_root', 'internal_worker', 'internal_worker_token',
-    'probe_only', 'profile', 'run_token', 'identity_ledger', 'topology_manifest_path',
-    'topology_manifest_sha256', 'support_tcp_port', 'support_udp_port', 'support_pid',
-    'support_owner', 'wintun_zip', 'powershell_zip', 'evidence_directory',
-    'credential_path', 'readiness_timeout_seconds', 'shutdown_timeout_seconds'
+    'repository_root', 'internal_worker_token', 'candidate_artifact_manifest',
+    'profile', 'run_token', 'identity_ledger', 'topology_manifest_path',
+    'topology_manifest_sha256', 'support_tcp_port', 'support_udp_port',
+    'support_pid', 'support_owner', 'wintun_zip', 'powershell_zip',
+    'evidence_directory', 'credential_path', 'readiness_timeout_seconds',
+    'shutdown_timeout_seconds'
 )
-Assert-Ferrum2ClosedProperties $Context $expectedFields 'main host controller context'
-$entryPointPath = [string]$Context.entrypoint_path
+Assert-Ferrum2ClosedProperties $Context $expectedFields 'main host worker context'
 $repositoryRoot = [string]$Context.repository_root
-$InternalWorker = [bool]$Context.internal_worker
-$InternalWorkerToken = [string]$Context.internal_worker_token
-$ProbeOnly = [bool]$Context.probe_only
-$Profile = [string]$Context.profile
+$internalWorkerToken = [string]$Context.internal_worker_token
+$candidateArtifactManifest = [string]$Context.candidate_artifact_manifest
+$qualificationProfile = [string]$Context.profile
 $RunToken = [string]$Context.run_token
 $IdentityLedger = [string]$Context.identity_ledger
 $TopologyManifestPath = [string]$Context.topology_manifest_path
@@ -31,32 +30,27 @@ $expectedWintunZipSha256 = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79
 $expectedWintunDllSha256 = 'e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce'
 $expectedPowerShellVersion = '7.4.19'
 $expectedPowerShellZipSha256 = 'cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9'
+
 $hostRuntime = Initialize-Ferrum2HostHyperVModule -RepositoryRoot $repositoryRoot
+Assert-BoundedHyperVInternalWorker -Token $internalWorkerToken
+if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Windows
+    ) -or
+    [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64' -or
+    [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne 'X64') {
+    throw 'the Hyper-V qualification worker requires 64-bit Windows AMD64'
+}
 $topologyRuntimeSha256 = [string]$hostRuntime.topology_runtime_sha256
 $hostNetworkPathHelperSha256 = [string]$hostRuntime.host_network_path_helper_sha256
 $guestNetworkPathProbeSha256 = [string]$hostRuntime.guest_network_path_probe_sha256
 $guestNetworkPathProbePath = [string]$hostRuntime.guest_network_path_probe
-if ($LibraryOnly) { return }
-
-if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
-        [Runtime.InteropServices.OSPlatform]::Windows
-    ) -or
-    [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne "X64" -or
-    [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne "X64") {
-    throw "the Hyper-V host orchestrator requires 64-bit Windows AMD64"
-}
-if ($InternalWorker) {
-    if ([string]::IsNullOrWhiteSpace($InternalWorkerToken)) {
-        throw "bounded Hyper-V worker token is required"
-    }
-    Assert-BoundedHyperVInternalWorker -Token $InternalWorkerToken
-} elseif (-not [string]::IsNullOrWhiteSpace($InternalWorkerToken)) {
-    throw "bounded Hyper-V worker token is not valid outside the internal worker"
-}
-# Resolve both exact identities and the DPAPI credential before any VM lifecycle operation.
 $topologyInitialization = Initialize-ApprovedHyperVTopology `
     -ManifestPath $TopologyManifestPath -ExpectedSha256 $TopologyManifestSha256
 $topologyDocument = $topologyInitialization.Document
+$approvedVmName = [string]$topologyDocument.Value.vm.name
+$approvedVmId = [Guid][string]$topologyDocument.Value.vm.id
+$approvedCheckpointName = [string]$topologyDocument.Value.lab_checkpoint.name
+$approvedCheckpointId = [Guid][string]$topologyDocument.Value.lab_checkpoint.id
 $initialTopologyState = [pscustomobject][ordered]@{
     Runtime = $topologyInitialization.Runtime
     VmNetwork = $topologyInitialization.VmNetwork
@@ -66,265 +60,34 @@ $supportHostBaseline = Get-ApprovedHostSupportRuntimeState `
     -TopologyDocument $topologyDocument `
     -Address $supportAddress -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
     -ProcessId $SupportPid -ProcessOwner $SupportOwner
-$initialContext = Get-ApprovedVmContext
-$guestCredential = Import-ApprovedGuestCredential -Path $CredentialPath
-
-# Keep the user-facing process outside the VM-active execution path. The hidden worker may use
-# synchronous PowerShell Direct, but the supervisor has already captured exact-GUID cleanup authority
-# and can terminate the entire worker tree before performing bounded Stop -> Restore -> Stop cleanup.
-if (-not $InternalWorker) {
-    $supervisorInitialState = [string]$initialContext.Vm.State
-    if ($ProbeOnly) {
-        if ($supervisorInitialState -notin @("Off", "Running")) {
-            throw "ProbeOnly requires the approved VM to be Off or Running"
-        }
-    } elseif ($supervisorInitialState -cne "Off") {
-        throw "approved VM must be Off at the full qualification supervisor baseline"
-    }
-    $supervisorCleanupAuthority = if ($supervisorInitialState -ceq "Off") {
-        New-ApprovedVmCleanupAuthority -Context $initialContext
-    } else {
-        $null
-    }
-    $workerTimeoutSeconds = if ($ProbeOnly) {
-        1800
-    } elseif ($Profile -clike "*-1000") {
-        10800
-    } else {
-        7200
-    }
-    $supervisorFailureManifestPath = $null
-    if (-not $ProbeOnly) {
-        $supervisorEvidenceDirectory = $EvidenceDirectory
-        if ([string]::IsNullOrWhiteSpace($supervisorEvidenceDirectory)) {
-            if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-                throw "LOCALAPPDATA is required for the default evidence directory"
-            }
-            $supervisorEvidenceDirectory = Join-Path $env:LOCALAPPDATA `
-                "Ferrum2\windows-tun-evidence\$RunToken"
-        }
-        $supervisorEvidenceDirectory = Resolve-ExternalDirectoryTarget `
-            -Path $supervisorEvidenceDirectory `
-            -Label "supervised evidence directory"
-        $supervisorFailureManifestPath = Join-Path `
-            $supervisorEvidenceDirectory "host-orchestration.json"
-    }
-    Invoke-BoundedHyperVWorkerSupervisor `
-        -ScriptPath $entryPointPath `
-        -BoundParameters $PSBoundParameters `
-        -ForwardedParameterNames @(
-            "ProbeOnly", "Profile", "RunToken", "IdentityLedger",
-            "TopologyManifestPath", "TopologyManifestSha256",
-            "SupportTcpPort", "SupportUdpPort", "SupportPid", "SupportOwner",
-            "WintunZip", "PowerShellZip", "EvidenceDirectory", "CredentialPath",
-            "ReadinessTimeoutSeconds", "ShutdownTimeoutSeconds"
-        ) `
-        -WorkerTimeoutSeconds $workerTimeoutSeconds `
-        -ShutdownTimeoutSeconds $ShutdownTimeoutSeconds `
-        -ExpectedVmId $approvedVmId `
-        -ExpectedVmName $approvedVmName `
-        -ExpectedFinalState $supervisorInitialState `
-        -CleanupAuthority $supervisorCleanupAuthority `
-        -CleanupMode $(if ($ProbeOnly) { "StopOnly" } else { "RestoreCheckpoint" }) `
-        -WorkerContract $(if ($ProbeOnly) { "Probe" } else { "Qualification" }) `
-        -FailureManifestPath $supervisorFailureManifestPath `
-        -Label "Windows TUN HyperV worker"
-    return
-}
-
-if ($ProbeOnly) {
-    $initialState = [string]$initialContext.Vm.State
-    if ($initialState -notin @("Off", "Running")) {
-        throw "ProbeOnly requires the approved VM to be Off or Running"
-    }
-
-    $probeStartedVm = $false
-    $probeCleanupAuthority = $null
-    $connection = $null
-    $probeGuestTopology = $null
-    $probeFailure = $null
-    $probeFinalizationFailures = [Collections.Generic.List[string]]::new()
-    try {
-        if ($initialState -ceq "Off") {
-            $probeCleanupAuthority = New-ApprovedVmCleanupAuthority `
-                -Context (Get-ApprovedVmContext)
-            $probeStartedVm = $true
-            Start-ApprovedVm -TimeoutSeconds $ReadinessTimeoutSeconds
-        }
-        $connection = Connect-ApprovedGuest `
-            -Credential $guestCredential `
-            -TimeoutSeconds $ReadinessTimeoutSeconds
-        $probeGuestTopology = Get-ApprovedGuestSupportTopologyRuntimeState `
-            -Session $connection.Session -TopologyDocument $topologyDocument
-    } catch {
-        $probeFailure = $_
-    } finally {
-        if ($probeStartedVm) {
-            $probeVmConfirmedOff = $false
-            try {
-                Stop-ApprovedVmEmergency -Authority $probeCleanupAuthority `
-                    -TimeoutSeconds $ShutdownTimeoutSeconds
-                $probeVmConfirmedOff = $true
-            } catch {
-                $probeFinalizationFailures.Add(
-                    "probe emergency VM stop failed: $($_.Exception.Message)"
-                )
-            }
-            if (-not $probeVmConfirmedOff) {
-                $probeFinalizationFailures.Add("probe did not prove the temporarily started VM Off")
-            }
-        }
-        if ($null -ne $connection) {
-            Remove-PSSession -Session $connection.Session -ErrorAction SilentlyContinue
-        }
-    }
-
-    $probeFinalVmState = $null
-    $probeFinalTopologyState = $null
-    $probeFinalSupport = $null
-    try {
-        $probeFinalVmState = [string](Get-ApprovedVmContext).Vm.State
-        if ($probeFinalVmState -cne $initialState) {
-            $probeFinalizationFailures.Add(
-                "probe changed the approved VM state: expected=$initialState actual=$probeFinalVmState"
-            )
-            if ($probeStartedVm -and $null -ne $probeCleanupAuthority) {
-                Stop-ApprovedVmEmergency -Authority $probeCleanupAuthority `
-                    -TimeoutSeconds $ShutdownTimeoutSeconds
-                $probeFinalVmState = [string](
-                    Get-ApprovedVmEmergencyState -Authority $probeCleanupAuthority
-                ).State
-                if ($probeFinalVmState -cne "Off") {
-                    throw "probe emergency final VM state is $probeFinalVmState"
-                }
-            }
-        }
-    } catch {
-        $probeFinalizationFailures.Add(
-            "probe final VM state readback failed: $($_.Exception.Message)"
-        )
-        if ($probeStartedVm -and $null -ne $probeCleanupAuthority) {
-            try {
-                $probeFinalVmState = [string](
-                    Get-ApprovedVmEmergencyState -Authority $probeCleanupAuthority
-                ).State
-                if ($probeFinalVmState -cne "Off") {
-                    Stop-ApprovedVmEmergency -Authority $probeCleanupAuthority `
-                        -TimeoutSeconds $ShutdownTimeoutSeconds
-                    $probeFinalVmState = [string](
-                        Get-ApprovedVmEmergencyState -Authority $probeCleanupAuthority
-                    ).State
-                }
-                if ($probeFinalVmState -cne "Off") {
-                    throw "probe emergency final VM state is $probeFinalVmState"
-                }
-            } catch {
-                $probeFinalizationFailures.Add(
-                    "probe emergency final VM state recovery failed: " +
-                        $_.Exception.Message
-                )
-            }
-        }
-    }
-    try {
-        $probeFinalTopologyState = Get-ApprovedHyperVTopologyRuntimeState `
-            -TopologyDocument $topologyDocument
-        Assert-ApprovedHyperVTopologyRuntimeStateUnchanged `
-            -Expected $initialTopologyState -Actual $probeFinalTopologyState
-    } catch {
-        $probeFinalizationFailures.Add(
-            "probe final topology readback failed: $($_.Exception.Message)"
-        )
-    }
-    try {
-        $probeFinalSupport = Get-ApprovedHostSupportRuntimeState `
-            -TopologyDocument $topologyDocument `
-            -Address $supportAddress -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
-            -ProcessId $SupportPid -ProcessOwner $SupportOwner
-        Assert-ApprovedHostSupportRuntimeStateUnchanged `
-            -Expected $supportHostBaseline -Actual $probeFinalSupport
-    } catch {
-        $probeFinalizationFailures.Add(
-            "probe final support-listener readback failed: $($_.Exception.Message)"
-        )
-    }
-    try {
-        Assert-ApprovedTopologyHelperSourcesUnchanged
-    } catch {
-        $probeFinalizationFailures.Add(
-            "probe final helper-source readback failed: $($_.Exception.Message)"
-        )
-    }
-
-    if ($null -ne $probeFailure -or $probeFinalizationFailures.Count -ne 0) {
-        $messages = [Collections.Generic.List[string]]::new()
-        if ($null -ne $probeFailure) {
-            $messages.Add("probe failed: $($probeFailure.Exception.Message)")
-        }
-        foreach ($message in $probeFinalizationFailures) {
-            $messages.Add($message)
-        }
-        throw [InvalidOperationException]::new(($messages -join "; "))
-    }
-
-    [ordered]@{
-        schema = "ferrum2.windows-tun.hyperv-probe.v2"
-        status = "pass"
-        vm_name = $approvedVmName
-        vm_id = $approvedVmId.ToString("D")
-        checkpoint_name = $approvedCheckpointName
-        checkpoint_id = $approvedCheckpointId.ToString("D")
-        initial_vm_state = $initialState.ToLowerInvariant()
-        final_vm_state = $probeFinalVmState
-        guest_product = [string]$connection.Probe.Product
-        guest_edition = [string]$connection.Probe.Edition
-        guest_version = [string]$connection.Probe.Version
-        guest_build = [string]$connection.Probe.Build
-        guest_architecture = [string]$connection.Probe.Architecture
-        powershell_version = [string]$connection.Probe.PowerShellVersion
-        topology_manifest_sha256 = [string]$topologyDocument.Sha256
-        topology_plan_sha256 = [string]$topologyDocument.PlanDocument.Sha256
-        support_switch_id = [string]$topologyDocument.Value.support.switch.switch_id
-        support_host_ipv4 = $supportAddress
-        support_guest = $probeGuestTopology
-        protected_host_tun = $probeFinalTopologyState.Runtime.ProtectedHostTun
-        support_listener = $probeFinalSupport
-        checkpoint_restored = $false
-        files_staged = $false
-        controller_invoked = $false
-        host_tun_unchanged = $true
-        host_network_mutations = 0
-    } | ConvertTo-Json -Compress
-    return
-}
-
-$profileContract = Resolve-Ferrum2QualificationProfile -Profile $Profile
-$requestedMode = [string]$profileContract.mode
-$requestedRestartCycles = if ([long]$profileContract.restart_cycles -gt 0) {
-    [long]$profileContract.restart_cycles
-} else { $null }
-$requestedNetworkResetCycles = if ([long]$profileContract.network_reset_cycles -gt 0) {
-    [long]$profileContract.network_reset_cycles
-} else { $null }
-
 $candidate = Get-CandidateIdentity
 $controllerPath = Resolve-BoundedFile `
-    -Path (Join-Path $repositoryRoot "tests\platform\qualify_windows_tun.ps1") `
-    -Label "qualification controller" `
-    -MaximumBytes 4194304
+    -Path (Join-Path $repositoryRoot 'tests/platform/qualify_windows_tun.ps1') `
+    -Label 'qualification controller' -MaximumBytes 4194304
 $controllerBundleFileMap = @(
     Get-Ferrum2MainControllerBundleFileMap -RepositoryRoot $repositoryRoot
 )
 $controllerBundleManifest = New-Ferrum2ControllerBundleManifest `
-    -FileMap $controllerBundleFileMap `
-    -EntryPoint "qualify_windows_tun.ps1"
+    -FileMap $controllerBundleFileMap -EntryPoint 'qualify_windows_tun.ps1'
 $ledgerIdentity = Read-IdentityLedger `
-    -Path $IdentityLedger `
-    -CandidateSha $candidate.Sha `
+    -Path $IdentityLedger -CandidateSha $candidate.Sha `
     -ControllerPath $controllerPath `
     -ControllerBundleSha256 $controllerBundleManifest.controller_bundle_sha256 `
     -TopologyDocument $topologyDocument `
     -ExpectedSupportContext $supportHostBaseline
+$profileContract = Resolve-Ferrum2QualificationProfile -Profile $qualificationProfile
+$requestedCycleLimit = if ([long]$profileContract.cycle_limit -gt 0) {
+    [long]$profileContract.cycle_limit
+} else { $null }
+$requestedReleaseMilestones = @(
+    $profileContract.release_milestones | ForEach-Object { [long]$_ }
+)
+$candidateArtifacts = Read-Ferrum2CandidateArtifactBundle `
+    -ManifestPath $candidateArtifactManifest `
+    -CandidateSha $candidate.Sha -Ledger $ledgerIdentity.Ledger
+$initialContext = Get-ApprovedVmContext
+$guestCredential = Import-ApprovedGuestCredential -Path $CredentialPath
+
 $wintunPath = Resolve-BoundedFile `
     -Path $WintunZip `
     -Label "Wintun archive" `
@@ -369,7 +132,6 @@ Assert-ApprovedHostSupportRuntimeStateUnchanged `
 $startedUtc = [DateTime]::UtcNow.ToString("o")
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("ferrum2-hyperv-" + [Guid]::NewGuid().ToString("N"))
 $temporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-$hostArtifactRoot = Join-Path $temporaryRoot "artifacts"
 $hostRuntimeLibraryRoot = Join-Path $temporaryRoot "vc-runtime"
 $hostPowerShellArchive = Join-Path $temporaryRoot "portable-pwsh.zip"
 $stagedInputManifestPath = Join-Path $temporaryRoot "staged-input.json"
@@ -384,7 +146,6 @@ $checkpointRestored = $false
 $runFailure = $null
 $finalizationFailures = [Collections.Generic.List[string]]::new()
 $guestResult = $null
-$candidateArtifacts = $null
 $portablePowerShell = $null
 $runtimeLibraries = @()
 $stagedInputSha256 = $null
@@ -395,6 +156,8 @@ $hostNetworkPathSha256 = $null
 $postGuestTopology = $null
 $finalTopologyState = $null
 $finalSupportState = $null
+$finalTopologyUnchanged = $false
+$finalSupportUnchanged = $false
 
 try {
 
@@ -534,6 +297,7 @@ try {
         -TopologyDocument $topologyDocument
     Assert-ApprovedHyperVTopologyRuntimeStateUnchanged `
         -Expected $initialTopologyState -Actual $finalTopologyState
+    $finalTopologyUnchanged = $true
 } catch {
     $finalizationFailures.Add("approved topology final readback failed: $($_.Exception.Message)")
 }
@@ -544,6 +308,7 @@ try {
         -ProcessId $SupportPid -ProcessOwner $SupportOwner
     Assert-ApprovedHostSupportRuntimeStateUnchanged `
         -Expected $supportHostBaseline -Actual $finalSupportState
+    $finalSupportUnchanged = $true
 } catch {
     $finalizationFailures.Add("support listener final readback failed: $($_.Exception.Message)")
 }
@@ -564,18 +329,18 @@ try {
             throw "mandatory host evidence root is invalid"
         }
         $manifest = [ordered]@{
-            schema = "ferrum2.windows-tun.hyperv-host-run.v5"
+            schema = "ferrum2.windows-tun.hyperv-host-run.v7"
             status = $status
-            profile = $Profile
-            mode = $requestedMode
-            restart_cycles = $requestedRestartCycles
-            network_reset_cycles = $requestedNetworkResetCycles
+            profile = $qualificationProfile
+            cycle_limit = $requestedCycleLimit
+            release_milestones = $requestedReleaseMilestones
             run_token = $RunToken
             vm_name = $approvedVmName
             vm_id = $approvedVmId.ToString("D")
             checkpoint_name = $approvedCheckpointName
             checkpoint_id = $approvedCheckpointId.ToString("D")
             candidate_sha = $candidate.Sha
+            candidate_artifact_manifest_sha256 = $candidateArtifacts.ManifestSha256
             identity_sha256 = $ledgerIdentity.Sha256
             controller_bundle_sha256 = [string]$controllerBundleManifest.controller_bundle_sha256
             staged_input_sha256 = $stagedInputSha256
@@ -593,13 +358,11 @@ try {
             host_network_path_helper_sha256 = $hostNetworkPathHelperSha256
             guest_network_path_probe_sha256 = $guestNetworkPathProbeSha256
             rust_version = if ($null -eq $candidateArtifacts) { $null } else { $candidateArtifacts.RustVersion }
-            fuzz_smoke_sha256 = if ($null -eq $candidateArtifacts) { $null } else { $candidateArtifacts.FuzzSmoke.Sha256 }
-            fuzz_smoke_bytes = if ($null -eq $candidateArtifacts) { $null } else { $candidateArtifacts.FuzzSmoke.Bytes }
             guest_execution = "host-built-precompiled-artifacts-only"
             guest_build = if ($null -eq $guestResult) { $null } else { [string]$connection.Probe.Build }
             checkpoint_restored = $checkpointRestored -and $finalVmState -ceq "Off"
-            support_listener_unchanged = $null -ne $finalSupportState
-            host_tun_unchanged = $null -ne $finalTopologyState
+            support_listener_unchanged = $finalSupportUnchanged
+            host_tun_unchanged = $finalTopologyUnchanged
             host_network_mutations = 0
             started_utc = $startedUtc
             finished_utc = [DateTime]::UtcNow.ToString("o")
@@ -628,22 +391,25 @@ try {
             $hostManifestReadback = Get-Content -LiteralPath $hostManifestPendingPath `
                 -Raw -Encoding utf8 | ConvertFrom-Json -Depth 10 -ErrorAction Stop
         $hostManifestKeys = @(
-            "schema", "status", "profile", "mode", "restart_cycles", "network_reset_cycles",
+            "schema", "status", "profile", "cycle_limit", "release_milestones",
             "run_token", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id",
-            "candidate_sha", "identity_sha256", "controller_bundle_sha256",
+            "candidate_sha", "candidate_artifact_manifest_sha256", "identity_sha256",
+            "controller_bundle_sha256",
             "staged_input_sha256",
             "topology_manifest_sha256", "topology_plan_sha256", "topology",
             "guest_network_path_sha256", "guest_network_path", "host_network_path_sha256",
             "support_listener", "protected_host_tun", "topology_runtime_sha256",
             "host_network_path_helper_sha256", "guest_network_path_probe_sha256",
-            "rust_version", "fuzz_smoke_sha256", "fuzz_smoke_bytes", "guest_execution",
+            "rust_version", "guest_execution",
             "guest_build", "checkpoint_restored", "support_listener_unchanged",
             "host_tun_unchanged", "host_network_mutations", "started_utc", "finished_utc",
             "final_vm_state", "evidence_files"
         )
         if ((@($hostManifestReadback.PSObject.Properties.Name) -join "|") -cne
                 ($hostManifestKeys -join "|") -or
-            $hostManifestReadback.schema -cne "ferrum2.windows-tun.hyperv-host-run.v5" -or
+            $hostManifestReadback.schema -cne "ferrum2.windows-tun.hyperv-host-run.v7" -or
+            $hostManifestReadback.candidate_artifact_manifest_sha256 -cne
+                $candidateArtifacts.ManifestSha256 -or
             $hostManifestReadback.identity_sha256 -cne $ledgerIdentity.Sha256 -or
             $hostManifestReadback.controller_bundle_sha256 -cne
                 [string]$controllerBundleManifest.controller_bundle_sha256 -or
@@ -748,4 +514,4 @@ if ($null -ne $runFailure -or $finalizationFailures.Count -ne 0) {
     throw [InvalidOperationException]::new(($messages -join "; "))
 }
 
-Write-Output "hyperv_windows_tun status=PASS profile=$Profile run_token=$RunToken candidate_sha=$($candidate.Sha) evidence=$hostEvidencePath final_vm_state=Off"
+Write-Output "hyperv_windows_tun status=PASS profile=$qualificationProfile run_token=$RunToken candidate_sha=$($candidate.Sha) evidence=$hostEvidencePath final_vm_state=Off"

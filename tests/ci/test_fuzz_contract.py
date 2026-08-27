@@ -15,6 +15,9 @@ owner_paths = [
     "crates/ferrum2-tun/**",
     "tools/ci/fuzz_contract.py",
 ]
+documentation_exclusions = [
+    { pattern = "crates/ferrum2-tun/fuzz/*.md", kind = "markdown" },
+]
 
 [fuzz_campaign]
 targets = [
@@ -87,6 +90,32 @@ class FuzzContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     fuzz_contract.load_contract(self.policy_path)
 
+    def test_documentation_exclusions_are_explicit_and_typed(self) -> None:
+        contract = fuzz_contract.load_contract(self.policy_path)
+        self.assertEqual(
+            contract.documentation_exclusions,
+            (
+                fuzz_contract.ImpactExclusion(
+                    "crates/ferrum2-tun/fuzz/*.md", "markdown"
+                ),
+            ),
+        )
+
+        source = textwrap.dedent(POLICY)
+        for mutation in [
+            source.replace('kind = "markdown"', 'kind = "source"'),
+            source.replace("fuzz/*.md", "fuzz/*"),
+            source.replace(
+                '{ pattern = "crates/ferrum2-tun/fuzz/*.md", kind = "markdown" }',
+                '{ pattern = "crates/ferrum2-tun/fuzz/*.md", kind = "markdown", '
+                'reason = "broad" }',
+            ),
+        ]:
+            with self.subTest(mutation=mutation):
+                self.policy_path.write_text(mutation, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Markdown|exactly"):
+                    fuzz_contract.load_contract(self.policy_path)
+
     def test_changed_owner_path_is_affected_and_unrelated_path_is_not(self) -> None:
         repository = TemporaryRepository()
         self.addCleanup(repository.close)
@@ -126,13 +155,84 @@ class FuzzContractTests(unittest.TestCase):
         for relative in [
             "Cargo.toml",
             "Cargo.lock",
+            "rust-toolchain.toml",
+            "crates/ferrum2-config/Cargo.toml",
             "crates/ferrum2-config/src/lib.rs",
+            "crates/ferrum2-core/Cargo.toml",
             "crates/ferrum2-core/src/lib.rs",
+            "crates/ferrum2-crypto/Cargo.toml",
             "crates/ferrum2-crypto/src/lib.rs",
+            "crates/ferrum2-net/Cargo.toml",
             "crates/ferrum2-net/src/lib.rs",
+            "crates/ferrum2-rule/Cargo.toml",
             "crates/ferrum2-rule/src/lib.rs",
+            "crates/ferrum2-runtime/Cargo.toml",
             "crates/ferrum2-runtime/src/lib.rs",
-            "tools/windows-tun/controller.ps1",
+            "crates/ferrum2-platform-windows/Cargo.toml",
+            "crates/ferrum2-platform-windows/src/lib.rs",
+            "crates/ferrum2-tun/Cargo.toml",
+            "crates/ferrum2-tun/src/lib.rs",
+            "crates/ferrum2-tun/fuzz/Cargo.toml",
+            "crates/ferrum2-tun/fuzz/build.rs",
+            "crates/ferrum2-tun/fuzz/generated_tables.rs",
+            "crates/ferrum2-tun/fuzz/fuzz_targets/packet_reassembly.rs",
+            "crates/ferrum2-tun/fuzz/corpus/packet_reassembly/malformed.hex",
+            "crates/ferrum2-tun/tests/fixtures/packets/reassembly-v1.hex",
+            "vendor/shadowsocks-crypto/Cargo.toml",
+            "vendor/shadowsocks-crypto/src/lib.rs",
+            "tools/ci/__init__.py",
+            "tools/ci/fuzz_contract.py",
+            ".github/workflows/tun-fuzz-deterministic.yml",
+        ]:
+            with self.subTest(relative=relative):
+                head = repository.commit_file(relative, f"changed {relative}\n")
+                decision = fuzz_contract.classify_impact(
+                    contract,
+                    event_name="push",
+                    base_sha=base,
+                    head_sha=head,
+                    repository=repository.root,
+                )
+                self.assertTrue(decision.affected)
+                self.assertEqual(decision.changed_path_count, 1)
+                base = head
+
+    def test_repository_policy_ignores_documentation_inside_owner_directories(self) -> None:
+        repository = TemporaryRepository()
+        self.addCleanup(repository.close)
+        base = repository.commit_file("README.md", "baseline\n")
+        contract = fuzz_contract.load_contract(REPOSITORY_POLICY)
+
+        for relative in [
+            "crates/ferrum2-config/AGENTS.md",
+            "crates/ferrum2-core/README.md",
+            "crates/ferrum2-tun/AGENTS.md",
+            "crates/ferrum2-tun/fuzz/README.md",
+            "vendor/shadowsocks-crypto/README.md",
+        ]:
+            with self.subTest(relative=relative):
+                head = repository.commit_file(relative, f"changed {relative}\n")
+                decision = fuzz_contract.classify_impact(
+                    contract,
+                    event_name="push",
+                    base_sha=base,
+                    head_sha=head,
+                    repository=repository.root,
+                )
+                self.assertFalse(decision.affected)
+                self.assertEqual(decision.changed_path_count, 1)
+                base = head
+
+    def test_repository_policy_does_not_charge_platform_qualification_to_fuzz(self) -> None:
+        repository = TemporaryRepository()
+        self.addCleanup(repository.close)
+        base = repository.commit_file("README.md", "baseline\n")
+        contract = fuzz_contract.load_contract(REPOSITORY_POLICY)
+
+        for relative in [
+            "tests/platform/Main.CampaignController.ps1",
+            "tools/powershell/Ferrum2.Performance/HostContract.ps1",
+            "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
             "tools/windows_tun_hyperv_support_topology_plan.json",
             "tools/windows_tun_performance_policy.json",
         ]:
@@ -145,7 +245,7 @@ class FuzzContractTests(unittest.TestCase):
                     head_sha=head,
                     repository=repository.root,
                 )
-                self.assertTrue(decision.affected)
+                self.assertFalse(decision.affected)
                 self.assertEqual(decision.changed_path_count, 1)
                 base = head
 
@@ -254,6 +354,39 @@ class FuzzContractTests(unittest.TestCase):
             "manual dispatch has no trusted comparison range",
             summary.read_text(encoding="utf-8"),
         )
+
+    def test_cli_derives_per_target_budget_from_the_policy(self) -> None:
+        source = textwrap.dedent(POLICY)
+        source = source.replace(
+            '    "config_legacy_fields",\n    "strict_route_rules",\n', ""
+        )
+        source = source.replace("seconds_per_target = 900", "seconds_per_target = 1800")
+        self.policy_path.write_text(source, encoding="utf-8")
+        repository = TemporaryRepository()
+        self.addCleanup(repository.close)
+        head = repository.commit_file("README.md", "baseline\n")
+        output = Path(self.temporary.name) / "derived-budget-output"
+        summary = Path(self.temporary.name) / "derived-budget-summary"
+
+        result = fuzz_contract.main(
+            [
+                "--policy",
+                str(self.policy_path),
+                "--repository",
+                str(repository.root),
+                "--event-name",
+                "workflow_dispatch",
+                "--head-sha",
+                head,
+                "--github-output",
+                str(output),
+                "--github-summary",
+                str(summary),
+            ]
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("seconds_per_target=1800", output.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -1,16 +1,11 @@
-#[cfg(all(windows, target_arch = "x86_64"))]
-mod owner;
-#[cfg(all(windows, target_arch = "x86_64"))]
-mod prepare;
-#[cfg(all(windows, target_arch = "x86_64"))]
-mod rebuild;
 mod reducer;
 mod reset;
-#[cfg(all(windows, target_arch = "x86_64"))]
-mod session;
 
-#[cfg(all(windows, target_arch = "x86_64"))]
-pub(crate) use owner::owner_main;
+#[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
+mod live;
+#[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
+pub(crate) use live::owner_main;
+
 #[cfg(test)]
 pub(crate) use reset::{
     NetworkChangeErrorDisposition, NetworkChangeTransition, NetworkResetHealthDisposition,

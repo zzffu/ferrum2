@@ -441,7 +441,7 @@ function Assert-HardKillExport(
     $cleanup = Get-Content -LiteralPath $cleanupPath -Raw -Encoding utf8 |
         ConvertFrom-Json -Depth 8 -ErrorAction Stop
     $cleanupProperties = @(
-        "schema", "status", "source_mode", "run_token", "identity_sha256", "topology",
+        "schema", "status", "source_profile", "run_token", "identity_sha256", "topology",
         "qualification_outcome", "processes", "adapters", "target_addresses",
         "target_routes", "dns_rows", "sibling_dll", "work_directories", "mutation_journals",
         "firewall_rules", "identity_journal", "finished_utc"
@@ -450,7 +450,7 @@ function Assert-HardKillExport(
     Assert-True (
         $cleanup.schema -ceq "ferrum2.windows-tun.hard-kill-cleanup.v2" -and
         $cleanup.status -ceq "pass" -and
-        $cleanup.source_mode -ceq "hard-kill" -and
+        $cleanup.source_profile -ceq "hard-kill" -and
         $cleanup.run_token -ceq $script:RunToken -and
         $cleanup.identity_sha256 -ceq $IdentitySha256 -and
         $cleanup.qualification_outcome -ceq "success"
@@ -493,7 +493,8 @@ function Assert-HardKillHostManifest(
     $fields = @(
         "schema", "status", "mode", "run_token", "vm_name", "vm_id",
         "checkpoint_name", "checkpoint_id", "topology", "support_listener",
-        "candidate_sha", "identity_sha256", "controller_sha256",
+        "candidate_sha", "candidate_artifact_manifest_sha256",
+        "identity_sha256", "controller_sha256",
         "controller_bundle_sha256", "guest_wrapper_sha256",
         "topology_runtime_sha256", "host_network_path_helper_sha256",
         "guest_network_path_probe_sha256", "staged_input_sha256", "rust_version",
@@ -505,7 +506,8 @@ function Assert-HardKillHostManifest(
 
     foreach ($name in @(
         "schema", "status", "mode", "run_token", "vm_name", "vm_id",
-        "checkpoint_name", "checkpoint_id", "candidate_sha", "identity_sha256",
+        "checkpoint_name", "checkpoint_id", "candidate_sha",
+        "candidate_artifact_manifest_sha256", "identity_sha256",
         "controller_sha256", "controller_bundle_sha256", "guest_wrapper_sha256",
         "topology_runtime_sha256",
         "host_network_path_helper_sha256", "guest_network_path_probe_sha256",
@@ -520,10 +522,12 @@ function Assert-HardKillHostManifest(
         ) "hard-kill host manifest changed: $name"
     }
     Assert-True (
-        $readback.schema -ceq "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3" -and
+        $readback.schema -ceq "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4" -and
         $readback.status -cin @("pass", "fail") -and
         $readback.mode -ceq "hard-kill" -and
         [string]$readback.candidate_sha -cmatch '^[0-9a-f]{40}$' -and
+        [string]$readback.candidate_artifact_manifest_sha256 -cmatch
+            '^[0-9a-f]{64}$' -and
         [string]$readback.identity_sha256 -cmatch '^[0-9a-f]{64}$' -and
         [string]$readback.controller_sha256 -cmatch '^[0-9a-f]{64}$' -and
         [string]$readback.controller_bundle_sha256 -cmatch '^[0-9a-f]{64}$' -and
@@ -540,7 +544,8 @@ function Assert-HardKillHostManifest(
     ) "hard-kill host manifest identity or types are invalid"
     foreach ($name in @(
         "schema", "status", "mode", "run_token", "vm_name", "vm_id",
-        "checkpoint_name", "checkpoint_id", "candidate_sha", "identity_sha256",
+        "checkpoint_name", "checkpoint_id", "candidate_sha",
+        "candidate_artifact_manifest_sha256", "identity_sha256",
         "controller_sha256", "topology_runtime_sha256", "host_network_path_helper_sha256",
         "guest_network_path_probe_sha256", "guest_execution", "guest_build"
     )) {
@@ -634,6 +639,10 @@ function Assert-HardKillHostManifest(
             sha256 = [string]$readback.identity_sha256
         },
         [ordered]@{
+            path = "candidate-artifacts.json"
+            sha256 = [string]$readback.candidate_artifact_manifest_sha256
+        },
+        [ordered]@{
             path = "staged-input.json"
             sha256 = [string]$readback.staged_input_sha256
         },
@@ -662,6 +671,25 @@ function Assert-HardKillHostManifest(
                 [string]$matches[0].sha256 -ceq [string]$critical.sha256
             ) "hard-kill failure evidence identity is invalid: $($critical.path)"
         }
+    }
+
+    $stagedBindingPath = Join-Path $EvidenceRoot "staged-input.json"
+    if (Test-Path -LiteralPath $stagedBindingPath -PathType Leaf) {
+        $stagedBindingItem = Get-Item -LiteralPath $stagedBindingPath `
+            -Force -ErrorAction Stop
+        Assert-True (
+            ($stagedBindingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            $stagedBindingItem.Length -ge 2 -and
+            $stagedBindingItem.Length -le 2097152
+        ) "hard-kill staged-input evidence boundary is invalid"
+        $stagedBinding = Get-Content -LiteralPath $stagedBindingPath `
+            -Raw -Encoding utf8 | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        Assert-True (
+            $stagedBinding.schema -ceq
+                "ferrum2.windows-tun.hard-kill-staged-input.v4" -and
+            [string]$stagedBinding.candidate_artifact_manifest_sha256 -ceq
+                [string]$readback.candidate_artifact_manifest_sha256
+        ) "hard-kill staged-input candidate artifact binding is invalid"
     }
 
     if ($readback.status -ceq "pass") {

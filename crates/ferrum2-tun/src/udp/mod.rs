@@ -1,5 +1,8 @@
 // Public bridge types still compile on unsupported hosts; their owner half is unreachable there.
-#![cfg_attr(not(any(all(windows, target_arch = "x86_64"), test)), allow(dead_code))]
+#![cfg_attr(
+    not(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test)),
+    allow(dead_code)
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -728,13 +731,42 @@ impl Drop for UdpAssociation {
     }
 }
 
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "fuzzing"
+))]
 mod table;
-
-#[cfg(any(all(windows, target_arch = "x86_64"), test, feature = "fuzzing"))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "fuzzing"
+))]
 pub(crate) use table::{Admission, ResponseProcessOutcome, UdpTable};
 #[cfg(test)]
 pub(crate) use table::{EventOutcome, ExpireOutcome};
-use table::{lock_unpoisoned, same_ip_family, valid_unicast_ip};
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn same_ip_family(left: IpAddr, right: IpAddr) -> bool {
+    matches!(
+        (left, right),
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+    )
+}
+
+fn valid_unicast_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(address) => {
+            !address.is_unspecified() && !address.is_multicast() && !address.is_broadcast()
+        }
+        IpAddr::V6(address) => !address.is_unspecified() && !address.is_multicast(),
+    }
+}
 
 #[cfg(test)]
 mod tests;

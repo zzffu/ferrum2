@@ -14,18 +14,18 @@ function Read-M17TopologyManifest([string]$Path, [object]$Ledger) {
     $manifest = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) |
         ConvertFrom-Json -Depth 12 -ErrorAction Stop
     Assert-ClosedJsonProperties -Object $manifest -Expected @(
-        "schema", "created_utc", "topology_plan_sha256", "inspector_sha256",
-        "provisioning_library_sha256", "provisioning_script_sha256", "vm",
-        "source_checkpoint", "qualification_checkpoint", "management_adapter", "support",
+        "schema", "created_utc", "topology_plan_sha256",
+        "provisioning_source_manifest_sha256", "provisioning_source_bundle_sha256", "vm",
+        "source_checkpoint", "lab_checkpoint", "management_adapter", "support",
         "protected_host_tun", "constraints"
     ) -Label "support topology manifest"
     Assert-ClosedJsonProperties -Object $manifest.vm -Expected @(
         "name", "id", "terminal_state", "automatic_checkpoints_enabled"
     ) -Label "support topology manifest VM"
-    Assert-ClosedJsonProperties -Object $manifest.qualification_checkpoint -Expected @(
+    Assert-ClosedJsonProperties -Object $manifest.lab_checkpoint -Expected @(
         "name", "id", "type", "parent_id", "support_vm_adapter_snapshot_id",
         "restore_verified"
-    ) -Label "support topology manifest qualification checkpoint"
+    ) -Label "support topology manifest lab checkpoint"
     Assert-ClosedJsonProperties -Object $manifest.support -Expected @(
         "switch", "vm_adapter", "guest"
     ) -Label "support topology manifest support"
@@ -57,16 +57,18 @@ function Read-M17TopologyManifest([string]$Path, [object]$Ledger) {
     $topology = $Ledger.topology
     Assert-True ($manifest.schema -is [long] -and [long]$manifest.schema -eq 1 -and
         [string]$manifest.topology_plan_sha256 -ceq [string]$topology.plan_sha256 -and
+        [string]$manifest.provisioning_source_manifest_sha256 -cmatch '^[0-9a-f]{64}$' -and
+        [string]$manifest.provisioning_source_bundle_sha256 -cmatch '^[0-9a-f]{64}$' -and
         [string]$manifest.vm.name -ceq [string]$Ledger.vm_name -and
         [string]$manifest.vm.id -ceq [string]$Ledger.vm_id -and
         [string]$manifest.vm.terminal_state -ceq "Off" -and
         $manifest.vm.automatic_checkpoints_enabled -is [bool] -and
         $manifest.vm.automatic_checkpoints_enabled -eq $false -and
-        [string]$manifest.qualification_checkpoint.name -ceq [string]$Ledger.checkpoint_name -and
-        [string]$manifest.qualification_checkpoint.id -ceq [string]$Ledger.checkpoint_id -and
-        [string]$manifest.qualification_checkpoint.type -ceq "Standard" -and
-        $manifest.qualification_checkpoint.restore_verified -is [bool] -and
-        $manifest.qualification_checkpoint.restore_verified -eq $true) "support topology manifest VM or checkpoint identity mismatch"
+        [string]$manifest.lab_checkpoint.name -ceq [string]$Ledger.checkpoint_name -and
+        [string]$manifest.lab_checkpoint.id -ceq [string]$Ledger.checkpoint_id -and
+        [string]$manifest.lab_checkpoint.type -ceq "Standard" -and
+        $manifest.lab_checkpoint.restore_verified -is [bool] -and
+        $manifest.lab_checkpoint.restore_verified -eq $true) "support topology manifest VM or checkpoint identity mismatch"
     $switch = $manifest.support.switch
     $guest = $manifest.support.guest
     Assert-True ([string]$switch.switch_id -ceq [string]$topology.support_switch_id -and
@@ -201,8 +203,7 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
         "schema", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id", "guest_product",
         "guest_edition", "guest_architecture", "guest_version", "guest_build", "candidate_sha",
         "probe_sha256", "controller_bundle_sha256", "client_sha256", "server_sha256",
-        "support_listener", "topology",
-        "test_binaries"
+        "support_listener", "topology"
     )
     Assert-True ((@($ledger.PSObject.Properties.Name) -join "|") -ceq ($keys -join "|")) "identity ledger keys are invalid"
     $listenerKeys = @(
@@ -218,7 +219,7 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
     )
     Assert-True ((@($ledger.topology.PSObject.Properties.Name) -join "|") -ceq ($topologyKeys -join "|")) "identity ledger topology keys are invalid"
     Assert-True (($ledger | ConvertTo-Json -Compress -Depth 6) -ceq $json) "identity ledger is not canonical JSON"
-    Assert-True ($ledger.schema -is [long] -and $ledger.schema -eq 3) "identity ledger schema is invalid"
+    Assert-True ($ledger.schema -is [long] -and $ledger.schema -eq 4) "identity ledger schema is invalid"
     Assert-True ([string]$ledger.vm_name -cmatch '^[^\r\n]{1,128}$') "identity ledger VM name is invalid"
     Assert-True ([string]$ledger.checkpoint_name -cmatch '^[^\r\n]{1,128}$') "identity ledger checkpoint name is invalid"
     $parsedGuid = [Guid]::Empty
@@ -235,23 +236,6 @@ function Get-NetworkFeasibilityIdentity([string]$Path, [bool]$RequireServer) {
         "identity ledger controller bundle hash is invalid"
     Assert-True ([string]$ledger.client_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger client hash is invalid"
     Assert-True ([string]$ledger.server_sha256 -cmatch '^[0-9a-f]{64}$') "identity ledger server hash is invalid"
-    $testKeys = @("client", "tun", "wintun")
-    Assert-True ((@($ledger.test_binaries.PSObject.Properties.Name) -join "|") -ceq ($testKeys -join "|")) "identity ledger test binary keys are invalid"
-    foreach ($name in $testKeys) {
-        Assert-True ([string]$ledger.test_binaries.$name -cmatch '^[0-9a-f]{64}$') "identity ledger test binary hash is invalid"
-    }
-    if ($script:candidateTestDirectoryExplicit) {
-        $testFiles = [ordered]@{
-            client = "ferrum2-client-tests.exe"
-            tun = "ferrum2-tun-tests.exe"
-            wintun = "ferrum2-platform-windows-tests.exe"
-        }
-        foreach ($name in $testFiles.Keys) {
-            $path = Join-Path $script:resolvedCandidateTestDirectory $testFiles[$name]
-            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-            Assert-True ($ledger.test_binaries.$name -ceq $hash) "staged candidate test hash mismatch: $name"
-        }
-    }
     $probePath = (Resolve-Path -LiteralPath `
         $script:controllerEntryPointPath -ErrorAction Stop).Path
     $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256).Hash.ToLowerInvariant()

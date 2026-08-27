@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[path = "workspace_policy/feature_topology_contract.rs"]
+mod feature_topology_contract;
 #[path = "workspace_policy/r0_policy.rs"]
 mod r0_policy;
 
@@ -323,13 +325,19 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
     .join("src")
     .canonicalize()
     .expect("Windows platform source directory");
-    let unsafe_root = platform_windows_src
-        .join("windows/ffi")
-        .canonicalize()
-        .expect("Windows FFI subtree");
+    let unsafe_paths = [
+        platform_windows_src
+            .join("windows/live")
+            .canonicalize()
+            .expect("Windows live subtree"),
+        platform_windows_src
+            .join("windows/core/raw.rs")
+            .canonicalize()
+            .expect("Windows raw row boundary"),
+    ];
     let mut platform_windows_sources = Vec::new();
     rust_sources(&platform_windows_src, &mut platform_windows_sources);
-    let mut unsafe_source_count = 0;
+    let mut unsafe_source_counts = [0_usize; 2];
     for source in platform_windows_sources {
         let source = source
             .canonicalize()
@@ -338,21 +346,25 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
             .expect("Windows platform Rust source")
             .parse::<TokenStream>()
             .expect("valid Windows platform Rust tokens");
-        if source.starts_with(&unsafe_root) {
+        if let Some((index, _)) = unsafe_paths
+            .iter()
+            .enumerate()
+            .find(|(_, allowed)| source == **allowed || source.starts_with(allowed))
+        {
             if has_unsafe_token(tokens) {
-                unsafe_source_count += 1;
+                unsafe_source_counts[index] += 1;
             }
         } else {
             assert!(
                 !has_unsafe_token(tokens),
-                "unsafe Rust escaped the Windows FFI subtree into {}",
+                "unsafe Rust escaped the reviewed Windows boundaries into {}",
                 source.display()
             );
         }
     }
     assert!(
-        unsafe_source_count > 0,
-        "the declared Windows FFI boundary disappeared"
+        unsafe_source_counts.iter().all(|count| *count > 0),
+        "a declared Windows unsafe boundary disappeared: {unsafe_source_counts:?}"
     );
 
     for (package_name, target_name) in [

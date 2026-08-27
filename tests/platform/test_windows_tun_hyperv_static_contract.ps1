@@ -124,7 +124,7 @@ function Write-HardKillEvidence([string]$Path, [bool]$TamperHash = $false) {
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..") `
     -ErrorAction Stop).Path
-$commonPath = Join-Path $PSScriptRoot "run_windows_tun_hyperv.ps1"
+$mainRunnerPath = Join-Path $PSScriptRoot "run_windows_tun_hyperv.ps1"
 $hardKillHostPath = Join-Path $PSScriptRoot "run_windows_tun_hard_kill_hyperv.ps1"
 $guestWrapperPath = Join-Path $PSScriptRoot "invoke_windows_tun_hard_kill_guest.ps1"
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
@@ -135,21 +135,21 @@ $temporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '
 Assert-True ($temporaryRoot.StartsWith("$temporaryBase\", `
     [StringComparison]::OrdinalIgnoreCase)) "temporary test root escaped TEMP"
 
-$commonModule = $null
+$labModule = $null
 $guestModule = $null
 $hostModule = $null
 $supervisorModule = $null
 try {
     New-Item -ItemType Directory -Path $temporaryRoot -ErrorAction Stop | Out-Null
-    $commonModule = New-Module -Name (
-        "Ferrum2HyperVStaticCommon_" + [Guid]::NewGuid().ToString("N")
-    ) -ArgumentList $commonPath -ScriptBlock {
+    $labModule = New-Module -Name (
+        "Ferrum2HyperVStaticLab_" + [Guid]::NewGuid().ToString("N")
+    ) -ArgumentList $mainRunnerPath -ScriptBlock {
         param([string]$Path)
-        . $Path -LibraryOnly
         $root = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) `
             '..\..') -ErrorAction Stop).Path
+        $script:repositoryRoot = $root
         Import-Module (Join-Path $root `
-            'tools\powershell\Ferrum2.Qualification.Common\Ferrum2.Qualification.Common.psd1') `
+            'tools\powershell\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1') `
             -Scope Local -Force -ErrorAction Stop
         foreach ($owner in @(
             'Paths.ps1', 'Process.ps1', 'Manifest.ps1', 'Artifacts.ps1', 'Evidence.ps1'
@@ -163,9 +163,9 @@ try {
             "Assert-BoundedWorkerPassManifestAndTerminal"
         )
     }
-    Import-Module $commonModule -Scope Local -Force
+    Import-Module $labModule -Scope Local -Force
     Import-Module (Join-Path $repositoryRoot `
-        "tools\powershell\Ferrum2.Qualification.Common\Ferrum2.Qualification.Common.psd1") `
+        "tools\powershell\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1") `
         -Scope Local -Force -ErrorAction Stop
 
     $evidenceRoot = Join-Path $temporaryRoot "evidence"
@@ -220,12 +220,13 @@ try {
         creation_utc = $listenerTimestamp
     }
     $validFailure = [ordered]@{
-        schema = "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3"
+        schema = "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4"
         status = "fail"; mode = "hard-kill"; run_token = $runToken
         vm_name = $vmName; vm_id = $vmId.ToString("D")
         checkpoint_name = "Static checkpoint"; checkpoint_id = $checkpointId.ToString("D")
         topology = $topology; support_listener = $supportListener
-        candidate_sha = "5" * 40; identity_sha256 = "6" * 64
+        candidate_sha = "5" * 40; candidate_artifact_manifest_sha256 = "d" * 64
+        identity_sha256 = "6" * 64
         controller_sha256 = "7" * 64; controller_bundle_sha256 = "b" * 64
         guest_wrapper_sha256 = $null
         topology_runtime_sha256 = "8" * 64; host_network_path_helper_sha256 = "9" * 64
@@ -286,11 +287,13 @@ try {
     [IO.Directory]::CreateDirectory($guestExportRoot) | Out-Null
     $identityPath = Join-Path $evidenceRoot "identity-ledger.json"
     $guestIdentityPath = Join-Path $guestExportRoot "identity-ledger.json"
+    $candidateArtifactPath = Join-Path $evidenceRoot "candidate-artifacts.json"
     $stagedPath = Join-Path $evidenceRoot "staged-input.json"
     $topologyPath = Join-Path $evidenceRoot "topology-manifest.json"
     foreach ($entry in @(
-        [ordered]@{ path = $identityPath; text = "identity" },
-        [ordered]@{ path = $guestIdentityPath; text = "identity" },
+        [ordered]@{ path = $identityPath; text = '{"schema":4}' },
+        [ordered]@{ path = $guestIdentityPath; text = '{"schema":4}' },
+        [ordered]@{ path = $candidateArtifactPath; text = "candidate" },
         [ordered]@{ path = $stagedPath; text = "staged" },
         [ordered]@{ path = $topologyPath; text = "topology" }
     )) {
@@ -302,6 +305,8 @@ try {
     }
     $validPass.identity_sha256 = (Get-FileHash -LiteralPath $identityPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
+    $validPass.candidate_artifact_manifest_sha256 = (Get-FileHash `
+        -LiteralPath $candidateArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $validPass.staged_input_sha256 = (Get-FileHash -LiteralPath $stagedPath `
         -Algorithm SHA256).Hash.ToLowerInvariant()
     $validPass.topology.manifest_sha256 = (Get-FileHash -LiteralPath $topologyPath `
@@ -410,7 +415,6 @@ try {
         "Ferrum2HostEvidenceStatic_" + [Guid]::NewGuid().ToString("N")
     ) -ArgumentList $hardKillHostPath -ScriptBlock {
         param([string]$Path)
-        . $Path -LibraryOnly
         . (Join-Path (Split-Path -Parent $Path) 'Hard.HostContract.ps1')
         Export-ModuleMember -Function Assert-HardKillEvidenceRows
     }
@@ -441,7 +445,7 @@ try {
 
     $supervisorModule = New-Module -Name (
         "Ferrum2SupervisorStatic_" + [Guid]::NewGuid().ToString("N")
-    ) -ArgumentList $commonPath -ScriptBlock {
+    ) -ArgumentList $mainRunnerPath -ScriptBlock {
         param([string]$Path)
         $root = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) `
             '..\..') -ErrorAction Stop).Path
@@ -529,44 +533,25 @@ try {
     } "primary=synthetic primary failure; recovery=synthetic recovery failure" `
         "primary and recovery aggregation"
 
-    if ($null -eq ("Ferrum2ThrowingTextWriter" -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Text;
-public sealed class Ferrum2ThrowingTextWriter : TextWriter
-{
-    public override Encoding Encoding { get { return Encoding.UTF8; } }
-    public override void Write(string value) { throw new IOException("synthetic console failure"); }
-}
-'@
-    }
     Set-SupervisorScenario "pass" $supervisorVmId "Off"
-    $consoleFailure = $null
-    $originalConsoleOut = [Console]::Out
-    try {
-        [Console]::SetOut([Ferrum2ThrowingTextWriter]::new())
-        try {
-            Invoke-BoundedHyperVWorkerSupervisor -ScriptPath $PSCommandPath `
-                -BoundParameters ([ordered]@{ RunToken = "static-contract" }) `
-                -ForwardedParameterNames @("RunToken") -WorkerTimeoutSeconds 30 `
-                -ShutdownTimeoutSeconds 30 -ExpectedVmId $supervisorVmId `
-                -ExpectedVmName $supervisorVmName -ExpectedFinalState "Off" `
-                -CleanupAuthority $authority -CleanupMode "StopOnly" `
-                -WorkerContract "Probe" -FailureManifestPath $null `
-                -Label "Static supervisor"
-        } catch { $consoleFailure = $_ }
-    } finally {
-        [Console]::SetOut($originalConsoleOut)
-    }
-    Assert-True ($null -ne $consoleFailure -and
-        $consoleFailure.Exception.Message -match "synthetic console failure" -and
-        (Get-SupervisorCleanupCalls) -eq 1) `
-        "terminal emission failure bypassed supervisor recovery"
+    $supervisorTerminal = Invoke-BoundedHyperVWorkerSupervisor -ScriptPath $PSCommandPath `
+        -BoundParameters ([ordered]@{ RunToken = "static-contract" }) `
+        -ForwardedParameterNames @("RunToken") -WorkerTimeoutSeconds 30 `
+        -ShutdownTimeoutSeconds 30 -ExpectedVmId $supervisorVmId `
+        -ExpectedVmName $supervisorVmName -ExpectedFinalState "Off" `
+        -CleanupAuthority $authority -CleanupMode "StopOnly" `
+        -WorkerContract "Probe" -FailureManifestPath $null `
+        -Label "Static supervisor"
+    $supervisorTerminalDocument = $supervisorTerminal |
+        ConvertFrom-Json -Depth 8 -ErrorAction Stop
+    Assert-True ($supervisorTerminalDocument.status -ceq 'pass' -and
+        [Guid][string]$supervisorTerminalDocument.vm_id -eq $supervisorVmId -and
+        (Get-SupervisorCleanupCalls) -eq 0) `
+        "supervisor did not return its accepted terminal"
 
     Write-Output "Windows TUN Hyper-V static contract: PASS"
 } finally {
-    foreach ($module in @($supervisorModule, $hostModule, $guestModule, $commonModule)) {
+    foreach ($module in @($supervisorModule, $hostModule, $guestModule, $labModule)) {
         if ($null -ne $module) { Remove-Module $module -Force -ErrorAction SilentlyContinue }
     }
     if (Test-Path -LiteralPath $temporaryRoot) {

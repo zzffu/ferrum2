@@ -1,0 +1,85 @@
+{
+  "schema": "ferrum2.windows-tun-provisioning-source-bundle.v1",
+  "entrypoint": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology.ps1",
+  "files": [
+    {
+      "role": "bootstrap",
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
+      "bytes": 23974,
+      "sha256": "e54d1bef45f29d9a5027680d2c095d671246f08e743f35254771c21ec95bf037"
+    },
+    {
+      "role": "driver",
+      "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology.ps1",
+      "bytes": 9947,
+      "sha256": "302b8c977b99153870963a0a3c7b6f79b53afd7ae108998c17e48117eea84151"
+    },
+    {
+      "role": "readonly",
+      "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
+      "bytes": 34634,
+      "sha256": "07a70176093c9c55a09c46a43b3cb8e70eb65fb37812f6afc61280827c6c2769"
+    },
+    {
+      "role": "primary",
+      "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning.ps1",
+      "bytes": 8011,
+      "sha256": "78d3465e8c30fb51e1d34587a707a0ff2aeac07d6224915d8dda39ecff45f11c"
+    },
+    {
+      "role": "host",
+      "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning_host.ps1",
+      "bytes": 2646,
+      "sha256": "7fb5aa7c66a25ad576c6295957cd44369d790e6056f4e16cafe1a968d6da89de"
+    },
+    {
+      "role": "guest",
+      "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning_guest.ps1",
+      "bytes": 13093,
+      "sha256": "6ce7c6a33b57733854b86da424748ce756e720cb997ab1c0cc6ace477f776eb5"
+    },
+    {
+      "role": "rollback",
+      "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology_rollback.ps1",
+      "bytes": 15505,
+      "sha256": "d4e44ed6b3aaa3d059b554820cfc57007380608767c29820f317c80524edac76"
+    },
+    {
+      "role": "transaction",
+      "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology_transaction.ps1",
+      "bytes": 37277,
+      "sha256": "0c269a3cd06415d5ae7e1cceea3caa3ef4b950ddef04a4b3c85aebec0dcb8c7d"
+    },
+    {
+      "role": "lab_manifest",
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1",
+      "bytes": 1535,
+      "sha256": "63262999c3ef7f1fc14a2f7ecdded7169566fa49be86383cc941e32f2a564d18"
+    },
+    {
+      "role": "lab_module",
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psm1",
+      "bytes": 1291,
+      "sha256": "e6d7b16353c33f647f805485ecad6ae44c892a21a255474bf2b5bd7cbde611aa"
+    },
+    {
+      "role": "lab_json",
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/JsonSource.ps1",
+      "bytes": 8928,
+      "sha256": "bfd07be31de88c1848aaa4dc4d7fdd8ec9d31873a56c7aa353f3be70253ab39f"
+    },
+    {
+      "role": "lab_bundle",
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/BundleFileSystem.ps1",
+      "bytes": 16398,
+      "sha256": "3189789c76e1db477df5d0bd40235f0a19cd2d29e4488085c73b082f4e562447"
+    },
+    {
+      "role": "lab_vm",
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/VmSession.ps1",
+      "bytes": 14787,
+      "sha256": "0e5671a332569d455ddfc0d4d21adedba75cb878a917d1a1932bfc7b483889e3"
+    }
+  ],
+  "source_bundle_sha256": "c209661d772b8309f0c62130cdcd193fd9d817735a1908717713d1227d06ea30"
+}

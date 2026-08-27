@@ -1,12 +1,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$commonManifest = Join-Path $PSScriptRoot `
-    '..\Ferrum2.Qualification.Common\Ferrum2.Qualification.Common.psd1'
-Import-Module $commonManifest -Scope Local -Force -ErrorAction Stop
+$labManifest = Join-Path $PSScriptRoot `
+    '..\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1'
+Import-Module $labManifest -Scope Local -ErrorAction Stop
 
 foreach ($owner in @(
-    'Facade.ps1'
     'Paths.ps1'
     'VmTransaction.ps1'
     'Process.ps1'
@@ -19,26 +18,64 @@ foreach ($owner in @(
 
 $script:HostContextInitialized = $false
 
-function Invoke-Ferrum2HostControllerExtension {
+function Invoke-Ferrum2QualificationHostController {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$RepositoryRoot,
-        [Parameter(Mandatory)] [string]$ExtensionPath,
         [Parameter(Mandatory)]
-        [ValidatePattern('^[0-9a-f]{64}$')]
-        [string]$ExpectedSha256,
-        [Parameter(Mandatory)] [Collections.IDictionary]$Context,
-        [ValidateSet('Evidence', 'GuestController')]
-        [string[]]$RequiredModules = @('Evidence')
+        [ValidateSet('MainCampaign', 'MainProbe', 'MainProbeWorker', 'MainWorker', 'HardKill')]
+        [string]$Controller,
+        [Parameter(Mandatory)] [Collections.IDictionary]$Context
     )
     $root = (Resolve-Path -LiteralPath $RepositoryRoot -ErrorAction Stop).Path
-    $resolved = Resolve-Ferrum2OrdinaryFile -Path $ExtensionPath `
-        -Label 'HostHyperV controller extension' -MaximumBytes 4MB -RequiredRoot $root
-    if ((Get-Ferrum2LowerSha256 $resolved) -cne $ExpectedSha256) {
-        throw 'HostHyperV controller extension identity changed'
+    $contracts = [ordered]@{
+        MainCampaign = [ordered]@{
+            source = 'tests/platform/Main.CampaignController.ps1'
+            bundle = 'tests/platform/main-source-bundle.json'
+            modules = @('Evidence', 'GuestController')
+        }
+        MainProbe = [ordered]@{
+            source = 'tests/platform/Main.ProbeController.ps1'
+            bundle = 'tests/platform/main-source-bundle.json'
+            modules = @('Evidence')
+        }
+        MainProbeWorker = [ordered]@{
+            source = 'tests/platform/Main.ProbeWorkerController.ps1'
+            bundle = 'tests/platform/main-source-bundle.json'
+            modules = @('Evidence')
+        }
+        MainWorker = [ordered]@{
+            source = 'tests/platform/Main.HostController.ps1'
+            bundle = 'tests/platform/main-source-bundle.json'
+            modules = @('Evidence', 'GuestController')
+        }
+        HardKill = [ordered]@{
+            source = 'tests/platform/Hard.HostController.ps1'
+            bundle = 'tests/platform/hard-source-bundle.json'
+            modules = @('Evidence')
+        }
+    }
+    $contract = $contracts[$Controller]
+    $bundlePath = Resolve-Ferrum2OrdinaryFile `
+        -Path (Join-Path $root $contract.bundle) `
+        -Label "$Controller source bundle" -MaximumBytes 1MB -RequiredRoot $root
+    $bundle = Get-Content -LiteralPath $bundlePath -Raw -Encoding utf8 |
+        ConvertFrom-Json -Depth 8 -ErrorAction Stop
+    [void](Assert-Ferrum2ControllerBundleManifest -Manifest $bundle -BundleRoot $root)
+    $sourceEntry = @($bundle.files | Where-Object {
+        [string]$_.path -ceq [string]$contract.source
+    })
+    if ($sourceEntry.Count -ne 1) {
+        throw "$Controller fixed controller source is absent from its bundle"
+    }
+    $resolved = Resolve-Ferrum2OrdinaryFile `
+        -Path (Join-Path $root $contract.source) `
+        -Label "$Controller fixed controller" -MaximumBytes 4MB -RequiredRoot $root
+    if ((Get-Ferrum2LowerSha256 $resolved) -cne [string]$sourceEntry[0].sha256) {
+        throw "$Controller fixed controller source identity changed"
     }
     $moduleRoot = Join-Path $root 'tools/powershell'
-    foreach ($name in @($RequiredModules | Sort-Object -Unique)) {
+    foreach ($name in @($contract.modules)) {
         $moduleName = "Ferrum2.Qualification.$name"
         Import-Module (Join-Path $moduleRoot "$moduleName/$moduleName.psd1") `
             -Scope Local -ErrorAction Stop
@@ -62,15 +99,16 @@ function Initialize-Ferrum2HostHyperVModule {
     $script:approvedVmId = [Guid]::Empty
     $script:approvedCheckpointName = ''
     $script:approvedCheckpointId = [Guid]::Empty
+    $script:approvedVmIdentity = $null
     $script:topologyRuntimeLoaded = $false
     $script:topologyRuntimePath = Join-Path $script:repositoryRoot `
-        'tools/windows-tun/windows_tun_hyperv_support_topology_runtime.ps1'
+        'tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1'
     $script:hostNetworkPathHelperPath = Join-Path $script:repositoryRoot `
-        'tools/windows-tun/windows_tun_host_network_path.ps1'
+        'tools/windows-tun/lab/windows_tun_host_network_path.ps1'
     $script:guestNetworkPathProbePath = Join-Path $script:repositoryRoot `
-        'tools/windows-tun/get_windows_tun_guest_network_path.ps1'
+        'tools/windows-tun/lab/get_windows_tun_guest_network_path.ps1'
     $script:topologyProvisioningLibraryPath = Join-Path $script:repositoryRoot `
-        'tools/windows-tun/windows_tun_hyperv_support_topology_provisioning.ps1'
+        'tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning.ps1'
     foreach ($source in @(
         [ordered]@{ Path = $script:topologyRuntimePath; Label = 'support topology runtime' }
         [ordered]@{ Path = $script:hostNetworkPathHelperPath; Label = 'host network-path helper' }
@@ -239,11 +277,6 @@ function Assert-Ferrum2HostFinalState {
 }
 
 Export-ModuleMember -Function @(
-    'Invoke-Ferrum2HostControllerExtension'
+    'Invoke-Ferrum2QualificationHostController'
     'Initialize-Ferrum2HostHyperVModule'
-    'Resolve-Ferrum2HostInput'
-    'New-Ferrum2HostVmIdentity'
-    'Get-Ferrum2HostVmContext'
-    'Invoke-Ferrum2HostVmLifecycle'
-    'Connect-Ferrum2HostGuest'
 )

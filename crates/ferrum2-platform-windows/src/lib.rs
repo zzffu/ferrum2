@@ -4,27 +4,28 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
-const DLL_BYTES: u64 = 427_552;
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
-const DLL_SHA256: [u8; 32] = [
-    0xe5, 0xda, 0x84, 0x47, 0xdc, 0x2c, 0x32, 0x0e, 0xdc, 0x0f, 0xc5, 0x2f, 0xa0, 0x18, 0x85, 0xc1,
-    0x03, 0xde, 0x8c, 0x11, 0x84, 0x81, 0xf6, 0x83, 0x64, 0x3c, 0xac, 0xc3, 0x22, 0x0d, 0xaf, 0xce,
-];
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
-const ABI_EXPORTS: [&[u8]; 11] = [
-    b"WintunCreateAdapter\0",
-    b"WintunCloseAdapter\0",
-    b"WintunGetAdapterLUID\0",
-    b"WintunGetRunningDriverVersion\0",
-    b"WintunStartSession\0",
-    b"WintunEndSession\0",
-    b"WintunGetReadWaitEvent\0",
-    b"WintunReceivePacket\0",
-    b"WintunReleaseReceivePacket\0",
-    b"WintunAllocateSendPacket\0",
-    b"WintunSendPacket\0",
-];
+#[allow(dead_code)]
+mod artifact {
+    pub(crate) const DLL_BYTES: u64 = 427_552;
+    pub(crate) const DLL_SHA256: [u8; 32] = [
+        0xe5, 0xda, 0x84, 0x47, 0xdc, 0x2c, 0x32, 0x0e, 0xdc, 0x0f, 0xc5, 0x2f, 0xa0, 0x18, 0x85,
+        0xc1, 0x03, 0xde, 0x8c, 0x11, 0x84, 0x81, 0xf6, 0x83, 0x64, 0x3c, 0xac, 0xc3, 0x22, 0x0d,
+        0xaf, 0xce,
+    ];
+    pub(crate) const ABI_EXPORTS: [&[u8]; 11] = [
+        b"WintunCreateAdapter\0",
+        b"WintunCloseAdapter\0",
+        b"WintunGetAdapterLUID\0",
+        b"WintunGetRunningDriverVersion\0",
+        b"WintunStartSession\0",
+        b"WintunEndSession\0",
+        b"WintunGetReadWaitEvent\0",
+        b"WintunReceivePacket\0",
+        b"WintunReleaseReceivePacket\0",
+        b"WintunAllocateSendPacket\0",
+        b"WintunSendPacket\0",
+    ];
+}
 
 /// Result of handing one complete packet to the Wintun send ring.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,33 +257,32 @@ impl ManagedNetworkConfig {
         self.strict_route = enabled;
         self
     }
+}
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
+// These pure views stay available in fail-closed builds so capability selection remains a module
+// boundary rather than a collection of item-level feature predicates.
+#[allow(dead_code)]
+impl ManagedNetworkConfig {
     pub(crate) fn capture_routes(&self) -> &[IpPrefix] {
         &self.capture_routes
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) fn physical_endpoints(&self) -> &[SocketAddr] {
         &self.physical_endpoints
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn needs_target_binder(&self) -> bool {
         self.target_binder
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn ipv4_dns_address(&self) -> Option<Ipv4Addr> {
         self.ipv4_dns_address
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn ipv6_dns_address(&self) -> Option<Ipv6Addr> {
         self.ipv6_dns_address
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
     pub(crate) const fn strict_route(&self) -> bool {
         self.strict_route
     }
@@ -332,8 +332,10 @@ impl AdapterConfig {
         self.managed = Some(managed);
         Ok(self)
     }
+}
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(dead_code)]
+impl AdapterConfig {
     pub(crate) fn managed_network(&self) -> Option<&ManagedNetworkConfig> {
         self.managed.as_ref()
     }
@@ -372,18 +374,18 @@ impl Error {
     const fn invalid_input() -> Self {
         Self::new(ErrorKind::InvalidInput)
     }
+}
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(dead_code)]
+impl Error {
     pub(crate) const fn recoverable_session() -> Self {
         Self::new(ErrorKind::RecoverableSession)
     }
 
-    #[cfg(all(windows, target_arch = "x86_64"))]
     const fn unrecoverable_corruption() -> Self {
         Self::new(ErrorKind::UnrecoverableCorruption)
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     pub(crate) const fn cleanup() -> Self {
         Self::new(ErrorKind::Cleanup)
     }
@@ -391,8 +393,7 @@ impl Error {
 
 // Existing trust-boundary code uses this conservative redacted value for failures that are not
 // explicitly proven to be invalid input, a recoverable session end, or a cleanup failure.
-#[allow(non_upper_case_globals)]
-#[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(dead_code, non_upper_case_globals)]
 pub(crate) const Error: Error = Error::unrecoverable_corruption();
 
 /// Redacted adapter-creation failure that preserves only rollback integrity.
@@ -409,8 +410,10 @@ impl CreateError {
             strict_route_install_failed: false,
         }
     }
+}
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[allow(dead_code)]
+impl CreateError {
     pub(crate) const fn cleanup() -> Self {
         Self {
             cleanup_failed: true,
@@ -418,7 +421,6 @@ impl CreateError {
         }
     }
 
-    #[cfg(any(all(windows, target_arch = "x86_64"), test))]
     pub(crate) const fn strict_route_install(cleanup_failed: bool) -> Self {
         Self {
             cleanup_failed,
@@ -453,37 +455,52 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[cfg(any(all(windows, target_arch = "x86_64"), feature = "fuzzing"))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "fuzzing"
+))]
 mod strict_route;
 #[cfg(feature = "fuzzing")]
 pub use strict_route::{
     FUZZ_MAX_WFP_APP_ID_BYTES, StrictRouteRulePlanObservation, fuzz_strict_route_rule_plan,
 };
 
-#[cfg(all(windows, target_arch = "x86_64"))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    all(test, windows, target_arch = "x86_64")
+))]
 mod windows;
-#[cfg(all(windows, target_arch = "x86_64"))]
-pub use windows::{
-    Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkChangeMonitor,
-    WindowsNetworkInterfaceCatalog, WindowsResolvedSocketBinder, WorkSignal, bind_resolved_socket,
-};
+#[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
+use windows::backend;
 
-#[cfg(not(all(windows, target_arch = "x86_64")))]
-mod unsupported;
-#[cfg(not(all(windows, target_arch = "x86_64")))]
-pub use unsupported::{
+// Library tests always select the fail-closed hosted adapter. The live Windows backend is not
+// exported into a test crate, so a hosted test cannot reach adapter creation or network mutation
+// through the public interface.
+#[cfg(any(
+    test,
+    not(all(windows, target_arch = "x86_64", feature = "live-backend"))
+))]
+#[path = "unsupported.rs"]
+mod backend;
+
+pub use backend::{
     Adapter, ReceivedPacket, StopSignal, UnderlayPolicy, WindowsNetworkChangeMonitor,
     WindowsNetworkInterfaceCatalog, WindowsResolvedSocketBinder, WorkSignal,
 };
+
+#[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
+pub use backend::bind_resolved_socket;
 
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::time::Duration;
 
+    use super::artifact::{ABI_EXPORTS, DLL_BYTES, DLL_SHA256};
     use super::{
-        ABI_EXPORTS, AdapterConfig, CreateError, DLL_BYTES, DLL_SHA256, Error, ErrorKind, IpPrefix,
-        Ipv4Prefix, Ipv6Prefix, ManagedNetworkConfig, NetworkChangeWaitOutcome,
+        AdapterConfig, CreateError, Error, ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix,
+        ManagedNetworkConfig, NetworkChangeWaitOutcome,
     };
 
     #[test]
@@ -602,12 +619,11 @@ mod tests {
         .unwrap();
         assert_eq!(managed.clone().with_strict_route(false), managed);
         assert_ne!(managed.clone().with_strict_route(true), managed);
-        assert!(
-            make(Some(v4), Some(v6))
-                .unwrap()
-                .with_managed_network(managed.clone())
-                .is_ok()
-        );
+        let configured = make(Some(v4), Some(v6))
+            .unwrap()
+            .with_managed_network(managed.clone())
+            .unwrap();
+        assert_eq!(configured.managed_network(), Some(&managed));
         assert!(
             make(Some(v4), None)
                 .unwrap()

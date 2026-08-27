@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Ferrum2 is a Rust 2024 workspace pinned to Rust 1.97.1. Binaries live in `bins/ferrum2-client` and `bins/ferrum2-server`; shared networking, crypto, DNS, runtime, configuration, and TUN code lives in `crates/ferrum2-*`. Cross-binary qualification tests are in `tests/m0-harness`; crate integration tests use each crate's `tests/` directory. Cross-workspace stable inputs and vectors belong under `tests/fixtures/{config,crypto,dns-tls,sip022,srs}`. The TUN crate's reviewed packet corpus is intentionally crate-owned under `crates/ferrum2-tun/tests/fixtures/packets`, with separate fuzz seed sets under `crates/ferrum2-tun/fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}`. Platform qualification entry points, guest controllers, and their static contracts live in `tests/platform`; operator, topology-provisioning, and Windows TUN performance scripts live in `tools/windows-tun`. Performance-controller tests live in `tests/{performance_candidate,performance_rule}`; offline CI-controller tests live in `tests/ci`. Declarative workflow controllers live in `tools/ci`, and qualification tooling is in `tools/{ferrum2-m4-qualification,ferrum2-rule-qualification}`. `vendor/shadowsocks-crypto` is patched through the root manifest; treat it as reviewed third-party source. Each workspace package and major test/tool subtree has a scoped `AGENTS.md`; follow the nearest guide while retaining this guide.
+Ferrum2 is a Rust 2024 workspace pinned to Rust 1.97.1. Binaries live in `bins/ferrum2-client` and `bins/ferrum2-server`; shared networking, crypto, DNS, runtime, configuration, and TUN code lives in `crates/ferrum2-*`. Cross-binary qualification tests are in `tests/m0-harness`; crate integration tests use each crate's `tests/` directory. Cross-workspace stable inputs and vectors belong under `tests/fixtures/{config,crypto,dns-tls,sip022,srs}`. The TUN crate's reviewed packet corpus is intentionally crate-owned under `crates/ferrum2-tun/tests/fixtures/packets`, with separate fuzz seed sets under `crates/ferrum2-tun/fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}`. Platform qualification campaigns, guest controllers, and their static contracts live in `tests/platform`; neutral Windows TUN lab scripts live in `tools/windows-tun/lab`, and Windows TUN performance scripts live in `tools/windows-tun/performance`. Performance-controller tests live in `tests/{performance_candidate,performance_rule}`; offline CI-controller tests live in `tests/ci`. Declarative workflow controllers live in `tools/ci`, and qualification tooling is in `tools/{ferrum2-m4-qualification,ferrum2-rule-qualification}`. `vendor/shadowsocks-crypto` is patched through the root manifest; treat it as reviewed third-party source. Each workspace package and major test/tool subtree has a scoped `AGENTS.md`; follow the nearest guide while retaining this guide.
 
 ## Build, Test, and Development Commands
 
@@ -13,10 +13,10 @@ cargo build --workspace --bins --locked
 cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
 cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked
 cargo test -p ferrum2-client --all-features --no-run --locked
-cargo test -p ferrum2-tun --all-features --no-run --locked
-cargo test -p ferrum2-platform-windows --all-features --no-run --locked
+cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
+cargo test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
+cargo check -p ferrum2-tun -p ferrum2-platform-windows --all-features --locked
 cargo check -p ferrum2-tun --features fuzzing --target x86_64-unknown-linux-gnu --locked
-cargo test -p ferrum2-tun --lib --locked process::unsupported_target_tests::unsupported_target_fails_during_preparation -- --exact --nocapture
 cargo test -p ferrum2-dns --features __interop-test-root --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -43,12 +43,15 @@ the matching profile and target, for example on Windows:
 python -X utf8 tests/platform/qualify_native.py --local-contract --profile windows-msvc --target x86_64-pc-windows-msvc --client target/x86_64-pc-windows-msvc/release/ferrum2-client.exe --server target/x86_64-pc-windows-msvc/release/ferrum2-server.exe
 ```
 
-The client, TUN, and Windows platform test binaries are compile-only on ordinary hosts, except for the
-exact non-Windows unsupported-target preparation test listed above. Execute all other TUN tests, the
-deterministic TUN smoke corpus, and adapter/underlay qualification only inside the approved local
-Hyper-V guest. Sanitizer-backed, pure in-memory fuzz targets may run only in their bounded Linux CI
-campaign. `tests/platform/qualify_native.py --local-contract` may execute its unprivileged loopback
-binary contract locally; omitting `--local-contract` retains hosted-CI identity and evidence checks.
+The client test binary is compile-only on ordinary hosts. The hosted `ferrum2-tun` and
+`ferrum2-platform-windows` library suites are safe by contract: they use target-neutral logic,
+unsupported-target stubs, or injected Windows operations and run in ordinary Linux and hosted Windows
+CI. Tests that create a real adapter or mutate route, DNS, WFP, interface, or Hyper-V state do not
+belong in either hosted library suite; keep them in the approved local Hyper-V qualification runner.
+The deterministic TUN smoke corpus and sanitizer-backed, pure in-memory fuzz targets run only in their
+bounded Linux CI workflow. `tests/platform/qualify_native.py --local-contract` may execute its
+unprivileged loopback binary contract locally; omitting `--local-contract` retains hosted-CI identity
+and evidence checks.
 
 Use `cargo run -p ferrum2-client -- --help` (or `ferrum2-server`) for CLI help. Iterate with targeted tests, then run the full relevant gate.
 

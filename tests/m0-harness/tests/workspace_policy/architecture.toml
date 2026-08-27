@@ -39,10 +39,13 @@ package = "ferrum2-observability"
 allowed = []
 
 [unsafe_boundary]
-allow_declarations = 1
+allow_declarations = 2
 legacy_file = "crates/ferrum2-platform-windows/src/windows.rs"
 legacy_allowed = false
-ffi_subtree = "crates/ferrum2-platform-windows/src/windows/ffi"
+allowed_paths = [
+    "crates/ferrum2-platform-windows/src/windows/live",
+    "crates/ferrum2-platform-windows/src/windows/core/raw.rs",
+]
 
 [shared_dns_tls]
 root = "tests/fixtures/dns-tls"
@@ -146,28 +149,39 @@ milestone = "RT-04"
 [fuzz_impact]
 owner_paths = [
     ".gitattributes",
-    ".cargo/**",
+    ".cargo/config.toml",
     "Cargo.toml",
     "Cargo.lock",
-    "crates/ferrum2-tun/**",
-    "crates/ferrum2-config/**",
-    "crates/ferrum2-core/**",
-    "crates/ferrum2-crypto/**",
-    "crates/ferrum2-net/**",
-    "crates/ferrum2-rule/**",
-    "crates/ferrum2-runtime/**",
-    "crates/ferrum2-platform-windows/**",
-    "tests/platform/**",
-    "tools/powershell/**",
-    "tools/windows-tun/**",
-    "tools/windows_tun_hyperv_support_topology_plan.json",
-    "tools/windows_tun_performance_policy.json",
+    "rust-toolchain.toml",
+    "crates/ferrum2-config/Cargo.toml",
+    "crates/ferrum2-config/src/**",
+    "crates/ferrum2-core/Cargo.toml",
+    "crates/ferrum2-core/src/**",
+    "crates/ferrum2-crypto/Cargo.toml",
+    "crates/ferrum2-crypto/src/**",
+    "crates/ferrum2-net/Cargo.toml",
+    "crates/ferrum2-net/src/**",
+    "crates/ferrum2-rule/Cargo.toml",
+    "crates/ferrum2-rule/src/**",
+    "crates/ferrum2-runtime/Cargo.toml",
+    "crates/ferrum2-runtime/src/**",
+    "crates/ferrum2-platform-windows/Cargo.toml",
+    "crates/ferrum2-platform-windows/src/**",
+    "crates/ferrum2-tun/Cargo.toml",
+    "crates/ferrum2-tun/src/**",
+    "crates/ferrum2-tun/tests/fixtures/packets/**",
+    "crates/ferrum2-tun/fuzz/**",
     "tools/ci/__init__.py",
     "tools/ci/git_changes.py",
     "tools/ci/fuzz_contract.py",
     ".github/workflows/tun-fuzz-deterministic.yml",
-    "tests/m0-harness/tests/workspace_policy/**",
-    "vendor/shadowsocks-crypto/**",
+    "tests/m0-harness/tests/workspace_policy/architecture.toml",
+    "vendor/shadowsocks-crypto/Cargo.toml",
+    "vendor/shadowsocks-crypto/src/**",
+]
+documentation_exclusions = [
+    { pattern = "crates/ferrum2-tun/fuzz/*.md", kind = "markdown" },
+    { pattern = "crates/ferrum2-tun/fuzz/**/*.md", kind = "markdown" },
 ]
 
 [ci_required]

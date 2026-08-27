@@ -1,29 +1,30 @@
 function Get-BoundedWorkerManifestFields([string]$Schema) {
     switch ($Schema) {
-        "ferrum2.windows-tun.hyperv-host-run.v5" {
+        "ferrum2.windows-tun.hyperv-host-run.v7" {
             return @(
-                "schema", "status", "profile", "mode", "restart_cycles",
-                "network_reset_cycles", "run_token", "vm_name", "vm_id",
+                "schema", "status", "profile", "cycle_limit",
+                "release_milestones", "run_token", "vm_name", "vm_id",
                 "checkpoint_name", "checkpoint_id", "candidate_sha",
-                "identity_sha256", "controller_bundle_sha256", "staged_input_sha256",
+                "candidate_artifact_manifest_sha256", "identity_sha256",
+                "controller_bundle_sha256", "staged_input_sha256",
                 "topology_manifest_sha256", "topology_plan_sha256", "topology",
                 "guest_network_path_sha256", "guest_network_path",
                 "host_network_path_sha256", "support_listener",
                 "protected_host_tun", "topology_runtime_sha256",
                 "host_network_path_helper_sha256",
-                "guest_network_path_probe_sha256", "rust_version",
-                "fuzz_smoke_sha256", "fuzz_smoke_bytes", "guest_execution",
+                "guest_network_path_probe_sha256", "rust_version", "guest_execution",
                 "guest_build", "checkpoint_restored",
                 "support_listener_unchanged", "host_tun_unchanged",
                 "host_network_mutations", "started_utc", "finished_utc",
                 "final_vm_state", "evidence_files"
             )
         }
-        "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3" {
+        "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4" {
             return @(
                 "schema", "status", "mode", "run_token", "vm_name", "vm_id",
                 "checkpoint_name", "checkpoint_id", "topology", "support_listener",
-                "candidate_sha", "identity_sha256", "controller_sha256",
+                "candidate_sha", "candidate_artifact_manifest_sha256",
+                "identity_sha256", "controller_sha256",
                 "controller_bundle_sha256",
                 "guest_wrapper_sha256", "topology_runtime_sha256",
                 "host_network_path_helper_sha256",
@@ -310,21 +311,20 @@ function Test-BoundedWorkerManifestMinimum {
         "topology_runtime_sha256", "host_network_path_helper_sha256",
         "guest_network_path_probe_sha256"
     )
-    if ($ExpectedSchema -ceq "ferrum2.windows-tun.hyperv-host-run.v5") {
+    if ($ExpectedSchema -ceq "ferrum2.windows-tun.hyperv-host-run.v7") {
         $requiredShaFields += @(
-            "controller_bundle_sha256", "topology_manifest_sha256", "topology_plan_sha256"
+            "candidate_artifact_manifest_sha256", "controller_bundle_sha256",
+            "topology_manifest_sha256", "topology_plan_sha256"
         )
         if ($Document.profile -isnot [string] -or
             [string]::IsNullOrWhiteSpace([string]$Document.profile) -or
-            $Document.mode -isnot [string] -or
-            [string]::IsNullOrWhiteSpace([string]$Document.mode) -or
             $Document.support_listener_unchanged -isnot [bool] -or
             $Document.guest_execution -cne "host-built-precompiled-artifacts-only") {
             return $false
         }
         foreach ($name in @(
             "staged_input_sha256", "guest_network_path_sha256",
-            "host_network_path_sha256", "fuzz_smoke_sha256"
+            "host_network_path_sha256"
         )) {
             if ($null -ne $Document.$name -and
                 ($Document.$name -isnot [string] -or
@@ -332,11 +332,18 @@ function Test-BoundedWorkerManifestMinimum {
                 return $false
             }
         }
-        foreach ($name in @("restart_cycles", "network_reset_cycles", "fuzz_smoke_bytes")) {
-            if ($null -ne $Document.$name -and
-                -not (Test-BoundedWorkerJsonInteger $Document.$name)) {
-                return $false
-            }
+        if ($null -ne $Document.cycle_limit -and
+            (-not (Test-BoundedWorkerJsonInteger $Document.cycle_limit) -or
+                [long]$Document.cycle_limit -le 0)) {
+            return $false
+        }
+        $milestones = @($Document.release_milestones)
+        if (@($milestones | Where-Object {
+                -not (Test-BoundedWorkerJsonInteger $_) -or [long]$_ -le 0
+            }).Count -ne 0 -or
+            (($milestones | ForEach-Object { [long]$_ }) -join '|') -cne
+                ((@($milestones | ForEach-Object { [long]$_ } | Sort-Object -Unique)) -join '|')) {
+            return $false
         }
         foreach ($name in @("rust_version", "guest_build")) {
             if ($null -ne $Document.$name -and $Document.$name -isnot [string]) {
@@ -357,10 +364,6 @@ function Test-BoundedWorkerManifestMinimum {
                 $null -eq $Document.guest_network_path -or
                 $Document.host_network_path_sha256 -isnot [string] -or
                 [string]$Document.host_network_path_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                $Document.fuzz_smoke_sha256 -isnot [string] -or
-                [string]$Document.fuzz_smoke_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                -not (Test-BoundedWorkerJsonInteger $Document.fuzz_smoke_bytes) -or
-                [long]$Document.fuzz_smoke_bytes -le 0 -or
                 $Document.rust_version -isnot [string] -or
                 [string]$Document.rust_version -cnotmatch '^rustc 1\.97\.1 \(' -or
                 $Document.guest_build -isnot [string] -or
@@ -369,7 +372,10 @@ function Test-BoundedWorkerManifestMinimum {
             return $false
         }
     } else {
-        $requiredShaFields += @("controller_sha256", "controller_bundle_sha256")
+        $requiredShaFields += @(
+            "candidate_artifact_manifest_sha256", "controller_sha256",
+            "controller_bundle_sha256"
+        )
         if ($Document.mode -cne "hard-kill" -or
             $Document.guest_execution -cne "host-built-precompiled-artifacts-only" -or
             $Document.guest_build -isnot [string] -or
@@ -407,6 +413,7 @@ function Test-BoundedWorkerManifestMinimum {
     if ($ExpectedStatus -ceq "pass") {
         $criticalEvidence = @(
             [ordered]@{ path = "identity-ledger.json"; sha256 = [string]$Document.identity_sha256 },
+            [ordered]@{ path = "candidate-artifacts.json"; sha256 = [string]$Document.candidate_artifact_manifest_sha256 },
             [ordered]@{ path = "staged-input.json"; sha256 = [string]$Document.staged_input_sha256 },
             [ordered]@{ path = "topology-manifest.json"; sha256 = [string]$Document.topology.manifest_sha256 },
             [ordered]@{ path = "guest/export/identity-ledger.json"; sha256 = [string]$Document.identity_sha256 }
@@ -453,9 +460,9 @@ function Assert-BoundedWorkerPassManifestAndTerminal {
     $manifestText = Get-Content -LiteralPath $item.FullName -Raw -Encoding utf8
     $document = $manifestText | ConvertFrom-Json -Depth 10 -ErrorAction Stop
     $schema = if ($WorkerContract -ceq "Qualification") {
-        "ferrum2.windows-tun.hyperv-host-run.v5"
+        "ferrum2.windows-tun.hyperv-host-run.v7"
     } else {
-        "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3"
+        "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4"
     }
     $runToken = [string]$BoundParameters["RunToken"]
     $evidenceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $fullPath))
@@ -560,6 +567,7 @@ function Invoke-BoundedHyperVWorkerSupervisor {
     }
     $workerEnvironment.FERRUM2_HYPERV_WORKER_GATE = $workerGateName
     $workerAccepted = $false
+    $workerTerminal = $null
     $primaryFailure = $null
     $recoveryIssues = [Collections.Generic.List[string]]::new()
     try {
@@ -640,12 +648,8 @@ function Invoke-BoundedHyperVWorkerSupervisor {
             )
         }
         if ($null -eq $primaryFailure -and $recoveryIssues.Count -eq 0) {
-            try {
-                [Console]::Out.Write($result.Stdout)
-                $workerAccepted = $true
-            } catch {
-                $primaryFailure = $_
-            }
+            $workerTerminal = $workerLines[0]
+            $workerAccepted = $true
         }
         if (-not $workerAccepted) {
             if ($null -ne $CleanupAuthority) {
@@ -662,10 +666,10 @@ function Invoke-BoundedHyperVWorkerSupervisor {
                 try {
                     $failureManifestSchema = switch ($WorkerContract) {
                         "Qualification" {
-                            "ferrum2.windows-tun.hyperv-host-run.v5"
+                            "ferrum2.windows-tun.hyperv-host-run.v7"
                         }
                         "HardKill" {
-                            "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3"
+                            "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4"
                         }
                         default { "" }
                     }
@@ -695,6 +699,7 @@ function Invoke-BoundedHyperVWorkerSupervisor {
     if ($recoveryIssues.Count -ne 0) {
         throw "$Label supervisor recovery failed: $($recoveryIssues -join '; ')"
     }
+    return $workerTerminal
 }
 
 function Assert-BoundedHyperVInternalWorker {

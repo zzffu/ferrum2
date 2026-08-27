@@ -20,8 +20,15 @@ TARGET_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
 @dataclass(frozen=True)
+class ImpactExclusion:
+    pattern: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class FuzzContract:
     owner_paths: tuple[str, ...]
+    documentation_exclusions: tuple[ImpactExclusion, ...]
     targets: tuple[str, ...]
     seconds_per_target: int
 
@@ -48,6 +55,28 @@ def _string_list(value: object, field: str) -> tuple[str, ...]:
     return items
 
 
+def _documentation_exclusions(value: object) -> tuple[ImpactExclusion, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("fuzz_impact.documentation_exclusions must be an array")
+    exclusions: list[ImpactExclusion] = []
+    for index, item in enumerate(value):
+        field = f"fuzz_impact.documentation_exclusions[{index}]"
+        if not isinstance(item, dict) or set(item) != {"pattern", "kind"}:
+            raise ValueError(f"{field} must contain exactly pattern and kind")
+        pattern = item["pattern"]
+        kind = item["kind"]
+        if not isinstance(pattern, str) or not pattern or "\\" in pattern or ".." in pattern:
+            raise ValueError(f"{field}.pattern must be a normalized repository glob")
+        if kind != "markdown" or not pattern.endswith(".md"):
+            raise ValueError(f"{field} may only exclude typed Markdown paths")
+        exclusions.append(ImpactExclusion(pattern, kind))
+    if len({item.pattern for item in exclusions}) != len(exclusions):
+        raise ValueError("fuzz_impact.documentation_exclusions must not contain duplicates")
+    return tuple(exclusions)
+
+
 def load_contract(policy_path: Path) -> FuzzContract:
     with policy_path.open("rb") as source:
         policy = tomllib.load(source)
@@ -58,6 +87,9 @@ def load_contract(policy_path: Path) -> FuzzContract:
         raise ValueError("policy must define fuzz_impact and fuzz_campaign tables")
 
     owner_paths = _string_list(impact.get("owner_paths"), "fuzz_impact.owner_paths")
+    documentation_exclusions = _documentation_exclusions(
+        impact.get("documentation_exclusions")
+    )
     targets = _string_list(campaign.get("targets"), "fuzz_campaign.targets")
     if any(TARGET_NAME.fullmatch(target) is None for target in targets):
         raise ValueError("fuzz_campaign.targets contains an unsafe target name")
@@ -77,7 +109,7 @@ def load_contract(policy_path: Path) -> FuzzContract:
     if total_seconds != ONE_HOUR_SECONDS:
         raise ValueError("fuzz campaign total_seconds must be exactly 3600")
 
-    return FuzzContract(owner_paths, targets, seconds_per_target)
+    return FuzzContract(owner_paths, documentation_exclusions, targets, seconds_per_target)
 
 
 def classify_impact(
@@ -94,10 +126,16 @@ def classify_impact(
     )
     if not changes.complete:
         return ImpactDecision(True, 0, f"{changes.reason}; fuzz impact fails closed")
-    match_count = sum(
-        any(fnmatch.fnmatchcase(path, pattern) for pattern in contract.owner_paths)
-        for path in changes.paths
-    )
+    match_count = 0
+    for path in changes.paths:
+        owned = any(fnmatch.fnmatchcase(path, pattern) for pattern in contract.owner_paths)
+        documented = any(
+            exclusion.kind == "markdown"
+            and fnmatch.fnmatchcase(path, exclusion.pattern)
+            for exclusion in contract.documentation_exclusions
+        )
+        if owned and not documented:
+            match_count += 1
     if match_count:
         reason = f"{match_count} changed path(s) matched the reviewed owner ledger"
     else:

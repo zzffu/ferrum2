@@ -1,7 +1,8 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 $expectedFields = @(
     'entrypoint_path', 'repository_root', 'internal_worker', 'internal_worker_token',
-    'run_token', 'identity_ledger', 'topology_manifest_path', 'topology_manifest_sha256',
+    'run_token', 'identity_ledger', 'candidate_artifact_manifest',
+    'topology_manifest_path', 'topology_manifest_sha256',
     'support_tcp_port', 'support_udp_port', 'support_pid', 'support_owner', 'wintun_zip',
     'powershell_zip', 'evidence_directory', 'credential_path',
     'readiness_timeout_seconds', 'shutdown_timeout_seconds'
@@ -13,6 +14,7 @@ $InternalWorker = [bool]$Context.internal_worker
 $InternalWorkerToken = [string]$Context.internal_worker_token
 $RunToken = [string]$Context.run_token
 $IdentityLedger = [string]$Context.identity_ledger
+$CandidateArtifactManifest = [string]$Context.candidate_artifact_manifest
 $TopologyManifestPath = [string]$Context.topology_manifest_path
 $TopologyManifestSha256 = [string]$Context.topology_manifest_sha256
 $SupportTcpPort = [int]$Context.support_tcp_port
@@ -68,8 +70,8 @@ $topologyInitialization = Initialize-ApprovedHyperVTopology `
 $topologyDocument = $topologyInitialization.Document
 $approvedVmName = [string]$topologyDocument.Value.vm.name
 $approvedVmId = [Guid][string]$topologyDocument.Value.vm.id
-$approvedCheckpointName = [string]$topologyDocument.Value.qualification_checkpoint.name
-$approvedCheckpointId = [Guid][string]$topologyDocument.Value.qualification_checkpoint.id
+$approvedCheckpointName = [string]$topologyDocument.Value.lab_checkpoint.name
+$approvedCheckpointId = [Guid][string]$topologyDocument.Value.lab_checkpoint.id
 $topologyBinding = New-TopologyBinding $topologyDocument
 $initialTopologyState = [pscustomobject][ordered]@{
     Runtime = $topologyInitialization.Runtime
@@ -100,8 +102,7 @@ $guestWrapperPath = Resolve-BoundedFile `
     -Label "hard-kill guest wrapper" `
     -MaximumBytes 2097152
 $guestNetworkPathProbePath = Resolve-BoundedFile `
-    -Path (Join-Path $repositoryRoot `
-        "tools\windows-tun\get_windows_tun_guest_network_path.ps1") `
+    -Path $guestNetworkPathProbePath `
     -Label "guest network-path probe" `
     -MaximumBytes 1048576
 Assert-True (
@@ -125,6 +126,18 @@ Assert-ExactObjectFields `
     -Actual $ledgerIdentity.Ledger.support_listener `
     -Fields $supportListenerPropertyNames `
     -Label "identity ledger support listener"
+$candidateArtifacts = $null
+if ($InternalWorker) {
+    if ([string]::IsNullOrWhiteSpace($CandidateArtifactManifest)) {
+        throw "hard-kill internal worker candidate artifact manifest is required"
+    }
+    $candidateArtifacts = Read-Ferrum2CandidateArtifactBundle `
+        -ManifestPath $CandidateArtifactManifest `
+        -CandidateSha $candidate.Sha `
+        -Ledger $ledgerIdentity.Ledger
+} elseif (-not [string]::IsNullOrWhiteSpace($CandidateArtifactManifest)) {
+    throw "hard-kill candidate artifact manifest is reserved for the internal worker"
+}
 $wintunPath = Resolve-BoundedFile `
     -Path $WintunZip `
     -Label "Wintun archive" `
@@ -175,26 +188,79 @@ $guestCredential = Import-ApprovedGuestCredential -Path $CredentialPath
 # hang cannot prevent exact-GUID Stop -> Restore -> Stop cleanup.
 if (-not $InternalWorker) {
     $supervisorCleanupAuthority = New-ApprovedVmCleanupAuthority -Context $baselineContext
-    Invoke-BoundedHyperVWorkerSupervisor `
-        -ScriptPath $entryPointPath `
-        -BoundParameters $PSBoundParameters `
-        -ForwardedParameterNames @(
-            "RunToken", "IdentityLedger", "TopologyManifestPath",
-            "TopologyManifestSha256", "SupportTcpPort", "SupportUdpPort",
-            "SupportPid", "SupportOwner", "WintunZip", "PowerShellZip",
-            "EvidenceDirectory", "CredentialPath", "ReadinessTimeoutSeconds",
-            "ShutdownTimeoutSeconds"
-        ) `
-        -WorkerTimeoutSeconds 7200 `
-        -ShutdownTimeoutSeconds $ShutdownTimeoutSeconds `
-        -ExpectedVmId $approvedVmId `
-        -ExpectedVmName $approvedVmName `
-        -ExpectedFinalState "Off" `
-        -CleanupAuthority $supervisorCleanupAuthority `
-        -CleanupMode "RestoreCheckpoint" `
-        -WorkerContract "HardKill" `
-        -FailureManifestPath (Join-Path $hostEvidencePath "host-orchestration.json") `
-        -Label "Windows TUN hard kill worker"
+    $artifactTemporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+    $artifactTemporaryRoot = Join-Path $artifactTemporaryBase (
+        "ferrum2-hard-kill-candidate-" + [Guid]::NewGuid().ToString("N")
+    )
+    $preparedArtifacts = $null
+    $workerTerminal = $null
+    try {
+        $preparedArtifacts = Build-Ferrum2CandidateArtifactBundle `
+            -Destination (Join-Path $artifactTemporaryRoot "candidate") `
+            -CandidateSha $candidate.Sha `
+            -Ledger $ledgerIdentity.Ledger
+        $workerParameters = [ordered]@{
+            RunToken = $RunToken
+            IdentityLedger = $IdentityLedger
+            CandidateArtifactManifest = $preparedArtifacts.ManifestPath
+            TopologyManifestPath = $TopologyManifestPath
+            TopologyManifestSha256 = $TopologyManifestSha256
+            SupportTcpPort = $SupportTcpPort
+            SupportUdpPort = $SupportUdpPort
+            SupportPid = $SupportPid
+            SupportOwner = $SupportOwner
+            WintunZip = $WintunZip
+            ReadinessTimeoutSeconds = $ReadinessTimeoutSeconds
+            ShutdownTimeoutSeconds = $ShutdownTimeoutSeconds
+        }
+        if (-not [string]::IsNullOrWhiteSpace($PowerShellZip)) {
+            $workerParameters.PowerShellZip = $PowerShellZip
+        }
+        if (-not [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
+            $workerParameters.EvidenceDirectory = $EvidenceDirectory
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CredentialPath)) {
+            $workerParameters.CredentialPath = $CredentialPath
+        }
+        $workerTerminal = Invoke-BoundedHyperVWorkerSupervisor `
+            -ScriptPath $entryPointPath `
+            -BoundParameters $workerParameters `
+            -ForwardedParameterNames @(
+                "RunToken", "IdentityLedger", "CandidateArtifactManifest",
+                "TopologyManifestPath", "TopologyManifestSha256", "SupportTcpPort",
+                "SupportUdpPort", "SupportPid", "SupportOwner", "WintunZip",
+                "PowerShellZip", "EvidenceDirectory", "CredentialPath",
+                "ReadinessTimeoutSeconds", "ShutdownTimeoutSeconds"
+            ) `
+            -WorkerTimeoutSeconds 7200 `
+            -ShutdownTimeoutSeconds $ShutdownTimeoutSeconds `
+            -ExpectedVmId $approvedVmId `
+            -ExpectedVmName $approvedVmName `
+            -ExpectedFinalState "Off" `
+            -CleanupAuthority $supervisorCleanupAuthority `
+            -CleanupMode "RestoreCheckpoint" `
+            -WorkerContract "HardKill" `
+            -FailureManifestPath (Join-Path $hostEvidencePath "host-orchestration.json") `
+            -Label "Windows TUN hard kill worker"
+    } finally {
+        if (Test-Path -LiteralPath $artifactTemporaryRoot) {
+            $resolvedArtifactRoot = (Resolve-Path -LiteralPath $artifactTemporaryRoot `
+                -ErrorAction Stop).Path
+            if (-not $resolvedArtifactRoot.StartsWith(
+                    $artifactTemporaryBase + [IO.Path]::DirectorySeparatorChar,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [IO.Path]::GetFileName($resolvedArtifactRoot) -cnotmatch
+                    '^ferrum2-hard-kill-candidate-[0-9a-f]{32}$') {
+                throw "hard-kill candidate artifact cleanup boundary is invalid"
+            }
+            Assert-NoReparsePointInExistingPath `
+                -Path $resolvedArtifactRoot `
+                -Label "hard-kill candidate artifact cleanup"
+            Remove-Item -LiteralPath $resolvedArtifactRoot -Recurse -Force -ErrorAction Stop
+        }
+    }
+    Write-Output $workerTerminal
     return
 }
 
@@ -203,7 +269,6 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     "ferrum2-hard-kill-hyperv-" + [Guid]::NewGuid().ToString("N")
 )
 $temporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-$hostArtifactRoot = Join-Path $temporaryRoot "artifacts"
 $hostRuntimeLibraryRoot = Join-Path $temporaryRoot "vc-runtime"
 $hostPowerShellArchive = Join-Path $temporaryRoot "portable-pwsh.zip"
 $stagedInputManifestPath = Join-Path $temporaryRoot "staged-input.json"
@@ -216,7 +281,6 @@ $cleanupAuthority = $null
 $checkpointRestored = $false
 $runFailure = $null
 $finalizationFailures = [Collections.Generic.List[string]]::new()
-$candidateArtifacts = $null
 $portablePowerShell = $null
 $runtimeLibraries = @()
 $stagedInputSha256 = $null
@@ -332,7 +396,7 @@ try {
             ($hostEvidenceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
         ) "mandatory hard-kill evidence root is invalid"
         $manifest = [ordered]@{
-            schema = "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3"
+            schema = "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4"
             status = $status
             mode = "hard-kill"
             run_token = $RunToken
@@ -343,6 +407,7 @@ try {
             topology = $topologyBinding
             support_listener = $supportListenerBinding
             candidate_sha = $candidate.Sha
+            candidate_artifact_manifest_sha256 = $candidateArtifacts.ManifestSha256
             identity_sha256 = $ledgerIdentity.Sha256
             controller_sha256 = [string]$ledgerIdentity.Ledger.probe_sha256
             controller_bundle_sha256 = [string]$ledgerIdentity.Ledger.controller_bundle_sha256
@@ -357,11 +422,7 @@ try {
             guest_network_path_probe_sha256 =
                 [string]$topologyInitialization.GuestNetworkPathProbeSha256
             staged_input_sha256 = $stagedInputSha256
-            rust_version = if ($null -eq $candidateArtifacts) {
-                $null
-            } else {
-                $candidateArtifacts.RustVersion
-            }
+            rust_version = $candidateArtifacts.RustVersion
             guest_execution = "host-built-precompiled-artifacts-only"
             guest_build = [string]$ledgerIdentity.Ledger.guest_build
             checkpoint_restored = [bool]$checkpointRestored

@@ -139,6 +139,23 @@ def _sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _resolve_closed_member(
+    root: pathlib.Path, parts: tuple[str, ...], *, label: str
+) -> pathlib.Path:
+    closed_root = root.resolve(strict=True)
+    source = closed_root
+    for part in parts:
+        source /= part
+        if source.is_symlink():
+            raise CandidateControlError(f"{label} path is unsafe")
+    try:
+        resolved = source.resolve(strict=True)
+        resolved.relative_to(closed_root)
+    except (OSError, ValueError):
+        raise CandidateControlError(f"{label} path is unsafe") from None
+    return resolved
+
+
 def network_model_bundle_path() -> pathlib.Path:
     return pathlib.Path(__file__).with_name("network_model_bundle.json")
 
@@ -149,6 +166,7 @@ def source_paths() -> dict[str, pathlib.Path]:
         "runner": root
         / "tools"
         / "windows-tun"
+        / "performance"
         / "run_windows_tun_performance_hyperv.ps1",
         "performance_bundle": root
         / "tools"
@@ -159,22 +177,27 @@ def source_paths() -> dict[str, pathlib.Path]:
         "topology_runtime": root
         / "tools"
         / "windows-tun"
+        / "lab"
         / "windows_tun_hyperv_support_topology_runtime.ps1",
         "host_network_path": root
         / "tools"
         / "windows-tun"
+        / "lab"
         / "windows_tun_host_network_path.ps1",
         "guest_network_path": root
         / "tools"
         / "windows-tun"
+        / "lab"
         / "get_windows_tun_guest_network_path.ps1",
         "collector": root
         / "tools"
         / "windows-tun"
+        / "performance"
         / "collect_windows_tun_performance_trial.ps1",
         "diagnostic_collector": root
         / "tools"
         / "windows-tun"
+        / "performance"
         / "collect_windows_tun_udp_boundary_diagnostic.ps1",
         "harness": root
         / "tools"
@@ -310,19 +333,9 @@ def _m4_windows_tun_bundle_sha256(manifest_path: pathlib.Path) -> str:
     bundle_root = manifest_path.parent.resolve(strict=True)
     resolved_sources: dict[str, pathlib.Path] = {}
     for relative, (_, parts) in entries.items():
-        source = bundle_root
-        for part in parts:
-            source /= part
-            if source.is_symlink():
-                raise CandidateControlError("M4 Windows TUN bundle file path is unsafe")
-        try:
-            resolved = source.resolve(strict=True)
-            resolved.relative_to(bundle_root)
-        except (OSError, ValueError):
-            raise CandidateControlError(
-                "M4 Windows TUN bundle file path is unsafe"
-            ) from None
-        resolved_sources[relative] = resolved
+        resolved_sources[relative] = _resolve_closed_member(
+            bundle_root, parts, label="M4 Windows TUN bundle file"
+        )
 
     for relative, (entry, _) in entries.items():
         source = resolved_sources[relative]
@@ -359,7 +372,7 @@ def performance_source_bundle_sha256() -> str:
         manifest["schema_version"] != 1
         or manifest["kind"] != "ferrum2.windows-tun-performance-source-bundle.v1"
         or manifest["entrypoint"]
-        != "tools/windows-tun/run_windows_tun_performance_hyperv.ps1"
+        != "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1"
         or type(manifest["files"]) is not list
     ):
         raise CandidateControlError("performance source bundle identity is invalid")
@@ -376,8 +389,12 @@ def performance_source_bundle_sha256() -> str:
             or relative in observed
         ):
             raise CandidateControlError("performance source bundle path is unsafe")
-        source = root / pathlib.PurePosixPath(relative)
-        if not source.is_file() or source.is_symlink():
+        source = _resolve_closed_member(
+            root,
+            tuple(pathlib.PurePosixPath(relative).parts),
+            label="performance source bundle file",
+        )
+        if not source.is_file():
             raise CandidateControlError("performance source bundle file set is invalid")
         if (
             type(entry["bytes"]) is not int
@@ -392,23 +409,19 @@ def performance_source_bundle_sha256() -> str:
             )
         observed.add(relative)
     expected = {
-        "tools/windows-tun/run_windows_tun_performance_hyperv.ps1",
-        "tools/windows-tun/collect_windows_tun_performance_trial.ps1",
-        "tools/windows-tun/collect_windows_tun_udp_boundary_diagnostic.ps1",
-        "tools/powershell/Ferrum2.Qualification.Common/BundleBootstrap.ps1",
-        "tools/powershell/Ferrum2.Qualification.Common/Ferrum2.Qualification.Common.psd1",
-        "tools/powershell/Ferrum2.Qualification.Common/Ferrum2.Qualification.Common.psm1",
-        "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psd1",
-        "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psm1",
-        "tools/powershell/Ferrum2.Qualification.HostHyperV/Ferrum2.Qualification.HostHyperV.psd1",
-        "tools/powershell/Ferrum2.Qualification.HostHyperV/Ferrum2.Qualification.HostHyperV.psm1",
-        *{
-            f"tools/powershell/Ferrum2.Qualification.HostHyperV/private/{name}"
-            for name in (
-                "Artifacts.ps1", "Evidence.ps1", "Facade.ps1", "Manifest.ps1",
-                "Paths.ps1", "Process.ps1", "VmTransaction.ps1",
-            )
-        },
+        "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
+        "tools/windows-tun/performance/collect_windows_tun_performance_trial.ps1",
+        "tools/windows-tun/performance/collect_windows_tun_udp_boundary_diagnostic.ps1",
+        "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
+        "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1",
+        "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psm1",
+        "tools/powershell/Ferrum2.WindowsTun.Lab/private/BundleFileSystem.ps1",
+        "tools/powershell/Ferrum2.WindowsTun.Lab/private/JsonSource.ps1",
+        "tools/powershell/Ferrum2.WindowsTun.Lab/private/VmSession.ps1",
+        "tools/windows-tun/lab/get_windows_tun_guest_network_path.ps1",
+        "tools/windows-tun/lab/windows_tun_host_network_path.ps1",
+        "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
+        "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
         *{
             f"tools/powershell/Ferrum2.Performance/{name}"
             for name in (

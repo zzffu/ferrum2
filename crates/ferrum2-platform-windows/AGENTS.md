@@ -6,7 +6,16 @@ This file refines the repository-level `AGENTS.md` for this crate.
 
 `ferrum2-platform-windows` is the Windows x86_64 trust boundary for Wintun loading, adapter/session ownership, managed network state, underlay binding, packet I/O, and teardown. Its only internal Ferrum2 dependency is the platform-neutral `ferrum2-net`; runtime, DNS, configuration, RuleSet, and TUN orchestration must remain callers. Non-Windows implementations are fail-closed stubs; keep their API aligned without simulating success.
 
-The crate denies unsafe code globally and grants one reviewed exception to `src/windows/ffi/mod.rs`. Do not broaden it. Every unsafe block must make its FFI, pointer-length, aliasing, callback-lifetime, thread-safety, byte-order, or handle-ownership invariant evident. Use RAII for handles, session state, and received packets; `EndSession` must not overlap an active wait.
+`src/windows/core` owns pure and injected contracts, grouped by loader, managed state, network,
+notification, strict-route, and session concepts. `src/windows/live` is the only concrete backend;
+the Windows root must not grow parallel concept modules or glob-reexport a second ownership surface.
+
+The crate denies unsafe code globally and grants two exact reviewed boundaries: `src/windows/live`
+owns every real Win32/Wintun call, while `src/windows/core/raw.rs` contains only safe wrappers around
+Windows union and row-layout access used by core logic and hosted tests. Do not add unsafe
+code anywhere else or widen either allowance. Every unsafe block must make its FFI, pointer-length,
+aliasing, callback-lifetime, thread-safety, byte-order, or handle-ownership invariant evident. Use
+RAII for handles, session state, and received packets; `EndSession` must not overlap an active wait.
 
 DLL loading is security-sensitive. Preserve rejection of network/reparse paths, held directory/file identity, the pinned DLL size and SHA-256, System32-scoped dependency loading, and the required export set. Pin changes require reviewed provenance. Platform errors stay redacted; never retain paths, identities, Win32 messages, or network data.
 
@@ -22,13 +31,19 @@ explicit drop outcome without retry or session failure.
 
 ## Focused Verification
 
-Run on Windows x86_64:
+Run on ordinary Linux or Windows x86_64:
 
 ```text
-cargo test -p ferrum2-platform-windows --locked --no-run
+cargo test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
+cargo check -p ferrum2-platform-windows --all-features --locked
 ```
 
-Execute every Wintun/WFP test and live adapter profile only in the pinned local Hyper-V guest;
-ordinary injected-operation tests do not prove live-driver behavior. The local qualification runner
-must restore the approved checkpoint, stage host-built artifacts, export evidence, restore the same
-checkpoint again, and leave the VM Off. CI must not claim privileged TUN evidence.
+The explicit no-default-feature library suite is hosted-safe on ordinary Linux and hosted Windows. Linux exercises
+target-neutral logic and unsupported-target behavior; hosted Windows additionally exercises injected
+operation seams. `live-backend` is the positive production capability and remains enabled by default
+and by `--all-features`; hosted test commands must disable default features so the live Windows module
+is absent from their dependency graph. Tests must not call `Adapter::create` or invoke route, address, DNS, WFP, interface,
+or Hyper-V mutators. Live Wintun/WFP behavior and adapter profiles run only in the pinned local
+Hyper-V guest. The local qualification runner must restore the approved checkpoint, stage host-built
+artifacts, export evidence, restore the same checkpoint again, and leave the VM Off. Hosted unit tests
+prove transaction semantics, not live-driver behavior; CI must not claim privileged TUN evidence.

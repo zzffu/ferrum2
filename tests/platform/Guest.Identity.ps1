@@ -39,13 +39,9 @@ function Get-RequiredJsonStrings([string]$Json, [string[]]$Names, [string]$Label
 }
 
 function Get-ControllerWorkPaths {
-    $paths = @(
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m15-tun-$script:runIdentity"
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-network-$script:runIdentity"
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m16-product-$script:runIdentity"
-        Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-tun-$script:runIdentity"
-    )
-    return @($paths | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\', '/') })
+    return @([IO.Path]::GetFullPath(
+        (Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-tun-$script:runIdentity")
+    ).TrimEnd('\', '/'))
 }
 
 function Assert-ClosedJsonProperties([object]$Object, [string[]]$Expected, [string]$Label) {
@@ -129,14 +125,11 @@ function Write-RunIdentityJournal {
     $workPath = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
     $siblingPath = [IO.Path]::GetFullPath($script:siblingDll).TrimEnd('\', '/')
     $controllerPath = (Resolve-Path -LiteralPath $PSCommandPath).Path
-    $serverRequired = $script:Mode -in @(
-        "tcp", "tcp08", "udp", "full", "performance", "network-reset", "restart-stress",
-        "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
-    )
+    $serverRequired = $true
     $document = [ordered]@{
         schema = "ferrum2.windows-tun.cleanup-identity.v2"
         run_token = $script:runIdentity
-        mode = $script:Mode
+        profile = $script:Profile
         identity_sha256 = (Get-FileHash -LiteralPath $script:identityMarker -Algorithm SHA256).Hash.ToLowerInvariant()
         work_path = $workPath
         product_root = $productRoot
@@ -169,7 +162,7 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     Assert-True ($item.Length -gt 0 -and $item.Length -le 65536) "run identity journal size is invalid"
     $document = Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -Depth 4 -ErrorAction Stop
     Assert-ClosedJsonProperties $document @(
-        "schema", "run_token", "mode", "identity_sha256", "work_path", "product_root",
+        "schema", "run_token", "profile", "identity_sha256", "work_path", "product_root",
         "client_binary_path", "client_binary_sha256", "client_binary_explicit",
         "server_binary_path", "server_binary_sha256", "server_binary_explicit", "server_required",
         "sibling_dll_path", "dll_ownership", "dll_marker_path", "expected_dll_sha256",
@@ -177,11 +170,10 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     ) "run identity journal"
     Assert-True ($document.schema -ceq "ferrum2.windows-tun.cleanup-identity.v2" -and
         $document.run_token -ceq $script:runIdentity) "run identity journal schema/token mismatch"
-    Assert-True ($document.mode -in @(
-        "lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance",
-        "network-feasibility", "managed-product", "hard-kill", "network-reset",
-        "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
-    )) "run identity journal mode is invalid"
+    Assert-True ($document.profile -in @(
+        "hard-kill", "network-reset", "restart-stress", "fragments", "dual-stack-dns",
+        "udp-policy", "scheduler-ring-full"
+    )) "run identity journal profile is invalid"
     Assert-True ([string]$document.identity_sha256 -cmatch '^[0-9a-f]{64}$') "run identity journal hash is invalid"
     $workPath = Get-CanonicalJournalPath ([string]$document.work_path) "journal work_path"
     Assert-True (@($ExpectedWorks | Where-Object { $_.Equals($workPath, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) "run identity journal work path is outside the token scope"
@@ -202,11 +194,8 @@ function Read-RunIdentityJournal([string]$Path, [string[]]$ExpectedWorks) {
     }
     Assert-True ($document.client_binary_explicit -is [bool] -and
         $document.server_binary_explicit -is [bool] -and $document.server_required -is [bool]) "run identity journal boolean field is invalid"
-    $expectedServerRequired = $document.mode -in @(
-        "tcp", "tcp08", "udp", "full", "performance", "network-reset", "restart-stress",
-        "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full"
-    )
-    Assert-True ($document.server_required -eq $expectedServerRequired) "run identity journal server requirement is inconsistent with mode"
+    $expectedServerRequired = $true
+    Assert-True ($document.server_required -eq $expectedServerRequired) "run identity journal server requirement is inconsistent"
     if (-not $document.client_binary_explicit) {
         Assert-True ($clientPath.Equals((Join-Path $productRoot "target\debug\ferrum2-client.exe"), [StringComparison]::OrdinalIgnoreCase)) "default client path escaped product root"
     } else {
@@ -333,7 +322,7 @@ function Read-M17MutationIntent(
     [string]$Schema,
     [string[]]$Properties,
     [string]$ExpectedWorkPath = $script:work,
-    [string[]]$ExpectedSourceMode = @("network-reset")
+    [string[]]$ExpectedSourceProfile = @("network-reset")
 ) {
     Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "M17 mutation intent is missing"
     Assert-NotReparsePoint $Path "M17 mutation intent"
@@ -346,7 +335,7 @@ function Read-M17MutationIntent(
         ConvertFrom-Json -Depth 4 -ErrorAction Stop
     Assert-ClosedJsonProperties $document $Properties "M17 mutation intent"
     Assert-True ($document.schema -ceq $Schema -and $document.run_token -ceq $script:runIdentity -and
-        $ExpectedSourceMode -ccontains [string]$document.source_mode -and
+        $ExpectedSourceProfile -ccontains [string]$document.source_profile -and
         (Get-CanonicalJournalPath ([string]$document.work_path) "M17 mutation intent work_path").Equals(
             (Get-CanonicalJournalPath $ExpectedWorkPath "M17 expected mutation work_path"),
             [StringComparison]::OrdinalIgnoreCase
@@ -360,7 +349,7 @@ function Read-M17UdpFirewallMutationIntent(
     [string]$JournalPath = $script:m17NetworkMutationJournal
 ) {
     $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-udp-firewall-intent.v1" @(
-        "schema", "run_token", "source_mode", "work_path", "rule_name",
+        "schema", "run_token", "source_profile", "work_path", "rule_name",
         "local_address", "remote_address", "protocol", "direction", "action",
         "local_only_mapping", "program_path"
     ) $ExpectedWorkPath @("udp-policy", "scheduler-ring-full")
@@ -388,7 +377,7 @@ function Read-M17NetworkResetRouteMutationIntent(
     [string]$JournalPath = $script:m17NetworkMutationJournal
 ) {
     $document = Read-M17MutationIntent $Path "ferrum2.windows-tun.m17-network-reset-route-intent.v2" @(
-        "schema", "run_token", "source_mode", "work_path", "interface_index",
+        "schema", "run_token", "source_profile", "work_path", "interface_index",
         "destination_prefix", "next_hop", "route_metrics"
     ) $ExpectedWorkPath @("network-reset")
     $expectedPath = Get-M17NetworkResetRouteIntentPath $JournalPath
@@ -434,13 +423,13 @@ function Get-M17OwnedUdpFirewallRule([object]$Intent) {
 }
 
 function Enable-M17UdpFirewallAdmission {
-    Assert-True (@("udp-policy", "scheduler-ring-full") -ccontains $script:Mode) "M17 UDP firewall exception is restricted to UDP live modes"
+    Assert-True (@("udp-policy", "scheduler-ring-full") -ccontains $script:Profile) "M17 UDP firewall exception is restricted to UDP profiles"
     Assert-True (-not (Get-NetFirewallRule -Name $script:m17UdpFirewallRuleName -PolicyStore ActiveStore -ErrorAction SilentlyContinue)) "M17 UDP firewall rule baseline is not absent"
     $intentPath = Join-Path $script:m17NetworkMutationJournal "udp-firewall.json"
     Write-M17DurableMutationIntent $intentPath ([ordered]@{
         schema = "ferrum2.windows-tun.m17-udp-firewall-intent.v1"
         run_token = $script:runIdentity
-        source_mode = $script:Mode
+        source_profile = $script:Profile
         work_path = [IO.Path]::GetFullPath($script:work).TrimEnd('\', '/')
         rule_name = $script:m17UdpFirewallRuleName
         local_address = "198.18.0.2"

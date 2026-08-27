@@ -39,7 +39,7 @@ impl ResolvedSocketBinder for WindowsResolvedSocketBinder {
 }
 
 /// Fail-closed placeholder for the Windows read-only network catalog.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct WindowsNetworkInterfaceCatalog {
     managed_tun: Option<(u64, u32)>,
 }
@@ -172,6 +172,24 @@ impl Clone for WorkSignal {
 }
 
 impl UnderlayPolicy {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub fn bind_fixed<T: std::os::windows::io::AsRawSocket>(
+        &self,
+        _: &T,
+        _: std::net::SocketAddr,
+    ) -> Result<(), Error> {
+        Err(UNSUPPORTED)
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    pub fn bind_target<T: std::os::windows::io::AsRawSocket>(
+        &self,
+        _: &T,
+        _: std::net::SocketAddr,
+    ) -> Result<(), Error> {
+        Err(UNSUPPORTED)
+    }
+
     pub fn generation_is_current(&self) -> bool {
         false
     }

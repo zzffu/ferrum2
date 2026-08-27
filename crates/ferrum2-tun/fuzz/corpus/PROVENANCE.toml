@@ -6,7 +6,7 @@ source = "independently selected bounded state selectors and descriptive ASCII p
 source_license = "GPL-3.0-only"
 external_bytes = "none"
 consumer = "crates/ferrum2-tun/fuzz/src/bin/smoke.rs and matching libFuzzer targets"
-execution_boundary = "deterministic smoke executes only in the approved Hyper-V guest; hosted Linux CI may run sanitizer-backed libFuzzer campaigns against pure in-memory targets without TUN, Hyper-V, privileged networking, or adapter qualification"
+execution_boundary = "hosted Linux CI executes the deterministic smoke corpus and sanitizer-backed libFuzzer campaigns only against pure in-memory targets without TUN, Hyper-V, privileged networking, or adapter qualification"
 
 [[seeds]]
 path = "corpus/config_legacy_fields/client-route-target.seed"

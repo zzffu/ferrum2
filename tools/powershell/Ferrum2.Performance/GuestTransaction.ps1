@@ -90,9 +90,7 @@ if ($CanonicalSourceIpv4 -cne "198.18.0.2" -or
 }
 $controllerBundleRoot = Join-Path $InputRoot "controller"
 $controllerBundleManifestPath = Join-Path $InputRoot "controller-bundle.json"
-$controllerEvidenceModule = Join-Path $controllerBundleRoot `
-    "modules\Ferrum2.Qualification.Evidence\Ferrum2.Qualification.Evidence.psd1"
-$bootstrapRelative = "modules/Ferrum2.Qualification.Common/BundleBootstrap.ps1"
+$bootstrapRelative = "modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1"
 $bootstrapManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
     -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
 $bootstrapEntry = @($bootstrapManifest.files | Where-Object {
@@ -108,7 +106,6 @@ if ($bootstrapEntry.Count -ne 1 -or
 . $bootstrapPath
 $controllerBundleManifest = Assert-Ferrum2BootstrapControllerBundle `
     -ManifestPath $controllerBundleManifestPath -BundleRoot $controllerBundleRoot
-Import-Module $controllerEvidenceModule -Scope Local -Force -ErrorAction Stop
 if ([string]$controllerBundleManifest.controller_bundle_sha256 -cne
         $ControllerBundleSha256) {
     throw "guest performance controller bundle identity changed"

@@ -8,13 +8,8 @@
     PowerShellVersion = '7.4'
     CompatiblePSEditions = @('Core')
     FunctionsToExport = @(
-        'Invoke-Ferrum2HostControllerExtension'
+        'Invoke-Ferrum2QualificationHostController'
         'Initialize-Ferrum2HostHyperVModule'
-        'Resolve-Ferrum2HostInput'
-        'New-Ferrum2HostVmIdentity'
-        'Get-Ferrum2HostVmContext'
-        'Invoke-Ferrum2HostVmLifecycle'
-        'Connect-Ferrum2HostGuest'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

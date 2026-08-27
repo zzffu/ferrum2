@@ -10,6 +10,7 @@ if ($instrumentedDiagnosticMode) {
         throw "exported UDP diagnostic evidence roots are incomplete"
     }
     $supportFinalContext = Get-HostSupportContext `
+        -RepositoryRoot $repositoryRoot `
         -TopologyDocument $topologyManifestDocument `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
         -ProcessId $SupportPid -ProcessOwner $SupportOwner `

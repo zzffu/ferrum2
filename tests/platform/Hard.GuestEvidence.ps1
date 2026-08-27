@@ -13,9 +13,9 @@ function Read-StagedTopologyManifest([string]$Path, [object]$Manifest) {
     Assert-NoDuplicateJsonProperties $text "support topology manifest"
     $topologyManifest = $text | ConvertFrom-Json -Depth 12 -ErrorAction Stop
     Assert-ClosedProperties $topologyManifest @(
-        "schema", "created_utc", "topology_plan_sha256", "inspector_sha256",
-        "provisioning_library_sha256", "provisioning_script_sha256", "vm",
-        "source_checkpoint", "qualification_checkpoint", "management_adapter", "support",
+        "schema", "created_utc", "topology_plan_sha256",
+        "provisioning_source_manifest_sha256", "provisioning_source_bundle_sha256", "vm",
+        "source_checkpoint", "lab_checkpoint", "management_adapter", "support",
         "protected_host_tun", "constraints"
     ) "support topology manifest"
     Assert-ClosedProperties $topologyManifest.vm @(
@@ -24,10 +24,10 @@ function Read-StagedTopologyManifest([string]$Path, [object]$Manifest) {
     Assert-ClosedProperties $topologyManifest.source_checkpoint @(
         "name", "id", "type"
     ) "support topology manifest source checkpoint"
-    Assert-ClosedProperties $topologyManifest.qualification_checkpoint @(
+    Assert-ClosedProperties $topologyManifest.lab_checkpoint @(
         "name", "id", "type", "parent_id", "support_vm_adapter_snapshot_id",
         "restore_verified"
-    ) "support topology manifest qualification checkpoint"
+    ) "support topology manifest lab checkpoint"
     Assert-ClosedProperties $topologyManifest.management_adapter @(
         "name", "id", "switch_name", "switch_id", "mac_address",
         "dynamic_mac_address", "guest_interface_alias", "guest_interface_guid"
@@ -84,8 +84,8 @@ function Read-StagedTopologyManifest([string]$Path, [object]$Manifest) {
         "staged input and support topology manifest"
     Assert-CanonicalGuid $topologyManifest.source_checkpoint.id `
         "support topology manifest source checkpoint"
-    Assert-CanonicalGuid $topologyManifest.qualification_checkpoint.parent_id `
-        "support topology manifest qualification checkpoint parent"
+    Assert-CanonicalGuid $topologyManifest.lab_checkpoint.parent_id `
+        "support topology manifest lab checkpoint parent"
     Assert-CanonicalGuid $topologyManifest.management_adapter.switch_id `
         "support topology manifest management switch"
     Assert-CanonicalGuid $topologyManifest.management_adapter.guest_interface_guid `
@@ -97,18 +97,22 @@ function Read-StagedTopologyManifest([string]$Path, [object]$Manifest) {
     }
     Assert-True (
         $topologyManifest.schema -eq 1 -and
+        [string]$topologyManifest.provisioning_source_manifest_sha256 -cmatch
+            '^[0-9a-f]{64}$' -and
+        [string]$topologyManifest.provisioning_source_bundle_sha256 -cmatch
+            '^[0-9a-f]{64}$' -and
         $topologyManifest.vm.name -ceq $Manifest.vm_name -and
         $topologyManifest.vm.id -ceq $Manifest.vm_id -and
         $topologyManifest.vm.terminal_state -ceq "Off" -and
         $topologyManifest.vm.automatic_checkpoints_enabled -is [bool] -and
         -not $topologyManifest.vm.automatic_checkpoints_enabled -and
-        $topologyManifest.qualification_checkpoint.name -ceq $Manifest.checkpoint_name -and
-        $topologyManifest.qualification_checkpoint.id -ceq $Manifest.checkpoint_id -and
-        $topologyManifest.qualification_checkpoint.type -ceq "Standard" -and
-        $topologyManifest.qualification_checkpoint.parent_id -ceq
+        $topologyManifest.lab_checkpoint.name -ceq $Manifest.checkpoint_name -and
+        $topologyManifest.lab_checkpoint.id -ceq $Manifest.checkpoint_id -and
+        $topologyManifest.lab_checkpoint.type -ceq "Standard" -and
+        $topologyManifest.lab_checkpoint.parent_id -ceq
             $topologyManifest.source_checkpoint.id -and
-        $topologyManifest.qualification_checkpoint.restore_verified -is [bool] -and
-        $topologyManifest.qualification_checkpoint.restore_verified -and
+        $topologyManifest.lab_checkpoint.restore_verified -is [bool] -and
+        $topologyManifest.lab_checkpoint.restore_verified -and
         $topologyManifest.management_adapter.dynamic_mac_address -is [bool] -and
         $topologyManifest.management_adapter.dynamic_mac_address -and
         $topologyManifest.support.switch.switch_type -ceq "Internal" -and
@@ -228,18 +232,15 @@ function Read-CanonicalIdentityLedger([string]$Path, [object]$Manifest) {
         "schema", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id",
         "guest_product", "guest_edition", "guest_architecture", "guest_version", "guest_build",
         "candidate_sha", "probe_sha256", "controller_bundle_sha256",
-        "client_sha256", "server_sha256", "support_listener",
-        "topology", "test_binaries"
+        "client_sha256", "server_sha256", "support_listener", "topology"
     ) "identity ledger"
     Assert-SupportListenerContract $ledger.support_listener "identity support listener"
     Assert-TopologyContract $ledger.topology "identity topology"
-    Assert-ClosedProperties $ledger.test_binaries @("client", "tun", "wintun") `
-        "identity test binaries"
     $canonical = ($ledger | ConvertTo-Json -Compress -Depth 8) + "`n"
     Assert-True ([Convert]::ToHexString([Text.UTF8Encoding]::new($false).GetBytes($canonical)) -ceq
         [Convert]::ToHexString($bytes)) "identity ledger serialization is not canonical"
     Assert-True (
-        $ledger.schema -eq 3 -and
+        $ledger.schema -eq 4 -and
         $ledger.vm_name -ceq $Manifest.vm_name -and
         $ledger.vm_id -ceq $Manifest.vm_id -and
         $ledger.checkpoint_name -ceq $Manifest.checkpoint_name -and
@@ -263,10 +264,6 @@ function Read-CanonicalIdentityLedger([string]$Path, [object]$Manifest) {
         )) {
         Assert-True ([string]$ledger.$name -cmatch '^[0-9a-f]{64}$') `
             "identity ledger hash is invalid: $name"
-    }
-    foreach ($name in @("client", "tun", "wintun")) {
-        Assert-True ([string]$ledger.test_binaries.$name -cmatch '^[0-9a-f]{64}$') `
-            "identity test hash is invalid: $name"
     }
     return $ledger
 }
@@ -618,7 +615,7 @@ function Assert-PublishedHardKillJson([object]$Ledger) {
     Assert-UtcTimestamp $result.finished_utc "hard-kill result finished_utc"
 
     $cleanupProperties = @(
-        "schema", "status", "source_mode", "run_token", "identity_sha256", "topology",
+        "schema", "status", "source_profile", "run_token", "identity_sha256", "topology",
         "qualification_outcome", "processes", "adapters", "target_addresses", "target_routes",
         "dns_rows", "sibling_dll", "work_directories", "mutation_journals", "firewall_rules",
         "identity_journal", "finished_utc"
@@ -629,7 +626,7 @@ function Assert-PublishedHardKillJson([object]$Ledger) {
     Assert-True (
         $cleanup.schema -ceq "ferrum2.windows-tun.hard-kill-cleanup.v2" -and
         $cleanup.status -ceq "pass" -and
-        $cleanup.source_mode -ceq "hard-kill" -and
+        $cleanup.source_profile -ceq "hard-kill" -and
         $cleanup.run_token -ceq $script:runToken -and
         $cleanup.identity_sha256 -ceq [string]$script:manifest.identity_sha256 -and
         $cleanup.qualification_outcome -ceq "success"

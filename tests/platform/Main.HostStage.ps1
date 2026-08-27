@@ -16,9 +16,16 @@
         (Join-Path $hostEvidencePath "identity-ledger.json"),
         $ledgerIdentity.Bytes
     )
-    $candidateArtifacts = Build-CandidateArtifacts `
-        -Destination $hostArtifactRoot `
-        -Ledger $ledgerIdentity.Ledger
+    $hostCandidateArtifactManifestPath = Join-Path $hostEvidencePath `
+        'candidate-artifacts.json'
+    Copy-Item `
+        -LiteralPath $candidateArtifacts.ManifestPath `
+        -Destination $hostCandidateArtifactManifestPath `
+        -ErrorAction Stop
+    if ((Get-Ferrum2LowerSha256 $hostCandidateArtifactManifestPath) -cne
+        $candidateArtifacts.ManifestSha256) {
+        throw 'candidate artifact manifest evidence copy changed'
+    }
     $portablePowerShell = New-PortablePowerShellArchive `
         -SourceZip $PowerShellZip `
         -Destination $hostPowerShellArchive
@@ -66,15 +73,15 @@
         throw "candidate commit changed during host artifact preparation"
     }
     $stagedInput = [ordered]@{
-        schema = "ferrum2.windows-tun.hyperv-staged-input.v4"
+        schema = "ferrum2.windows-tun.hyperv-staged-input.v6"
         candidate_sha = $candidate.Sha
+        candidate_artifact_manifest_sha256 = $candidateArtifacts.ManifestSha256
         identity_sha256 = $ledgerIdentity.Sha256
         controller_bundle = $controllerBundleManifest
         topology_manifest_sha256 = [string]$topologyDocument.Sha256
-        profile = $Profile
-        mode = $requestedMode
-        network_reset_cycles = $requestedNetworkResetCycles
-        restart_cycles = $requestedRestartCycles
+        profile = $qualificationProfile
+        cycle_limit = $requestedCycleLimit
+        release_milestones = $requestedReleaseMilestones
         files = [ordered]@{
             controller = $controllerEntry
             controller_bundle_manifest = $controllerBundleManifestEntry
@@ -84,10 +91,6 @@
             wintun_zip = $wintunEntry
             client = $(New-StagedFileEntry -Path $candidateArtifacts.Client.Path -Name "ferrum2-client.exe")
             server = $(New-StagedFileEntry -Path $candidateArtifacts.Server.Path -Name "ferrum2-server.exe")
-            client_tests = $(New-StagedFileEntry -Path $candidateArtifacts.Tests.client.Path -Name "ferrum2-client-tests.exe")
-            tun_tests = $(New-StagedFileEntry -Path $candidateArtifacts.Tests.tun.Path -Name "ferrum2-tun-tests.exe")
-            wintun_tests = $(New-StagedFileEntry -Path $candidateArtifacts.Tests.wintun.Path -Name "ferrum2-platform-windows-tests.exe")
-            fuzz_smoke = $(New-StagedFileEntry -Path $candidateArtifacts.FuzzSmoke.Path -Name "ferrum2-tun-fuzz-smoke.exe")
             powershell_archive = $(New-StagedFileEntry `
                 -Path $portablePowerShell.Path `
                 -Name "portable-pwsh.zip" `
@@ -161,9 +164,8 @@
             New-Item -ItemType Directory -Path $exportPath -Force -ErrorAction Stop | Out-Null
             foreach ($relative in @(
                     "controller",
-                    "controller\modules\Ferrum2.Qualification.Common",
+                    "controller\modules\Ferrum2.WindowsTun.Lab",
                     "controller\modules\Ferrum2.Qualification.GuestController",
-                    "controller\modules\Ferrum2.Qualification.Evidence",
                     "artifacts",
                     "runtime\vc-runtime"
                 )) {
@@ -193,11 +195,7 @@
         [ordered]@{ Source = $stagedInputManifestPath; Destination = $(Join-Path $guestInputPath "staged-input.json") },
         [ordered]@{ Source = $portablePowerShell.Path; Destination = $(Join-Path $guestInputPath "portable-pwsh.zip") },
         [ordered]@{ Source = $candidateArtifacts.Client.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-client.exe") },
-        [ordered]@{ Source = $candidateArtifacts.Server.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-server.exe") },
-        [ordered]@{ Source = $candidateArtifacts.Tests.client.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-client-tests.exe") },
-        [ordered]@{ Source = $candidateArtifacts.Tests.tun.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-tun-tests.exe") },
-        [ordered]@{ Source = $candidateArtifacts.Tests.wintun.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-platform-windows-tests.exe") },
-        [ordered]@{ Source = $candidateArtifacts.FuzzSmoke.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-tun-fuzz-smoke.exe") }
+        [ordered]@{ Source = $candidateArtifacts.Server.Path; Destination = $(Join-Path $guestInputPath "artifacts\ferrum2-server.exe") }
     )
     foreach ($mapping in $controllerBundleFileMap) {
         $stagedFiles += [ordered]@{
@@ -256,7 +254,7 @@
             manifest_sha256 = [string]$topologyDocument.Sha256
             plan_sha256 = [string]$topologyDocument.PlanDocument.Sha256
             support_switch_id = [string]$topologyDocument.Value.support.switch.switch_id
-            qualification_checkpoint_id = $approvedCheckpointId.ToString("D")
+            lab_checkpoint_id = $approvedCheckpointId.ToString("D")
         }
         support_listener = $pathSupportState
         approved_vm_network = $pathTopologyState.VmNetwork

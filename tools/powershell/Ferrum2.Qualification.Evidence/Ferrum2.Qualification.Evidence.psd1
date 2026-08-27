@@ -8,11 +8,6 @@
     PowerShellVersion = '7.4'
     CompatiblePSEditions = @('Core')
     FunctionsToExport = @(
-        'New-Ferrum2ControllerBundleManifest'
-        'Assert-Ferrum2ControllerBundleManifest'
-        'Copy-Ferrum2ControllerBundle'
-        'Write-Ferrum2ControllerBundleManifest'
-        'Get-Ferrum2GuestControllerModuleFileMap'
         'Get-Ferrum2MainControllerBundleFileMap'
         'Get-Ferrum2HardKillControllerBundleFileMap'
     )

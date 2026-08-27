@@ -16,14 +16,12 @@ const fn is_initial_syn(metadata: TcpMetadata) -> bool {
     metadata.flags & 0x17 == 0x02
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct TcpTuple {
     pub(crate) source: SocketAddr,
     pub(crate) target: SocketAddr,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(crate) struct TcpFlowEntry {
     pub(crate) tuple: TcpTuple,
     pub(crate) generation: GenerationId,
@@ -350,7 +348,6 @@ impl Stack {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
 pub(super) fn initial_tcp_tuple(parsed: ParsedIpPacket) -> Result<Option<TcpTuple>, ()> {
     let TransportMetadata::Tcp(tcp) = parsed.transport else {
         return Ok(None);

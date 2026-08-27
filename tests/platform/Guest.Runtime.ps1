@@ -1,57 +1,3 @@
-function Get-Tcp01Boundary([hashtable]$State) {
-    $yesNo = @("yes", "no")
-    $gateFaults = @("none", "io", "disposed", "socket", "cancelled", "invalid_operation", "not_supported", "aggregate", "other")
-    $probeFaults = @("none", "io", "disposed", "socket", "cancelled", "other")
-    $stages = @("pending", "source_stream", "destination_stream", "read", "write", "shutdown")
-    foreach ($name in @("GateAccepted", "GateForwardEof", "GateReverseEof", "GateComplete", "ProbeAccepted", "ProbeReadEof", "ProbeShutdown", "ProbeComplete")) {
-        if (-not $State.ContainsKey($name) -or $yesNo -notcontains $State[$name]) { return "UNRESOLVED" }
-    }
-    foreach ($name in @("GateForwardFault", "GateReverseFault")) {
-        if (-not $State.ContainsKey($name) -or $gateFaults -notcontains $State[$name]) { return "UNRESOLVED" }
-    }
-    if (-not $State.ContainsKey("ProbeFault") -or $probeFaults -notcontains $State.ProbeFault) { return "UNRESOLVED" }
-    foreach ($name in @("GateForwardStage", "GateReverseStage")) {
-        if (-not $State.ContainsKey($name) -or $stages -notcontains $State[$name]) { return "UNRESOLVED" }
-    }
-    foreach ($name in @("GateForwardBytes", "GateReverseBytes")) {
-        if (-not $State.ContainsKey($name) -or @("zero", "nonzero") -notcontains $State[$name]) { return "UNRESOLVED" }
-    }
-    foreach ($name in @("ProbeRequest", "ProbeEcho")) {
-        if (-not $State.ContainsKey($name) -or @("none", "exact", "other") -notcontains $State[$name]) { return "UNRESOLVED" }
-    }
-    if (-not $State.ContainsKey("AppResult") -or @("reset", "io", "success", "other") -notcontains $State.AppResult) { return "UNRESOLVED" }
-    if ($State.GateAccepted -eq "no" -or $State.GateForwardBytes -eq "zero" -or $State.ProbeAccepted -eq "no") { return "BEFORE_TARGET" }
-    if ($State.ProbeRequest -ne "exact" -or $State.ProbeReadEof -ne "yes" -or $State.ProbeEcho -ne "exact" -or
-        $State.ProbeShutdown -ne "yes" -or $State.ProbeFault -ne "none" -or $State.ProbeComplete -ne "yes") { return "TARGET_ECHO_INCOMPLETE" }
-    if ($State.GateReverseBytes -eq "zero" -or $State.GateReverseEof -ne "yes" -or
-        $State.GateReverseFault -ne "none" -or $State.GateComplete -ne "yes") { return "GATE_REVERSE_INCOMPLETE" }
-    if ($State.GateForwardEof -ne "yes" -or $State.GateForwardFault -ne "none") { return "UNRESOLVED" }
-    if ($State.AppResult -ne "success") { return "CLIENT_AFTER_GATE_REVERSE" }
-    return "COMPLETE"
-}
-
-$tcp01CompleteState = @{
-    GateAccepted = "yes"; GateForwardBytes = "nonzero"; GateForwardEof = "yes"; GateForwardFault = "none"; GateForwardStage = "shutdown"
-    GateReverseBytes = "nonzero"; GateReverseEof = "yes"; GateReverseFault = "none"; GateReverseStage = "shutdown"; GateComplete = "yes"
-    ProbeAccepted = "yes"; ProbeRequest = "exact"; ProbeReadEof = "yes"; ProbeEcho = "exact"
-    ProbeShutdown = "yes"; ProbeFault = "none"; ProbeComplete = "yes"; AppResult = "success"
-}
-foreach ($row in @(
-    @{ Change = @{ GateAccepted = "no" }; Expected = "BEFORE_TARGET" },
-    @{ Change = @{ ProbeEcho = "other" }; Expected = "TARGET_ECHO_INCOMPLETE" },
-    @{ Change = @{ ProbeComplete = "no" }; Expected = "TARGET_ECHO_INCOMPLETE" },
-    @{ Change = @{ GateReverseBytes = "zero" }; Expected = "GATE_REVERSE_INCOMPLETE" },
-    @{ Change = @{ GateComplete = "no" }; Expected = "GATE_REVERSE_INCOMPLETE" },
-    @{ Change = @{ AppResult = "reset" }; Expected = "CLIENT_AFTER_GATE_REVERSE" },
-    @{ Change = @{}; Expected = "COMPLETE" },
-    @{ Change = @{ GateForwardFault = "invalid" }; Expected = "UNRESOLVED" },
-    @{ Change = @{ GateReverseStage = "invalid" }; Expected = "UNRESOLVED" }
-)) {
-    $state = $tcp01CompleteState.Clone()
-    foreach ($name in $row.Change.Keys) { $state[$name] = $row.Change[$name] }
-    Assert-True ((Get-Tcp01Boundary $state) -eq $row.Expected) "TCP-01 boundary table mismatch"
-}
-
 function Get-PeExportNames([byte[]]$Bytes) {
     Assert-True ($Bytes.Length -ge 64) "PE image is truncated"
     $stream = [IO.MemoryStream]::new($Bytes, $false)
@@ -185,22 +131,6 @@ function Wait-AdapterAbsent([string]$Name, [int]$TimeoutSeconds = 20, [int]$Requ
     throw "adapter cleanup timeout"
 }
 
-function Get-InterfaceAddressSnapshot([int]$InterfaceIndex) {
-    return @(
-        Get-NetIPAddress -InterfaceIndex $InterfaceIndex -ErrorAction SilentlyContinue |
-            Sort-Object AddressFamily, IPAddress, PrefixLength |
-            ForEach-Object { "$($_.AddressFamily)|$($_.IPAddress)|$($_.PrefixLength)|$($_.AddressState)" }
-    )
-}
-
-function Get-InterfaceRouteSnapshot([int]$InterfaceIndex) {
-    return @(
-        Get-NetRoute -InterfaceIndex $InterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
-            Sort-Object AddressFamily, DestinationPrefix, NextHop |
-            ForEach-Object { "$($_.AddressFamily)|$($_.DestinationPrefix)|$($_.NextHop)" }
-    )
-}
-
 function Assert-SnapshotEqual([object[]]$Expected, [object[]]$Actual, [string]$Label) {
     $difference = @(Compare-Object -ReferenceObject @($Expected) -DifferenceObject @($Actual))
     Assert-True ($difference.Count -eq 0) "$Label snapshot changed"
@@ -243,86 +173,10 @@ function Get-Metrics([int]$Port, [int]$TimeoutSeconds = 10) {
     throw "metrics readiness timeout"
 }
 
-function Get-CounterValue([string]$Metrics, [string]$Name) {
-    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total ([0-9]+)$")
-    Assert-True $match.Success "missing no-label counter: $Name"
-    return [uint64]$match.Groups[1].Value
-}
-
 function Get-ClientGaugeValue([string]$Metrics, [string]$Name) {
     $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))\{role=`"client`"\} ([0-9]+)$")
     Assert-True $match.Success "missing client gauge: $Name"
     return [uint64]$match.Groups[1].Value
-}
-
-function Get-ClientCounterValue([string]$Metrics, [string]$Name) {
-    $match = [regex]::Match($Metrics, "(?m)^$([regex]::Escape($Name))_total\{role=`"client`"\} ([0-9]+)$")
-    Assert-True $match.Success "missing client counter: $Name"
-    return [uint64]$match.Groups[1].Value
-}
-
-function Get-AdapterTraffic([string]$Name) {
-    $statistics = Get-NetAdapterStatistics -Name $Name -ErrorAction Stop
-    return @{
-        ReceivedBytes = [uint64]$statistics.ReceivedBytes
-        SentBytes = [uint64]$statistics.SentBytes
-        ReceivedUnicastPackets = [uint64]$statistics.ReceivedUnicastPackets
-        SentUnicastPackets = [uint64]$statistics.SentUnicastPackets
-        ReceivedPacketErrors = [uint64]$statistics.ReceivedPacketErrors
-        OutboundPacketErrors = [uint64]$statistics.OutboundPacketErrors
-        ReceivedDiscardedPackets = [uint64]$statistics.ReceivedDiscardedPackets
-        OutboundDiscardedPackets = [uint64]$statistics.OutboundDiscardedPackets
-    }
-}
-
-function Update-PerformancePeaks([System.Diagnostics.Process]$Process, [int]$MetricsPort) {
-    $Process.Refresh()
-    $script:performanceRssBytes = [Math]::Max($script:performanceRssBytes, [uint64]$Process.WorkingSet64)
-    $script:performanceHandlesPeak = [Math]::Max($script:performanceHandlesPeak, [uint64]$Process.HandleCount)
-    $script:performanceThreadsPeak = [Math]::Max($script:performanceThreadsPeak, [uint64]$Process.Threads.Count)
-    $metrics = Get-Metrics $MetricsPort
-    $script:performanceUdpSessionsPeak = [Math]::Max(
-        $script:performanceUdpSessionsPeak,
-        (Get-ClientGaugeValue $metrics "ferrum2_udp_sessions_active")
-    )
-    $script:performanceUdpBufferedBytesPeak = [Math]::Max(
-        $script:performanceUdpBufferedBytesPeak,
-        (Get-ClientGaugeValue $metrics "ferrum2_udp_buffered_bytes")
-    )
-}
-
-function Start-PerformanceSample([System.Diagnostics.Process]$Process, [int]$MetricsPort) {
-    $Process.Refresh()
-    $script:performanceCpuBaseline = $Process.TotalProcessorTime.TotalMilliseconds
-    $metrics = Get-Metrics $MetricsPort
-    $script:performanceTunAcceptedBaseline = Get-CounterValue $metrics "ferrum2_tun_packets_accepted"
-    $script:performanceTrafficBaseline = Get-AdapterTraffic $script:adapterName
-    $script:performanceFieldsCollected = $true
-    Update-PerformancePeaks $Process $MetricsPort
-}
-
-function Complete-PerformanceSample([System.Diagnostics.Process]$Process, [int]$MetricsPort) {
-    Update-PerformancePeaks $Process $MetricsPort
-    $Process.Refresh()
-    $cpu = $Process.TotalProcessorTime.TotalMilliseconds
-    Assert-True ($cpu -ge $script:performanceCpuBaseline) "candidate CPU counter moved backwards"
-    $script:performanceCpuMilliseconds += [uint64][Math]::Ceiling($cpu - $script:performanceCpuBaseline)
-    $metrics = Get-Metrics $MetricsPort
-    $accepted = Get-CounterValue $metrics "ferrum2_tun_packets_accepted"
-    Assert-True ($accepted -ge $script:performanceTunAcceptedBaseline) "TUN accepted counter moved backwards"
-    $script:performanceTunAcceptedDelta += $accepted - $script:performanceTunAcceptedBaseline
-    $after = Get-AdapterTraffic $script:adapterName
-    foreach ($property in $script:performanceTrafficBaseline.Keys) {
-        Assert-True ($after[$property] -ge $script:performanceTrafficBaseline[$property]) "adapter counter moved backwards: $property"
-    }
-    $script:performanceAdapterRxBytes += $after.ReceivedBytes - $script:performanceTrafficBaseline.ReceivedBytes
-    $script:performanceAdapterTxBytes += $after.SentBytes - $script:performanceTrafficBaseline.SentBytes
-    $script:performanceAdapterRxPackets += $after.ReceivedUnicastPackets - $script:performanceTrafficBaseline.ReceivedUnicastPackets
-    $script:performanceAdapterTxPackets += $after.SentUnicastPackets - $script:performanceTrafficBaseline.SentUnicastPackets
-    $script:performanceAdapterRxErrors += $after.ReceivedPacketErrors - $script:performanceTrafficBaseline.ReceivedPacketErrors
-    $script:performanceAdapterTxErrors += $after.OutboundPacketErrors - $script:performanceTrafficBaseline.OutboundPacketErrors
-    $script:performanceAdapterRxDiscards += $after.ReceivedDiscardedPackets - $script:performanceTrafficBaseline.ReceivedDiscardedPackets
-    $script:performanceAdapterTxDiscards += $after.OutboundDiscardedPackets - $script:performanceTrafficBaseline.OutboundDiscardedPackets
 }
 
 function Assert-InterfaceGone([string]$Name, [Nullable[int]]$InterfaceIndex) {
@@ -341,14 +195,12 @@ function Wait-ProcessExit([System.Diagnostics.Process]$Process, [int]$TimeoutSec
 
 function Start-Candidate([string]$Executable, [string]$Configuration) {
     $arguments = "--config `"$Configuration`""
-    $stdoutPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "client.stdout.log" } else { $null }
-    $stderrPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "client.stderr.log" } else { $null }
     $id = [Ferrum2ProcessGroup]::Start(
         $Executable,
         $arguments,
         (Split-Path -Parent $Executable),
-        $stdoutPath,
-        $stderrPath
+        $null,
+        $null
     )
     return Get-Process -Id $id
 }
@@ -374,23 +226,12 @@ function Wait-TcpListener(
         $Process.Refresh()
         if ($Process.HasExited) {
             $exitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$Process.Id)
-            Add-Tcp08Event "server_listener_process_exited" ([ordered]@{
-                label = $Label
-                port = $Port
-                process_id = [uint32]$Process.Id
-                exit_code = $exitCode
-            })
             throw "TCP listener process exited before readiness: label=$Label port=$Port pid=$($Process.Id) exit=$exitCode"
         }
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
         if (@($listeners | Where-Object { [uint32]$_.OwningProcess -eq [uint32]$Process.Id }).Count -gt 0) {
             $Process.Refresh()
             if (-not $Process.HasExited) {
-                Add-Tcp08Event "server_listener_ready" ([ordered]@{
-                    label = $Label
-                    port = $Port
-                    process_id = [uint32]$Process.Id
-                })
                 return
             }
         }
@@ -403,21 +244,9 @@ function Wait-TcpListener(
     $Process.Refresh()
     if ($Process.HasExited) {
         $exitCode = [Ferrum2ProcessGroup]::ExitCode([uint32]$Process.Id)
-        Add-Tcp08Event "server_listener_process_exited" ([ordered]@{
-            label = $Label
-            port = $Port
-            process_id = [uint32]$Process.Id
-            exit_code = $exitCode
-        })
         throw "TCP listener process exited before readiness: label=$Label port=$Port pid=$($Process.Id) exit=$exitCode"
     }
     $foreignText = if ($foreignListenerPids.Count -eq 0) { "none" } else { $foreignListenerPids -join "," }
-    Add-Tcp08Event "server_listener_readiness_timeout" ([ordered]@{
-        label = $Label
-        port = $Port
-        process_id = [uint32]$Process.Id
-        foreign_listener_process_ids = @($foreignListenerPids)
-    })
     throw "TCP listener readiness timeout: label=$Label port=$Port expected_pid=$($Process.Id) foreign_listener_pids=$foreignText"
 }
 
@@ -457,22 +286,6 @@ function Wait-UdpListener(
     } while ([DateTime]::UtcNow -lt $deadline)
     $foreignText = if ($foreignListenerPids.Count -eq 0) { "none" } else { $foreignListenerPids -join "," }
     throw "UDP listener readiness timeout: label=$Label port=$Port expected_pid=$($Process.Id) foreign_listener_pids=$foreignText"
-}
-
-function Start-Server([string]$Executable, [string]$Configuration) {
-    $arguments = "--config `"$Configuration`""
-    $stdoutPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "server.stdout.log" } else { $null }
-    $stderrPath = if ($script:tcp08Enabled) { Join-Path $script:tcp08ArtifactPath "server.stderr.log" } else { $null }
-    $id = [Ferrum2ProcessGroup]::Start(
-        $Executable,
-        $arguments,
-        (Split-Path -Parent $Executable),
-        $stdoutPath,
-        $stderrPath
-    )
-    $process = Get-Process -Id $id
-    $script:serverProcesses.Add($process)
-    return $process
 }
 
 function Add-TunRoute([int]$InterfaceIndex, [string]$DestinationPrefix, [int]$RouteMetric = 1) {

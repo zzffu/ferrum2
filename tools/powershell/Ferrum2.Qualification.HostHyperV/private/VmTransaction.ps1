@@ -16,8 +16,9 @@ function Initialize-ApprovedHyperVTopology {
     $script:topologyManifestDocument = $document
     $script:approvedVmName = [string]$document.Value.vm.name
     $script:approvedVmId = [Guid][string]$document.Value.vm.id
-    $script:approvedCheckpointName = [string]$document.Value.qualification_checkpoint.name
-    $script:approvedCheckpointId = [Guid][string]$document.Value.qualification_checkpoint.id
+    $script:approvedCheckpointName = [string]$document.Value.lab_checkpoint.name
+    $script:approvedCheckpointId = [Guid][string]$document.Value.lab_checkpoint.id
+    $script:approvedVmIdentity = New-Ferrum2HostVmIdentity -TopologyDocument $document
     $state = Get-ApprovedHyperVTopologyRuntimeState -TopologyDocument $document
     return [pscustomobject][ordered]@{
         Document = $document
@@ -32,59 +33,19 @@ function Initialize-ApprovedHyperVTopology {
 function Import-ApprovedGuestCredential {
     param([string]$Path)
 
-    $candidate = $Path
-    if ([string]::IsNullOrWhiteSpace($candidate)) {
-        if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-            throw "LOCALAPPDATA is required for the default guest credential path"
-        }
-        $candidate = Join-Path $env:LOCALAPPDATA "Ferrum2\hyperv-ferrum2-test.credential.xml"
-    }
-    $resolved = Resolve-BoundedFile `
-        -Path $candidate `
+    Resolve-Ferrum2HostInput `
+        -RepositoryRoot $script:repositoryRoot `
+        -Path $Path `
         -Label "guest credential" `
-        -MaximumBytes 1048576 `
-        -RequireOutsideRepository
-    $credential = Import-Clixml -LiteralPath $resolved -ErrorAction Stop
-    if ($credential -isnot [Management.Automation.PSCredential] -or
-        [string]$credential.UserName -cne "ferrum2-test") {
-        throw "guest credential file does not contain the approved local PSCredential"
-    }
-    return $credential
+        -Kind GuestCredential `
+        -MaximumBytes 1048576
 }
 
 function Get-ApprovedVmContext {
-    $document = Get-ApprovedTopologyDocument
-    Assert-Ferrum2SupportTopologyManifestUnchanged -Document $document
-    $vm = Get-VM -Id $script:approvedVmId -ErrorAction Stop
-    if ($vm.Name -cne $script:approvedVmName -or
-        $vm.AutomaticCheckpointsEnabled -ne $false) {
-        throw "approved VM identity mismatch"
+    if ($null -eq $script:approvedVmIdentity) {
+        throw "approved VM identity is not initialized"
     }
-    $namedVm = @(Get-VM -Name $script:approvedVmName -ErrorAction Stop)
-    if ($namedVm.Count -ne 1 -or $namedVm[0].Id -ne $script:approvedVmId) {
-        throw "approved VM name does not resolve to the approved ID"
-    }
-
-    $checkpoints = @(Get-VMSnapshot -VM $vm -ErrorAction Stop)
-    $checkpoint = @($checkpoints | Where-Object {
-        $_.Id -eq $script:approvedCheckpointId
-    })
-    $sourceCheckpointId = [Guid][string]$document.Value.source_checkpoint.id
-    $sourceCheckpoint = @($checkpoints | Where-Object { $_.Id -eq $sourceCheckpointId })
-    if ($checkpoints.Count -ne 2 -or $sourceCheckpoint.Count -ne 1 -or
-        $checkpoint.Count -ne 1 -or $checkpoint[0].Name -cne $script:approvedCheckpointName -or
-        [Guid][string]$checkpoint[0].ParentCheckpointId -ne $sourceCheckpointId) {
-        throw "approved checkpoint identity mismatch"
-    }
-    $namedCheckpoint = @(Get-VMSnapshot -VM $vm -Name $script:approvedCheckpointName -ErrorAction Stop)
-    if ($namedCheckpoint.Count -ne 1 -or $namedCheckpoint[0].Id -ne $script:approvedCheckpointId) {
-        throw "approved checkpoint name does not resolve to the approved ID"
-    }
-
-    return [pscustomobject]@{
-        Vm = $vm
-        Checkpoint = $checkpoint[0]
-    }
+    Get-Ferrum2HostVmContext -Identity $script:approvedVmIdentity
 }
 
 function Invoke-BoundedHyperVMutation {

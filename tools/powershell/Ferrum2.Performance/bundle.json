@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
   "kind": "ferrum2.windows-tun-performance-source-bundle.v1",
-  "entrypoint": "tools/windows-tun/run_windows_tun_performance_hyperv.ps1",
+  "entrypoint": "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
   "files": [
     {
-      "path": "tools/windows-tun/collect_windows_tun_performance_trial.ps1",
-      "bytes": 31680,
-      "sha256": "177879eb0868f6d2803aabd61e89b9c3a3a7b5b80646f3a69394e22b0aac5d32"
+      "path": "tools/windows-tun/performance/collect_windows_tun_performance_trial.ps1",
+      "bytes": 31461,
+      "sha256": "cb9a1e820a09bde728ef638813e85c804fad7d41b8cc667ae2e70570900634f0"
     },
     {
-      "path": "tools/windows-tun/collect_windows_tun_udp_boundary_diagnostic.ps1",
-      "bytes": 22997,
-      "sha256": "00111881b8eb8656f95a687a02d34c285d7c298afd0eb094d42a4451deea2746"
+      "path": "tools/windows-tun/performance/collect_windows_tun_udp_boundary_diagnostic.ps1",
+      "bytes": 22991,
+      "sha256": "cc974e42dcf842b16f8f3e5f680ac72fb398ccc1c6bcc18f9e64e413f98b475b"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/CollectorCore.ps1",
@@ -45,8 +45,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/GuestTransaction.ps1",
-      "bytes": 38639,
-      "sha256": "7e903271cc4870a7c0dde1a0f6e9225ecb26a518f2ea8fcf2cbdf4b3e851432a"
+      "bytes": 38412,
+      "sha256": "7f5b763f534e11c5eac064a1736c370ca0e3f2b6954fc5f4c4dfe553437adb4a"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostContract.ps1",
@@ -60,13 +60,13 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostUdpResult.ps1",
-      "bytes": 30495,
-      "sha256": "a7ec7e5950971ab0bb330890f262c3cb0a82fda270b220c8be26c9d322bc1096"
+      "bytes": 30537,
+      "sha256": "b956a7188f96485563134b99a05460ae8d391964504b1478289a2ef7b4ae9d42"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostVmTransaction.ps1",
-      "bytes": 35958,
-      "sha256": "eeccb9002d9c0f6ca7dcae568860305a35e186f52904389f5ceccd14786dacc8"
+      "bytes": 36032,
+      "sha256": "99ed75c0ac7a8a5407285017b1fd4ee1aeebcd103abc0e30f118adb153e50ff2"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
@@ -139,79 +139,59 @@
       "sha256": "46196ca35ffb1f7a5a17911e166cb563249e4df27e20c88ae281953fff8d9a43"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.Common/BundleBootstrap.ps1",
-      "bytes": 6200,
-      "sha256": "424149ccd4decaa62a069d4db681965f2e3d097bdb2fa7dad6d112345f3b022b"
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
+      "bytes": 23974,
+      "sha256": "e54d1bef45f29d9a5027680d2c095d671246f08e743f35254771c21ec95bf037"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.Common/Ferrum2.Qualification.Common.psd1",
-      "bytes": 584,
-      "sha256": "11f6b2091b0b80405245023ff445bcaaab09a1c12180523c75247c616b6823bd"
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1",
+      "bytes": 1535,
+      "sha256": "63262999c3ef7f1fc14a2f7ecdded7169566fa49be86383cc941e32f2a564d18"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.Common/Ferrum2.Qualification.Common.psm1",
-      "bytes": 3647,
-      "sha256": "b3f49484c24698b2c35cb1e37b69770f9b6c59653fc6fcec548a943aa0a383bc"
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psm1",
+      "bytes": 1291,
+      "sha256": "e6d7b16353c33f647f805485ecad6ae44c892a21a255474bf2b5bd7cbde611aa"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psd1",
-      "bytes": 734,
-      "sha256": "1337cd997b0f6b764195a34f9aa910c96f64b951178b3ed9a88183b9879d712b"
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/BundleFileSystem.ps1",
+      "bytes": 16398,
+      "sha256": "3189789c76e1db477df5d0bd40235f0a19cd2d29e4488085c73b082f4e562447"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.Evidence/Ferrum2.Qualification.Evidence.psm1",
-      "bytes": 12203,
-      "sha256": "5dd8669e1a68922fc19a188eec3abdfff1026b33e09b7f3f8d64fffa0fbface9"
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/JsonSource.ps1",
+      "bytes": 8928,
+      "sha256": "bfd07be31de88c1848aaa4dc4d7fdd8ec9d31873a56c7aa353f3be70253ab39f"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/Ferrum2.Qualification.HostHyperV.psd1",
-      "bytes": 676,
-      "sha256": "5534bd8b0f76c635e59c154a39df04f4667bb8c0e06486391d94902aabc295a6"
+      "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/VmSession.ps1",
+      "bytes": 14787,
+      "sha256": "0e5671a332569d455ddfc0d4d21adedba75cb878a917d1a1932bfc7b483889e3"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/Ferrum2.Qualification.HostHyperV.psm1",
-      "bytes": 10528,
-      "sha256": "25cbec2f0cca12ed32656bff598bef8c9dda91594a83fd6420629166b23a0216"
+      "path": "tools/windows-tun/lab/get_windows_tun_guest_network_path.ps1",
+      "bytes": 15557,
+      "sha256": "5d79a5115534878ed637aab0cb4358479d1a6de94ae35f31122bb9b46e862c24"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Artifacts.ps1",
-      "bytes": 27260,
-      "sha256": "82a5764c988ed3bff9751c5d515754109092ebf1436c0148ce8709af5a85953f"
+      "path": "tools/windows-tun/lab/windows_tun_host_network_path.ps1",
+      "bytes": 16060,
+      "sha256": "23cfcdfb084738a5e522ee2b2565f9cb32233df319c71329652c89fda2c38d63"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Evidence.ps1",
-      "bytes": 9252,
-      "sha256": "41e4f6a9fb6fb1120e242d52b7c450192604b56ea93fe9ae6b94307eedd6f58b"
+      "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
+      "bytes": 37689,
+      "sha256": "c4e5396c9718d6307981175b6278b65293d0fc79854b1ad219a16db37ecd072f"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Facade.ps1",
-      "bytes": 10656,
-      "sha256": "7839d71bd85f5a8f12dd9f7c76abd182d60900b19adf4defa1f2890c15964506"
+      "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",
+      "bytes": 34634,
+      "sha256": "07a70176093c9c55a09c46a43b3cb8e70eb65fb37812f6afc61280827c6c2769"
     },
     {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Manifest.ps1",
-      "bytes": 33467,
-      "sha256": "287e1a05b809e5c50188c23e60451196fdb740c60f8b100358673d7a9a24bb38"
-    },
-    {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Paths.ps1",
-      "bytes": 21050,
-      "sha256": "cd9bfb90071a51b76f1a1ca85a43331aa60857a4758324bd6e1210fd0948241b"
-    },
-    {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Process.ps1",
-      "bytes": 22614,
-      "sha256": "6e49678a083e871393a31a4b168fb6d61a9d85cd70977881bc31392b65fcdb84"
-    },
-    {
-      "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/VmTransaction.ps1",
-      "bytes": 16387,
-      "sha256": "575ebe2436321b111c3b6dd642cc8701780bb5dee0ece52cc126e0b7498d91a6"
-    },
-    {
-      "path": "tools/windows-tun/run_windows_tun_performance_hyperv.ps1",
-      "bytes": 33864,
-      "sha256": "05c66b2c6af6ce5b89a9a99697738972ad5d2ebc3f7da67e4bcb9b40f8c13bc7"
+      "path": "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
+      "bytes": 36210,
+      "sha256": "53901678f51df80d9468a77a5d11379d4dee20f5dd6181d29fabd7c2ca65749b"
     }
   ]
 }

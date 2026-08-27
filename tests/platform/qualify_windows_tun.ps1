@@ -1,9 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("lifecycle", "tcp", "tcp08", "udp", "cycles", "full", "performance", "network-feasibility", "managed-product", "network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full", "cleanup")]
-    [string]$Mode,
-    [ValidateSet(10, 100, 1000)] [int]$NetworkResetCycles = 10,
-    [ValidateSet(10, 100, 1000)] [int]$RestartCycles = 10,
+    [ValidateSet("network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full")]
+    [string]$Profile,
     [string]$WintunZip,
     [string]$RunToken,
     [string]$IdentityLedger,
@@ -13,9 +11,7 @@ param(
     [string]$ServerBinary,
     [string]$ProductRoot,
     [string]$ArtifactDirectory,
-    [string]$CandidateTestDirectory,
-    [string]$RuntimeLibraryDirectory,
-    [switch]$RequireTcp08ProductMetrics
+    [string]$RuntimeLibraryDirectory
 )
 
 Set-StrictMode -Version Latest

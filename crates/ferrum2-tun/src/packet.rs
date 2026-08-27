@@ -1,11 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 mod control;
-#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 pub(crate) use control::{
     ControlRateLimiter, LocalControlKind, control_context, ipv4_directed_broadcast,
-    oversized_ingress_control, write_local_control_error,
+    map_packet_reject, oversized_ingress_control, write_local_control_error,
 };
 
 pub(crate) const IP_PROTOCOL_TCP: u8 = 6;

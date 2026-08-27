@@ -42,8 +42,8 @@ $Additional
     return [pscustomobject]@{ Name = $Name; Source = $source }
 }
 
-function Get-M17ModeContract {
-    switch ($script:Mode) {
+function Get-M17ProfileContract {
+    switch ($script:Profile) {
         "network-reset" {
             return [ordered]@{
                 fixtures = @(
@@ -65,16 +65,7 @@ udp_filtering = "address_dependent"
                     "managed_addresses_routes_and_dns_are_unchanged",
                     "strict_route_is_effective_and_filter_identity_is_unchanged",
                     "network_generation_and_reset_metrics_advance",
-                    "retry_reset_failure_and_full_rebuild_metrics_are_unchanged",
-                    "fixed_and_direct_dual_stack_underlay_binding",
-                    "multihoming_prefix_and_metric_selection",
-                    "route_interface_and_address_notifications",
-                    "foreign_route_state_survives_cleanup",
-                    "foreign_address_state_survives_cleanup",
-                    "dad_failure_rolls_back_in_reverse",
-                    "owned_state_damage_is_the_only_full_rebuild_trigger",
-                    "reset_retries_without_managed_teardown",
-                    "network_reset_hooks_accept_each_generation_once"
+                    "retry_reset_failure_and_full_rebuild_metrics_are_unchanged"
                 )
                 counters = @(
                     "ferrum2_network_reset_total",
@@ -85,7 +76,6 @@ udp_filtering = "address_dependent"
                     "ferrum2_tun_strict_route_effective",
                     "ferrum2_tun_strict_route_filter_install_total"
                 )
-                network_reset_cycles = $script:NetworkResetCycles
             }
         }
         "restart-stress" {
@@ -104,7 +94,6 @@ udp_filtering = "address_dependent"
                 )
                 witnesses = @(
                     "same_process_for_every_restart", "generation_advances_once_per_restart",
-                    "admission_quiesces_during_rebuild", "stale_flows_and_fragments_are_cleared",
                     "adapter_route_dns_and_handler_baselines_restore"
                 )
                 counters = @(
@@ -113,7 +102,6 @@ udp_filtering = "address_dependent"
                     "ferrum2_network_generation",
                     "ferrum2_tun_session_generation"
                 )
-                restart_cycles = $script:RestartCycles
             }
         }
         "fragments" {
@@ -130,10 +118,7 @@ udp_filtering = "address_dependent"
 "@ $true
                 )
                 witnesses = @(
-                    "ipv4_udp_out_of_order", "ipv4_tcp_out_of_order",
-                    "ipv6_extension_and_fragment", "ipv6_atomic_fragment",
-                    "fragmented_synthetic_dns", "overlap_drops_entry", "timeout_drops_entry",
-                    "disabled_family_rejects_fragment", "network_reset_rejects_stale_generation"
+                    "large_ipv4_and_ipv6_udp_reassembles", "fragmented_synthetic_dns"
                 )
                 counters = @(
                     "ferrum2_tun_reassembly_entries_active",
@@ -170,7 +155,6 @@ udp_filtering = "address_dependent"
                 )
                 witnesses = @(
                     "ipv4_udp_dns", "ipv4_tcp_dns", "ipv6_udp_dns", "ipv6_tcp_dns",
-                    "exact_port_53_match", "ordinary_port_53_not_intercepted",
                     "dual_dns_readback_and_restore"
                 )
                 counters = @("ferrum2_tun_packets_ingress_total", "ferrum2_tun_packets_egress_total")
@@ -221,17 +205,13 @@ outbound = "direct"
                 witnesses = @(
                     "one_eim_association_for_multiple_targets", "adf_allows_authorized_ip_any_port",
                     "adf_rejects_unauthorized_ip", "eif_allows_valid_same_family_peer",
-                    "rejected_target_never_authorizes_peer", "first_ordinary_datagram_freezes_route_and_outbound",
-                    "ipv4_and_ipv6_sources_form_distinct_associations", "directed_broadcast_never_allocates_association",
+                    "ipv4_and_ipv6_sources_form_distinct_associations",
                     "udp_firewall_scope_is_journaled_and_removed",
                     "dns_udp_payload_round_trips", "quic_v1_initial_envelope_round_trips",
                     "stun_binding_requests_reach_multiple_servers",
                     "webrtc_ice_candidate_check_round_trips",
                     "game_style_binary_datagrams_reach_multiple_peers",
-                    "one_eim_association_reuses_first_outbound_for_all_targets",
-                    "association_capacity_drops_new_without_evicting_live",
-                    "udp_queue_pressure_is_bounded_and_control_remains_live",
-                    "reset_clears_udp_stale_generation_state"
+                    "association_capacity_drops_new_without_evicting_live"
                 )
                 counters = @(
                     "ferrum2_tun_udp_associations_active", "ferrum2_tun_udp_candidates_active",
@@ -255,10 +235,7 @@ udp_filtering = "address_dependent"
 "@ $false
                 )
                 witnesses = @(
-                    "rx_bursts_8_16_64_have_no_structural_drop", "work_stages_rotate_fairly",
-                    "udp_response_backpressure_is_lossless", "ring_full_drops_one_complete_packet",
-                    "ring_full_is_not_retried", "ring_full_does_not_reset_or_rebuild_network",
-                    "wintun_error_kinds_have_exact_owner_dispositions",
+                    "rx_bursts_8_16_64_have_no_structural_drop",
                     "live_egress_pressure_has_closed_accounting"
                 )
                 counters = @(
@@ -268,13 +245,13 @@ udp_filtering = "address_dependent"
                 )
             }
         }
-        default { throw "M17 contract dispatch received an invalid mode" }
+        default { throw "M17 contract dispatch received an invalid profile" }
     }
 }
 
 function Invoke-M17ContractPreflight {
     Assert-M17ExternalIdentityInputsUnchanged
-    $contract = Get-M17ModeContract
+    $contract = Get-M17ProfileContract
     $artifactRoot = if ([string]::IsNullOrWhiteSpace($script:ArtifactDirectory)) {
         Join-Path ([System.IO.Path]::GetTempPath()) "ferrum2-m17-artifacts\$script:runIdentity"
     } else {
@@ -324,11 +301,13 @@ function Invoke-M17ContractPreflight {
         })
     }
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.m17-contract.v3"
+        schema = "ferrum2.windows-tun.m17-contract.v4"
         status = "preflight_pass"
-        mode = $script:Mode
-        network_reset_cycles = if ($script:Mode -eq "network-reset") { $script:NetworkResetCycles } else { $null }
-        restart_cycles = if ($script:Mode -eq "restart-stress") { $script:RestartCycles } else { $null }
+        profile = $script:Profile
+        cycle_limit = if ($script:Profile -in @("network-reset", "restart-stress")) { 1000 } else { $null }
+        release_milestones = if ($script:Profile -in @("network-reset", "restart-stress")) {
+            $script:releaseMilestones
+        } else { @() }
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId
         approved_checkpoint_name = $script:expectedHyperVCheckpointName
@@ -342,7 +321,6 @@ function Invoke-M17ContractPreflight {
         controller_bundle_sha256 = [string]$script:controllerBundleManifest.controller_bundle_sha256
         wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
         wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
-        test_binaries = $script:capabilityIdentity.Ledger.test_binaries
         topology = $script:capabilityIdentity.Ledger.topology
         guest_network_path = $script:m17GuestNetworkPathDocument.Value
         fixtures = $fixtureRows
@@ -360,7 +338,7 @@ function Invoke-M17ContractPreflight {
 }
 
 function Add-M17Witness([string]$Name, [string]$Provenance, [string]$Evidence) {
-    Assert-True ($Name -in @($script:m17Contract.witnesses)) "M17 witness is outside the mode contract: $Name"
+    Assert-True ($Name -in @($script:m17Contract.witnesses)) "M17 witness is outside the profile contract: $Name"
     Assert-True (-not $script:m17WitnessRows.Contains($Name)) "duplicate M17 witness: $Name"
     $script:m17WitnessRows[$Name] = [ordered]@{
         name = $Name

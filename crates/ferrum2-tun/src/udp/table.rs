@@ -1,8 +1,8 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc as sync_mpsc};
+use std::sync::{Arc, mpsc as sync_mpsc};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -14,6 +14,7 @@ use super::{
     DATAGRAM_QUEUE_PACKETS, GenerationId, GenerationTable, InjectOutcome, LeasePhase,
     OwnerResponse, PeerPolicy, RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION, UdpCandidate,
     UdpCommitError, UdpDatagram, UdpDatagramEndpoints, UdpFiltering, emit_response_drop,
+    same_ip_family, valid_unicast_ip,
 };
 use crate::{OwnerWake, TunEvent, TunEventSink, TunRejectReason, UdpResponseDropReason};
 
@@ -863,28 +864,6 @@ impl Drop for UdpTable {
 
 fn duration_millis(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-}
-
-pub(super) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-pub(super) fn same_ip_family(left: IpAddr, right: IpAddr) -> bool {
-    matches!(
-        (left, right),
-        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
-    )
-}
-
-pub(super) fn valid_unicast_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(address) => {
-            !address.is_unspecified() && !address.is_multicast() && !address.is_broadcast()
-        }
-        IpAddr::V6(address) => !address.is_unspecified() && !address.is_multicast(),
-    }
 }
 
 fn invalid_datagram_endpoint(source: SocketAddr, target: SocketAddr) -> Option<TunRejectReason> {

@@ -24,8 +24,8 @@ ferrum2-ruleset.workspace = true
 ferrum2-shadowsocks = { workspace = true, features = ["tokio"] }
 ferrum2-sniff.workspace = true
 ferrum2-socks5.workspace = true
-ferrum2-tun.workspace = true
-ferrum2-platform-windows.workspace = true
+ferrum2-tun = { workspace = true, features = ["live-backend"] }
+ferrum2-platform-windows = { workspace = true, features = ["live-backend"] }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -1,4 +1,5 @@
 function Remove-BoundedWorkerManifestIfPresent {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "Low")]
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ExpectedSchema,
@@ -15,8 +16,8 @@ function Remove-BoundedWorkerManifestIfPresent {
         (Test-Ferrum2PathWithinRoot -Path $fullPath -Root $script:repositoryRoot) -or
         [IO.Path]::GetFileName($fullPath) -cne "host-orchestration.json" -or
         $ExpectedSchema -notin @(
-            "ferrum2.windows-tun.hyperv-host-run.v5",
-            "ferrum2.windows-tun.hard-kill-hyperv-host-run.v3"
+            "ferrum2.windows-tun.hyperv-host-run.v7",
+            "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4"
         ) -or $ExpectedVmId -eq [Guid]::Empty) {
         throw "bounded worker failure manifest path is invalid"
     }
@@ -57,7 +58,12 @@ function Remove-BoundedWorkerManifestIfPresent {
                     continue
                 }
             }
-            [IO.File]::Delete($item.FullName)
+            if ($PSCmdlet.ShouldProcess(
+                    $item.FullName,
+                    "remove stale bounded worker manifest"
+                )) {
+                [IO.File]::Delete($item.FullName)
+            }
         } catch {
             $cleanupIssues.Add(
                 "$(Split-Path -Leaf $candidate): $($_.Exception.Message)"
@@ -79,68 +85,29 @@ function Connect-ApprovedGuest {
         [int]$TimeoutSeconds
     )
 
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    do {
-        $context = Get-ApprovedVmContext
-        if ([string]$context.Vm.State -cne "Running") {
-            throw "approved VM left Running state before PowerShell Direct became ready"
+    if ($null -eq $script:approvedVmIdentity) {
+        throw "approved VM identity is not initialized"
+    }
+    $connection = Connect-Ferrum2HostGuest `
+        -Identity $script:approvedVmIdentity `
+        -Credential $Credential `
+        -TimeoutSeconds $TimeoutSeconds
+    [pscustomobject][ordered]@{
+        Session = $connection.Session
+        Probe = [pscustomobject][ordered]@{
+            Manufacturer = [string]$connection.Probe.Manufacturer
+            Model = [string]$connection.Probe.Model
+            Product = [string]$connection.Probe.Product
+            Edition = [string]$connection.Probe.Edition
+            Version = [string]$connection.Probe.Version
+            Build = [string]$connection.Probe.Build
+            OsBuildNumber = [string]$connection.Probe.OsBuild
+            CurrentBuildNumber = [string]$connection.Probe.CurrentBuild
+            Architecture = "X64"
+            PowerShellVersion = [string]$connection.Probe.PowerShell
+            IsAdministrator = [bool]$connection.Probe.IsAdministrator
         }
-
-        $session = $null
-        try {
-            $session = New-PSSession `
-                -VMId $script:approvedVmId `
-                -Credential $Credential `
-                -Name ("ferrum2-hyperv-" + [Guid]::NewGuid().ToString("N")) `
-                -ErrorAction Stop
-            $guestProbe = @(Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
-                $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-                $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-                $currentVersion = Get-ItemProperty `
-                    -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
-                    -ErrorAction Stop
-                $principal = [Security.Principal.WindowsPrincipal]::new(
-                    [Security.Principal.WindowsIdentity]::GetCurrent()
-                )
-                [pscustomobject]@{
-                    Manufacturer = [string]$computer.Manufacturer
-                    Model = [string]$computer.Model
-                    Product = [string]$currentVersion.ProductName
-                    Edition = [string]$currentVersion.EditionID
-                    Version = [Environment]::OSVersion.Version.ToString()
-                    Build = "$($currentVersion.CurrentBuildNumber).$($currentVersion.UBR)"
-                    OsBuildNumber = [string]$operatingSystem.BuildNumber
-                    CurrentBuildNumber = [string]$currentVersion.CurrentBuildNumber
-                    Architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-                    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
-                    IsAdministrator = $principal.IsInRole(
-                        [Security.Principal.WindowsBuiltInRole]::Administrator
-                    )
-                }
-            })
-            if ($guestProbe.Count -ne 1 -or
-                $guestProbe[0].Manufacturer -cne "Microsoft Corporation" -or
-                $guestProbe[0].Model -cne "Virtual Machine" -or
-                $guestProbe[0].OsBuildNumber -cne $guestProbe[0].CurrentBuildNumber -or
-                $guestProbe[0].Architecture -cne "X64" -or
-                $guestProbe[0].IsAdministrator -ne $true) {
-                throw "PowerShell Direct reached an ineligible guest identity"
-            }
-            return [pscustomobject]@{
-                Session = $session
-                Probe = $guestProbe[0]
-            }
-        } catch {
-            if ($null -ne $session) {
-                Remove-PSSession -Session $session -ErrorAction SilentlyContinue
-            }
-            if ([DateTime]::UtcNow -ge $deadline) {
-                break
-            }
-            Start-Sleep -Seconds 2
-        }
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw "PowerShell Direct did not become ready before the bounded timeout"
+    }
 }
 
 function Read-IdentityLedger {
@@ -190,18 +157,17 @@ function Read-IdentityLedger {
         "topology"
     )
     $actualKeys = @($ledger.PSObject.Properties.Name)
-    $expectedKeys = @($baseKeys + "test_binaries")
-    if (($actualKeys -join "|") -cne ($expectedKeys -join "|") -or
+    if (($actualKeys -join "|") -cne ($baseKeys -join "|") -or
         ($ledger | ConvertTo-Json -Compress -Depth 8) -cne $json) {
         throw "identity ledger is not canonical or has an invalid property set"
     }
-    if ($ledger.schema -isnot [long] -or $ledger.schema -ne 3 -or
+    if ($ledger.schema -isnot [long] -or $ledger.schema -ne 4 -or
         $ledger.vm_name -cne [string]$topologyDocument.Value.vm.name -or
         $ledger.vm_id -cne [string]$topologyDocument.Value.vm.id -or
         $ledger.checkpoint_name -cne
-            [string]$topologyDocument.Value.qualification_checkpoint.name -or
+            [string]$topologyDocument.Value.lab_checkpoint.name -or
         $ledger.checkpoint_id -cne
-            [string]$topologyDocument.Value.qualification_checkpoint.id -or
+            [string]$topologyDocument.Value.lab_checkpoint.id -or
         $ledger.guest_architecture -cne "AMD64" -or
         $ledger.candidate_sha -cne $CandidateSha) {
         throw "identity ledger does not bind the approved guest and candidate"
@@ -324,17 +290,6 @@ function Read-IdentityLedger {
     if ($canonicalSupportCreationUtc -cne [string]$ExpectedSupportContext.creation_utc) {
         throw "identity ledger support listener changed: field=creation_utc"
     }
-    $testKeys = @("client", "tun", "wintun")
-    if ((@($ledger.test_binaries.PSObject.Properties.Name) -join "|") -cne
-        ($testKeys -join "|")) {
-        throw "identity ledger test binary shape is invalid"
-    }
-    foreach ($name in $testKeys) {
-        if ([string]$ledger.test_binaries.$name -cnotmatch '^[0-9a-f]{64}$') {
-            throw "identity ledger contains an invalid test binary hash"
-        }
-    }
-
     $controllerHash = (Get-FileHash -LiteralPath $ControllerPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($ledger.probe_sha256 -cne $controllerHash) {
         throw "identity ledger controller hash does not match the candidate"
@@ -401,7 +356,7 @@ function Invoke-CapturedNativeCommand {
     return @($lines)
 }
 
-function Get-CargoCompilerArtifacts {
+function Get-CargoCompilerArtifact {
     param([string[]]$Lines)
 
     $artifacts = [Collections.Generic.List[object]]::new()
@@ -437,16 +392,16 @@ function Select-CargoExecutable {
         [string]$Label
     )
 
-    $matches = @($Messages | Where-Object {
+    $artifactMatches = @($Messages | Where-Object {
         $_.target.name -ceq $TargetName -and
         @($_.target.kind) -ccontains $TargetKind -and
         [bool]$_.profile.test -eq $TestProfile
     })
-    if ($matches.Count -ne 1) {
+    if ($artifactMatches.Count -ne 1) {
         throw "$Label build did not yield exactly one executable"
     }
     return Resolve-BoundedFile `
-        -Path ([string]$matches[0].executable) `
+        -Path ([string]$artifactMatches[0].executable) `
         -Label $Label `
         -MaximumBytes 536870912
 }
@@ -481,38 +436,199 @@ function Copy-CandidateArtifact {
     }
 }
 
-function Build-CandidateArtifacts {
+function Read-Ferrum2CandidateArtifactBundle {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Destination,
+        [string]$ManifestPath,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$CandidateSha,
         [Parameter(Mandatory = $true)]
         [object]$Ledger
     )
 
+    if ($null -eq $Ledger -or
+        [string]$Ledger.candidate_sha -cne $CandidateSha -or
+        [string]$Ledger.client_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$Ledger.server_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "candidate artifact ledger identity is invalid"
+    }
+    $resolvedManifest = Resolve-BoundedFile `
+        -Path $ManifestPath `
+        -Label "candidate artifact manifest" `
+        -MaximumBytes 65536 `
+        -RequireOutsideRepository
+    if ([IO.Path]::GetFileName($resolvedManifest) -cne "candidate-artifacts.json") {
+        throw "candidate artifact manifest filename is invalid"
+    }
+
+    [byte[]]$manifestBytes = [IO.File]::ReadAllBytes($resolvedManifest)
+    if ($manifestBytes.Length -lt 2 -or
+        $manifestBytes[-1] -ne 10 -or
+        ($manifestBytes.Length -ge 3 -and
+            $manifestBytes[0] -eq 0xef -and
+            $manifestBytes[1] -eq 0xbb -and
+            $manifestBytes[2] -eq 0xbf) -or
+        @($manifestBytes | Where-Object { $_ -eq 10 }).Count -ne 1 -or
+        @($manifestBytes | Where-Object { $_ -eq 13 }).Count -ne 0) {
+        throw "candidate artifact manifest must be one BOM-free LF-terminated UTF-8 line"
+    }
+
+    $manifestJson = [Text.UTF8Encoding]::new($false, $true).GetString(
+        $manifestBytes,
+        0,
+        $manifestBytes.Length - 1
+    )
+    $manifest = $manifestJson | ConvertFrom-Json -Depth 6 -ErrorAction Stop
+    if ((@($manifest.PSObject.Properties.Name) -join "|") -cne
+            "schema|candidate_sha|target|rust_version|files" -or
+        $manifest.schema -cne "ferrum2.windows-tun.candidate-artifacts.v1" -or
+        [string]$manifest.candidate_sha -cne $CandidateSha -or
+        [string]$manifest.target -cne "x86_64-pc-windows-msvc" -or
+        [string]$manifest.rust_version -cnotmatch
+            '^rustc 1\.97\.1 \([0-9a-f]{9,40} [0-9]{4}-[0-9]{2}-[0-9]{2}\)$' -or
+        ($manifest | ConvertTo-Json -Compress -Depth 6) -cne $manifestJson) {
+        throw "candidate artifact manifest identity is invalid"
+    }
+    if ((@($manifest.files.PSObject.Properties.Name) -join "|") -cne
+            "client|server") {
+        throw "candidate artifact manifest file set is not closed"
+    }
+
+    $bundleRoot = Split-Path -Parent $resolvedManifest
+    Assert-NoReparsePointInExistingPath `
+        -Path $bundleRoot `
+        -Label "candidate artifact bundle"
+    $expectedNames = @(
+        "candidate-artifacts.json",
+        "ferrum2-client.exe",
+        "ferrum2-server.exe"
+    )
+    $bundleItems = @(Get-ChildItem -LiteralPath $bundleRoot -Force -ErrorAction Stop)
+    if ($bundleItems.Count -ne $expectedNames.Count -or
+        @($bundleItems | Where-Object {
+            $_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        }).Count -ne 0 -or
+        ((@($bundleItems.Name | Sort-Object -CaseSensitive) -join "|") -cne
+            ((@($expectedNames | Sort-Object -CaseSensitive)) -join "|"))) {
+        throw "candidate artifact bundle file set is not closed"
+    }
+
+    $artifacts = [ordered]@{}
+    $specifications = @(
+        [ordered]@{
+            Key = "client"
+            Name = "ferrum2-client.exe"
+            LedgerHash = [string]$Ledger.client_sha256
+        },
+        [ordered]@{
+            Key = "server"
+            Name = "ferrum2-server.exe"
+            LedgerHash = [string]$Ledger.server_sha256
+        }
+    )
+    foreach ($specification in $specifications) {
+        $entry = $manifest.files.($specification.Key)
+        if ((@($entry.PSObject.Properties.Name) -join "|") -cne
+                "name|bytes|sha256" -or
+            [string]$entry.name -cne $specification.Name -or
+            ($entry.bytes -isnot [long] -and $entry.bytes -isnot [int]) -or
+            [long]$entry.bytes -lt 4096 -or
+            [long]$entry.bytes -gt 536870912 -or
+            [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$entry.sha256 -cne $specification.LedgerHash) {
+            throw "candidate $($specification.Key) manifest entry is invalid"
+        }
+        $path = Resolve-BoundedFile `
+            -Path (Join-Path $bundleRoot $specification.Name) `
+            -Label "candidate $($specification.Key) artifact" `
+            -MaximumBytes 536870912 `
+            -RequireOutsideRepository
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        $sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+        if ([long]$item.Length -ne [long]$entry.bytes -or
+            $sha256 -cne [string]$entry.sha256) {
+            throw "candidate $($specification.Key) artifact identity changed"
+        }
+        $artifacts[$specification.Key] = [pscustomobject][ordered]@{
+            Path = $path
+            Name = $specification.Name
+            Bytes = [long]$item.Length
+            Sha256 = $sha256
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        ManifestPath = $resolvedManifest
+        ManifestSha256 = (Get-FileHash -LiteralPath $resolvedManifest -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+        CandidateSha = $CandidateSha
+        Target = [string]$manifest.target
+        RustVersion = [string]$manifest.rust_version
+        Client = $artifacts.client
+        Server = $artifacts.server
+    }
+}
+
+function Build-Ferrum2CandidateArtifactBundle {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Destination,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{40}$')]
+        [string]$CandidateSha,
+        [Parameter(Mandatory = $true)]
+        [object]$Ledger
+    )
+
+    if ($null -eq $Ledger -or
+        [string]$Ledger.candidate_sha -cne $CandidateSha -or
+        [string]$Ledger.client_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$Ledger.server_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "candidate artifact ledger identity is invalid"
+    }
+    $preBuildCandidate = Get-CandidateIdentity
+    if ($preBuildCandidate.Sha -cne $CandidateSha) {
+        throw "candidate artifact build commit does not match the requested candidate"
+    }
+    $target = "x86_64-pc-windows-msvc"
     $rustup = (Get-Command rustup -CommandType Application -ErrorAction Stop).Source
     $versionDetails = Invoke-CapturedNativeCommand `
         -Executable $rustup `
         -Arguments @("run", "1.97.1", "rustc", "--version", "--verbose") `
         -Label "host Rust toolchain verification" `
         -MaximumOutputBytes 65536
-    $versionLines = @($versionDetails | Where-Object { $_ -cmatch '^rustc 1\.97\.1 \(' })
-    $hostLines = @($versionDetails | Where-Object {
-        $_ -ceq "host: x86_64-pc-windows-msvc"
+    $versionLines = @($versionDetails | Where-Object {
+        $_ -cmatch '^rustc 1\.97\.1 \([0-9a-f]{9,40} [0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
     })
+    $hostLines = @($versionDetails | Where-Object { $_ -ceq "host: $target" })
     $releaseLines = @($versionDetails | Where-Object { $_ -ceq "release: 1.97.1" })
-    if ($versionLines.Count -ne 1 -or $hostLines.Count -ne 1 -or $releaseLines.Count -ne 1) {
-        throw "host Rust toolchain does not match Rust 1.97.1 x86_64-pc-windows-msvc"
+    if ($versionLines.Count -ne 1 -or
+        $hostLines.Count -ne 1 -or
+        $releaseLines.Count -ne 1) {
+        throw "host Rust toolchain does not match Rust 1.97.1 $target"
     }
+    $rustVersion = [string]$versionLines[0]
 
-    [IO.Directory]::CreateDirectory($Destination) | Out-Null
-    $common = @("run", "1.97.1", "cargo")
-    $buildMessages = Get-CargoCompilerArtifacts (Invoke-CapturedNativeCommand `
+    $bundleRoot = Resolve-ExternalDirectoryTarget `
+        -Path $Destination `
+        -Label "candidate artifact bundle"
+    [IO.Directory]::CreateDirectory($bundleRoot) | Out-Null
+    Assert-NoReparsePointInExistingPath `
+        -Path $bundleRoot `
+        -Label "candidate artifact bundle"
+
+    $buildMessages = Get-CargoCompilerArtifact (Invoke-CapturedNativeCommand `
         -Executable $rustup `
-        -Arguments ($common + @(
-            "build", "-p", "ferrum2-client", "-p", "ferrum2-server", "--bins",
-            "--locked", "--message-format=json-render-diagnostics",
+        -Arguments @(
+            "run", "1.97.1", "cargo", "build",
+            "-p", "ferrum2-client", "-p", "ferrum2-server", "--bins",
+            "--locked", "--target", $target,
+            "--message-format=json-render-diagnostics",
             "--manifest-path", (Join-Path $script:repositoryRoot "Cargo.toml")
-        )) `
+        ) `
         -Label "host candidate binary build")
     $clientSource = Select-CargoExecutable `
         -Messages $buildMessages `
@@ -526,99 +642,60 @@ function Build-CandidateArtifacts {
         -TargetKind "bin" `
         -TestProfile $false `
         -Label "candidate server"
-
-    $testBuilds = @(
-        [ordered]@{
-            Key = "client"
-            File = "ferrum2-client-tests.exe"
-            Package = "ferrum2-client"
-            CargoTarget = @("--bin", "ferrum2-client")
-            TargetName = "ferrum2-client"
-            TargetKind = "bin"
-        },
-        [ordered]@{
-            Key = "tun"
-            File = "ferrum2-tun-tests.exe"
-            Package = "ferrum2-tun"
-            CargoTarget = @("--lib")
-            TargetName = "ferrum2_tun"
-            TargetKind = "lib"
-        },
-        [ordered]@{
-            Key = "wintun"
-            File = "ferrum2-platform-windows-tests.exe"
-            Package = "ferrum2-platform-windows"
-            CargoTarget = @("--lib")
-            TargetName = "ferrum2_platform_windows"
-            TargetKind = "lib"
-        }
-    )
-
     $client = Copy-CandidateArtifact `
         -Source $clientSource `
-        -Destination (Join-Path $Destination "ferrum2-client.exe") `
+        -Destination (Join-Path $bundleRoot "ferrum2-client.exe") `
         -Label "candidate client"
     $server = Copy-CandidateArtifact `
         -Source $serverSource `
-        -Destination (Join-Path $Destination "ferrum2-server.exe") `
+        -Destination (Join-Path $bundleRoot "ferrum2-server.exe") `
         -Label "candidate server"
-    $tests = [ordered]@{}
-    foreach ($spec in $testBuilds) {
-        $messages = Get-CargoCompilerArtifacts (Invoke-CapturedNativeCommand `
-            -Executable $rustup `
-            -Arguments ($common + @(
-                "test", "-p", $spec.Package, "--locked"
-            ) + @($spec.CargoTarget) + @(
-                "--no-run", "--message-format=json-render-diagnostics",
-                "--manifest-path", (Join-Path $script:repositoryRoot "Cargo.toml")
-            )) `
-            -Label "host $($spec.Package) test build")
-        $source = Select-CargoExecutable `
-            -Messages $messages `
-            -TargetName $spec.TargetName `
-            -TargetKind $spec.TargetKind `
-            -TestProfile $true `
-            -Label "$($spec.Package) test binary"
-        $tests[$spec.Key] = Copy-CandidateArtifact `
-            -Source $source `
-            -Destination (Join-Path $Destination $spec.File) `
-            -Label "$($spec.Package) test binary"
-    }
-
-    $fuzzManifest = Join-Path $script:repositoryRoot "crates\ferrum2-tun\fuzz\Cargo.toml"
-    $fuzzMessages = Get-CargoCompilerArtifacts (Invoke-CapturedNativeCommand `
-        -Executable $rustup `
-        -Arguments ($common + @(
-            "build", "--manifest-path", $fuzzManifest, "--bin", "smoke",
-            "--no-default-features", "--locked", "--target", "x86_64-pc-windows-msvc",
-            "--message-format=json-render-diagnostics"
-        )) `
-        -Label "host Windows TUN fuzz smoke build")
-    $fuzzSmokeSource = Select-CargoExecutable `
-        -Messages $fuzzMessages `
-        -TargetName "smoke" `
-        -TargetKind "bin" `
-        -TestProfile $false `
-        -Label "Windows TUN fuzz smoke binary"
-    $fuzzSmoke = Copy-CandidateArtifact `
-        -Source $fuzzSmokeSource `
-        -Destination (Join-Path $Destination "ferrum2-tun-fuzz-smoke.exe") `
-        -Label "Windows TUN fuzz smoke binary"
-
     if ($client.Sha256 -cne [string]$Ledger.client_sha256 -or
         $server.Sha256 -cne [string]$Ledger.server_sha256) {
         throw "host-built candidate binary hashes do not match the identity ledger"
     }
-    foreach ($key in @("client", "tun", "wintun")) {
-        if ($tests[$key].Sha256 -cne [string]$Ledger.test_binaries.$key) {
-            throw "host-built $key test hash does not match the identity ledger"
+
+    $manifest = [ordered]@{
+        schema = "ferrum2.windows-tun.candidate-artifacts.v1"
+        candidate_sha = $CandidateSha
+        target = $target
+        rust_version = $rustVersion
+        files = [ordered]@{
+            client = [ordered]@{
+                name = $client.Name
+                bytes = [long]$client.Bytes
+                sha256 = $client.Sha256
+            }
+            server = [ordered]@{
+                name = $server.Name
+                bytes = [long]$server.Bytes
+                sha256 = $server.Sha256
+            }
         }
     }
-    return [pscustomobject]@{
-        Client = $client
-        Server = $server
-        Tests = $tests
-        FuzzSmoke = $fuzzSmoke
-        RustVersion = $versionLines[0]
+    $manifestPath = Join-Path $bundleRoot "candidate-artifacts.json"
+    $manifestBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        ($manifest | ConvertTo-Json -Compress -Depth 6) + "`n"
+    )
+    $manifestStream = [IO.FileStream]::new(
+        $manifestPath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $manifestStream.Write($manifestBytes, 0, $manifestBytes.Length)
+        $manifestStream.Flush($true)
+    } finally {
+        $manifestStream.Dispose()
     }
+    $postBuildCandidate = Get-CandidateIdentity
+    if ($postBuildCandidate.Sha -cne $CandidateSha) {
+        throw "candidate commit changed during artifact bundle construction"
+    }
+
+    return Read-Ferrum2CandidateArtifactBundle `
+        -ManifestPath $manifestPath `
+        -CandidateSha $CandidateSha `
+        -Ledger $Ledger
 }

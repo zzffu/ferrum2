@@ -15,7 +15,6 @@ pub(super) use crate::lifecycle::{
 };
 pub(super) use crate::reassembly::REASSEMBLY_TIMEOUT_MILLIS;
 pub(super) use crate::tcp::tcp_flow_pair;
-#[cfg(all(windows, target_arch = "x86_64"))]
 pub(super) use crate::{AdapterErrorDisposition, classify_adapter_error};
 pub(super) use crate::{
     Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NetworkResetBridgeOutcome,

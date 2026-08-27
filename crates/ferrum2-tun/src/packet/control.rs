@@ -2,8 +2,34 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::{
     ControlContext, IP_PROTOCOL_ICMP, IP_PROTOCOL_ICMPV6, IpFamily, MAX_REASSEMBLED_PACKET,
-    ParsedIpPacket, internet_checksum, ipv4_unicast, ipv6_unicast,
+    PacketRejectReason, ParsedIpPacket, internet_checksum, ipv4_unicast, ipv6_unicast,
 };
+
+pub(crate) const fn map_packet_reject(reason: PacketRejectReason) -> crate::TunRejectReason {
+    match reason {
+        PacketRejectReason::Empty | PacketRejectReason::InvalidVersion => {
+            crate::TunRejectReason::InvalidIpVersion
+        }
+        PacketRejectReason::DisabledFamily => crate::TunRejectReason::FamilyDisabled,
+        PacketRejectReason::InvalidLength | PacketRejectReason::JumbogramUnsupported => {
+            crate::TunRejectReason::InvalidIpLength
+        }
+        PacketRejectReason::InvalidHeaderChecksum => crate::TunRejectReason::InvalidIpChecksum,
+        PacketRejectReason::InvalidSource => crate::TunRejectReason::InvalidSource,
+        PacketRejectReason::InvalidDestination => crate::TunRejectReason::InvalidDestination,
+        PacketRejectReason::InvalidIpv4Options
+        | PacketRejectReason::SourceRouteOption
+        | PacketRejectReason::ExtensionLimit
+        | PacketRejectReason::MalformedExtension => crate::TunRejectReason::InvalidExtensionHeader,
+        PacketRejectReason::InvalidFragment => crate::TunRejectReason::FragmentMalformed,
+        PacketRejectReason::UnsupportedProtocol => crate::TunRejectReason::UnsupportedIpProtocol,
+        PacketRejectReason::IcmpEchoUnsupported => crate::TunRejectReason::IcmpEchoUnsupported,
+        PacketRejectReason::InvalidTransport => crate::TunRejectReason::InvalidTransportLength,
+        PacketRejectReason::InvalidTransportChecksum => {
+            crate::TunRejectReason::InvalidTransportChecksum
+        }
+    }
+}
 
 pub(crate) const CONTROL_ERROR_INTERVAL_MILLIS: i64 = 100;
 

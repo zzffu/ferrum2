@@ -145,7 +145,12 @@ fn rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
 fn managed_rust_sources(root: &Path, source_roots: &BTreeSet<String>) -> BTreeMap<String, String> {
     let mut paths = Vec::new();
     for source_root in source_roots {
-        rust_sources(&root.join(source_root), &mut paths);
+        let path = root.join(source_root);
+        if path.is_file() {
+            paths.push(path);
+        } else {
+            rust_sources(&path, &mut paths);
+        }
     }
     paths
         .into_iter()
@@ -209,7 +214,7 @@ fn count_unsafe_allowances(source: &str) -> usize {
 fn validate_unsafe_sources(
     sources: &[(PathBuf, String)],
     legacy: Option<&Path>,
-    ffi_root: &Path,
+    allowed_paths: &[PathBuf],
     expected_allowances: usize,
 ) -> Result<(), String> {
     let allowance_count: usize = sources
@@ -227,7 +232,9 @@ fn validate_unsafe_sources(
             .map_err(|error| format!("invalid Rust source {}: {error}", path.display()))?;
         if has_unsafe_token(tokens)
             && !legacy.is_some_and(|legacy| path == legacy)
-            && !path.starts_with(ffi_root)
+            && !allowed_paths
+                .iter()
+                .any(|allowed| path == allowed || path.starts_with(allowed))
         {
             return Err(format!(
                 "unsafe token escaped declared boundary: {}",
@@ -287,6 +294,13 @@ fn validate_action_reference(reference: &str) -> Result<(), String> {
     }
 }
 
+#[path = "workflow_contract.rs"]
+mod workflow_contract;
+
+use workflow_contract::{
+    validate_fuzz_workflow_execution, validate_hosted_library_execution,
+    validate_lifecycle_triggers, validate_read_only_permissions, validate_required_job,
+};
 #[test]
 fn shared_dns_tls_fixtures_match_provenance_and_consumers() {
     let root = workspace_root();
@@ -410,12 +424,17 @@ fn declarative_architecture_policy_matches_the_workspace() {
 }
 
 #[test]
-fn unsafe_boundary_honors_the_declared_legacy_phase_and_ffi_subtree() {
+fn unsafe_boundary_honors_the_declared_reviewed_paths() {
     let root = workspace_root();
     let policy = policy();
     let boundary = &policy["unsafe_boundary"];
     let legacy = root.join(boundary["legacy_file"].as_str().expect("legacy file"));
-    let ffi_root = root.join(boundary["ffi_subtree"].as_str().expect("FFI subtree"));
+    let allowed_paths: Vec<_> = boundary["allowed_paths"]
+        .as_array()
+        .expect("unsafe allowed paths")
+        .iter()
+        .map(|path| root.join(path.as_str().expect("unsafe allowed path")))
+        .collect();
     let mut paths = Vec::new();
     rust_sources(&root.join("bins"), &mut paths);
     rust_sources(&root.join("crates"), &mut paths);
@@ -432,7 +451,7 @@ fn unsafe_boundary_honors_the_declared_legacy_phase_and_ffi_subtree() {
             .as_bool()
             .expect("legacy phase flag")
             .then_some(legacy.as_path()),
-        &ffi_root,
+        &allowed_paths,
         boundary["allow_declarations"]
             .as_integer()
             .expect("allow declaration count") as usize,
@@ -482,11 +501,8 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
             continue;
         }
         let source = fs::read_to_string(&path).expect("workflow source");
-        assert!(
-            source.contains("permissions:\n  contents: read"),
-            "{} lacks read-only permissions",
-            path.display()
-        );
+        validate_read_only_permissions(&source)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for line in source.lines().map(str::trim) {
             if let Some(reference) = line.strip_prefix("uses:") {
                 validate_action_reference(reference.trim())
@@ -497,53 +513,68 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
 
     let fuzz = fs::read_to_string(workflow_root.join("tun-fuzz-deterministic.yml"))
         .expect("fuzz workflow");
-    let trigger = fuzz
-        .split_once("\npermissions:\n")
-        .expect("fuzz workflow trigger boundary")
-        .0;
-    assert!(
-        trigger.contains("\n  pull_request:\n") && trigger.contains("\n  push:\n"),
-        "the independently required fuzz workflow must cover pull requests and protected pushes"
-    );
-    assert!(
-        !trigger
-            .lines()
-            .any(|line| matches!(line.trim(), "paths:" | "paths-ignore:")),
-        "the independently required fuzz workflow must run on every PR and protected push"
-    );
-    assert!(
-        fuzz.contains("  cancel-in-progress: false\n  queue: max\n"),
-        "affected fuzz campaigns must use the complete bounded queue so later pushes cannot replace pending coverage"
-    );
-    let owner_paths = strings(&policy()["fuzz_impact"]["owner_paths"]);
+    validate_fuzz_workflow_execution(&fuzz).expect("fuzz workflow execution contract");
+    let fuzz_policy = policy();
+    let owner_paths = strings(&fuzz_policy["fuzz_impact"]["owner_paths"]);
     assert_eq!(
         owner_paths,
         BTreeSet::from([
             ".gitattributes".to_owned(),
-            ".cargo/**".to_owned(),
+            ".cargo/config.toml".to_owned(),
             ".github/workflows/tun-fuzz-deterministic.yml".to_owned(),
             "Cargo.lock".to_owned(),
             "Cargo.toml".to_owned(),
-            "crates/ferrum2-config/**".to_owned(),
-            "crates/ferrum2-core/**".to_owned(),
-            "crates/ferrum2-crypto/**".to_owned(),
-            "crates/ferrum2-net/**".to_owned(),
-            "crates/ferrum2-platform-windows/**".to_owned(),
-            "crates/ferrum2-rule/**".to_owned(),
-            "crates/ferrum2-runtime/**".to_owned(),
-            "crates/ferrum2-tun/**".to_owned(),
-            "tests/m0-harness/tests/workspace_policy/**".to_owned(),
-            "tests/platform/**".to_owned(),
+            "crates/ferrum2-config/Cargo.toml".to_owned(),
+            "crates/ferrum2-config/src/**".to_owned(),
+            "crates/ferrum2-core/Cargo.toml".to_owned(),
+            "crates/ferrum2-core/src/**".to_owned(),
+            "crates/ferrum2-crypto/Cargo.toml".to_owned(),
+            "crates/ferrum2-crypto/src/**".to_owned(),
+            "crates/ferrum2-net/Cargo.toml".to_owned(),
+            "crates/ferrum2-net/src/**".to_owned(),
+            "crates/ferrum2-platform-windows/Cargo.toml".to_owned(),
+            "crates/ferrum2-platform-windows/src/**".to_owned(),
+            "crates/ferrum2-rule/Cargo.toml".to_owned(),
+            "crates/ferrum2-rule/src/**".to_owned(),
+            "crates/ferrum2-runtime/Cargo.toml".to_owned(),
+            "crates/ferrum2-runtime/src/**".to_owned(),
+            "crates/ferrum2-tun/Cargo.toml".to_owned(),
+            "crates/ferrum2-tun/fuzz/**".to_owned(),
+            "crates/ferrum2-tun/src/**".to_owned(),
+            "crates/ferrum2-tun/tests/fixtures/packets/**".to_owned(),
+            "rust-toolchain.toml".to_owned(),
+            "tests/m0-harness/tests/workspace_policy/architecture.toml".to_owned(),
             "tools/ci/__init__.py".to_owned(),
             "tools/ci/fuzz_contract.py".to_owned(),
             "tools/ci/git_changes.py".to_owned(),
-            "tools/powershell/**".to_owned(),
-            "tools/windows-tun/**".to_owned(),
-            "tools/windows_tun_hyperv_support_topology_plan.json".to_owned(),
-            "tools/windows_tun_performance_policy.json".to_owned(),
-            "vendor/shadowsocks-crypto/**".to_owned(),
+            "vendor/shadowsocks-crypto/Cargo.toml".to_owned(),
+            "vendor/shadowsocks-crypto/src/**".to_owned(),
         ]),
         "the fuzz owner-impact ledger drifted"
+    );
+    let documentation_exclusions = fuzz_policy["fuzz_impact"]["documentation_exclusions"]
+        .as_array()
+        .expect("typed fuzz documentation exclusions");
+    let actual_exclusions: BTreeSet<_> = documentation_exclusions
+        .iter()
+        .map(|entry| {
+            (
+                entry["pattern"]
+                    .as_str()
+                    .expect("documentation exclusion pattern"),
+                entry["kind"]
+                    .as_str()
+                    .expect("documentation exclusion kind"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual_exclusions,
+        BTreeSet::from([
+            ("crates/ferrum2-tun/fuzz/*.md", "markdown"),
+            ("crates/ferrum2-tun/fuzz/**/*.md", "markdown"),
+        ]),
+        "fuzz documentation exclusions must remain explicit and typed"
     );
     let campaign = &policy()["fuzz_campaign"];
     let campaign_targets = strings(&campaign["targets"]);
@@ -572,6 +603,8 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
         total_seconds, 3_600,
         "the required fuzz campaign is one hour"
     );
+    let main = fs::read_to_string(workflow_root.join("m0.yml")).expect("main workflow source");
+    validate_hosted_library_execution(&main).expect("hosted-safe library execution contract");
     let policy = policy();
     let required = &policy["ci_required"];
     for (workflow_key, needs_key) in [
@@ -582,64 +615,14 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
             .as_str()
             .expect("required workflow path");
         let source = fs::read_to_string(root.join(relative)).expect("required workflow");
-        assert_eq!(
-            source.matches("\n  required:\n").count(),
-            1,
-            "{relative} must expose one stable required job"
-        );
-        let required_job = source
-            .split_once("\n  required:\n")
-            .expect("required job block")
-            .1;
-        assert!(
-            required_job.contains("    if: ${{ always() }}"),
-            "{relative} required job must run after failed dependencies"
-        );
         let expected_dependencies = strings(&required[needs_key]);
-        let mut actual_dependencies = BTreeSet::new();
-        let mut in_needs = false;
-        for line in required_job.lines() {
-            if line == "    needs:" {
-                in_needs = true;
-                continue;
-            }
-            if !in_needs {
-                continue;
-            }
-            let Some(dependency) = line.strip_prefix("      - ") else {
-                break;
-            };
-            actual_dependencies.insert(dependency.to_owned());
-        }
-        assert_eq!(
-            actual_dependencies, expected_dependencies,
-            "{relative} required job dependency set drift"
-        );
-        for dependency in expected_dependencies {
-            assert!(
-                required_job.contains(&format!("needs.{dependency}.result")),
-                "{relative} required job does not explicitly enforce {dependency}"
-            );
-        }
+        validate_required_job(&source, &expected_dependencies)
+            .unwrap_or_else(|error| panic!("{relative}: {error}"));
     }
 
-    let main = fs::read_to_string(root.join(".github/workflows/m0.yml")).expect("main workflow");
-    for command in [
-        "cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked",
-        "cargo test -p ferrum2-client --all-features --no-run --locked",
-        "cargo test -p ferrum2-tun --all-features --no-run --locked",
-        "cargo test -p ferrum2-platform-windows --all-features --no-run --locked",
-        "cargo +1.97.1 test -p ferrum2-client --all-features --no-run --locked --target ${{ matrix.target }}",
-        "cargo +1.97.1 test -p ferrum2-tun --all-features --no-run --locked --target ${{ matrix.target }}",
-        "cargo +1.97.1 test -p ferrum2-platform-windows --all-features --no-run --locked --target ${{ matrix.target }}",
-        "python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v",
-        "python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v",
-    ] {
-        assert!(
-            main.contains(command),
-            "main workflow lost safe command: {command}"
-        );
-    }
+    let lifecycle =
+        fs::read_to_string(workflow_root.join("lifecycle-stress.yml")).expect("lifecycle workflow");
+    validate_lifecycle_triggers(&lifecycle).expect("lifecycle workflow trigger contract");
 }
 
 #[test]
@@ -673,7 +656,15 @@ fn policy_mutations_fail_closed() {
             "#[allow(unsafe_code)] fn second() { unsafe {} }".to_owned(),
         ),
     ];
-    assert!(validate_unsafe_sources(&second_allowance, Some(&legacy), &ffi, 1).is_err());
+    assert!(
+        validate_unsafe_sources(
+            &second_allowance,
+            Some(&legacy),
+            std::slice::from_ref(&ffi),
+            1
+        )
+        .is_err()
+    );
 
     let vendor_source =
         fs::read_to_string(workspace_root().join("vendor/shadowsocks-crypto/Cargo.toml"))

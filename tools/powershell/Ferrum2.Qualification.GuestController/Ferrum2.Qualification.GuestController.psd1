@@ -9,9 +9,8 @@
     CompatiblePSEditions = @('Core')
     FunctionsToExport = @(
         'Get-Ferrum2QualificationProfiles'
+        'Get-Ferrum2QualificationSuiteProfiles'
         'Resolve-Ferrum2QualificationProfile'
-        'Assert-Ferrum2GuestQualificationMode'
-        'Get-Ferrum2GuestQualificationModeContract'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

@@ -235,6 +235,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         -Text ($serverTemplate.TrimStart([char[]]"`r`n") + "`n")
 
     $supportHostReadback = Get-HostSupportContext `
+        -RepositoryRoot $repositoryRoot `
         -TopologyDocument $topologyManifestDocument `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
         -ProcessId $SupportPid -ProcessOwner $SupportOwner `
@@ -390,6 +391,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     $guestNetworkPathJson = [string]$guestNetworkPathJsonRows[0]
     $guestNetworkPath = $guestNetworkPathJson | ConvertFrom-Json -Depth 5
     $supportHostAfterProbe = Get-HostSupportContext `
+        -RepositoryRoot $repositoryRoot `
         -TopologyDocument $topologyManifestDocument `
         -Address $SupportIpv4 -TcpPort $SupportTcpPort -UdpPort $SupportUdpPort `
         -ProcessId $SupportPid -ProcessOwner $SupportOwner `
@@ -411,7 +413,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
             manifest_sha256 = [string]$topologyManifestDocument.Sha256
             plan_sha256 = [string]$topologyPlanDocument.Sha256
             support_switch_id = [string]$topologyManifestDocument.Value.support.switch.switch_id
-            qualification_checkpoint_id = $approvedCheckpointId.ToString("D")
+            lab_checkpoint_id = $approvedCheckpointId.ToString("D")
         }
         support_listener = $supportHostAfterProbe
         approved_vm_network = $vmNetworkAfterProbe

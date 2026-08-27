@@ -18,7 +18,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$Mode = 'hard-kill'
+$Profile = 'hard-kill'
 $controllerEntryPointPath = Join-Path $PSScriptRoot `
     'qualify_windows_tun_hard_kill.ps1'
 $controllerBundleManifestPath = Join-Path $PSScriptRoot 'controller-bundle.json'
@@ -28,7 +28,7 @@ if (-not (Test-Path -LiteralPath $controllerBundleManifestPath -PathType Leaf)) 
 $controllerBundleManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
     -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
 $bootstrapRelative = `
-    'modules/Ferrum2.Qualification.Common/BundleBootstrap.ps1'
+    'modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1'
 $bootstrapEntry = @($controllerBundleManifest.files | Where-Object {
     [string]$_.path -ceq $bootstrapRelative
 })
@@ -125,8 +125,6 @@ $serverBinary = if ($serverBinaryExplicit) {
     Join-Path $resolvedProductRoot 'target\debug\ferrum2-server.exe'
 }
 $siblingDll = Join-Path (Split-Path -Parent $binary) 'wintun.dll'
-$candidateTestDirectoryExplicit = $false
-$resolvedCandidateTestDirectory = $null
 $createdSiblingDll = $false
 $ownedInterfaceIndex = $null
 $m17GuestNetworkPathDocument = $null

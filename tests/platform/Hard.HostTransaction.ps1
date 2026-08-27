@@ -12,6 +12,15 @@ try {
         (Get-Ferrum2LowerSha256 (Join-Path $hostEvidencePath "identity-ledger.json")) -ceq
             $ledgerIdentity.Sha256
     ) "host identity ledger evidence copy changed"
+    Copy-Item `
+        -LiteralPath $candidateArtifacts.ManifestPath `
+        -Destination (Join-Path $hostEvidencePath "candidate-artifacts.json") `
+        -ErrorAction Stop
+    Assert-True (
+        (Get-Ferrum2LowerSha256 `
+            (Join-Path $hostEvidencePath "candidate-artifacts.json")) -ceq
+                $candidateArtifacts.ManifestSha256
+    ) "host candidate artifact manifest evidence copy changed"
     $topologyBytes = [IO.File]::ReadAllBytes([string]$topologyDocument.Path)
     Assert-True (
         [long]$topologyBytes.Length -eq [long]$topologyDocument.Length -and
@@ -22,9 +31,6 @@ try {
     Assert-True ((Get-Ferrum2LowerSha256 $hostTopologyManifestPath) -ceq
         [string]$topologyDocument.Sha256) `
         "host topology manifest evidence copy changed"
-    $candidateArtifacts = Build-CandidateArtifacts `
-        -Destination $hostArtifactRoot `
-        -Ledger $ledgerIdentity.Ledger
     $portablePowerShell = New-PortablePowerShellArchive `
         -SourceZip $PowerShellZip `
         -Destination $hostPowerShellArchive
@@ -79,10 +85,11 @@ try {
         "candidate commit changed during artifact preparation"
 
     $stagedInput = [ordered]@{
-        schema = "ferrum2.windows-tun.hard-kill-staged-input.v3"
+        schema = "ferrum2.windows-tun.hard-kill-staged-input.v4"
         mode = "hard-kill"
         run_token = $RunToken
         candidate_sha = $candidate.Sha
+        candidate_artifact_manifest_sha256 = $candidateArtifacts.ManifestSha256
         identity_sha256 = $ledgerIdentity.Sha256
         controller_bundle = $controllerBundleManifest
         vm_name = $approvedVmName
@@ -195,8 +202,7 @@ try {
             New-Item -ItemType Directory -Path $exportPath -Force -ErrorAction Stop | Out-Null
             foreach ($relative in @(
                     "controller",
-                    "controller\modules\Ferrum2.Qualification.Common",
-                    "controller\modules\Ferrum2.Qualification.Evidence",
+                    "controller\modules\Ferrum2.WindowsTun.Lab",
                     "artifacts",
                     "runtime\vc-runtime"
                 )) {
@@ -339,9 +345,11 @@ try {
             }
             $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 |
                 ConvertFrom-Json -ErrorAction Stop
-            if ($manifest.schema -cne "ferrum2.windows-tun.hard-kill-staged-input.v3" -or
+            if ($manifest.schema -cne "ferrum2.windows-tun.hard-kill-staged-input.v4" -or
                 $manifest.mode -cne "hard-kill" -or
                 $manifest.run_token -cne $ExpectedRunToken -or
+                [string]$manifest.candidate_artifact_manifest_sha256 -cnotmatch
+                    '^[0-9a-f]{64}$' -or
                 [string]$manifest.files.powershell_archive.sha256 -cne
                     $ExpectedPowerShellZipSha256 -or
                 [string]$manifest.runtime.powershell_version -cne $ExpectedPowerShellVersion -or

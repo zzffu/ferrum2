@@ -252,6 +252,8 @@ ready_timeout_ms = 15000
         full_rebuild_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_network_full_rebuild" $true) - $fullRebuildBefore
         live_ring_full_delta = (Get-M17MetricValue $ordinaryMetrics "ferrum2_tun_wintun_ring_full_dropped") - $ringBefore
     })
+    Add-M17Witness "rx_bursts_8_16_64_have_no_structural_drop" "live-product" `
+        "8, 16, and 64 packet capacity-aware sequences round-tripped exactly with stable ingress and egress accounting"
     $script:m17CounterAfter = Get-M17CounterSnapshot $metrics
     Stop-M17Candidate $script:activeProcess "scheduler-ring-full"
     } finally {
@@ -271,16 +273,15 @@ function Invoke-M17Qualification([string]$SourceDll) {
     $script:createdSiblingDll = $true
     Assert-True ((Get-FileHash -LiteralPath $script:siblingDll -Algorithm SHA256).Hash -eq $script:expectedDllHash) "M17 sibling DLL identity changed"
     Start-M17Server
-    switch ($script:Mode) {
+    switch ($script:Profile) {
         "network-reset" { Invoke-M17NetworkReset }
         "restart-stress" { Invoke-M17RestartStress }
         "fragments" { Invoke-M17Fragments }
         "dual-stack-dns" { Invoke-M17DualStackDns }
         "udp-policy" { Invoke-M17UdpPolicy }
         "scheduler-ring-full" { Invoke-M17SchedulerRingFull }
-        default { throw "M17 live dispatch received an invalid mode" }
+        default { throw "M17 live dispatch received an invalid profile" }
     }
-    Invoke-M17CandidateTests
     $actualWitnesses = @($script:m17WitnessRows.Keys | Sort-Object)
     $expectedWitnesses = @($script:m17Contract.witnesses | Sort-Object)
     Assert-True (($actualWitnesses -join "`n") -ceq ($expectedWitnesses -join "`n")) "M17 witness set is incomplete"
@@ -314,12 +315,14 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         Assert-True $cleanupPassed "M17 cleanup evidence is not absent"
     }
     $document = [ordered]@{
-        schema = "ferrum2.windows-tun.m17-result.v3"
+        schema = "ferrum2.windows-tun.m17-result.v4"
         status = if ($Succeeded) { "pass" } else { "fail" }
-        mode = $script:Mode
+        profile = $script:Profile
         run_token = $script:runIdentity
-        network_reset_cycles = if ($script:Mode -eq "network-reset") { $script:NetworkResetCycles } else { $null }
-        restart_cycles = if ($script:Mode -eq "restart-stress") { $script:RestartCycles } else { $null }
+        cycle_limit = if ($script:Profile -in @("network-reset", "restart-stress")) { 1000 } else { $null }
+        release_milestones = if ($script:Profile -in @("network-reset", "restart-stress")) {
+            $script:releaseMilestones
+        } else { @() }
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId
         approved_checkpoint_name = $script:expectedHyperVCheckpointName
@@ -333,7 +336,6 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         controller_bundle_sha256 = [string]$script:controllerBundleManifest.controller_bundle_sha256
         wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
         wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
-        test_binaries = $script:capabilityIdentity.Ledger.test_binaries
         topology = $script:capabilityIdentity.Ledger.topology
         guest_network_path = $script:m17GuestNetworkPathDocument.Value
         started_utc = $script:m17StartedUtc
@@ -341,7 +343,6 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         fixtures = $script:m17FixtureRows
         processes = @($script:m17ProcessRows)
         live_checks = @($script:m17LiveRows)
-        deterministic_tests = @($script:m17TestRows)
         witnesses = @($script:m17WitnessRows.Values)
         counters_before = $script:m17CounterBefore
         counters_after = $script:m17CounterAfter

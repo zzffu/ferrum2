@@ -1,14 +1,8 @@
-mod loader;
-mod managed;
-mod network;
-mod notification;
-mod strict_route;
-mod wintun;
+mod core;
 
-mod ffi;
+#[cfg(not(test))]
+#[path = "live/mod.rs"]
+pub(crate) mod backend;
 
-pub use ffi::{
-    Adapter, ReceivedPacket, StopSignal, WindowsNetworkChangeMonitor, WindowsResolvedSocketBinder,
-    WorkSignal, bind_resolved_socket,
-};
-pub use network::{UnderlayPolicy, WindowsNetworkInterfaceCatalog};
+#[cfg(test)]
+mod tests;

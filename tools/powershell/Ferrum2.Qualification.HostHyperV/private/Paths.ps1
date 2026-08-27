@@ -6,24 +6,7 @@ function Assert-NoReparsePointInExistingPath {
         [string]$Label
     )
 
-    $fullPath = [IO.Path]::GetFullPath($Path)
-    $root = [IO.Path]::GetPathRoot($fullPath)
-    if ([string]::IsNullOrWhiteSpace($root)) {
-        throw "$Label must use a rooted filesystem path"
-    }
-
-    $current = $root
-    $relative = $fullPath.Substring($root.Length)
-    foreach ($segment in @($relative -split '[\\/]' | Where-Object { $_.Length -gt 0 })) {
-        $current = Join-Path $current $segment
-        if (-not (Test-Path -LiteralPath $current)) {
-            break
-        }
-        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "$Label cannot traverse a reparse point"
-        }
-    }
+    Assert-Ferrum2NoReparsePointInExistingPath -Path $Path -Label $Label
 }
 
 function Resolve-BoundedFile {
@@ -36,19 +19,16 @@ function Resolve-BoundedFile {
         [switch]$RequireOutsideRepository
     )
 
-    if (-not [IO.Path]::IsPathFullyQualified($Path)) {
-        throw "$Label path must be absolute"
+    $resolved = Resolve-Ferrum2OrdinaryFile `
+        -Path $Path `
+        -Label $Label `
+        -MaximumBytes $MaximumBytes
+    Assert-Ferrum2NoReparsePointInExistingPath -Path $resolved -Label $Label
+    if ($RequireOutsideRepository -and
+        (Test-Ferrum2PathWithinRoot -Path $resolved -Root $script:repositoryRoot)) {
+        throw "$Label must be stored outside the repository"
     }
-    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
-    Assert-NoReparsePointInExistingPath -Path $resolved -Label $Label
-    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
-    if (-not $item.PSIsContainer -and $item.Length -gt 0 -and $item.Length -le $MaximumBytes) {
-        if ($RequireOutsideRepository -and (Test-Ferrum2PathWithinRoot -Path $resolved -Root $script:repositoryRoot)) {
-            throw "$Label must be stored outside the repository"
-        }
-        return $resolved
-    }
-    throw "$Label file boundary is invalid"
+    return $resolved
 }
 
 function Resolve-ExternalDirectoryTarget {
@@ -59,32 +39,11 @@ function Resolve-ExternalDirectoryTarget {
         [string]$Label
     )
 
-    if (-not [IO.Path]::IsPathFullyQualified($Path)) {
-        throw "$Label path must be absolute"
-    }
-    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
-    if (Test-Ferrum2PathWithinRoot -Path $fullPath -Root $script:repositoryRoot) {
-        throw "$Label must be stored outside the repository"
-    }
-    if (Test-Path -LiteralPath $fullPath) {
-        throw "$Label baseline must be absent"
-    }
-
-    $ancestor = [IO.Path]::GetDirectoryName($fullPath)
-    while (-not [string]::IsNullOrWhiteSpace($ancestor) -and
-        -not (Test-Path -LiteralPath $ancestor -PathType Container)) {
-        $next = [IO.Path]::GetDirectoryName($ancestor)
-        if ($next -ceq $ancestor) {
-            break
-        }
-        $ancestor = $next
-    }
-    if ([string]::IsNullOrWhiteSpace($ancestor) -or
-        -not (Test-Path -LiteralPath $ancestor -PathType Container)) {
-        throw "$Label has no existing filesystem ancestor"
-    }
-    Assert-NoReparsePointInExistingPath -Path $ancestor -Label $Label
-    return $fullPath
+    Resolve-Ferrum2HostInput `
+        -RepositoryRoot $script:repositoryRoot `
+        -Path $Path `
+        -Label $Label `
+        -Kind ExternalDirectory
 }
 
 function Resolve-ExternalFile {
@@ -94,8 +53,12 @@ function Resolve-ExternalFile {
         [long]$MaximumBytes = 1073741824
     )
 
-    return Resolve-BoundedFile -Path $Path -Label $Label -MaximumBytes $MaximumBytes `
-        -RequireOutsideRepository
+    Resolve-Ferrum2HostInput `
+        -RepositoryRoot $script:repositoryRoot `
+        -Path $Path `
+        -Label $Label `
+        -Kind ExternalFile `
+        -MaximumBytes $MaximumBytes
 }
 
 function Import-ApprovedTopologyRuntime {
@@ -167,7 +130,7 @@ function Assert-ApprovedHyperVTopologyRuntimeStateUnchanged {
         -Label "protected host TUN runtime identity"
     foreach ($identity in @(
         [ordered]@{ Expected = $Expected.Runtime.Vm.Id; Actual = $Actual.Runtime.Vm.Id; Label = "VM" },
-        [ordered]@{ Expected = $Expected.Runtime.Checkpoint.Id; Actual = $Actual.Runtime.Checkpoint.Id; Label = "qualification checkpoint" },
+        [ordered]@{ Expected = $Expected.Runtime.Checkpoint.Id; Actual = $Actual.Runtime.Checkpoint.Id; Label = "lab checkpoint" },
         [ordered]@{ Expected = $Expected.Runtime.SupportSwitch.Id; Actual = $Actual.Runtime.SupportSwitch.Id; Label = "support switch" },
         [ordered]@{ Expected = $Expected.Runtime.SupportVmAdapter.Id; Actual = $Actual.Runtime.SupportVmAdapter.Id; Label = "support VM adapter" }
     )) {
@@ -189,7 +152,8 @@ function Get-ApprovedHostSupportRuntimeState {
 
     Import-ApprovedTopologyRuntime
     $document = Get-ApprovedTopologyDocument -TopologyDocument $TopologyDocument
-    return Get-HostSupportContext -TopologyDocument $document `
+    return Get-HostSupportContext -RepositoryRoot $script:repositoryRoot `
+        -TopologyDocument $document `
         -Address $Address -TcpPort $TcpPort -UdpPort $UdpPort `
         -ProcessId $ProcessId -ProcessOwner $ProcessOwner `
         -MinimumIpv4PacketBytes $script:minimumSupportIpv4PacketBytes
@@ -213,7 +177,20 @@ function Get-ApprovedGuestSupportTopologyRuntimeState {
     Import-ApprovedTopologyRuntime
     $document = Get-ApprovedTopologyDocument -TopologyDocument $TopologyDocument
     Assert-Ferrum2SupportTopologySourceUnchanged -Document $document
-    $expectedLibraryHash = [string]$document.Value.provisioning_library_sha256
+    $sourceIdentity = Get-Ferrum2ProvisioningSourceIdentity `
+        -ExpectedManifestSha256 `
+            ([string]$document.Value.provisioning_source_manifest_sha256) `
+        -ExpectedBundleSha256 `
+            ([string]$document.Value.provisioning_source_bundle_sha256)
+    $libraryRelativePath = `
+        'tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning.ps1'
+    $libraryEntry = @($sourceIdentity.Manifest.files | Where-Object {
+        [string]$_.path -ceq $libraryRelativePath
+    })
+    if ($libraryEntry.Count -ne 1) {
+        throw 'topology provisioning library is absent from its source manifest'
+    }
+    $expectedLibraryHash = [string]$libraryEntry[0].sha256
     if ((Get-FileHash -LiteralPath $script:topologyProvisioningLibraryPath -Algorithm SHA256).
             Hash.ToLowerInvariant() -cne $expectedLibraryHash) {
         throw "topology provisioning library changed before guest readback"
@@ -348,7 +325,7 @@ function Invoke-ApprovedGuestNetworkPathProbe {
         }
         $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding utf8 |
             ConvertFrom-Json -ErrorAction Stop
-        if ($ledger.schema -ne 3 -or
+        if ($ledger.schema -ne 4 -or
             [string]$ledger.topology.manifest_sha256 -cne $ExpectedManifestSha256 -or
             [string]$ledger.topology.support_host_ipv4 -cne $ExpectedSupportIpv4 -or
             [string]$ledger.topology.guest_ipv4 -cne $ExpectedGuestIpv4 -or
