@@ -57,6 +57,7 @@ pwsh -NoProfile -File tests/platform/run_windows_tun_hyperv.ps1 `
   -Suite Release `
   -CampaignToken release-001 `
   -IdentityLedger C:\evidence\identity-ledger.json `
+  -TopologyPlanPath C:\Ferrum2\lab-topology.json `
   -TopologyManifestPath C:\evidence\topology.json `
   -TopologyManifestSha256 <sha256> `
   -SupportTcpPort 18080 `
