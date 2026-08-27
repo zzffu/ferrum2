@@ -18,10 +18,10 @@ use super::profile_contract::{
 use super::profile_output::{
     ensure_profile_workers_running, wait_for_profile_phase_optional_server,
 };
-use super::resource::{
-    M14UdpRoundTripBuffers, m14_udp_associate, m14_udp_round_trip_reused, m14_udp_server_config,
-    profile_direct_udp_client_config, profile_shadowsocks_udp_client_config,
+use super::proxy_config::{
+    m14_udp_server_config, profile_direct_udp_client_config, profile_shadowsocks_udp_client_config,
 };
+use super::resource::{M14UdpRoundTripBuffers, m14_udp_associate, m14_udp_round_trip_reused};
 use super::throughput::{rate_per_second, transfer_is_measured};
 
 pub(super) fn run_profile_udp(

@@ -27,10 +27,11 @@ use super::process_support::{
     HoldingTarget, IO_TIMEOUT, STARTUP_TIMEOUT, TargetWorker, clean_io, json, remaining, sha256,
     socks_connect, v4, wait_for_listener, wait_for_metrics, wait_for_sample_slot,
 };
-use super::profile_contract::{
-    HostedArgs, PROFILE_SOCKS_IPV4_HEADER_BYTES, PROFILE_UDP_MAX_BUFFERED_BYTES, Topology,
+use super::profile_contract::{HostedArgs, PROFILE_SOCKS_IPV4_HEADER_BYTES, Topology};
+use super::proxy_config::{
+    ferrum_client_config, ferrum_server_config, m14_dns_hijack_client_config,
+    m14_udp_client_config, m14_udp_server_config,
 };
-use super::proxy_config::{ferrum_client_config, ferrum_server_config};
 use super::resource_sampling::{
     establish_sessions, sample_pair, validate_drain, validate_owner_tuple, validate_samples,
     validate_thp_profile, wait_for_sessions,
@@ -576,71 +577,6 @@ pub(super) fn run_m14_udp_measurement(output: &mut Evidence, work: &Path) -> Res
     ))
 }
 
-pub(super) fn m14_udp_server_config(listen: SocketAddrV4, max_buffered_bytes: usize) -> String {
-    format!(
-        "schema_version = 2\n[[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\
-         [[outbounds]]\ntag = \"direct\"\n\
-         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-         [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
-         [logging]\nlevel = \"error\"\n"
-    )
-}
-
-pub(super) fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
-    format!(
-        "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
-         outbound = \"profile-direct\"\n\
-         [[outbounds]]\ntag = \"profile-direct\"\ntype = \"direct\"\n\
-         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
-         [logging]\nlevel = \"error\"\n"
-    )
-}
-
-pub(super) fn profile_shadowsocks_udp_client_config(
-    listen: SocketAddrV4,
-    server: SocketAddrV4,
-) -> String {
-    format!(
-        "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
-         [[outbounds]]\ntag = \"profile-proxy\"\nserver = \"{server}\"\n\
-         [route]\nfinal = \"profile-proxy\"\n\
-         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
-         [logging]\nlevel = \"error\"\n"
-    )
-}
-
-pub(super) fn m14_udp_client_config(
-    listen: SocketAddrV4,
-    server: SocketAddrV4,
-    unselected: SocketAddrV4,
-    first: SocketAddrV4,
-    second: SocketAddrV4,
-    max_buffered_bytes: usize,
-) -> String {
-    format!(
-        "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
-         [[outbounds]]\ntag = \"selected\"\nserver = \"{server}\"\n\
-         [[outbounds]]\ntag = \"unselected\"\nserver = \"{unselected}\"\n\
-         [route]\nfinal = \"unselected\"\n\
-         [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\n\
-         ip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"selected\"\n\
-         [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\n\
-         ip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"unselected\"\n\
-         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-         [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
-         [logging]\nlevel = \"error\"\n",
-        first.ip(),
-        first.port(),
-        second.ip(),
-        second.port(),
-    )
-}
-
 pub(super) fn m14_udp_associate(
     proxy: SocketAddrV4,
 ) -> Result<(TcpStream, UdpSocket, SocketAddrV4), String> {
@@ -803,21 +739,7 @@ pub(super) fn run_m14_dns_hijack_measurements(
     let config = directory.path().join("client.toml");
     fs::write(
         &config,
-        format!(
-            "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{proxy}\"\n\
-             [[outbounds]]\ntag = \"protected\"\nserver = \"{protected}\"\n\
-             [route]\nfinal = \"protected\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = 53\naction = \"hijack-dns\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\naction = \"sniff\"\nsniffers = \"dns\"\n\
-             [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\nprotocol = \"dns\"\naction = \"hijack-dns\"\n\
-             [dns]\nmax_inflight = 4\n[[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
-             [[dns.servers]]\ntag = \"upstream\"\ntransport = \"udp\"\naddress = \"{upstream_address}\"\n\
-             [dns.route]\nfinal = \"upstream\"\n\
-             [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
-             [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-             [udp]\nmax_sessions = 16\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
-             [logging]\nlevel = \"error\"\n"
-        ),
+        m14_dns_hijack_client_config(proxy, protected, dns_listen, upstream_address),
     )
     .map_err(clean_io)?;
     let config_hash = sha256("M14 DNS hijack config SHA-256 probe", &config)?;

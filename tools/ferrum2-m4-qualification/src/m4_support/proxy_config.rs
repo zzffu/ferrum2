@@ -2,6 +2,14 @@ use std::net::SocketAddrV4;
 
 use super::PSK;
 use super::dns_resource::DNS_MAX_INFLIGHT;
+use super::profile_contract::PROFILE_UDP_MAX_BUFFERED_BYTES;
+
+fn render_client_shadowsocks_outbound(tag: &str, server: SocketAddrV4) -> String {
+    format!(
+        "[[outbounds]]\ntag = \"{tag}\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\n\
+         method = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n"
+    )
+}
 
 pub(super) fn ferrum_client_config(
     listen: SocketAddrV4,
@@ -11,10 +19,10 @@ pub(super) fn ferrum_client_config(
     let metrics = metrics
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
         .unwrap_or_default();
+    let outbound = render_client_shadowsocks_outbound("proxy", server);
     format!(
         "schema_version = 2\n\n[[inbounds]]\ntag = \"client-in\"\nlisten = \"{listen}\"\noutbound = \"proxy\"\n\n\
-         [[outbounds]]\ntag = \"proxy\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\n\
-         method = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\n\
+         {outbound}\n\
          [runtime]\nmax_connections = 12000\nlisten_backlog = 65535\n\
          idle_timeout_ms = 3600000\n\n[logging]\nlevel = \"error\"\n{metrics}"
     )
@@ -44,11 +52,11 @@ pub(super) fn ferrum_dns_resource_client_config(
     detoured_upstream: SocketAddrV4,
     metrics: SocketAddrV4,
 ) -> String {
+    let outbound = render_client_shadowsocks_outbound("dns-hop", server);
     format!(
         "schema_version = 2\n\
          [[inbounds]]\ntag = \"socks\"\nlisten = \"{proxy}\"\n\
-         [[outbounds]]\ntag = \"dns-hop\"\ntype = \"shadowsocks\"\nserver = \"{server}\"\n\
-         method = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+         {outbound}\
          [route]\nfinal = \"dns-hop\"\n\
          [dns]\ntimeout_ms = 5000\nmax_inflight = {DNS_MAX_INFLIGHT}\n\
          [[dns.inbounds]]\ntag = \"dns-direct\"\nlisten = \"{direct_dns}\"\n\
@@ -61,6 +69,95 @@ pub(super) fn ferrum_dns_resource_client_config(
          [udp]\nenabled = false\n\
          [logging]\nlevel = \"error\"\n\
          [metrics]\nlisten = \"{metrics}\"\n"
+    )
+}
+
+pub(super) fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
+         outbound = \"profile-direct\"\n\
+         [[outbounds]]\ntag = \"profile-direct\"\ntype = \"direct\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
+
+pub(super) fn profile_shadowsocks_udp_client_config(
+    listen: SocketAddrV4,
+    server: SocketAddrV4,
+) -> String {
+    let outbound = render_client_shadowsocks_outbound("profile-proxy", server);
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
+         {outbound}\
+         [route]\nfinal = \"profile-proxy\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
+
+pub(super) fn m14_udp_client_config(
+    listen: SocketAddrV4,
+    server: SocketAddrV4,
+    unselected: SocketAddrV4,
+    first: SocketAddrV4,
+    second: SocketAddrV4,
+    max_buffered_bytes: usize,
+) -> String {
+    let selected_outbound = render_client_shadowsocks_outbound("selected", server);
+    let unselected_outbound = render_client_shadowsocks_outbound("unselected", unselected);
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{listen}\"\n\
+         {selected_outbound}\
+         {unselected_outbound}\
+         [route]\nfinal = \"unselected\"\n\
+         [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\n\
+         ip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"selected\"\n\
+         [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\n\
+         ip = \"{}\"\nport = {}\naction = \"route\"\noutbound = \"unselected\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
+         [logging]\nlevel = \"error\"\n",
+        first.ip(),
+        first.port(),
+        second.ip(),
+        second.port(),
+    )
+}
+
+pub(super) fn m14_dns_hijack_client_config(
+    proxy: SocketAddrV4,
+    protected: SocketAddrV4,
+    dns_listen: SocketAddrV4,
+    upstream: SocketAddrV4,
+) -> String {
+    let outbound = render_client_shadowsocks_outbound("protected", protected);
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"in\"\nlisten = \"{proxy}\"\n\
+         {outbound}\
+         [route]\nfinal = \"protected\"\n\
+         [[route.rules]]\ninbound = \"in\"\nnetwork = \"tcp\"\nport = 53\naction = \"hijack-dns\"\n\
+         [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\naction = \"sniff\"\nsniffers = \"dns\"\n\
+         [[route.rules]]\ninbound = \"in\"\nnetwork = \"udp\"\nport = 53\nprotocol = \"dns\"\naction = \"hijack-dns\"\n\
+         [dns]\nmax_inflight = 4\n[[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
+         [[dns.servers]]\ntag = \"upstream\"\ntransport = \"udp\"\naddress = \"{upstream}\"\n\
+         [dns.route]\nfinal = \"upstream\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nmax_sessions = 16\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
+
+pub(super) fn m14_udp_server_config(listen: SocketAddrV4, max_buffered_bytes: usize) -> String {
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\
+         [[outbounds]]\ntag = \"direct\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
+         [logging]\nlevel = \"error\"\n"
     )
 }
 
