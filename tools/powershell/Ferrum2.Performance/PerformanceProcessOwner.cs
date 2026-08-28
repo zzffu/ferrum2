@@ -209,3 +209,4 @@ public static class Ferrum2PerfProcessGroup {
         lock (Sync) { if (!Handles.TryGetValue(processId, out handle)) return; Handles.Remove(processId); }
         CloseHandle(handle);
     }
+}

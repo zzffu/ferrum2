@@ -70,8 +70,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
-      "bytes": 11386,
-      "sha256": "b64d5695e1828a4536eed3e5afb4dcc5c0c048b1b2e521622908ea76a6a9c576"
+      "bytes": 11388,
+      "sha256": "3b3202f32f109cf4466bac4c57e145588df17db21bf1ee1be0db1e66f4d1adc4"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/RuntimeStaging.ps1",
