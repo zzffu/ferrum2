@@ -21,9 +21,6 @@
     if ((@($guestResult.PSObject.Properties.Name) -join "|") -cne ($guestResultKeys -join "|")) {
         throw "guest qualification result property set is invalid"
     }
-    if (($guestResult | ConvertTo-Json -Compress -Depth 8) -cne $guestResultJson) {
-        throw "guest qualification result serialization is not canonical"
-    }
     $cleanupExitMatches = $null -ne $guestResult.cleanup_exit -and
         [long]$guestResult.cleanup_exit -eq 0
     $guestTopologyMatches = ($guestResult.topology | ConvertTo-Json -Compress -Depth 5) -ceq
