@@ -24,11 +24,12 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..'
 $labManifestPath = Join-Path $repositoryRoot `
     'tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1'
 Import-Module $labManifestPath -Force -ErrorAction Stop
+$libraryOnlyRequested = [bool]$LibraryOnly
 $readonlyOwnerPath = Join-Path $PSScriptRoot `
     'windows_tun_hyperv_support_topology_readonly.ps1'
 . $readonlyOwnerPath -LibraryOnly
 
-if ($LibraryOnly) {
+if ($libraryOnlyRequested) {
     return
 }
 

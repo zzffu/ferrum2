@@ -160,13 +160,13 @@
     },
     {
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/JsonSource.ps1",
-      "bytes": 8928,
-      "sha256": "bfd07be31de88c1848aaa4dc4d7fdd8ec9d31873a56c7aa353f3be70253ab39f"
+      "bytes": 9054,
+      "sha256": "472b93e257476d1ec3d855681c19c9690e662d971d5e99ec5185e6cc28a3acff"
     },
     {
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/VmSession.ps1",
-      "bytes": 14787,
-      "sha256": "0e5671a332569d455ddfc0d4d21adedba75cb878a917d1a1932bfc7b483889e3"
+      "bytes": 15108,
+      "sha256": "710023b75c7049bff710cb5e12b6dd6d90931b7be2dd8cf618c0bac6ce50cc97"
     },
     {
       "path": "tools/windows-tun/lab/get_windows_tun_guest_network_path.ps1",
@@ -180,8 +180,8 @@
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1",
-      "bytes": 37786,
-      "sha256": "f8ded02c67aa30a72d75abeff410c3d965bc5c1482167a26eed1653f8c8a8fc1"
+      "bytes": 37909,
+      "sha256": "d6cfe0191ed6b53e431bab989b80f6fad2a29a7635e46db1b5f821ee56841e8a"
     },
     {
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1",

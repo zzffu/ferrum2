@@ -35,20 +35,20 @@
     {
       "role": "guest",
       "path": "tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning_guest.ps1",
-      "bytes": 13093,
-      "sha256": "6ce7c6a33b57733854b86da424748ce756e720cb997ab1c0cc6ace477f776eb5"
+      "bytes": 13114,
+      "sha256": "129e39812a6af5b2d86fd23fff14ca6750272b468c31a8442de2eeaafb48d148"
     },
     {
       "role": "rollback",
       "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology_rollback.ps1",
-      "bytes": 15505,
-      "sha256": "d4e44ed6b3aaa3d059b554820cfc57007380608767c29820f317c80524edac76"
+      "bytes": 15542,
+      "sha256": "35ed4ec46bad62ac1d60dced0fe8a677a6ecb8afa694915e65e6911b85a68d6e"
     },
     {
       "role": "transaction",
       "path": "tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology_transaction.ps1",
-      "bytes": 37339,
-      "sha256": "a093407e1ce86be44b4c5065615bfbafde3390edea6c407e514eb6a13f54d634"
+      "bytes": 37682,
+      "sha256": "d4b9ab93adfca1b14c9478a389985721f40f82796adc528971d5e83955289a1f"
     },
     {
       "role": "lab_manifest",
@@ -65,8 +65,8 @@
     {
       "role": "lab_json",
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/JsonSource.ps1",
-      "bytes": 8928,
-      "sha256": "bfd07be31de88c1848aaa4dc4d7fdd8ec9d31873a56c7aa353f3be70253ab39f"
+      "bytes": 9054,
+      "sha256": "472b93e257476d1ec3d855681c19c9690e662d971d5e99ec5185e6cc28a3acff"
     },
     {
       "role": "lab_bundle",
@@ -77,9 +77,9 @@
     {
       "role": "lab_vm",
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/private/VmSession.ps1",
-      "bytes": 14787,
-      "sha256": "0e5671a332569d455ddfc0d4d21adedba75cb878a917d1a1932bfc7b483889e3"
+      "bytes": 15108,
+      "sha256": "710023b75c7049bff710cb5e12b6dd6d90931b7be2dd8cf618c0bac6ce50cc97"
     }
   ],
-  "source_bundle_sha256": "91756d8fb007ff22856cb6338700228618dd5db0aeb1dba48a8f736bc4c67f84"
+  "source_bundle_sha256": "c2744d2c5f4232128a20e3f0c6796b263927e093002e9b8298cdc15f53ea3f78"
 }

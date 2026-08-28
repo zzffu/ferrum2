@@ -306,6 +306,13 @@ function Rename-ProvisioningCheckpoint {
     param([Parameter(Mandatory)] [object]$State)
 
     $vm = (Get-Ferrum2PinnedVmContext -Identity $State.VmIdentity).Vm
+    $checkpointCandidates = @(Get-VMSnapshot -VM $vm -ErrorAction Stop | Where-Object {
+            $_.Id -eq $State.CreatedCheckpointId -and
+            [string]$_.Name -ceq $State.CreatedCheckpointProvisioningName
+        })
+    if ($checkpointCandidates.Count -ne 1) {
+        throw 'created lab checkpoint is unavailable for rename'
+    }
     $renamedCheckpointRows = @($checkpointCandidates[0] | Rename-VMSnapshot `
             -NewName ([string]$State.Plan.lab_checkpoint.name) -Passthru `
             -Confirm:$false -ErrorAction Stop)

@@ -32,7 +32,7 @@ $script:guestContract = [pscustomobject][ordered]@{
 
 
 function ConvertTo-GuestCanonicalMac {
-    param([Parameter(Mandatory)] [string]$Value)
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string]$Value)
     ($Value -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
 }
 

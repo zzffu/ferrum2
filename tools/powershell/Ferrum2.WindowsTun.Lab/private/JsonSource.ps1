@@ -8,7 +8,11 @@ function Assert-Ferrum2ClosedProperties {
         [Parameter(Mandatory)] [string[]]$Expected,
         [Parameter(Mandatory)] [string]$Label
     )
-    $actual = @($Value.PSObject.Properties.Name)
+    $actual = if ($Value -is [Collections.IDictionary]) {
+        @($Value.Keys | ForEach-Object { [string]$_ })
+    } else {
+        @($Value.PSObject.Properties.Name)
+    }
     if (($actual -join '|') -cne ($Expected -join '|')) {
         throw "$Label property set or order is invalid"
     }

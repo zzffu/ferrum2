@@ -226,6 +226,7 @@ function Connect-Ferrum2VmGuest {
         [ValidateRange(1, 900)] [int]$TimeoutSeconds = 180
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastFailure = $null
     do {
         $session = $null
         try {
@@ -277,6 +278,7 @@ function Connect-Ferrum2VmGuest {
             }
             return [pscustomobject][ordered]@{ Session = $session; Probe = $probe[0] }
         } catch {
+            $lastFailure = $_
             if ($null -ne $session) {
                 Remove-PSSession -Session $session -ErrorAction SilentlyContinue
             }
@@ -284,7 +286,13 @@ function Connect-Ferrum2VmGuest {
             Start-Sleep -Seconds 2
         }
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'PowerShell Direct did not become ready before the bounded timeout'
+    $detail = if ($null -eq $lastFailure) {
+        'no connection attempt completed'
+    } else {
+        ([string]$lastFailure.Exception.Message -replace '[\r\n]+', ' ').Trim()
+    }
+    if ($detail.Length -gt 512) { $detail = $detail.Substring(0, 512) }
+    throw "PowerShell Direct did not become ready before the bounded timeout: $detail"
 }
 
 function Connect-Ferrum2HostGuest {

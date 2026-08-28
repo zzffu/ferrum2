@@ -31,6 +31,7 @@ $script:ferrum2RepositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptR
     -ErrorAction Stop).Path
 $script:ferrum2ToolsRoot = Join-Path $script:ferrum2RepositoryRoot 'tools'
 $script:ferrum2ExpectedProvisioningFiles = @(
+    [pscustomobject][ordered]@{ role = 'bootstrap'; path = 'tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1' }
     [pscustomobject][ordered]@{ role = 'driver'; path = 'tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology.ps1' }
     [pscustomobject][ordered]@{ role = 'readonly'; path = 'tools/windows-tun/lab/windows_tun_hyperv_support_topology_readonly.ps1' }
     [pscustomobject][ordered]@{ role = 'primary'; path = 'tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning.ps1' }

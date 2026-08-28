@@ -165,9 +165,16 @@ function Start-ApprovedVm {
     [void](Invoke-BoundedHyperVMutation -Action Start -VmId $script:approvedVmId `
         -ExpectedVmName $script:approvedVmName `
         -TimeoutSeconds $TimeoutSeconds)
-    $started = Get-ApprovedVmContext
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $started = Get-ApprovedVmContext
+        if ([string]$started.Vm.State -ceq 'Running') {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
     if ([string]$started.Vm.State -cne "Running") {
-        throw "approved VM did not enter Running state"
+        throw "approved VM did not enter Running state: actual=$([string]$started.Vm.State)"
     }
 }
 
@@ -343,7 +350,7 @@ function New-BoundedPwshFileArguments {
         $arguments.Add($argument)
     }
     foreach ($name in $ForwardedParameterNames) {
-        if (-not $BoundParameters.ContainsKey($name)) {
+        if (-not $BoundParameters.Contains($name)) {
             continue
         }
         $value = $BoundParameters[$name]

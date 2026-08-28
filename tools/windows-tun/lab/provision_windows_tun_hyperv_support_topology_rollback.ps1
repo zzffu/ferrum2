@@ -59,7 +59,7 @@ function Get-TopologyRollbackOwnership {
     $allCheckpoints = @(Get-VMSnapshot -VM $vm -ErrorAction Stop)
     $ownedCheckpointIds = @()
     if ($State.CheckpointCreationAttempted) {
-        $ownedCheckpoints = if ($State.CreatedCheckpointId -ne [Guid]::Empty) {
+        $ownedCheckpoints = @(if ($State.CreatedCheckpointId -ne [Guid]::Empty) {
             @($allCheckpoints | Where-Object {
                 $_.Id -eq $State.CreatedCheckpointId -and
                 $State.InitialCheckpointIds -cnotcontains $_.Id.ToString('D') -and
@@ -72,7 +72,7 @@ function Get-TopologyRollbackOwnership {
             @(Get-NewLabCheckpointCandidate -Plan $State.Plan `
                 -InitialCheckpointIds $State.InitialCheckpointIds `
                 -ProvisioningName $State.CreatedCheckpointProvisioningName)
-        }
+        })
         if ($ownedCheckpoints.Count -gt 1) {
             throw 'lab checkpoint ownership is ambiguous before rollback'
         }
@@ -235,8 +235,9 @@ function Remove-TopologyRollbackSwitch {
         $addressRows = if ($store -ceq 'ActiveStore') {
             @(Get-ActiveIpv4AddressRow -InterfaceIndex ([int]$context.HostAdapter.ifIndex))
         } else {
-            @(Get-ProvisioningPersistentIpv4AddressRow `
-                -InterfaceIndex ([int]$context.HostAdapter.ifIndex))
+            @(Get-PersistentIpv4AddressRow | Where-Object {
+                    [int]$_.InterfaceIndex -eq [int]$context.HostAdapter.ifIndex
+                })
         }
         $unexpected = @($addressRows | Where-Object {
             [string]$_.IPAddress -cne [string]$State.Plan.support.host_ipv4 -or

@@ -190,26 +190,54 @@ function Get-ApprovedGuestSupportTopologyRuntimeState {
     if ($libraryEntry.Count -ne 1) {
         throw 'topology provisioning library is absent from its source manifest'
     }
+    $guestRelativePath = `
+        'tools/windows-tun/lab/windows_tun_hyperv_support_topology_provisioning_guest.ps1'
+    $guestEntry = @($sourceIdentity.Manifest.files | Where-Object {
+        [string]$_.path -ceq $guestRelativePath
+    })
+    if ($guestEntry.Count -ne 1) {
+        throw 'topology guest provisioning source is absent from its source manifest'
+    }
     $expectedLibraryHash = [string]$libraryEntry[0].sha256
+    $guestPath = Join-Path $script:repositoryRoot `
+        $guestRelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
+    $expectedGuestHash = [string]$guestEntry[0].sha256
     if ((Get-FileHash -LiteralPath $script:topologyProvisioningLibraryPath -Algorithm SHA256).
-            Hash.ToLowerInvariant() -cne $expectedLibraryHash) {
-        throw "topology provisioning library changed before guest readback"
+            Hash.ToLowerInvariant() -cne $expectedLibraryHash -or
+        (Get-FileHash -LiteralPath $guestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            $expectedGuestHash) {
+        throw "topology provisioning source changed before guest readback"
     }
     $module = New-Module -Name (
         "Ferrum2M17GuestTopology_" + [Guid]::NewGuid().ToString("N")
     ) -ArgumentList @(
         $script:topologyProvisioningLibraryPath,
-        $expectedLibraryHash
+        $expectedLibraryHash,
+        $guestPath,
+        $expectedGuestHash
     ) -ScriptBlock {
-        param([string]$LibraryPath, [string]$ExpectedSha256)
+        param(
+            [string]$LibraryPath,
+            [string]$ExpectedSha256,
+            [string]$GuestPath,
+            [string]$ExpectedGuestSha256
+        )
         if ((Get-FileHash -LiteralPath $LibraryPath -Algorithm SHA256).Hash.
-                ToLowerInvariant() -cne $ExpectedSha256) {
-            throw "topology provisioning library changed before loading"
+                ToLowerInvariant() -cne $ExpectedSha256 -or
+            (Get-FileHash -LiteralPath $GuestPath -Algorithm SHA256).Hash.
+                ToLowerInvariant() -cne $ExpectedGuestSha256) {
+            throw "topology provisioning source changed before loading"
         }
+        [byte[]]$guestBytes = [IO.File]::ReadAllBytes($GuestPath)
+        $script:guestProvisioningScript = [scriptblock]::Create(
+            [Text.UTF8Encoding]::new($false, $true).GetString($guestBytes)
+        )
         . $LibraryPath -LibraryOnly
         if ((Get-FileHash -LiteralPath $LibraryPath -Algorithm SHA256).Hash.
-                ToLowerInvariant() -cne $ExpectedSha256) {
-            throw "topology provisioning library changed while loading"
+                ToLowerInvariant() -cne $ExpectedSha256 -or
+            (Get-FileHash -LiteralPath $GuestPath -Algorithm SHA256).Hash.
+                ToLowerInvariant() -cne $ExpectedGuestSha256) {
+            throw "topology provisioning source changed while loading"
         }
         Export-ModuleMember -Function "Invoke-GuestSupportNetwork"
     }

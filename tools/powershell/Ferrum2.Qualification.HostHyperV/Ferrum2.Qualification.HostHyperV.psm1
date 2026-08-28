@@ -16,6 +16,24 @@ foreach ($owner in @(
     . (Join-Path $PSScriptRoot "private/$owner")
 }
 
+$moduleRepositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..') `
+    -ErrorAction Stop).Path
+$loadedTopologyRuntimePath = Join-Path $moduleRepositoryRoot `
+    'tools/windows-tun/lab/windows_tun_hyperv_support_topology_runtime.ps1'
+$loadedHostNetworkPathHelperPath = Join-Path $moduleRepositoryRoot `
+    'tools/windows-tun/lab/windows_tun_host_network_path.ps1'
+$script:loadedTopologyRuntimeSha256 = Get-Ferrum2LowerSha256 $loadedTopologyRuntimePath
+$script:loadedHostNetworkPathHelperSha256 = Get-Ferrum2LowerSha256 `
+    $loadedHostNetworkPathHelperPath
+. $loadedTopologyRuntimePath -LibraryOnly
+. $loadedHostNetworkPathHelperPath
+if ((Get-Ferrum2LowerSha256 $loadedTopologyRuntimePath) -cne
+        $script:loadedTopologyRuntimeSha256 -or
+    (Get-Ferrum2LowerSha256 $loadedHostNetworkPathHelperPath) -cne
+        $script:loadedHostNetworkPathHelperSha256) {
+    throw 'support topology runtime source changed while loading'
+}
+
 $script:HostContextInitialized = $false
 
 function Invoke-Ferrum2QualificationHostController {
@@ -121,10 +139,8 @@ function Initialize-Ferrum2HostHyperVModule {
     $runtimeHash = Get-Ferrum2LowerSha256 $script:topologyRuntimePath
     $hostHelperHash = Get-Ferrum2LowerSha256 $script:hostNetworkPathHelperPath
     $guestProbeHash = Get-Ferrum2LowerSha256 $script:guestNetworkPathProbePath
-    . $script:topologyRuntimePath -LibraryOnly
-    . $script:hostNetworkPathHelperPath
-    if ((Get-Ferrum2LowerSha256 $script:topologyRuntimePath) -cne $runtimeHash -or
-        (Get-Ferrum2LowerSha256 $script:hostNetworkPathHelperPath) -cne $hostHelperHash -or
+    if ($runtimeHash -cne $script:loadedTopologyRuntimeSha256 -or
+        $hostHelperHash -cne $script:loadedHostNetworkPathHelperSha256 -or
         (Get-Ferrum2LowerSha256 $script:guestNetworkPathProbePath) -cne $guestProbeHash) {
         throw 'support topology runtime source changed while loading'
     }
