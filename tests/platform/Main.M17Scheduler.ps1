@@ -320,9 +320,7 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         profile = $script:Profile
         run_token = $script:runIdentity
         cycle_limit = if ($script:Profile -in @("network-reset", "restart-stress")) { 1000 } else { $null }
-        release_milestones = if ($script:Profile -in @("network-reset", "restart-stress")) {
-            $script:releaseMilestones
-        } else { @() }
+        release_milestones = @($script:releaseMilestones)
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId
         approved_checkpoint_name = $script:expectedHyperVCheckpointName
@@ -332,7 +330,8 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         candidate_sha = [string]$script:capabilityIdentity.Ledger.candidate_sha
         client_sha256 = [string]$script:capabilityIdentity.Ledger.client_sha256
         server_sha256 = [string]$script:capabilityIdentity.Ledger.server_sha256
-        controller_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        controller_sha256 = (Get-FileHash -LiteralPath $script:controllerEntryPointPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
         controller_bundle_sha256 = [string]$script:controllerBundleManifest.controller_bundle_sha256
         wintun_zip_sha256 = $script:expectedZipHash.ToLowerInvariant()
         wintun_dll_sha256 = $script:expectedDllHash.ToLowerInvariant()
