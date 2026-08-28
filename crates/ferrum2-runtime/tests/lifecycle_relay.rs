@@ -15,8 +15,9 @@ use ferrum2_runtime::{
     AcceptListener, BoundedSupervisor, DEFAULT_HANDSHAKE_TIMEOUT, DeadlineError, OwnerRegistry,
     PreparedProcessRoot, ProcessCause, ProcessCleanupFailure, ProcessExitKind, ProcessFuture,
     ProcessRoot, ProcessRootEventPhase, ProcessRootExit, ProcessRootExitCategory, ProcessState,
-    ProcessSupervisor, RelayFailure, RelayRunError, RelayStats, SupervisorError,
-    relay_bidirectional_with_idle_timeout, relay_lifecycle, with_deadline,
+    ProcessSupervisor, RelayDirection, RelayFailure, RelayRunError, RelayStats, SupervisorError,
+    relay_bidirectional_with_idle_timeout, relay_lifecycle, relay_lifecycle_with_engine,
+    with_deadline,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Notify;
@@ -308,6 +309,125 @@ async fn relay_lifecycle_cancel_retains_asymmetric_stats_and_returns_buffers() {
             stats: RelayStats {
                 inbound_to_outbound: 1,
                 outbound_to_inbound: 2,
+            },
+        })
+    );
+    assert_eq!(registry.snapshot(), baseline);
+}
+
+#[tokio::test]
+async fn custom_engine_reports_directional_progress_and_redacts_io_failure() {
+    let failure =
+        relay_lifecycle_with_engine(Duration::from_secs(60), pending(), |progress| async move {
+            progress.record(RelayDirection::InboundToOutbound, 3);
+            progress.record(RelayDirection::OutboundToInbound, 5);
+            Err(io::Error::other("sensitive custom engine failure"))
+        })
+        .await
+        .expect_err("custom engine fails");
+
+    assert_eq!(
+        failure,
+        RelayFailure {
+            kind: RelayRunError::Io,
+            stats: RelayStats {
+                inbound_to_outbound: 3,
+                outbound_to_inbound: 5,
+            },
+        }
+    );
+    assert!(!format!("{failure:?}").contains("sensitive"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_wins_a_simultaneously_ready_idle_deadline() {
+    let result =
+        relay_lifecycle_with_engine(Duration::ZERO, ready(()), |_| pending::<io::Result<()>>())
+            .await;
+
+    assert_eq!(
+        result,
+        Err(RelayFailure {
+            kind: RelayRunError::Cancelled,
+            stats: RelayStats {
+                inbound_to_outbound: 0,
+                outbound_to_inbound: 0,
+            },
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn custom_progress_coalesces_and_resets_one_idle_deadline() {
+    let (progress_tx, progress_rx) = tokio::sync::oneshot::channel();
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(5),
+        pending(),
+        move |progress| {
+            assert!(
+                progress_tx.send(progress).is_ok(),
+                "publish custom progress recorder"
+            );
+            pending::<io::Result<()>>()
+        },
+    ));
+    let progress = progress_rx.await.expect("custom progress recorder");
+
+    tokio::time::advance(Duration::from_secs(4)).await;
+    for _ in 0..1_000 {
+        progress.record(RelayDirection::InboundToOutbound, 1);
+    }
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(
+        !relay.is_finished(),
+        "coalesced progress reset the deadline"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    assert_eq!(
+        relay.await.expect("custom relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            stats: RelayStats {
+                inbound_to_outbound: 1_000,
+                outbound_to_inbound: 0,
+            },
+        })
+    );
+}
+
+#[tokio::test]
+async fn custom_engine_owns_zero_generic_buffers() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(60),
+        async move {
+            let _ = cancel_rx.await;
+        },
+        move |progress| {
+            assert!(
+                entered_tx.send(progress).is_ok(),
+                "publish custom engine progress"
+            );
+            pending::<io::Result<()>>()
+        },
+    ));
+    let progress = entered_rx.await.expect("custom engine entered");
+
+    assert_eq!(registry.snapshot().owned_buffers, 0);
+    progress.record(RelayDirection::OutboundToInbound, 7);
+    cancel_tx.send(()).expect("cancel custom engine");
+    assert_eq!(
+        relay.await.expect("custom relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::Cancelled,
+            stats: RelayStats {
+                inbound_to_outbound: 0,
+                outbound_to_inbound: 7,
             },
         })
     );

@@ -40,8 +40,9 @@ pub use process::{
     ProcessTransition,
 };
 pub use relay::{
-    RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
-    relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
+    RELAY_BUFFER_BYTES, RelayDirection, RelayFailure, RelayProgress, RelayRunError, RelayStats,
+    relay_bidirectional, relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout,
+    relay_lifecycle, relay_lifecycle_with_engine,
 };
 pub use reset::{
     AdmittedNetworkRuntimeResource, DEFAULT_NETWORK_RESET_HOOKS, DEFAULT_NETWORK_RUNTIME_OWNERS,

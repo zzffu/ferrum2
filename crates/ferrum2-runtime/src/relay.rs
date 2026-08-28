@@ -3,7 +3,7 @@ use std::future::{Future, pending};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -22,6 +22,74 @@ pub struct RelayStats {
     pub inbound_to_outbound: u64,
     /// Bytes forwarded from the outbound stream to the inbound stream.
     pub outbound_to_inbound: u64,
+}
+
+/// Direction of bytes successfully accepted by a relay destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelayDirection {
+    /// Bytes accepted by the outbound destination from the inbound source.
+    InboundToOutbound,
+    /// Bytes accepted by the inbound destination from the outbound source.
+    OutboundToInbound,
+}
+
+/// Cloneable progress recorder supplied to a specialized relay engine.
+///
+/// Engines call [`Self::record`] only after a destination accepts non-zero
+/// bytes. The recorder owns direction-separated statistics and coalesces idle
+/// notifications until the supervisor observes the accumulated progress.
+#[derive(Clone)]
+pub struct RelayProgress {
+    inner: Arc<RelayProgressInner>,
+}
+
+struct RelayProgressInner {
+    activity: ActivitySignal,
+    inbound_to_outbound: AtomicU64,
+    outbound_to_inbound: AtomicU64,
+}
+
+impl RelayProgress {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(RelayProgressInner {
+                activity: ActivitySignal::new(),
+                inbound_to_outbound: AtomicU64::new(0),
+                outbound_to_inbound: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Records bytes successfully accepted by the selected destination.
+    pub fn record(&self, direction: RelayDirection, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.add_stats_only(direction, bytes as u64);
+        self.mark_activity();
+    }
+
+    fn add_stats_only(&self, direction: RelayDirection, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let counter = match direction {
+            RelayDirection::InboundToOutbound => &self.inner.inbound_to_outbound,
+            RelayDirection::OutboundToInbound => &self.inner.outbound_to_inbound,
+        };
+        counter.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    fn mark_activity(&self) {
+        self.inner.activity.mark();
+    }
+
+    fn stats(&self) -> RelayStats {
+        RelayStats {
+            inbound_to_outbound: self.inner.inbound_to_outbound.load(Ordering::Acquire),
+            outbound_to_inbound: self.inner.outbound_to_inbound.load(Ordering::Acquire),
+        }
+    }
 }
 
 /// Relays both directions in the caller's task with fixed buffers and TCP half-close.
@@ -116,7 +184,8 @@ impl std::error::Error for RelayFailure {}
 
 struct ActivityIo<'a, T> {
     inner: &'a mut T,
-    activity: Arc<ActivitySignal>,
+    progress: RelayProgress,
+    direction: RelayDirection,
     bytes_written: u64,
 }
 
@@ -173,7 +242,7 @@ where
         if let Poll::Ready(Ok(written)) = result {
             if written > 0 {
                 self.bytes_written += written as u64;
-                self.activity.mark();
+                self.progress.mark_activity();
             }
             Poll::Ready(Ok(written))
         } else {
@@ -187,6 +256,13 @@ where
 
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut *self.inner).poll_shutdown(context)
+    }
+}
+
+impl<T> Drop for ActivityIo<'_, T> {
+    fn drop(&mut self) {
+        self.progress
+            .add_stats_only(self.direction, self.bytes_written);
     }
 }
 
@@ -225,6 +301,76 @@ where
     relay_with_controls(inbound, outbound, idle_timeout, cancellation).await
 }
 
+/// Supervises a specialized relay engine without acquiring generic relay buffers.
+///
+/// The engine owns its protocol-specific storage and reports completed writes
+/// through the supplied [`RelayProgress`]. Cancellation wins over engine
+/// completion, which wins over an idle deadline when outcomes become ready in
+/// the same poll.
+pub async fn relay_lifecycle_with_engine<C, M, E>(
+    idle_timeout: Duration,
+    cancellation: C,
+    make_engine: M,
+) -> Result<RelayStats, RelayFailure>
+where
+    C: Future<Output = ()>,
+    M: FnOnce(RelayProgress) -> E,
+    E: Future<Output = io::Result<()>>,
+{
+    let progress = RelayProgress::new();
+    let idle_progress = progress.clone();
+    let idle = async move {
+        let timer = tokio::time::sleep(idle_timeout);
+        tokio::pin!(timer);
+        loop {
+            let notified = idle_progress.inner.activity.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if idle_progress.inner.activity.take_dirty() {
+                timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
+                continue;
+            }
+            tokio::select! {
+                biased;
+                () = &mut timer => {
+                    if idle_progress.inner.activity.take_dirty() {
+                        timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + idle_timeout);
+                    } else {
+                        return;
+                    }
+                }
+                () = &mut notified => {
+                    if idle_progress.inner.activity.take_dirty() {
+                        timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + idle_timeout);
+                    }
+                }
+            }
+        }
+    };
+    let outcome = {
+        let engine = make_engine(progress.clone());
+        tokio::pin!(engine);
+        tokio::pin!(idle);
+        tokio::pin!(cancellation);
+        tokio::select! {
+            biased;
+            () = &mut cancellation => Err(RelayRunError::Cancelled),
+            result = &mut engine => result.map_err(|_| RelayRunError::Io),
+            () = &mut idle => Err(RelayRunError::IdleTimeout),
+        }
+    };
+    let stats = progress.stats();
+    outcome
+        .map(|()| stats)
+        .map_err(|kind| RelayFailure { kind, stats })
+}
+
 async fn relay_with_controls<A, B, C>(
     inbound: &mut A,
     outbound: &mut B,
@@ -236,70 +382,24 @@ where
     B: AsyncRead + AsyncWrite + Unpin,
     C: Future<Output = ()>,
 {
-    let activity = Arc::new(ActivitySignal::new());
-    let mut inbound = ActivityIo {
-        inner: inbound,
-        activity: Arc::clone(&activity),
-        bytes_written: 0,
-    };
-    let mut outbound = ActivityIo {
-        inner: outbound,
-        activity: Arc::clone(&activity),
-        bytes_written: 0,
-    };
-    let idle = async move {
-        let timer = tokio::time::sleep(idle_timeout);
-        tokio::pin!(timer);
-        loop {
-            let notified = activity.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if activity.take_dirty() {
-                timer
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + idle_timeout);
-                continue;
-            }
-            tokio::select! {
-                biased;
-                () = &mut timer => {
-                    if activity.take_dirty() {
-                        timer
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + idle_timeout);
-                    } else {
-                        return;
-                    }
-                }
-                () = &mut notified => {
-                    if activity.take_dirty() {
-                        timer
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + idle_timeout);
-                    }
-                }
-            }
-        }
-    };
-    let outcome = {
-        let relay = relay_bidirectional(&mut inbound, &mut outbound);
-        tokio::pin!(relay);
-        tokio::pin!(idle);
-        tokio::pin!(cancellation);
-        tokio::select! {
-            biased;
-            () = &mut cancellation => Err(RelayRunError::Cancelled),
-            result = &mut relay => result.map(|_| ()).map_err(|_| RelayRunError::Io),
-            () = &mut idle => Err(RelayRunError::IdleTimeout),
-        }
-    };
-    let stats = RelayStats {
-        inbound_to_outbound: outbound.bytes_written,
-        outbound_to_inbound: inbound.bytes_written,
-    };
-    outcome
-        .map(|()| stats)
-        .map_err(|kind| RelayFailure { kind, stats })
+    relay_lifecycle_with_engine(idle_timeout, cancellation, |progress| async move {
+        let mut inbound = ActivityIo {
+            inner: inbound,
+            progress: progress.clone(),
+            direction: RelayDirection::OutboundToInbound,
+            bytes_written: 0,
+        };
+        let mut outbound = ActivityIo {
+            inner: outbound,
+            progress,
+            direction: RelayDirection::InboundToOutbound,
+            bytes_written: 0,
+        };
+        relay_bidirectional(&mut inbound, &mut outbound)
+            .await
+            .map(|_| ())
+    })
+    .await
 }
 
 #[cfg(test)]
