@@ -92,7 +92,7 @@ $controllerBundleRoot = Join-Path $InputRoot "controller"
 $controllerBundleManifestPath = Join-Path $InputRoot "controller-bundle.json"
 $bootstrapRelative = "modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1"
 $bootstrapManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
-    -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
+    -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
 $bootstrapEntry = @($bootstrapManifest.files | Where-Object {
     [string]$_.path -ceq $bootstrapRelative
 })

@@ -45,8 +45,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/GuestTransaction.ps1",
-      "bytes": 38538,
-      "sha256": "f6a2a9b2e732c1806b2b0297a9e3ba2da49474a87751c10439fabe055b992971"
+      "bytes": 38529,
+      "sha256": "cc13875cd07171b0efec31f557c0ce986bc95a548c2de049f57deb7bd54b9d2b"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostContract.ps1",

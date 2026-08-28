@@ -45,7 +45,7 @@
                 throw "guest staged input manifest changed before source verification"
             }
             $preflightInput = Get-Content -LiteralPath $inputManifestPath `
-                -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
+                -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
             $controllerBundleManifestPath = Join-Path $inputPath `
                 "controller\controller-bundle.json"
             if ((Get-FileHash -LiteralPath $controllerBundleManifestPath `
@@ -54,7 +54,7 @@
                 throw "guest controller bundle manifest changed before source verification"
             }
             $preflightBundle = Get-Content -LiteralPath $controllerBundleManifestPath `
-                -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
+                -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
             $controllerRoot = Join-Path $inputPath 'controller'
             $bootstrapRelative = `
                 'modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1'
@@ -179,7 +179,7 @@
                     Assert-StagedFileIdentity $check[0] $check[1] $check[2] $check[3] $check[4]
                 }
                 $bundleManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
-                    -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop
+                    -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
                 if (($bundleManifest | ConvertTo-Json -Compress -Depth 8) -cne
                     ($manifest.controller_bundle | ConvertTo-Json -Compress -Depth 8)) {
                     throw "guest controller bundle manifests disagree"

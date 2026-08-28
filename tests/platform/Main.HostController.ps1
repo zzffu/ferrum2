@@ -383,7 +383,7 @@ try {
             }
             Write-Ferrum2JsonCreateNew -Path $hostManifestPendingPath -Value $manifest -Depth 8
             $expectedHostManifestBytes = [Text.UTF8Encoding]::new($false).GetBytes(
-                ($manifest | ConvertTo-Json -Depth 8) + "`n"
+                (($manifest | ConvertTo-Json -Depth 8) -replace "`r`n", "`n") + "`n"
             )
             $actualHostManifestBytes = [IO.File]::ReadAllBytes($hostManifestPendingPath)
             if ([Convert]::ToBase64String($actualHostManifestBytes) -cne

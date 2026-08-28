@@ -451,7 +451,7 @@ try {
                 -Path $hostManifestPendingPath -Expected $manifest `
                 -EvidenceRoot $hostEvidencePath
             $expectedPublishedManifestBytes = [Text.UTF8Encoding]::new($false).GetBytes(
-                ($manifest | ConvertTo-Json -Depth 8) + "`n"
+                (($manifest | ConvertTo-Json -Depth 8) -replace "`r`n", "`n") + "`n"
             )
             [IO.File]::Move($hostManifestPendingPath, $hostManifestPath)
             $hostManifestFinalCreated = $true
