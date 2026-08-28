@@ -71,6 +71,7 @@ async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback
                 )
                 .await
                 .expect("selected chain");
+            assert!(matches!(&flow, super::super::ClientTcpFlow::Proxy(_)));
             assert_eq!(
                 engine
                     .connector
@@ -161,6 +162,54 @@ async fn tcp_chain_opens_hops_in_order_with_distinct_credentials_and_no_fallback
         assert_eq!(selector.selected("manual"), Ok("c-d"));
         assert_eq!(snapshot.hops(), &[0, 1], "captured rotation {case}");
         assert_eq!(next_snapshot.hops(), &[2, 3], "next rotation {case}");
+    }
+}
+
+#[tokio::test]
+async fn only_socks_single_hop_retains_the_concrete_fast_path() {
+    let (outbounds, _, _) = tcp_chain_test_setup([MethodProfile::Blake3Aes128Gcm2022; 4], 42_101);
+    let application = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 443))
+        .expect("application target");
+    let plan = ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned();
+
+    for origin in [
+        ClientRequestOrigin::Socks,
+        ClientRequestOrigin::Tun,
+        ClientRequestOrigin::Dns,
+        ClientRequestOrigin::RuleSet,
+    ] {
+        let (stream, _peer) = tokio::io::duplex(65_536);
+        let engine = ClientEgressEngine::new(
+            Arc::clone(&outbounds),
+            DeadlineConnector {
+                delay: Duration::ZERO,
+                targets: Mutex::new(Vec::new()),
+                stream: Mutex::new(Some(TokioTransport::new(ScriptedIo::duplex(
+                    stream,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_152),
+                    Arc::new(AtomicUsize::new(0)),
+                )))),
+            },
+            SystemClock::new(),
+            FixedRandom,
+            (Duration::from_secs(1), Duration::from_secs(1)),
+            None,
+            None,
+        );
+        let flow = engine
+            .open_tcp_for_ingress(origin, 0, Some(plan.clone()), &application, None, None)
+            .await
+            .expect("single-hop open");
+        assert_eq!(
+            matches!(&flow, super::super::ClientTcpFlow::SingleProxy(_)),
+            origin == ClientRequestOrigin::Socks,
+            "origin={origin:?}"
+        );
+        assert_eq!(
+            matches!(&flow, super::super::ClientTcpFlow::Proxy(_)),
+            origin != ClientRequestOrigin::Socks,
+            "origin={origin:?}"
+        );
     }
 }
 

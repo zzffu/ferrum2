@@ -322,45 +322,112 @@ pub(super) fn encode_response_state_into<K: TcpKeyProvider>(
     {
         return Err(FrameError::KeyUnavailable);
     }
-    let payload_len = u16::try_from(first_payload.len()).map_err(|_| FrameError::Bounds)?;
-    let fixed_plaintext_len = response_fixed_plaintext_len(response_salt.profile());
+    let mut sealer =
+        prepare_response_state_into(keys, response_salt, timestamp, request_salt, scratch)?;
+    scratch.extend_from_slice(first_payload);
+    seal_prepared_response_state_into(
+        &mut sealer,
+        response_salt.profile(),
+        first_payload.len(),
+        scratch,
+    )?;
+    Ok(sealer)
+}
+
+/// Prepares the fixed response header while leaving the final payload region
+/// as the next append position.
+pub(super) fn prepare_response_state_into<K: TcpKeyProvider>(
+    keys: &K,
+    response_salt: &MethodTcpSalt,
+    timestamp: u64,
+    request_salt: &MethodTcpSalt,
+    scratch: &mut BytesMut,
+) -> Result<TcpSealer, FrameError> {
     let response_first_read_len = response_salt.profile().initial_response_read_bytes();
-    let salt_len = response_salt.profile().salt_bytes();
-    let payload_wire_len = first_payload
-        .len()
-        .checked_add(TAG_LEN)
-        .ok_or(FrameError::Bounds)?;
-    let total = response_first_read_len
-        .checked_add(payload_wire_len)
-        .ok_or(FrameError::Bounds)?;
-    if total > MAX_ENCRYPT_WIRE_LEN || total > scratch.capacity() {
+    if response_first_read_len > scratch.capacity() {
         return Err(FrameError::Bounds);
     }
-    let mut sealer = sealer_for(keys, response_salt)?;
-
     scratch.clear();
-    scratch.resize(total, 0);
+    scratch.resize(response_first_read_len, 0);
+    prepare_response_state_in_place(keys, response_salt, timestamp, request_salt, scratch)
+}
+
+/// Populates a fixed response header without moving a payload that already
+/// occupies its final offset.
+pub(super) fn prepare_response_state_in_place<K: TcpKeyProvider>(
+    keys: &K,
+    response_salt: &MethodTcpSalt,
+    timestamp: u64,
+    request_salt: &MethodTcpSalt,
+    scratch: &mut BytesMut,
+) -> Result<TcpSealer, FrameError> {
+    if response_salt == request_salt {
+        return Err(FrameError::ResponseSaltReuse);
+    }
+    if response_salt.profile() != request_salt.profile()
+        || keys.tcp_profile() != response_salt.profile()
+    {
+        return Err(FrameError::KeyUnavailable);
+    }
+    let profile = response_salt.profile();
+    let fixed_plaintext_len = response_fixed_plaintext_len(profile);
+    let response_first_read_len = profile.initial_response_read_bytes();
+    let salt_len = profile.salt_bytes();
+    if response_first_read_len > scratch.len() {
+        return Err(FrameError::Bounds);
+    }
+    let sealer = sealer_for(keys, response_salt)?;
+
     scratch[..salt_len].copy_from_slice(response_salt.as_bytes());
-    let fixed_end = salt_len + fixed_plaintext_len;
     scratch[salt_len] = RESPONSE_TYPE;
     scratch[salt_len + 1..salt_len + 9].copy_from_slice(&timestamp.to_be_bytes());
     let binding_end = salt_len + 9 + request_salt.as_bytes().len();
     scratch[salt_len + 9..binding_end].copy_from_slice(request_salt.as_bytes());
-    scratch[binding_end..fixed_end].copy_from_slice(&payload_len.to_be_bytes());
-    let payload_end = response_first_read_len + first_payload.len();
-    scratch[response_first_read_len..payload_end].copy_from_slice(first_payload);
+    debug_assert_eq!(binding_end + 2, salt_len + fixed_plaintext_len);
+    Ok(sealer)
+}
 
+/// Seals a response whose payload was appended directly after the prepared
+/// fixed header.
+pub(super) fn seal_prepared_response_state_into(
+    sealer: &mut TcpSealer,
+    profile: MethodProfile,
+    payload_len: usize,
+    scratch: &mut BytesMut,
+) -> Result<(), FrameError> {
+    if payload_len == 0 {
+        return Err(FrameError::EmptyResponse);
+    }
+    if payload_len > MAX_ENCODE_PAYLOAD_LEN {
+        return Err(FrameError::Bounds);
+    }
+    let payload_u16 = u16::try_from(payload_len).map_err(|_| FrameError::Bounds)?;
+    let fixed_plaintext_len = response_fixed_plaintext_len(profile);
+    let response_first_read_len = profile.initial_response_read_bytes();
+    let salt_len = profile.salt_bytes();
+    let payload_end = response_first_read_len
+        .checked_add(payload_len)
+        .ok_or(FrameError::Bounds)?;
+    if scratch.len() != payload_end {
+        return Err(FrameError::Bounds);
+    }
+    let total = payload_end.checked_add(TAG_LEN).ok_or(FrameError::Bounds)?;
+    if total > MAX_ENCRYPT_WIRE_LEN || total > scratch.capacity() {
+        return Err(FrameError::Bounds);
+    }
+    let length_start = salt_len + fixed_plaintext_len - 2;
+    scratch[length_start..length_start + 2].copy_from_slice(&payload_u16.to_be_bytes());
+    scratch.resize(total, 0);
     seal_wire_region(
-        &mut sealer,
+        sealer,
         &mut scratch[salt_len..response_first_read_len],
         fixed_plaintext_len,
     )?;
     seal_wire_region(
-        &mut sealer,
+        sealer,
         &mut scratch[response_first_read_len..total],
-        first_payload.len(),
-    )?;
-    Ok(sealer)
+        payload_len,
+    )
 }
 
 pub(super) fn seal_data_chunk_into(
@@ -371,31 +438,51 @@ pub(super) fn seal_data_chunk_into(
     if payload.len() > MAX_ENCODE_PAYLOAD_LEN {
         return Err(FrameError::Bounds);
     }
-    let payload_len = u16::try_from(payload.len()).map_err(|_| FrameError::Bounds)?;
-    let payload_wire_len = payload
-        .len()
-        .checked_add(TAG_LEN)
+    prepare_data_chunk_into(scratch)?;
+    scratch.extend_from_slice(payload);
+    seal_prepared_data_chunk_into(sealer, payload.len(), scratch)
+}
+
+/// Positions the next plaintext read directly at the final data-frame payload
+/// offset.
+pub(super) fn prepare_data_chunk_into(scratch: &mut BytesMut) -> Result<(), FrameError> {
+    if ENCRYPTED_LENGTH_LEN > scratch.capacity() {
+        return Err(FrameError::Bounds);
+    }
+    scratch.clear();
+    scratch.resize(ENCRYPTED_LENGTH_LEN, 0);
+    Ok(())
+}
+
+/// Seals a data frame whose payload was appended directly into its final wire
+/// layout.
+pub(super) fn seal_prepared_data_chunk_into(
+    sealer: &mut TcpSealer,
+    payload_len: usize,
+    scratch: &mut BytesMut,
+) -> Result<(), FrameError> {
+    if payload_len > MAX_ENCODE_PAYLOAD_LEN {
+        return Err(FrameError::Bounds);
+    }
+    let payload_u16 = u16::try_from(payload_len).map_err(|_| FrameError::Bounds)?;
+    let payload_end = ENCRYPTED_LENGTH_LEN
+        .checked_add(payload_len)
         .ok_or(FrameError::Bounds)?;
-    let total = ENCRYPTED_LENGTH_LEN
-        .checked_add(payload_wire_len)
-        .ok_or(FrameError::Bounds)?;
+    if scratch.len() != payload_end {
+        return Err(FrameError::Bounds);
+    }
+    let total = payload_end.checked_add(TAG_LEN).ok_or(FrameError::Bounds)?;
     if total > MAX_ENCRYPT_WIRE_LEN || total > scratch.capacity() {
         return Err(FrameError::Bounds);
     }
-
-    scratch.clear();
+    scratch[..2].copy_from_slice(&payload_u16.to_be_bytes());
     scratch.resize(total, 0);
-    scratch[..2].copy_from_slice(&payload_len.to_be_bytes());
-    let payload_end = ENCRYPTED_LENGTH_LEN + payload.len();
-    scratch[ENCRYPTED_LENGTH_LEN..payload_end].copy_from_slice(payload);
-
     seal_wire_region(sealer, &mut scratch[..ENCRYPTED_LENGTH_LEN], 2)?;
     seal_wire_region(
         sealer,
         &mut scratch[ENCRYPTED_LENGTH_LEN..total],
-        payload.len(),
-    )?;
-    Ok(())
+        payload_len,
+    )
 }
 
 fn seal_wire_region(

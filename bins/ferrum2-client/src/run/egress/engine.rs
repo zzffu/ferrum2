@@ -254,7 +254,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         application_target: &TargetAddr,
         timeout_limit: Option<Duration>,
         #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
-    ) -> Result<tcp::ClientTcpFlow<'a, C::Stream>, ClientOpenFailure>
+    ) -> Result<tcp::ClientTcpFlow<'a, C::Stream, T>, ClientOpenFailure>
     where
         C: ClientPhysicalConnector,
         C::Stream: TransportIo + LocalEndpoint + 'a,
@@ -355,7 +355,15 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             #[cfg(test)]
             observers,
         );
-        open.await.map(tcp::ClientTcpFlow::Proxy)
+        match open.await? {
+            tcp::ClientProxyTcpFlow::Single(flow) if origin == ClientRequestOrigin::Socks => {
+                Ok(tcp::ClientTcpFlow::SingleProxy(flow))
+            }
+            tcp::ClientProxyTcpFlow::Single(flow) => {
+                Ok(tcp::ClientTcpFlow::Proxy(flow.into_boxed()))
+            }
+            tcp::ClientProxyTcpFlow::Chain(flow) => Ok(tcp::ClientTcpFlow::Proxy(flow)),
+        }
     }
 
     pub(in crate::run) async fn prepare_udp_for_ingress(

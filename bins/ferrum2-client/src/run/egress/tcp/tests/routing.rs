@@ -81,6 +81,11 @@ outbound = "manual"
     let (mut first, reply) = socks_connect_port(listens[0], 80).await;
     assert_eq!(&reply[..2], &[5, 0]);
     let (mut first_upstream, _) = upstreams[0].accept().await.expect("selected A");
+    assert_eq!(
+        registry.snapshot().owned_buffers,
+        0,
+        "single-hop SOCKS fused relay owns no generic relay buffers"
+    );
     let mut wire = [0; 256];
     assert!(
         first_upstream

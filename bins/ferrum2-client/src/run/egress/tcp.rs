@@ -3,10 +3,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ferrum2_core::{ConnectErrorKind, Connector, LocalEndpoint, TargetAddr};
-use ferrum2_crypto::{Clock, SecureRandom};
+use ferrum2_crypto::{Clock, MethodSinglePskProvider, SecureRandom};
 use ferrum2_shadowsocks::{
-    BoxedClientFlow, ClientTcpOutbound, FlowTerminal, PlainDuplex, ShadowsocksError, TransportIo,
-    TransportPhase,
+    BoxedClientFlow, ClientFlow, ClientTcpOutbound, FlowTerminal, MethodKeyAdapter, PlainDuplex,
+    ShadowsocksError, TransportIo, TransportPhase,
 };
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
@@ -14,26 +14,32 @@ use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 use super::context::ClientOutboundContext;
 use super::engine::ClientOpenFailure;
 
-pub(in crate::run) enum ClientTcpFlow<'a, S> {
+// The concrete variant intentionally stays inline: boxing it would add one
+// allocation to every single-hop connection selected for the fused path.
+#[allow(clippy::large_enum_variant)]
+pub(in crate::run) enum ClientTcpFlow<'a, S, T> {
     Direct(S),
+    SingleProxy(ClientFlow<'a, S, MethodKeyAdapter<MethodSinglePskProvider>, T>),
     Proxy(BoxedClientFlow<'a>),
 }
 
-impl<S> LocalEndpoint for ClientTcpFlow<'_, S>
+impl<S, T> LocalEndpoint for ClientTcpFlow<'_, S, T>
 where
     S: LocalEndpoint,
 {
     fn local_socket_addr(&self) -> std::net::SocketAddr {
         match self {
             Self::Direct(stream) => stream.local_socket_addr(),
+            Self::SingleProxy(flow) => flow.local_socket_addr(),
             Self::Proxy(flow) => flow.local_socket_addr(),
         }
     }
 }
 
-impl<S> PlainDuplex for ClientTcpFlow<'_, S>
+impl<S, T> PlainDuplex for ClientTcpFlow<'_, S, T>
 where
     S: TransportIo + LocalEndpoint,
+    T: Clock + Sync,
 {
     fn poll_read_plain(
         mut self: Pin<&mut Self>,
@@ -44,6 +50,7 @@ where
             Self::Direct(stream) => Pin::new(stream)
                 .poll_read_initialized(context, destination)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Read)),
+            Self::SingleProxy(flow) => Pin::new(flow).poll_read_plain(context, destination),
             Self::Proxy(flow) => Pin::new(flow).poll_read_plain(context, destination),
         }
     }
@@ -57,6 +64,7 @@ where
             Self::Direct(stream) => Pin::new(stream)
                 .poll_write(context, source)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Write)),
+            Self::SingleProxy(flow) => Pin::new(flow).poll_write_plain(context, source),
             Self::Proxy(flow) => Pin::new(flow).poll_write_plain(context, source),
         }
     }
@@ -69,6 +77,7 @@ where
             Self::Direct(stream) => Pin::new(stream)
                 .poll_flush(context)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Flush)),
+            Self::SingleProxy(flow) => Pin::new(flow).poll_flush_plain(context),
             Self::Proxy(flow) => Pin::new(flow).poll_flush_plain(context),
         }
     }
@@ -81,6 +90,7 @@ where
             Self::Direct(stream) => Pin::new(stream)
                 .poll_shutdown(context)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
+            Self::SingleProxy(flow) => Pin::new(flow).poll_shutdown_plain(context),
             Self::Proxy(flow) => Pin::new(flow).poll_shutdown_plain(context),
         }
     }
@@ -90,6 +100,7 @@ where
             Self::Direct(stream) => stream
                 .mark_abortive()
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
+            Self::SingleProxy(flow) => flow.mark_abortive_plain(),
             Self::Proxy(flow) => flow.mark_abortive_plain(),
         }
     }
@@ -97,9 +108,16 @@ where
     fn terminal(&self) -> Option<FlowTerminal> {
         match self {
             Self::Direct(_) => None,
+            Self::SingleProxy(flow) => flow.terminal(),
             Self::Proxy(flow) => flow.terminal(),
         }
     }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ClientProxyTcpFlow<'a, S, T> {
+    Single(ClientFlow<'a, S, MethodKeyAdapter<MethodSinglePskProvider>, T>),
+    Chain(BoxedClientFlow<'a>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -112,7 +130,7 @@ pub(super) async fn open<'a, C, T, R>(
     application_target: &TargetAddr,
     deadlines: (Duration, Duration),
     #[cfg(test)] observers: Option<(&'a dyn BufferObserver, &'a dyn FlowObserver)>,
-) -> Result<BoxedClientFlow<'a>, ClientOpenFailure>
+) -> Result<ClientProxyTcpFlow<'a, C::Stream, T>, ClientOpenFailure>
 where
     C: Connector,
     C::Stream: TransportIo + LocalEndpoint + 'a,
@@ -147,7 +165,11 @@ where
                 .expect("classified Shadowsocks plan")
                 .tcp_server
         });
-        let mut flow = connected.write_request(first_target).await?.into_boxed();
+        let first_flow = connected.write_request(first_target).await?;
+        if plan.len() == 1 {
+            return Ok(ClientProxyTcpFlow::Single(first_flow));
+        }
+        let mut flow = first_flow.into_boxed();
         for (position, index) in plan.iter().copied().enumerate().skip(1) {
             let hop = outbounds[index]
                 .shadowsocks()
@@ -173,7 +195,7 @@ where
         if plan.len() > 1 {
             std::future::poll_fn(|cx| Pin::new(&mut flow).poll_flush_plain(cx)).await?;
         }
-        Ok(flow)
+        Ok(ClientProxyTcpFlow::Chain(flow))
     })
     .await
     .map_err(|_| ClientOpenFailure::HandshakeTimeout)?

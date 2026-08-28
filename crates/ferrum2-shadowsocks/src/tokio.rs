@@ -8,8 +8,13 @@ use std::task::{Context, Poll};
 use ::tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use bytes::{BufMut, BytesMut};
 use ferrum2_core::{AbortiveClose, ConnectError, Connector, LocalEndpoint, TargetAddr};
+use ferrum2_crypto::{Clock, SecureRandom};
 
-use crate::{FlowTerminal, PlainBufferedDuplex, PlainDuplex, ShadowsocksError, TransportIo};
+use crate::tcp::{FusedRelayDirection as CoreFusedRelayDirection, fused_relay};
+use crate::{
+    ClientFlow, FlowTerminal, PlainBufferedDuplex, PlainDuplex, ServerFlow, ShadowsocksError,
+    TcpKeyProvider, TransportIo,
+};
 
 /// Adapts a core connector so its streams implement [`TransportIo`].
 pub struct TokioConnector<C> {
@@ -123,6 +128,61 @@ where
         Pin::new(&mut self.inner)
             .poll_shutdown(cx)
             .map_err(|_| io::ErrorKind::Other.into())
+    }
+}
+
+/// Direction of plaintext accepted by the fused single-hop relay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FusedRelayDirection {
+    /// Bytes read from the raw endpoint and admitted by the encrypted tunnel.
+    PlainToTunnel,
+    /// Authenticated tunnel bytes accepted by the raw endpoint.
+    TunnelToPlain,
+}
+
+/// Runs the zero-copy payload relay for one concrete client flow.
+pub async fn relay_client_flow<P, S, K, T, O>(
+    plain: &mut P,
+    flow: &mut ClientFlow<'_, S, K, T>,
+    mut observe: O,
+) -> io::Result<()>
+where
+    P: AsyncRead + AsyncWrite + Unpin,
+    S: TransportIo,
+    K: TcpKeyProvider + Sync,
+    T: Clock + Sync,
+    O: FnMut(FusedRelayDirection, usize) + Unpin,
+{
+    fused_relay(plain, flow, move |direction, bytes| {
+        observe(public_fused_direction(direction), bytes);
+    })
+    .await
+}
+
+/// Runs the zero-copy payload relay for one concrete server flow.
+pub async fn relay_server_flow<P, S, K, T, R, O>(
+    plain: &mut P,
+    flow: &mut ServerFlow<'_, S, K, T, R>,
+    mut observe: O,
+) -> io::Result<()>
+where
+    P: AsyncRead + AsyncWrite + Unpin,
+    S: TransportIo,
+    K: TcpKeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
+    O: FnMut(FusedRelayDirection, usize) + Unpin,
+{
+    fused_relay(plain, flow, move |direction, bytes| {
+        observe(public_fused_direction(direction), bytes);
+    })
+    .await
+}
+
+const fn public_fused_direction(direction: CoreFusedRelayDirection) -> FusedRelayDirection {
+    match direction {
+        CoreFusedRelayDirection::PlainToTunnel => FusedRelayDirection::PlainToTunnel,
+        CoreFusedRelayDirection::TunnelToPlain => FusedRelayDirection::TunnelToPlain,
     }
 }
 

@@ -11,6 +11,8 @@ pub use error::{
 pub use flow::{
     BoxedClientFlow, ClientFlow, PlainBufferedDuplex, PlainDuplex, ServerFlow, TransportIo,
 };
+#[cfg(feature = "tokio")]
+pub(crate) use flow::{FusedRelayDirection, fused_relay};
 pub use handshake::{
     ClientTcpOutbound, ConnectedClientOpen, MethodKeyAdapter, NoReply, ShadowsocksTcpInbound,
     TcpKeyError, TcpKeyProvider,

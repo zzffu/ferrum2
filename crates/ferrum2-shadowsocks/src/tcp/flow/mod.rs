@@ -1,8 +1,12 @@
 mod client;
+#[cfg(feature = "tokio")]
+mod fused;
 mod io;
 mod server;
 
 pub use client::{BoxedClientFlow, ClientFlow};
+#[cfg(feature = "tokio")]
+pub(crate) use fused::{FusedRelayDirection, fused_relay};
 pub use server::ServerFlow;
 
 use std::pin::Pin;
