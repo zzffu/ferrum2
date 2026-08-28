@@ -54,6 +54,7 @@ struct BufferedSourceRelay<'a, R, P> {
     reverse: Box<[u8]>,
     reverse_position: usize,
     reverse_filled: usize,
+    reverse_draining: bool,
     reverse_flush_pending: bool,
     buffered_eof: bool,
     reverse_eof: bool,
@@ -71,6 +72,7 @@ impl<'a, R, P> BufferedSourceRelay<'a, R, P> {
             reverse: vec![0; RELAY_BUFFER_BYTES].into_boxed_slice(),
             reverse_position: 0,
             reverse_filled: 0,
+            reverse_draining: false,
             reverse_flush_pending: false,
             buffered_eof: false,
             reverse_eof: false,
@@ -141,7 +143,7 @@ where
             }
 
             if !this.reverse_done {
-                if this.reverse_position < this.reverse_filled {
+                if this.reverse_draining {
                     let source = &this.reverse[this.reverse_position..this.reverse_filled];
                     match Pin::new(&mut *this.buffered).poll_write(cx, source) {
                         Poll::Pending => {}
@@ -161,10 +163,44 @@ where
                             if this.reverse_position == this.reverse_filled {
                                 this.reverse_position = 0;
                                 this.reverse_filled = 0;
+                                this.reverse_draining = false;
                                 this.reverse_flush_pending = true;
                             }
                         }
                     }
+                } else if !this.reverse_eof && this.reverse_filled < this.reverse.len() {
+                    let mut buffer = ReadBuf::new(&mut this.reverse[this.reverse_filled..]);
+                    match Pin::new(&mut *this.peer).poll_read(cx, &mut buffer) {
+                        Poll::Pending if this.reverse_filled > 0 => {
+                            this.reverse_draining = true;
+                            progressed = true;
+                        }
+                        Poll::Pending if this.reverse_flush_pending => {
+                            match Pin::new(&mut *this.buffered).poll_flush(cx) {
+                                Poll::Pending => {}
+                                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                                Poll::Ready(Ok(())) => {
+                                    ready_io += 1;
+                                    progressed = true;
+                                    this.reverse_flush_pending = false;
+                                }
+                            }
+                        }
+                        Poll::Pending => {}
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(())) => {
+                            ready_io += 1;
+                            progressed = true;
+                            let read = buffer.filled().len();
+                            this.reverse_filled += read;
+                            this.reverse_eof = read == 0;
+                            this.reverse_draining = this.reverse_filled > 0
+                                && (this.reverse_eof || this.reverse_filled == this.reverse.len());
+                        }
+                    }
+                } else if this.reverse_filled > 0 {
+                    this.reverse_draining = true;
+                    progressed = true;
                 } else if this.reverse_flush_pending {
                     match Pin::new(&mut *this.buffered).poll_flush(cx) {
                         Poll::Pending => {}
@@ -183,18 +219,6 @@ where
                             ready_io += 1;
                             progressed = true;
                             this.reverse_done = true;
-                        }
-                    }
-                } else {
-                    let mut buffer = ReadBuf::new(&mut this.reverse);
-                    match Pin::new(&mut *this.peer).poll_read(cx, &mut buffer) {
-                        Poll::Pending => {}
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(())) => {
-                            ready_io += 1;
-                            progressed = true;
-                            this.reverse_filled = buffer.filled().len();
-                            this.reverse_eof = this.reverse_filled == 0;
                         }
                     }
                 }
