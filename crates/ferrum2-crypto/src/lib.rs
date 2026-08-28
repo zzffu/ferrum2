@@ -18,6 +18,6 @@ pub use random::{
 };
 pub use tcp::{AeadError, NonceCounter, TcpOpener, TcpSealer, TcpSubkey};
 pub use udp::{
-    UdpCrypto, UdpCryptoError, UdpOpenResult, UdpOutboundSession, UdpSealReservation,
-    UdpSealResult, UdpSessionId,
+    UdpAesSessionCipher, UdpCrypto, UdpCryptoError, UdpOpenResult, UdpOutboundSession,
+    UdpSealReservation, UdpSealResult, UdpSessionId,
 };

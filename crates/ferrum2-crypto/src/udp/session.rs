@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use super::aead::UdpAesSessionCipher;
 use super::{UDP_SESSION_ID_BYTES, UdpCryptoError};
 use crate::method::MethodProfile;
 use crate::random::{RandomError, SecureRandom};
@@ -151,14 +152,20 @@ pub struct UdpOutboundSession {
     pub(super) profile: MethodProfile,
     pub(super) session_id: UdpSessionId,
     pub(super) counter: UdpPacketCounter,
+    pub(super) aes_body_cipher: Option<UdpAesSessionCipher>,
 }
 
 impl UdpOutboundSession {
-    pub(super) fn new(profile: MethodProfile, session_id: UdpSessionId) -> Self {
+    pub(super) fn new(
+        profile: MethodProfile,
+        session_id: UdpSessionId,
+        aes_body_cipher: Option<UdpAesSessionCipher>,
+    ) -> Self {
         Self {
             profile,
             session_id,
             counter: UdpPacketCounter::new(),
+            aes_body_cipher,
         }
     }
 
@@ -181,6 +188,7 @@ impl fmt::Debug for UdpOutboundSession {
 
 impl Zeroize for UdpOutboundSession {
     fn zeroize(&mut self) {
+        self.aes_body_cipher.take();
         self.session_id.zeroize();
         self.counter.zeroize();
     }
