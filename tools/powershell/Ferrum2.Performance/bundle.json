@@ -190,8 +190,8 @@
     },
     {
       "path": "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
-      "bytes": 36174,
-      "sha256": "e26fb3b52556a1520707a64e5945aa1f41559aafd7f85ec27459d107f7b2ff31"
+      "bytes": 36222,
+      "sha256": "f8b78ddcb1ef23a347d9b2a03ed29a5efff5127eb793eb22dbc7fd1095f55caa"
     }
   ]
 }

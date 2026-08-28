@@ -179,6 +179,17 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
         )
         self.assertTrue(self.guest_transaction.rstrip().endswith("$guestControllerResult"))
 
+    def test_udp_diagnostic_exits_before_formal_evidence_reduction(self) -> None:
+        result = self.source.index(". $hostUdpResultPath")
+        diagnostic_exit = self.source.index(
+            "if ($instrumentedDiagnosticMode) {\n    exit 0\n}",
+            result,
+        )
+        formal_evidence = self.source.index("$rawEvidence =", result)
+
+        self.assertLess(result, diagnostic_exit)
+        self.assertLess(diagnostic_exit, formal_evidence)
+
 
 if __name__ == "__main__":
     unittest.main()

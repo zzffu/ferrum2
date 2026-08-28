@@ -640,6 +640,9 @@ if ([string]$finalTopologyContext.Vm.State -cne "Off") {
     throw "approved topology final VM state is not Off"
 }
 . $hostUdpResultPath
+if ($instrumentedDiagnosticMode) {
+    exit 0
+}
 $rawEvidence = Join-Path $hostEvidenceRoot "raw-evidence"
 $rawNetworkModelEvidence = Join-Path $rawEvidence "network-model"
 $rawProcessLogs = Join-Path $rawEvidence "process-logs"
