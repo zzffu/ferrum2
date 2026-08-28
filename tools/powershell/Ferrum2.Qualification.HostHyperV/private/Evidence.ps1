@@ -169,6 +169,9 @@ function Copy-GuestEvidence {
 
     $guestDestination = Join-Path $HostEvidencePath "guest"
     [IO.Directory]::CreateDirectory($guestDestination) | Out-Null
+    Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+        Set-StrictMode -Off
+    }
     Copy-Item `
         -FromSession $Session `
         -LiteralPath $GuestExportPath `

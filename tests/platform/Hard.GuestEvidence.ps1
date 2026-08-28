@@ -150,7 +150,8 @@ function Invoke-GuestNetworkPathProbe(
     Assert-True (-not (Test-Path -LiteralPath $OutputPath)) `
         "guest network-path output baseline is not absent"
     $arguments = @(
-        "-NoProfile", "-File", $Path,
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", $Path,
         "-SupportIpv4", [string]$Topology.support_host_ipv4,
         "-SupportPort", [string]$SupportPort,
         "-ExpectedGuestIpv4", [string]$Topology.guest_ipv4,

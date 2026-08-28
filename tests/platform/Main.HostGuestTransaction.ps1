@@ -374,7 +374,8 @@
 
                 $phase = "qualification"
                 $controllerArguments = @(
-                        "-NoProfile", "-File", $controllerPath,
+                        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                        "-File", $controllerPath,
                         "-Profile", $RequestedProfile,
                         "-RunToken", $Token,
                         "-IdentityLedger", $ledgerPath,
@@ -402,7 +403,8 @@
                         $cleanupExit = Invoke-LoggedCommand `
                             -Executable $pwsh `
                             -Arguments @(
-                                "-NoProfile", "-File", $cleanupControllerPath,
+                                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                "-File", $cleanupControllerPath,
                                 "-Profile", $RequestedProfile,
                                 "-RunToken", $Token,
                                 "-ClientBinary", $clientBinary,

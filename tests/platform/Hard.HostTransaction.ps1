@@ -386,7 +386,8 @@ try {
                 [string]$manifest.runtime.powershell_executable_sha256) {
                 throw "portable PowerShell executable hash changed"
             }
-            $output = @(& $pwsh -NoProfile -File $wrapperPath `
+            $output = @(& $pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                -File $wrapperPath `
                 -RunRoot $Root `
                 -ExpectedManifestSha256 $ExpectedManifestSha256 2>&1)
             $exitCode = [int]$LASTEXITCODE

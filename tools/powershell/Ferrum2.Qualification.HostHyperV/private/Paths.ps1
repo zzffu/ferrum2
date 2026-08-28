@@ -351,6 +351,10 @@ function Invoke-ApprovedGuestNetworkPathProbe {
                 $ExpectedLedgerSha256) {
             throw "guest topology preflight source identity is invalid"
         }
+        [byte[]]$probeBytes = [IO.File]::ReadAllBytes($probePath)
+        $probeScript = [scriptblock]::Create(
+            [Text.UTF8Encoding]::new($false, $true).GetString($probeBytes)
+        )
         $ledger = Get-Content -LiteralPath $ledgerPath -Raw -Encoding utf8 |
             ConvertFrom-Json -ErrorAction Stop
         if ($ledger.schema -ne 4 -or
@@ -367,7 +371,7 @@ function Invoke-ApprovedGuestNetworkPathProbe {
             [int]$ledger.topology.support_prefix_length -ne $ExpectedPrefixLength) {
             throw "guest topology preflight ledger binding is invalid"
         }
-        $probeRows = @(& $probePath `
+        $probeRows = @(& $probeScript `
             -SupportIpv4 $ExpectedSupportIpv4 `
             -SupportPort $ExpectedUdpPort `
             -ExpectedGuestIpv4 $ExpectedGuestIpv4 `

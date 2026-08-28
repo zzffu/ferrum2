@@ -14,8 +14,8 @@
     },
     {
       "path": "tests/platform/Main.HostGuestTransaction.ps1",
-      "bytes": 41285,
-      "sha256": "4e131d54d60d27cb0bf5b35cd1b8039261a812d857fec3dda17ede3eddd68fdb"
+      "bytes": 41439,
+      "sha256": "91ddfddda6cdbd24e7421770c54d87053e50c93a7359b96762b8876fc7938b99"
     },
     {
       "path": "tests/platform/Main.HostReadback.ps1",
@@ -94,8 +94,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Evidence.ps1",
-      "bytes": 9334,
-      "sha256": "5cbbcfc2401de4058817ccfe58e48d475a570b8f84254578e7489ab67823bd03"
+      "bytes": 9438,
+      "sha256": "5ac12c4b0a8c72d7189049ccd0eb557d0231d0d805eca7bd389f22672eb885b6"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Manifest.ps1",
@@ -104,8 +104,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Paths.ps1",
-      "bytes": 21299,
-      "sha256": "7c659c9a80be6b117ac0f96110cd0cb85660c8b00df9b6a01001ef6c37e72b5c"
+      "bytes": 21498,
+      "sha256": "62295a7d0184ae5d3cac97049f144a836ef022af1ab6ff759a1f66baed5e08ed"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Process.ps1",
@@ -168,5 +168,5 @@
       "sha256": "d6cfe0191ed6b53e431bab989b80f6fad2a29a7635e46db1b5f821ee56841e8a"
     }
   ],
-  "controller_bundle_sha256": "eba9e927b8a30161c892f0f7c1bdab864c061b31b4c5da78419ba18707fd621b"
+  "controller_bundle_sha256": "81feffb9aff00bc35e9819f45d44bc1e01306dddbef8144aea1d26fc04d1f369"
 }

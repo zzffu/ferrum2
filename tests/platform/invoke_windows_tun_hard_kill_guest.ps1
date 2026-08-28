@@ -354,7 +354,8 @@ $qualificationOutcome = "failure"
 try {
     try {
         $exitCode = Invoke-CapturedPwsh @(
-            "-NoProfile", "-File", $controller,
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", $controller,
             "-WintunZip", $wintunZip,
             "-RunToken", $runToken,
             "-IdentityLedger", $identityLedger,
@@ -423,7 +424,8 @@ try {
     $residue = $null
     try {
         $cleanupExit = Invoke-CapturedPwsh @(
-            "-NoProfile", "-File", $controller,
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", $controller,
             "-Cleanup",
             "-RunToken", $runToken
         ) $cleanupStdout $cleanupStderr $false 900

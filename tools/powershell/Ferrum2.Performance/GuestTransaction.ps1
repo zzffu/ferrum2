@@ -484,7 +484,8 @@ foreach ($trial in $executionTrials) {
             $diagnosticRawOutput = Join-Path $DiagnosticEvidenceRoot `
                 "guest-raw.json"
             $boundaryArguments = @(
-                "-NoProfile", "-File", $udpBoundaryCollector,
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", $udpBoundaryCollector,
                 "-Profile", $DiagnosticProfileValue,
                 "-RunKind", $RunKindValue,
                 "-Member", $member,
@@ -563,7 +564,8 @@ foreach ($trial in $executionTrials) {
         )
         $output = Join-Path $EvidenceRoot $outputName
         $collectorArguments = @(
-            "-NoProfile", "-File", $collector,
+            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", $collector,
             "-Scenario", [string]$trial.scenario,
             "-RunKind", $RunKindValue,
             "-Member", $member,
