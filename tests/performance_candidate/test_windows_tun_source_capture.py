@@ -17,6 +17,20 @@ BOOTSTRAP = (
     / "Ferrum2.WindowsTun.Lab"
     / "BundleBootstrap.ps1"
 )
+HOST_VM_TRANSACTION = (
+    ROOT
+    / "tools"
+    / "powershell"
+    / "Ferrum2.Performance"
+    / "HostVmTransaction.ps1"
+)
+GUEST_TRANSACTION = (
+    ROOT
+    / "tools"
+    / "powershell"
+    / "Ferrum2.Performance"
+    / "GuestTransaction.ps1"
+)
 
 
 class WindowsTunSourceCaptureTests(unittest.TestCase):
@@ -24,6 +38,8 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = RUNNER.read_text(encoding="utf-8")
         cls.bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+        cls.host_vm_transaction = HOST_VM_TRANSACTION.read_text(encoding="utf-8")
+        cls.guest_transaction = GUEST_TRANSACTION.read_text(encoding="utf-8")
 
     def test_verified_sources_are_captured_before_any_module_or_owner_load(self) -> None:
         source = self.source
@@ -114,6 +130,20 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
             "Close-Ferrum2BootstrapLockedStage",
         ):
             self.assertIn(f"function {canonical}", self.bootstrap)
+
+    def test_guest_bundle_manifest_stays_within_its_controller_root(self) -> None:
+        self.assertIn(
+            'Join-Path $performanceControllerBundleRoot "controller-bundle.json"',
+            self.host_vm_transaction,
+        )
+        self.assertIn(
+            'Join-Path $controllerBundleRoot "controller-bundle.json"',
+            self.guest_transaction,
+        )
+        self.assertNotIn(
+            'Join-Path $InputRoot "controller-bundle.json"',
+            self.guest_transaction,
+        )
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ try {
         -Manifest $performanceControllerBundleManifest `
         -DestinationRoot $performanceControllerBundleRoot
     Write-Ferrum2ControllerBundleManifest `
-        -Path (Join-Path $temporaryRoot "input\controller-bundle.json") `
+        -Path (Join-Path $performanceControllerBundleRoot "controller-bundle.json") `
         -Manifest $performanceControllerBundleManifest
     $udpBoundaryCollectorSha256 = ""
     if ($instrumentedDiagnosticMode) {

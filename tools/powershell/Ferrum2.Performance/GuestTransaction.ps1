@@ -98,7 +98,7 @@ if ($CanonicalSourceIpv4 -cne "198.18.0.2" -or
     throw "guest canonical UDP association source identity is invalid"
 }
 $controllerBundleRoot = Join-Path $InputRoot "controller"
-$controllerBundleManifestPath = Join-Path $InputRoot "controller-bundle.json"
+$controllerBundleManifestPath = Join-Path $controllerBundleRoot "controller-bundle.json"
 $bootstrapRelative = "modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1"
 $bootstrapManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
     -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
