@@ -10,6 +10,7 @@ members = [
     "crates/ferrum2-socks5",
     "crates/ferrum2-net",
     "crates/ferrum2-runtime",
+    "crates/ferrum2-structural",
     "crates/ferrum2-config",
     "crates/ferrum2-dns",
     "crates/ferrum2-observability",
@@ -39,6 +40,7 @@ ferrum2-shadowsocks = { path = "crates/ferrum2-shadowsocks", version = "=0.1.0" 
 ferrum2-socks5 = { path = "crates/ferrum2-socks5", version = "=0.1.0" }
 ferrum2-net = { path = "crates/ferrum2-net", version = "=0.1.0" }
 ferrum2-runtime = { path = "crates/ferrum2-runtime", version = "=0.1.0" }
+ferrum2-structural = { path = "crates/ferrum2-structural", version = "=0.1.0" }
 ferrum2-config = { path = "crates/ferrum2-config", version = "=0.1.0" }
 ferrum2-dns = { path = "crates/ferrum2-dns", version = "=0.1.0" }
 ferrum2-observability = { path = "crates/ferrum2-observability", version = "=0.1.0" }

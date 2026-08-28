@@ -10,6 +10,16 @@ publish.workspace = true
 name = "ferrum2-client"
 path = "src/main.rs"
 
+[features]
+default = []
+structural-metrics = [
+    "dep:ferrum2-structural",
+    "ferrum2-dns/structural-metrics",
+    "ferrum2-observability/structural-metrics",
+    "ferrum2-runtime/structural-metrics",
+    "ferrum2-shadowsocks/structural-metrics",
+]
+
 [dependencies]
 bytes.workspace = true
 ferrum2-config.workspace = true
@@ -24,6 +34,7 @@ ferrum2-ruleset.workspace = true
 ferrum2-shadowsocks = { workspace = true, features = ["tokio"] }
 ferrum2-sniff.workspace = true
 ferrum2-socks5.workspace = true
+ferrum2-structural = { workspace = true, optional = true }
 ferrum2-tun = { workspace = true, features = ["live-backend"] }
 ferrum2-platform-windows = { workspace = true, features = ["live-backend"] }
 clap.workspace = true

@@ -49,39 +49,53 @@ fn validate_member_set(
     }
 }
 
-fn workspace_adjacency(metadata: &Value) -> BTreeMap<String, BTreeSet<String>> {
-    let id_to_name: BTreeMap<_, _> = metadata["packages"]
+fn workspace_declared_adjacency(metadata: &Value) -> BTreeMap<String, BTreeSet<String>> {
+    let member_ids: BTreeSet<_> = metadata["workspace_members"]
+        .as_array()
+        .expect("workspace members")
+        .iter()
+        .map(|member| member.as_str().expect("workspace member id"))
+        .collect();
+    let member_roots: BTreeMap<_, _> = metadata["packages"]
         .as_array()
         .expect("metadata packages")
         .iter()
+        .filter(|package| member_ids.contains(package["id"].as_str().expect("package id")))
         .map(|package| {
             (
-                package["id"].as_str().expect("package id").to_owned(),
+                Path::new(
+                    package["manifest_path"]
+                        .as_str()
+                        .expect("package manifest path"),
+                )
+                .parent()
+                .expect("package manifest parent")
+                .to_path_buf(),
                 package["name"].as_str().expect("package name").to_owned(),
             )
         })
         .collect();
-    let workspace_names = workspace_member_names(metadata);
-    metadata["resolve"]["nodes"]
+    metadata["packages"]
         .as_array()
-        .expect("resolve nodes")
+        .expect("metadata packages")
         .iter()
-        .filter_map(|node| {
-            let name = id_to_name.get(node["id"].as_str().expect("node id"))?;
-            if !workspace_names.contains(name) {
-                return None;
-            }
-            let dependencies = node["dependencies"]
+        .filter(|package| member_ids.contains(package["id"].as_str().expect("package id")))
+        .map(|package| {
+            let dependencies = package["dependencies"]
                 .as_array()
-                .expect("resolved dependencies")
+                .expect("package dependencies")
                 .iter()
                 .filter_map(|dependency| {
-                    id_to_name.get(dependency.as_str().expect("dependency id"))
+                    dependency["path"]
+                        .as_str()
+                        .and_then(|path| member_roots.get(Path::new(path)))
                 })
-                .filter(|dependency| workspace_names.contains(*dependency))
                 .cloned()
                 .collect();
-            Some((name.clone(), dependencies))
+            (
+                package["name"].as_str().expect("package name").to_owned(),
+                dependencies,
+            )
         })
         .collect()
 }
@@ -363,7 +377,10 @@ fn declarative_architecture_policy_matches_the_workspace() {
     validate_member_set(&workspace_member_names(metadata()), &expected_members)
         .expect("declared workspace members");
 
-    let adjacency = workspace_adjacency(metadata());
+    // Manifest declarations are the security boundary: optional, renamed,
+    // target-specific, build, and development edges require review even when
+    // the default feature resolution does not activate them.
+    let adjacency = workspace_declared_adjacency(metadata());
     for edge in policy["transitive_forbidden_edges"]
         .as_array()
         .expect("transitive forbidden edges")
@@ -420,6 +437,82 @@ fn declarative_architecture_policy_matches_the_workspace() {
             "ferrum2-platform-windows".to_owned(),
         ]),
         "runtime final-state forbidden edges must remain explicit"
+    );
+}
+
+#[test]
+fn declared_adjacency_reviews_optional_renamed_and_target_specific_edges() {
+    let metadata = serde_json::json!({
+        "workspace_members": ["app-id", "structural-id", "runtime-id", "core-id"],
+        "packages": [
+            {
+                "id": "app-id",
+                "name": "app",
+                "manifest_path": "C:/workspace/app/Cargo.toml",
+                "dependencies": [
+                    {
+                        "name": "ferrum2-structural",
+                        "rename": "evidence",
+                        "kind": null,
+                        "optional": true,
+                        "target": "cfg(windows)",
+                        "path": "C:/workspace/structural"
+                    },
+                    {
+                        "name": "ferrum2-runtime",
+                        "rename": "runtime_build",
+                        "kind": "build",
+                        "optional": false,
+                        "target": null,
+                        "path": "C:/workspace/runtime"
+                    },
+                    {
+                        "name": "ferrum2-core",
+                        "rename": null,
+                        "kind": "dev",
+                        "optional": false,
+                        "target": "cfg(unix)",
+                        "path": "C:/workspace/core"
+                    },
+                    {
+                        "name": "ferrum2-core",
+                        "rename": "external_lookalike",
+                        "kind": null,
+                        "optional": false,
+                        "target": null,
+                        "path": "C:/outside/core"
+                    }
+                ]
+            },
+            {
+                "id": "structural-id",
+                "name": "ferrum2-structural",
+                "manifest_path": "C:/workspace/structural/Cargo.toml",
+                "dependencies": []
+            },
+            {
+                "id": "runtime-id",
+                "name": "ferrum2-runtime",
+                "manifest_path": "C:/workspace/runtime/Cargo.toml",
+                "dependencies": []
+            },
+            {
+                "id": "core-id",
+                "name": "ferrum2-core",
+                "manifest_path": "C:/workspace/core/Cargo.toml",
+                "dependencies": []
+            }
+        ]
+    });
+
+    let adjacency = workspace_declared_adjacency(&metadata);
+    assert_eq!(
+        adjacency["app"],
+        BTreeSet::from([
+            "ferrum2-core".to_owned(),
+            "ferrum2-runtime".to_owned(),
+            "ferrum2-structural".to_owned(),
+        ])
     );
 }
 

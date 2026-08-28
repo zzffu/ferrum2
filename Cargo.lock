@@ -488,6 +488,7 @@ dependencies = [
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
  "ferrum2-socks5",
+ "ferrum2-structural",
  "ferrum2-tun",
  "hickory-proto",
  "serde_json",
@@ -542,6 +543,7 @@ dependencies = [
  "ferrum2-core",
  "ferrum2-net",
  "ferrum2-rule",
+ "ferrum2-structural",
  "futures-util",
  "h2",
  "hickory-proto",
@@ -678,6 +680,7 @@ dependencies = [
  "bytes",
  "ferrum2-core",
  "ferrum2-net",
+ "ferrum2-structural",
  "futures-util",
  "socket2",
  "thiserror",
@@ -702,6 +705,7 @@ dependencies = [
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
+ "ferrum2-structural",
  "hickory-proto",
  "socket2",
  "tokio",
@@ -715,6 +719,7 @@ dependencies = [
  "bytes",
  "ferrum2-core",
  "ferrum2-crypto",
+ "ferrum2-structural",
  "hex",
  "serde_json",
  "thiserror",
@@ -740,6 +745,10 @@ dependencies = [
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "ferrum2-structural"
+version = "0.1.0"
 
 [[package]]
 name = "ferrum2-tun"

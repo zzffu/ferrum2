@@ -18,13 +18,18 @@ workspace_members = [
     "ferrum2-shadowsocks",
     "ferrum2-sniff",
     "ferrum2-socks5",
+    "ferrum2-structural",
     "ferrum2-tun",
     "ferrum2-platform-windows",
 ]
 
 [[internal_dependency_allowlists]]
 package = "ferrum2-runtime"
-allowed = ["ferrum2-core", "ferrum2-net"]
+allowed = ["ferrum2-core", "ferrum2-net", "ferrum2-structural"]
+
+[[internal_dependency_allowlists]]
+package = "ferrum2-structural"
+allowed = []
 
 [[internal_dependency_allowlists]]
 package = "ferrum2-platform-windows"

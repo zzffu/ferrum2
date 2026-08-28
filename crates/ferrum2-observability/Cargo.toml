@@ -9,6 +9,10 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+structural-metrics = []
+
 [dependencies]
 prometheus-client.workspace = true
 thiserror.workspace = true

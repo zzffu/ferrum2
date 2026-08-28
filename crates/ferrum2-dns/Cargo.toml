@@ -12,12 +12,14 @@ path = "src/lib.rs"
 [features]
 default = []
 __interop-test-root = ["dep:rustls"]
+structural-metrics = ["dep:ferrum2-structural"]
 
 [dependencies]
 bytes.workspace = true
 ferrum2-core.workspace = true
 ferrum2-net.workspace = true
 ferrum2-rule.workspace = true
+ferrum2-structural = { workspace = true, optional = true }
 futures-util.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true

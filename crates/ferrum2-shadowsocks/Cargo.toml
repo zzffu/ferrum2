@@ -11,11 +11,13 @@ path = "src/lib.rs"
 
 [features]
 default = []
+structural-metrics = ["dep:ferrum2-structural"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 
 [dependencies]
 ferrum2-core.workspace = true
 ferrum2-crypto.workspace = true
+ferrum2-structural = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
