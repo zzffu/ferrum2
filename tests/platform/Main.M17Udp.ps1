@@ -102,17 +102,12 @@ function Invoke-M17UdpPolicy {
         purpose = "prevent Windows stateful endpoint filtering from masking product ADF/EIF while remaining controller-process scoped"
     })
     try {
-    $directTarget = [ordered]@{
-        Address = [string]$script:capabilityIdentity.SupportAddress
-        Port = [int]$script:capabilityIdentity.UdpPort
-    }
-    Assert-True ([Net.IPAddress]::Parse($directTarget.Address).AddressFamily -eq
-        [Net.Sockets.AddressFamily]::InterNetwork) "M17 UDP direct witness requires the approved IPv4 support listener"
     $targets = @(
         [ordered]@{ Address = "192.0.2.241"; Port = Get-UniqueTcpPort },
         [ordered]@{ Address = "192.0.2.242"; Port = Get-UniqueTcpPort },
         [ordered]@{ Address = "2001:db8::241"; Port = Get-UniqueTcpPort }
     )
+    $directTarget = $targets[1]
     $probes = @(
         Add-M17LoopbackTarget $targets[0].Address $targets[0].Port
         Add-M17LoopbackTarget $targets[1].Address $targets[1].Port
@@ -155,7 +150,6 @@ outbound = "direct"
             $prefix = if ($target.Address.Contains(":")) { "$($target.Address)/128" } else { "$($target.Address)/32" }
             [void](Add-TunRoute $script:ownedInterfaceIndex $prefix 500)
         }
-        [void](Add-TunRoute $script:ownedInterfaceIndex "$($directTarget.Address)/32" 500)
         $targetRoutePreference = @($targets | ForEach-Object {
             Get-M17TargetRoutePreference $script:ownedInterfaceIndex $_.Address
         })
@@ -278,7 +272,13 @@ outbound = "direct"
 
                 [byte[]]$laterRulePayload = New-M17StunBindingRequest 0x71 $false
                 Assert-M17StunBindingRequest $laterRulePayload $false
+                $laterRuleRequestsBefore = $probes[1].Requests
                 Invoke-M17UdpEcho $v4 $directTarget.Address $directTarget.Port $laterRulePayload
+                $laterRuleRelayEndpoint = Wait-M17ProbeRemoteEndpoint $probes[1]
+                Assert-True ($probes[1].Requests -eq $laterRuleRequestsBefore + 1 -and
+                    $laterRuleRelayEndpoint.Address.ToString() -ceq $directTarget.Address -and
+                    $laterRuleRelayEndpoint.Port -eq $relayEndpoint.Port) `
+                    "M17 later rule target escaped the frozen proxy route"
 
                 Add-M17LiveRow "udp-protocol-interoperability" ([ordered]@{
                     dns = [ordered]@{ bytes = $dnsPayload.Length; sha256 = Get-M17PayloadSha256 $dnsPayload; target = "proxy-ipv4-a" }

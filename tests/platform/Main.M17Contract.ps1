@@ -518,20 +518,9 @@ schema_version = 2
 [[inbounds]]
 tag = "server-in"
 listen = "127.0.0.1:$script:m17ServerPort"
+outbound = "direct"
 [[outbounds]]
 tag = "direct"
-[[outbounds]]
-tag = "support-direct"
-bind_interface = "$($script:capabilityIdentity.Ledger.topology.guest_interface_alias)"
-inet4_bind_address = "$($script:capabilityIdentity.Ledger.topology.guest_ipv4)"
-[route]
-final = "direct"
-[[route.rules]]
-network = "udp"
-ip = "$($script:capabilityIdentity.SupportAddress)"
-port = $($script:capabilityIdentity.UdpPort)
-action = "route"
-outbound = "support-direct"
 [runtime]
 shutdown_grace_ms = 1000
 [udp]
