@@ -434,7 +434,9 @@ impl ClientUdpAssociation {
                 *meter_global_buffers,
                 &egress.clock,
             );
-            upstream.fill(0);
+            if result.is_err() {
+                upstream.fill(0);
+            }
             upstream.clear();
             return result;
         }
@@ -471,7 +473,9 @@ impl ClientUdpAssociation {
                         *meter_global_buffers,
                         &egress.clock,
                     );
-                    upstream.fill(0);
+                    if result.is_err() {
+                        upstream.fill(0);
+                    }
                     upstream.clear();
                     return result;
                 }
@@ -518,7 +522,9 @@ impl ClientUdpAssociation {
                         *meter_global_buffers,
                         &egress.clock,
                     );
-                    inner.fill(0);
+                    if result.is_err() {
+                        inner.fill(0);
+                    }
                     inner.clear();
                     return result;
                 }

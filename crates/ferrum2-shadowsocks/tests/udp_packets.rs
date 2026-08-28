@@ -335,7 +335,7 @@ fn in_place_receive_clears_failures_and_materializes_only_actual_payload() {
             .prepare_request_in_place(&clock, &mut request_wire)
             .expect("in-place request");
         assert_eq!(request_wire.capacity(), request_capacity);
-        assert!(request_wire.iter().all(|byte| *byte == 0));
+        assert!(request_wire.is_empty());
         assert_eq!(
             pending.datagram().allocated_capacity(),
             b"small request".len()
@@ -475,10 +475,19 @@ fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id()
             .encode_request(&clock, &random, &maximum_datagram, 0, &mut wire)
             .expect("exact maximum");
         assert_eq!(wire_len, MAX_UDP_WIRE_LEN);
-        assert_eq!(scratch.storage_identity(), identity);
-        let pending = server
+        let borrowed = server
             .prepare_request(&clock, &wire, &mut scratch)
-            .expect("maximum authenticates");
+            .expect("maximum authenticates through reusable scratch");
+        assert_eq!(borrowed.datagram().payload().len(), maximum);
+        drop(borrowed);
+        assert_eq!(scratch.storage_identity(), identity);
+        let mut in_place_wire = BytesMut::from(wire.as_slice());
+        let in_place_capacity = in_place_wire.capacity();
+        let pending = server
+            .prepare_request_in_place(&clock, &mut in_place_wire)
+            .expect("maximum authenticates in place");
+        assert!(in_place_wire.is_empty());
+        assert_eq!(in_place_wire.capacity(), in_place_capacity);
         let (_, commit) = pending.into_parts();
         let accepted = server
             .commit_request(

@@ -231,9 +231,9 @@ impl UdpServer {
     /// Destructively authenticates an exclusive receive wire and materializes
     /// only the authenticated payload bytes.
     ///
-    /// The receive allocation remains caller-owned and is cleared on every
-    /// outcome, while accepted replay/session state still changes only in
-    /// [`Self::commit_request`].
+    /// The receive allocation remains caller-owned and is logically cleared
+    /// on success. Rejected candidate plaintext is physically cleared, while
+    /// accepted replay/session state still changes only in [`Self::commit_request`].
     pub fn prepare_request_in_place(
         &self,
         clock: &(impl Clock + ?Sized),

@@ -335,8 +335,16 @@ pub(super) fn open_packet_in_place(
             datagram,
         })
     })();
-    wire.zeroize();
-    result
+    match result {
+        Ok(opened) => {
+            wire.clear();
+            Ok(opened)
+        }
+        Err(error) => {
+            wire.zeroize();
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn open_packet_in_place_borrowed<'a>(
