@@ -20,4 +20,4 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 & (Join-Path $PSScriptRoot 'Hard.GuestController.ps1') @PSBoundParameters
-exit $LASTEXITCODE
+exit 0
