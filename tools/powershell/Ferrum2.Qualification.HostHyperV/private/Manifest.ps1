@@ -40,6 +40,16 @@ function Get-BoundedWorkerManifestFields([string]$Schema) {
     }
 }
 
+function Get-BoundedWorkerGuestIdentityEvidencePath([string]$Schema) {
+    if ($Schema -ceq "ferrum2.windows-tun.hyperv-host-run.v7") {
+        return "guest/export/artifacts/identity-ledger.json"
+    }
+    if ($Schema -ceq "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4") {
+        return "guest/export/identity-ledger.json"
+    }
+    throw "bounded worker manifest schema is invalid"
+}
+
 function Test-BoundedWorkerClosedProperties {
     param(
         [AllowNull()][object]$Value,
@@ -411,12 +421,14 @@ function Test-BoundedWorkerManifestMinimum {
         }
     }
     if ($ExpectedStatus -ceq "pass") {
+        $guestIdentityEvidencePath = Get-BoundedWorkerGuestIdentityEvidencePath `
+            -Schema $ExpectedSchema
         $criticalEvidence = @(
             [ordered]@{ path = "identity-ledger.json"; sha256 = [string]$Document.identity_sha256 },
             [ordered]@{ path = "candidate-artifacts.json"; sha256 = [string]$Document.candidate_artifact_manifest_sha256 },
             [ordered]@{ path = "staged-input.json"; sha256 = [string]$Document.staged_input_sha256 },
             [ordered]@{ path = "topology-manifest.json"; sha256 = [string]$Document.topology.manifest_sha256 },
-            [ordered]@{ path = "guest/export/identity-ledger.json"; sha256 = [string]$Document.identity_sha256 }
+            [ordered]@{ path = $guestIdentityEvidencePath; sha256 = [string]$Document.identity_sha256 }
         )
         foreach ($critical in $criticalEvidence) {
             $matches = @($Document.evidence_files | Where-Object {

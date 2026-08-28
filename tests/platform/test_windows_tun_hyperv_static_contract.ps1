@@ -160,13 +160,23 @@ try {
         Export-ModuleMember -Function @(
             "Get-EvidenceHashes", "Remove-BoundedWorkerManifestIfPresent",
             "Invoke-BoundedPwshFile",
-            "Assert-BoundedWorkerPassManifestAndTerminal"
+            "Assert-BoundedWorkerPassManifestAndTerminal",
+            "Get-BoundedWorkerGuestIdentityEvidencePath"
         )
     }
     Import-Module $labModule -Scope Local -Force
     Import-Module (Join-Path $repositoryRoot `
         "tools\powershell\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1") `
         -Scope Local -Force -ErrorAction Stop
+
+    Assert-True ((Get-BoundedWorkerGuestIdentityEvidencePath `
+            -Schema "ferrum2.windows-tun.hyperv-host-run.v7") -ceq
+        "guest/export/artifacts/identity-ledger.json") `
+        "qualification guest identity evidence path is invalid"
+    Assert-True ((Get-BoundedWorkerGuestIdentityEvidencePath `
+            -Schema "ferrum2.windows-tun.hard-kill-hyperv-host-run.v4") -ceq
+        "guest/export/identity-ledger.json") `
+        "hard-kill guest identity evidence path is invalid"
 
     $evidenceRoot = Join-Path $temporaryRoot "evidence"
     New-Item -ItemType Directory -Path $evidenceRoot -ErrorAction Stop | Out-Null
