@@ -29,6 +29,9 @@ if ($bootstrapEntry.Count -ne 1 -or
 . $bootstrapPath
 [void](Assert-Ferrum2BootstrapControllerBundle `
     -ManifestPath $controllerBundleManifestPath -BundleRoot $PSScriptRoot)
+Import-Module (Join-Path $PSScriptRoot `
+    'modules\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1') `
+    -Scope Local -Force -ErrorAction Stop
 $cleanupEntry = @($controllerBundleManifest.files | Where-Object {
     [string]$_.path -ceq 'qualify_windows_tun_cleanup.ps1'
 })
