@@ -31,6 +31,20 @@ GUEST_TRANSACTION = (
     / "Ferrum2.Performance"
     / "GuestTransaction.ps1"
 )
+COLLECTOR = (
+    ROOT
+    / "tools"
+    / "windows-tun"
+    / "performance"
+    / "collect_windows_tun_performance_trial.ps1"
+)
+UDP_COLLECTOR = (
+    ROOT
+    / "tools"
+    / "windows-tun"
+    / "performance"
+    / "collect_windows_tun_udp_boundary_diagnostic.ps1"
+)
 
 
 class WindowsTunSourceCaptureTests(unittest.TestCase):
@@ -40,6 +54,10 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
         cls.bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
         cls.host_vm_transaction = HOST_VM_TRANSACTION.read_text(encoding="utf-8")
         cls.guest_transaction = GUEST_TRANSACTION.read_text(encoding="utf-8")
+        cls.collectors = (
+            COLLECTOR.read_text(encoding="utf-8"),
+            UDP_COLLECTOR.read_text(encoding="utf-8"),
+        )
 
     def test_verified_sources_are_captured_before_any_module_or_owner_load(self) -> None:
         source = self.source
@@ -144,6 +162,15 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
             'Join-Path $InputRoot "controller-bundle.json"',
             self.guest_transaction,
         )
+        for collector in self.collectors:
+            self.assertIn(
+                'Join-Path $PSScriptRoot "controller-bundle.json"',
+                collector,
+            )
+            self.assertNotIn(
+                "Split-Path -Parent $PSScriptRoot",
+                collector,
+            )
 
 
 if __name__ == "__main__":

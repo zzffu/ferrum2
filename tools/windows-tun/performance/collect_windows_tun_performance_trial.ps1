@@ -78,8 +78,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$controllerBundleManifestPath = Join-Path (Split-Path -Parent $PSScriptRoot) `
-    "controller-bundle.json"
+$controllerBundleManifestPath = Join-Path $PSScriptRoot "controller-bundle.json"
 $bootstrapRelative = "modules/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1"
 $bootstrapManifest = Get-Content -LiteralPath $controllerBundleManifestPath `
     -Raw -Encoding utf8 | ConvertFrom-Json -Depth 8 -ErrorAction Stop

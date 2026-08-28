@@ -5,13 +5,13 @@
   "files": [
     {
       "path": "tools/windows-tun/performance/collect_windows_tun_performance_trial.ps1",
-      "bytes": 31619,
-      "sha256": "7898adaad70dfcd23df6cbde1d74b803f0d13bf5f40e77a7d82e0e5c4f3ec883"
+      "bytes": 31592,
+      "sha256": "b24334f61da97d5e3c9060ae9f09e3a1af01be298821dc7c4ed5b9921d21a2e8"
     },
     {
       "path": "tools/windows-tun/performance/collect_windows_tun_udp_boundary_diagnostic.ps1",
-      "bytes": 22991,
-      "sha256": "cc974e42dcf842b16f8f3e5f680ac72fb398ccc1c6bcc18f9e64e413f98b475b"
+      "bytes": 22964,
+      "sha256": "9ee373131ffd444205e44159b76746dbc2faa5c21bf072d4d8f643a0956819bf"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/CollectorCore.ps1",
