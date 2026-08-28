@@ -27,7 +27,7 @@ pub use cache::{
     DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheError, DnsCacheKey, DnsCacheLookup,
     DnsCacheObserver, DnsCacheQtype, DnsCacheWorkSnapshot, DnsServerId, ResolverGeneration,
 };
-pub use channel_datagram::ChannelDnsDatagram;
+pub use channel_datagram::{ChannelDnsDatagram, DnsDatagramLease, DnsDatagramLeaseSender};
 pub use endpoint::{
     FixedEndpointKind, FixedEndpointLookup, FixedEndpointMaterializeError, FixedEndpointPlanEntry,
     FixedEndpointResolveBackend, FixedEndpointResolveFuture, FixedEndpointResolveRequest,

@@ -538,6 +538,7 @@ dependencies = [
 name = "ferrum2-dns"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ferrum2-core",
  "ferrum2-net",
  "ferrum2-rule",

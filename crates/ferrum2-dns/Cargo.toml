@@ -14,6 +14,7 @@ default = []
 __interop-test-root = ["dep:rustls"]
 
 [dependencies]
+bytes.workspace = true
 ferrum2-core.workspace = true
 ferrum2-net.workspace = true
 ferrum2-rule.workspace = true
