@@ -658,15 +658,16 @@
                     } elseif ($RequestedProfile -ceq "restart-stress") {
                         "restart-stress"
                     } else { $null }
-                    $expectedMilestoneNames = if ($null -eq $milestonePrefix) { @() } else {
+                    $expectedMilestoneNames = @(if ($null -eq $milestonePrefix) { @() } else {
                         @($releaseMilestones | ForEach-Object {
                             "{0}-milestone-{1:D4}" -f $milestonePrefix, [long]$_
                         })
-                    }
+                    })
                     $milestoneRows = @($result.live_checks | Where-Object {
                         [string]$_.name -like '*-milestone-*'
                     })
-                    $milestonesMatch = $milestoneRows.Count -eq $expectedMilestoneNames.Count -and
+                    $milestonesMatch = $milestoneRows.Count -eq
+                        @($expectedMilestoneNames).Count -and
                         (@($milestoneRows | ForEach-Object { [string]$_.name } | Sort-Object) -join '|') -ceq
                             (@($expectedMilestoneNames | Sort-Object) -join '|') -and
                         @($milestoneRows | Where-Object {
