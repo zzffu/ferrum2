@@ -2,9 +2,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-Ferrum2BootstrapBytesSha256([byte[]]$Bytes) {
-    [Convert]::ToHexString(
-        [Security.Cryptography.SHA256]::HashData($Bytes)
-    ).ToLowerInvariant()
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($hasher.ComputeHash($Bytes))).
+            Replace('-', '').ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+    }
 }
 
 function Get-Ferrum2BootstrapSha256([string]$Path) {
@@ -23,37 +27,56 @@ function Assert-Ferrum2BootstrapPropertySet(
 }
 
 function Assert-Ferrum2BootstrapJsonPropertiesUnique([string]$Json) {
-    function Assert-Ferrum2BootstrapJsonElementUnique(
-        [Text.Json.JsonElement]$Element,
-        [string]$Path
-    ) {
-        if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
-            $names = [Collections.Generic.HashSet[string]]::new(
-                [StringComparer]::OrdinalIgnoreCase
-            )
-            foreach ($property in $Element.EnumerateObject()) {
-                if (-not $names.Add($property.Name)) {
-                    throw "source manifest has a duplicate property at $Path"
+    [byte[]]$jsonBytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($Json)
+    if ($null -eq ('System.Xml.XmlDictionaryReaderQuotas' -as [type])) {
+        Add-Type -AssemblyName System.Runtime.Serialization -ErrorAction Stop
+    }
+    $quotas = [System.Xml.XmlDictionaryReaderQuotas]::new()
+    $quotas.MaxDepth = 64
+    $quotas.MaxStringContentLength = 1048576
+    $quotas.MaxArrayLength = 65536
+    $quotas.MaxBytesPerRead = 4096
+    $quotas.MaxNameTableCharCount = 1048576
+    $reader = [System.Runtime.Serialization.Json.JsonReaderWriterFactory]::CreateJsonReader(
+        $jsonBytes,
+        $quotas
+    )
+    $objects = [Collections.Generic.Stack[object]]::new()
+    try {
+        while ($reader.Read()) {
+            if ($reader.NodeType -eq [Xml.XmlNodeType]::Element) {
+                $elementPath = '$'
+                if ($objects.Count -gt 0 -and
+                    $reader.Depth -eq ([int]$objects.Peek().Depth + 1)) {
+                    $parent = $objects.Peek()
+                    $propertyName = [string]$reader.LocalName
+                    $encodedName = [string]$reader.GetAttribute('item')
+                    if ($propertyName -ceq 'item' -and
+                        -not [string]::IsNullOrWhiteSpace($encodedName)) {
+                        $propertyName = $encodedName
+                    }
+                    if (-not $parent.Names.Add($propertyName)) {
+                        throw "source manifest has a duplicate property at $($parent.Path)"
+                    }
+                    $elementPath = "$($parent.Path).$propertyName"
                 }
-                Assert-Ferrum2BootstrapJsonElementUnique `
-                    -Element $property.Value -Path "$Path.$($property.Name)"
-            }
-        } elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
-            $index = 0
-            foreach ($item in $Element.EnumerateArray()) {
-                Assert-Ferrum2BootstrapJsonElementUnique `
-                    -Element $item -Path "$Path[$index]"
-                $index += 1
+                if ([string]$reader.GetAttribute('type') -ceq 'object') {
+                    $objects.Push([pscustomobject]@{
+                        Depth = [int]$reader.Depth
+                        Path = $elementPath
+                        Names = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase
+                        )
+                    })
+                }
+            } elseif ($reader.NodeType -eq [Xml.XmlNodeType]::EndElement -and
+                $objects.Count -gt 0 -and
+                [int]$objects.Peek().Depth -eq [int]$reader.Depth) {
+                [void]$objects.Pop()
             }
         }
-    }
-
-    $document = [Text.Json.JsonDocument]::Parse($Json)
-    try {
-        Assert-Ferrum2BootstrapJsonElementUnique `
-            -Element $document.RootElement -Path '$'
     } finally {
-        $document.Dispose()
+        $reader.Dispose()
     }
 }
 
