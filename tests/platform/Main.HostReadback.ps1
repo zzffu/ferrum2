@@ -1,7 +1,12 @@
     if ($guestResults.Count -ne 1) {
         throw "guest execution did not return one result"
     }
-    $guestResult = $guestResults[0]
+    $guestResultJson = [string]$guestResults[0]
+    if ($guestResultJson.Length -lt 2 -or $guestResultJson.Length -gt 65536 -or
+        $guestResultJson.Contains("`r") -or $guestResultJson.Contains("`n")) {
+        throw "guest qualification result framing is invalid"
+    }
+    $guestResult = $guestResultJson | ConvertFrom-Json -Depth 8 -ErrorAction Stop
     $expectedCycleLimit = if ($null -eq $requestedCycleLimit) {
         $null
     } else { [long]$requestedCycleLimit }
@@ -15,6 +20,9 @@
     )
     if ((@($guestResult.PSObject.Properties.Name) -join "|") -cne ($guestResultKeys -join "|")) {
         throw "guest qualification result property set is invalid"
+    }
+    if (($guestResult | ConvertTo-Json -Compress -Depth 8) -cne $guestResultJson) {
+        throw "guest qualification result serialization is not canonical"
     }
     $cleanupExitMatches = $null -ne $guestResult.cleanup_exit -and
         [long]$guestResult.cleanup_exit -eq 0

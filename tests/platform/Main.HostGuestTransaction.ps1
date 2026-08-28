@@ -480,6 +480,16 @@
                     -StderrPath $controllerStderr
             } catch {
                 $failurePhase = $phase
+                $failureText = ($_.Exception.GetType().FullName + ": " +
+                    $_.Exception.Message).Replace("`r", " ").Replace("`n", " ")
+                if ($failureText.Length -gt 2048) {
+                    $failureText = $failureText.Substring(0, 2048)
+                }
+                [IO.File]::AppendAllText(
+                    $setupStderr,
+                    "phase=$phase failure=$failureText`n",
+                    [Text.UTF8Encoding]::new($false)
+                )
             } finally {
                 if ($controllerStarted) {
                     $phase = "cleanup"
@@ -500,6 +510,16 @@
                             -StderrPath $cleanupStderr
                     } catch {
                         $cleanupExit = -1
+                        $cleanupFailureText = ($_.Exception.GetType().FullName + ": " +
+                            $_.Exception.Message).Replace("`r", " ").Replace("`n", " ")
+                        if ($cleanupFailureText.Length -gt 2048) {
+                            $cleanupFailureText = $cleanupFailureText.Substring(0, 2048)
+                        }
+                        [IO.File]::AppendAllText(
+                            $setupStderr,
+                            "phase=cleanup failure=$cleanupFailureText`n",
+                            [Text.UTF8Encoding]::new($false)
+                        )
                         if ($null -eq $failurePhase) {
                             $failurePhase = "cleanup"
                         }
@@ -758,6 +778,8 @@
                 finished_utc = [DateTime]::UtcNow.ToString("o")
             }
             Write-GuestJsonNew -Path (Join-Path $exportPath "guest-run.json") -Value $guestResult
-            [pscustomobject]$guestResult
+            [Console]::Out.WriteLine(
+                ($guestResult | ConvertTo-Json -Compress -Depth 6)
+            )
         })
     # END GUEST_ONLY_EXECUTION
