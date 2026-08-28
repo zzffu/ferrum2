@@ -390,8 +390,21 @@ try {
                 [Convert]::ToBase64String($expectedHostManifestBytes)) {
                 throw "host manifest bytes differ from the expected closed document"
             }
-            $hostManifestReadback = Get-Content -LiteralPath $hostManifestPendingPath `
-                -Raw -Encoding utf8 | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+            $hostManifestReadbackJson = Get-Content -LiteralPath $hostManifestPendingPath `
+                -Raw -Encoding utf8
+            $hostManifestJsonDocument = [Text.Json.JsonDocument]::Parse(
+                $hostManifestReadbackJson
+            )
+            try {
+                $hostManifestSupportCreationUtc = $hostManifestJsonDocument.RootElement.
+                    GetProperty("support_listener").GetProperty("creation_utc").GetString()
+            } finally {
+                $hostManifestJsonDocument.Dispose()
+            }
+            $hostManifestReadback = $hostManifestReadbackJson |
+                ConvertFrom-Json -Depth 10 -ErrorAction Stop
+            $hostManifestReadback.support_listener.creation_utc =
+                $hostManifestSupportCreationUtc
         $hostManifestKeys = @(
             "schema", "status", "profile", "cycle_limit", "release_milestones",
             "run_token", "vm_name", "vm_id", "checkpoint_name", "checkpoint_id",
