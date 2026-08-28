@@ -140,8 +140,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/BundleBootstrap.ps1",
-      "bytes": 25160,
-      "sha256": "025c81e9e7e6a6af7be04c5c6dac2e2a40aa375ed041d975aa14fd8bac61a4ee"
+      "bytes": 25279,
+      "sha256": "e744cd0db394a3a3b92a5fea1ca89d882116fb51db3e8ddb6f71af6120c0b4ca"
     },
     {
       "path": "tools/powershell/Ferrum2.WindowsTun.Lab/Ferrum2.WindowsTun.Lab.psd1",

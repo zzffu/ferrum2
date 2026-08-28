@@ -120,7 +120,7 @@ function Resolve-Ferrum2BootstrapMember(
     [string]$Label
 ) {
     if ([string]::IsNullOrWhiteSpace($RelativePath) -or
-        [IO.Path]::IsPathFullyQualified($RelativePath) -or
+        [IO.Path]::IsPathRooted($RelativePath) -or
         $RelativePath -cmatch '\\' -or
         $RelativePath -cmatch '(^|/)\.\.?(/|$)' -or
         $RelativePath -cnotmatch '^[A-Za-z0-9._/-]+$') {
@@ -180,7 +180,7 @@ function Read-Ferrum2BootstrapManifestDocument {
         Path = [string]$item.FullName
         Bytes = $bytes
         Sha256 = Get-Ferrum2BootstrapBytesSha256 -Bytes $bytes
-        Value = $json | ConvertFrom-Json -Depth 12 -ErrorAction Stop
+        Value = $json | ConvertFrom-Json -ErrorAction Stop
     }
 }
 
@@ -289,7 +289,8 @@ function Read-Ferrum2BootstrapSourceClosure {
             }
         }
         $relativePath = [string]$file.path
-        if ($file.bytes -isnot [long] -or [long]$file.bytes -lt 1 -or
+        if (($file.bytes -isnot [long] -and $file.bytes -isnot [int]) -or
+            [long]$file.bytes -lt 1 -or
             [string]$file.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             -not $seenPaths.Add($relativePath) -or
             ($Format -ceq 'Controller' -and $null -ne $previousPath -and
@@ -428,7 +429,8 @@ function Read-Ferrum2BootstrapFlatSourceClosure {
     Assert-Ferrum2BootstrapPropertySet -Value $manifest `
         -Expected @('schema_version', 'kind', 'entrypoint', 'files') `
         -Label 'flat source manifest'
-    if ($manifest.schema_version -isnot [long] -or
+    if (($manifest.schema_version -isnot [long] -and
+            $manifest.schema_version -isnot [int]) -or
         $manifest.schema_version -ne 1 -or
         [string]$manifest.kind -cne $ExpectedKind -or
         [string]$manifest.entrypoint -cne $ExpectedEntrypoint) {
@@ -459,7 +461,8 @@ function Read-Ferrum2BootstrapFlatSourceClosure {
         Assert-Ferrum2BootstrapPropertySet -Value $file `
             -Expected @('path', 'bytes', 'sha256') -Label 'flat source member'
         $relativePath = [string]$file.path
-        if ($file.bytes -isnot [long] -or [long]$file.bytes -lt 1 -or
+        if (($file.bytes -isnot [long] -and $file.bytes -isnot [int]) -or
+            [long]$file.bytes -lt 1 -or
             [string]$file.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
             -not $seen.Add($relativePath) -or -not $expected.Contains($relativePath)) {
             throw 'flat source member identity is invalid'
@@ -540,7 +543,7 @@ function Open-Ferrum2BootstrapLockedStage {
     )
 
     if ([string]::IsNullOrWhiteSpace($ManifestRelativePath) -or
-        [IO.Path]::IsPathFullyQualified($ManifestRelativePath) -or
+        [IO.Path]::IsPathRooted($ManifestRelativePath) -or
         $ManifestRelativePath -cmatch '\\' -or
         $ManifestRelativePath -cmatch '(^|/)\.\.?(/|$)' -or
         $ManifestRelativePath -cnotmatch '^[A-Za-z0-9._/-]+$' -or
