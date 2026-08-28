@@ -54,6 +54,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+function Get-BytesSha256([byte[]]$Bytes) {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($hasher.ComputeHash($Bytes))).
+            Replace('-', '').ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+    }
+}
 $Utf8NoBom = New-Object Text.UTF8Encoding($false)
 $InputRoot = Join-Path $Root "input"
 $EvidenceRoot = Join-Path $Root "raw-evidence"
@@ -98,12 +107,15 @@ $bootstrapEntry = @($bootstrapManifest.files | Where-Object {
 })
 $bootstrapPath = Join-Path $controllerBundleRoot `
     $bootstrapRelative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+[byte[]]$bootstrapBytes = [IO.File]::ReadAllBytes($bootstrapPath)
+$bootstrapSha256 = Get-BytesSha256 $bootstrapBytes
 if ($bootstrapEntry.Count -ne 1 -or
-    (Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256 -ErrorAction Stop).
-        Hash.ToLowerInvariant() -cne [string]$bootstrapEntry[0].sha256) {
+    $bootstrapSha256 -cne [string]$bootstrapEntry[0].sha256) {
     throw "guest performance bundle bootstrap changed"
 }
-. $bootstrapPath
+. ([scriptblock]::Create(
+    [Text.UTF8Encoding]::new($false, $true).GetString($bootstrapBytes)
+))
 $controllerBundleManifest = Assert-Ferrum2BootstrapControllerBundle `
     -ManifestPath $controllerBundleManifestPath -BundleRoot $controllerBundleRoot
 if ([string]$controllerBundleManifest.controller_bundle_sha256 -cne
@@ -229,7 +241,19 @@ foreach ($runtimeDll in @(Get-ChildItem -LiteralPath (Join-Path $InputRoot "runt
 
 $processOwnerSource = Join-Path $controllerBundleRoot "PerformanceProcessOwner.cs"
 Add-Type -Path $processOwnerSource
-. (Join-Path $controllerBundleRoot "GuestSupport.ps1")
+$guestSupportPath = Join-Path $controllerBundleRoot "GuestSupport.ps1"
+$guestSupportEntry = @($controllerBundleManifest.files | Where-Object {
+    [string]$_.path -ceq 'GuestSupport.ps1'
+})
+[byte[]]$guestSupportBytes = [IO.File]::ReadAllBytes($guestSupportPath)
+$guestSupportSha256 = Get-BytesSha256 $guestSupportBytes
+if ($guestSupportEntry.Count -ne 1 -or
+    $guestSupportSha256 -cne [string]$guestSupportEntry[0].sha256) {
+    throw "guest performance support source changed"
+}
+. ([scriptblock]::Create(
+    [Text.UTF8Encoding]::new($false, $true).GetString($guestSupportBytes)
+))
 
 $collector = Join-Path $controllerBundleRoot "collect_windows_tun_performance_trial.ps1"
 $performanceSourceBundle = Join-Path $controllerBundleRoot "performance-source-bundle.json"

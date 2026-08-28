@@ -36,6 +36,15 @@
             Set-StrictMode -Version Latest
             $ErrorActionPreference = "Stop"
             $ProgressPreference = "SilentlyContinue"
+            function Get-BytesSha256([byte[]]$Bytes) {
+                $hasher = [Security.Cryptography.SHA256]::Create()
+                try {
+                    ([BitConverter]::ToString($hasher.ComputeHash($Bytes))).
+                        Replace('-', '').ToLowerInvariant()
+                } finally {
+                    $hasher.Dispose()
+                }
+            }
 
             $inputPath = Join-Path $RunRoot "input"
             $inputManifestPath = Join-Path $inputPath "staged-input.json"
@@ -63,20 +72,41 @@
             })
             $bootstrapPath = Join-Path $controllerRoot `
                 $bootstrapRelative.Replace('/', [IO.Path]::DirectorySeparatorChar)
+            [byte[]]$bootstrapBytes = [IO.File]::ReadAllBytes($bootstrapPath)
+            $bootstrapSha256 = Get-BytesSha256 $bootstrapBytes
             if ($bootstrapEntry.Count -ne 1 -or
-                (Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256 `
-                    -ErrorAction Stop).Hash.ToLowerInvariant() -cne
-                    [string]$bootstrapEntry[0].sha256) {
+                $bootstrapSha256 -cne [string]$bootstrapEntry[0].sha256) {
                 throw "guest controller bundle bootstrap changed"
             }
-            . $bootstrapPath
+            . ([scriptblock]::Create(
+                [Text.UTF8Encoding]::new($false, $true).GetString($bootstrapBytes)
+            ))
             $verifiedBundle = Assert-Ferrum2BootstrapControllerBundle `
                 -ManifestPath $controllerBundleManifestPath `
                 -BundleRoot $controllerRoot
             if ([string]$verifiedBundle.entrypoint -cne 'qualify_windows_tun.ps1') {
                 throw "guest controller bundle entrypoint changed"
             }
-            . (Join-Path $inputPath "controller\Main.GuestBootstrapSupport.ps1")
+            $guestBootstrapSupportPath = Join-Path $controllerRoot `
+                'Main.GuestBootstrapSupport.ps1'
+            $guestBootstrapSupportEntry = @($preflightBundle.files | Where-Object {
+                [string]$_.path -ceq 'Main.GuestBootstrapSupport.ps1'
+            })
+            [byte[]]$guestBootstrapSupportBytes = [IO.File]::ReadAllBytes(
+                $guestBootstrapSupportPath
+            )
+            $guestBootstrapSupportSha256 = Get-BytesSha256 `
+                $guestBootstrapSupportBytes
+            if ($guestBootstrapSupportEntry.Count -ne 1 -or
+                $guestBootstrapSupportSha256 -cne
+                    [string]$guestBootstrapSupportEntry[0].sha256) {
+                throw "guest bootstrap support changed"
+            }
+            . ([scriptblock]::Create(
+                [Text.UTF8Encoding]::new($false, $true).GetString(
+                    $guestBootstrapSupportBytes
+                )
+            ))
             $exportPath = Join-Path $RunRoot "export"
             $runtimePath = Join-Path $RunRoot "runtime"
             $artifactPath = Join-Path $exportPath "artifacts"
@@ -184,14 +214,31 @@
                     ($manifest.controller_bundle | ConvertTo-Json -Compress -Depth 8)) {
                     throw "guest controller bundle manifests disagree"
                 }
-                $labModule = Join-Path $inputPath `
-                    "controller\modules\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1"
-                Import-Module $labModule -Scope Local -Force -ErrorAction Stop
-                [void](Assert-Ferrum2ControllerBundleManifest `
-                    -Manifest $bundleManifest `
-                    -BundleRoot (Join-Path $inputPath "controller"))
-                $guestControllerModule = Join-Path $inputPath `
-                    "controller\modules\Ferrum2.Qualification.GuestController\Ferrum2.Qualification.GuestController.psd1"
+                $guestControllerModuleRelative = `
+                    'modules/Ferrum2.Qualification.GuestController/' +
+                    'Ferrum2.Qualification.GuestController.psm1'
+                $guestControllerModulePath = Join-Path $controllerRoot `
+                    $guestControllerModuleRelative.Replace('/', '\')
+                $guestControllerModuleEntry = @($preflightBundle.files | Where-Object {
+                    [string]$_.path -ceq $guestControllerModuleRelative
+                })
+                [byte[]]$guestControllerModuleBytes = [IO.File]::ReadAllBytes(
+                    $guestControllerModulePath
+                )
+                $guestControllerModuleSha256 = Get-BytesSha256 `
+                    $guestControllerModuleBytes
+                if ($guestControllerModuleEntry.Count -ne 1 -or
+                    $guestControllerModuleSha256 -cne
+                        [string]$guestControllerModuleEntry[0].sha256) {
+                    throw "guest controller module changed"
+                }
+                $guestControllerModule = New-Module -ScriptBlock (
+                    [scriptblock]::Create(
+                        [Text.UTF8Encoding]::new($false, $true).GetString(
+                            $guestControllerModuleBytes
+                        )
+                    )
+                )
                 Import-Module $guestControllerModule -Scope Local -Force -ErrorAction Stop
                 $profileContract = Resolve-Ferrum2QualificationProfile -Profile $RequestedProfile
                 $cycleLimit = if ([long]$profileContract.cycle_limit -gt 0) {
