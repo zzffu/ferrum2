@@ -163,7 +163,7 @@ $result = Get-Content -LiteralPath $resultPath -Raw -Encoding utf8 |
     ConvertFrom-Json -Depth 10 -ErrorAction Stop
 if ($result.schema -cne 'ferrum2.windows-tun.m17-result.v4' -or
     $result.profile -cne $Profile -or $result.run_token -cne $runIdentity -or
-    $result.status -cne 'pass') {
+    $result.status -cnotin @('pass', 'fail')) {
     throw 'external cleanup result identity is invalid'
 }
 $identitySha256 = (Get-FileHash -LiteralPath $identityLedgerPath `
