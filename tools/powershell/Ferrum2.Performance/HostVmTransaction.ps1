@@ -1,3 +1,4 @@
+$guestFirewallRulesCreated = $false
 try {
     [IO.Directory]::CreateDirectory($hostEvidenceRoot) | Out-Null
     Copy-Item -LiteralPath $topologyManifestDocument.Path `
@@ -279,6 +280,58 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     }
     Copy-Item -ToSession $session -LiteralPath (Join-Path $temporaryRoot "input") `
         -Destination $guestRoot -Recurse -ErrorAction Stop
+
+    Invoke-Command -Session $session -ArgumentList $guestRoot, $guestToken `
+        -ErrorAction Stop -ScriptBlock {
+            param([string]$Root, [string]$Token)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = "Stop"
+            $programs = @(
+                (Join-Path $Root "input\artifacts\m4-qualification.exe"),
+                (Join-Path $Root "input\artifacts\parent\ferrum2-client.exe"),
+                (Join-Path $Root "input\artifacts\parent\ferrum2-server.exe"),
+                (Join-Path $Root "input\artifacts\candidate\ferrum2-client.exe"),
+                (Join-Path $Root "input\artifacts\candidate\ferrum2-server.exe")
+            )
+            $createdNames = @()
+            try {
+                for ($index = 0; $index -lt $programs.Count; $index++) {
+                    $program = $programs[$index]
+                    $ruleName = "Ferrum2-Tun-Performance-$Token-$index"
+                    if (-not (Test-Path -LiteralPath $program -PathType Leaf) -or
+                        @(Get-NetFirewallRule -Name $ruleName `
+                            -PolicyStore ActiveStore `
+                            -ErrorAction SilentlyContinue).Count -ne 0) {
+                        throw "guest performance firewall baseline is invalid"
+                    }
+                    New-NetFirewallRule -Name $ruleName -DisplayName $ruleName `
+                        -Group "Ferrum2 Windows TUN Performance" `
+                        -Direction Inbound -Action Allow -Enabled True -Profile Any `
+                        -Program $program -EdgeTraversalPolicy Block `
+                        -PolicyStore PersistentStore -ErrorAction Stop | Out-Null
+                    $createdNames += $ruleName
+                    $createdRule = @(Get-NetFirewallRule -Name $ruleName `
+                        -PolicyStore ActiveStore -ErrorAction Stop)
+                    $applicationFilter = @($createdRule |
+                        Get-NetFirewallApplicationFilter -ErrorAction Stop)
+                    if ($createdRule.Count -ne 1 -or
+                        [string]$createdRule[0].Enabled -cne "True" -or
+                        [string]$createdRule[0].Direction -cne "Inbound" -or
+                        [string]$createdRule[0].Action -cne "Allow" -or
+                        $applicationFilter.Count -ne 1 -or
+                        [string]$applicationFilter[0].Program -cne $program) {
+                        throw "guest performance firewall rule verification failed"
+                    }
+                }
+            } catch {
+                foreach ($createdName in $createdNames) {
+                    Remove-NetFirewallRule -Name $createdName `
+                        -PolicyStore PersistentStore -ErrorAction SilentlyContinue
+                }
+                throw
+            }
+        }
+    $guestFirewallRulesCreated = $true
 
     $guestNetworkPathJsonRows = @(Invoke-Command -Session $session -ErrorAction Stop `
         -ArgumentList @(
@@ -734,6 +787,44 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
                     [Management.Automation.ErrorCategory]::OperationStopped,
                     $hostEvidenceRoot
                 )
+            }
+        }
+        if ($guestFirewallRulesCreated) {
+            $firewallCleanupFailure = $null
+            try {
+                Invoke-Command -Session $session -ArgumentList $guestToken `
+                    -ErrorAction Stop -ScriptBlock {
+                        param([string]$Token)
+                        Set-StrictMode -Version Latest
+                        $ErrorActionPreference = "Stop"
+                        for ($index = 0; $index -lt 5; $index++) {
+                            $ruleName = "Ferrum2-Tun-Performance-$Token-$index"
+                            Remove-NetFirewallRule -Name $ruleName `
+                                -PolicyStore PersistentStore -ErrorAction Stop
+                            if (@(Get-NetFirewallRule -Name $ruleName `
+                                    -PolicyStore ActiveStore `
+                                    -ErrorAction SilentlyContinue).Count -ne 0) {
+                                throw "guest performance firewall rule remains active"
+                            }
+                        }
+                    }
+            } catch {
+                $firewallCleanupFailure = $_
+            }
+            if ($null -ne $firewallCleanupFailure) {
+                if ($null -eq $runFailure) {
+                    $runFailure = $firewallCleanupFailure
+                } else {
+                    $runFailure = [Management.Automation.ErrorRecord]::new(
+                        [InvalidOperationException]::new(
+                            "$($runFailure.Exception.Message); firewall cleanup: " +
+                            "$($firewallCleanupFailure.Exception.Message)"
+                        ),
+                        "Ferrum2PerformanceFirewallCleanup",
+                        [Management.Automation.ErrorCategory]::OperationStopped,
+                        $guestRoot
+                    )
+                }
             }
         }
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue

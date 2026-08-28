@@ -140,6 +140,7 @@
             $cleanupExit = $null
             $controllerStarted = $false
             $failurePhase = $null
+            $guestFirewallRuleNames = @()
             try {
                 $inputItems = @(Get-Item -LiteralPath $inputPath -Force) + @(
                     Get-ChildItem -LiteralPath $inputPath -Force -Recurse
@@ -419,6 +420,42 @@
                     [Text.UTF8Encoding]::new($false)
                 )
 
+                $phase = "firewall"
+                $firewallRuleSpecs = @(
+                    [pscustomobject]@{
+                        Name = "Ferrum2-Tun-Qualification-$Token-Client"
+                        Program = $clientBinary
+                    },
+                    [pscustomobject]@{
+                        Name = "Ferrum2-Tun-Qualification-$Token-Server"
+                        Program = $serverBinary
+                    }
+                )
+                foreach ($spec in $firewallRuleSpecs) {
+                    if (@(Get-NetFirewallRule -Name $spec.Name -PolicyStore ActiveStore `
+                            -ErrorAction SilentlyContinue).Count -ne 0) {
+                        throw "guest qualification firewall baseline is not absent"
+                    }
+                    New-NetFirewallRule -Name $spec.Name -DisplayName $spec.Name `
+                        -Group "Ferrum2 Windows TUN Qualification" `
+                        -Direction Inbound -Action Allow -Enabled True -Profile Any `
+                        -Program $spec.Program -EdgeTraversalPolicy Block `
+                        -PolicyStore PersistentStore -ErrorAction Stop | Out-Null
+                    $guestFirewallRuleNames += $spec.Name
+                    $createdRule = @(Get-NetFirewallRule -Name $spec.Name `
+                        -PolicyStore ActiveStore -ErrorAction Stop)
+                    $applicationFilter = @($createdRule |
+                        Get-NetFirewallApplicationFilter -ErrorAction Stop)
+                    if ($createdRule.Count -ne 1 -or
+                        [string]$createdRule[0].Enabled -cne "True" -or
+                        [string]$createdRule[0].Direction -cne "Inbound" -or
+                        [string]$createdRule[0].Action -cne "Allow" -or
+                        $applicationFilter.Count -ne 1 -or
+                        [string]$applicationFilter[0].Program -cne $spec.Program) {
+                        throw "guest qualification firewall rule verification failed"
+                    }
+                }
+
                 $phase = "qualification"
                 $controllerArguments = @(
                         "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -467,6 +504,23 @@
                             $failurePhase = "cleanup"
                         }
                     }
+                }
+                $firewallCleanupFailed = $false
+                foreach ($ruleName in @($guestFirewallRuleNames)) {
+                    try {
+                        Remove-NetFirewallRule -Name $ruleName `
+                            -PolicyStore PersistentStore -ErrorAction Stop
+                        if (@(Get-NetFirewallRule -Name $ruleName `
+                                -PolicyStore ActiveStore `
+                                -ErrorAction SilentlyContinue).Count -ne 0) {
+                            throw "guest qualification firewall rule remains active"
+                        }
+                    } catch {
+                        $firewallCleanupFailed = $true
+                    }
+                }
+                if ($firewallCleanupFailed -and $null -eq $failurePhase) {
+                    $failurePhase = "firewall-cleanup"
                 }
             }
 

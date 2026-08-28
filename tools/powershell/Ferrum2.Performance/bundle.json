@@ -65,8 +65,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostVmTransaction.ps1",
-      "bytes": 36032,
-      "sha256": "99ed75c0ac7a8a5407285017b1fd4ee1aeebcd103abc0e30f118adb153e50ff2"
+      "bytes": 40848,
+      "sha256": "6d97e1cf1bda6616ffd62ca1fa5cf5fd37751145d2dae859ef300cbffcfae467"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
