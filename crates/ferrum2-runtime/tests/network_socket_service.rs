@@ -109,6 +109,9 @@ struct FakeState {
     connect_started: tokio::sync::Notify,
     tcp_read_started: tokio::sync::Notify,
     udp_read_started: tokio::sync::Notify,
+    udp_send_started: tokio::sync::Notify,
+    udp_recv_started: tokio::sync::Notify,
+    udp_send_pending: AtomicUsize,
     tcp_socket_drops: AtomicUsize,
     tcp_stream_drops: AtomicUsize,
     udp_socket_drops: AtomicUsize,
@@ -229,6 +232,10 @@ impl DirectUdpSocket for FakeUdpSocket {
             generation: self.generation,
             source: self.source,
         });
+        self.state.udp_send_started.notify_one();
+        if self.state.udp_send_pending.load(Ordering::SeqCst) != 0 {
+            std::future::pending::<()>().await;
+        }
         Ok(payload.len())
     }
 
@@ -238,6 +245,7 @@ impl DirectUdpSocket for FakeUdpSocket {
     }
 
     async fn recv_buf_from(&self, _: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        self.state.udp_recv_started.notify_one();
         std::future::pending().await
     }
 
@@ -805,6 +813,100 @@ async fn udp_reset_waits_for_an_inflight_operation_before_acknowledging_its_owne
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
     assert!(socket.is_closed().await);
     assert!(socket.closed().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_reset_cancels_concurrent_send_and_receive_before_acknowledging() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    state.udp_send_pending.store(1, Ordering::SeqCst);
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let socket = Arc::new(
+        service
+            .open_udp(&DialOptions::default(), &route(), destination(53))
+            .unwrap(),
+    );
+
+    let send_socket = Arc::clone(&socket);
+    let send =
+        tokio::spawn(async move { send_socket.send_to(b"pending", destination(5353)).await });
+    let recv_socket = Arc::clone(&socket);
+    let recv = tokio::spawn(async move {
+        let mut payload = BytesMut::with_capacity(512);
+        recv_socket.recv_buf_from(&mut payload).await
+    });
+    state.udp_send_started.notified().await;
+    state.udp_recv_started.notified().await;
+
+    let intent = NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged);
+    let report = coordinator
+        .reset_network(snapshot(2), intent)
+        .await
+        .unwrap();
+
+    assert!(send.await.unwrap().is_err());
+    assert!(recv.await.unwrap().is_err());
+    assert_eq!(report.cancelled_runtime_owners(), 1);
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    assert!(socket.is_closed().await);
+    let NetworkRuntimeOwnerCancellation::Reset(signal) =
+        socket.closed().expect("reset terminal reason")
+    else {
+        panic!("UDP socket retained the wrong terminal reason");
+    };
+    assert_eq!(signal.target_generation(), 2);
+    assert_eq!(signal.intent(), intent);
+}
+
+#[tokio::test]
+async fn udp_close_is_idempotent_and_retains_the_first_terminal_reason() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let socket = service
+        .open_udp(&DialOptions::default(), &route(), destination(53))
+        .unwrap();
+    let first_intent = NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged);
+
+    let first_report = coordinator
+        .reset_network(snapshot(2), first_intent)
+        .await
+        .unwrap();
+    assert_eq!(first_report.cancelled_runtime_owners(), 1);
+    assert!(socket.send_to(b"stale", destination(5353)).await.is_err());
+    assert!(socket.readable().await.is_err());
+    let mut payload = BytesMut::with_capacity(512);
+    assert!(socket.recv_buf_from(&mut payload).await.is_err());
+    assert!(socket.try_recv_buf_from(&mut payload).is_err());
+
+    let second_report = coordinator
+        .reset_network(
+            snapshot(3),
+            NetworkResetIntent::Ordinary(NetworkResetReason::InterfaceChanged),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_report.cancelled_runtime_owners(), 0);
+    let NetworkRuntimeOwnerCancellation::Reset(signal) =
+        socket.closed().expect("first reset terminal reason")
+    else {
+        panic!("UDP socket retained the wrong terminal reason");
+    };
+    assert_eq!(signal.target_generation(), 2);
+    assert_eq!(signal.intent(), first_intent);
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+
+    drop(service);
+    drop(coordinator);
+    assert!(matches!(
+        socket.closed(),
+        Some(NetworkRuntimeOwnerCancellation::Reset(signal))
+            if signal.target_generation() == 2 && signal.intent() == first_intent
+    ));
+    drop(socket);
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

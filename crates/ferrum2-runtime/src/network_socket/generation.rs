@@ -477,10 +477,20 @@ impl<T: AbortiveClose> AbortiveClose for NetworkTcpStream<T> {
 /// UDP socket retained with its exact interface decision and reset acknowledgement owner.
 #[must_use = "dropping the wrapper closes the socket and acknowledges reset cancellation"]
 pub struct GenerationBoundUdpSocket<T> {
-    resource: Arc<StdMutex<Option<Arc<GenerationBoundUdpResource<T>>>>>,
+    state: Arc<StdMutex<GenerationBoundUdpState<T>>>,
     resolved: ResolvedInterface,
     cancellation: NetworkRuntimeCancellation,
-    closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
+    closed: Arc<AtomicU8>,
+}
+
+const UDP_OPEN: u8 = 0;
+const UDP_CLOSED_RESET: u8 = 1;
+const UDP_CLOSED_COORDINATOR: u8 = 2;
+const UDP_CLOSED_DROPPED: u8 = 3;
+
+struct GenerationBoundUdpState<T> {
+    resource: Option<Arc<GenerationBoundUdpResource<T>>>,
+    terminal: Option<NetworkRuntimeOwnerCancellation>,
 }
 
 struct GenerationBoundUdpResource<T> {
@@ -489,13 +499,13 @@ struct GenerationBoundUdpResource<T> {
 }
 
 struct GenerationBoundUdpCloser<T> {
-    resource: Arc<StdMutex<Option<Arc<GenerationBoundUdpResource<T>>>>>,
-    closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
+    state: Arc<StdMutex<GenerationBoundUdpState<T>>>,
+    closed: Arc<AtomicU8>,
 }
 
 impl<T: Send + Sync + 'static> NetworkRuntimeOwnerCloser for GenerationBoundUdpCloser<T> {
     fn close(&self, cancellation: NetworkRuntimeOwnerCancellation) {
-        close_generation_bound_udp_resource(&self.resource, &self.closed, Some(cancellation));
+        close_generation_bound_udp_state(&self.state, &self.closed, Some(cancellation));
     }
 }
 
@@ -514,18 +524,25 @@ impl<T> Drop for GenerationBoundUdpResource<T> {
     }
 }
 
-fn close_generation_bound_udp_resource<T>(
-    resource: &Arc<StdMutex<Option<Arc<GenerationBoundUdpResource<T>>>>>,
-    closed: &Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
+fn close_generation_bound_udp_state<T>(
+    state: &Arc<StdMutex<GenerationBoundUdpState<T>>>,
+    closed: &Arc<AtomicU8>,
     terminal: Option<NetworkRuntimeOwnerCancellation>,
 ) {
-    if let Some(terminal) = terminal {
-        *lock_unpoisoned(closed) = Some(terminal);
+    let mut state = lock_unpoisoned(state);
+    if closed.load(Ordering::Relaxed) != UDP_OPEN {
+        return;
     }
-    let mut resource_guard = lock_unpoisoned(resource);
-    let resource = resource_guard.take();
+    let resource = state.resource.take();
+    state.terminal = terminal;
+    let closed_state = match terminal {
+        Some(NetworkRuntimeOwnerCancellation::Reset(_)) => UDP_CLOSED_RESET,
+        Some(NetworkRuntimeOwnerCancellation::CoordinatorDropped) => UDP_CLOSED_COORDINATOR,
+        None => UDP_CLOSED_DROPPED,
+    };
+    closed.store(closed_state, Ordering::Release);
+    drop(state);
     drop(resource);
-    drop(resource_guard);
 }
 
 impl<T: Send + Sync + 'static> GenerationBoundUdpSocket<T> {
@@ -535,16 +552,20 @@ impl<T: Send + Sync + 'static> GenerationBoundUdpSocket<T> {
         owner: NetworkRuntimeOwner,
     ) -> Result<Self, NetworkRuntimeOwnerCancellation> {
         let cancellation = owner.cancellation();
-        let resource = Arc::new(StdMutex::new(Some(Arc::new(GenerationBoundUdpResource {
-            socket: Some(socket),
-            owner: Some(owner),
-        }))));
-        let closed = Arc::new(StdMutex::new(None));
+        let state = Arc::new(StdMutex::new(GenerationBoundUdpState {
+            resource: Some(Arc::new(GenerationBoundUdpResource {
+                socket: Some(socket),
+                owner: Some(owner),
+            })),
+            terminal: None,
+        }));
+        let closed = Arc::new(AtomicU8::new(UDP_OPEN));
         let closer: Arc<dyn NetworkRuntimeOwnerCloser> = Arc::new(GenerationBoundUdpCloser {
-            resource: Arc::clone(&resource),
+            state: Arc::clone(&state),
             closed: Arc::clone(&closed),
         });
-        let attach_result = lock_unpoisoned(&resource)
+        let attach_result = lock_unpoisoned(&state)
+            .resource
             .as_ref()
             .expect("new UDP generation resource")
             .owner
@@ -552,7 +573,7 @@ impl<T: Send + Sync + 'static> GenerationBoundUdpSocket<T> {
             .expect("new UDP generation owner")
             .attach_closer(closer);
         let socket = Self {
-            resource,
+            state,
             resolved,
             cancellation,
             closed,
@@ -568,7 +589,7 @@ impl<T: Send + Sync + 'static> GenerationBoundUdpSocket<T> {
 
 impl<T> GenerationBoundUdpSocket<T> {
     pub async fn is_closed(&self) -> bool {
-        lock_unpoisoned(&self.resource).is_none()
+        self.closed.load(Ordering::Acquire) != UDP_OPEN
     }
 
     pub const fn resolved_interface(&self) -> &ResolvedInterface {
@@ -576,38 +597,50 @@ impl<T> GenerationBoundUdpSocket<T> {
     }
 
     pub fn closed(&self) -> Option<NetworkRuntimeOwnerCancellation> {
-        *lock_unpoisoned(&self.closed)
+        if self.closed.load(Ordering::Acquire) == UDP_OPEN {
+            None
+        } else {
+            lock_unpoisoned(&self.state).terminal
+        }
     }
 
     fn live_resource(&self) -> io::Result<Arc<GenerationBoundUdpResource<T>>> {
-        lock_unpoisoned(&self.resource)
+        if self.closed.load(Ordering::Acquire) != UDP_OPEN {
+            return Err(closed_resource_io_error());
+        }
+        lock_unpoisoned(&self.state)
+            .resource
             .as_ref()
             .cloned()
             .ok_or_else(closed_resource_io_error)
     }
 
     fn try_live_resource(&self) -> io::Result<Arc<GenerationBoundUdpResource<T>>> {
-        let resource = match self.resource.try_lock() {
-            Ok(resource) => resource,
+        if self.closed.load(Ordering::Acquire) != UDP_OPEN {
+            return Err(closed_resource_io_error());
+        }
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
             Err(std::sync::TryLockError::WouldBlock) => {
                 return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
         };
-        resource
+        state
+            .resource
             .as_ref()
             .cloned()
             .ok_or_else(closed_resource_io_error)
     }
 
     fn close(&self, terminal: NetworkRuntimeOwnerCancellation) {
-        close_generation_bound_udp_resource(&self.resource, &self.closed, Some(terminal));
+        close_generation_bound_udp_state(&self.state, &self.closed, Some(terminal));
     }
 }
 
 impl<T> Drop for GenerationBoundUdpSocket<T> {
     fn drop(&mut self) {
-        close_generation_bound_udp_resource(&self.resource, &self.closed, None);
+        close_generation_bound_udp_state(&self.state, &self.closed, None);
     }
 }
 
