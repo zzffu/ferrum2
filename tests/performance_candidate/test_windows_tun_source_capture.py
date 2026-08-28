@@ -172,6 +172,13 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
                 collector,
             )
 
+    def test_guest_transaction_returns_only_its_closed_result(self) -> None:
+        self.assertIn(
+            "[void](Add-Type -Path $processOwnerSource)",
+            self.guest_transaction,
+        )
+        self.assertTrue(self.guest_transaction.rstrip().endswith("$guestControllerResult"))
+
 
 if __name__ == "__main__":
     unittest.main()

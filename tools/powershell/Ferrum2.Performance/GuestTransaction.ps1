@@ -240,7 +240,7 @@ foreach ($runtimeDll in @(Get-ChildItem -LiteralPath (Join-Path $InputRoot "runt
 }
 
 $processOwnerSource = Join-Path $controllerBundleRoot "PerformanceProcessOwner.cs"
-Add-Type -Path $processOwnerSource
+[void](Add-Type -Path $processOwnerSource)
 $guestSupportPath = Join-Path $controllerBundleRoot "GuestSupport.ps1"
 $guestSupportEntry = @($controllerBundleManifest.files | Where-Object {
     [string]$_.path -ceq 'GuestSupport.ps1'
@@ -814,3 +814,4 @@ if ($InstrumentedDiagnostic) {
     $guestControllerResult["power_plan_guid"] = `
         $powerMatch.Value.ToLowerInvariant()
 }
+$guestControllerResult
