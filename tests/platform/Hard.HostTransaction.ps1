@@ -203,6 +203,7 @@ try {
             foreach ($relative in @(
                     "controller",
                     "controller\modules\Ferrum2.WindowsTun.Lab",
+                    "controller\modules\Ferrum2.WindowsTun.Lab\private",
                     "artifacts",
                     "runtime\vc-runtime"
                 )) {

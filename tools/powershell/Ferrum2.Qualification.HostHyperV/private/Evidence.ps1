@@ -54,7 +54,8 @@ function New-PortablePowerShellArchive {
         throw "portable PowerShell runtime cannot contain a reparse point"
     }
     $files = @($items | Where-Object { -not $_.PSIsContainer })
-    $bytes = [long]($files | Measure-Object Length -Sum).Sum
+    [long]$bytes = 0
+    foreach ($file in $files) { $bytes += [long]$file.Length }
     if ($files.Count -eq 0 -or $files.Count -gt 4096 -or
         $bytes -le 0 -or $bytes -gt 1073741824) {
         throw "portable PowerShell runtime exceeds its staging boundary"
@@ -146,7 +147,8 @@ function Copy-GuestEvidence {
         $items = @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Force -Recurse)
         $files = @($items | Where-Object { -not $_.PSIsContainer })
         $directories = @($items | Where-Object { $_.PSIsContainer })
-        $totalBytes = [long]($files | Measure-Object Length -Sum).Sum
+        [long]$totalBytes = 0
+        foreach ($file in $files) { $totalBytes += [long]$file.Length }
         return [pscustomobject]@{
             Exists = $true
             Safe = @($items | Where-Object {
@@ -179,7 +181,8 @@ function Copy-GuestEvidence {
     )
     $hostFiles = @($hostItems | Where-Object { -not $_.PSIsContainer })
     $hostDirectories = @($hostItems | Where-Object { $_.PSIsContainer })
-    $hostBytes = [long]($hostFiles | Measure-Object Length -Sum).Sum
+    [long]$hostBytes = 0
+    foreach ($file in $hostFiles) { $hostBytes += [long]$file.Length }
     if ($hostFiles.Count -ne [long]$boundary[0].Files -or
         $hostDirectories.Count -gt ([long]$boundary[0].Directories + 1) -or
         $hostBytes -ne [long]$boundary[0].Bytes -or

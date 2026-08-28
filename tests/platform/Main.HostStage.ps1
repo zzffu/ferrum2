@@ -165,6 +165,7 @@
             foreach ($relative in @(
                     "controller",
                     "controller\modules\Ferrum2.WindowsTun.Lab",
+                    "controller\modules\Ferrum2.WindowsTun.Lab\private",
                     "controller\modules\Ferrum2.Qualification.GuestController",
                     "artifacts",
                     "runtime\vc-runtime"

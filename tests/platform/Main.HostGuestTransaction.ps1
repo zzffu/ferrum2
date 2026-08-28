@@ -305,6 +305,7 @@
                     (Join-Path $inputPath "controller"),
                     (Join-Path $inputPath "controller\modules"),
                     (Join-Path $inputPath "controller\modules\Ferrum2.WindowsTun.Lab"),
+                    (Join-Path $inputPath "controller\modules\Ferrum2.WindowsTun.Lab\private"),
                     (Join-Path $inputPath "controller\modules\Ferrum2.Qualification.GuestController"),
                     $candidateArtifactDirectory,
                     (Join-Path $inputPath "runtime"),

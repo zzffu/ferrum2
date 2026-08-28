@@ -284,6 +284,7 @@ $expectedInputDirectories = @(
     (Join-Path $inputRoot "controller"),
     (Join-Path $inputRoot "controller\modules"),
     (Join-Path $inputRoot "controller\modules\Ferrum2.WindowsTun.Lab"),
+    (Join-Path $inputRoot "controller\modules\Ferrum2.WindowsTun.Lab\private"),
     (Join-Path $inputRoot "artifacts"),
     (Join-Path $inputRoot "runtime"),
     $runtimeLibraries
