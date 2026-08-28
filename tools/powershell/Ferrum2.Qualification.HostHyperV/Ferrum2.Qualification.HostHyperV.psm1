@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:expectedPowerShellVersion = '7.4.19'
+$script:expectedPowerShellZipSha256 = `
+    'cd62ad6d8174cc6fb85b335a0058444bc934fe27c39fa97fe342134286d28af9'
 
 $labManifest = Join-Path $PSScriptRoot `
     '..\Ferrum2.WindowsTun.Lab\Ferrum2.WindowsTun.Lab.psd1'

@@ -44,8 +44,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/Ferrum2.Qualification.HostHyperV.psm1",
-      "bytes": 12906,
-      "sha256": "eb42572366a5b61840de4f14192c732fc5a18b076dfc6c796e695adc08f49f70"
+      "bytes": 13062,
+      "sha256": "b7608707a7779bc5e87f06c70553b2e71f771f897bcf5e12ce7866dbf7397536"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.HostHyperV/private/Artifacts.ps1",
@@ -128,5 +128,5 @@
       "sha256": "d6cfe0191ed6b53e431bab989b80f6fad2a29a7635e46db1b5f821ee56841e8a"
     }
   ],
-  "controller_bundle_sha256": "201f1982d3d86ce2f0c3dbe97bfa78b76fb8be74e8bc1ecf059573887811cf21"
+  "controller_bundle_sha256": "8b4ca1191820329cb462c0e9005d6d11b221bc6551c9db9078192453f17e9e1e"
 }
