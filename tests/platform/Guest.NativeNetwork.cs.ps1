@@ -12,6 +12,31 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+internal static class Ferrum2NetworkBackgroundTaskCleanup {
+    private const int TimeoutMilliseconds = 5000;
+
+    internal static long CreateDeadline() {
+        return Environment.TickCount64 + TimeoutMilliseconds;
+    }
+
+    internal static Exception Wait(Task task, long deadline, string name) {
+        var remaining = deadline - Environment.TickCount64;
+        var boundedMilliseconds = remaining <= 0
+            ? 0
+            : (int)Math.Min(remaining, (long)Int32.MaxValue);
+        try {
+            if (!task.Wait(boundedMilliseconds)) {
+                return new TimeoutException(name + " did not stop within the bounded cleanup timeout");
+            }
+        } catch (AggregateException error) {
+            return new InvalidOperationException(name + " faulted during bounded cleanup", error.Flatten());
+        }
+        return task.IsCompleted
+            ? null
+            : new TimeoutException(name + " did not report completion after bounded cleanup wait");
+    }
+}
+
 public sealed class Ferrum2DnsResponder : IDisposable {
     private readonly UdpClient socket;
     private readonly CancellationTokenSource stopped = new CancellationTokenSource();
@@ -70,8 +95,8 @@ public sealed class Ferrum2DnsResponder : IDisposable {
         stopped.Cancel();
         socket.Dispose();
 
-        var deadline = Ferrum2BackgroundTaskCleanup.CreateDeadline();
-        var workerFailure = Ferrum2BackgroundTaskCleanup.Wait(worker, deadline, "DNS responder worker");
+        var deadline = Ferrum2NetworkBackgroundTaskCleanup.CreateDeadline();
+        var workerFailure = Ferrum2NetworkBackgroundTaskCleanup.Wait(worker, deadline, "DNS responder worker");
         if (!worker.IsCompleted) {
             throw workerFailure ?? new TimeoutException("DNS responder worker did not report completion after bounded cleanup wait");
         }

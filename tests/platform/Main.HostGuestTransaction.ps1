@@ -480,8 +480,8 @@
                     -StderrPath $controllerStderr
             } catch {
                 $failurePhase = $phase
-                $failureText = ($_.Exception.GetType().FullName + ": " +
-                    $_.Exception.Message).Replace("`r", " ").Replace("`n", " ")
+                $failureText = [string]($_ | Out-String -Width 4096)
+                $failureText = $failureText.Replace("`r", " ").Replace("`n", " ").Trim()
                 if ($failureText.Length -gt 2048) {
                     $failureText = $failureText.Substring(0, 2048)
                 }
@@ -510,8 +510,10 @@
                             -StderrPath $cleanupStderr
                     } catch {
                         $cleanupExit = -1
-                        $cleanupFailureText = ($_.Exception.GetType().FullName + ": " +
-                            $_.Exception.Message).Replace("`r", " ").Replace("`n", " ")
+                        $cleanupFailureText = [string]($_ | Out-String -Width 4096)
+                        $cleanupFailureText = $cleanupFailureText.Replace(
+                            "`r", " "
+                        ).Replace("`n", " ").Trim()
                         if ($cleanupFailureText.Length -gt 2048) {
                             $cleanupFailureText = $cleanupFailureText.Substring(0, 2048)
                         }
@@ -778,8 +780,8 @@
                 finished_utc = [DateTime]::UtcNow.ToString("o")
             }
             Write-GuestJsonNew -Path (Join-Path $exportPath "guest-run.json") -Value $guestResult
-            [Console]::Out.WriteLine(
-                ($guestResult | ConvertTo-Json -Compress -Depth 6)
+            Write-Output -NoEnumerate (
+                $guestResult | ConvertTo-Json -Compress -Depth 6
             )
         })
     # END GUEST_ONLY_EXECUTION

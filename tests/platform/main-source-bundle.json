@@ -14,8 +14,8 @@
     },
     {
       "path": "tests/platform/Main.HostGuestTransaction.ps1",
-      "bytes": 47700,
-      "sha256": "bfcd3d83f873697538cad233099596461aafa0728975e2c0ba483f0692372ca5"
+      "bytes": 47778,
+      "sha256": "f670fb4f4afac90e8c17e0240d0ae275c6e61fb231cc8382b260107b56a41657"
     },
     {
       "path": "tests/platform/Main.HostReadback.ps1",
@@ -168,5 +168,5 @@
       "sha256": "d6cfe0191ed6b53e431bab989b80f6fad2a29a7635e46db1b5f821ee56841e8a"
     }
   ],
-  "controller_bundle_sha256": "cda8de892dd4955575b31c81fec386240262a4fc65a5ed875b52f5c7f1c31b0c"
+  "controller_bundle_sha256": "6fee43b69e7bd8e40f47ae57be190cd396815e050aea0c8c3540147522a445ad"
 }

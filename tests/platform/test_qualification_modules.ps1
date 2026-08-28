@@ -961,4 +961,26 @@ try {
     }
 }
 
+$nativeTypePaths = @(
+    'Guest.NativeProcess.cs.ps1',
+    'Guest.NativeTransport.cs.ps1',
+    'Guest.NativeNetwork.cs.ps1'
+) | ForEach-Object {
+    (Join-Path $PSScriptRoot $_).Replace("'", "''")
+}
+$nativeTypeScript = @(
+    "`$ErrorActionPreference = 'Stop'"
+) + @($nativeTypePaths | ForEach-Object {
+    ". '$_'"
+}) + @("Write-Output 'native_types=PASS'")
+$nativeTypeEncoded = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes(($nativeTypeScript -join "`n"))
+)
+$nativeTypeRows = @(& (Get-Command pwsh -CommandType Application -ErrorAction Stop).Source `
+    -NoProfile -NonInteractive -EncodedCommand $nativeTypeEncoded 2>&1)
+$nativeTypeExit = $LASTEXITCODE
+Assert-True ($nativeTypeExit -eq 0 -and $nativeTypeRows.Count -eq 1 -and
+    [string]$nativeTypeRows[0] -ceq 'native_types=PASS') `
+    'guest native helper C# sources do not compile as one controller load sequence'
+
 Write-Output 'qualification_modules status=PASS profiles=6 cleanup=independent hard_kill=independent'
