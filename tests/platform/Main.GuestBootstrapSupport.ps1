@@ -5,8 +5,17 @@
                     [string]$StdoutPath,
                     [string]$StderrPath
                 )
-                & $Executable @Arguments 1>> $StdoutPath 2>> $StderrPath
-                return [int]$LASTEXITCODE
+                if (@($Arguments | Where-Object {
+                        [string]::IsNullOrWhiteSpace($_) -or $_ -cmatch '[\s"]'
+                    }).Count -ne 0) {
+                    throw "logged command arguments must not require command-line quoting"
+                }
+                $process = Start-Process -FilePath $Executable `
+                    -ArgumentList $Arguments `
+                    -RedirectStandardOutput $StdoutPath `
+                    -RedirectStandardError $StderrPath `
+                    -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+                return [int]$process.ExitCode
             }
 
             function Write-GuestJsonNew {
