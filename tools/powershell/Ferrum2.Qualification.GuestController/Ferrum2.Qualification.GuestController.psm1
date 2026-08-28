@@ -29,15 +29,34 @@ function Get-Ferrum2QualificationSuiteProfiles {
 
 function Resolve-Ferrum2QualificationProfile {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] [string]$Profile)
+    param(
+        [Parameter(Mandatory)] [string]$Profile,
+        [ValidateRange(0, 10)] [int]$ValidationCycleLimit = 0
+    )
     if ($Profile -cnotin $script:Profiles) {
         throw 'qualification profile is outside the closed set'
     }
     $isEndurance = $Profile -cin $script:EnduranceProfiles
+    $cycleLimit = if (-not $isEndurance) {
+        [long]0
+    } elseif ($ValidationCycleLimit -gt 0) {
+        [long]$ValidationCycleLimit
+    } else {
+        [long]1000
+    }
+    $releaseMilestones = if (-not $isEndurance) {
+        @()
+    } elseif ($ValidationCycleLimit -eq 1) {
+        @([long]1)
+    } elseif ($ValidationCycleLimit -gt 1) {
+        @([long]1, [long]$ValidationCycleLimit)
+    } else {
+        @([long]10, [long]100, [long]1000)
+    }
     [pscustomobject][ordered]@{
         profile = $Profile
-        cycle_limit = if ($isEndurance) { [long]1000 } else { [long]0 }
-        release_milestones = if ($isEndurance) { @([long]10, [long]100, [long]1000) } else { @() }
+        cycle_limit = $cycleLimit
+        release_milestones = $releaseMilestones
     }
 }
 

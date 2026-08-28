@@ -13,7 +13,9 @@
             $stagedInputSha256,
             [string]$topologyDocument.Sha256,
             $guestNetworkPathProbeSha256,
-            $guestNetworkPathSha256
+            $guestNetworkPathSha256,
+            $validationOnly,
+            $validationCycleLimit
         ) `
         -ErrorAction Stop `
         -ScriptBlock {
@@ -30,7 +32,9 @@
                 [string]$ExpectedInputManifestHash,
                 [string]$ExpectedTopologyManifestHash,
                 [string]$ExpectedGuestNetworkPathProbeHash,
-                [string]$ExpectedGuestNetworkPathHash
+                [string]$ExpectedGuestNetworkPathHash,
+                [bool]$ValidationOnly,
+                [int]$ValidationCycleLimit
             )
 
             Set-StrictMode -Version Latest
@@ -241,7 +245,12 @@
                     )
                 )
                 Import-Module $guestControllerModule -Scope Local -Force -ErrorAction Stop
-                $profileContract = Resolve-Ferrum2QualificationProfile -Profile $RequestedProfile
+                $profileContract = if ($ValidationOnly) {
+                    Resolve-Ferrum2QualificationProfile -Profile $RequestedProfile `
+                        -ValidationCycleLimit $ValidationCycleLimit
+                } else {
+                    Resolve-Ferrum2QualificationProfile -Profile $RequestedProfile
+                }
                 $cycleLimit = if ([long]$profileContract.cycle_limit -gt 0) {
                     [long]$profileContract.cycle_limit
                 } else { $null }
@@ -461,6 +470,9 @@
                         "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                         "-File", $controllerPath,
                         "-Profile", $RequestedProfile,
+                        "-ValidationCycleLimit", $(if ($ValidationOnly) {
+                            [string]$ValidationCycleLimit
+                        } else { "0" }),
                         "-RunToken", $Token,
                         "-IdentityLedger", $ledgerPath,
                         "-TopologyManifest", $topologyManifestPath,

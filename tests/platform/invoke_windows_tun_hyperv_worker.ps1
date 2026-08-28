@@ -13,6 +13,8 @@ param(
         'udp-policy', 'scheduler-ring-full'
     )]
     [string]$Profile,
+    [switch]$ValidationOnly,
+    [ValidateRange(1, 10)] [int]$ValidationCycleLimit = 1,
     [Parameter(Mandatory)]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,47}$')]
     [string]$RunToken,
@@ -83,6 +85,8 @@ $context = [ordered]@{
     internal_worker_token = $InternalWorkerToken
     candidate_artifact_manifest = $CandidateArtifactManifest
     profile = $Profile
+    validation_only = [bool]$ValidationOnly
+    validation_cycle_limit = $ValidationCycleLimit
     run_token = $RunToken
     identity_ledger = $IdentityLedger
     topology_plan_path = $TopologyPlanPath

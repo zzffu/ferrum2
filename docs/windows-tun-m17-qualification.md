@@ -71,6 +71,26 @@ pwsh -NoProfile -File tests/platform/run_windows_tun_hyperv.ps1 `
 Do not run this command on an ordinary development host. The read-only identity probe has a separate
 entrypoint, `tests/platform/probe_windows_tun_hyperv.ps1`.
 
+### Non-qualification script validation
+
+The main runner also accepts the explicit `-ValidationOnly` switch. It keeps the selected suite and
+all of its live profiles, but changes the two endurance contracts to the bounded
+`-ValidationCycleLimit` value from 1 through 10. The default is one cycle. A one-cycle validation
+uses milestone `[1]`; larger values use milestones `[1, cycle_limit]`. Core profiles are unchanged.
+
+For complete path coverage, use `-Suite Release -ValidationOnly -ValidationCycleLimit 1`. The root
+artifact is `script-validation-campaign.json`, schema
+`ferrum2.windows-tun.script-validation-campaign.v1`, and contains `qualification: false`. It is not
+Release evidence and cannot replace the fixed 1,000-cycle Endurance contract. Supplying
+`-ValidationCycleLimit` without `-ValidationOnly` is rejected.
+
+Hard-kill has no repeat loop to shorten: its smallest complete execution remains all three fixed
+cases once. The performance runner has a separate `-ValidationOnly -ValidationPairCount <1..6>`
+mode. It still creates and validates the canonical 108-trial plan, executes only the selected number
+of complete ABBA pairs across all nine scenarios (18 trials for one pair), skips the formal reducer,
+and writes `script-validation.json` with `qualification: false`. Formal performance and calibration
+remain fixed at six pairs and 108 trials.
+
 ## Campaign, transaction, and staging contract
 
 The host must:

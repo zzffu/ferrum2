@@ -319,7 +319,11 @@ function Complete-M17Artifact([bool]$Succeeded, [object]$PrimaryFailure, [object
         status = if ($Succeeded) { "pass" } else { "fail" }
         profile = $script:Profile
         run_token = $script:runIdentity
-        cycle_limit = if ($script:Profile -in @("network-reset", "restart-stress")) { 1000 } else { $null }
+        cycle_limit = if ($script:Profile -ceq "network-reset") {
+            [long]$script:NetworkResetCycles
+        } elseif ($script:Profile -ceq "restart-stress") {
+            [long]$script:RestartCycles
+        } else { $null }
         release_milestones = @($script:releaseMilestones)
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId

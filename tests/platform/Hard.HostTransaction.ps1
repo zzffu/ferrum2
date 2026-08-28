@@ -419,7 +419,7 @@ try {
     Assert-Ferrum2ClosedProperties $guestResult @(
         "schema", "status", "mode", "run_token", "staged_input_sha256",
         "controller_bundle_sha256", "topology", "files",
-        "cleanup"
+        "cleanup", "PSComputerName", "RunspaceId", "PSShowComputerName"
     ) "hard-kill guest bootstrap"
     Assert-True (
         $guestResult.schema -ceq "ferrum2.windows-tun.hard-kill-guest-bootstrap.v3" -and
@@ -431,7 +431,12 @@ try {
             [string]$controllerBundleManifest.controller_bundle_sha256 -and
         ($guestResult.files -is [int] -or $guestResult.files -is [long]) -and
         [long]$guestResult.files -eq 17 -and
-        $guestResult.cleanup -ceq "pass"
+        $guestResult.cleanup -ceq "pass" -and
+        $guestResult.PSComputerName -is [string] -and
+        -not [string]::IsNullOrWhiteSpace($guestResult.PSComputerName) -and
+        $guestResult.RunspaceId -is [Guid] -and
+        $guestResult.RunspaceId -ne [Guid]::Empty -and
+        $guestResult.PSShowComputerName -is [bool]
     ) "hard-kill guest bootstrap result is invalid"
     Assert-ExactObjectFields `
         -Expected $topologyBinding `

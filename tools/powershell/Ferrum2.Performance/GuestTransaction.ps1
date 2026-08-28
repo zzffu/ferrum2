@@ -49,7 +49,8 @@ param(
     [string]$UdpBoundaryCollectorSha256,
     [string]$DiagnosticSourceIpv4,
     [int]$DiagnosticSourcePortFirst,
-    [int]$DiagnosticSourcePortLast
+    [int]$DiagnosticSourcePortLast,
+    [int]$ValidationPairCountValue
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -71,6 +72,11 @@ $NetworkModelEvidenceRoot = Join-Path $EvidenceRoot "network-model"
 $InstrumentedDiagnostic = -not [string]::IsNullOrWhiteSpace(
     $DiagnosticProfileValue
 )
+$ScriptValidation = $ValidationPairCountValue -gt 0
+if ($ValidationPairCountValue -lt 0 -or $ValidationPairCountValue -gt 6 -or
+    ($InstrumentedDiagnostic -and $ScriptValidation)) {
+    throw "guest performance execution mode is invalid"
+}
 $ProcessLogRoot = if ($InstrumentedDiagnostic) {
     Join-Path $DiagnosticEvidenceRoot "process-logs"
 } else {
@@ -351,11 +357,18 @@ if ($InstrumentedDiagnostic) {
 }
 $executionTrials = @(if ($InstrumentedDiagnostic) {
     $diagnosticTrial
+} elseif ($ScriptValidation) {
+    $plan.trials | Where-Object {
+        [int]$_.pair -le $ValidationPairCountValue
+    } | Sort-Object sequence
 } else {
     $plan.trials | Sort-Object sequence
 })
 if (($InstrumentedDiagnostic -and $executionTrials.Count -ne 1) -or
-    (-not $InstrumentedDiagnostic -and $executionTrials.Count -ne 108)) {
+    ($ScriptValidation -and
+        $executionTrials.Count -ne (18 * $ValidationPairCountValue)) -or
+    (-not $InstrumentedDiagnostic -and -not $ScriptValidation -and
+        $executionTrials.Count -ne 108)) {
     throw "guest canonical trial execution selection is invalid"
 }
 $expectedTrialCount = if ($InstrumentedDiagnostic) { 0 } else {

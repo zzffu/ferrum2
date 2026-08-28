@@ -67,7 +67,8 @@
                     [string]$ArtifactPath,
                     [int]$ExpectedCycles
                 )
-                if ($ExpectedCycles -notin @(10, 100, 1000)) {
+                if (($ExpectedCycles -lt 1 -or $ExpectedCycles -gt 10) -and
+                    $ExpectedCycles -ne 1000) {
                     throw "network-reset evidence cycle count is invalid"
                 }
                 $baselineRows = @($Result.live_checks | Where-Object {

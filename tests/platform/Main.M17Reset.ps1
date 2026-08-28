@@ -62,13 +62,29 @@ final = "resolver"
     Invoke-M17DnsQuery "198.18.0.2" "198.18.0.1" $false 0x1710
     $initialDrain = Wait-M17FlowDrain $script:m17MetricsPort $initial.Generation $udpAssociationLimit
     $baseline = Get-M17NetworkResetMetricState $initialDrain.Metrics
+    $baselineStable = $false
+    $baselineDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $baselineCanonical = $baseline | ConvertTo-Json -Compress
+        Start-Sleep -Milliseconds 500
+        $baselineMetrics = Get-Metrics $script:m17MetricsPort 2
+        $nextBaseline = Get-M17NetworkResetMetricState $baselineMetrics
+        if (($nextBaseline | ConvertTo-Json -Compress) -ceq $baselineCanonical) {
+            $baseline = $nextBaseline
+            $baselineStable = $true
+            break
+        }
+        $baseline = $nextBaseline
+    } while ([DateTime]::UtcNow -lt $baselineDeadline)
+    Assert-True $baselineStable "M17 network-reset startup state did not become stable"
+    $initial.Generation = [long]$baseline.SessionGeneration
     Assert-True ($baseline.StrictRequested -eq 1 -and $baseline.StrictEffective -eq 1 -and
         $baseline.StrictInstallSucceeded -ge 1 -and $baseline.StrictInstallFailed -eq 0 -and
         $baseline.SessionGeneration -eq $initial.Generation -and
         $baseline.ResetStarted -eq $baseline.ResetSucceeded -and $baseline.ResetFailed -eq 0 -and
         $baseline.RetryStarted -eq 0 -and $baseline.RetrySucceeded -eq 0 -and $baseline.RetryFailed -eq 0 -and
         $baseline.FullRebuild -eq 0) "M17 network-reset strict-route or lifecycle metric baseline is invalid"
-    $script:m17CounterBefore = Get-M17CounterSnapshot $initialDrain.Metrics
+    $script:m17CounterBefore = Get-M17CounterSnapshot $baselineMetrics
     Add-M17LiveRow "network-reset-baseline" ([ordered]@{
         process_id = $candidatePid
         interface_guid = $managedBaseline.InterfaceGuid

@@ -304,7 +304,11 @@ function Invoke-M17ContractPreflight {
         schema = "ferrum2.windows-tun.m17-contract.v4"
         status = "preflight_pass"
         profile = $script:Profile
-        cycle_limit = if ($script:Profile -in @("network-reset", "restart-stress")) { 1000 } else { $null }
+        cycle_limit = if ($script:Profile -ceq "network-reset") {
+            [long]$script:NetworkResetCycles
+        } elseif ($script:Profile -ceq "restart-stress") {
+            [long]$script:RestartCycles
+        } else { $null }
         release_milestones = @($script:releaseMilestones)
         approved_vm_name = $script:expectedHyperVVmName
         approved_vm_id = $script:expectedHyperVVmId
@@ -469,8 +473,14 @@ function Wait-M17AdapterReady(
                 $v6Interface = Get-NetIPInterface -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -PolicyStore ActiveStore -ErrorAction SilentlyContinue
                 $mtuReady = ((-not $Ipv4) -or ($v4Interface -and [uint32]$v4Interface.NlMtu -eq $ExpectedMtu)) -and
                     ((-not $Ipv6) -or ($v6Interface -and [uint32]$v6Interface.NlMtu -eq $ExpectedMtu))
-                $actualV4Dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
-                $actualV6Dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+                $actualV4Dns = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        ForEach-Object { $_.ServerAddresses } |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                        Sort-Object -Unique)
+                $actualV6Dns = @(Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+                        ForEach-Object { $_.ServerAddresses } |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                        Sort-Object -Unique)
                 $expectedV4Dns = @($Ipv4Dns | Sort-Object -Unique)
                 $expectedV6Dns = @($Ipv6Dns | Sort-Object -Unique)
                 $windowsIntrinsicV6Dns = @(

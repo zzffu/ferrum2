@@ -98,6 +98,13 @@ param(
     [string]$CredentialPath,
 
     [Parameter(ParameterSetName = "Run")]
+    [switch]$ValidationOnly,
+
+    [Parameter(ParameterSetName = "Run")]
+    [ValidateRange(1, 6)]
+    [int]$ValidationPairCount = 1,
+
+    [Parameter(ParameterSetName = "Run")]
     [ValidateSet("UdpFlowBoundary")]
     [string]$DiagnosticProfile,
 
@@ -125,6 +132,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $instrumentedDiagnosticMode = $PSBoundParameters.ContainsKey("DiagnosticProfile")
+$scriptValidationMode = [bool]$ValidationOnly
+$scriptValidationPairCount = if ($scriptValidationMode) {
+    $ValidationPairCount
+} else { 0 }
+if (-not $scriptValidationMode -and
+    $PSBoundParameters.ContainsKey("ValidationPairCount")) {
+    throw "ValidationPairCount requires ValidationOnly"
+}
+if ($scriptValidationMode -and $instrumentedDiagnosticMode) {
+    throw "ValidationOnly cannot be combined with DiagnosticProfile"
+}
+if ($scriptValidationMode -and $RunKind -cne "calibration-aa") {
+    throw "ValidationOnly requires calibration-aa"
+}
 $supportDiagnosticParameterNames = @(
     "SupportDiagnosticLedger",
     "SupportDiagnosticRunNonce",
@@ -665,6 +686,55 @@ if (-not (Test-Path -LiteralPath $hostNetworkPathPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $rawProcessLogs -PathType Container) -or
     $rawProcessLogFiles.Count -ne $expectedProcessLogCount) {
     throw "exported raw evidence is incomplete"
+}
+if ($scriptValidationMode) {
+    $scenarioRows = @($rawTrialFiles | ForEach-Object {
+        Get-Content -LiteralPath $_.FullName -Raw -Encoding utf8 |
+            ConvertFrom-Json -Depth 12 -ErrorAction Stop
+    })
+    $expectedScenarios = @($plan.scenarios.PSObject.Properties.Name | Sort-Object)
+    $actualScenarios = @($scenarioRows.scenario | Sort-Object -Unique)
+    $invalidScenarioCounts = @($expectedScenarios | Where-Object {
+        $scenario = $_
+        @($scenarioRows | Where-Object {
+            [string]$_.scenario -ceq $scenario
+        }).Count -ne (2 * $scriptValidationPairCount)
+    })
+    if (($actualScenarios -join '|') -cne ($expectedScenarios -join '|') -or
+        $invalidScenarioCounts.Count -ne 0 -or
+        @($scenarioRows | Where-Object {
+            $_.status -cne 'PASS' -or $_.correctness.status -cne 'PASS' -or
+            [int]$_.pair -lt 1 -or
+            [int]$_.pair -gt $scriptValidationPairCount
+        }).Count -ne 0) {
+        throw 'performance script-validation evidence is incomplete or invalid'
+    }
+    $validationResultPath = Join-Path $hostEvidenceRoot `
+        'script-validation.json'
+    $validationResult = [ordered]@{
+        schema = 'ferrum2.windows-tun.performance-script-validation.v1'
+        status = 'PASS'
+        qualification = $false
+        formal_plan_trials = @($plan.trials).Count
+        validation_pairs = $scriptValidationPairCount
+        executed_trials = $rawTrialFiles.Count
+        scenarios = $expectedScenarios
+        parent_sha = $ParentSha
+        candidate_sha = $CandidateSha
+        controller_bundle_sha256 = [string]$performanceControllerBundleManifest.
+            controller_bundle_sha256
+        topology_manifest_sha256 = [string]$topologyManifestDocument.Sha256
+        host_tun_bypassed = $true
+        host_network_mutations = 0
+        final_vm_state = [string](
+            Get-Ferrum2HostVmContext -Identity $hostHyperVIdentity
+        ).Vm.State
+        checkpoint_restored = $true
+    }
+    Write-Utf8FileNew -Path $validationResultPath `
+        -Text (($validationResult | ConvertTo-Json -Depth 5) + "`n")
+    [pscustomobject]$validationResult | ConvertTo-Json -Depth 5
+    exit 0
 }
 $summaryArguments = @(
     "-B", "-m", $controlModule, "windows-tun-summarize",

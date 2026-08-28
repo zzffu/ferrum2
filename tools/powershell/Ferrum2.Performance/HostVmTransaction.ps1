@@ -45,11 +45,18 @@ try {
     }
     $executionTrials = @(if ($instrumentedDiagnosticMode) {
         $diagnosticTrial
+    } elseif ($scriptValidationMode) {
+        $plan.trials | Where-Object {
+            [int]$_.pair -le $scriptValidationPairCount
+        } | Sort-Object sequence
     } else {
         $plan.trials | Sort-Object sequence
     })
     if (($instrumentedDiagnosticMode -and $executionTrials.Count -ne 1) -or
-        (-not $instrumentedDiagnosticMode -and $executionTrials.Count -ne 108)) {
+        ($scriptValidationMode -and
+            $executionTrials.Count -ne (18 * $scriptValidationPairCount)) -or
+        (-not $instrumentedDiagnosticMode -and -not $scriptValidationMode -and
+            $executionTrials.Count -ne 108)) {
         throw "canonical Windows TUN execution selection is invalid"
     }
     $expectedTrialCount = if ($instrumentedDiagnosticMode) {
@@ -69,7 +76,7 @@ try {
     $diagnosticSequenceValue = if ($instrumentedDiagnosticMode) {
         [int]$diagnosticTrial.sequence
     } else { 0 }
-    $scheduleLines = @($plan.trials | ForEach-Object {
+    $scheduleLines = @($executionTrials | ForEach-Object {
         "$($_.sequence)`t$($_.scenario)`t$($_.member)`t$($_.pair)`t$($_.order)"
     })
     Write-Utf8FileNew -Path $hostSchedulePath -Text (($scheduleLines -join "`n") + "`n")
@@ -563,7 +570,8 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         } else { 0 }),
         $(if ($instrumentedDiagnosticMode) {
             [int]$diagnosticSourcePlan.PortLast
-        } else { 0 })
+        } else { 0 }),
+        $scriptValidationPairCount
     )
     # END GUEST_ONLY_NETWORK_EXECUTION
     if (@($guestResult).Count -ne 1 -or $guestResult.status -cne "PASS" -or

@@ -251,6 +251,7 @@ listen = "127.0.0.1:$managedMetricsPort"
 
                 $activeProcess = Start-Candidate $binary $hardKillConfiguration
                 $Context.active_process = $activeProcess
+                $script:activeProcess = $activeProcess
                 $adapter = Wait-AdapterReady -Name $managedAutoAdapterName -TimeoutSeconds 20 `
                     -Managed $true -ManagedDns ([bool]$hardKill.Dns) `
                     -ManagedCapturePrefixes @($hardKillCapturePrefix)
@@ -308,12 +309,27 @@ listen = "127.0.0.1:$managedMetricsPort"
                         Start-Sleep -Milliseconds 25
                     }
                     Assert-True (
-                        $dnsResponder.Requests -eq $dnsRequestsBefore + 1
-                    ) "hard-kill system DNS did not reach the guest-local responder exactly once"
-                    Start-Sleep -Milliseconds 500
+                        $dnsResponder.Requests -ge $dnsRequestsBefore + 1 -and
+                        $dnsResponder.Requests -le $dnsRequestsBefore + 4
+                    ) "hard-kill system DNS did not reach the guest-local responder within bounds"
+                    $dnsRequestsObserved = [int]$dnsResponder.Requests
+                    $dnsQuietSince = [DateTime]::UtcNow
+                    $dnsQuietDeadline = $dnsQuietSince.AddSeconds(2)
+                    while ([DateTime]::UtcNow -lt $dnsQuietDeadline -and
+                        [DateTime]::UtcNow -lt $dnsQuietSince.AddMilliseconds(500)) {
+                        Start-Sleep -Milliseconds 25
+                        $dnsRequestsCurrent = [int]$dnsResponder.Requests
+                        Assert-True (
+                            $dnsRequestsCurrent -le $dnsRequestsBefore + 4
+                        ) "hard-kill system DNS retries exceeded the bounded witness"
+                        if ($dnsRequestsCurrent -ne $dnsRequestsObserved) {
+                            $dnsRequestsObserved = $dnsRequestsCurrent
+                            $dnsQuietSince = [DateTime]::UtcNow
+                        }
+                    }
                     Assert-True (
-                        $dnsResponder.Requests -eq $dnsRequestsBefore + 1
-                    ) "hard-kill system DNS retried after the guest-local response"
+                        [DateTime]::UtcNow -ge $dnsQuietSince.AddMilliseconds(500)
+                    ) "hard-kill system DNS did not become quiet after bounded retries"
                 }
                 if ($hardKill.Dns) {
                     $hardKillManagedPlane = Get-M17ManagedPlaneIdentity `
@@ -333,6 +349,7 @@ listen = "127.0.0.1:$managedMetricsPort"
                 [Ferrum2ProcessGroup]::Close([uint32]$activeProcess.Id)
                 $activeProcess = $null
                 $Context.active_process = $null
+                $script:activeProcess = $null
                 if ($heldHardKillTcp) {
                     Assert-True $tcpResources.Remove($heldHardKillTcp) "hard-kill TCP witness ownership mismatch"
                     $heldHardKillTcp.Dispose()

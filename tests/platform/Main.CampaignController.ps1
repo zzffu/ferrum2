@@ -1,7 +1,8 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 
 $expectedFields = @(
-    'repository_root', 'suite', 'campaign_token', 'identity_ledger',
+    'repository_root', 'suite', 'validation_only', 'validation_cycle_limit',
+    'campaign_token', 'identity_ledger',
     'topology_plan_path', 'topology_manifest_path', 'topology_manifest_sha256', 'support_tcp_port',
     'support_udp_port', 'support_pid', 'support_owner', 'wintun_zip', 'powershell_zip',
     'evidence_directory', 'credential_path', 'readiness_timeout_seconds',
@@ -11,6 +12,8 @@ Assert-Ferrum2ClosedProperties $Context $expectedFields 'qualification campaign 
 
 $repositoryRoot = [string]$Context.repository_root
 $suite = [string]$Context.suite
+$validationOnly = [bool]$Context.validation_only
+$validationCycleLimit = [int]$Context.validation_cycle_limit
 $campaignToken = [string]$Context.campaign_token
 $identityLedger = [string]$Context.identity_ledger
 $topologyPlanPath = [string]$Context.topology_plan_path
@@ -123,6 +126,18 @@ try {
     }
 
     foreach ($qualificationProfile in $suiteProfiles) {
+        $profileContract = if ($validationOnly) {
+            Resolve-Ferrum2QualificationProfile -Profile $qualificationProfile `
+                -ValidationCycleLimit $validationCycleLimit
+        } else {
+            Resolve-Ferrum2QualificationProfile -Profile $qualificationProfile
+        }
+        $expectedCycleLimit = if ([long]$profileContract.cycle_limit -gt 0) {
+            [long]$profileContract.cycle_limit
+        } else { $null }
+        $expectedMilestones = @(
+            $profileContract.release_milestones | ForEach-Object { [long]$_ }
+        )
         $runToken = "$campaignToken-$($tokenSuffixes[$qualificationProfile])"
         $profileEvidencePath = Join-Path $evidenceRoot $qualificationProfile
         if (Test-Path -LiteralPath $profileEvidencePath) {
@@ -135,6 +150,7 @@ try {
         $cleanupAuthority = New-ApprovedVmCleanupAuthority -Context $profileBaseline
         $workerParameters = [ordered]@{
             Profile = $qualificationProfile
+            ValidationCycleLimit = $validationCycleLimit
             RunToken = $runToken
             IdentityLedger = $ledgerIdentity.Path
             CandidateArtifactManifest = $candidateArtifacts.ManifestPath
@@ -149,6 +165,10 @@ try {
             EvidenceDirectory = $profileEvidencePath
             ReadinessTimeoutSeconds = $readinessTimeoutSeconds
             ShutdownTimeoutSeconds = $shutdownTimeoutSeconds
+        }
+        if ($validationOnly) {
+            $workerParameters.ValidationOnly = `
+                [Management.Automation.SwitchParameter]$true
         }
         if (-not [string]::IsNullOrWhiteSpace($powerShellZip)) {
             $workerParameters.PowerShellZip = $powerShellZip
@@ -169,7 +189,8 @@ try {
                 'tests/platform/invoke_windows_tun_hyperv_worker.ps1') `
             -BoundParameters $workerParameters `
             -ForwardedParameterNames @(
-                'Profile', 'RunToken', 'IdentityLedger', 'CandidateArtifactManifest',
+                'Profile', 'ValidationOnly', 'ValidationCycleLimit', 'RunToken',
+                'IdentityLedger', 'CandidateArtifactManifest',
                 'TopologyPlanPath', 'TopologyManifestPath', 'TopologyManifestSha256', 'SupportTcpPort',
                 'SupportUdpPort', 'SupportPid', 'SupportOwner', 'WintunZip',
                 'PowerShellZip', 'EvidenceDirectory', 'CredentialPath',
@@ -196,6 +217,13 @@ try {
             $hostManifest.candidate_sha -cne $candidate.Sha -or
             $hostManifest.candidate_artifact_manifest_sha256 -cne
                 $candidateArtifacts.ManifestSha256 -or
+            ($null -eq $expectedCycleLimit -and
+                $null -ne $hostManifest.cycle_limit) -or
+            ($null -ne $expectedCycleLimit -and
+                [long]$hostManifest.cycle_limit -ne $expectedCycleLimit) -or
+            (@($hostManifest.release_milestones | ForEach-Object {
+                [long]$_
+            }) -join '|') -cne ($expectedMilestones -join '|') -or
             $hostManifest.final_vm_state -cne 'Off' -or
             $hostManifest.checkpoint_restored -ne $true) {
             throw "qualification profile host manifest is invalid: $qualificationProfile"
@@ -281,25 +309,42 @@ $campaignFailureMessage = if ($null -eq $campaignFailure) {
     [string]$campaignFailure
 }
 $campaignManifest = [ordered]@{
-    schema = 'ferrum2.windows-tun.qualification-campaign.v1'
+    schema = if ($validationOnly) {
+        'ferrum2.windows-tun.script-validation-campaign.v1'
+    } else {
+        'ferrum2.windows-tun.qualification-campaign.v1'
+    }
     status = $campaignStatus
-    suite = $suite
-    campaign_token = $campaignToken
-    candidate_sha = $candidate.Sha
-    identity_sha256 = $ledgerIdentity.Sha256
-    controller_bundle_sha256 = $controllerBundleManifest.controller_bundle_sha256
-    candidate_artifact_manifest_sha256 = if ($null -eq $candidateArtifacts) {
-        $null
-    } else { $candidateArtifacts.ManifestSha256 }
-    selected_profiles = @($suiteProfiles)
-    profiles = @($profileRows)
-    started_utc = $campaignStartedUtc
-    finished_utc = [DateTime]::UtcNow.ToString('o')
-    final_vm_state = $finalVmState
-    artifact_bundle_removed = $null -eq $artifactCleanupFailure
-    failure = $campaignFailureMessage
 }
-$campaignManifestPath = Join-Path $evidenceRoot 'qualification-campaign.json'
+if ($validationOnly) {
+    $campaignManifest.qualification = $false
+}
+$campaignManifest.suite = $suite
+if ($validationOnly) {
+    $campaignManifest.validation_cycle_limit = [long]$validationCycleLimit
+}
+$campaignManifest.campaign_token = $campaignToken
+$campaignManifest.candidate_sha = $candidate.Sha
+$campaignManifest.identity_sha256 = $ledgerIdentity.Sha256
+$campaignManifest.controller_bundle_sha256 = `
+    $controllerBundleManifest.controller_bundle_sha256
+$campaignManifest.candidate_artifact_manifest_sha256 = if (
+    $null -eq $candidateArtifacts
+) {
+    $null
+} else { $candidateArtifacts.ManifestSha256 }
+$campaignManifest.selected_profiles = @($suiteProfiles)
+$campaignManifest.profiles = @($profileRows)
+$campaignManifest.started_utc = $campaignStartedUtc
+$campaignManifest.finished_utc = [DateTime]::UtcNow.ToString('o')
+$campaignManifest.final_vm_state = $finalVmState
+$campaignManifest.artifact_bundle_removed = $null -eq $artifactCleanupFailure
+$campaignManifest.failure = $campaignFailureMessage
+$campaignManifestPath = Join-Path $evidenceRoot $(if ($validationOnly) {
+    'script-validation-campaign.json'
+} else {
+    'qualification-campaign.json'
+})
 Write-Ferrum2JsonCreateNew `
     -Path $campaignManifestPath `
     -Value $campaignManifest `
@@ -312,7 +357,11 @@ if ($campaignStatus -cne 'pass') {
     )
 }
 Write-Output (
-    "windows_tun_qualification_campaign status=PASS suite=$suite " +
+    $(if ($validationOnly) {
+        "windows_tun_script_validation status=PASS qualification=false suite=$suite "
+    } else {
+        "windows_tun_qualification_campaign status=PASS suite=$suite "
+    }) +
         "campaign_token=$campaignToken candidate_sha=$($candidate.Sha) " +
         "profiles=$($profileRows.Count) evidence=$evidenceRoot final_vm_state=Off"
 )

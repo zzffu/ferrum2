@@ -84,8 +84,8 @@ if (-not $principal.IsInRole(
 $expectedZipHash = '07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51'
 $expectedDllHash = 'E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE'
 $expectedExports = @(
-    'WintunAllocateSendPacket', 'WintunCloseAdapter', 'WintunEndSession',
-    'WintunFreeAdapter', 'WintunGetAdapterLUID', 'WintunGetReadWaitEvent',
+    'WintunAllocateSendPacket', 'WintunCloseAdapter', 'WintunCreateAdapter',
+    'WintunDeleteDriver', 'WintunEndSession', 'WintunGetAdapterLUID', 'WintunGetReadWaitEvent',
     'WintunGetRunningDriverVersion', 'WintunOpenAdapter', 'WintunReceivePacket',
     'WintunReleaseReceivePacket', 'WintunSendPacket', 'WintunSetLogger',
     'WintunStartSession'
@@ -130,6 +130,8 @@ $ownedInterfaceIndex = $null
 $m17GuestNetworkPathDocument = $null
 $capabilityEvidence = $null
 $tcpResources = [Collections.Generic.List[IDisposable]]::new()
+$usedTcpPorts = [Collections.Generic.HashSet[int]]::new()
+$activeProcess = $null
 
 function Invoke-Ferrum2HardKillRecovery {
     $issues = [Collections.Generic.List[string]]::new()
@@ -145,6 +147,7 @@ function Invoke-Ferrum2HardKillRecovery {
             $script:hardContext.active_process = $null
         } catch { $issues.Add("owned process: $($_.Exception.Message)") }
     }
+    $script:activeProcess = $null
     $processes = @(Get-ExactRunProcesses -WorkPath $script:work)
     foreach ($process in $processes) {
         try {

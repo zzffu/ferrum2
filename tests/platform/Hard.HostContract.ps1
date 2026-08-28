@@ -314,7 +314,7 @@ function Assert-HardKillExport(
     Assert-True (
         $items.Count -eq 8 -and
         (($items.Name | Sort-Object) -join "|") -ceq
-            (($script:expectedArtifactFiles | Sort-Object) -join "|") -and
+            (($expectedArtifactFiles | Sort-Object) -join "|") -and
         @($items | Where-Object {
             $_.PSIsContainer -or
             ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
@@ -335,7 +335,7 @@ function Assert-HardKillExport(
     $expectedTerminal = "m16_windows_hard_kill status=PASS cases=3/3 process_absent=PASS " +
         "adapter=ABSENT addresses=ABSENT routes=ABSENT dns=ABSENT " +
         "strict_route_wfp=ABSENT cleanup=PASS " +
-        "guest_build=$($Ledger.guest_build) run_token=$($script:RunToken) " +
+        "guest_build=$($Ledger.guest_build) run_token=$RunToken " +
         "candidate_sha=$CandidateSha probe_sha256=$($Ledger.probe_sha256) " +
         "identity_sha256=$IdentitySha256"
     $stdoutLines = @(Get-Content -LiteralPath $stdoutPath -Encoding utf8 -ErrorAction Stop)
@@ -363,7 +363,7 @@ function Assert-HardKillExport(
         $result.schema -ceq "ferrum2.windows-tun.hard-kill-result.v3" -and
         $result.status -ceq "pass" -and
         $result.mode -ceq "hard-kill" -and
-        $result.run_token -ceq $script:RunToken -and
+        $result.run_token -ceq $RunToken -and
         $result.identity_sha256 -ceq $IdentitySha256 -and
         $result.candidate_sha -ceq $CandidateSha -and
         $result.client_sha256 -ceq [string]$Ledger.client_sha256 -and
@@ -393,12 +393,12 @@ function Assert-HardKillExport(
     Assert-ExactObjectFields `
         -Expected $Ledger.support_listener `
         -Actual $result.support_listener `
-        -Fields $script:supportListenerPropertyNames `
+        -Fields $supportListenerPropertyNames `
         -Label "hard-kill result support listener"
     Assert-ExactObjectFields `
         -Expected $Ledger.topology `
         -Actual $result.topology `
-        -Fields $script:topologyPropertyNames `
+        -Fields $topologyPropertyNames `
         -Label "hard-kill result topology"
     Assert-Ferrum2ClosedProperties $result.guest_network_path @(
         "schema", "support_ipv4", "guest_ipv4", "guest_prefix_length",
@@ -451,14 +451,14 @@ function Assert-HardKillExport(
         $cleanup.schema -ceq "ferrum2.windows-tun.hard-kill-cleanup.v2" -and
         $cleanup.status -ceq "pass" -and
         $cleanup.source_profile -ceq "hard-kill" -and
-        $cleanup.run_token -ceq $script:RunToken -and
+        $cleanup.run_token -ceq $RunToken -and
         $cleanup.identity_sha256 -ceq $IdentitySha256 -and
         $cleanup.qualification_outcome -ceq "success"
     ) "exported hard-kill cleanup identity or outcome is invalid"
     Assert-ExactObjectFields `
         -Expected $Ledger.topology `
         -Actual $cleanup.topology `
-        -Fields $script:topologyPropertyNames `
+        -Fields $topologyPropertyNames `
         -Label "hard-kill cleanup topology"
     foreach ($name in $cleanupProperties[7..16]) {
         Assert-True (
@@ -481,7 +481,7 @@ function Assert-HardKillHostManifest(
         $item.Length -ge 2 -and $item.Length -le 2097152
     ) "hard-kill host manifest file boundary is invalid"
     $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes(
-        ($Expected | ConvertTo-Json -Depth 8) + "`n"
+        (($Expected | ConvertTo-Json -Depth 8) -replace "`r`n", "`n") + "`n"
     )
     $actualBytes = [IO.File]::ReadAllBytes($Path)
     Assert-True (
@@ -589,10 +589,10 @@ function Assert-HardKillHostManifest(
     Assert-True ($readback.evidence_files -is [object[]]) `
         "hard-kill host evidence_files must be a JSON array"
     Assert-ExactObjectFields -Expected $Expected.topology -Actual $readback.topology `
-        -Fields $script:topologyPropertyNames -Label "hard-kill host manifest topology"
+        -Fields $topologyPropertyNames -Label "hard-kill host manifest topology"
     Assert-ExactObjectFields `
         -Expected $Expected.support_listener -Actual $readback.support_listener `
-        -Fields $script:supportListenerPropertyNames `
+        -Fields $supportListenerPropertyNames `
         -Label "hard-kill host manifest support listener"
     Assert-UtcTimestamp $readback.started_utc "hard-kill host manifest started_utc"
     Assert-UtcTimestamp $readback.finished_utc "hard-kill host manifest finished_utc"

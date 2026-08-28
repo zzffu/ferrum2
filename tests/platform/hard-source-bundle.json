@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "tests/platform/Hard.HostContract.ps1",
-      "bytes": 35774,
-      "sha256": "b8a2e179893a043eb46678b1c61d682f147f0eb20ecc63e30bdbcb27a8390772"
+      "bytes": 35732,
+      "sha256": "7b82b9b5e8db9ef308d8fdc5772b30df56352e29bb99d4011bf724ed36cc65aa"
     },
     {
       "path": "tests/platform/Hard.HostController.ps1",
@@ -14,8 +14,8 @@
     },
     {
       "path": "tests/platform/Hard.HostTransaction.ps1",
-      "bytes": 25219,
-      "sha256": "dbc2a8dd31139866d3f9c6f34f842fa038ebed8da42c9825e0ed8456a81e395a"
+      "bytes": 25562,
+      "sha256": "f91c802f701284d4c7a691ed7f11d52f363deb2501af893e91c090dffc3b4327"
     },
     {
       "path": "tests/platform/invoke_windows_tun_hard_kill_guest.ps1",
@@ -128,5 +128,5 @@
       "sha256": "d6cfe0191ed6b53e431bab989b80f6fad2a29a7635e46db1b5f821ee56841e8a"
     }
   ],
-  "controller_bundle_sha256": "d699e23392d11df79e2f0b85737c743a77851773c01065c7a1a88218676d17b9"
+  "controller_bundle_sha256": "f794f3679c720efd50319be41a83618d8c3db7740dd650189c1b643806908209"
 }

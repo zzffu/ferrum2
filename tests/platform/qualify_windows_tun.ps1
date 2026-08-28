@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("network-reset", "restart-stress", "fragments", "dual-stack-dns", "udp-policy", "scheduler-ring-full")]
     [string]$Profile,
+    [ValidateRange(0, 10)] [int]$ValidationCycleLimit = 0,
     [string]$WintunZip,
     [string]$RunToken,
     [string]$IdentityLedger,

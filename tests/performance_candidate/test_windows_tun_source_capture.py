@@ -190,6 +190,33 @@ class WindowsTunSourceCaptureTests(unittest.TestCase):
         self.assertLess(result, diagnostic_exit)
         self.assertLess(diagnostic_exit, formal_evidence)
 
+    def test_script_validation_selects_bounded_pairs_and_skips_reduction(self) -> None:
+        source = self.source
+        raw_evidence = source.index('$rawEvidence =')
+        validation = source.index('if ($scriptValidationMode) {', raw_evidence)
+        reducer = source.index('$summaryArguments =', validation)
+
+        self.assertLess(raw_evidence, validation)
+        self.assertLess(validation, reducer)
+        self.assertIn("qualification = $false", source[validation:reducer])
+        self.assertIn("formal_plan_trials = @($plan.trials).Count", source)
+        self.assertIn(
+            "[int]$_.pair -le $scriptValidationPairCount",
+            self.host_vm_transaction,
+        )
+        self.assertIn(
+            "[int]$_.pair -le $ValidationPairCountValue",
+            self.guest_transaction,
+        )
+        self.assertIn(
+            "$executionTrials.Count -ne (18 * $scriptValidationPairCount)",
+            self.host_vm_transaction,
+        )
+        self.assertIn(
+            "$executionTrials.Count -ne (18 * $ValidationPairCountValue)",
+            self.guest_transaction,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

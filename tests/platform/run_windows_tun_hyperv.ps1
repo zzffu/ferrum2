@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('Core', 'Endurance', 'Release')]
     [string]$Suite,
+    [switch]$ValidationOnly,
+    [ValidateRange(1, 10)] [int]$ValidationCycleLimit = 1,
     [Parameter(Mandatory)]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,30}$')]
     [string]$CampaignToken,
@@ -38,6 +40,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+if (-not $ValidationOnly -and $PSBoundParameters.ContainsKey('ValidationCycleLimit')) {
+    throw 'ValidationCycleLimit requires ValidationOnly'
+}
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') `
     -ErrorAction Stop).Path
@@ -78,6 +83,8 @@ Import-Module (Join-Path $repositoryRoot `
 $context = [ordered]@{
     repository_root = $repositoryRoot
     suite = $Suite
+    validation_only = [bool]$ValidationOnly
+    validation_cycle_limit = $ValidationCycleLimit
     campaign_token = $CampaignToken
     identity_ledger = $IdentityLedger
     topology_plan_path = $TopologyPlanPath

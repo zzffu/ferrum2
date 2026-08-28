@@ -50,6 +50,13 @@ therefore requires manifest regeneration and fresh calibration review.
 
 Schema, recipe, source-path, source-hash, runner image, observed CPU/kernel stratum, or paired schedule changes require atomic producer/consumer updates. Linux trial schema v4 binds explicit units, deterministic cleanup, environment identity, and producer/controller/semantic-recipe/bundle digests. Both Linux and Windows use the pre-registered six-pair ABBA schedule; Windows therefore emits 108 ordinary trials. Any binding change makes existing calibration inapplicable until reviewed evidence is regenerated.
 
+The Windows runner's explicit `-ValidationOnly` mode is control-path evidence, not performance
+evidence. `-ValidationPairCount 1` executes one complete pair for each of the nine scenarios while
+retaining the canonical 108-trial plan as its reviewed input. Its result is
+`script-validation.json` with `qualification: false`; it skips summary reduction, calibration
+generation, adoption, and regression decisions. The ordinary runner continues to require all six
+pairs and exactly 108 trials.
+
 Closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`, `REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`. Only the first two are accepted. Invalid evidence exits 2, regression exits 3, and inconclusive or calibration-required results exit 4.
 
 ## Rule qualification evidence

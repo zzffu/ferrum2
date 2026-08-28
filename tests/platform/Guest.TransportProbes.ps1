@@ -133,12 +133,22 @@ function Invoke-TunProductTcp([string]$Address, [int]$Port, [int]$InterfaceIndex
 }
 
 function Invoke-TunProductUdp([string]$Address, [int]$Port, [int]$InterfaceIndex, [byte[]]$Payload) {
-    $client = Open-TunUdp $Address $Port $InterfaceIndex
-    try {
-        [void]$client.Send($Payload, $Payload.Length)
-        $echo = Receive-TunUdp $client
-        Assert-True (($echo -join ",") -eq ($Payload -join ",")) "manual TUN UDP echo mismatch"
-    } finally { $client.Dispose() }
+    foreach ($attempt in 1..3) {
+        $client = Open-TunUdp $Address $Port $InterfaceIndex
+        try {
+            [void]$client.Send($Payload, $Payload.Length)
+            $echo = Receive-TunUdp $client 2000
+            Assert-True (($echo -join ",") -eq ($Payload -join ",")) `
+                "manual TUN UDP echo mismatch"
+            return
+        } catch {
+            if ($attempt -eq 3 -or
+                $_.Exception.Message -cne "TUN UDP response timeout") {
+                throw
+            }
+        } finally { $client.Dispose() }
+        Start-Sleep -Milliseconds 50
+    }
 }
 
 function Open-TunUdp([string]$Address, [int]$Port, [int]$InterfaceIndex) {

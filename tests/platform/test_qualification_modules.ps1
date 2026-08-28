@@ -194,6 +194,23 @@ Assert-True ((@($restart.PSObject.Properties.Name) -join '|') -ceq
 $reset = Resolve-Ferrum2QualificationProfile -Profile 'network-reset'
 Assert-True ($reset.profile -ceq 'network-reset' -and $reset.cycle_limit -eq 1000 -and
     (@($reset.release_milestones) -join '|') -ceq '10|100|1000') 'network-reset profile mapping changed'
+$validationReset = Resolve-Ferrum2QualificationProfile -Profile 'network-reset' `
+    -ValidationCycleLimit 1
+$validationRestart = Resolve-Ferrum2QualificationProfile -Profile 'restart-stress' `
+    -ValidationCycleLimit 3
+$validationCore = Resolve-Ferrum2QualificationProfile -Profile 'fragments' `
+    -ValidationCycleLimit 3
+Assert-True ($validationReset.cycle_limit -eq 1 -and
+    (@($validationReset.release_milestones) -join '|') -ceq '1' -and
+    $validationRestart.cycle_limit -eq 3 -and
+    (@($validationRestart.release_milestones) -join '|') -ceq '1|3' -and
+    $validationCore.cycle_limit -eq 0 -and
+    @($validationCore.release_milestones).Count -eq 0) `
+    'script-validation profile mapping changed'
+Assert-Throws {
+    Resolve-Ferrum2QualificationProfile -Profile 'network-reset' `
+        -ValidationCycleLimit 11
+} 'script-validation cycle boundary'
 Assert-Throws { Resolve-Ferrum2QualificationProfile -Profile 'hard-kill' } `
     'hard-kill main-profile separation'
 
@@ -673,6 +690,8 @@ $mainRunnerAst = Get-ScriptAst $mainRunnerPath
 $mainRunnerParameters = @($mainRunnerAst.ParamBlock.Parameters |
     ForEach-Object { $_.Name.VariablePath.UserPath })
 Assert-True ('Suite' -cin $mainRunnerParameters -and
+    'ValidationOnly' -cin $mainRunnerParameters -and
+    'ValidationCycleLimit' -cin $mainRunnerParameters -and
     'CampaignToken' -cin $mainRunnerParameters -and
     'TopologyPlanPath' -cin $mainRunnerParameters -and
     @('Profile', 'ProbeOnly', 'InternalWorker', 'CandidateArtifactManifest' |
@@ -683,7 +702,8 @@ $workerAst = Get-ScriptAst (Join-Path $PSScriptRoot `
 $workerParameters = @($workerAst.ParamBlock.Parameters |
     ForEach-Object { $_.Name.VariablePath.UserPath })
 Assert-True (@('InternalWorker', 'InternalWorkerToken', 'Profile',
-        'CandidateArtifactManifest', 'TopologyPlanPath' | Where-Object {
+        'ValidationOnly', 'ValidationCycleLimit', 'CandidateArtifactManifest',
+        'TopologyPlanPath' | Where-Object {
             $_ -cnotin $workerParameters
         }).Count -eq 0) 'main capability worker contract is incomplete'
 
@@ -704,7 +724,9 @@ $performanceRunnerInterfaceParameters = @(
     $performanceRunnerInterfaceAst.ParamBlock.Parameters |
         ForEach-Object { $_.Name.VariablePath.UserPath }
 )
-Assert-True ('TopologyPlanPath' -cin $performanceRunnerInterfaceParameters) `
+Assert-True ('TopologyPlanPath' -cin $performanceRunnerInterfaceParameters -and
+    'ValidationOnly' -cin $performanceRunnerInterfaceParameters -and
+    'ValidationPairCount' -cin $performanceRunnerInterfaceParameters) `
     'performance runner does not expose the configured topology plan'
 $topologyReadonlyValues = @(Get-AstStringValue (Get-ScriptAst (Join-Path $repositoryRoot `
     'tools\windows-tun\lab\windows_tun_hyperv_support_topology_readonly.ps1')))

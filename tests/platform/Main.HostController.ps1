@@ -1,7 +1,8 @@
 param([Parameter(Mandatory)] [Collections.IDictionary]$Context)
 $expectedFields = @(
     'repository_root', 'internal_worker_token', 'candidate_artifact_manifest',
-    'profile', 'run_token', 'identity_ledger', 'topology_plan_path', 'topology_manifest_path',
+    'profile', 'validation_only', 'validation_cycle_limit', 'run_token',
+    'identity_ledger', 'topology_plan_path', 'topology_manifest_path',
     'topology_manifest_sha256', 'support_tcp_port', 'support_udp_port',
     'support_pid', 'support_owner', 'wintun_zip', 'powershell_zip',
     'evidence_directory', 'credential_path', 'readiness_timeout_seconds',
@@ -12,6 +13,8 @@ $repositoryRoot = [string]$Context.repository_root
 $internalWorkerToken = [string]$Context.internal_worker_token
 $candidateArtifactManifest = [string]$Context.candidate_artifact_manifest
 $qualificationProfile = [string]$Context.profile
+$validationOnly = [bool]$Context.validation_only
+$validationCycleLimit = [int]$Context.validation_cycle_limit
 $RunToken = [string]$Context.run_token
 $IdentityLedger = [string]$Context.identity_ledger
 $TopologyPlanPath = [string]$Context.topology_plan_path
@@ -77,7 +80,12 @@ $ledgerIdentity = Read-IdentityLedger `
     -ControllerBundleSha256 $controllerBundleManifest.controller_bundle_sha256 `
     -TopologyDocument $topologyDocument `
     -ExpectedSupportContext $supportHostBaseline
-$profileContract = Resolve-Ferrum2QualificationProfile -Profile $qualificationProfile
+$profileContract = if ($validationOnly) {
+    Resolve-Ferrum2QualificationProfile -Profile $qualificationProfile `
+        -ValidationCycleLimit $validationCycleLimit
+} else {
+    Resolve-Ferrum2QualificationProfile -Profile $qualificationProfile
+}
 $requestedCycleLimit = if ([long]$profileContract.cycle_limit -gt 0) {
     [long]$profileContract.cycle_limit
 } else { $null }
