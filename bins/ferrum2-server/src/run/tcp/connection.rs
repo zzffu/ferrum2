@@ -4,9 +4,7 @@ use ferrum2_core::{ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply a
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
-use ferrum2_runtime::{
-    CancellationToken, RelayRunError, RuntimeTcpStream, relay_lifecycle_buffered_inbound,
-};
+use ferrum2_runtime::{CancellationToken, RelayRunError, RuntimeTcpStream, relay_lifecycle};
 use ferrum2_shadowsocks::ShadowsocksTcpInbound;
 use ferrum2_shadowsocks::tokio::{TokioFramed, TokioTransport};
 
@@ -199,7 +197,7 @@ pub(super) async fn server_connection(
         .succeeded_socket(target_stream.local_socket_addr())
         .await;
     let mut framed = TokioFramed::new(stream);
-    let relay = relay_lifecycle_buffered_inbound(
+    let relay = relay_lifecycle(
         &mut framed,
         &mut target_stream,
         context.runtime.idle_timeout,

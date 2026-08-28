@@ -6,16 +6,14 @@ use ferrum2_core::{ConnectErrorKind, LocalEndpoint, SessionReply as _};
 use ferrum2_observability::{
     Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
-use ferrum2_runtime::{CancellationToken, relay_lifecycle, relay_lifecycle_buffered_outbound};
+use ferrum2_runtime::{CancellationToken, relay_lifecycle};
 use ferrum2_shadowsocks::ShadowsocksError;
 use ferrum2_shadowsocks::tokio::TokioFramed;
 use ferrum2_socks5::SocksCommand;
 use tokio::net::UdpSocket;
 
 use crate::run::context::{ClientContext, ClientRouting};
-use crate::run::egress::{
-    ClientOpenFailure, ClientPlanFailure, ClientRequestOrigin, ClientTcpFlow,
-};
+use crate::run::egress::{ClientOpenFailure, ClientPlanFailure, ClientRequestOrigin};
 use crate::run::observation::{finish_relay, observation_for_error, record_failure};
 use crate::run::routing::{ClientTerminalRoute, relay_hijacked_tcp};
 
@@ -219,36 +217,17 @@ pub(super) async fn client_connection(
         Stage::Socks5,
         Outcome::Accepted,
     ));
-    match flow {
-        ClientTcpFlow::Direct(direct) => {
-            let mut framed = TokioFramed::new(ClientTcpFlow::Direct(direct));
-            let relay = relay_lifecycle(
-                &mut stream,
-                &mut framed,
-                context.runtime.idle_timeout,
-                &context.registry,
-                cancellation.cancelled(),
-            )
-            .await;
-            context
-                .metrics
-                .active_connections_dec(Role::Client, Inbound::Socks5);
-            finish_relay(&context, &framed, relay);
-        }
-        ClientTcpFlow::Proxy(proxy) => {
-            let mut framed = TokioFramed::new(proxy);
-            let relay = relay_lifecycle_buffered_outbound(
-                &mut stream,
-                &mut framed,
-                context.runtime.idle_timeout,
-                &context.registry,
-                cancellation.cancelled(),
-            )
-            .await;
-            context
-                .metrics
-                .active_connections_dec(Role::Client, Inbound::Socks5);
-            finish_relay(&context, &framed, relay);
-        }
-    }
+    let mut framed = TokioFramed::new(flow);
+    let relay = relay_lifecycle(
+        &mut stream,
+        &mut framed,
+        context.runtime.idle_timeout,
+        &context.registry,
+        cancellation.cancelled(),
+    )
+    .await;
+    context
+        .metrics
+        .active_connections_dec(Role::Client, Inbound::Socks5);
+    finish_relay(&context, &framed, relay);
 }
