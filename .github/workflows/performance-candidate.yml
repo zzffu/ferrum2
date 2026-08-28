@@ -102,6 +102,17 @@ jobs:
           fetch-depth: 0
           clean: true
           persist-credentials: false
+      - name: Require preferred AMD performance host
+        shell: bash
+        run: |
+          set -euo pipefail
+          vendor_id="$(awk -F ': ' '/^vendor_id[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)"
+          cpu_model="$(awk -F ': ' '/^model name[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)"
+          if [ "$vendor_id" != AuthenticAMD ]; then
+            echo "::error::Performance qualification prefers an AMD host; observed ${vendor_id:-unknown} / ${cpu_model:-unknown}. Re-run this workflow to obtain an AMD runner."
+            exit 1
+          fi
+          printf 'Selected preferred AMD performance host: %s\n' "$cpu_model"
       - name: Bind exact parent and runner identity
         shell: bash
         run: |

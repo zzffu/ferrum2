@@ -69,9 +69,17 @@ class LinuxCalibrationTests(unittest.TestCase):
 
     def test_workflow_preflights_reviewed_comparison_host_before_build(self) -> None:
         workflow = self._workflow()
+        amd_name = "- name: Require preferred AMD performance host"
+        bind_name = "- name: Bind exact parent and runner identity"
         preflight_name = "- name: Preflight reviewed comparison host applicability"
         build_name = "- name: Prove parent and candidate correctness and build identities"
+        self.assertLess(workflow.index(amd_name), workflow.index(bind_name))
         self.assertLess(workflow.index(preflight_name), workflow.index(build_name))
+
+        amd_gate = workflow.split(amd_name, 1)[1].split(bind_name, 1)[0]
+        self.assertIn("/proc/cpuinfo", amd_gate)
+        self.assertIn("AuthenticAMD", amd_gate)
+        self.assertIn("exit 1", amd_gate)
 
         preflight = workflow.split(preflight_name, 1)[1].split(build_name, 1)[0]
         self.assertIn(
