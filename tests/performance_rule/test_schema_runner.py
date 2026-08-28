@@ -52,6 +52,43 @@ class SchemaAndRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ControlError, "p50"):
             validate_report(nonfinite, "abc")
 
+    def test_candidate_identity_is_closed_sorted_and_non_adopting(self):
+        enabled = report("abc")
+        enabled["candidate"]["enabled_features"] = [
+            "candidate-atomic-snapshot",
+            "candidate-cidr-radix",
+            "candidate-domain-suffix-trie",
+        ]
+        self.assertEqual(validate_report(enabled, "abc"), SCENARIO_SUITES)
+
+        for candidate, message in (
+            ({"enabled_features": []}, "fields"),
+            ({"adoption_claim": True, "enabled_features": []}, "adoption"),
+            (
+                {
+                    "adoption_claim": False,
+                    "enabled_features": ["candidate-domain-suffix-trie", "candidate-cidr-radix"],
+                },
+                "identity",
+            ),
+            (
+                {
+                    "adoption_claim": False,
+                    "enabled_features": ["candidate-cidr-radix", "candidate-cidr-radix"],
+                },
+                "identity",
+            ),
+            (
+                {"adoption_claim": False, "enabled_features": ["candidate-unknown"]},
+                "identity",
+            ),
+        ):
+            malformed = report("abc")
+            malformed["candidate"] = candidate
+            with self.subTest(candidate=candidate):
+                with self.assertRaisesRegex(ControlError, message):
+                    validate_report(malformed, "abc")
+
     def test_closed_json_rejects_duplicate_nonfinite_and_oversize_input(self):
         for payload, message in (
             (b'{"value":1,"value":2}', "duplicate"),

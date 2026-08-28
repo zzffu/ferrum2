@@ -23,7 +23,7 @@ RUNNER_CAPTURE_DRAIN_TIMEOUT_SECONDS = 5
 REPORT_FIELDS = frozenset(
     {
         "schema", "generated_unix_millis", "profile", "environment", "repository",
-        "runner", "configuration", "measurement_policy", "fixtures", "measurements",
+        "runner", "candidate", "configuration", "measurement_policy", "fixtures", "measurements",
         "parity_observations", "scenario_count", "correctness_passed",
         "allocation_gate_passed", "parity_gate_passed", "thresholds_passed",
     }
@@ -35,6 +35,14 @@ REPOSITORY_FIELDS = frozenset(
     {"git_head", "git_tree", "tree_state", "changed_entries", "status_sha256"}
 )
 RUNNER_FIELDS = frozenset({"sha256", "bytes"})
+CANDIDATE_FIELDS = frozenset({"adoption_claim", "enabled_features"})
+CANDIDATE_FEATURES = frozenset(
+    {
+        "candidate-atomic-snapshot",
+        "candidate-cidr-radix",
+        "candidate-domain-suffix-trie",
+    }
+)
 CONFIGURATION_FIELDS = frozenset(
     {"match_sizes", "route_sizes", "dns_rule_sizes", "samples", "base_iterations_per_sample", "includes_100k"}
 )
@@ -96,6 +104,7 @@ def _validate_closed_report_shape(report: Any) -> dict[str, Any]:
     exact_fields(report["environment"], ENVIRONMENT_FIELDS, label="runner environment")
     exact_fields(report["repository"], REPOSITORY_FIELDS, label="runner repository")
     exact_fields(report["runner"], RUNNER_FIELDS, label="runner identity")
+    exact_fields(report["candidate"], CANDIDATE_FIELDS, label="runner candidate evidence")
     exact_fields(report["configuration"], CONFIGURATION_FIELDS, label="runner configuration")
     exact_fields(
         report["measurement_policy"],
@@ -131,6 +140,17 @@ def validate_report(report: Any, expected_sha256: str) -> dict[str, str]:
     report = _validate_closed_report_shape(report)
     if report.get("schema") != RUNNER_SCHEMA:
         raise ControlError("runner emitted an unsupported JSON schema")
+    candidate = report["candidate"]
+    if candidate["adoption_claim"] is not False:
+        raise ControlError("runner candidate evidence must not claim adoption")
+    enabled_features = candidate["enabled_features"]
+    if (
+        not isinstance(enabled_features, list)
+        or any(not isinstance(feature, str) for feature in enabled_features)
+        or enabled_features != sorted(set(enabled_features))
+        or not set(enabled_features).issubset(CANDIDATE_FEATURES)
+    ):
+        raise ControlError("runner candidate feature identity is invalid")
     runner = report.get("runner")
     if not isinstance(runner, dict) or runner.get("sha256") != expected_sha256:
         raise ControlError("runner-reported SHA-256 does not match the executed binary")

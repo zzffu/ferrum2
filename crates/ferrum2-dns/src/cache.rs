@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
@@ -210,40 +211,169 @@ impl fmt::Debug for DnsCacheAnswer {
 struct DnsCacheEntry {
     answer: DnsCacheAnswer,
     expires_at: Instant,
+    serial: u64,
+}
+
+#[derive(Clone)]
+struct InsertionNode {
+    key: DnsCacheKey,
+    serial: u64,
+}
+
+#[derive(Clone)]
+struct ExpiryNode {
+    expires_at: Instant,
+    serial: u64,
+    key: DnsCacheKey,
+}
+
+impl PartialEq for ExpiryNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.expires_at == other.expires_at && self.serial == other.serial
+    }
+}
+
+impl Eq for ExpiryNode {}
+
+impl PartialOrd for ExpiryNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExpiryNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.expires_at
+            .cmp(&other.expires_at)
+            .then_with(|| self.serial.cmp(&other.serial))
+    }
 }
 
 struct DnsCacheState {
     capacity: usize,
     entries: HashMap<DnsCacheKey, DnsCacheEntry>,
-    insertion_order: VecDeque<DnsCacheKey>,
+    insertion_order: VecDeque<InsertionNode>,
+    expiry_order: BinaryHeap<Reverse<ExpiryNode>>,
+    next_serial: u64,
     observer: Option<Arc<dyn DnsCacheObserver>>,
+    cache_scan_entries: u64,
 }
 
 impl DnsCacheState {
+    fn record_scan(&mut self, entries: usize) {
+        self.cache_scan_entries = self
+            .cache_scan_entries
+            .saturating_add(u64::try_from(entries).unwrap_or(u64::MAX));
+    }
+
     fn remove(&mut self, key: &DnsCacheKey) {
         self.entries.remove(key);
-        if let Some(index) = self
-            .insertion_order
-            .iter()
-            .position(|candidate| candidate == key)
-        {
-            self.insertion_order.remove(index);
-        }
     }
 
     fn purge_expired(&mut self, now: Instant) {
-        self.entries.retain(|_, entry| entry.expires_at > now);
-        let entries = &self.entries;
-        self.insertion_order.retain(|key| entries.contains_key(key));
+        while self
+            .expiry_order
+            .peek()
+            .is_some_and(|Reverse(node)| node.expires_at <= now)
+        {
+            let Reverse(node) = self
+                .expiry_order
+                .pop()
+                .expect("peeked DNS cache expiry node");
+            self.record_scan(1);
+            let is_current = self
+                .entries
+                .get(&node.key)
+                .is_some_and(|entry| entry.serial == node.serial && entry.expires_at <= now);
+            if is_current {
+                self.entries.remove(&node.key);
+            }
+        }
+        self.maybe_rebuild_indexes();
     }
 
     fn evict_until_available(&mut self) {
         while self.entries.len() >= self.capacity {
             let Some(oldest) = self.insertion_order.pop_front() else {
-                break;
+                self.rebuild_indexes();
+                continue;
             };
-            self.entries.remove(&oldest);
+            self.record_scan(1);
+            let is_current = self
+                .entries
+                .get(&oldest.key)
+                .is_some_and(|entry| entry.serial == oldest.serial);
+            if is_current {
+                self.entries.remove(&oldest.key);
+            }
         }
+    }
+
+    fn allocate_serial(&mut self) -> u64 {
+        if self.next_serial == u64::MAX {
+            self.renumber_serials();
+        }
+        let serial = self.next_serial;
+        self.next_serial = self
+            .next_serial
+            .checked_add(1)
+            .expect("bounded DNS cache exhausted serial space");
+        serial
+    }
+
+    fn renumber_serials(&mut self) {
+        self.record_scan(self.entries.len().saturating_mul(2));
+        let mut keys = self
+            .entries
+            .iter()
+            .map(|(key, entry)| (entry.serial, key.clone()))
+            .collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|(serial, _)| *serial);
+        for (serial, (_, key)) in keys.iter().enumerate() {
+            self.entries
+                .get_mut(key)
+                .expect("DNS cache key collected from entries")
+                .serial = u64::try_from(serial).expect("DNS cache capacity fits u64");
+        }
+        self.next_serial = u64::try_from(keys.len()).expect("DNS cache capacity fits u64");
+        self.rebuild_indexes();
+    }
+
+    fn maybe_rebuild_indexes(&mut self) {
+        if self.entries.is_empty() {
+            self.insertion_order.clear();
+            self.expiry_order.clear();
+            return;
+        }
+        let rebuild_limit = self.entries.len().saturating_mul(2).saturating_add(1);
+        if self.insertion_order.len() > rebuild_limit || self.expiry_order.len() > rebuild_limit {
+            self.rebuild_indexes();
+        }
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.record_scan(self.entries.len().saturating_mul(2));
+        let mut insertion_order = self
+            .entries
+            .iter()
+            .map(|(key, entry)| InsertionNode {
+                key: key.clone(),
+                serial: entry.serial,
+            })
+            .collect::<Vec<_>>();
+        insertion_order.sort_unstable_by_key(|node| node.serial);
+        self.insertion_order = insertion_order.into();
+        self.expiry_order = self
+            .entries
+            .iter()
+            .map(|(key, entry)| {
+                Reverse(ExpiryNode {
+                    expires_at: entry.expires_at,
+                    serial: entry.serial,
+                    key: key.clone(),
+                })
+            })
+            .collect();
     }
 }
 
@@ -258,6 +388,13 @@ pub struct DnsCache {
 pub enum DnsCacheLookup {
     Hit,
     Miss,
+}
+
+/// Identity-free cumulative work observed inside the cache indexes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DnsCacheWorkSnapshot {
+    /// Expiry, eviction, renumbering, and rebuild index entries examined.
+    pub cache_scan_entries: u64,
 }
 
 /// Identity-free observer for cache lookups.
@@ -286,12 +423,19 @@ impl DnsCache {
         insertion_order
             .try_reserve(capacity)
             .map_err(|_| DnsCacheError::Allocation)?;
+        let mut expiry_order = BinaryHeap::new();
+        expiry_order
+            .try_reserve(capacity)
+            .map_err(|_| DnsCacheError::Allocation)?;
         Ok(Self {
             state: Arc::new(Mutex::new(DnsCacheState {
                 capacity,
                 entries,
                 insertion_order,
+                expiry_order,
+                next_serial: 0,
                 observer: None,
+                cache_scan_entries: 0,
             })),
         })
     }
@@ -310,6 +454,13 @@ impl DnsCache {
         Ok(self.lock()?.capacity)
     }
 
+    /// Returns cumulative identity-free index work for qualification tooling.
+    pub fn work_snapshot(&self) -> Result<DnsCacheWorkSnapshot, DnsCacheError> {
+        Ok(DnsCacheWorkSnapshot {
+            cache_scan_entries: self.lock()?.cache_scan_entries,
+        })
+    }
+
     /// Returns a live answer and lazily removes this key when expired.
     pub fn get(
         &self,
@@ -324,6 +475,7 @@ impl DnsCache {
                 .is_some_and(|entry| entry.expires_at <= now);
             if expired {
                 state.remove(key);
+                state.maybe_rebuild_indexes();
             }
             (
                 state.entries.get(key).map(|entry| entry.answer.clone()),
@@ -386,13 +538,29 @@ impl DnsCache {
         state.purge_expired(now);
         state.remove(&key);
         if ttl.is_zero() {
+            state.maybe_rebuild_indexes();
             return Ok(());
         }
         state.evict_until_available();
-        state.insertion_order.push_back(key.clone());
-        state
-            .entries
-            .insert(key, DnsCacheEntry { answer, expires_at });
+        let serial = state.allocate_serial();
+        state.insertion_order.push_back(InsertionNode {
+            key: key.clone(),
+            serial,
+        });
+        state.expiry_order.push(Reverse(ExpiryNode {
+            expires_at,
+            serial,
+            key: key.clone(),
+        }));
+        state.entries.insert(
+            key,
+            DnsCacheEntry {
+                answer,
+                expires_at,
+                serial,
+            },
+        );
+        state.maybe_rebuild_indexes();
         Ok(())
     }
 
@@ -432,3 +600,120 @@ impl fmt::Display for DnsCacheError {
 }
 
 impl std::error::Error for DnsCacheError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(name: &str) -> DnsCacheKey {
+        DnsCacheKey::new(
+            DnsServerId::new(1),
+            CanonicalDomain::new(name).expect("cache test domain"),
+            DnsCacheQtype::A,
+            ResolverGeneration::new(1),
+        )
+    }
+
+    fn records(octet: u8) -> DnsAddressRecords {
+        DnsAddressRecords::A(Arc::from([Ipv4Addr::new(192, 0, 2, octet)]))
+    }
+
+    #[test]
+    fn replacement_serial_prevents_stale_expiry_from_removing_the_new_answer() {
+        let cache =
+            DnsCache::try_new(NonZeroUsize::new(2).expect("cache capacity")).expect("cache");
+        let now = Instant::now();
+        let key = key("replace.example");
+        cache
+            .insert_positive(key.clone(), records(1), Duration::from_secs(1), now)
+            .expect("first answer");
+        cache
+            .insert_positive(key.clone(), records(2), Duration::from_secs(10), now)
+            .expect("replacement answer");
+
+        assert_eq!(
+            cache
+                .get(&key, now + Duration::from_secs(2))
+                .expect("replacement lookup"),
+            Some(DnsCacheAnswer::Positive(records(2)))
+        );
+    }
+
+    #[test]
+    fn eviction_skips_stale_queue_nodes_and_uses_current_insertion_order() {
+        let cache =
+            DnsCache::try_new(NonZeroUsize::new(2).expect("cache capacity")).expect("cache");
+        let now = Instant::now();
+        let first = key("first.example");
+        let second = key("second.example");
+        let third = key("third.example");
+        for (key, octet) in [(&first, 1), (&second, 2), (&first, 3), (&third, 4)] {
+            cache
+                .insert_positive(key.clone(), records(octet), Duration::from_secs(60), now)
+                .expect("cache insert");
+        }
+
+        assert_eq!(cache.get(&second, now).expect("evicted lookup"), None);
+        assert_eq!(
+            cache.get(&first, now).expect("replacement lookup"),
+            Some(DnsCacheAnswer::Positive(records(3)))
+        );
+        assert!(cache.get(&third, now).expect("newest lookup").is_some());
+    }
+
+    #[test]
+    fn expiry_heap_work_tracks_only_due_nodes() {
+        let cache =
+            DnsCache::try_new(NonZeroUsize::new(4).expect("cache capacity")).expect("cache");
+        let now = Instant::now();
+        let first = key("expires-first.example");
+        let second = key("expires-second.example");
+        let third = key("expires-third.example");
+        for (key, ttl, octet) in [(&first, 1, 1), (&second, 3, 2), (&third, 5, 3)] {
+            cache
+                .insert_positive(key.clone(), records(octet), Duration::from_secs(ttl), now)
+                .expect("cache insert");
+        }
+
+        assert_eq!(
+            cache
+                .entry_count(now + Duration::from_secs(3))
+                .expect("expiry purge"),
+            1
+        );
+        assert_eq!(cache.get(&first, now).expect("first expired"), None);
+        assert_eq!(cache.get(&second, now).expect("second expired"), None);
+        assert!(cache.get(&third, now).expect("third live").is_some());
+        assert_eq!(
+            cache
+                .work_snapshot()
+                .expect("work snapshot")
+                .cache_scan_entries,
+            2
+        );
+    }
+
+    #[test]
+    fn repeated_replacement_rebuilds_stale_indexes_with_a_hard_bound() {
+        let cache =
+            DnsCache::try_new(NonZeroUsize::new(64).expect("cache capacity")).expect("cache");
+        let now = Instant::now();
+        let key = key("stale.example");
+        for octet in 1..=100 {
+            cache
+                .insert_positive(
+                    key.clone(),
+                    records(octet),
+                    Duration::from_secs(60 + u64::from(octet)),
+                    now,
+                )
+                .expect("replacement insert");
+        }
+
+        let state = cache.lock().expect("cache state");
+        let limit = state.entries.len() * 2 + 1;
+        assert_eq!(state.entries.len(), 1);
+        assert!(state.insertion_order.len() <= limit);
+        assert!(state.expiry_order.len() <= limit);
+    }
+}

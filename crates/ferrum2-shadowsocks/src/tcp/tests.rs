@@ -11,10 +11,12 @@ use ferrum2_crypto::{
 use super::error::{
     OneShotCipherFault, frame_from_open_aead, frame_from_seal_aead, terminate_detection,
 };
-use super::flow::{Lifecycle, protocol_cipher_boundary};
+use super::flow::{Lifecycle, prepare_decrypt, protocol_cipher_boundary};
 use super::observe::{NOOP_OBSERVER, fixed_scratch};
 use super::replay::{MIN_REPLAY_CAPACITY, ReplayInsertError};
-use super::wire::{open_data_frame_into, opener_for, seal_data_chunk_into, sealer_for};
+use super::wire::{
+    ENCRYPTED_LENGTH_LEN, open_data_frame_into, opener_for, seal_data_chunk_into, sealer_for,
+};
 use super::*;
 #[derive(Default)]
 struct CountingFlowObserver {
@@ -158,15 +160,26 @@ fn server_open_nonce_flow_internal_contract() {
 fn encrypt_scratch_capacity_flow_internal_contract() {
     let keys = provider();
     let mut sealer = sealer_for(&keys, &salt(1)).expect("sealer");
+    let mut expected_sealer = sealer_for(&keys, &salt(1)).expect("expected sealer");
     let mut scratch = fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, &NOOP_OBSERVER);
     let identity = scratch.as_ptr() as usize;
     let capacity = scratch.capacity();
 
-    for payload in [Vec::new(), vec![0x5a; MAX_ENCODE_PAYLOAD_LEN]]
-        .into_iter()
-        .chain((0_u8..32).map(|value| vec![value]))
+    for payload in [
+        Vec::new(),
+        vec![0x5a; 1024],
+        vec![0x5a; 4096],
+        vec![0x5a; 16 * 1024],
+        vec![0x5a; MAX_ENCODE_PAYLOAD_LEN],
+    ]
+    .into_iter()
+    .chain((0_u8..32).map(|value| vec![value]))
     {
+        let (expected_length, expected_payload) = encrypted_frame(&mut expected_sealer, &payload);
         seal_data_chunk_into(&mut sealer, &payload, &mut scratch).expect("seal frame");
+
+        assert_eq!(&scratch[..ENCRYPTED_LENGTH_LEN], expected_length.as_ref());
+        assert_eq!(&scratch[ENCRYPTED_LENGTH_LEN..], expected_payload.as_ref());
         assert_scratch_unchanged(&scratch, identity, capacity);
     }
 }
@@ -191,6 +204,34 @@ fn decrypt_scratch_capacity_flow_internal_contract() {
         assert_eq!(scratch.as_ref(), payload);
         assert_scratch_unchanged(&scratch, identity, capacity);
     }
+}
+
+#[test]
+fn decrypt_prepare_exposes_no_initialized_bytes_and_reuses_capacity() {
+    let mut scratch = fixed_scratch(BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN, &NOOP_OBSERVER);
+    let identity = scratch.as_ptr() as usize;
+    let capacity = scratch.capacity();
+
+    for exact_len in [
+        REQUEST_FIRST_READ_LEN,
+        ENCRYPTED_LENGTH_LEN,
+        1 + TAG_LEN,
+        1024 + TAG_LEN,
+        4096 + TAG_LEN,
+        16 * 1024 + TAG_LEN,
+        MAX_DECRYPT_WIRE_LEN,
+        ENCRYPTED_LENGTH_LEN,
+    ] {
+        prepare_decrypt(&mut scratch, exact_len);
+
+        assert!(scratch.is_empty());
+        assert_scratch_unchanged(&scratch, identity, capacity);
+        scratch.resize(exact_len, 0xa5);
+    }
+
+    scratch.clear();
+    assert!(scratch.is_empty(), "handoff exposes no stale frame range");
+    assert_scratch_unchanged(&scratch, identity, capacity);
 }
 
 #[test]

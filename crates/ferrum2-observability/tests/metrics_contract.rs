@@ -100,6 +100,31 @@ fn prebound_udp_datagram_grid_keeps_every_closed_tuple_distinct() {
 }
 
 #[test]
+fn dns_udp_pool_metrics_are_identity_free_and_balance_inflight() {
+    let metrics = Metrics::new();
+    metrics.dns_udp_request_started();
+    metrics.dns_udp_request_started();
+    metrics.set_dns_udp_inflight_peak(2);
+    metrics.dns_udp_request_completed();
+    metrics.dns_udp_request_completed();
+    metrics.dns_udp_pool_drop();
+    metrics.dns_udp_encode_failure();
+
+    let output = metrics.encode_text().expect("DNS UDP metrics");
+    assert!(output.contains("ferrum2_dns_udp_requests_total 2"));
+    assert!(output.contains("ferrum2_dns_udp_inflight 0"));
+    assert!(output.contains("ferrum2_dns_udp_inflight_peak 2"));
+    assert!(output.contains("ferrum2_dns_udp_pool_drops_total 1"));
+    assert!(output.contains("ferrum2_dns_udp_encode_failures_total 1"));
+    for line in output
+        .lines()
+        .filter(|line| line.starts_with("ferrum2_dns_udp_"))
+    {
+        assert!(!line.contains('{'));
+    }
+}
+
+#[test]
 fn registry_preserves_the_fourteen_stable_families_and_allows_additions() {
     let metrics = Metrics::new();
     metrics.connection(Role::Client, Inbound::Socks5, Outcome::Accepted);

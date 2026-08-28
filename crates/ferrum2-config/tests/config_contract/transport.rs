@@ -1,6 +1,65 @@
 use super::support::*;
 
 #[test]
+fn network_generation_mode_defaults_dynamic_and_static_is_explicitly_non_tun() {
+    let client_default = validated_client(TempConfig::text(CLIENT_BASE).path()).unwrap();
+    let server_default = validated_server(TempConfig::text(SERVER_BASE).path()).unwrap();
+    assert_eq!(
+        client_default.runtime.network_generation,
+        NetworkGenerationMode::Dynamic
+    );
+    assert_eq!(
+        server_default.runtime.network_generation,
+        NetworkGenerationMode::Dynamic
+    );
+
+    let client_static = validated_client(
+        TempConfig::text(&format!(
+            "{CLIENT_BASE}\n[runtime]\nnetwork_generation = \"static\"\n"
+        ))
+        .path(),
+    )
+    .unwrap();
+    let server_static = validated_server(
+        TempConfig::text(&format!(
+            "{SERVER_BASE}\n[runtime]\nnetwork_generation = \"static\"\n"
+        ))
+        .path(),
+    )
+    .unwrap();
+    assert_eq!(
+        client_static.runtime.network_generation,
+        NetworkGenerationMode::Static
+    );
+    assert_eq!(
+        server_static.runtime.network_generation,
+        NetworkGenerationMode::Static
+    );
+
+    let invalid = validated_client(
+        TempConfig::text(&format!(
+            "{CLIENT_BASE}\n[runtime]\nnetwork_generation = \"adaptive\"\n"
+        ))
+        .path(),
+    )
+    .err()
+    .expect("unknown network generation mode");
+    assert_eq!(invalid.kind(), ConfigErrorKind::Semantic);
+    assert_eq!(invalid.field(), ConfigField::RuntimeNetworkGeneration);
+
+    let tun = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\noutbound = \"proxy\"";
+    let static_tun = format!(
+        "{}\n[runtime]\nnetwork_generation = \"static\"\n",
+        tun_client(tun)
+    );
+    let error = validated_client(TempConfig::text(&static_tun).path())
+        .err()
+        .expect("static generation mode rejects TUN");
+    assert_eq!(error.kind(), ConfigErrorKind::Semantic);
+    assert_eq!(error.field(), ConfigField::RuntimeNetworkGeneration);
+}
+
+#[test]
 fn client_udp_is_explicit_and_reuses_server_defaults_boundaries_and_errors() {
     let cases = [
         ("empty", "", (true, 4_096, 16_777_216, 300_000)),
@@ -58,6 +117,46 @@ fn client_udp_is_explicit_and_reuses_server_defaults_boundaries_and_errors() {
         assert_eq!(error.kind(), ConfigErrorKind::Semantic, "{name}");
         assert_eq!(error.field(), expected, "{name}");
     }
+}
+
+#[test]
+fn udp_receive_workers_are_bounded_server_only_and_default_to_one() {
+    let client =
+        validated_client(TempConfig::text(&format!("{CLIENT_BASE}\n[udp]\n")).path()).unwrap();
+    let server = validated_server(TempConfig::text(SERVER_BASE).path()).unwrap();
+    assert_eq!(client.udp.expect("client UDP").receive_workers, 1);
+    assert_eq!(server.udp.receive_workers, 1);
+
+    let server_workers = validated_server(
+        TempConfig::text(&format!(
+            "{SERVER_BASE}\n[udp]\nreceive_workers = {}\n",
+            MAX_UDP_RECEIVE_WORKERS
+        ))
+        .path(),
+    )
+    .unwrap();
+    assert_eq!(server_workers.udp.receive_workers, MAX_UDP_RECEIVE_WORKERS);
+
+    for value in [0, MAX_UDP_RECEIVE_WORKERS + 1] {
+        let error = validated_server(
+            TempConfig::text(&format!(
+                "{SERVER_BASE}\n[udp]\nreceive_workers = {value}\n"
+            ))
+            .path(),
+        )
+        .err()
+        .expect("out-of-range worker count");
+        assert_eq!(error.kind(), ConfigErrorKind::Semantic);
+        assert_eq!(error.field(), ConfigField::UdpReceiveWorkers);
+    }
+
+    let client_error = validated_client(
+        TempConfig::text(&format!("{CLIENT_BASE}\n[udp]\nreceive_workers = 2\n")).path(),
+    )
+    .err()
+    .expect("client cannot configure server receive workers");
+    assert_eq!(client_error.kind(), ConfigErrorKind::Semantic);
+    assert_eq!(client_error.field(), ConfigField::UdpReceiveWorkers);
 }
 
 #[test]

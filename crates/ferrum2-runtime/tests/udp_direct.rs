@@ -52,6 +52,10 @@ async fn direct_socket_factory_receives_explicit_context_and_first_concrete_dest
         .await
         .expect("target-aware socket admission");
 
+    let admitted = registry.snapshot();
+    assert_eq!(admitted.udp_scratch_buffers, 1);
+    assert_eq!(admitted.udp_buffered_bytes, MAX_UDP_WIRE_DATAGRAM_BYTES + 7);
+
     assert_eq!(
         selections
             .lock()
@@ -61,6 +65,8 @@ async fn direct_socket_factory_receives_explicit_context_and_first_concrete_dest
     );
     assert_eq!(contexts.lock().expect("open contexts").as_slice(), &[41]);
     drop(admission);
+    assert_eq!(registry.snapshot().udp_scratch_buffers, 0);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
     runtime.shutdown(Duration::ZERO).await;
     wait_for_zero_udp_owners(&registry).await;
 }
@@ -447,10 +453,185 @@ async fn direct_response_awaits_handler_without_creating_a_queue_owner() {
     assert_eq!(handling.udp_sockets, 1);
     assert_eq!(handling.udp_tasks, 1);
     assert_eq!(handling.udp_queued_datagrams, 0);
-    assert_eq!(handling.udp_buffered_bytes, MAX_UDP_WIRE_DATAGRAM_BYTES);
-    assert_eq!(handling.udp_scratch_buffers, 0);
+    assert_eq!(
+        handling.udp_buffered_bytes,
+        MAX_UDP_WIRE_DATAGRAM_BYTES + b"reply".len()
+    );
+    assert_eq!(handling.udp_scratch_buffers, 1);
 
     assert_eq!(runtime.shutdown(Duration::ZERO).await, 1);
+    wait_for_zero_udp_owners(&registry).await;
+}
+
+#[tokio::test]
+async fn direct_response_reuses_one_scratch_across_would_block_and_charges_exact_payload() {
+    #[derive(Clone)]
+    struct InspectingHandler {
+        capacities: Arc<Mutex<Vec<usize>>>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl DirectUdpPacketHandler for InspectingHandler {
+        type Error = ();
+
+        async fn handle_target_response(
+            &self,
+            _session: UdpSessionHandle,
+            response: AccountedDatagram,
+        ) -> Result<(), Self::Error> {
+            self.capacities
+                .lock()
+                .expect("capacity lock")
+                .push(response.allocated_capacity());
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    let registry = OwnerRegistry::new();
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    let responses = Arc::clone(&socket.responses);
+    let response_ready = Arc::clone(&socket.response_ready);
+    let send_completed = Arc::clone(&socket.send_completed);
+    let capacities = Arc::new(Mutex::new(Vec::new()));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        Duration::from_secs(10),
+        empty_resolver(),
+        scripted_factory(socket),
+        InspectingHandler {
+            capacities: Arc::clone(&capacities),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        },
+        registry.clone(),
+    );
+    let admission = runtime
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .expect("reserve direct session");
+    let handle = runtime
+        .commit_session(admission, ip_datagram(b"request"), Instant::now())
+        .expect("commit direct session");
+    send_completed.notified().await;
+
+    response_ready.notify_one();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    let after_would_block = registry.snapshot();
+    assert_eq!(after_would_block.udp_scratch_buffers, 1);
+    assert_eq!(
+        after_would_block.udp_buffered_bytes,
+        MAX_UDP_WIRE_DATAGRAM_BYTES
+    );
+    assert!(capacities.lock().expect("capacity lock").is_empty());
+
+    responses
+        .lock()
+        .expect("response lock")
+        .push_back((vec![0x5a; 128], SocketAddr::from(([127, 0, 0, 1], 9000))));
+    response_ready.notify_one();
+    entered.notified().await;
+
+    assert_eq!(capacities.lock().expect("capacity lock").as_slice(), &[128]);
+    let handling = registry.snapshot();
+    assert_eq!(handling.udp_scratch_buffers, 1);
+    assert_eq!(
+        handling.udp_buffered_bytes,
+        MAX_UDP_WIRE_DATAGRAM_BYTES + 128
+    );
+
+    release.notify_one();
+    assert!(runtime.remove_session(handle));
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
+    wait_for_zero_udp_owners(&registry).await;
+}
+
+#[tokio::test]
+async fn cancelling_an_exact_response_budget_wait_releases_the_session_scratch() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let budget = manager.buffer_budget();
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    let responses = Arc::clone(&socket.responses);
+    let response_ready = Arc::clone(&socket.response_ready);
+    let send_completed = Arc::clone(&socket.send_completed);
+    let handled = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = DirectUdpRuntime::with_shared_adapters(
+        manager,
+        Duration::from_secs(10),
+        empty_resolver(),
+        scripted_factory(socket),
+        RecordingHandler {
+            responses: Arc::clone(&handled),
+            entered: Arc::new(Notify::new()),
+            block: false,
+        },
+        registry.clone(),
+    );
+    let admission = runtime
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .expect("reserve direct session");
+    let handle = runtime
+        .commit_session(admission, ip_datagram(b"request"), Instant::now())
+        .expect("commit direct session");
+    send_completed.notified().await;
+
+    let mut held = Vec::new();
+    loop {
+        let remaining = MIN_UDP_MAX_BUFFERED_BYTES - budget.reserved_bytes();
+        if remaining == 0 {
+            break;
+        }
+        held.push(
+            budget
+                .reserve(remaining.min(MAX_UDP_WIRE_DATAGRAM_BYTES))
+                .expect("fill exact response budget"),
+        );
+    }
+    responses
+        .lock()
+        .expect("response lock")
+        .push_back((vec![0x5a; 128], SocketAddr::from(([127, 0, 0, 1], 9000))));
+    response_ready.notify_one();
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(handled.lock().expect("handler lock").is_empty());
+    assert_eq!(registry.snapshot().udp_scratch_buffers, 1);
+    assert_eq!(budget.reserved_bytes(), MIN_UDP_MAX_BUFFERED_BYTES);
+
+    assert!(runtime.remove_session(handle));
+    for _ in 0..200 {
+        let snapshot = registry.snapshot();
+        if snapshot.udp_sessions == 0
+            && snapshot.udp_sockets == 0
+            && snapshot.udp_tasks == 0
+            && snapshot.udp_scratch_buffers == 0
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let cancelled = registry.snapshot();
+    assert_eq!(cancelled.udp_sessions, 0);
+    assert_eq!(cancelled.udp_sockets, 0);
+    assert_eq!(cancelled.udp_tasks, 0);
+    assert_eq!(cancelled.udp_scratch_buffers, 0);
+    assert_eq!(
+        budget.reserved_bytes(),
+        held.iter().map(|reservation| reservation.capacity()).sum()
+    );
+
+    drop(held);
+    assert_eq!(budget.reserved_bytes(), 0);
+    assert_eq!(runtime.shutdown(Duration::ZERO).await, 0);
     wait_for_zero_udp_owners(&registry).await;
 }
 

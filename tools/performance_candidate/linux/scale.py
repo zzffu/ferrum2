@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from tools.performance_candidate.identity import COMMIT_SHA
 from tools.performance_candidate.json_contract import CandidateControlError, SHA256, _exact_fields, _scale_decimal, read_bounded_closed_json
+from tools.performance_candidate.linux.environment import (
+    MEMORY_CAPACITY_QUANTUM_KIB,
+    calibration_environments_match,
+)
 
 import pathlib
 from decimal import Decimal
@@ -16,7 +20,20 @@ SCALE_SAFETY_POLICY_MAX_BYTES = 64 * 1024
 SCALE_SCENARIO = "tcp-scale-10k"
 
 
-SCALE_POLICY_SCHEMA_VERSION = 2
+SCALE_POLICY_SCHEMA_VERSION = 3
+
+
+SCALE_OBSERVED_ENVIRONMENT_FIELDS = frozenset(
+    {
+        "runner_image",
+        "rustc",
+        "kernel",
+        "cpu_model",
+        "cpu_count",
+        "memory_kib",
+        "build_profile",
+    }
+)
 
 
 SCALE_RECIPE = {
@@ -217,6 +234,7 @@ def _scale_scenario_entry() -> dict[str, object]:
         "direction": "higher_is_better",
         "topology": "shadowsocks",
         "application_payload_bytes": SCALE_RECIPE["payload_bytes"],
+        "workload_scale": None,
         "socks_datagram_bytes": None,
         "upstream_wire_bytes": None,
     }
@@ -274,6 +292,10 @@ def validate_scale_safety_policy(policy: dict[str, object]) -> None:
         for field in ("cpu_count", "memory_kib"):
             if type(calibration_environment[field]) is not int or calibration_environment[field] <= 0:
                 raise CandidateControlError(f"scale calibration_environment {field} is invalid")
+        if calibration_environment["memory_kib"] % MEMORY_CAPACITY_QUANTUM_KIB != 0:
+            raise CandidateControlError(
+                "scale calibration_environment memory_kib must be a 64 MiB capacity anchor"
+            )
     exact_integers = {
         "required_pairs": 6,
         "required_sessions": 10_000,
@@ -318,8 +340,14 @@ def scale_policy_is_applicable(
 ) -> bool:
     validate_scale_safety_policy(policy)
     environment = policy["calibration_environment"]
+    if (
+        environment is None
+        or type(observed_environment) is not dict
+        or set(observed_environment) != SCALE_OBSERVED_ENVIRONMENT_FIELDS
+    ):
+        return False
     contract = scenario_plan["evidence_contract"]
-    return environment == {
+    expected_environment = {
         "runner_image": contract["runner_image"],
         "pair_schedule": "abba-six-pairs",
         "required_pairs": 6,
@@ -334,6 +362,7 @@ def scale_policy_is_applicable(
         },
         **observed_environment,
     }
+    return calibration_environments_match(environment, expected_environment)
 
 
 def load_scale_safety_policy(path: pathlib.Path) -> dict[str, object]:

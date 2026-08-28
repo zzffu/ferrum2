@@ -81,29 +81,28 @@ where
             .capability(session)
             .await
             .ok_or(UdpAdapterError)?;
-        let encoded = loop {
-            let returned = self.codec.returned.notified();
-            match self.codec.try_encode(
+        let encoded = match self
+            .codec
+            .encode(
                 &self.protocol,
                 capability,
                 self.clock.as_ref(),
                 response.datagram(),
-            ) {
-                Ok(Some(encoded)) => break encoded,
-                Ok(None) => returned.await,
-                Err(ResponseEncodeError::Protocol(error)) => {
-                    self.mappings.invalidate_handle(session);
-                    record_udp_protocol_failure(&self.metrics, error);
-                    return Err(UdpAdapterError);
-                }
-                Err(ResponseEncodeError::Runtime(error)) => {
-                    record_udp_runtime_failure(&self.metrics, error);
-                    return Err(UdpAdapterError);
-                }
+            )
+            .await
+        {
+            Ok(encoded) => encoded,
+            Err(ResponseEncodeError::Protocol(error)) => {
+                self.mappings.invalidate_handle(session);
+                record_udp_protocol_failure(&self.metrics, error);
+                return Err(UdpAdapterError);
+            }
+            Err(ResponseEncodeError::Runtime(error)) => {
+                record_udp_runtime_failure(&self.metrics, error);
+                return Err(UdpAdapterError);
             }
         };
         drop(response);
-        self.codec.notify_capacity_change();
         let wire_len = encoded.wire_len;
         self.listener
             .send_to(encoded.wire.wire(wire_len), encoded.peer)

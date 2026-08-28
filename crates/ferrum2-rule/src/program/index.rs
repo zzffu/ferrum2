@@ -15,6 +15,7 @@ use super::{OrderedRouteProgram, OrderedRouteRule};
 
 pub(super) struct ConstraintIndex<P> {
     masks: [Box<[u64]>; FIELD_KIND_COUNT],
+    active_fields: Box<[ActiveField]>,
     inbound: SparseValueIndex<usize>,
     network: SparseValueIndex<Network>,
     protocol: SparseValueIndex<P>,
@@ -29,6 +30,13 @@ pub(super) struct ConstraintIndex<P> {
     rule_set: SparseValueIndex<RuleSetId>,
 }
 
+#[derive(Clone, Copy)]
+struct ActiveField {
+    kind: FieldKind,
+    first_word: usize,
+    end_word: usize,
+}
+
 impl<P: Ord, A> OrderedRouteProgram<P, A> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn find_next(
@@ -41,7 +49,7 @@ impl<P: Ord, A> OrderedRouteProgram<P, A> {
         snapshot: Option<&RuleEngineSnapshot>,
         scratch: &mut RuleEvaluationScratch,
     ) -> Option<usize> {
-        scratch.candidate_visits = 0;
+        scratch.reset_observation();
         if self.compiled.mode() == RuleProgramMode::SmallLinear {
             for (offset, rule) in self.compiled.rules()[cursor..].iter().enumerate() {
                 scratch.candidate_visits = scratch.candidate_visits.saturating_add(1);
@@ -57,31 +65,48 @@ impl<P: Ord, A> OrderedRouteProgram<P, A> {
 
         let constraints = self.compiled.index().expect("indexed constraints");
         scratch.fill_candidates(self.compiled.len(), cursor);
-        for kind in FieldKind::ALL {
-            let mask = &constraints.masks[kind.index()];
-            if mask.iter().all(|word| *word == 0) {
-                continue;
-            }
-            scratch.matched.fill(0);
+        let domain = selected_domain(original, metadata);
+        let address = match original.host() {
+            TargetHostRef::Ip(address) => Some(address),
+            TargetHostRef::Domain(_) => None,
+        };
+        for field in constraints.active_fields.iter().copied() {
+            let mask = &constraints.masks[field.kind.index()];
+            scratch.matched[field.first_word..field.end_word].fill(0);
+            scratch.bitmap_words_cleared = scratch
+                .bitmap_words_cleared
+                .saturating_add(field.end_word - field.first_word);
             constraints.visit_matches(
-                kind,
+                field.kind,
                 inbound,
                 network,
                 original,
                 metadata,
                 snapshot,
+                domain,
+                address,
                 &mut scratch.matched,
                 &mut scratch.candidate_visits,
             );
-            for ((candidate, constraint), matched) in scratch
-                .candidates
-                .iter_mut()
-                .zip(mask.iter())
-                .zip(scratch.matched.iter())
-            {
+            for word in field.first_word..field.end_word {
+                let candidate = &mut scratch.candidates[word];
+                let was_nonzero = *candidate != 0;
+                let constraint = mask[word];
+                let matched = scratch.matched[word];
                 *candidate &= !constraint | matched;
+                let is_nonzero = *candidate != 0;
+                match (was_nonzero, is_nonzero) {
+                    (true, false) => {
+                        scratch.nonzero_candidate_words -= 1;
+                    }
+                    (false, true) => {
+                        scratch.nonzero_candidate_words += 1;
+                    }
+                    _ => {}
+                }
+                scratch.bitmap_words_combined = scratch.bitmap_words_combined.saturating_add(1);
             }
-            if scratch.candidates.iter().all(|word| *word == 0) {
+            if scratch.nonzero_candidate_words == 0 {
                 return None;
             }
         }
@@ -167,8 +192,29 @@ pub(super) fn build_constraints<P: Clone + Ord, A>(
             }
         }
     }
+    let mut active_fields = Vec::new();
+    active_fields
+        .try_reserve_exact(FIELD_KIND_COUNT)
+        .map_err(|_| RuleCompileError::Allocation)?;
+    for kind in FieldKind::ALL {
+        let mask = &masks[kind.index()];
+        let Some(first_word) = mask.iter().position(|word| *word != 0) else {
+            continue;
+        };
+        let end_word = mask
+            .iter()
+            .rposition(|word| *word != 0)
+            .expect("active field has a last word")
+            + 1;
+        active_fields.push(ActiveField {
+            kind,
+            first_word,
+            end_word,
+        });
+    }
     Ok(ConstraintIndex {
         masks: masks.map(Vec::into_boxed_slice),
+        active_fields: active_fields.into_boxed_slice(),
         inbound: inbound.build()?,
         network: network.build()?,
         protocol: protocol.build()?,
@@ -194,14 +240,11 @@ impl<P: Ord> ConstraintIndex<P> {
         original: &TargetAddr,
         metadata: &RouteMetadata<'_, P>,
         snapshot: Option<&RuleEngineSnapshot>,
+        domain: Option<&ferrum2_core::CanonicalDomain>,
+        address: Option<std::net::IpAddr>,
         matched: &mut [u64],
         visits: &mut usize,
     ) {
-        let domain = selected_domain(original, metadata);
-        let address = match original.host() {
-            TargetHostRef::Ip(address) => Some(address),
-            TargetHostRef::Domain(_) => None,
-        };
         let mut mark = |candidate| {
             *visits = visits.saturating_add(1);
             set_bit(matched, candidate as usize);
@@ -238,6 +281,10 @@ pub struct RuleEvaluationScratch {
     candidates: Vec<u64>,
     matched: Vec<u64>,
     candidate_visits: usize,
+    nonzero_candidate_words: usize,
+    candidate_words_initialized: usize,
+    bitmap_words_cleared: usize,
+    bitmap_words_combined: usize,
 }
 
 impl RuleEvaluationScratch {
@@ -263,6 +310,10 @@ impl RuleEvaluationScratch {
             candidates,
             matched,
             candidate_visits: 0,
+            nonzero_candidate_words: 0,
+            candidate_words_initialized: 0,
+            bitmap_words_cleared: 0,
+            bitmap_words_combined: 0,
         })
     }
 
@@ -277,6 +328,19 @@ impl RuleEvaluationScratch {
         self.candidate_visits
     }
 
+    /// Returns bitmap words cleared and combined by the last evaluation step.
+    ///
+    /// This deterministic structural observation is intended for qualification
+    /// without exposing rule values or matcher inputs.
+    pub const fn bitmap_word_operations(&self) -> (usize, usize) {
+        (self.bitmap_words_cleared, self.bitmap_words_combined)
+    }
+
+    /// Returns candidate bitmap words initialized by the last evaluation step.
+    pub const fn candidate_word_initializations(&self) -> usize {
+        self.candidate_words_initialized
+    }
+
     pub(super) fn assert_words(&self, words: usize) {
         assert!(
             self.candidates.len() >= words && self.matched.len() >= words,
@@ -286,19 +350,33 @@ impl RuleEvaluationScratch {
 
     fn fill_candidates(&mut self, rules: usize, cursor: usize) {
         let words = words_for(rules);
-        self.candidates.fill(0);
-        self.candidates[..words].fill(u64::MAX);
-        if let Some(last) = self.candidates.get_mut(words.saturating_sub(1)) {
+        let first_word = (cursor / 64).min(words);
+        self.candidates[..first_word].fill(0);
+        self.candidates[first_word..words].fill(u64::MAX);
+        self.candidates[words..].fill(0);
+        self.candidate_words_initialized = self.candidates.len();
+        if first_word < words {
+            self.candidates[first_word] &= u64::MAX << (cursor % 64);
+        }
+        if words != 0 {
+            let last = &mut self.candidates[words - 1];
             let used = rules % 64;
             if used != 0 {
                 *last &= (1_u64 << used) - 1;
             }
         }
-        let whole_words = cursor / 64;
-        self.candidates[..whole_words.min(words)].fill(0);
-        if whole_words < words {
-            self.candidates[whole_words] &= u64::MAX << (cursor % 64);
-        }
+        self.nonzero_candidate_words = if cursor < rules {
+            words - first_word
+        } else {
+            0
+        };
+    }
+
+    fn reset_observation(&mut self) {
+        self.candidate_visits = 0;
+        self.candidate_words_initialized = 0;
+        self.bitmap_words_cleared = 0;
+        self.bitmap_words_combined = 0;
     }
 }
 

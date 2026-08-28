@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
@@ -10,8 +11,8 @@ use bytes::BytesMut;
 use ferrum2_core::{AbortiveClose, LocalEndpoint};
 use ferrum2_net::ResolvedInterface;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::oneshot;
 
+use crate::reset::NetworkRuntimeOwnerCloser;
 use crate::{
     DirectUdpSocket, NetworkRuntimeCancellation, NetworkRuntimeOwner,
     NetworkRuntimeOwnerCancellation,
@@ -20,56 +21,94 @@ use crate::{
 /// TCP stream retained with its exact interface decision and reset acknowledgement owner.
 #[must_use = "dropping the wrapper closes the stream and acknowledges reset cancellation"]
 pub struct GenerationBoundTcpStream<T> {
-    stream: Arc<StdMutex<Option<T>>>,
-    owner: Arc<StdMutex<Option<NetworkRuntimeOwner>>>,
+    state: Arc<StdMutex<GenerationBoundTcpState<T>>>,
     resolved: ResolvedInterface,
     local_socket_addr: SocketAddr,
-    closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
-    cancellation: StdMutex<Pin<Box<dyn Future<Output = NetworkRuntimeOwnerCancellation> + Send>>>,
-    drop_signal: Option<oneshot::Sender<()>>,
-    _monitor: tokio::task::JoinHandle<()>,
+    closed: Arc<AtomicU8>,
+    cancellation:
+        Pin<Box<dyn Future<Output = NetworkRuntimeOwnerCancellation> + Send + Sync + 'static>>,
+}
+
+const TCP_OPEN: u8 = 0;
+const TCP_CLOSED_RESET: u8 = 1;
+const TCP_CLOSED_COORDINATOR: u8 = 2;
+const TCP_CLOSED_DROPPED: u8 = 3;
+
+struct GenerationBoundTcpState<T> {
+    stream: Option<T>,
+    owner: Option<NetworkRuntimeOwner>,
+    terminal: Option<NetworkRuntimeOwnerCancellation>,
+}
+
+struct GenerationBoundTcpCloser<T> {
+    state: Arc<StdMutex<GenerationBoundTcpState<T>>>,
+    closed: Arc<AtomicU8>,
+}
+
+impl<T: Send + 'static> NetworkRuntimeOwnerCloser for GenerationBoundTcpCloser<T> {
+    fn close(&self, cancellation: NetworkRuntimeOwnerCancellation) {
+        close_generation_bound_tcp_state(&self.state, &self.closed, Some(cancellation));
+    }
+}
+
+fn close_generation_bound_tcp_state<T>(
+    state: &Arc<StdMutex<GenerationBoundTcpState<T>>>,
+    closed: &Arc<AtomicU8>,
+    terminal: Option<NetworkRuntimeOwnerCancellation>,
+) {
+    let mut state = lock_unpoisoned(state);
+    if closed.load(Ordering::Relaxed) != TCP_OPEN {
+        return;
+    }
+    let stream = state.stream.take();
+    drop(stream);
+    state.terminal = terminal;
+    let closed_state = match terminal {
+        Some(NetworkRuntimeOwnerCancellation::Reset(_)) => TCP_CLOSED_RESET,
+        Some(NetworkRuntimeOwnerCancellation::CoordinatorDropped) => TCP_CLOSED_COORDINATOR,
+        None => TCP_CLOSED_DROPPED,
+    };
+    closed.store(closed_state, Ordering::Release);
+    let owner = state.owner.take();
+    drop(owner);
 }
 
 impl<T: LocalEndpoint + Send + 'static> GenerationBoundTcpStream<T> {
-    pub(super) fn new(stream: T, resolved: ResolvedInterface, owner: NetworkRuntimeOwner) -> Self {
+    pub(super) fn new(
+        stream: T,
+        resolved: ResolvedInterface,
+        owner: NetworkRuntimeOwner,
+    ) -> Result<Self, NetworkRuntimeOwnerCancellation> {
         let local_socket_addr = stream.local_socket_addr();
-        let stream = Arc::new(StdMutex::new(Some(stream)));
-        let closed = Arc::new(StdMutex::new(None));
         let cancellation = owner.cancellation();
-        let owner = Arc::new(StdMutex::new(Some(owner)));
         let mut operation_cancellation = cancellation.clone();
-        let mut monitor_cancellation = cancellation;
-        let monitor_stream = Arc::clone(&stream);
-        let monitor_owner = Arc::clone(&owner);
-        let monitor_closed = Arc::clone(&closed);
-        let (drop_signal, drop_receiver) = oneshot::channel();
-        let monitor = tokio::spawn(async move {
-            let terminal = tokio::select! {
-                biased;
-                cancellation = monitor_cancellation.cancelled() => Some(cancellation),
-                _ = drop_receiver => None,
-            };
-            let mut stream_guard = lock_unpoisoned(&monitor_stream);
-            let stream = stream_guard.take();
-            drop(stream);
-            if let Some(terminal) = terminal {
-                *lock_unpoisoned(&monitor_closed) = Some(terminal);
-            }
-            let owner = lock_unpoisoned(&monitor_owner).take();
-            drop(owner);
-            drop(stream_guard);
+        let state = Arc::new(StdMutex::new(GenerationBoundTcpState {
+            stream: Some(stream),
+            owner: Some(owner),
+            terminal: None,
+        }));
+        let closed = Arc::new(AtomicU8::new(TCP_OPEN));
+        let closer: Arc<dyn NetworkRuntimeOwnerCloser> = Arc::new(GenerationBoundTcpCloser {
+            state: Arc::clone(&state),
+            closed: Arc::clone(&closed),
         });
-        Self {
-            stream,
-            owner,
+        let attach_result = lock_unpoisoned(&state)
+            .owner
+            .as_ref()
+            .expect("new TCP generation owner")
+            .attach_closer(closer);
+        let mut stream = Self {
+            state,
             resolved,
             local_socket_addr,
             closed,
-            cancellation: StdMutex::new(Box::pin(async move {
-                operation_cancellation.cancelled().await
-            })),
-            drop_signal: Some(drop_signal),
-            _monitor: monitor,
+            cancellation: Box::pin(async move { operation_cancellation.cancelled().await }),
+        };
+        if let Err(cancellation) = attach_result {
+            stream.close(cancellation);
+            Err(cancellation)
+        } else {
+            Ok(stream)
         }
     }
 }
@@ -81,28 +120,32 @@ impl<T> GenerationBoundTcpStream<T> {
 
     /// Runs one synchronous adapter against the live stream without detaching its owner.
     pub fn with_stream<R>(&self, operation: impl FnOnce(&T) -> R) -> Option<R> {
-        let stream = lock_unpoisoned(&self.stream);
-        stream.as_ref().map(operation)
+        if self.closed.load(Ordering::Acquire) != TCP_OPEN {
+            return None;
+        }
+        let state = lock_unpoisoned(&self.state);
+        state.stream.as_ref().map(operation)
     }
 
     /// Runs one synchronous mutable adapter against the live stream without detaching its owner.
     pub fn with_stream_mut<R>(&mut self, operation: impl FnOnce(&mut T) -> R) -> Option<R> {
-        let mut stream = lock_unpoisoned(&self.stream);
-        stream.as_mut().map(operation)
+        if self.closed.load(Ordering::Acquire) != TCP_OPEN {
+            return None;
+        }
+        let mut state = lock_unpoisoned(&self.state);
+        state.stream.as_mut().map(operation)
     }
 
     pub fn closed(&self) -> Option<NetworkRuntimeOwnerCancellation> {
-        *lock_unpoisoned(&self.closed)
+        if self.closed.load(Ordering::Acquire) == TCP_OPEN {
+            None
+        } else {
+            lock_unpoisoned(&self.state).terminal
+        }
     }
 
     fn poll_cancellation(&mut self, context: &mut Context<'_>) -> Poll<io::Error> {
-        if let Some(cancellation) = self.closed() {
-            return Poll::Ready(closed_io_error(cancellation));
-        }
-        let cancellation = {
-            let mut cancellation = lock_unpoisoned(&self.cancellation);
-            cancellation.as_mut().poll(context)
-        };
+        let cancellation = { self.cancellation.as_mut().poll(context) };
         match cancellation {
             Poll::Ready(cancellation) => {
                 self.close(cancellation);
@@ -113,23 +156,24 @@ impl<T> GenerationBoundTcpStream<T> {
     }
 
     fn close_if_signalled(&mut self) -> Option<io::Error> {
-        let cancellation = self.closed();
-        if let Some(cancellation) = cancellation {
-            self.close(cancellation);
-            Some(closed_io_error(cancellation))
-        } else {
-            None
-        }
+        self.closed_error()
     }
 
     fn close(&mut self, cancellation: NetworkRuntimeOwnerCancellation) {
-        let mut stream_guard = lock_unpoisoned(&self.stream);
-        let stream = stream_guard.take();
-        drop(stream);
-        *lock_unpoisoned(&self.closed) = Some(cancellation);
-        let owner = lock_unpoisoned(&self.owner).take();
-        drop(owner);
-        drop(stream_guard);
+        close_generation_bound_tcp_state(&self.state, &self.closed, Some(cancellation));
+    }
+
+    fn closed_error(&self) -> Option<io::Error> {
+        match self.closed.load(Ordering::Acquire) {
+            TCP_OPEN => None,
+            TCP_CLOSED_RESET | TCP_CLOSED_COORDINATOR => Some(
+                lock_unpoisoned(&self.state)
+                    .terminal
+                    .map_or_else(closed_resource_io_error, closed_io_error),
+            ),
+            TCP_CLOSED_DROPPED => Some(closed_resource_io_error()),
+            _ => unreachable!("invalid TCP generation close state"),
+        }
     }
 
     fn poll_read_inner(
@@ -141,8 +185,8 @@ impl<T> GenerationBoundTcpStream<T> {
         T: AsyncRead + Unpin,
     {
         let result = {
-            let mut stream = lock_unpoisoned(&self.stream);
-            match stream.as_mut() {
+            let mut state = lock_unpoisoned(&self.state);
+            match state.stream.as_mut() {
                 Some(stream) => Pin::new(stream).poll_read(context, buffer),
                 None => Poll::Ready(Err(closed_resource_io_error())),
             }
@@ -156,15 +200,7 @@ impl<T> GenerationBoundTcpStream<T> {
 
 impl<T> Drop for GenerationBoundTcpStream<T> {
     fn drop(&mut self) {
-        let mut stream_guard = lock_unpoisoned(&self.stream);
-        let stream = stream_guard.take();
-        drop(stream);
-        let owner = lock_unpoisoned(&self.owner).take();
-        drop(owner);
-        drop(stream_guard);
-        if let Some(drop_signal) = self.drop_signal.take() {
-            let _ = drop_signal.send(());
-        }
+        close_generation_bound_tcp_state(&self.state, &self.closed, None);
     }
 }
 
@@ -204,8 +240,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for GenerationBoundTcpStream<T> {
             return Poll::Ready(Err(error));
         }
         let result = {
-            let mut stream = lock_unpoisoned(&this.stream);
-            match stream.as_mut() {
+            let mut state = lock_unpoisoned(&this.state);
+            match state.stream.as_mut() {
                 Some(stream) => Pin::new(stream).poll_write(context, buffer),
                 None => Poll::Ready(Err(closed_resource_io_error())),
             }
@@ -222,8 +258,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for GenerationBoundTcpStream<T> {
             return Poll::Ready(Err(error));
         }
         let result = {
-            let mut stream = lock_unpoisoned(&this.stream);
-            match stream.as_mut() {
+            let mut state = lock_unpoisoned(&this.state);
+            match state.stream.as_mut() {
                 Some(stream) => Pin::new(stream).poll_flush(context),
                 None => Poll::Ready(Err(closed_resource_io_error())),
             }
@@ -240,8 +276,8 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for GenerationBoundTcpStream<T> {
             return Poll::Ready(Err(error));
         }
         let result = {
-            let mut stream = lock_unpoisoned(&this.stream);
-            match stream.as_mut() {
+            let mut state = lock_unpoisoned(&this.state);
+            match state.stream.as_mut() {
                 Some(stream) => Pin::new(stream).poll_shutdown(context),
                 None => Poll::Ready(Err(closed_resource_io_error())),
             }
@@ -263,14 +299,178 @@ impl<T: AbortiveClose> AbortiveClose for GenerationBoundTcpStream<T> {
     type Error = GenerationBoundSocketError<T::Error>;
 
     fn mark_abortive(&mut self) -> Result<(), Self::Error> {
-        if let Some(cancellation) = self.closed() {
-            self.close(cancellation);
+        if self.closed.load(Ordering::Acquire) != TCP_OPEN {
+            return Err(GenerationBoundSocketError::Closed);
         }
-        lock_unpoisoned(&self.stream)
+        lock_unpoisoned(&self.state)
+            .stream
             .as_mut()
             .ok_or(GenerationBoundSocketError::Closed)?
             .mark_abortive()
             .map_err(GenerationBoundSocketError::Inner)
+    }
+}
+
+/// Physical TCP stream using either the static bare fast path or dynamic reset ownership.
+#[must_use = "dropping the wrapper closes the physical stream"]
+pub struct NetworkTcpStream<T> {
+    inner: NetworkTcpStreamInner<T>,
+}
+
+enum NetworkTcpStreamInner<T> {
+    Static(StaticTcpStream<T>),
+    Dynamic(GenerationBoundTcpStream<T>),
+}
+
+struct StaticTcpStream<T> {
+    stream: T,
+    resolved: ResolvedInterface,
+    local_socket_addr: SocketAddr,
+}
+
+impl<T: LocalEndpoint + Send + 'static> NetworkTcpStream<T> {
+    pub(super) fn static_socket(stream: T, resolved: ResolvedInterface) -> Self {
+        let local_socket_addr = stream.local_socket_addr();
+        Self {
+            inner: NetworkTcpStreamInner::Static(StaticTcpStream {
+                stream,
+                resolved,
+                local_socket_addr,
+            }),
+        }
+    }
+
+    pub(super) fn dynamic_socket(
+        stream: T,
+        resolved: ResolvedInterface,
+        owner: NetworkRuntimeOwner,
+    ) -> Result<Self, NetworkRuntimeOwnerCancellation> {
+        GenerationBoundTcpStream::new(stream, resolved, owner).map(|stream| Self {
+            inner: NetworkTcpStreamInner::Dynamic(stream),
+        })
+    }
+}
+
+impl<T> NetworkTcpStream<T> {
+    pub const fn resolved_interface(&self) -> &ResolvedInterface {
+        match &self.inner {
+            NetworkTcpStreamInner::Static(stream) => &stream.resolved,
+            NetworkTcpStreamInner::Dynamic(stream) => stream.resolved_interface(),
+        }
+    }
+
+    pub const fn is_generation_bound(&self) -> bool {
+        matches!(&self.inner, NetworkTcpStreamInner::Dynamic(_))
+    }
+
+    pub fn closed(&self) -> Option<NetworkRuntimeOwnerCancellation> {
+        match &self.inner {
+            NetworkTcpStreamInner::Static(_) => None,
+            NetworkTcpStreamInner::Dynamic(stream) => stream.closed(),
+        }
+    }
+
+    pub fn with_stream<R>(&self, operation: impl FnOnce(&T) -> R) -> Option<R> {
+        match &self.inner {
+            NetworkTcpStreamInner::Static(stream) => Some(operation(&stream.stream)),
+            NetworkTcpStreamInner::Dynamic(stream) => stream.with_stream(operation),
+        }
+    }
+
+    pub fn with_stream_mut<R>(&mut self, operation: impl FnOnce(&mut T) -> R) -> Option<R> {
+        match &mut self.inner {
+            NetworkTcpStreamInner::Static(stream) => Some(operation(&mut stream.stream)),
+            NetworkTcpStreamInner::Dynamic(stream) => stream.with_stream_mut(operation),
+        }
+    }
+}
+
+impl<T> fmt::Debug for NetworkTcpStream<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkTcpStream")
+            .field(
+                "mode",
+                if self.is_generation_bound() {
+                    &"dynamic"
+                } else {
+                    &"static"
+                },
+            )
+            .field("resolved", self.resolved_interface())
+            .field("closed", &self.closed())
+            .finish()
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for NetworkTcpStream<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut self.get_mut().inner {
+            NetworkTcpStreamInner::Static(stream) => {
+                Pin::new(&mut stream.stream).poll_read(context, buffer)
+            }
+            NetworkTcpStreamInner::Dynamic(stream) => Pin::new(stream).poll_read(context, buffer),
+        }
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for NetworkTcpStream<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut self.get_mut().inner {
+            NetworkTcpStreamInner::Static(stream) => {
+                Pin::new(&mut stream.stream).poll_write(context, buffer)
+            }
+            NetworkTcpStreamInner::Dynamic(stream) => Pin::new(stream).poll_write(context, buffer),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.get_mut().inner {
+            NetworkTcpStreamInner::Static(stream) => {
+                Pin::new(&mut stream.stream).poll_flush(context)
+            }
+            NetworkTcpStreamInner::Dynamic(stream) => Pin::new(stream).poll_flush(context),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.get_mut().inner {
+            NetworkTcpStreamInner::Static(stream) => {
+                Pin::new(&mut stream.stream).poll_shutdown(context)
+            }
+            NetworkTcpStreamInner::Dynamic(stream) => Pin::new(stream).poll_shutdown(context),
+        }
+    }
+}
+
+impl<T> LocalEndpoint for NetworkTcpStream<T> {
+    fn local_socket_addr(&self) -> SocketAddr {
+        match &self.inner {
+            NetworkTcpStreamInner::Static(stream) => stream.local_socket_addr,
+            NetworkTcpStreamInner::Dynamic(stream) => stream.local_socket_addr(),
+        }
+    }
+}
+
+impl<T: AbortiveClose> AbortiveClose for NetworkTcpStream<T> {
+    type Error = GenerationBoundSocketError<T::Error>;
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        match &mut self.inner {
+            NetworkTcpStreamInner::Static(stream) => stream
+                .stream
+                .mark_abortive()
+                .map_err(GenerationBoundSocketError::Inner),
+            NetworkTcpStreamInner::Dynamic(stream) => stream.mark_abortive(),
+        }
     }
 }
 
@@ -281,13 +481,22 @@ pub struct GenerationBoundUdpSocket<T> {
     resolved: ResolvedInterface,
     cancellation: NetworkRuntimeCancellation,
     closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
-    drop_signal: Option<oneshot::Sender<()>>,
-    _monitor: tokio::task::JoinHandle<()>,
 }
 
 struct GenerationBoundUdpResource<T> {
     socket: Option<T>,
     owner: Option<NetworkRuntimeOwner>,
+}
+
+struct GenerationBoundUdpCloser<T> {
+    resource: Arc<StdMutex<Option<Arc<GenerationBoundUdpResource<T>>>>>,
+    closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
+}
+
+impl<T: Send + Sync + 'static> NetworkRuntimeOwnerCloser for GenerationBoundUdpCloser<T> {
+    fn close(&self, cancellation: NetworkRuntimeOwnerCancellation) {
+        close_generation_bound_udp_resource(&self.resource, &self.closed, Some(cancellation));
+    }
 }
 
 impl<T> GenerationBoundUdpResource<T> {
@@ -320,32 +529,39 @@ fn close_generation_bound_udp_resource<T>(
 }
 
 impl<T: Send + Sync + 'static> GenerationBoundUdpSocket<T> {
-    pub(super) fn new(socket: T, resolved: ResolvedInterface, owner: NetworkRuntimeOwner) -> Self {
+    pub(super) fn new(
+        socket: T,
+        resolved: ResolvedInterface,
+        owner: NetworkRuntimeOwner,
+    ) -> Result<Self, NetworkRuntimeOwnerCancellation> {
         let cancellation = owner.cancellation();
-        let mut monitor_cancellation = cancellation.clone();
         let resource = Arc::new(StdMutex::new(Some(Arc::new(GenerationBoundUdpResource {
             socket: Some(socket),
             owner: Some(owner),
         }))));
         let closed = Arc::new(StdMutex::new(None));
-        let monitor_resource = Arc::clone(&resource);
-        let monitor_closed = Arc::clone(&closed);
-        let (drop_signal, drop_receiver) = oneshot::channel();
-        let monitor = tokio::spawn(async move {
-            let terminal = tokio::select! {
-                biased;
-                cancellation = monitor_cancellation.cancelled() => Some(cancellation),
-                _ = drop_receiver => None,
-            };
-            close_generation_bound_udp_resource(&monitor_resource, &monitor_closed, terminal);
+        let closer: Arc<dyn NetworkRuntimeOwnerCloser> = Arc::new(GenerationBoundUdpCloser {
+            resource: Arc::clone(&resource),
+            closed: Arc::clone(&closed),
         });
-        Self {
+        let attach_result = lock_unpoisoned(&resource)
+            .as_ref()
+            .expect("new UDP generation resource")
+            .owner
+            .as_ref()
+            .expect("new UDP generation owner")
+            .attach_closer(closer);
+        let socket = Self {
             resource,
             resolved,
             cancellation,
             closed,
-            drop_signal: Some(drop_signal),
-            _monitor: monitor,
+        };
+        if let Err(cancellation) = attach_result {
+            socket.close(cancellation);
+            Err(cancellation)
+        } else {
+            Ok(socket)
         }
     }
 }
@@ -357,10 +573,6 @@ impl<T> GenerationBoundUdpSocket<T> {
 
     pub const fn resolved_interface(&self) -> &ResolvedInterface {
         &self.resolved
-    }
-
-    pub const fn cancellation(&self) -> &NetworkRuntimeCancellation {
-        &self.cancellation
     }
 
     pub fn closed(&self) -> Option<NetworkRuntimeOwnerCancellation> {
@@ -396,9 +608,6 @@ impl<T> GenerationBoundUdpSocket<T> {
 impl<T> Drop for GenerationBoundUdpSocket<T> {
     fn drop(&mut self) {
         close_generation_bound_udp_resource(&self.resource, &self.closed, None);
-        if let Some(drop_signal) = self.drop_signal.take() {
-            let _ = drop_signal.send(());
-        }
     }
 }
 
@@ -505,6 +714,115 @@ impl<T: DirectUdpSocket> DirectUdpSocket for GenerationBoundUdpSocket<T> {
             Err(closed_io_error(cancellation))
         } else {
             result
+        }
+    }
+}
+
+/// Physical UDP socket using either the static bare fast path or dynamic reset ownership.
+#[must_use = "dropping the wrapper closes the physical socket"]
+pub struct NetworkUdpSocket<T> {
+    inner: NetworkUdpSocketInner<T>,
+}
+
+enum NetworkUdpSocketInner<T> {
+    Static(StaticUdpSocket<T>),
+    Dynamic(GenerationBoundUdpSocket<T>),
+}
+
+struct StaticUdpSocket<T> {
+    socket: T,
+    resolved: ResolvedInterface,
+}
+
+impl<T: Send + Sync + 'static> NetworkUdpSocket<T> {
+    pub(super) const fn static_socket(socket: T, resolved: ResolvedInterface) -> Self {
+        Self {
+            inner: NetworkUdpSocketInner::Static(StaticUdpSocket { socket, resolved }),
+        }
+    }
+
+    pub(super) fn dynamic_socket(
+        socket: T,
+        resolved: ResolvedInterface,
+        owner: NetworkRuntimeOwner,
+    ) -> Result<Self, NetworkRuntimeOwnerCancellation> {
+        GenerationBoundUdpSocket::new(socket, resolved, owner).map(|socket| Self {
+            inner: NetworkUdpSocketInner::Dynamic(socket),
+        })
+    }
+}
+
+impl<T> NetworkUdpSocket<T> {
+    pub async fn is_closed(&self) -> bool {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(_) => false,
+            NetworkUdpSocketInner::Dynamic(socket) => socket.is_closed().await,
+        }
+    }
+
+    pub const fn resolved_interface(&self) -> &ResolvedInterface {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(socket) => &socket.resolved,
+            NetworkUdpSocketInner::Dynamic(socket) => socket.resolved_interface(),
+        }
+    }
+
+    pub const fn is_generation_bound(&self) -> bool {
+        matches!(&self.inner, NetworkUdpSocketInner::Dynamic(_))
+    }
+
+    pub fn closed(&self) -> Option<NetworkRuntimeOwnerCancellation> {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(_) => None,
+            NetworkUdpSocketInner::Dynamic(socket) => socket.closed(),
+        }
+    }
+}
+
+impl<T> fmt::Debug for NetworkUdpSocket<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkUdpSocket")
+            .field(
+                "mode",
+                if self.is_generation_bound() {
+                    &"dynamic"
+                } else {
+                    &"static"
+                },
+            )
+            .field("resolved", self.resolved_interface())
+            .field("closed", &self.closed())
+            .finish()
+    }
+}
+
+impl<T: DirectUdpSocket> DirectUdpSocket for NetworkUdpSocket<T> {
+    async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(socket) => socket.socket.send_to(payload, target).await,
+            NetworkUdpSocketInner::Dynamic(socket) => socket.send_to(payload, target).await,
+        }
+    }
+
+    async fn readable(&self) -> io::Result<()> {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(socket) => socket.socket.readable().await,
+            NetworkUdpSocketInner::Dynamic(socket) => socket.readable().await,
+        }
+    }
+
+    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(socket) => socket.socket.recv_buf_from(payload).await,
+            NetworkUdpSocketInner::Dynamic(socket) => socket.recv_buf_from(payload).await,
+        }
+    }
+
+    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+        match &self.inner {
+            NetworkUdpSocketInner::Static(socket) => socket.socket.try_recv_buf_from(payload),
+            NetworkUdpSocketInner::Dynamic(socket) => socket.try_recv_buf_from(payload),
         }
     }
 }

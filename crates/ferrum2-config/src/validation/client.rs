@@ -5,7 +5,8 @@ use ferrum2_rule::{EgressPlanHandle, SelectorControl};
 
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{
-    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, ValidatedClientConfig,
+    ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, NetworkGenerationMode,
+    ValidatedClientConfig,
 };
 use crate::prepared::{ClientOutboundDraft, ClientPreparationDraft, PreparedDnsDraft};
 use crate::raw::{RawChain, RawClientInbound, RawSelector};
@@ -143,7 +144,13 @@ pub(crate) fn validate_client_prepared(
         policy_blueprint: None,
     });
     let runtime = validate_runtime(raw.runtime)?;
+    if tun.is_some() && runtime.network_generation == NetworkGenerationMode::Static {
+        return Err(ConfigError::semantic(ConfigField::RuntimeNetworkGeneration));
+    }
     let udp = raw.udp.map(validate_udp).transpose()?;
+    if udp.as_ref().is_some_and(|udp| udp.receive_workers != 1) {
+        return Err(ConfigError::semantic(ConfigField::UdpReceiveWorkers));
+    }
     let logging = validate_logging(raw.logging)?;
     let mut listens: Vec<_> = inbounds.iter().map(|inbound| inbound.listen).collect();
     if let Some(dns) = &dns {

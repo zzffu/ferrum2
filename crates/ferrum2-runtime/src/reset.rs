@@ -155,6 +155,11 @@ pub enum NetworkRuntimeOwnerKind {
     UdpAssociation,
 }
 
+/// Synchronous close target retained by the coordinator's central socket registry.
+pub(crate) trait NetworkRuntimeOwnerCloser: Send + Sync {
+    fn close(&self, cancellation: NetworkRuntimeOwnerCancellation);
+}
+
 const OWNER_RESET_ORDER: [NetworkRuntimeOwnerKind; 3] = [
     NetworkRuntimeOwnerKind::GenerationTask,
     NetworkRuntimeOwnerKind::TcpConnection,
@@ -236,7 +241,7 @@ impl NetworkResetCoordinator {
                 .or(state.pending.as_ref())
                 .map(|pending| pending.snapshot.generation()),
             registered_hooks: state.hooks.len(),
-            registered_runtime_owners: state.runtime_owners.len(),
+            registered_runtime_owners: state.runtime_owner_count(),
         }
     }
 
@@ -282,26 +287,29 @@ impl NetworkResetCoordinator {
         if generation != self.inner.snapshots.generation() {
             return Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration);
         }
-        if state.runtime_owners.len() >= self.inner.limits.max_runtime_owners {
+        if state.runtime_owner_count() >= self.inner.limits.max_runtime_owners {
             return Err(NetworkRuntimeOwnerRegistrationError::CapacityExhausted);
         }
-        let id = state.next_runtime_owner_id;
-        state.next_runtime_owner_id = state
-            .next_runtime_owner_id
+        let registration_generation = state
+            .next_runtime_owner_generation
             .checked_add(1)
             .ok_or(NetworkRuntimeOwnerRegistrationError::IdentifierExhausted)?;
+        state.next_runtime_owner_generation = registration_generation;
         let (cancellation, receiver) = watch::channel(None);
-        state.runtime_owners.insert(
-            id,
-            RuntimeOwnerEntry {
-                generation,
-                kind,
-                cancellation,
-            },
-        );
+        let handle = state
+            .insert_runtime_owner(
+                registration_generation,
+                RuntimeOwnerEntry {
+                    network_generation: generation,
+                    kind,
+                    cancellation,
+                    closer: None,
+                },
+            )
+            .ok_or(NetworkRuntimeOwnerRegistrationError::IdentifierExhausted)?;
         Ok(NetworkRuntimeOwner {
             coordinator: Arc::downgrade(&self.inner),
-            id,
+            handle,
             generation,
             kind,
             cancellation: receiver,
@@ -570,7 +578,7 @@ impl NetworkResetCoordinator {
             .full_rebuild
             .as_ref()
             .ok_or(NetworkResetCoordinatorError::FullRebuildNotPending)?;
-        if !state.runtime_owners.is_empty() {
+        if state.runtime_owner_count() != 0 {
             return Err(NetworkResetCoordinatorError::FullRebuildOwnersRemain);
         }
         if snapshot.generation() < requested.snapshot.generation() {
@@ -808,18 +816,26 @@ impl NetworkResetCoordinator {
     async fn cancel_runtime_owners(&self, signal: NetworkResetSignal) -> usize {
         let mut cancelled = 0_usize;
         for kind in OWNER_RESET_ORDER {
-            let senders = {
+            let closers = {
                 let state = lock_unpoisoned(&self.inner.state);
-                state
-                    .runtime_owners
-                    .values()
+                let mut closers = Vec::new();
+                for owner in state
+                    .runtime_owners()
                     .filter(|owner| owner.kind == kind && owner_is_stale(owner, signal))
-                    .map(|owner| owner.cancellation.clone())
-                    .collect::<Vec<_>>()
+                {
+                    // Delivery and closer discovery share this state-lock linearization point.
+                    // A concurrently attached closer therefore either appears here or observes
+                    // the already-delivered cancellation and closes itself before returning.
+                    owner.cancellation.send_replace(Some(signal));
+                    if let Some(closer) = owner.closer.as_ref() {
+                        closers.push(Arc::clone(closer));
+                    }
+                    cancelled += 1;
+                }
+                closers
             };
-            cancelled += senders.len();
-            for sender in senders {
-                sender.send_replace(Some(signal));
+            for closer in closers {
+                closer.close(NetworkRuntimeOwnerCancellation::Reset(signal));
             }
             self.wait_for_runtime_owner_kind(kind, signal).await;
         }
@@ -834,8 +850,7 @@ impl NetworkResetCoordinator {
         let mut changes = self.inner.owner_changes.subscribe();
         loop {
             let remaining = lock_unpoisoned(&self.inner.state)
-                .runtime_owners
-                .values()
+                .runtime_owners()
                 .any(|owner| owner.kind == kind && owner_is_stale(owner, signal));
             if !remaining {
                 return;
@@ -843,6 +858,18 @@ impl NetworkResetCoordinator {
             if changes.changed().await.is_err() {
                 return;
             }
+        }
+    }
+}
+
+impl Drop for CoordinatorInner {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for closer in state.take_runtime_owner_closers() {
+            closer.close(NetworkRuntimeOwnerCancellation::CoordinatorDropped);
         }
     }
 }

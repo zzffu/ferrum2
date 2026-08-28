@@ -188,7 +188,13 @@ async fn tagged_tcp_shares_static_direct_mapping_and_one_replay_store() {
         .write_all(b"captured A")
         .await
         .expect("target write");
-    assert!(first.read(&mut [0; 64]).await.expect("captured A wire") > 0);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), first.read(&mut [0; 64]))
+            .await
+            .expect("captured A response deadline")
+            .expect("captured A wire")
+            > 0
+    );
 
     let mut replay = tokio::net::TcpStream::connect(second_listen)
         .await

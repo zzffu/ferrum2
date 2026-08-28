@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
+use std::ops::Range;
 
+use bytes::BytesMut;
 use shadowsocks_crypto::v2::{
     CryptoError as ShadowsocksCryptoError,
     udp::{AesHeaderCipher as ShadowsocksAesHeaderCipher, UdpCipher as ShadowsocksUdpCipher},
@@ -134,6 +136,46 @@ impl UdpCrypto {
         }
     }
 
+    /// Reserves the exact method-specific wire layout for one semantic body.
+    ///
+    /// The returned reservation lends only the semantic plaintext body range
+    /// to the caller. Dropping it before a successful seal clears the complete
+    /// reserved wire range and leaves the packet counter uncommitted.
+    pub fn reserve_seal<'a>(
+        &'a self,
+        outbound: &'a mut UdpOutboundSession,
+        body_len: usize,
+        output: &'a mut [u8],
+    ) -> Result<UdpSealReservation<'a>, UdpCryptoError> {
+        if outbound.profile != self.profile() {
+            return Err(UdpCryptoError::MethodMismatch);
+        }
+        let packet_id = outbound.counter.current()?;
+        let wire_len = body_len
+            .checked_add(self.profile().udp_wire_overhead_bytes())
+            .ok_or(UdpCryptoError::OutputTooSmall)?;
+        if output.len() < wire_len {
+            return Err(UdpCryptoError::OutputTooSmall);
+        }
+        let body_start = match self.inner {
+            UdpCryptoInner::Aes { .. } => UDP_IDENTITY_BYTES,
+            UdpCryptoInner::ChaCha20Poly1305(_) => XCHACHA_NONCE_BYTES + UDP_IDENTITY_BYTES,
+        };
+        let body_end = body_start
+            .checked_add(body_len)
+            .ok_or(UdpCryptoError::OutputTooSmall)?;
+        debug_assert_eq!(body_end + AEAD_TAG_BYTES, wire_len);
+        Ok(UdpSealReservation {
+            crypto: self,
+            outbound,
+            output,
+            body_range: body_start..body_end,
+            wire_len,
+            packet_id,
+            sealed: false,
+        })
+    }
+
     /// Seals one complete method-specific UDP crypto envelope.
     ///
     /// The packet ID advances only after the complete wire result is present
@@ -146,45 +188,9 @@ impl UdpCrypto {
         output: &mut [u8],
         random: &(impl SecureRandom + ?Sized),
     ) -> Result<UdpSealResult, UdpCryptoError> {
-        if outbound.profile != self.profile() {
-            return Err(UdpCryptoError::MethodMismatch);
-        }
-        let packet_id = outbound.counter.current()?;
-        let wire_len = plaintext_body
-            .len()
-            .checked_add(self.profile().udp_wire_overhead_bytes())
-            .ok_or(UdpCryptoError::OutputTooSmall)?;
-        if output.len() < wire_len {
-            return Err(UdpCryptoError::OutputTooSmall);
-        }
-
-        let result = match &self.inner {
-            UdpCryptoInner::Aes { .. } => seal_aes_udp(
-                self,
-                &outbound.session_id,
-                packet_id,
-                plaintext_body,
-                &mut output[..wire_len],
-            ),
-            UdpCryptoInner::ChaCha20Poly1305(cipher) => seal_xchacha_udp(
-                cipher,
-                random,
-                &outbound.session_id,
-                packet_id,
-                plaintext_body,
-                &mut output[..wire_len],
-            ),
-        };
-
-        if let Err(error) = result {
-            output[..wire_len].zeroize();
-            return Err(error);
-        }
-        outbound.counter.commit(packet_id);
-        Ok(UdpSealResult {
-            wire_len,
-            packet_id,
-        })
+        let mut reservation = self.reserve_seal(outbound, plaintext_body.len(), output)?;
+        reservation.body_mut().copy_from_slice(plaintext_body);
+        reservation.seal(random)
     }
 
     /// Authenticates and opens one complete method-specific UDP envelope.
@@ -202,6 +208,79 @@ impl UdpCrypto {
             UdpCryptoInner::ChaCha20Poly1305(cipher) => {
                 open_xchacha_udp(cipher, wire, plaintext_output)
             }
+        }
+    }
+
+    /// Destructively authenticates one exclusively owned wire buffer in place.
+    ///
+    /// The result names the authenticated semantic body range without moving
+    /// it. AES opens its body after the protected identity header; XChaCha
+    /// leaves the authenticated identity prefix before the body. Authentication
+    /// failure clears the complete candidate-plaintext range.
+    pub fn open_in_place(&self, wire: &mut BytesMut) -> Result<UdpOpenResult, UdpCryptoError> {
+        match &self.inner {
+            UdpCryptoInner::Aes { .. } => open_aes_udp_in_place(self, wire),
+            UdpCryptoInner::ChaCha20Poly1305(cipher) => open_xchacha_udp_in_place(cipher, wire),
+        }
+    }
+}
+
+/// Exact final-wire reservation for one caller-built UDP semantic body.
+///
+/// Callers must completely initialize [`Self::body_mut`] before sealing. The
+/// reservation owns counter commit and all method-specific layout details.
+pub struct UdpSealReservation<'a> {
+    crypto: &'a UdpCrypto,
+    outbound: &'a mut UdpOutboundSession,
+    output: &'a mut [u8],
+    body_range: Range<usize>,
+    wire_len: usize,
+    packet_id: u64,
+    sealed: bool,
+}
+
+impl UdpSealReservation<'_> {
+    /// Returns the exact semantic plaintext body region in the final wire.
+    pub fn body_mut(&mut self) -> &mut [u8] {
+        &mut self.output[self.body_range.clone()]
+    }
+
+    /// Seals the initialized body and commits the reserved packet ID.
+    pub fn seal(
+        mut self,
+        random: &(impl SecureRandom + ?Sized),
+    ) -> Result<UdpSealResult, UdpCryptoError> {
+        let result = match &self.crypto.inner {
+            UdpCryptoInner::Aes { .. } => seal_aes_udp_in_place(
+                self.crypto,
+                &self.outbound.session_id,
+                self.packet_id,
+                self.body_range.clone(),
+                &mut self.output[..self.wire_len],
+            ),
+            UdpCryptoInner::ChaCha20Poly1305(cipher) => seal_xchacha_udp_in_place(
+                cipher,
+                random,
+                &self.outbound.session_id,
+                self.packet_id,
+                self.body_range.clone(),
+                &mut self.output[..self.wire_len],
+            ),
+        };
+        result?;
+        self.outbound.counter.commit(self.packet_id);
+        self.sealed = true;
+        Ok(UdpSealResult {
+            wire_len: self.wire_len,
+            packet_id: self.packet_id,
+        })
+    }
+}
+
+impl Drop for UdpSealReservation<'_> {
+    fn drop(&mut self) {
+        if !self.sealed {
+            self.output[..self.wire_len].zeroize();
         }
     }
 }
@@ -228,6 +307,9 @@ impl UdpSealResult {
 pub struct UdpOpenResult {
     session_id: UdpSessionId,
     packet_id: u64,
+    authenticated_offset: usize,
+    authenticated_len: usize,
+    plaintext_offset: usize,
     plaintext_len: usize,
 }
 
@@ -245,6 +327,17 @@ impl UdpOpenResult {
     /// Returns the authenticated plaintext body length in the output buffer.
     pub const fn plaintext_len(&self) -> usize {
         self.plaintext_len
+    }
+
+    /// Returns the authenticated semantic body range in the opened buffer.
+    pub fn plaintext_range(&self) -> Range<usize> {
+        self.plaintext_offset..self.plaintext_offset + self.plaintext_len
+    }
+
+    /// Returns every authenticated cleartext byte requiring cleanup if a
+    /// later semantic or replay check rejects the packet.
+    pub fn authenticated_range(&self) -> Range<usize> {
+        self.authenticated_offset..self.authenticated_offset + self.authenticated_len
     }
 }
 
@@ -291,11 +384,11 @@ fn udp_identity(session_id: &UdpSessionId, packet_id: u64) -> [u8; UDP_IDENTITY_
     identity
 }
 
-fn seal_aes_udp(
+fn seal_aes_udp_in_place(
     crypto: &UdpCrypto,
     session_id: &UdpSessionId,
     packet_id: u64,
-    plaintext_body: &[u8],
+    body_range: Range<usize>,
     output: &mut [u8],
 ) -> Result<(), UdpCryptoError> {
     let mut identity = Zeroizing::new(udp_identity(session_id, packet_id));
@@ -306,12 +399,10 @@ fn seal_aes_udp(
     let mut nonce = Zeroizing::new([0_u8; AEAD_NONCE_BYTES]);
     nonce.copy_from_slice(&identity[4..UDP_IDENTITY_BYTES]);
     let cipher = crypto.aes_body_cipher(session_id);
-    let body_end = UDP_IDENTITY_BYTES + plaintext_body.len();
-    output[UDP_IDENTITY_BYTES..body_end].copy_from_slice(plaintext_body);
     let tag = cipher
-        .encrypt_packet(nonce.as_ref(), &mut output[UDP_IDENTITY_BYTES..body_end])
+        .encrypt_packet(nonce.as_ref(), &mut output[body_range.clone()])
         .map_err(map_udp_operation_error)?;
-    output[body_end..body_end + AEAD_TAG_BYTES].copy_from_slice(&tag);
+    output[body_range.end..body_range.end + AEAD_TAG_BYTES].copy_from_slice(&tag);
 
     protected_header.zeroize();
     nonce.zeroize();
@@ -319,12 +410,12 @@ fn seal_aes_udp(
     Ok(())
 }
 
-fn seal_xchacha_udp(
+fn seal_xchacha_udp_in_place(
     cipher: &ShadowsocksUdpCipher,
     random: &(impl SecureRandom + ?Sized),
     session_id: &UdpSessionId,
     packet_id: u64,
-    plaintext_body: &[u8],
+    body_range: Range<usize>,
     output: &mut [u8],
 ) -> Result<(), UdpCryptoError> {
     let mut nonce = Zeroizing::new([0_u8; XCHACHA_NONCE_BYTES]);
@@ -332,18 +423,17 @@ fn seal_xchacha_udp(
         .fill(nonce.as_mut())
         .map_err(|_| UdpCryptoError::RandomUnavailable)?;
 
-    let body_start = XCHACHA_NONCE_BYTES;
-    let body_end = body_start + UDP_IDENTITY_BYTES + plaintext_body.len();
-    output[body_start..body_start + UDP_SESSION_ID_BYTES].copy_from_slice(&session_id.bytes);
-    output[body_start + UDP_SESSION_ID_BYTES..body_start + UDP_IDENTITY_BYTES]
+    let encrypted_start = XCHACHA_NONCE_BYTES;
+    output[encrypted_start..encrypted_start + UDP_SESSION_ID_BYTES]
+        .copy_from_slice(&session_id.bytes);
+    output[encrypted_start + UDP_SESSION_ID_BYTES..encrypted_start + UDP_IDENTITY_BYTES]
         .copy_from_slice(&packet_id.to_be_bytes());
-    output[body_start + UDP_IDENTITY_BYTES..body_end].copy_from_slice(plaintext_body);
 
     let tag = cipher
-        .encrypt_packet(nonce.as_ref(), &mut output[body_start..body_end])
+        .encrypt_packet(nonce.as_ref(), &mut output[encrypted_start..body_range.end])
         .map_err(map_udp_operation_error)?;
     output[..XCHACHA_NONCE_BYTES].copy_from_slice(nonce.as_ref());
-    output[body_end..body_end + AEAD_TAG_BYTES].copy_from_slice(&tag);
+    output[body_range.end..body_range.end + AEAD_TAG_BYTES].copy_from_slice(&tag);
     nonce.zeroize();
     Ok(())
 }
@@ -391,6 +481,9 @@ fn open_aes_udp(
     Ok(UdpOpenResult {
         session_id: candidate_session,
         packet_id,
+        authenticated_offset: 0,
+        authenticated_len: body_len,
+        plaintext_offset: 0,
         plaintext_len: body_len,
     })
 }
@@ -452,7 +545,98 @@ fn open_xchacha_udp(
     Ok(UdpOpenResult {
         session_id: UdpSessionId::from_bytes(session_bytes),
         packet_id,
+        authenticated_offset: 0,
+        authenticated_len: body_len,
+        plaintext_offset: 0,
         plaintext_len: body_len,
+    })
+}
+
+fn open_aes_udp_in_place(
+    crypto: &UdpCrypto,
+    wire: &mut BytesMut,
+) -> Result<UdpOpenResult, UdpCryptoError> {
+    let body_len = wire
+        .len()
+        .checked_sub(UDP_IDENTITY_BYTES + AEAD_TAG_BYTES)
+        .ok_or(UdpCryptoError::InputTooShort)?;
+    let body_range = UDP_IDENTITY_BYTES..UDP_IDENTITY_BYTES + body_len;
+    let mut identity = Zeroizing::new([0_u8; UDP_IDENTITY_BYTES]);
+    identity.copy_from_slice(&wire[..UDP_IDENTITY_BYTES]);
+    crypto.crypt_aes_header(&mut identity, false);
+
+    let mut session_bytes = [0_u8; UDP_SESSION_ID_BYTES];
+    session_bytes.copy_from_slice(&identity[..UDP_SESSION_ID_BYTES]);
+    let packet_id = u64::from_be_bytes(
+        identity[UDP_SESSION_ID_BYTES..]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("UDP packet IDs have a fixed width")),
+    );
+    let mut nonce = Zeroizing::new([0_u8; AEAD_NONCE_BYTES]);
+    nonce.copy_from_slice(&identity[4..UDP_IDENTITY_BYTES]);
+    let candidate_session = UdpSessionId::from_bytes(session_bytes);
+    let cipher = crypto.aes_body_cipher(&candidate_session);
+    let tag_bytes: [u8; AEAD_TAG_BYTES] = wire[body_range.end..]
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("validated UDP tag width"));
+    let result = cipher.decrypt_packet(nonce.as_ref(), &mut wire[body_range.clone()], &tag_bytes);
+
+    identity.zeroize();
+    nonce.zeroize();
+    if result.is_err() {
+        return Err(UdpCryptoError::AuthenticationFailed);
+    }
+    Ok(UdpOpenResult {
+        session_id: candidate_session,
+        packet_id,
+        authenticated_offset: body_range.start,
+        authenticated_len: body_len,
+        plaintext_offset: body_range.start,
+        plaintext_len: body_len,
+    })
+}
+
+fn open_xchacha_udp_in_place(
+    cipher: &ShadowsocksUdpCipher,
+    wire: &mut BytesMut,
+) -> Result<UdpOpenResult, UdpCryptoError> {
+    let encrypted_len = wire
+        .len()
+        .checked_sub(XCHACHA_NONCE_BYTES + AEAD_TAG_BYTES)
+        .filter(|length| *length >= UDP_IDENTITY_BYTES)
+        .ok_or(UdpCryptoError::InputTooShort)?;
+    let encrypted_range = XCHACHA_NONCE_BYTES..XCHACHA_NONCE_BYTES + encrypted_len;
+    let mut nonce = Zeroizing::new([0_u8; XCHACHA_NONCE_BYTES]);
+    nonce.copy_from_slice(&wire[..XCHACHA_NONCE_BYTES]);
+    let tag_bytes: [u8; AEAD_TAG_BYTES] = wire[encrypted_range.end..]
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("validated UDP tag width"));
+    let result = cipher.decrypt_packet(
+        nonce.as_ref(),
+        &mut wire[encrypted_range.clone()],
+        &tag_bytes,
+    );
+    nonce.zeroize();
+    if result.is_err() {
+        return Err(UdpCryptoError::AuthenticationFailed);
+    }
+
+    let identity_start = encrypted_range.start;
+    let identity_end = identity_start + UDP_IDENTITY_BYTES;
+    let mut session_bytes = [0_u8; UDP_SESSION_ID_BYTES];
+    session_bytes.copy_from_slice(&wire[identity_start..identity_start + UDP_SESSION_ID_BYTES]);
+    let packet_id = u64::from_be_bytes(
+        wire[identity_start + UDP_SESSION_ID_BYTES..identity_end]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("UDP packet IDs have a fixed width")),
+    );
+    Ok(UdpOpenResult {
+        session_id: UdpSessionId::from_bytes(session_bytes),
+        packet_id,
+        authenticated_offset: encrypted_range.start,
+        authenticated_len: encrypted_len,
+        plaintext_offset: identity_end,
+        plaintext_len: encrypted_len - UDP_IDENTITY_BYTES,
     })
 }
 
@@ -464,7 +648,7 @@ fn map_udp_operation_error(_: ShadowsocksCryptoError) -> UdpCryptoError {
 mod tests {
     use super::*;
     use crate::method::{AES_128_KEY_BYTES, WIDE_KEY_BYTES};
-    use crate::random::SystemRandom;
+    use crate::random::{RandomError, SystemRandom};
     use zeroize::Zeroizing;
 
     fn aes128_udp_crypto() -> UdpCrypto {
@@ -475,6 +659,142 @@ mod tests {
     fn aes256_udp_crypto() -> UdpCrypto {
         let psk = MethodPskBytes::Aes256(Zeroizing::new([0x33; WIDE_KEY_BYTES]));
         UdpCrypto::from_method_key(&psk)
+    }
+
+    fn chacha20_udp_crypto() -> UdpCrypto {
+        let psk = MethodPskBytes::ChaCha20Poly1305(Zeroizing::new([0x55; WIDE_KEY_BYTES]));
+        UdpCrypto::from_method_key(&psk)
+    }
+
+    fn udp_cryptos() -> [UdpCrypto; 3] {
+        [
+            aes128_udp_crypto(),
+            aes256_udp_crypto(),
+            chacha20_udp_crypto(),
+        ]
+    }
+
+    struct FailingRandom;
+
+    impl SecureRandom for FailingRandom {
+        fn fill(&self, _destination: &mut [u8]) -> Result<(), RandomError> {
+            Err(RandomError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn udp_reservation_builds_final_wire_and_owned_open_keeps_body_at_profile_offset() {
+        let body = b"semantic body is written once";
+
+        for crypto in udp_cryptos() {
+            let session_id = UdpSessionId::from_bytes([0x77; UDP_SESSION_ID_BYTES]);
+            let mut outbound = UdpOutboundSession::new(crypto.profile(), session_id);
+            let wire_len = body.len() + crypto.profile().udp_wire_overhead_bytes();
+            let mut wire = BytesMut::from(&vec![0xa5; wire_len][..]);
+            let mut reservation = crypto
+                .reserve_seal(&mut outbound, body.len(), &mut wire)
+                .expect("exact final wire reserves");
+            assert_eq!(reservation.body_mut().len(), body.len());
+            reservation.body_mut().copy_from_slice(body);
+            let sealed = reservation.seal(&SystemRandom).expect("wire seals");
+            assert_eq!(sealed.packet_id(), 0);
+            assert_eq!(sealed.wire_len(), wire_len);
+
+            let opened = crypto
+                .open_in_place(&mut wire)
+                .expect("owned wire authenticates");
+            let expected_offset = match crypto.profile() {
+                MethodProfile::Blake3Aes128Gcm2022 | MethodProfile::Blake3Aes256Gcm2022 => {
+                    UDP_IDENTITY_BYTES
+                }
+                MethodProfile::Blake3ChaCha20Poly13052022 => {
+                    XCHACHA_NONCE_BYTES + UDP_IDENTITY_BYTES
+                }
+            };
+            assert_eq!(
+                opened.plaintext_range(),
+                expected_offset..expected_offset + body.len()
+            );
+            let authenticated_offset = match crypto.profile() {
+                MethodProfile::Blake3Aes128Gcm2022 | MethodProfile::Blake3Aes256Gcm2022 => {
+                    UDP_IDENTITY_BYTES
+                }
+                MethodProfile::Blake3ChaCha20Poly13052022 => XCHACHA_NONCE_BYTES,
+            };
+            assert_eq!(
+                opened.authenticated_range(),
+                authenticated_offset..expected_offset + body.len()
+            );
+            assert_eq!(&wire[opened.plaintext_range()], body);
+        }
+    }
+
+    #[test]
+    fn udp_owned_open_auth_failure_clears_every_candidate_plaintext_byte() {
+        let body = b"unauthenticated plaintext must not escape";
+
+        for crypto in udp_cryptos() {
+            let session_id = UdpSessionId::from_bytes([0x88; UDP_SESSION_ID_BYTES]);
+            let mut outbound = UdpOutboundSession::new(crypto.profile(), session_id);
+            let mut wire = BytesMut::from(
+                &vec![0xa5; body.len() + crypto.profile().udp_wire_overhead_bytes()][..],
+            );
+            let sealed = crypto
+                .seal(&mut outbound, body, &mut wire, &SystemRandom)
+                .expect("wire seals");
+            *wire
+                .get_mut(sealed.wire_len() - 1)
+                .expect("authentication tag byte") ^= 1;
+            let candidate_range = match crypto.profile() {
+                MethodProfile::Blake3Aes128Gcm2022 | MethodProfile::Blake3Aes256Gcm2022 => {
+                    UDP_IDENTITY_BYTES..sealed.wire_len() - AEAD_TAG_BYTES
+                }
+                MethodProfile::Blake3ChaCha20Poly13052022 => {
+                    XCHACHA_NONCE_BYTES..sealed.wire_len() - AEAD_TAG_BYTES
+                }
+            };
+
+            assert!(matches!(
+                crypto.open_in_place(&mut wire),
+                Err(UdpCryptoError::AuthenticationFailed)
+            ));
+            assert!(wire[candidate_range].iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[test]
+    fn udp_dropped_or_failed_reservation_clears_wire_and_does_not_commit_counter() {
+        let body_len = 17;
+        let crypto = chacha20_udp_crypto();
+        let session_id = UdpSessionId::from_bytes([0x99; UDP_SESSION_ID_BYTES]);
+        let mut outbound = UdpOutboundSession::new(crypto.profile(), session_id);
+        let wire_len = body_len + crypto.profile().udp_wire_overhead_bytes();
+        let mut output = [0xa5; 96];
+
+        {
+            let mut reservation = crypto
+                .reserve_seal(&mut outbound, body_len, &mut output)
+                .expect("reservation");
+            reservation.body_mut().fill(0x42);
+        }
+        assert!(output[..wire_len].iter().all(|byte| *byte == 0));
+        assert!(output[wire_len..].iter().all(|byte| *byte == 0xa5));
+
+        output.fill(0xa5);
+        let mut reservation = crypto
+            .reserve_seal(&mut outbound, body_len, &mut output)
+            .expect("retry reservation");
+        reservation.body_mut().fill(0x24);
+        assert!(matches!(
+            reservation.seal(&FailingRandom),
+            Err(UdpCryptoError::RandomUnavailable)
+        ));
+        assert!(output[..wire_len].iter().all(|byte| *byte == 0));
+
+        let sealed = crypto
+            .seal(&mut outbound, b"ok", &mut output, &SystemRandom)
+            .expect("failed reservations did not commit counter");
+        assert_eq!(sealed.packet_id(), 0);
     }
 
     #[test]

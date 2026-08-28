@@ -28,6 +28,7 @@ PROFILE_FIELDS = frozenset(
         "active_seconds",
         "topology",
         "application_payload_bytes",
+        "workload_scale",
         "socks_datagram_bytes",
         "upstream_wire_bytes",
         "sha",
@@ -47,6 +48,7 @@ PROFILE_FIELDS = frozenset(
         "p99_nanoseconds",
         "io_completions",
         "scale",
+        "structural_metrics",
         "producer_source_sha256",
         "controller_source_sha256",
         "semantic_recipe_sha256",
@@ -57,6 +59,78 @@ PROFILE_FIELDS = frozenset(
         "status",
     }
 )
+
+
+STRUCTURAL_FIELDS = frozenset(
+    {
+        "allocations",
+        "copy_bytes",
+        "zero_bytes",
+        "wakeups",
+        "lock_wait_nanoseconds",
+        "replay_words_touched",
+        "inflight_peak",
+        "drop_count",
+        "cache_scan_entries",
+        "request_count",
+        "encode_failure_count",
+    }
+)
+
+
+STRUCTURAL_CLOSED_REASONS = frozenset(
+    {"not_applicable", "not_exposed", "external_artifact"}
+)
+
+
+def _validate_structural_metrics(row: dict[str, object], scenario: str) -> None:
+    metrics = row["structural_metrics"]
+    if type(metrics) is not dict or set(metrics) != STRUCTURAL_FIELDS | {"closed"}:
+        raise CandidateControlError("evidence structural_metrics is not a closed object")
+    closed = metrics["closed"]
+    if type(closed) is not dict:
+        raise CandidateControlError("evidence structural_metrics.closed must be an object")
+    null_fields = {field for field in STRUCTURAL_FIELDS if metrics[field] is None}
+    if set(closed) != null_fields:
+        raise CandidateControlError(
+            "evidence structural_metrics.closed must exactly explain null fields"
+        )
+    for field, reason in closed.items():
+        if type(reason) is not str or reason not in STRUCTURAL_CLOSED_REASONS:
+            raise CandidateControlError(
+                f"evidence structural metric {field} has an unsupported closure reason"
+            )
+    for field in STRUCTURAL_FIELDS - null_fields:
+        value = metrics[field]
+        if type(value) is not int or value < 0:
+            raise CandidateControlError(
+                f"evidence structural metric {field} must be an unsigned integer"
+            )
+    if scenario == "udp-replay-sequential":
+        required_positive = {"replay_words_touched"}
+        required_observed = required_positive | {"drop_count"}
+    elif scenario.startswith("udp-") or scenario == "dns-udp-concurrency":
+        required_positive = {"inflight_peak"}
+        required_observed = required_positive | {"drop_count"}
+        if scenario == "dns-udp-concurrency":
+            required_positive.add("request_count")
+            required_observed |= {"request_count", "encode_failure_count"}
+    elif scenario.startswith("dns-cache-size-"):
+        required_positive = {"cache_scan_entries"}
+        required_observed = required_positive
+    else:
+        required_positive = set()
+        required_observed = set()
+    for field in required_observed:
+        if metrics[field] is None:
+            raise CandidateControlError(
+                f"evidence scenario {scenario} must observe structural metric {field}"
+            )
+    for field in required_positive:
+        if metrics[field] == 0:
+            raise CandidateControlError(
+                f"evidence scenario {scenario} structural metric {field} must be positive"
+            )
 
 
 def _read_trial(path: pathlib.Path) -> dict[str, object]:
@@ -137,14 +211,13 @@ def _validate_trial(
         raise CandidateControlError("evidence active_seconds does not match the plan")
     if _required_string(row, "topology") != planned[scenario]["topology"]:
         raise CandidateControlError("evidence topology does not match the scenario")
-    if (
-        _required_u64(row, "application_payload_bytes", positive=True)
-        != planned[scenario]["application_payload_bytes"]
-    ):
+    if _optional_u64(row, "application_payload_bytes") != planned[scenario][
+        "application_payload_bytes"
+    ]:
         raise CandidateControlError(
             "evidence application_payload_bytes does not match the scenario"
         )
-    for field in ("socks_datagram_bytes", "upstream_wire_bytes"):
+    for field in ("workload_scale", "socks_datagram_bytes", "upstream_wire_bytes"):
         if _optional_u64(row, field) != planned[scenario][field]:
             raise CandidateControlError(f"evidence {field} does not match the scenario")
     expected_sha = parent_sha if member == "parent" else candidate_sha
@@ -173,7 +246,12 @@ def _validate_trial(
     value = _required_u64(row, "value")
     is_scale = scenario == SCALE_SCENARIO
     _required_u64(row, "checked_units", positive=not is_scale)
-    _required_u64(row, "io_completions", positive=not is_scale)
+    non_io_profile = metric == "operations_per_second" or scenario.startswith(
+        "dns-cache-size-"
+    )
+    _required_u64(
+        row, "io_completions", positive=not is_scale and not non_io_profile
+    )
     p99 = row.get("p99_nanoseconds")
     if metric == "p99_nanoseconds":
         if type(p99) is not int or p99 != value or value == 0:
@@ -184,6 +262,7 @@ def _validate_trial(
         raise CandidateControlError(
             "throughput evidence must have null p99_nanoseconds"
         )
+    _validate_structural_metrics(row, scenario)
     if is_scale:
         _validate_scale_evidence(row)
     elif row["scale"] is not None:

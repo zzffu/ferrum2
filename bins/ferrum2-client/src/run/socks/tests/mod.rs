@@ -240,7 +240,6 @@ async fn receive_request_and_encode_response(
                 &response,
                 0,
                 &mut wire,
-                scratch,
             )
             .expect("response encode");
         if index == 0 {
@@ -639,7 +638,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
             &test_datagram(target.clone(), b"pong"),
             0,
             &mut wire,
-            &mut scratch,
         )
         .expect("inner response");
     let inner_wire = wire[..inner_response.wire_len()].to_vec();
@@ -653,7 +651,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
                 &test_datagram(target.clone(), &inner_wire),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("wrong intermediate wrapper");
         upstreams[0]
@@ -681,7 +678,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
                 ),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("invalid inner wrapper");
         upstreams[0]
@@ -707,7 +703,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
                 ),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("outer tamper wrapper");
         let mut outer_tamper = wire[..outer_tamper.wire_len()].to_vec();
@@ -735,7 +730,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
             ),
             0,
             &mut wire,
-            &mut scratch,
         )
         .expect("outer response");
     upstreams[0]
@@ -775,7 +769,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
                 ),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("fresh outer replayed inner");
         upstreams[0]
@@ -798,7 +791,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
                 &test_datagram(target.clone(), b"next"),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("next inner response");
         let next_inner = wire[..next_inner.wire_len()].to_vec();
@@ -813,7 +805,6 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
                 ),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("next outer response");
         upstreams[0]

@@ -118,7 +118,7 @@ async fn lifecycle_composition_contract_production_registry_witnesses_live_then_
         let live = registry.snapshot();
         if live.active_supervisor_children == 1
             && live.connection_tasks == 1
-            && live.owned_buffers == 2
+            && live.owned_buffers == 1
             && live.owned_permits >= 1
             && live.listeners == 1
         {

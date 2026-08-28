@@ -17,7 +17,7 @@ use super::error::{
     DetectionReason, ShadowsocksError, detection_from_aead, detection_from_frame,
     terminate_detection,
 };
-use super::flow::{ClientFlow, ServerFlow, TransportIo, reset_decrypt};
+use super::flow::{ClientFlow, ServerFlow, TransportIo, prepare_decrypt};
 use super::observe::{
     BufferObserver, BufferRole, FlowObserver, Observers, fixed_scratch, inspect_scratch,
 };
@@ -377,18 +377,17 @@ where
             MAX_ENCRYPT_WIRE_LEN,
             self.observers.buffer,
         );
-        reset_decrypt(&mut decrypt);
-
         let profile = self.keys.tcp_profile();
         let salt_len = profile.salt_bytes();
         let request_first_read_len = profile.initial_request_read_bytes();
+        prepare_decrypt(&mut decrypt, request_first_read_len);
         let first_read =
-            poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[..request_first_read_len]))
+            poll_fn(|cx| Pin::new(&mut io).poll_read_buf(cx, &mut decrypt, request_first_read_len))
                 .await
                 .map_err(|_| {
                     terminate_detection(&mut io, self.observers.flow, DetectionReason::ReadFailed)
                 })?;
-        if first_read != request_first_read_len {
+        if first_read != request_first_read_len || decrypt.len() != request_first_read_len {
             return Err(terminate_detection(
                 &mut io,
                 self.observers.flow,
@@ -450,11 +449,11 @@ where
                 terminate_detection(&mut io, self.observers.flow, DetectionReason::FrameBounds)
             })?;
 
-        reset_decrypt(&mut decrypt);
+        prepare_decrypt(&mut decrypt, wire_len);
         let mut filled = 0;
         while filled < wire_len {
             let read =
-                poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[filled..wire_len]))
+                poll_fn(|cx| Pin::new(&mut io).poll_read_buf(cx, &mut decrypt, wire_len - filled))
                     .await
                     .map_err(|_| {
                         terminate_detection(
@@ -476,8 +475,14 @@ where
                 .ok_or_else(|| {
                     terminate_detection(&mut io, self.observers.flow, DetectionReason::FrameBounds)
                 })?;
+            if decrypt.len() != filled {
+                return Err(terminate_detection(
+                    &mut io,
+                    self.observers.flow,
+                    DetectionReason::FrameBounds,
+                ));
+            }
         }
-        decrypt.truncate(wire_len);
         opener.open_in_place(&mut decrypt).map_err(|error| {
             terminate_detection(&mut io, self.observers.flow, detection_from_aead(error))
         })?;
@@ -519,7 +524,7 @@ where
         }
 
         let initial_payload = parsed.initial_payload;
-        reset_decrypt(&mut decrypt);
+        decrypt.clear();
         inspect_scratch(BufferRole::Encrypt, &encrypt, self.observers.buffer);
         inspect_scratch(BufferRole::Decrypt, &decrypt, self.observers.buffer);
         Ok(Session {

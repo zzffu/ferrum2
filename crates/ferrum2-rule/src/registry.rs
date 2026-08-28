@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use ferrum2_core::{CanonicalDomain, GenerationChange, GenerationSignal};
 
@@ -410,9 +410,261 @@ impl fmt::Display for RegistryPublishError {
 
 impl Error for RegistryPublishError {}
 
+fn validate_successor(
+    current: &RuleEngineSnapshot,
+    next: &RuleEngineSnapshot,
+) -> Result<(), RegistryPublishError> {
+    if next.generation <= current.generation {
+        return Err(RegistryPublishError::StaleGeneration);
+    }
+    if !current.is_compatible_successor(next) {
+        return Err(RegistryPublishError::IncompatibleLayout);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "candidate-atomic-snapshot"))]
+mod snapshot_store {
+    use std::sync::{Arc, RwLock};
+
+    use ferrum2_core::{GenerationChange, GenerationSignal};
+
+    use super::{RegistryPublishError, RuleEngineSnapshot, validate_successor};
+
+    pub(super) struct SnapshotStore {
+        current: RwLock<Arc<RuleEngineSnapshot>>,
+    }
+
+    impl SnapshotStore {
+        pub(super) fn new(initial: RuleEngineSnapshot) -> Self {
+            Self {
+                current: RwLock::new(Arc::new(initial)),
+            }
+        }
+
+        pub(super) fn load(&self) -> Arc<RuleEngineSnapshot> {
+            Arc::clone(
+                &self
+                    .current
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+
+        pub(super) fn watch_generation(&self, changes: &GenerationSignal) -> GenerationChange {
+            let current = self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let change = changes.watch_from(current.generation());
+            drop(current);
+            change
+        }
+
+        pub(super) fn watch_generation_from(
+            &self,
+            generation: u64,
+            changes: &GenerationSignal,
+        ) -> GenerationChange {
+            let current = self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let change = changes.watch_from(generation);
+            drop(current);
+            change
+        }
+
+        pub(super) fn publish(
+            &self,
+            next: RuleEngineSnapshot,
+            changes: &GenerationSignal,
+        ) -> Result<Arc<RuleEngineSnapshot>, RegistryPublishError> {
+            let mut current = self
+                .current
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            validate_successor(&current, &next)?;
+            let generation = next.generation();
+            let previous = std::mem::replace(&mut *current, Arc::new(next));
+            let notification = changes.prepare_notification(generation);
+            drop(current);
+            notification.wake();
+            Ok(previous)
+        }
+    }
+}
+
+#[cfg(feature = "candidate-atomic-snapshot")]
+mod snapshot_store {
+    use std::sync::{Arc, Mutex};
+
+    use arc_swap::ArcSwap;
+    use ferrum2_core::{GenerationChange, GenerationSignal};
+
+    use super::{RegistryPublishError, RuleEngineSnapshot, validate_successor};
+
+    pub(super) struct SnapshotStore {
+        current: ArcSwap<RuleEngineSnapshot>,
+        publication: Mutex<()>,
+    }
+
+    impl SnapshotStore {
+        pub(super) fn new(initial: RuleEngineSnapshot) -> Self {
+            let current = ArcSwap::from_pointee(initial);
+            // Prime the per-thread ArcSwap loading strategy before evaluations.
+            drop(current.load_full());
+            Self {
+                current,
+                publication: Mutex::new(()),
+            }
+        }
+
+        pub(super) fn load(&self) -> Arc<RuleEngineSnapshot> {
+            self.current.load_full()
+        }
+
+        pub(super) fn watch_generation(&self, changes: &GenerationSignal) -> GenerationChange {
+            let publication = self
+                .publication
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let change = changes.watch_from(self.current.load().generation());
+            drop(publication);
+            change
+        }
+
+        pub(super) fn watch_generation_from(
+            &self,
+            generation: u64,
+            changes: &GenerationSignal,
+        ) -> GenerationChange {
+            let publication = self
+                .publication
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let change = changes.watch_from(generation);
+            drop(publication);
+            change
+        }
+
+        pub(super) fn publish(
+            &self,
+            next: RuleEngineSnapshot,
+            changes: &GenerationSignal,
+        ) -> Result<Arc<RuleEngineSnapshot>, RegistryPublishError> {
+            self.publish_with_hook(next, changes, || {})
+        }
+
+        fn publish_with_hook(
+            &self,
+            next: RuleEngineSnapshot,
+            changes: &GenerationSignal,
+            after_swap: impl FnOnce(),
+        ) -> Result<Arc<RuleEngineSnapshot>, RegistryPublishError> {
+            let publication = self
+                .publication
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current = self.current.load_full();
+            validate_successor(&current, &next)?;
+            let generation = next.generation();
+            let previous = self.current.swap(Arc::new(next));
+            after_swap();
+            let notification = changes.prepare_notification(generation);
+            drop(publication);
+            notification.wake();
+            Ok(previous)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::{Arc, mpsc};
+        use std::task::{Context, Poll, Waker};
+        use std::thread;
+        use std::time::Duration;
+
+        use ferrum2_core::GenerationChange;
+
+        use super::*;
+        use crate::RuleEngineSnapshotBuilder;
+
+        fn poll_change(change: &mut GenerationChange) -> Poll<u64> {
+            Future::poll(Pin::new(change), &mut Context::from_waker(Waker::noop()))
+        }
+
+        #[test]
+        fn subscriptions_cannot_enter_between_snapshot_swap_and_signal_update() {
+            let initial = RuleEngineSnapshotBuilder::new(1).build().unwrap();
+            let next = initial.builder_for_generation(2).unwrap().build().unwrap();
+            let store = Arc::new(SnapshotStore::new(initial));
+            let changes = GenerationSignal::new(1);
+            let (started_tx, started_rx) = mpsc::sync_channel(2);
+            let (current_tx, current_rx) = mpsc::sync_channel(1);
+            let (selected_tx, selected_rx) = mpsc::sync_channel(1);
+
+            store
+                .publish_with_hook(next, &changes, || {
+                    let current_store = Arc::clone(&store);
+                    let current_changes = changes.clone();
+                    let started = started_tx.clone();
+                    thread::spawn(move || {
+                        started.send(()).unwrap();
+                        current_tx
+                            .send(current_store.watch_generation(&current_changes))
+                            .unwrap();
+                    });
+
+                    let selected_store = Arc::clone(&store);
+                    let selected_changes = changes.clone();
+                    thread::spawn(move || {
+                        started_tx.send(()).unwrap();
+                        selected_tx
+                            .send(selected_store.watch_generation_from(1, &selected_changes))
+                            .unwrap();
+                    });
+
+                    started_rx.recv().unwrap();
+                    started_rx.recv().unwrap();
+                    thread::yield_now();
+                    assert!(matches!(
+                        current_rx.try_recv(),
+                        Err(mpsc::TryRecvError::Empty)
+                    ));
+                    assert!(matches!(
+                        selected_rx.try_recv(),
+                        Err(mpsc::TryRecvError::Empty)
+                    ));
+                })
+                .unwrap();
+
+            let mut current = current_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let mut selected = selected_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(current.baseline(), 2);
+            assert_eq!(poll_change(&mut current), Poll::Pending);
+            assert_eq!(selected.baseline(), 1);
+            assert_eq!(poll_change(&mut selected), Poll::Ready(2));
+
+            let next = store
+                .load()
+                .builder_for_generation(3)
+                .unwrap()
+                .build()
+                .unwrap();
+            store.publish(next, &changes).unwrap();
+            assert_eq!(poll_change(&mut current), Poll::Ready(3));
+        }
+    }
+}
+
+use snapshot_store::SnapshotStore;
+
 /// Lock-safe atomic publication point for complete immutable snapshots.
 pub struct RuleEngineRegistry {
-    current: RwLock<Arc<RuleEngineSnapshot>>,
+    current: SnapshotStore,
     changes: GenerationSignal,
 }
 
@@ -420,18 +672,14 @@ impl RuleEngineRegistry {
     pub fn new(initial: RuleEngineSnapshot) -> Self {
         let generation = initial.generation();
         Self {
-            current: RwLock::new(Arc::new(initial)),
+            current: SnapshotStore::new(initial),
             changes: GenerationSignal::new(generation),
         }
     }
 
-    /// Captures exactly one generation. Poisoned locks retain their last complete value.
+    /// Captures exactly one complete generation.
     pub fn snapshot(&self) -> Arc<RuleEngineSnapshot> {
-        let current = self
-            .current
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(&current)
+        self.current.load()
     }
 
     pub fn generation(&self) -> u64 {
@@ -443,11 +691,7 @@ impl RuleEngineRegistry {
     /// The returned runtime-neutral future is independent from every other
     /// subscriber and completes with the newly published generation.
     pub fn watch_generation(&self) -> GenerationChange {
-        let _current = self
-            .current
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.changes.watch()
+        self.current.watch_generation(&self.changes)
     }
 
     /// Subscribes from a generation captured by an earlier route evaluation.
@@ -456,11 +700,8 @@ impl RuleEngineRegistry {
     /// returned future is immediately ready. This closes the interval between
     /// route selection and subscription construction.
     pub fn watch_generation_from(&self, generation: u64) -> GenerationChange {
-        let _current = self
-            .current
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.changes.watch_from(generation)
+        self.current
+            .watch_generation_from(generation, &self.changes)
     }
 
     /// Publishes a complete compatible successor or leaves the old snapshot untouched.
@@ -468,22 +709,7 @@ impl RuleEngineRegistry {
         &self,
         next: RuleEngineSnapshot,
     ) -> Result<Arc<RuleEngineSnapshot>, RegistryPublishError> {
-        let mut current = self
-            .current
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if next.generation <= current.generation {
-            return Err(RegistryPublishError::StaleGeneration);
-        }
-        if !current.is_compatible_successor(&next) {
-            return Err(RegistryPublishError::IncompatibleLayout);
-        }
-        let generation = next.generation();
-        let previous = std::mem::replace(&mut *current, Arc::new(next));
-        let notification = self.changes.prepare_notification(generation);
-        drop(current);
-        notification.wake();
-        Ok(previous)
+        self.current.publish(next, &self.changes)
     }
 }
 

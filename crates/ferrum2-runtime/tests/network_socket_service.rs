@@ -14,17 +14,17 @@ use ferrum2_net::{
     NetworkSnapshot, ResolvedInterface, RouteNetworkOptions, SystemBestRoute,
 };
 use ferrum2_runtime::{
-    DirectUdpSocket, GenerationBoundTcpStream, NetworkResetCoordinator, NetworkResetIntent,
-    NetworkResetLimits, NetworkResetReason, NetworkRuntimeResourceAdmissionError,
-    NetworkSnapshotPublisher, NetworkSocketOperations, NetworkSocketService,
-    NetworkSocketServiceError, OwnerRegistry, RuntimeTcpStream,
+    DirectUdpSocket, NetworkResetCoordinator, NetworkResetIntent, NetworkResetLimits,
+    NetworkResetReason, NetworkRuntimeOwnerCancellation, NetworkRuntimeResourceAdmissionError,
+    NetworkSnapshotPublisher, NetworkSocketMode, NetworkSocketOperations, NetworkSocketService,
+    NetworkSocketServiceError, NetworkTcpStream, OwnerRegistry, RuntimeTcpStream,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 #[test]
-fn generation_bound_tcp_stream_satisfies_shared_protocol_io_contract() {
+fn physical_tcp_stream_satisfies_shared_protocol_io_contract() {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<GenerationBoundTcpStream<RuntimeTcpStream>>();
+    assert_send_sync::<NetworkTcpStream<RuntimeTcpStream>>();
 }
 
 #[derive(Default)]
@@ -107,6 +107,7 @@ struct FakeState {
     tcp_connect_failure: AtomicUsize,
     udp_connect_pending: AtomicUsize,
     connect_started: tokio::sync::Notify,
+    tcp_read_started: tokio::sync::Notify,
     udp_read_started: tokio::sync::Notify,
     tcp_socket_drops: AtomicUsize,
     tcp_stream_drops: AtomicUsize,
@@ -171,6 +172,7 @@ impl AsyncRead for FakeTcpStream {
         _: &mut Context<'_>,
         _: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        self.state.tcp_read_started.notify_one();
         Poll::Pending
     }
 }
@@ -328,9 +330,21 @@ fn service(
     NetworkResetCoordinator,
     NetworkSocketService<Catalog, FakeOperations>,
 ) {
+    service_with_mode(owners, state, NetworkSocketMode::Dynamic)
+}
+
+fn service_with_mode(
+    owners: &OwnerRegistry,
+    state: Arc<FakeState>,
+    mode: NetworkSocketMode,
+) -> (
+    NetworkResetCoordinator,
+    NetworkSocketService<Catalog, FakeOperations>,
+) {
     let coordinator = coordinator(owners);
     *state.snapshots.lock().unwrap() = Some(coordinator.snapshots());
-    let service = NetworkSocketService::new(
+    let service = NetworkSocketService::with_mode(
+        mode,
         coordinator.clone(),
         NetworkInterfaceResolver::new(Catalog),
         FakeOperations { state },
@@ -570,6 +584,45 @@ async fn tcp_connect_reset_closes_the_prepared_socket_and_releases_owner() {
 }
 
 #[tokio::test]
+async fn tcp_reset_wakes_a_pending_operation_and_retains_the_terminal_reason() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let mut stream = service
+        .connect_tcp(&DialOptions::default(), &route(), destination(443))
+        .await
+        .expect("generation-bound TCP stream");
+    let operation = tokio::spawn(async move {
+        let result = stream.read_u8().await;
+        (stream, result)
+    });
+    state.tcp_read_started.notified().await;
+
+    let intent = NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged);
+    let report = coordinator
+        .reset_network(snapshot(2), intent)
+        .await
+        .unwrap();
+    let (stream, result) = tokio::time::timeout(std::time::Duration::from_secs(1), operation)
+        .await
+        .expect("reset wakes the pending TCP poll")
+        .expect("TCP operation task");
+
+    assert!(result.is_err());
+    let NetworkRuntimeOwnerCancellation::Reset(signal) = stream.closed().expect("reset reason")
+    else {
+        panic!("TCP stream retained the wrong terminal reason");
+    };
+    assert_eq!(signal.target_generation(), 2);
+    assert_eq!(signal.intent(), intent);
+    assert_eq!(report.cancelled_runtime_owners(), 1);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    drop(stream);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn udp_connect_reset_closes_the_prepared_socket_and_releases_owner() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
@@ -615,7 +668,15 @@ async fn idle_connected_resources_are_closed_before_reset_acknowledgement() {
     assert_eq!(tcp_report.cancelled_runtime_owners(), 1);
     assert_eq!(tcp_state.tcp_stream_drops.load(Ordering::SeqCst), 1);
     assert!(stream.read_u8().await.is_err());
-    assert!(stream.closed().is_some());
+    let NetworkRuntimeOwnerCancellation::Reset(signal) = stream.closed().expect("reset reason")
+    else {
+        panic!("TCP stream retained the wrong terminal reason");
+    };
+    assert_eq!(signal.target_generation(), 2);
+    assert_eq!(
+        signal.intent(),
+        NetworkResetIntent::Ordinary(NetworkResetReason::InterfaceChanged)
+    );
     assert_eq!(
         stream.resolved_interface().selection_source(),
         InterfaceSelectionSource::AutoDetected
@@ -643,6 +704,77 @@ async fn idle_connected_resources_are_closed_before_reset_acknowledgement() {
         InterfaceSelectionSource::AutoDetected
     );
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_reset_closes_many_wrappers_once_and_retains_every_reason() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let mut streams = Vec::new();
+    for offset in 0..64 {
+        streams.push(
+            service
+                .connect_tcp(
+                    &DialOptions::default(),
+                    &route(),
+                    destination(10_000 + offset),
+                )
+                .await
+                .expect("generation-bound TCP stream"),
+        );
+    }
+    assert_eq!(owners.snapshot().network_runtime_owners, 64);
+
+    let intent = NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged);
+    let report = coordinator
+        .reset_network(snapshot(2), intent)
+        .await
+        .unwrap();
+    assert_eq!(report.cancelled_runtime_owners(), 64);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 64);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+
+    for stream in &streams {
+        let NetworkRuntimeOwnerCancellation::Reset(signal) =
+            stream.closed().expect("reset terminal reason")
+        else {
+            panic!("TCP stream retained the wrong terminal reason");
+        };
+        assert_eq!(signal.target_generation(), 2);
+        assert_eq!(signal.intent(), intent);
+        assert!(stream.with_stream(|_| ()).is_none());
+    }
+    drop(streams);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 64);
+}
+
+#[tokio::test]
+async fn coordinator_drop_closes_tcp_wrapper_once_with_the_complete_reason() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let stream = service
+        .connect_tcp(&DialOptions::default(), &route(), destination(443))
+        .await
+        .expect("generation-bound TCP stream");
+    drop(service);
+    drop(coordinator);
+
+    for _ in 0..200 {
+        if stream.closed().is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        stream.closed(),
+        Some(NetworkRuntimeOwnerCancellation::CoordinatorDropped)
+    );
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    drop(stream);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -673,4 +805,178 @@ async fn udp_reset_waits_for_an_inflight_operation_before_acknowledging_its_owne
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
     assert!(socket.is_closed().await);
     assert!(socket.closed().is_some());
+}
+
+#[tokio::test]
+async fn static_mode_uses_bare_sockets_without_owners_and_keeps_the_startup_snapshot() {
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) =
+        service_with_mode(&owners, Arc::clone(&state), NetworkSocketMode::Static);
+    let mut stream = service
+        .connect_tcp(&DialOptions::default(), &route(), destination(443))
+        .await
+        .expect("static TCP stream");
+    let socket = service
+        .open_udp(&DialOptions::default(), &route(), destination(53))
+        .expect("static UDP socket");
+
+    assert!(!stream.is_generation_bound());
+    assert!(!socket.is_generation_bound());
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    assert_eq!(service.published_generation(), 1);
+    assert!(service.generation_is_admissible(1));
+
+    let report = coordinator
+        .reset_network(
+            snapshot(2),
+            NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.cancelled_runtime_owners(), 0);
+    assert_eq!(service.published_generation(), 1);
+    assert!(service.generation_is_admissible(1));
+    assert!(!service.generation_is_admissible(2));
+    assert!(stream.with_stream(|_| ()).is_some());
+    stream.write_all(b"still-open").await.unwrap();
+    assert_eq!(
+        socket.send_to(b"query", destination(5353)).await.unwrap(),
+        5
+    );
+    assert!(!socket.is_closed().await);
+
+    drop(stream);
+    drop(socket);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn central_registry_adds_no_task_per_dynamic_socket_and_bulk_closes_once() {
+    const SOCKETS_PER_TRANSPORT: usize = 512;
+
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let alive_before = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let mut streams = Vec::with_capacity(SOCKETS_PER_TRANSPORT);
+    let mut sockets = Vec::with_capacity(SOCKETS_PER_TRANSPORT);
+    for offset in 0..SOCKETS_PER_TRANSPORT {
+        streams.push(
+            service
+                .connect_tcp(
+                    &DialOptions::default(),
+                    &route(),
+                    destination(10_000 + u16::try_from(offset).unwrap()),
+                )
+                .await
+                .expect("dynamic TCP stream"),
+        );
+        sockets.push(
+            service
+                .open_udp(
+                    &DialOptions::default(),
+                    &route(),
+                    destination(20_000 + u16::try_from(offset).unwrap()),
+                )
+                .expect("dynamic UDP socket"),
+        );
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks(),
+        alive_before,
+        "physical sockets must not spawn per-connection monitor tasks"
+    );
+    assert_eq!(
+        owners.snapshot().network_runtime_owners,
+        SOCKETS_PER_TRANSPORT * 2
+    );
+
+    let report = coordinator
+        .reset_network(
+            snapshot(2),
+            NetworkResetIntent::Ordinary(NetworkResetReason::InterfaceChanged),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.cancelled_runtime_owners(), SOCKETS_PER_TRANSPORT * 2);
+    assert_eq!(
+        state.tcp_stream_drops.load(Ordering::SeqCst),
+        SOCKETS_PER_TRANSPORT
+    );
+    assert_eq!(
+        state.udp_socket_drops.load(Ordering::SeqCst),
+        SOCKETS_PER_TRANSPORT
+    );
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+
+    drop(streams);
+    drop(sockets);
+    assert_eq!(
+        state.tcp_stream_drops.load(Ordering::SeqCst),
+        SOCKETS_PER_TRANSPORT
+    );
+    assert_eq!(
+        state.udp_socket_drops.load(Ordering::SeqCst),
+        SOCKETS_PER_TRANSPORT
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_drop_and_reset_reclaim_each_registry_generation_once() {
+    const STREAMS: usize = 512;
+    const DROP_THREADS: usize = 8;
+
+    let owners = OwnerRegistry::new();
+    let state = Arc::new(FakeState::default());
+    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let mut streams = Vec::with_capacity(STREAMS);
+    for offset in 0..STREAMS {
+        streams.push(
+            service
+                .connect_tcp(
+                    &DialOptions::default(),
+                    &route(),
+                    destination(30_000 + u16::try_from(offset).unwrap()),
+                )
+                .await
+                .expect("dynamic TCP stream"),
+        );
+    }
+    let retained = streams.split_off(STREAMS / 2);
+    let mut drop_batches: Vec<Vec<_>> = (0..DROP_THREADS).map(|_| Vec::new()).collect();
+    for (index, stream) in streams.into_iter().enumerate() {
+        drop_batches[index % DROP_THREADS].push(stream);
+    }
+    let start = Arc::new(std::sync::Barrier::new(DROP_THREADS + 1));
+    let mut droppers = Vec::new();
+    for dropping in drop_batches {
+        let thread_start = Arc::clone(&start);
+        droppers.push(std::thread::spawn(move || {
+            thread_start.wait();
+            drop(dropping);
+        }));
+    }
+    start.wait();
+    let _ = coordinator
+        .reset_network(
+            snapshot(2),
+            NetworkResetIntent::Ordinary(NetworkResetReason::UnicastAddressChanged),
+        )
+        .await
+        .unwrap();
+    for dropper in droppers {
+        dropper.join().expect("drop worker");
+    }
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), STREAMS);
+    drop(retained);
+    assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), STREAMS);
 }

@@ -72,6 +72,104 @@ class ScaleControlTests(unittest.TestCase):
         _observation, failures = scale_decision._scale_trial_observation(row, self.policy)
         return set(failures)
 
+    def calibrated_scale_policy(self) -> dict[str, object]:
+        policy = copy.deepcopy(self.policy)
+        contract = self.plan["scenarios"][0]["evidence_contract"]
+        policy["calibration_source"] = "artifact:synthetic-scale-calibration"
+        policy["calibration_environment"] = {
+            "runner_image": contract["runner_image"],
+            "pair_schedule": "abba-six-pairs",
+            "required_pairs": 6,
+            **{
+                field: contract[field]
+                for field in (
+                    "producer_source_sha256",
+                    "controller_source_sha256",
+                    "semantic_recipe_sha256",
+                    "evidence_bundle_sha256",
+                )
+            },
+            "rustc": "rustc 1.97.1 test",
+            "kernel": "test-kernel",
+            "cpu_model": "test-cpu",
+            "cpu_count": 8,
+            "memory_kib": 16_384_000,
+            "build_profile": "current",
+        }
+        return policy
+
+    def test_repository_scale_policy_is_v3_and_rejects_old_or_unaligned_policy(
+        self,
+    ) -> None:
+        self.assertEqual(self.policy["schema_version"], 3)
+        self.assertEqual(
+            self.policy["policy_id"],
+            "github-hosted-ubuntu-24.04-tcp-scale-10k-safety-v3-calibration-required",
+        )
+
+        obsolete = copy.deepcopy(self.policy)
+        obsolete["schema_version"] = 2
+        with self.assertRaises(json_contract.CandidateControlError):
+            linux_scale.validate_scale_safety_policy(obsolete)
+
+        calibrated = self.calibrated_scale_policy()
+        linux_scale.validate_scale_safety_policy(calibrated)
+        calibrated["calibration_environment"]["memory_kib"] -= 1
+        with self.assertRaisesRegex(
+            json_contract.CandidateControlError, "64 MiB capacity anchor"
+        ):
+            linux_scale.validate_scale_safety_policy(calibrated)
+
+    def test_scale_policy_applicability_uses_exact_memory_capacity_classes(
+        self,
+    ) -> None:
+        policy = self.calibrated_scale_policy()
+        linux_scale.validate_scale_safety_policy(policy)
+        calibrated = policy["calibration_environment"]
+        observed = {
+            field: calibrated[field]
+            for field in linux_scale.SCALE_OBSERVED_ENVIRONMENT_FIELDS
+        }
+        scenario = self.plan["scenarios"][0]
+
+        def applicable(environment: dict[str, object]) -> bool:
+            return linux_scale.scale_policy_is_applicable(
+                policy, scenario, environment
+            )
+
+        anchor = calibrated["memory_kib"]
+        for name, memory_kib in (
+            ("lower-boundary", anchor - 32_768),
+            ("upper-boundary", anchor + 32_767),
+        ):
+            with self.subTest(name=name):
+                boundary = dict(observed)
+                boundary["memory_kib"] = memory_kib
+                self.assertTrue(applicable(boundary))
+
+        for name, memory_kib in (
+            ("lower-adjacent-class", anchor - 32_769),
+            ("upper-adjacent-class", anchor + 32_768),
+        ):
+            with self.subTest(name=name):
+                adjacent = dict(observed)
+                adjacent["memory_kib"] = memory_kib
+                self.assertFalse(applicable(adjacent))
+
+        for field, value in (
+            ("cpu_model", "different-cpu"),
+            ("cpu_count", 9),
+        ):
+            with self.subTest(field=field):
+                drifted = dict(observed)
+                drifted[field] = value
+                self.assertFalse(applicable(drifted))
+
+        self.assertFalse(applicable({**observed, "unexpected": "field"}))
+        missing = dict(observed)
+        missing.pop("kernel")
+        self.assertFalse(applicable(missing))
+
     def test_scale_plan_is_qualification_only_and_requires_exact_recipe(self) -> None:
         self.assertEqual(self.plan["scenario_group"], linux_scale.SCALE_SCENARIO)
         self.assertFalse(self.plan["adoption_eligible"])

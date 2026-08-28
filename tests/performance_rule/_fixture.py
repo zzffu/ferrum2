@@ -48,6 +48,10 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
             "status_sha256": "d" * 64,
         },
         "runner": {"sha256": sha256, "bytes": 1},
+        "candidate": {
+            "adoption_claim": False,
+            "enabled_features": [],
+        },
         "configuration": {
             "match_sizes": [100],
             "route_sizes": [1],

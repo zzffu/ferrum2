@@ -23,8 +23,8 @@ use super::manager::UdpRuntimeOwner;
 use super::{
     AccountedDatagram, MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES,
     PendingUdpDatagram, PendingUdpSession, UDP_CANDIDATE_HINT_ENTRIES, UdpBufferBudget,
-    UdpCommitError, UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
-    UdpSessionManager,
+    UdpBufferReservation, UdpCommitError, UdpDirection, UdpRuntimeError, UdpRuntimeLimits,
+    UdpSessionHandle, UdpSessionManager,
 };
 
 /// Production system UDP resolver.
@@ -179,6 +179,7 @@ pub trait DirectUdpPacketHandler: Send + Sync + 'static {
 pub struct DirectUdpSessionAdmission<S> {
     session: PendingUdpSession,
     first_datagram: PendingUdpDatagram,
+    receive_scratch: DirectReceiveScratch,
     initial_candidates: Option<Vec<SocketAddr>>,
     socket: S,
     socket_guard: OwnerGuard,
@@ -194,7 +195,32 @@ impl<S> fmt::Debug for DirectUdpSessionAdmission<S> {
 struct DirectUdpSessionRoot<S> {
     socket: S,
     handle: UdpSessionHandle,
+    receive_scratch: DirectReceiveScratch,
     initial_candidates: Option<Vec<SocketAddr>>,
+}
+
+struct DirectReceiveScratch {
+    buffer: BytesMut,
+    _reservation: UdpBufferReservation,
+    _guard: OwnerGuard,
+}
+
+impl DirectReceiveScratch {
+    fn reserve(
+        budget: &UdpBufferBudget,
+        registry: &OwnerRegistry,
+    ) -> Result<Self, UdpRuntimeError> {
+        let reservation = budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)?;
+        let buffer = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
+        if buffer.capacity() != reservation.capacity() {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        Ok(Self {
+            buffer,
+            _reservation: reservation,
+            _guard: registry.track_udp_scratch(),
+        })
+    }
 }
 
 struct DirectOwnerLifetime {
@@ -384,6 +410,8 @@ where
         let owner_slot = Arc::clone(&self.owner_slots)
             .try_acquire_owned()
             .map_err(|_| UdpRuntimeError::SessionLimit)?;
+        let receive_scratch =
+            DirectReceiveScratch::reserve(&self.manager.buffer_budget(), &self.registry)?;
         let first_datagram =
             session.reserve_datagram(UdpDirection::ToTarget, first_allocated_capacity)?;
         let socket = self
@@ -395,6 +423,7 @@ where
         Ok(DirectUdpSessionAdmission {
             session,
             first_datagram,
+            receive_scratch,
             initial_candidates,
             socket,
             socket_guard,
@@ -475,6 +504,7 @@ where
         let DirectUdpSessionAdmission {
             session,
             first_datagram,
+            receive_scratch,
             initial_candidates,
             socket,
             socket_guard,
@@ -484,7 +514,6 @@ where
         let manager = self.manager.clone();
         let handler = Arc::clone(&self.handler);
         let connect_timeout = self.connect_timeout;
-        let registry = self.registry.clone();
         let task_guard = self.registry.track_udp_task();
         let owner_lifetime = DirectOwnerLifetime {
             task_guard: Some(task_guard),
@@ -500,10 +529,10 @@ where
                 DirectUdpSessionRoot {
                     socket,
                     handle,
+                    receive_scratch,
                     initial_candidates,
                 },
                 connect_timeout,
-                registry,
             )
             .await;
             manager.remove(handle);
@@ -620,7 +649,6 @@ async fn run_direct_session<R, H, S>(
     handler: Arc<H>,
     session: DirectUdpSessionRoot<S>,
     connect_timeout: Duration,
-    registry: OwnerRegistry,
 ) -> Result<(), UdpRuntimeError>
 where
     R: UdpResolver,
@@ -631,6 +659,7 @@ where
     let DirectUdpSessionRoot {
         socket,
         handle,
+        mut receive_scratch,
         mut initial_candidates,
     } = session;
     let mut cancellation = manager.cancellation(handle)?;
@@ -678,7 +707,7 @@ where
             response = receive_target(
                 &socket,
                 manager.buffer_budget(),
-                registry.clone(),
+                &mut receive_scratch,
             ) => {
                 let response = response?;
                 // This task is the sole consumer of direct target responses and
@@ -699,35 +728,31 @@ where
 async fn receive_target<S>(
     socket: &S,
     budget: UdpBufferBudget,
-    registry: OwnerRegistry,
+    scratch: &mut DirectReceiveScratch,
 ) -> Result<AccountedDatagram, UdpRuntimeError>
 where
     S: DirectUdpSocket,
 {
     loop {
+        scratch.buffer.clear();
         socket
             .readable()
             .await
             .map_err(|_| UdpRuntimeError::Receive)?;
-        let reservation = budget
-            .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
-            .await?;
-        let scratch_guard = registry.track_udp_scratch();
-        let mut scratch = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
-        if scratch.capacity() != reservation.capacity() {
-            return Err(UdpRuntimeError::Bounds);
-        }
-        let (length, source) = match socket.try_recv_buf_from(&mut scratch) {
+        let (length, source) = match socket.try_recv_buf_from(&mut scratch.buffer) {
             Ok(received) => received,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => return Err(UdpRuntimeError::Receive),
         };
-        if length > MAX_UDP_WIRE_DATAGRAM_BYTES || scratch.len() != length {
+        if length > MAX_UDP_WIRE_DATAGRAM_BYTES || scratch.buffer.len() != length {
             return Err(UdpRuntimeError::Bounds);
         }
-        drop(scratch_guard);
         let target = ferrum2_core::TargetAddr::ip(source).map_err(|_| UdpRuntimeError::Bounds)?;
-        let datagram = Datagram::new(target, scratch, MAX_UDP_WIRE_DATAGRAM_BYTES)
+        let reservation = budget.reserve_when_available(length).await?;
+        let mut payload = BytesMut::with_capacity(length);
+        payload.extend_from_slice(&scratch.buffer[..length]);
+        scratch.buffer.clear();
+        let datagram = Datagram::new(target, payload, MAX_UDP_WIRE_DATAGRAM_BYTES)
             .map_err(|_| UdpRuntimeError::Bounds)?;
         return reservation.attach(datagram);
     }

@@ -15,6 +15,12 @@ pub const MIN_UDP_MAX_BUFFERED_BYTES: usize = 1024 * 1024;
 pub const MAX_UDP_MAX_BUFFERED_BYTES: usize = 256 * 1024 * 1024;
 /// Fixed number of datagrams retained per session and direction.
 pub const UDP_SESSION_QUEUE_DEPTH: usize = 4;
+/// Power-of-two session-state shard count used for independent queue/activity locks.
+pub(super) const UDP_SESSION_SHARD_COUNT: usize = 16;
+/// Minimum stale expiry nodes tolerated before a bounded shard rebuild.
+pub(super) const UDP_EXPIRY_REBUILD_MIN_NODES: usize = 64;
+/// Maximum expiry-node multiplier retained per committed session before rebuild.
+pub(super) const UDP_EXPIRY_STALE_FACTOR: usize = 4;
 /// Hard bound for one complete UDP wire datagram.
 pub const MAX_UDP_WIRE_DATAGRAM_BYTES: usize = 65_507;
 /// Default UDP session idle lifetime.

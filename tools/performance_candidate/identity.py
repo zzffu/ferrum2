@@ -55,15 +55,27 @@ def _require_commit(repository: pathlib.Path, sha: str, *, name: str) -> str:
 
 
 def validate_git_relation(
-    repository: pathlib.Path, parent_sha: str, candidate_sha: str
+    repository: pathlib.Path,
+    parent_sha: str,
+    candidate_sha: str,
+    *,
+    run_kind: str = "comparison",
 ) -> tuple[str, str]:
-    """Require two available commits with parent strictly ancestral to candidate."""
+    """Validate strict comparison ancestry or one same-commit A/A calibration."""
 
     repository = repository.resolve()
     if not repository.is_dir():
         raise CandidateControlError("repository must be an existing directory")
     parent = _require_commit(repository, parent_sha, name="parent_sha")
     candidate = _require_commit(repository, candidate_sha, name="candidate_sha")
+    if run_kind == "calibration-aa":
+        if parent != candidate:
+            raise CandidateControlError(
+                "calibration-aa requires identical parent and candidate commits"
+            )
+        return parent, candidate
+    if run_kind != "comparison":
+        raise CandidateControlError("run_kind must be comparison or calibration-aa")
     if parent == candidate:
         raise CandidateControlError(
             "parent_sha and candidate_sha must be different commits"

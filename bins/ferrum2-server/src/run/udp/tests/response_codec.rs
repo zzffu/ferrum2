@@ -1,4 +1,5 @@
 use super::*;
+use crate::run::udp::response_codec::{MAX_RESPONSE_CODEC_SHARDS, response_codec_shards};
 
 #[tokio::test]
 async fn response_codec_does_not_serialize_concurrent_sends() {
@@ -77,7 +78,9 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
         protocol: Arc::clone(&protocol),
         mappings,
         clock: Arc::clone(&clock),
-        codec: Arc::new(ResponseCodecPool::new(manager.buffer_budget()).expect("response codec")),
+        codec: Arc::new(
+            ResponseCodecPool::new(manager.buffer_budget(), 2).expect("response codec"),
+        ),
         metrics: Arc::new(Metrics::new()),
     });
 
@@ -100,24 +103,24 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
     });
 
     wait_for_send_entries(&entered, &entry_changed, 2).await;
+    let fixed_codec_capacity = handler.codec.shard_count() * 2 * MAX_UDP_WIRE_DATAGRAM_BYTES;
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
-        3 * MAX_UDP_WIRE_DATAGRAM_BYTES,
-        "two in-flight owned wires plus the shared codec scratch are charged"
+        fixed_codec_capacity,
+        "all shard direct-to-wire capacity is fixed and charged at startup"
     );
     send_gate.add_permits(2);
     assert!(first_task.await.expect("first response task").is_ok());
     assert!(second_task.await.expect("second response task").is_ok());
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
-        2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
-        "the concurrency wire is released after the burst"
+        fixed_codec_capacity,
+        "leased wires return to the fixed pool without changing its budget"
     );
-    let idle_wire = {
-        let codec = handler.codec.state.lock().expect("response codec");
-        assert_eq!(codec.available_wires.len(), 1);
-        codec.available_wires[0].wire.as_ptr()
-    };
+    assert_eq!(
+        handler.codec.available_wire_count(),
+        handler.codec.shard_count() * 2
+    );
 
     {
         let sent = sent.lock().expect("concurrent sends");
@@ -158,14 +161,14 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
             .await
             .is_ok()
     );
-    let codec = handler.codec.state.lock().expect("response codec");
-    assert_eq!(codec.available_wires.len(), 1);
-    assert_eq!(codec.available_wires[0].wire.as_ptr(), idle_wire);
-    drop(codec);
+    assert_eq!(
+        handler.codec.available_wire_count(),
+        handler.codec.shard_count() * 2
+    );
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
-        2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
-        "steady-state serial responses reuse the same accounted wire"
+        fixed_codec_capacity,
+        "steady-state responses reuse the fixed accounted shard wires"
     );
 
     manager.cancel_all();
@@ -175,10 +178,10 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
 }
 
 #[tokio::test]
-async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
+async fn response_codec_pool_is_fixed_and_third_lease_waits_for_one_return() {
     let keys = aes_keys();
-    let protocol = UdpServer::new(&keys).expect("server protocol");
-    let clock = SystemClock::new();
+    let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+    let clock = Arc::new(SystemClock::new());
     let registry = OwnerRegistry::new();
     let baseline = active(registry.snapshot());
     let byte_limit = 1024 * 1024;
@@ -187,7 +190,7 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
         registry.clone(),
     );
     let budget = manager.buffer_budget();
-    let codec = Arc::new(ResponseCodecPool::new(budget.clone()).expect("response codec"));
+    let codec = Arc::new(ResponseCodecPool::new(budget.clone(), 1).expect("response codec"));
     let mappings = UdpMappings::new(1);
     let mut client =
         UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("client protocol");
@@ -196,10 +199,10 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
     let mut scratch = UdpPacketScratch::new();
     let (capability, _handle) = commit_lifecycle_generation(
         &mut client,
-        &protocol,
+        protocol.as_ref(),
         &manager,
         &mappings,
-        &clock,
+        clock.as_ref(),
         target,
         peer,
         b"request",
@@ -208,62 +211,106 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
     );
     let wire = encoded_udp_request(
         &mut client,
-        &clock,
+        clock.as_ref(),
         TargetAddr::ip(target).expect("response source target"),
         b"response",
     );
     let pending = protocol
-        .prepare_request(&clock, &wire, &mut scratch)
+        .prepare_request(clock.as_ref(), &wire, &mut scratch)
         .expect("prepare response datagram");
+    let (response, _unused_commit) = pending.into_parts();
+    let response = Arc::new(response);
 
-    let first_encoded = match codec.try_encode(&protocol, capability, &clock, pending.datagram()) {
-        Ok(Some(encoded)) => encoded,
-        Ok(None) => panic!("initial response wire is reserved"),
-        Err(_) => panic!("initial response encoding succeeds"),
-    };
-    let mut pressure = Vec::new();
-    let mut remaining = byte_limit - budget.reserved_bytes();
-    while remaining != 0 {
-        let capacity = remaining.min(MAX_UDP_WIRE_DATAGRAM_BYTES);
-        pressure.push(budget.reserve(capacity).expect("budget pressure"));
-        remaining -= capacity;
-    }
-    assert_eq!(budget.reserved_bytes(), byte_limit);
-    assert!(matches!(
-        codec.try_encode(&protocol, capability, &clock, pending.datagram()),
-        Ok(None)
-    ));
-
-    let returned = codec.returned.notified();
-    let released = pressure
-        .iter()
-        .position(|reservation| reservation.capacity() == MAX_UDP_WIRE_DATAGRAM_BYTES)
-        .expect("full response-wire pressure chunk");
-    drop(pressure.swap_remove(released));
-    codec.notify_capacity_change();
-    tokio::time::timeout(Duration::from_secs(1), returned)
+    let first_encoded = codec
+        .encode(protocol.as_ref(), capability, clock.as_ref(), &response)
         .await
-        .expect("budget release notification");
-    let second_encoded = match codec.try_encode(&protocol, capability, &clock, pending.datagram()) {
-        Ok(Some(encoded)) => encoded,
-        Ok(None) => panic!("released capacity funds a concurrent response wire"),
-        Err(_) => panic!("concurrent response encoding succeeds"),
-    };
+        .unwrap_or_else(|_| panic!("first fixed wire encodes"));
+    let second_encoded = codec
+        .encode(protocol.as_ref(), capability, clock.as_ref(), &response)
+        .await
+        .unwrap_or_else(|_| panic!("second fixed wire encodes"));
     assert_eq!(
         budget.reserved_bytes(),
-        byte_limit,
-        "the second wire is fully budget-accounted while the first remains leased"
+        2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
+        "one shard owns exactly two fixed direct-to-wire buffers"
     );
+    assert_eq!(codec.available_wire_count(), 0);
 
-    drop(second_encoded);
+    let waiting = tokio::spawn({
+        let codec = Arc::clone(&codec);
+        let protocol = Arc::clone(&protocol);
+        let clock = Arc::clone(&clock);
+        let response = Arc::clone(&response);
+        async move {
+            codec
+                .encode(protocol.as_ref(), capability, clock.as_ref(), &response)
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    assert_eq!(codec.observations().0, 2);
+    assert_eq!(codec.observations().1, 1);
+
     drop(first_encoded);
-    drop(pressure);
+    let third_encoded = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("one return wakes one codec waiter")
+        .expect("codec waiter task")
+        .unwrap_or_else(|_| panic!("returned fixed wire encodes"));
+
+    drop(third_encoded);
+    drop(second_encoded);
+    assert_eq!(codec.available_wire_count(), 2);
     assert_eq!(budget.reserved_bytes(), 2 * MAX_UDP_WIRE_DATAGRAM_BYTES);
-    let state = codec.state.lock().expect("response codec");
-    assert_eq!(state.available_wires.len(), 1);
-    drop(state);
+
+    let fourth_encoded = codec
+        .encode(protocol.as_ref(), capability, clock.as_ref(), &response)
+        .await
+        .unwrap_or_else(|_| panic!("fourth fixed wire encodes"));
+    let fifth_encoded = codec
+        .encode(protocol.as_ref(), capability, clock.as_ref(), &response)
+        .await
+        .unwrap_or_else(|_| panic!("fifth fixed wire encodes"));
+    let cancelled_waiter = tokio::spawn({
+        let codec = Arc::clone(&codec);
+        let protocol = Arc::clone(&protocol);
+        let clock = Arc::clone(&clock);
+        let response = Arc::clone(&response);
+        async move {
+            codec
+                .encode(protocol.as_ref(), capability, clock.as_ref(), &response)
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert!(!cancelled_waiter.is_finished());
+    cancelled_waiter.abort();
+    assert!(matches!(
+        cancelled_waiter.await,
+        Err(error) if error.is_cancelled()
+    ));
+    drop(fourth_encoded);
+    drop(fifth_encoded);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        codec.available_wire_count(),
+        2,
+        "cancelling a waiter neither leaks a permit nor consumes a fixed wire"
+    );
+    assert_eq!(budget.reserved_bytes(), 2 * MAX_UDP_WIRE_DATAGRAM_BYTES);
     manager.cancel_all();
     drop(codec);
     drop(manager);
     assert_eq!(active(registry.snapshot()), baseline);
+}
+
+#[test]
+fn response_codec_shard_count_is_power_of_two_and_hard_bounded() {
+    for maximum_sessions in [0, 1, 2, 3, 4, 5, 65_535] {
+        let shards = response_codec_shards(maximum_sessions);
+        assert!(shards.is_power_of_two());
+        assert!((1..=MAX_RESPONSE_CODEC_SHARDS).contains(&shards));
+        assert!(shards <= maximum_sessions.max(1));
+    }
 }

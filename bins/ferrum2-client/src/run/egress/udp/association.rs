@@ -11,10 +11,10 @@ use ferrum2_crypto::{SecureRandom, UdpSessionId};
 use ferrum2_net::DialOptions;
 use ferrum2_runtime::{
     AccountedDatagram, MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram, PendingUdpSession,
-    UDP_SESSION_QUEUE_DEPTH, UdpBufferReservation, UdpDirection, UdpRuntimeError, UdpSessionHandle,
-    UdpSessionManager,
+    UDP_SESSION_QUEUE_DEPTH, UdpBufferBudget, UdpBufferReservation, UdpDirection, UdpRuntimeError,
+    UdpSessionHandle, UdpSessionManager,
 };
-use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketError, UdpPacketScratch};
+use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketError};
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
@@ -28,8 +28,8 @@ use super::direct::{
 };
 use super::request::{composed_udp_plan_limit, register_udp_plan};
 use super::response::{
-    UdpPlanResponseError, commit_final_udp_response, dns_response_target_matches,
-    invalid_dns_target, runtime_error,
+    UdpPlanResponseError, commit_composed_udp_response, commit_single_udp_response,
+    dns_response_target_matches, invalid_dns_target, runtime_error,
 };
 use super::socket::{ClientDirectUdpSocket, ClientProxyUdpSocket, ClientUdpSocketFactory};
 #[cfg(test)]
@@ -63,11 +63,9 @@ pub(in crate::run) struct ClientUdpAssociation {
     direct_candidate_hints: DirectUdpCandidateHints,
     direct_resolver: ferrum2_dns::ApplicationResolverAdapter,
     direct_timeout: std::time::Duration,
-    pending_direct_response: Option<(BytesMut, SocketAddr)>,
+    pending_direct_response: Option<PendingDirectResponse>,
     pub(super) direct_wire: Option<BytesMut>,
-    inner_wire: Option<Vec<u8>>,
-    upstream_wire: Option<BytesMut>,
-    scratch: Option<UdpPacketScratch>,
+    proxy_buffers: Option<ClientProxyBuffers>,
     _metered_fixed_capacity: Vec<UdpBufferReservation>,
     #[cfg(test)]
     io_fault: Option<Arc<UdpIoFaultPlan>>,
@@ -81,6 +79,18 @@ enum ClientUdpUpstream {
     },
 }
 
+enum PendingDirectResponse {
+    Ready {
+        payload: BytesMut,
+        source: SocketAddr,
+        reservation: PendingUdpDatagram,
+    },
+    Rejected {
+        wire_len: usize,
+        error: UdpRuntimeError,
+    },
+}
+
 pub(super) struct ClientUdpLeg {
     pub(super) protocol: UdpClientSession,
     pub(super) id: UdpSessionId,
@@ -90,7 +100,139 @@ pub(super) struct ClientUdpPlan {
     pub(super) legs: Vec<ClientUdpLeg>,
 }
 
+struct ProxyWireBuffer {
+    wire: BytesMut,
+    _reservation: Option<UdpBufferReservation>,
+}
+
+enum ClientProxyBuffers {
+    Dormant {
+        hop_count: usize,
+        budget: UdpBufferBudget,
+        meter_global_buffers: bool,
+    },
+    Single {
+        upstream: ProxyWireBuffer,
+    },
+    Multi {
+        upstream: ProxyWireBuffer,
+        inner: ProxyWireBuffer,
+    },
+}
+
+impl ProxyWireBuffer {
+    fn allocate(
+        budget: &UdpBufferBudget,
+        meter_global_buffers: bool,
+    ) -> Result<Self, UdpRuntimeError> {
+        let reservation = meter_global_buffers
+            .then(|| budget.reserve(MAX_UDP_WIRE_LEN))
+            .transpose()?;
+        let wire = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
+        if wire.capacity() != MAX_UDP_WIRE_LEN {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        debug_assert!(
+            reservation
+                .as_ref()
+                .is_none_or(|reservation| reservation.capacity() == wire.capacity())
+        );
+        Ok(Self {
+            wire,
+            _reservation: reservation,
+        })
+    }
+}
+
+impl ClientProxyBuffers {
+    fn dormant(
+        hop_count: usize,
+        budget: UdpBufferBudget,
+        meter_global_buffers: bool,
+    ) -> Result<Self, UdpRuntimeError> {
+        if !(1..=MAX_UDP_PLAN_HOPS).contains(&hop_count) {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        Ok(Self::Dormant {
+            hop_count,
+            budget,
+            meter_global_buffers,
+        })
+    }
+
+    fn ensure_ready(&mut self) -> Result<(), UdpRuntimeError> {
+        let Some((hop_count, budget, meter_global_buffers)) = (match self {
+            Self::Dormant {
+                hop_count,
+                budget,
+                meter_global_buffers,
+            } => Some((*hop_count, budget.clone(), *meter_global_buffers)),
+            Self::Single { .. } | Self::Multi { .. } => None,
+        }) else {
+            return Ok(());
+        };
+        let upstream = ProxyWireBuffer::allocate(&budget, meter_global_buffers)?;
+        *self = if hop_count == 1 {
+            Self::Single { upstream }
+        } else {
+            let inner = ProxyWireBuffer::allocate(&budget, meter_global_buffers)?;
+            Self::Multi { upstream, inner }
+        };
+        Ok(())
+    }
+
+    fn upstream(&self) -> &BytesMut {
+        match self {
+            Self::Single { upstream } | Self::Multi { upstream, .. } => &upstream.wire,
+            Self::Dormant { .. } => panic!("proxy UDP wire buffers are allocated before use"),
+        }
+    }
+
+    fn upstream_mut(&mut self) -> &mut BytesMut {
+        match self {
+            Self::Single { upstream } | Self::Multi { upstream, .. } => &mut upstream.wire,
+            Self::Dormant { .. } => panic!("proxy UDP wire buffers are allocated before use"),
+        }
+    }
+
+    fn pair_mut(&mut self) -> (&mut BytesMut, &mut BytesMut) {
+        match self {
+            Self::Multi { upstream, inner } => (&mut upstream.wire, &mut inner.wire),
+            Self::Dormant { .. } | Self::Single { .. } => {
+                panic!("multi-hop proxy UDP association owns two wire buffers")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn capacities(&self) -> Vec<usize> {
+        match self {
+            Self::Dormant { .. } => Vec::new(),
+            Self::Single { upstream } => vec![upstream.wire.capacity()],
+            Self::Multi { upstream, inner } => {
+                vec![upstream.wire.capacity(), inner.wire.capacity()]
+            }
+        }
+    }
+}
+
 pub(in crate::run::egress) const MAX_UDP_PLAN_HOPS: usize = 8;
+
+fn expected_nested_target(
+    outbounds: &[ClientOutboundContext],
+    hop: usize,
+) -> Result<TargetAddr, UdpPlanResponseError> {
+    TargetAddr::ip(
+        outbounds
+            .get(hop)
+            .and_then(ClientOutboundContext::shadowsocks)
+            .ok_or(UdpPlanResponseError::Packet(
+                UdpPacketError::StateUnavailable,
+            ))?
+            .udp_server,
+    )
+    .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))
+}
 
 impl Drop for ClientUdpAssociation {
     fn drop(&mut self) {
@@ -104,6 +246,13 @@ impl Drop for ClientUdpAssociation {
 }
 
 impl ClientUdpAssociation {
+    fn ensure_proxy_buffers(&mut self) -> Result<(), UdpRuntimeError> {
+        self.proxy_buffers
+            .as_mut()
+            .expect("proxy UDP association owns its buffer lifecycle")
+            .ensure_ready()
+    }
+
     pub(in crate::run) fn activate<C, T, R>(
         &mut self,
         egress: &ClientEgressEngine<C, T, R>,
@@ -158,27 +307,33 @@ impl ClientUdpAssociation {
         let Self {
             plan,
             protocol,
-            inner_wire,
-            upstream_wire,
-            scratch,
+            proxy_buffers,
             ..
         } = self;
-        let inner_wire = inner_wire
+        let buffers = proxy_buffers
             .as_mut()
-            .expect("proxy UDP association owns its inner wire buffer");
-        let upstream_wire = upstream_wire
-            .as_mut()
-            .expect("proxy UDP association owns its upstream wire buffer");
-        upstream_wire.resize(MAX_UDP_WIRE_LEN, 0);
-        let scratch = scratch
-            .as_mut()
-            .expect("proxy UDP association owns its packet scratch");
+            .expect("proxy UDP association owns its wire buffers");
         let hops = plan.as_ref().expect("proxy UDP plan").hops();
         let plan = protocol
             .as_mut()
             .expect("client UDP protocol is activated before encode");
+        if hops.len() == 1 {
+            let upstream = buffers.upstream_mut();
+            upstream.resize(MAX_UDP_WIRE_LEN, 0);
+            return plan.legs[0].protocol.encode_request_parts(
+                &egress.clock,
+                &egress.random,
+                datagram.target(),
+                datagram.payload(),
+                0,
+                upstream,
+            );
+        }
+
+        let (upstream, inner) = buffers.pair_mut();
+        upstream.resize(MAX_UDP_WIRE_LEN, 0);
+        inner.resize(MAX_UDP_WIRE_LEN, 0);
         let mut wire_len = 0;
-        let mut wire_in_upstream = false;
         for layer in (0..hops.len()).rev() {
             let intermediate;
             let target = if layer + 1 == hops.len() {
@@ -194,41 +349,35 @@ impl ClientUdpAssociation {
                 .map_err(|_| UdpPacketError::Bounds)?;
                 &intermediate
             };
-            wire_len = if layer + 1 == hops.len() {
+            wire_len = if layer % 2 == 0 {
+                let payload = if layer + 1 == hops.len() {
+                    datagram.payload()
+                } else {
+                    &inner[..wire_len]
+                };
                 plan.legs[layer].protocol.encode_request_parts(
                     &egress.clock,
                     &egress.random,
                     target,
-                    datagram.payload(),
+                    payload,
                     0,
-                    upstream_wire,
-                    scratch,
-                )?
-            } else if wire_in_upstream {
-                plan.legs[layer].protocol.encode_request_parts(
-                    &egress.clock,
-                    &egress.random,
-                    target,
-                    &upstream_wire[..wire_len],
-                    0,
-                    inner_wire,
-                    scratch,
+                    upstream,
                 )?
             } else {
+                let payload = if layer + 1 == hops.len() {
+                    datagram.payload()
+                } else {
+                    &upstream[..wire_len]
+                };
                 plan.legs[layer].protocol.encode_request_parts(
                     &egress.clock,
                     &egress.random,
                     target,
-                    &inner_wire[..wire_len],
+                    payload,
                     0,
-                    upstream_wire,
-                    scratch,
+                    inner,
                 )?
             };
-            wire_in_upstream = layer + 1 == hops.len() || !wire_in_upstream;
-        }
-        if !wire_in_upstream {
-            upstream_wire[..wire_len].copy_from_slice(&inner_wire[..wire_len]);
         }
         Ok(wire_len)
     }
@@ -248,109 +397,153 @@ impl ClientUdpAssociation {
             manager,
             handle,
             meter_global_buffers,
-            inner_wire,
-            upstream_wire,
-            scratch,
+            proxy_buffers,
             ..
         } = self;
-        let inner_wire = inner_wire
+        let buffers = proxy_buffers
             .as_mut()
-            .expect("proxy UDP association owns its inner wire buffer");
-        let upstream_wire = upstream_wire
-            .as_mut()
-            .expect("proxy UDP association owns its upstream wire buffer");
-        let scratch = scratch
-            .as_mut()
-            .expect("proxy UDP association owns its packet scratch");
+            .expect("proxy UDP association owns its wire buffers");
         let hops = plan.as_ref().expect("proxy UDP plan").hops();
         let plan = protocol
             .as_ref()
             .expect("client UDP protocol is activated before response");
-        let outer = plan.legs[0]
-            .protocol
-            .prepare_response_borrowed(&egress.clock, &upstream_wire[..wire_len], scratch)
-            .map_err(UdpPlanResponseError::Packet)?;
-        let mut commits = Vec::with_capacity(hops.len());
         if hops.len() == 1 {
-            return commit_final_udp_response(
-                outer,
-                plan,
+            let upstream = buffers.upstream_mut();
+            if wire_len != upstream.len() {
+                upstream.fill(0);
+                upstream.clear();
+                return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+            }
+            let pending = match plan.legs[0]
+                .protocol
+                .prepare_response_in_place(&egress.clock, upstream)
+            {
+                Ok(pending) => pending,
+                Err(error) => {
+                    upstream.clear();
+                    return Err(UdpPlanResponseError::Packet(error));
+                }
+            };
+            let result = commit_single_udp_response(
+                pending,
+                &plan.legs[0].protocol,
                 hops,
                 outbounds,
-                commits,
                 manager,
                 *handle,
                 *meter_global_buffers,
                 &egress.clock,
             );
+            upstream.fill(0);
+            upstream.clear();
+            return result;
         }
-        let expected = TargetAddr::ip(
-            outbounds
-                .get(hops[1])
-                .and_then(ClientOutboundContext::shadowsocks)
-                .ok_or(UdpPlanResponseError::Packet(
-                    UdpPacketError::StateUnavailable,
-                ))?
-                .udp_server,
-        )
-        .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
-        if !outer.target_matches(&expected) {
-            return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
+
+        let (upstream, inner) = buffers.pair_mut();
+        if wire_len != upstream.len() {
+            upstream.fill(0);
+            upstream.clear();
+            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
         }
-        let mut inner_len = outer
-            .copy_payload_to(inner_wire)
-            .map_err(UdpPlanResponseError::Packet)?;
-        commits.push(outer.into_commit());
-        let mut wire_in_inner = true;
-        for layer in 1..hops.len() {
-            let pending = if wire_in_inner {
-                plan.legs[layer].protocol.prepare_response_borrowed(
-                    &egress.clock,
-                    &inner_wire[..inner_len],
-                    scratch,
-                )
+        let mut commits = Vec::with_capacity(hops.len());
+        let mut source_is_upstream = true;
+        for layer in 0..hops.len() {
+            if source_is_upstream {
+                let pending = match plan.legs[layer]
+                    .protocol
+                    .prepare_response_in_place(&egress.clock, upstream)
+                {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        upstream.clear();
+                        return Err(UdpPlanResponseError::Packet(error));
+                    }
+                };
+                if layer + 1 == hops.len() {
+                    let result = commit_composed_udp_response(
+                        pending,
+                        plan,
+                        hops,
+                        outbounds,
+                        commits,
+                        manager,
+                        *handle,
+                        *meter_global_buffers,
+                        &egress.clock,
+                    );
+                    upstream.fill(0);
+                    upstream.clear();
+                    return result;
+                }
+                let expected = match expected_nested_target(outbounds, hops[layer + 1]) {
+                    Ok(expected) => expected,
+                    Err(error) => {
+                        drop(pending);
+                        upstream.fill(0);
+                        upstream.clear();
+                        return Err(error);
+                    }
+                };
+                if !pending.target_matches(&expected) {
+                    drop(pending);
+                    upstream.fill(0);
+                    upstream.clear();
+                    return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
+                }
+                inner.clear();
+                inner.extend_from_slice(pending.payload());
+                commits.push(pending.into_commit());
+                upstream.fill(0);
+                upstream.clear();
             } else {
-                plan.legs[layer].protocol.prepare_response_borrowed(
-                    &egress.clock,
-                    &upstream_wire[..inner_len],
-                    scratch,
-                )
+                let pending = match plan.legs[layer]
+                    .protocol
+                    .prepare_response_in_place(&egress.clock, inner)
+                {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        inner.clear();
+                        return Err(UdpPlanResponseError::Packet(error));
+                    }
+                };
+                if layer + 1 == hops.len() {
+                    let result = commit_composed_udp_response(
+                        pending,
+                        plan,
+                        hops,
+                        outbounds,
+                        commits,
+                        manager,
+                        *handle,
+                        *meter_global_buffers,
+                        &egress.clock,
+                    );
+                    inner.fill(0);
+                    inner.clear();
+                    return result;
+                }
+                let expected = match expected_nested_target(outbounds, hops[layer + 1]) {
+                    Ok(expected) => expected,
+                    Err(error) => {
+                        drop(pending);
+                        inner.fill(0);
+                        inner.clear();
+                        return Err(error);
+                    }
+                };
+                if !pending.target_matches(&expected) {
+                    drop(pending);
+                    inner.fill(0);
+                    inner.clear();
+                    return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
+                }
+                upstream.clear();
+                upstream.extend_from_slice(pending.payload());
+                commits.push(pending.into_commit());
+                inner.fill(0);
+                inner.clear();
             }
-            .map_err(UdpPlanResponseError::Packet)?;
-            if layer + 1 == hops.len() {
-                return commit_final_udp_response(
-                    pending,
-                    plan,
-                    hops,
-                    outbounds,
-                    commits,
-                    manager,
-                    *handle,
-                    *meter_global_buffers,
-                    &egress.clock,
-                );
-            }
-            let expected = TargetAddr::ip(
-                outbounds
-                    .get(hops[layer + 1])
-                    .and_then(ClientOutboundContext::shadowsocks)
-                    .ok_or(UdpPlanResponseError::Packet(
-                        UdpPacketError::StateUnavailable,
-                    ))?
-                    .udp_server,
-            )
-            .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
-            if !pending.target_matches(&expected) {
-                return Err(UdpPlanResponseError::Packet(UdpPacketError::Binding));
-            }
-            inner_len = if wire_in_inner {
-                pending.copy_payload_to(upstream_wire)
-            } else {
-                pending.copy_payload_to(inner_wire)
-            }
-            .map_err(UdpPlanResponseError::Packet)?;
-            commits.push(pending.into_commit());
-            wire_in_inner = !wire_in_inner;
+            source_is_upstream = !source_is_upstream;
         }
         unreachable!("validated UDP plan has a final layer")
     }
@@ -469,6 +662,10 @@ impl ClientUdpAssociation {
         if payload.len() > self.payload_limit(outbounds, false, encoded_target_len) {
             return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
         }
+        if matches!(&self.upstream, ClientUdpUpstream::Shadowsocks(_)) {
+            self.ensure_proxy_buffers()
+                .map_err(UdpPlanResponseError::Runtime)?;
+        }
         let payload_len = payload.len();
         let reservation = self
             .reserve_application_datagram(payload.capacity())
@@ -504,21 +701,36 @@ impl ClientUdpAssociation {
         T: Clock,
     {
         let response = if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
-            let (payload, source) =
+            let pending =
                 self.pending_direct_response
                     .take()
                     .ok_or(UdpPlanResponseError::Packet(
                         UdpPacketError::StateUnavailable,
                     ))?;
-            if payload.len() != wire_len {
-                self.restore_direct_wire(payload);
-                return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
-            }
-            let reservation = match self.reserve_response_datagram(payload.capacity()) {
-                Ok(reservation) => reservation,
-                Err(error) => {
+            let (payload, source, reservation) = match pending {
+                PendingDirectResponse::Ready {
+                    payload,
+                    source,
+                    reservation,
+                } if payload.len() == wire_len => (payload, source, reservation),
+                PendingDirectResponse::Ready {
+                    mut payload,
+                    reservation,
+                    ..
+                } => {
+                    payload.fill(0);
                     self.restore_direct_wire(payload);
+                    drop(reservation);
+                    return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+                }
+                PendingDirectResponse::Rejected {
+                    wire_len: rejected_len,
+                    error,
+                } if rejected_len == wire_len => {
                     return Err(UdpPlanResponseError::Runtime(error));
+                }
+                PendingDirectResponse::Rejected { .. } => {
+                    return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
                 }
             };
             let target = TargetAddr::ip(source)
@@ -541,6 +753,15 @@ impl ClientUdpAssociation {
         }
         debug_assert!(self.direct_wire.is_none());
         self.direct_wire = Some(wire);
+    }
+
+    fn clear_direct_wire(&mut self) {
+        let wire = self
+            .direct_wire
+            .as_mut()
+            .expect("direct UDP failure retains its wire buffer");
+        wire.fill(0);
+        wire.clear();
     }
 
     pub(in crate::run) fn recycle_application_response(&mut self, response: AccountedDatagram) {
@@ -573,9 +794,10 @@ impl ClientUdpAssociation {
         match &mut self.upstream {
             ClientUdpUpstream::Shadowsocks(socket) => {
                 let upstream_wire = self
-                    .upstream_wire
+                    .proxy_buffers
                     .as_ref()
-                    .expect("proxy UDP association owns its upstream wire buffer");
+                    .expect("proxy UDP association owns its wire buffers")
+                    .upstream();
                 socket.send(&upstream_wire[..wire_len]).await
             }
             ClientUdpUpstream::Direct { socket, factory } => {
@@ -622,12 +844,17 @@ impl ClientUdpAssociation {
         {
             return Err(io::Error::other("injected upstream receive failure"));
         }
+        if matches!(&self.upstream, ClientUdpUpstream::Shadowsocks(_)) {
+            self.ensure_proxy_buffers()
+                .map_err(|_| io::Error::other("proxy UDP wire budget unavailable"))?;
+        }
         match &self.upstream {
             ClientUdpUpstream::Shadowsocks(socket) => {
                 let upstream_wire = self
-                    .upstream_wire
+                    .proxy_buffers
                     .as_mut()
-                    .expect("proxy UDP association owns its upstream wire buffer");
+                    .expect("proxy UDP association owns its wire buffers")
+                    .upstream_mut();
                 socket.receive(upstream_wire).await
             }
             ClientUdpUpstream::Direct {
@@ -637,7 +864,7 @@ impl ClientUdpAssociation {
                 if self.pending_direct_response.is_some() {
                     return Err(io::Error::other("direct UDP response was not consumed"));
                 }
-                let (length, source, response_match) = receive_direct_response(
+                let received = receive_direct_response(
                     socket,
                     &self.direct_peers,
                     self.direct_response_policy,
@@ -645,17 +872,62 @@ impl ClientUdpAssociation {
                         .as_mut()
                         .ok_or_else(|| io::Error::other("direct UDP wire buffer unavailable"))?,
                 )
-                .await?;
-                let mut payload = self
-                    .direct_wire
-                    .take()
-                    .expect("direct UDP receive owns its wire buffer");
-                let unused = payload.split_off(length);
-                drop(unused);
+                .await;
+                let (length, source, response_match) = match received {
+                    Ok(received) => received,
+                    Err(error) => {
+                        self.clear_direct_wire();
+                        return Err(error);
+                    }
+                };
+                let reservation = self.reserve_response_datagram(length);
+                let pending = match reservation {
+                    Ok(reservation) => {
+                        if !self
+                            .direct_wire
+                            .as_ref()
+                            .is_some_and(|wire| wire.len() == length)
+                        {
+                            self.clear_direct_wire();
+                            PendingDirectResponse::Rejected {
+                                wire_len: length,
+                                error: UdpRuntimeError::Bounds,
+                            }
+                        } else {
+                            let mut payload = self
+                                .direct_wire
+                                .take()
+                                .expect("direct UDP receive owns its wire buffer");
+                            let unused = payload.split_off(length);
+                            drop(unused);
+                            if payload.capacity() != length {
+                                payload.fill(0);
+                                self.restore_direct_wire(payload);
+                                PendingDirectResponse::Rejected {
+                                    wire_len: length,
+                                    error: UdpRuntimeError::Bounds,
+                                }
+                            } else {
+                                PendingDirectResponse::Ready {
+                                    payload,
+                                    source,
+                                    reservation,
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.clear_direct_wire();
+                        PendingDirectResponse::Rejected {
+                            wire_len: length,
+                            error,
+                        }
+                    }
+                };
                 if let DirectUdpResponseMatch::OutstandingPeer(position) = response_match {
                     self.direct_peers.remove(position);
                 }
-                self.pending_direct_response = Some((payload, source));
+                self.pending_direct_response = Some(pending);
                 Ok(length)
             }
             ClientUdpUpstream::Direct { socket: None, .. } => {
@@ -784,29 +1056,44 @@ where
     let handle = pending_session.handle();
     let meter_global_buffers = origin != ClientRequestOrigin::Tun;
     let budget = udp.manager.buffer_budget();
-    let fixed_buffer_count = match selected {
-        SelectedEgress::Direct { .. } => 1,
-        SelectedEgress::Shadowsocks { .. } => 3,
-    };
+    let fixed_buffer_count = usize::from(matches!(selected, SelectedEgress::Direct { .. }));
     let mut fixed_capacity = Vec::with_capacity(fixed_buffer_count);
     if meter_global_buffers {
         for _ in 0..fixed_buffer_count {
-            let capacity = match selected {
-                SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
-                SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
-            };
-            fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
+            fixed_capacity.push(
+                budget
+                    .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
+                    .map_err(|_| ())?,
+            );
         }
     }
-    let inner_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
-        .then(|| vec![0_u8; MAX_UDP_WIRE_LEN]);
-    let upstream_wire = matches!(selected, SelectedEgress::Shadowsocks { .. }).then(|| {
-        let mut wire = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
-        wire.resize(MAX_UDP_WIRE_LEN, 0);
-        wire
-    });
-    let scratch =
-        matches!(selected, SelectedEgress::Shadowsocks { .. }).then(UdpPacketScratch::new);
+    let proxy_buffers = match selected {
+        SelectedEgress::Shadowsocks { .. } => Some(
+            ClientProxyBuffers::dormant(
+                plan.as_ref().ok_or(())?.hops().len(),
+                budget.clone(),
+                meter_global_buffers,
+            )
+            .map_err(|_| ())?,
+        ),
+        SelectedEgress::Direct { .. } => None,
+    };
+    let direct_wire = match selected {
+        SelectedEgress::Direct { .. } => {
+            let wire = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
+            if wire.capacity() != MAX_UDP_WIRE_DATAGRAM_BYTES {
+                return Err(());
+            }
+            debug_assert!(
+                !meter_global_buffers
+                    || fixed_capacity
+                        .first()
+                        .is_some_and(|reservation| reservation.capacity() == wire.capacity())
+            );
+            Some(wire)
+        }
+        SelectedEgress::Shadowsocks { .. } => None,
+    };
     let first_server = match selected {
         SelectedEgress::Shadowsocks { first_server, .. } => Some(first_server),
         SelectedEgress::Direct { .. } => None,
@@ -883,13 +1170,90 @@ where
         direct_resolver,
         direct_timeout: egress.phase_deadlines.0,
         pending_direct_response: None,
-        direct_wire: matches!(selected, SelectedEgress::Direct { .. })
-            .then(|| BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES)),
-        inner_wire,
-        upstream_wire,
-        scratch,
+        direct_wire,
+        proxy_buffers,
         _metered_fixed_capacity: fixed_capacity,
         #[cfg(test)]
         io_fault: None,
     })
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    use ferrum2_runtime::{
+        MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, UdpRuntimeLimits,
+    };
+
+    fn budget() -> (UdpSessionManager, UdpBufferBudget) {
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(8, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT)
+                .expect("buffer test limits"),
+            OwnerRegistry::new(),
+        );
+        let budget = manager.buffer_budget();
+        (manager, budget)
+    }
+
+    #[test]
+    fn one_two_and_eight_hops_allocate_only_lazy_minimal_wire_capacity() {
+        for (hop_count, expected_buffers) in [(1, 1), (2, 2), (8, 2)] {
+            let (_manager, budget) = budget();
+            let mut buffers = ClientProxyBuffers::dormant(hop_count, budget.clone(), true)
+                .expect("valid hop count");
+            assert!(buffers.capacities().is_empty());
+            assert_eq!(budget.reserved_bytes(), 0, "{hop_count} hops stay lazy");
+
+            buffers.ensure_ready().expect("wire capacity");
+            assert_eq!(
+                buffers.capacities(),
+                vec![MAX_UDP_WIRE_LEN; expected_buffers]
+            );
+            assert_eq!(
+                budget.reserved_bytes(),
+                expected_buffers * MAX_UDP_WIRE_LEN,
+                "budget exactly matches owned capacities for {hop_count} hops"
+            );
+
+            drop(buffers);
+            assert_eq!(budget.reserved_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn ten_thousand_dormant_associations_touch_no_wire_capacity() {
+        let (_manager, budget) = budget();
+        let dormant = (0..10_000)
+            .map(|_| ClientProxyBuffers::dormant(1, budget.clone(), true).expect("dormant"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert!(
+            dormant
+                .iter()
+                .all(|buffers| buffers.capacities().is_empty())
+        );
+    }
+
+    #[test]
+    fn multi_hop_lazy_allocation_rolls_back_atomically_when_second_buffer_is_unfunded() {
+        let (_manager, budget) = budget();
+        let mut remaining_to_hold = MIN_UDP_MAX_BUFFERED_BYTES - MAX_UDP_WIRE_LEN;
+        let mut held = Vec::new();
+        while remaining_to_hold != 0 {
+            let capacity = remaining_to_hold.min(MAX_UDP_WIRE_LEN);
+            held.push(budget.reserve(capacity).expect("hold test budget"));
+            remaining_to_hold -= capacity;
+        }
+        let baseline = budget.reserved_bytes();
+        let mut buffers =
+            ClientProxyBuffers::dormant(2, budget.clone(), true).expect("valid multi-hop buffers");
+
+        assert_eq!(buffers.ensure_ready(), Err(UdpRuntimeError::BufferLimit));
+        assert!(buffers.capacities().is_empty());
+        assert_eq!(budget.reserved_bytes(), baseline);
+
+        drop(held);
+        assert_eq!(budget.reserved_bytes(), 0);
+    }
 }

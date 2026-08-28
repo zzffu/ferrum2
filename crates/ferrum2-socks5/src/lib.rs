@@ -7,8 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
-use ferrum2_core::{ConnectErrorKind, Session, SessionReply, TargetAddr, TargetHostRef};
+use ferrum2_core::{ConnectErrorKind, SessionReply, TargetAddr, TargetHostRef};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
@@ -44,15 +43,20 @@ impl Socks5Inbound {
 
     /// Accepts one no-authentication SOCKS5 command, including `UDP ASSOCIATE`.
     ///
-    /// The returned UDP command retains the control stream and its one-shot
-    /// reply so composition can finish setup before committing success.
+    /// The returned CONNECT command uniquely owns its transport until a
+    /// successful reply returns that transport to the caller. The returned UDP
+    /// command retains the shared control stream and its one-shot reply so
+    /// composition can finish setup before committing success.
     pub async fn accept_command<IO>(&self, io: IO) -> Result<SocksCommand<IO>, SocksError>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let (io, command) = accept_command(io).await?;
         Ok(match command {
-            ParsedCommand::Connect(target) => SocksCommand::Connect(connect_session(io, target)),
+            ParsedCommand::Connect(target) => SocksCommand::Connect(SocksConnect {
+                target,
+                pending: SocksConnectPending { io },
+            }),
             ParsedCommand::UdpAssociate(source_port) => {
                 let io = Arc::new(Mutex::new(io));
                 SocksCommand::UdpAssociate(SocksUdpAssociate {
@@ -90,12 +94,37 @@ pub enum SocksError {
     Io,
 }
 
-/// The application stream retained after the SOCKS5 request is accepted.
+/// The shared TCP control stream retained by a UDP association.
 pub struct SocksStream<IO> {
     io: Arc<Mutex<IO>>,
 }
 
-/// The one-shot pending SOCKS5 request reply.
+/// A validated TCP `CONNECT` request with uniquely owned transport state.
+pub struct SocksConnect<IO> {
+    target: TargetAddr,
+    pending: SocksConnectPending<IO>,
+}
+
+impl<IO> SocksConnect<IO> {
+    /// Returns the validated target without consuming the pending request.
+    pub const fn target(&self) -> &TargetAddr {
+        &self.target
+    }
+
+    /// Separates route input from the one-shot reply and transport owner.
+    pub fn into_parts(self) -> (TargetAddr, SocksConnectPending<IO>) {
+        (self.target, self.pending)
+    }
+}
+
+/// The uniquely owned one-shot pending TCP `CONNECT` reply.
+///
+/// A successful reply returns the original transport directly to the relay.
+pub struct SocksConnectPending<IO> {
+    io: IO,
+}
+
+/// The one-shot pending UDP association reply.
 ///
 /// The core [`SessionReply`] methods consume this owner, preventing a second
 /// success or failure reply.
@@ -105,8 +134,8 @@ pub struct SocksReplyPending<IO> {
 
 /// A validated SOCKS5 command with its retained transport ownership.
 pub enum SocksCommand<IO> {
-    /// The existing TCP `CONNECT` session.
-    Connect(Session<SocksStream<IO>, SocksReplyPending<IO>>),
+    /// A reply-pending TCP `CONNECT` request with unique transport ownership.
+    Connect(SocksConnect<IO>),
     /// A reply-pending UDP association request.
     UdpAssociate(SocksUdpAssociate<IO>),
 }
@@ -135,6 +164,22 @@ where
     pub async fn reject_command_not_supported(self) -> Result<(), SocksError> {
         let mut stream = SocksStream { io: self.reply.io };
         write_failure(&mut stream, REPLY_COMMAND_NOT_SUPPORTED).await
+    }
+}
+
+impl<IO> SocksConnectPending<IO>
+where
+    IO: AsyncWrite + Unpin,
+{
+    /// Commits a successful reply and returns the uniquely owned application IO.
+    pub async fn succeeded_socket(mut self, bound: SocketAddr) -> Result<IO, SocksError> {
+        write_success(&mut self.io, bound).await?;
+        Ok(self.io)
+    }
+
+    /// Commits one mapped failure reply and closes the application IO.
+    pub async fn failed(mut self, kind: ConnectErrorKind) -> Result<(), SocksError> {
+        write_failure(&mut self.io, reply_for_error(kind)).await
     }
 }
 
@@ -285,36 +330,13 @@ where
     type Error = SocksError;
 
     async fn succeeded_socket(self, bound: SocketAddr) -> Result<(), Self::Error> {
-        let mut reply = [0_u8; 22];
-        reply[..3].copy_from_slice(&[SOCKS_VERSION, 0x00, 0x00]);
-        let reply_len = match bound {
-            SocketAddr::V4(bound) => {
-                reply[3] = ADDRESS_TYPE_IPV4;
-                reply[4..8].copy_from_slice(&bound.ip().octets());
-                reply[8..10].copy_from_slice(&bound.port().to_be_bytes());
-                10
-            }
-            SocketAddr::V6(bound) => {
-                reply[3] = ADDRESS_TYPE_IPV6;
-                reply[4..20].copy_from_slice(&bound.ip().octets());
-                reply[20..22].copy_from_slice(&bound.port().to_be_bytes());
-                22
-            }
-        };
         let mut stream = SocksStream { io: self.io };
-        write_exact(&mut stream, &reply[..reply_len]).await
+        write_success(&mut stream, bound).await
     }
 
     async fn failed(self, kind: ConnectErrorKind) -> Result<(), Self::Error> {
-        let reply = match kind {
-            ConnectErrorKind::NetworkUnreachable => REPLY_NETWORK_UNREACHABLE,
-            ConnectErrorKind::HostUnreachable => REPLY_HOST_UNREACHABLE,
-            ConnectErrorKind::ConnectionRefused => REPLY_CONNECTION_REFUSED,
-            ConnectErrorKind::PolicyDenied => REPLY_CONNECTION_NOT_ALLOWED,
-            ConnectErrorKind::Timeout | ConnectErrorKind::Other => REPLY_GENERAL_FAILURE,
-        };
         let mut stream = SocksStream { io: self.io };
-        write_failure(&mut stream, reply).await
+        write_failure(&mut stream, reply_for_error(kind)).await
     }
 }
 
@@ -429,21 +451,6 @@ where
             Err(SocksError::InvalidTarget)
         }
         error => Err(error),
-    }
-}
-
-fn connect_session<IO>(
-    io: IO,
-    target: TargetAddr,
-) -> Session<SocksStream<IO>, SocksReplyPending<IO>> {
-    let io = Arc::new(Mutex::new(io));
-    Session {
-        target,
-        stream: SocksStream {
-            io: Arc::clone(&io),
-        },
-        initial_payload: Bytes::new(),
-        reply: SocksReplyPending { io },
     }
 }
 
@@ -567,6 +574,39 @@ where
         ],
     )
     .await
+}
+
+async fn write_success<IO>(io: &mut IO, bound: SocketAddr) -> Result<(), SocksError>
+where
+    IO: AsyncWrite + Unpin,
+{
+    let mut reply = [0_u8; 22];
+    reply[..3].copy_from_slice(&[SOCKS_VERSION, 0x00, 0x00]);
+    let reply_len = match bound {
+        SocketAddr::V4(bound) => {
+            reply[3] = ADDRESS_TYPE_IPV4;
+            reply[4..8].copy_from_slice(&bound.ip().octets());
+            reply[8..10].copy_from_slice(&bound.port().to_be_bytes());
+            10
+        }
+        SocketAddr::V6(bound) => {
+            reply[3] = ADDRESS_TYPE_IPV6;
+            reply[4..20].copy_from_slice(&bound.ip().octets());
+            reply[20..22].copy_from_slice(&bound.port().to_be_bytes());
+            22
+        }
+    };
+    write_exact(io, &reply[..reply_len]).await
+}
+
+const fn reply_for_error(kind: ConnectErrorKind) -> u8 {
+    match kind {
+        ConnectErrorKind::NetworkUnreachable => REPLY_NETWORK_UNREACHABLE,
+        ConnectErrorKind::HostUnreachable => REPLY_HOST_UNREACHABLE,
+        ConnectErrorKind::ConnectionRefused => REPLY_CONNECTION_REFUSED,
+        ConnectErrorKind::PolicyDenied => REPLY_CONNECTION_NOT_ALLOWED,
+        ConnectErrorKind::Timeout | ConnectErrorKind::Other => REPLY_GENERAL_FAILURE,
+    }
 }
 
 fn poisoned_transport() -> io::Error {

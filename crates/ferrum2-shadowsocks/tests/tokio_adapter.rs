@@ -8,13 +8,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use bytes::BytesMut;
 use ferrum2_core::{AbortiveClose, ConnectError, Connector, LocalEndpoint, TargetAddr};
 use ferrum2_shadowsocks::tokio::{TokioConnector, TokioFramed, TokioTransport};
 use ferrum2_shadowsocks::{
-    DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, TransportIo,
-    TransportPhase,
+    DetectionReason, FlowTerminal, PlainBufferedDuplex, PlainDuplex, ProtocolReason,
+    ShadowsocksError, TransportIo, TransportPhase,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf,
+};
 use tokio::sync::Notify;
 
 struct EndpointIo {
@@ -78,12 +81,12 @@ async fn transport_delegates_io_endpoint_and_abortive_close() {
     });
 
     peer.write_all(b"abc").await.expect("peer write");
-    let mut read = [0_u8; 3];
-    let count = std::future::poll_fn(|cx| Pin::new(&mut transport).poll_read(cx, &mut read))
+    let mut read = BytesMut::with_capacity(3);
+    let count = std::future::poll_fn(|cx| Pin::new(&mut transport).poll_read_buf(cx, &mut read, 3))
         .await
         .expect("transport read");
     assert_eq!(count, 3);
-    assert_eq!(&read, b"abc");
+    assert_eq!(read.as_ref(), b"abc");
     assert_eq!(transport.local_socket_addr(), endpoint);
 
     let written = std::future::poll_fn(|cx| Pin::new(&mut transport).poll_write(cx, b"xyz"))
@@ -96,6 +99,46 @@ async fn transport_delegates_io_endpoint_and_abortive_close() {
 
     transport.mark_abortive().expect("abortive delegation");
     assert_eq!(aborts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn transport_appends_only_successful_bytes_with_exact_spare_limits() {
+    let endpoint = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40_003);
+    let (inner, mut peer) = tokio::io::duplex(32);
+    let mut transport = TokioTransport::new(EndpointIo {
+        inner,
+        endpoint,
+        aborts: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut scratch = BytesMut::with_capacity(32);
+    scratch.extend_from_slice(b"prefix");
+    let pointer = scratch.as_ptr();
+    let capacity = scratch.capacity();
+
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    assert!(matches!(
+        Pin::new(&mut transport).poll_read_buf(&mut cx, &mut scratch, 3),
+        Poll::Pending
+    ));
+    assert_eq!(scratch.as_ref(), b"prefix");
+    assert_eq!(scratch.as_ptr(), pointer);
+    assert_eq!(scratch.capacity(), capacity);
+
+    peer.write_all(b"abcdefghij").await.expect("peer write");
+    let first =
+        std::future::poll_fn(|cx| Pin::new(&mut transport).poll_read_buf(cx, &mut scratch, 3))
+            .await
+            .expect("first limited read");
+    assert_eq!(first, 3);
+    assert_eq!(scratch.as_ref(), b"prefixabc");
+    let second =
+        std::future::poll_fn(|cx| Pin::new(&mut transport).poll_read_buf(cx, &mut scratch, 7))
+            .await
+            .expect("second limited read");
+    assert_eq!(second, 7);
+    assert_eq!(scratch.as_ref(), b"prefixabcdefghij");
+    assert_eq!(scratch.as_ptr(), pointer);
+    assert_eq!(scratch.capacity(), capacity);
 }
 
 struct FailingIo;
@@ -145,13 +188,14 @@ fn assert_source_free(error: io::Error, expected: io::ErrorKind) {
 #[tokio::test]
 async fn transport_erases_all_io_error_sources() {
     let mut transport = TokioTransport::new(FailingIo);
-    let mut read = [0_u8; 1];
+    let mut read = BytesMut::with_capacity(1);
     assert_source_free(
-        std::future::poll_fn(|cx| Pin::new(&mut transport).poll_read(cx, &mut read))
+        std::future::poll_fn(|cx| Pin::new(&mut transport).poll_read_buf(cx, &mut read, 1))
             .await
             .expect_err("read failure"),
         io::ErrorKind::Other,
     );
+    assert!(read.is_empty(), "failed read must not expose spare bytes");
     assert_source_free(
         std::future::poll_fn(|cx| Pin::new(&mut transport).poll_write(cx, b"x"))
             .await
@@ -170,6 +214,80 @@ async fn transport_erases_all_io_error_sources() {
             .expect_err("shutdown failure"),
         io::ErrorKind::Other,
     );
+}
+
+struct BufferedViewFlow {
+    data: Vec<u8>,
+    position: usize,
+}
+
+impl PlainDuplex for BufferedViewFlow {
+    fn poll_read_plain(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        let copied = destination.len().min(self.data.len() - self.position);
+        destination[..copied].copy_from_slice(&self.data[self.position..self.position + copied]);
+        self.position += copied;
+        Poll::Ready(Ok(copied))
+    }
+
+    fn poll_write_plain(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush_plain(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown_plain(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn terminal(&self) -> Option<FlowTerminal> {
+        None
+    }
+}
+
+impl PlainBufferedDuplex for BufferedViewFlow {
+    fn poll_fill_plain_buf(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<&[u8], ShadowsocksError>> {
+        let this = self.get_mut();
+        Poll::Ready(Ok(&this.data[this.position..]))
+    }
+
+    fn consume_plain(mut self: Pin<&mut Self>, amount: usize) {
+        assert!(amount <= self.data.len() - self.position);
+        self.position += amount;
+    }
+}
+
+#[tokio::test]
+async fn framed_buffer_view_advances_only_when_consumed() {
+    let mut framed = TokioFramed::new(BufferedViewFlow {
+        data: b"plaintext view".to_vec(),
+        position: 0,
+    });
+    let first = framed.fill_buf().await.expect("first view");
+    let first_pointer = first.as_ptr();
+    assert_eq!(first, b"plaintext view");
+    framed.consume(5);
+    let second = framed.fill_buf().await.expect("second view");
+    assert_eq!(second, b"text view");
+    assert_eq!(second.as_ptr(), first_pointer.wrapping_add(5));
 }
 
 struct GateConnector {
@@ -282,6 +400,25 @@ impl PlainDuplex for OneReadFlow {
 
     fn terminal(&self) -> Option<FlowTerminal> {
         self.terminal
+    }
+}
+
+impl PlainBufferedDuplex for OneReadFlow {
+    fn poll_fill_plain_buf(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<&[u8], ShadowsocksError>> {
+        match self.result.as_ref().unwrap_or(&Ok(&[])) {
+            Ok(data) => Poll::Ready(Ok(data)),
+            Err(error) => Poll::Ready(Err(*error)),
+        }
+    }
+
+    fn consume_plain(mut self: Pin<&mut Self>, amount: usize) {
+        match self.result.take().unwrap_or(Ok(&[])) {
+            Ok(data) => assert_eq!(amount, data.len()),
+            Err(_) => assert_eq!(amount, 0),
+        }
     }
 }
 

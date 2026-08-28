@@ -125,7 +125,6 @@ async fn relay_dns_udp_hop_once(
                 &test_datagram(target, &plain[..length]),
                 0,
                 &mut wire,
-                scratch,
             )
             .expect("encrypt prefixed DNS response");
         socket
@@ -144,7 +143,6 @@ async fn relay_dns_udp_hop_once(
             ),
             0,
             &mut wire,
-            scratch,
         )
         .expect("encrypt DNS response");
     socket

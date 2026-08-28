@@ -36,7 +36,15 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
     let proxy = address(10_800);
     let server = address(8_388);
     let unselected = address(8_389);
-    let direct = proxy_config::profile_direct_udp_client_config(address(10_801));
+    let direct = proxy_config::profile_direct_udp_client_config(address(10_801), 32);
+    assert!(direct.contains("max_sessions = 32"));
+    let direct_tcp = proxy_config::profile_direct_tcp_client_config(address(10_805));
+    let profile_dns = proxy_config::profile_dns_udp_client_config(
+        address(10_806),
+        address(5_359),
+        address(5_360),
+        address(9_092),
+    );
     let ordinary = proxy_config::ferrum_client_config(proxy, server, Some(address(9_090)));
     let dns_resource = proxy_config::ferrum_dns_resource_client_config(
         proxy,
@@ -48,7 +56,7 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
         address(9_091),
     );
     let profile_shadowsocks =
-        proxy_config::profile_shadowsocks_udp_client_config(address(10_802), server);
+        proxy_config::profile_shadowsocks_udp_client_config(address(10_802), server, 16);
     let m14_udp = proxy_config::m14_udp_client_config(
         address(10_803),
         server,
@@ -72,6 +80,8 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
             vec![Some(SocketAddr::V4(server))],
         ),
         ("profile direct UDP", direct, vec![None]),
+        ("profile direct TCP", direct_tcp, vec![None]),
+        ("profile DNS UDP", profile_dns, vec![None]),
         (
             "profile Shadowsocks UDP",
             profile_shadowsocks,

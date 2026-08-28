@@ -9,6 +9,7 @@ async fn phase_deadline_contract_table_preserves_defaults_overrides_and_first_wr
         connect_timeout: Duration::from_secs(10),
         idle_timeout: Duration::from_secs(300),
         shutdown_grace: Duration::from_secs(30),
+        network_generation: ferrum2_config::NetworkGenerationMode::Dynamic,
     };
     let custom = RuntimeConfig {
         connect_timeout: Duration::from_millis(2_300),

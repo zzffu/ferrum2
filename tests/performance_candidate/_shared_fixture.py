@@ -212,6 +212,7 @@ def synthetic_scale_row(
         "active_seconds": 30,
         "topology": "shadowsocks",
         "application_payload_bytes": payload,
+        "workload_scale": None,
         "socks_datagram_bytes": None,
         "upstream_wire_bytes": None,
         "sha": parent if is_parent else candidate,
@@ -231,6 +232,17 @@ def synthetic_scale_row(
         "p99_nanoseconds": None,
         "io_completions": full_completion_sum * 2,
         "scale": scale,
+        "structural_metrics": {
+            **{field: None for field in linux_trial.STRUCTURAL_FIELDS},
+            "closed": {
+                field: (
+                    "external_artifact"
+                    if field == "allocations"
+                    else "not_exposed"
+                )
+                for field in linux_trial.STRUCTURAL_FIELDS
+            },
+        },
         "producer_source_sha256": contract["producer_source_sha256"],
         "controller_source_sha256": contract["controller_source_sha256"],
         "semantic_recipe_sha256": contract["semantic_recipe_sha256"],

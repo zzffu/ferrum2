@@ -5,6 +5,7 @@ use ferrum2_core::{CanonicalDomain, DomainName};
 use ipnet::IpNet;
 
 use crate::RuleCompileError;
+use crate::hybrid_index::{RadixTrie, SuffixTrie, use_cidr_radix, use_suffix_trie};
 
 /// Matcher categories present in one compiled set.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -156,6 +157,15 @@ impl MatchSetBuilder {
             )
         };
         let ip_prefixes = IpPrefixIndex::build(&self.ip_cidrs)?;
+        let suffix_trie = if use_suffix_trie(self.suffix_domains.len()) {
+            Some(SuffixTrie::try_build(
+                self.suffix_domains
+                    .iter()
+                    .map(|domain| (domain.as_str(), ())),
+            )?)
+        } else {
+            None
+        };
         let capabilities = MatchSetCapabilities {
             exact_domain: !self.exact_domains.is_empty(),
             domain_suffix: !self.suffix_domains.is_empty(),
@@ -171,6 +181,7 @@ impl MatchSetBuilder {
         Ok(CompiledMatchSet {
             exact_domains: self.exact_domains.into_boxed_slice(),
             suffix_domains: self.suffix_domains.into_boxed_slice(),
+            suffix_trie,
             domain_keywords: self.domain_keywords.into_boxed_slice(),
             keyword_matcher,
             ip_cidrs: self.ip_cidrs.into_boxed_slice(),
@@ -194,6 +205,7 @@ fn sort_unique<T: Ord>(values: &mut [T]) -> Result<(), RuleCompileError> {
 pub struct CompiledMatchSet {
     exact_domains: Box<[CanonicalDomain]>,
     suffix_domains: Box<[CanonicalDomain]>,
+    suffix_trie: Option<SuffixTrie<()>>,
     domain_keywords: Box<[Box<str>]>,
     keyword_matcher: Option<AhoCorasick>,
     ip_cidrs: Box<[IpNet]>,
@@ -270,6 +282,9 @@ impl CompiledMatchSet {
     }
 
     fn matches_suffix(&self, domain: &str) -> bool {
+        if let Some(trie) = &self.suffix_trie {
+            return trie.matches(domain);
+        }
         let mut suffix = domain;
         loop {
             if self
@@ -293,10 +308,19 @@ impl std::fmt::Debug for CompiledMatchSet {
     }
 }
 
-#[derive(Default)]
 struct IpPrefixIndex {
-    v4: Box<[PrefixGroupV4]>,
-    v6: Box<[PrefixGroupV6]>,
+    v4: IpPrefixV4,
+    v6: IpPrefixV6,
+}
+
+enum IpPrefixV4 {
+    Sorted(Box<[PrefixGroupV4]>),
+    Radix(RadixTrie<(), 32>),
+}
+
+enum IpPrefixV6 {
+    Sorted(Box<[PrefixGroupV6]>),
+    Radix(RadixTrie<(), 128>),
 }
 
 struct PrefixGroupV4 {
@@ -325,31 +349,50 @@ impl IpPrefixIndex {
                 }
             }
         }
-        Ok(Self {
-            v4: group_v4(v4)?.into_boxed_slice(),
-            v6: group_v6(v6)?.into_boxed_slice(),
-        })
+        let v4 = if use_cidr_radix(v4.len()) {
+            IpPrefixV4::Radix(RadixTrie::try_build(
+                v4.into_iter()
+                    .map(|(prefix, network)| (prefix, u128::from(network), ())),
+            )?)
+        } else {
+            IpPrefixV4::Sorted(group_v4(v4)?.into_boxed_slice())
+        };
+        let v6 = if use_cidr_radix(v6.len()) {
+            IpPrefixV6::Radix(RadixTrie::try_build(
+                v6.into_iter()
+                    .map(|(prefix, network)| (prefix, network, ())),
+            )?)
+        } else {
+            IpPrefixV6::Sorted(group_v6(v6)?.into_boxed_slice())
+        };
+        Ok(Self { v4, v6 })
     }
 
     fn matches(&self, address: IpAddr) -> bool {
         match address {
             IpAddr::V4(address) => {
                 let address = u32::from(address);
-                self.v4.iter().any(|group| {
-                    group
-                        .networks
-                        .binary_search(&(address & mask_v4(group.length)))
-                        .is_ok()
-                })
+                match &self.v4 {
+                    IpPrefixV4::Sorted(groups) => groups.iter().any(|group| {
+                        group
+                            .networks
+                            .binary_search(&(address & mask_v4(group.length)))
+                            .is_ok()
+                    }),
+                    IpPrefixV4::Radix(trie) => trie.matches(u128::from(address)),
+                }
             }
             IpAddr::V6(address) => {
                 let address = u128::from(address);
-                self.v6.iter().any(|group| {
-                    group
-                        .networks
-                        .binary_search(&(address & mask_v6(group.length)))
-                        .is_ok()
-                })
+                match &self.v6 {
+                    IpPrefixV6::Sorted(groups) => groups.iter().any(|group| {
+                        group
+                            .networks
+                            .binary_search(&(address & mask_v6(group.length)))
+                            .is_ok()
+                    }),
+                    IpPrefixV6::Radix(trie) => trie.matches(address),
+                }
             }
         }
     }

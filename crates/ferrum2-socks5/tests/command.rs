@@ -1,10 +1,13 @@
 use ferrum2_core::{ConnectErrorKind, SessionReply, TargetAddr};
-use ferrum2_socks5::{Socks5Inbound, SocksCommand, SocksError};
+use ferrum2_socks5::{Socks5Inbound, SocksCommand, SocksConnect, SocksError};
 use std::{
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
@@ -28,13 +31,12 @@ async fn connect_rows_keep_targets_replies_and_stream_exact() {
         "fragmented-ipv4 method"
     );
     fragmented(&mut client, &[5, 1, 0, 1, 192, 0, 2, 10, 0x1f, 0x90]).await;
-    let SocksCommand::Connect(mut session) = task.await.unwrap().unwrap() else {
+    let SocksCommand::Connect(accepted) = task.await.unwrap().unwrap() else {
         panic!("fragmented IPv4 CONNECT command")
     };
-    assert_eq!(session.target, ip("192.0.2.10:8080"), "ipv4 target");
-    assert!(session.initial_payload.is_empty(), "ipv4 initial payload");
-    session
-        .reply
+    let (target, pending) = accepted.into_parts();
+    assert_eq!(target, ip("192.0.2.10:8080"), "ipv4 target");
+    let mut stream = pending
         .succeeded_socket("127.0.0.7:49152".parse().unwrap())
         .await
         .unwrap();
@@ -45,9 +47,9 @@ async fn connect_rows_keep_targets_replies_and_stream_exact() {
     );
     client.write_all(b"ping").await.unwrap();
     let mut bytes = [0; 4];
-    session.stream.read_exact(&mut bytes).await.unwrap();
+    stream.read_exact(&mut bytes).await.unwrap();
     assert_eq!(&bytes, b"ping", "inbound stream");
-    session.stream.write_all(b"pong").await.unwrap();
+    stream.write_all(b"pong").await.unwrap();
     client.read_exact(&mut bytes).await.unwrap();
     assert_eq!(&bytes, b"pong", "outbound stream");
 
@@ -69,10 +71,10 @@ async fn connect_rows_keep_targets_replies_and_stream_exact() {
             TargetAddr::domain("example.test", 443).unwrap(),
         ),
     ] {
-        let (mut client, session) = connect(&wire(1, &suffix)).await;
-        assert_eq!(session.target, target, "{case} target");
-        session
-            .reply
+        let (mut client, connect) = connect(&wire(1, &suffix)).await;
+        let (actual_target, pending) = connect.into_parts();
+        assert_eq!(actual_target, target, "{case} target");
+        let _stream = pending
             .succeeded_socket(SocketAddr::V6(SocketAddrV6::new(bound, 49_152, 0, 0)))
             .await
             .unwrap();
@@ -188,9 +190,9 @@ async fn connect_failure_replies_are_mapped_and_exactly_once() {
         ("timeout", ConnectErrorKind::Timeout, GENERAL),
         ("other", ConnectErrorKind::Other, GENERAL),
     ] {
-        let (mut client, session) = connect(&wire(1, &[1, 192, 0, 2, 10, 0, 80])).await;
-        session.reply.failed(kind).await.unwrap();
-        drop(session.stream);
+        let (mut client, connect) = connect(&wire(1, &[1, 192, 0, 2, 10, 0, 80])).await;
+        let (_, pending) = connect.into_parts();
+        pending.failed(kind).await.unwrap();
         let mut actual = Vec::new();
         client.read_to_end(&mut actual).await.unwrap();
         assert_eq!(actual, expected, "reply-{case}");
@@ -198,17 +200,186 @@ async fn connect_failure_replies_are_mapped_and_exactly_once() {
 }
 
 #[tokio::test]
+async fn connect_success_returns_owned_io_after_half_close_and_drops_it_once() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (mut client, server) = tokio::io::duplex(128);
+    let tracked = DropTrackedIo {
+        io: server,
+        drops: Arc::clone(&drops),
+    };
+    let accepted = tokio::spawn(async move { Socks5Inbound::new().accept_command(tracked).await });
+    client
+        .write_all(&wire(1, &[1, 192, 0, 2, 10, 0, 80]))
+        .await
+        .expect("CONNECT request");
+    assert_eq!(read::<2>(&mut client).await, METHOD);
+    let SocksCommand::Connect(connect) = accepted.await.expect("accept join").expect("CONNECT")
+    else {
+        panic!("CONNECT command")
+    };
+    client.shutdown().await.expect("client write half-close");
+    let (_, pending) = connect.into_parts();
+    let mut owned = pending
+        .succeeded_socket("127.0.0.1:49152".parse().expect("bound address"))
+        .await
+        .expect("success reply after client half-close");
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        read::<10>(&mut client).await,
+        [5, 0, 0, 1, 127, 0, 0, 1, 0xc0, 0]
+    );
+
+    let mut eof = [0_u8; 1];
+    assert_eq!(owned.read(&mut eof).await.expect("owned read EOF"), 0);
+    owned
+        .write_all(b"after-half-close")
+        .await
+        .expect("owned write after read EOF");
+    let mut payload = [0_u8; 16];
+    client
+        .read_exact(&mut payload)
+        .await
+        .expect("client reads after half-close");
+    assert_eq!(&payload, b"after-half-close");
+    drop(owned);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn connect_partial_success_and_failure_replies_close_exactly_once() {
+    let input = wire(1, &[1, 192, 0, 2, 10, 0, 80]);
+
+    let success_output = Arc::new(Mutex::new(Vec::new()));
+    let success_drops = Arc::new(AtomicUsize::new(0));
+    let success_polls = Arc::new(AtomicUsize::new(0));
+    let command = Socks5Inbound::new()
+        .accept_command(ScriptedIo::new(
+            input.clone(),
+            Arc::clone(&success_output),
+            Arc::clone(&success_drops),
+            Arc::clone(&success_polls),
+            1,
+            None,
+        ))
+        .await
+        .expect("partial success CONNECT");
+    let SocksCommand::Connect(connect) = command else {
+        panic!("partial success CONNECT command")
+    };
+    let (_, pending) = connect.into_parts();
+    let owned = pending
+        .succeeded_socket("127.0.0.7:49152".parse().expect("success bound"))
+        .await
+        .expect("fragmented success reply");
+    assert_eq!(
+        *success_output.lock().expect("success output"),
+        [METHOD, &[5, 0, 0, 1, 127, 0, 0, 7, 0xc0, 0]].concat()
+    );
+    assert_eq!(success_drops.load(Ordering::SeqCst), 0);
+    drop(owned);
+    assert_eq!(success_drops.load(Ordering::SeqCst), 1);
+
+    let failure_output = Arc::new(Mutex::new(Vec::new()));
+    let failure_drops = Arc::new(AtomicUsize::new(0));
+    let failure_polls = Arc::new(AtomicUsize::new(0));
+    let command = Socks5Inbound::new()
+        .accept_command(ScriptedIo::new(
+            input,
+            Arc::clone(&failure_output),
+            Arc::clone(&failure_drops),
+            failure_polls,
+            1,
+            None,
+        ))
+        .await
+        .expect("partial failure CONNECT");
+    let SocksCommand::Connect(connect) = command else {
+        panic!("partial failure CONNECT command")
+    };
+    let (_, pending) = connect.into_parts();
+    pending
+        .failed(ConnectErrorKind::PolicyDenied)
+        .await
+        .expect("fragmented failure reply");
+    assert_eq!(
+        *failure_output.lock().expect("failure output"),
+        [METHOD, DENIED].concat()
+    );
+    assert_eq!(failure_drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn connect_reply_cancellation_and_early_close_drop_io_once() {
+    let input = wire(1, &[1, 192, 0, 2, 10, 0, 80]);
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let write_polls = Arc::new(AtomicUsize::new(0));
+    let command = Socks5Inbound::new()
+        .accept_command(ScriptedIo::new(
+            input.clone(),
+            Arc::clone(&output),
+            Arc::clone(&drops),
+            Arc::clone(&write_polls),
+            usize::MAX,
+            Some(METHOD.len()),
+        ))
+        .await
+        .expect("cancellable CONNECT");
+    let SocksCommand::Connect(connect) = command else {
+        panic!("cancellable CONNECT command")
+    };
+    let (_, pending) = connect.into_parts();
+    let reply = tokio::spawn(async move {
+        pending
+            .succeeded_socket("127.0.0.1:49152".parse().expect("cancel bound"))
+            .await
+    });
+    while write_polls.load(Ordering::SeqCst) < 2 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(*output.lock().expect("cancel output"), METHOD);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    reply.abort();
+    assert!(matches!(reply.await, Err(error) if error.is_cancelled()));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    let peer_drops = Arc::new(AtomicUsize::new(0));
+    let (mut client, server) = tokio::io::duplex(128);
+    let tracked = DropTrackedIo {
+        io: server,
+        drops: Arc::clone(&peer_drops),
+    };
+    let accepted = tokio::spawn(async move { Socks5Inbound::new().accept_command(tracked).await });
+    client.write_all(&input).await.expect("early-close request");
+    assert_eq!(read::<2>(&mut client).await, METHOD);
+    let SocksCommand::Connect(connect) = accepted.await.expect("accept join").expect("CONNECT")
+    else {
+        panic!("early-close CONNECT command")
+    };
+    drop(client);
+    let (_, pending) = connect.into_parts();
+    assert!(matches!(
+        pending
+            .succeeded_socket("127.0.0.1:49152".parse().expect("early-close bound"))
+            .await,
+        Err(SocksError::Io)
+    ));
+    assert_eq!(peer_drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn command_variant_and_udp_source_hint_rows_are_validated() {
     let (mut client, command) = commands(&wire(1, &[1, 192, 0, 2, 8, 1, 0xbb])).await;
-    let SocksCommand::Connect(session) = command else {
+    let SocksCommand::Connect(connect) = command else {
         panic!("command-connect variant")
     };
     assert_eq!(
-        session.target,
-        ip("192.0.2.8:443"),
+        connect.target(),
+        &ip("192.0.2.8:443"),
         "command-connect target"
     );
-    session.reply.failed(ConnectErrorKind::Other).await.unwrap();
+    let (_, pending) = connect.into_parts();
+    pending.failed(ConnectErrorKind::Other).await.unwrap();
     assert_eq!(
         read::<10>(&mut client).await,
         GENERAL,
@@ -406,6 +577,129 @@ impl AsyncWrite for RequestReadFailure {
     }
 }
 
+struct DropTrackedIo<IO> {
+    io: IO,
+    drops: Arc<AtomicUsize>,
+}
+
+impl<IO> Drop for DropTrackedIo<IO> {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl<IO> AsyncRead for DropTrackedIo<IO>
+where
+    IO: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_read(context, buffer)
+    }
+}
+
+impl<IO> AsyncWrite for DropTrackedIo<IO>
+where
+    IO: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(context)
+    }
+}
+
+struct ScriptedIo {
+    input: Vec<u8>,
+    offset: usize,
+    output: Arc<Mutex<Vec<u8>>>,
+    drops: Arc<AtomicUsize>,
+    write_polls: Arc<AtomicUsize>,
+    max_write: usize,
+    stall_after: Option<usize>,
+}
+
+impl ScriptedIo {
+    fn new(
+        input: Vec<u8>,
+        output: Arc<Mutex<Vec<u8>>>,
+        drops: Arc<AtomicUsize>,
+        write_polls: Arc<AtomicUsize>,
+        max_write: usize,
+        stall_after: Option<usize>,
+    ) -> Self {
+        Self {
+            input,
+            offset: 0,
+            output,
+            drops,
+            write_polls,
+            max_write,
+            stall_after,
+        }
+    }
+}
+
+impl Drop for ScriptedIo {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl AsyncRead for ScriptedIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let length = buffer.remaining().min(self.input.len() - self.offset);
+        buffer.put_slice(&self.input[self.offset..self.offset + length]);
+        self.offset += length;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for ScriptedIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_polls.fetch_add(1, Ordering::SeqCst);
+        let mut output = self.output.lock().expect("scripted output");
+        let remaining = self
+            .stall_after
+            .map_or(usize::MAX, |limit| limit.saturating_sub(output.len()));
+        let length = buffer.len().min(self.max_write).min(remaining);
+        if length == 0 {
+            return Poll::Pending;
+        }
+        output.extend_from_slice(&buffer[..length]);
+        Poll::Ready(Ok(length))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 fn wire(command: u8, suffix: &[u8]) -> Vec<u8> {
     [&[5, 1, 0, 5, command, 0][..], suffix].concat()
 }
@@ -434,15 +728,7 @@ async fn commands(input: &[u8]) -> (DuplexStream, SocksCommand<DuplexStream>) {
     );
     (client, task.await.unwrap().unwrap())
 }
-async fn connect(
-    input: &[u8],
-) -> (
-    DuplexStream,
-    ferrum2_core::Session<
-        ferrum2_socks5::SocksStream<DuplexStream>,
-        ferrum2_socks5::SocksReplyPending<DuplexStream>,
-    >,
-) {
+async fn connect(input: &[u8]) -> (DuplexStream, SocksConnect<DuplexStream>) {
     let (client, command) = commands(input).await;
     let SocksCommand::Connect(session) = command else {
         panic!("CONNECT command")

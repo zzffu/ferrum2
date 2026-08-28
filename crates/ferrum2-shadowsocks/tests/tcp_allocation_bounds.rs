@@ -285,7 +285,7 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
         ]
         .into_iter()
         .chain(frames.iter().cloned());
-        let (server_io, _) = RecordingIo::new(reads);
+        let (server_io, server_observation) = RecordingIo::new(reads);
         let replay = TcpReplayStore::new(1024).expect("capacity");
         let server_random = ScriptedRandom::new([]);
         let server_observers = RecordingObservers::default();
@@ -307,6 +307,22 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
         }
         assert_eq!(opened, plaintext);
         assert_fixed_storage_identity(&server_observers);
+
+        let mut expected_read_lengths = vec![
+            profile.initial_request_read_bytes(),
+            request.len() - profile.initial_request_read_bytes(),
+        ];
+        for _ in 0..frames.len() {
+            expected_read_lengths.extend([2 + TAG_LEN, MAX_ENCODE_PAYLOAD_LEN + TAG_LEN]);
+        }
+        assert_eq!(
+            server_observation
+                .lock()
+                .expect("server observation")
+                .read_lengths,
+            expected_read_lengths,
+            "continuous frames expose only encrypted length and current payload ranges"
+        );
     }
 }
 

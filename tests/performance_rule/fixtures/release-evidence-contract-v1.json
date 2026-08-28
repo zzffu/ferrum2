@@ -38,6 +38,10 @@
   "kind": "ferrum2_rule_release_evidence_contract_fixture",
   "qualification": {
     "allocation_gate_passed": true,
+    "candidate": {
+      "adoption_claim": false,
+      "enabled_features": []
+    },
     "configuration": {
       "base_iterations_per_sample": 10,
       "dns_rule_sizes": [1],
@@ -247,7 +251,7 @@
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
     "scenario_count": 2,
-    "schema": "ferrum2.rule-qualification.v1",
+    "schema": "ferrum2.rule-qualification.v2",
     "thresholds_passed": true
   },
   "schema_version": 1,

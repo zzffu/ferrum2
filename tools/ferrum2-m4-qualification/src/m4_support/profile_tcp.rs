@@ -16,9 +16,12 @@ use super::profile_contract::{
     ProfileScenario, ReadyFile, Topology,
 };
 use super::profile_output::{
-    ProfileTcpWorkerResult, ensure_profile_workers_running, wait_for_profile_phase,
+    ProfileTcpWorkerResult, ensure_profile_workers_running, wait_for_profile_phase_optional_server,
 };
-use super::proxy_config::{ferrum_client_config, ferrum_server_config};
+use super::profile_structural::StructuralMetrics;
+use super::proxy_config::{
+    ferrum_client_config, ferrum_server_config, profile_direct_tcp_client_config,
+};
 use super::throughput::{
     load_stream, load_tcp_request_response, load_tcp_stream, percentile_99, rate_per_second,
 };
@@ -32,6 +35,7 @@ pub(super) fn run_profile_tcp(
         .scenario
         .tcp_workers()
         .expect("TCP scenario has workers");
+    let direct = arguments.scenario.is_socks_direct();
     let mut directory = Some(
         tempfile::Builder::new()
             .prefix("profile-tcp-")
@@ -78,25 +82,34 @@ pub(super) fn run_profile_tcp(
     let mut ready = None;
     let mut started = false;
     let execution = (|| -> Result<(), String> {
-        fs::write(&client_config, ferrum_client_config(proxy, server, None)).map_err(clean_io)?;
-        fs::write(&server_config, ferrum_server_config(server, None)).map_err(clean_io)?;
+        let client_source = if direct {
+            profile_direct_tcp_client_config(proxy)
+        } else {
+            ferrum_client_config(proxy, server, None)
+        };
+        fs::write(&client_config, client_source).map_err(clean_io)?;
+        if !direct {
+            fs::write(&server_config, ferrum_server_config(server, None)).map_err(clean_io)?;
+        }
         let client_binary = profile_binary(&arguments.binary_dir, "ferrum2-client")?;
-        let server_binary = profile_binary(&arguments.binary_dir, "ferrum2-server")?;
         target_worker = Some(TargetWorker::echo(
             target_listener.take().expect("target listener"),
             tcp_workers,
         )?);
-        server_reservation
-            .take()
-            .expect("server reservation")
-            .release();
-        server_process = Some(spawn_proxy(
-            Topology::Ferrum,
-            "profile workload server",
-            &server_binary,
-            &server_config,
-        )?);
-        wait_for_listener(server_process.as_mut().expect("server process"), server)?;
+        if !direct {
+            let server_binary = profile_binary(&arguments.binary_dir, "ferrum2-server")?;
+            server_reservation
+                .take()
+                .expect("server reservation")
+                .release();
+            server_process = Some(spawn_proxy(
+                Topology::Ferrum,
+                "profile workload server",
+                &server_binary,
+                &server_config,
+            )?);
+            wait_for_listener(server_process.as_mut().expect("server process"), server)?;
+        }
         proxy_reservation
             .take()
             .expect("proxy reservation")
@@ -126,7 +139,10 @@ pub(super) fn run_profile_tcp(
                     }
                     ProfileScenario::TcpRequest1k
                     | ProfileScenario::TcpRequest4k
-                    | ProfileScenario::TcpRequest16k => load_tcp_request_response(
+                    | ProfileScenario::TcpRequest16k
+                    | ProfileScenario::SocksDirectRequest1k
+                    | ProfileScenario::SocksDirectRequest4k
+                    | ProfileScenario::SocksDirectRequest16k => load_tcp_request_response(
                         proxy,
                         target,
                         scenario.tcp_request_bytes().expect("request scenario"),
@@ -146,8 +162,16 @@ pub(super) fn run_profile_tcp(
                     | ProfileScenario::UdpPayload8192
                     | ProfileScenario::UdpMaxWire65507
                     | ProfileScenario::UdpDirectSmall128
-                    | ProfileScenario::UdpDirectMax65497 => {
-                        unreachable!("TCP runner received UDP scenario")
+                    | ProfileScenario::UdpDirectMax65497
+                    | ProfileScenario::UdpResponseConcurrency1
+                    | ProfileScenario::UdpResponseConcurrency8
+                    | ProfileScenario::UdpResponseConcurrency32
+                    | ProfileScenario::UdpReplaySequential
+                    | ProfileScenario::DnsUdpConcurrency
+                    | ProfileScenario::DnsCacheSize64
+                    | ProfileScenario::DnsCacheSize4096
+                    | ProfileScenario::DnsCacheSize65536 => {
+                        unreachable!("TCP runner received non-TCP scenario")
                     }
                 };
                 if result.is_err() {
@@ -161,9 +185,9 @@ pub(super) fn run_profile_tcp(
         started = true;
         let warm_end = start + warmup;
         let active_end = warm_end + active;
-        wait_for_profile_phase(
+        wait_for_profile_phase_optional_server(
             client_process.as_mut().expect("client process"),
-            server_process.as_mut().expect("server process"),
+            server_process.as_mut(),
             &gate,
             &workers,
             warm_end,
@@ -174,22 +198,21 @@ pub(super) fn run_profile_tcp(
             .as_mut()
             .expect("client process")
             .ensure_running()?;
-        server_process
-            .as_mut()
-            .expect("server process")
-            .ensure_running()?;
+        if let Some(process) = server_process.as_mut() {
+            process.ensure_running()?;
+        }
         ensure_profile_workers_running(&gate, &workers)?;
         ready = Some(ReadyFile::publish(
             ready_file,
             arguments.scenario,
             client_process.as_ref().expect("client process").id(),
-            Some(server_process.as_ref().expect("server process").id()),
+            server_process.as_ref().map(|process| process.id()),
             arguments.warmup_seconds,
             arguments.active_seconds,
         )?);
-        wait_for_profile_phase(
+        wait_for_profile_phase_optional_server(
             client_process.as_mut().expect("client process"),
-            server_process.as_mut().expect("server process"),
+            server_process.as_mut(),
             &gate,
             &workers,
             active_end,
@@ -281,6 +304,7 @@ pub(super) fn run_profile_tcp(
             p99_nanoseconds: None,
             io_completions: transactions.saturating_mul(2),
             scale_json: None,
+            structural_metrics: StructuralMetrics::unavailable(),
         });
     }
     if arguments.scenario == ProfileScenario::TcpStream64k {
@@ -298,6 +322,7 @@ pub(super) fn run_profile_tcp(
             p99_nanoseconds: None,
             io_completions: batches.saturating_mul((PROFILE_TCP_STREAM_BATCH + 1) as u64),
             scale_json: None,
+            structural_metrics: StructuralMetrics::unavailable(),
         });
     }
     let transactions = u64::try_from(latencies.len())
@@ -318,5 +343,6 @@ pub(super) fn run_profile_tcp(
         p99_nanoseconds: Some(p99_nanoseconds),
         io_completions: transactions.saturating_mul(2),
         scale_json: None,
+        structural_metrics: StructuralMetrics::unavailable(),
     })
 }

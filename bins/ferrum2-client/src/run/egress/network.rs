@@ -181,12 +181,14 @@ pub(in crate::run) struct ClientNetworkSocketService {
 #[cfg(all(windows, not(test)))]
 impl ClientNetworkSocketService {
     pub(in crate::run) fn new(
+        mode: ferrum2_runtime::NetworkSocketMode,
         coordinator: NetworkResetCoordinator,
         catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
-            inner: ferrum2_runtime::NetworkSocketService::new(
+            inner: ferrum2_runtime::NetworkSocketService::with_mode(
+                mode,
                 coordinator,
                 ferrum2_net::NetworkInterfaceResolver::new(catalog),
                 ferrum2_runtime::SystemNetworkSocketOperations::new(
@@ -203,8 +205,7 @@ impl ClientNetworkSocketService {
     }
 
     fn generation_is_admissible(&self, expected_generation: u64) -> bool {
-        let status = self.inner.coordinator().status();
-        status.admission_open() && status.published_generation() == expected_generation
+        self.inner.generation_is_admissible(expected_generation)
     }
 
     pub(in crate::run) fn reset_hub(&self) -> ClientNetworkResetHub {
@@ -217,7 +218,7 @@ impl ClientNetworkSocketService {
         route_network: &RouteNetworkOptions,
         destination: SocketAddr,
     ) -> Result<
-        ferrum2_runtime::GenerationBoundTcpStream<ferrum2_runtime::RuntimeTcpStream>,
+        ferrum2_runtime::NetworkTcpStream<ferrum2_runtime::RuntimeTcpStream>,
         NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_platform_windows::Error>>,
     > {
         let result = self
@@ -244,7 +245,7 @@ impl ClientNetworkSocketService {
         route_network: &RouteNetworkOptions,
         selection_destination: SocketAddr,
     ) -> Result<
-        ferrum2_runtime::GenerationBoundUdpSocket<tokio::net::UdpSocket>,
+        ferrum2_runtime::NetworkUdpSocket<tokio::net::UdpSocket>,
         NetworkSocketServiceError<SystemNetworkSocketError<ferrum2_platform_windows::Error>>,
     > {
         let result = self.inner.open_udp_for_generation(
@@ -333,9 +334,8 @@ where
 
 #[cfg(all(windows, not(test)))]
 impl ClientPhysicalConnector for NetworkServiceConnector {
-    type Stream = TokioTransport<
-        ferrum2_runtime::GenerationBoundTcpStream<ferrum2_runtime::RuntimeTcpStream>,
-    >;
+    type Stream =
+        TokioTransport<ferrum2_runtime::NetworkTcpStream<ferrum2_runtime::RuntimeTcpStream>>;
 
     async fn connect_physical(
         &self,

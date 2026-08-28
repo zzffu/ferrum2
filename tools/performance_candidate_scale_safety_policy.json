@@ -9,11 +9,11 @@
   "minimum_throughput_wins": 4,
   "minimum_trial_jain_index": 0.9,
   "minimum_trial_p01_median_ratio": 0.5,
-  "policy_id": "github-hosted-ubuntu-24.04-tcp-scale-10k-safety-v2-calibration-required",
+  "policy_id": "github-hosted-ubuntu-24.04-tcp-scale-10k-safety-v3-calibration-required",
   "calibration_source": null,
   "calibration_environment": null,
   "required_pairs": 6,
   "required_partial_active_sessions": 1000,
   "required_sessions": 10000,
-  "schema_version": 2
+  "schema_version": 3
 }

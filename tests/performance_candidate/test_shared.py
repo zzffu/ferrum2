@@ -218,6 +218,41 @@ class ScenarioPlanTests(unittest.TestCase):
         )
         self.assertTrue(all(entry["mandatory"] for entry in plan["scenarios"]))
 
+    def test_structural_baseline_group_closes_all_required_scales(self) -> None:
+        plan = self.plan("qualification", "structural-baseline-matrix")
+        self.assertEqual(plan["scenario_group"], "structural-baseline-matrix")
+        self.assertIsNone(plan["selected_scenario"])
+        self.assertEqual(
+            [entry["scenario"] for entry in plan["scenarios"]],
+            list(linux_catalog.STRUCTURAL_MATRIX_SCENARIOS),
+        )
+        self.assertEqual(len(plan["scenarios"]), 11)
+        self.assertEqual(
+            {
+                entry["evidence_contract"]["unit"]
+                for entry in plan["scenarios"]
+            },
+            {
+                "datagrams_per_second",
+                "operations_per_second",
+                "queries_per_second",
+                "nanoseconds",
+            },
+        )
+        self.assertTrue(all(entry["mandatory"] for entry in plan["scenarios"]))
+        by_name = {entry["scenario"]: entry for entry in plan["scenarios"]}
+        self.assertEqual(
+            by_name["dns-udp-concurrency"]["application_payload_bytes"], 40
+        )
+        self.assertEqual(by_name["dns-udp-concurrency"]["workload_scale"], 32)
+        for scale in (64, 4_096, 65_536):
+            entry = by_name[f"dns-cache-size-{scale}"]
+            self.assertIsNone(entry["application_payload_bytes"])
+            self.assertEqual(entry["workload_scale"], scale)
+        replay = by_name["udp-replay-sequential"]
+        self.assertIsNone(replay["application_payload_bytes"])
+        self.assertEqual(replay["workload_scale"], 1)
+
     def test_invalid_mode_or_selection_and_diagnostic_group_are_rejected(self) -> None:
         with self.assertRaisesRegex(json_contract.CandidateControlError, "mode"):
             self.plan("adopt", "tcp-bulk")

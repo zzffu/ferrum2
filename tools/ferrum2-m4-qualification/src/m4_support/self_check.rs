@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use super::evidence_support::{DnsLoad, DnsResponder, Evidence};
 use super::host_identity::{EnvironmentIdentity, validate_environment};
 use super::process_support::{
     ACTIVE_PROCESSES, ACTIVE_WORKERS, PROBE_TIMEOUT, STARTUP_TIMEOUT, StartGate, clean_io,
-    is_repository_root, parse_active_metric_response, probe_text, sample_slot_delay,
+    is_repository_root, parse_active_metric_response, probe_text, sample_slot_delay, v4,
 };
 use super::profile_contract::{
     PROFILE_SOCKS_IPV4_HEADER_BYTES, PROFILE_SS_AES_RESPONSE_OVERHEAD_BYTES,
@@ -28,6 +28,7 @@ use super::profile_contract::{
     parse_profile_args, profile_raw_prefix,
 };
 use super::profile_output::run_profile_scenario;
+use super::profile_structural::StructuralMetrics;
 use super::resource::{
     M14_MEASUREMENT_PHASES, M14UdpRoundTripBuffers, m14_tls_client_hello,
     validate_m14_measurement_plan,
@@ -41,8 +42,24 @@ use super::{MEASURE, PSK, REFERENCE_SHA256, REFERENCE_VERSION, SAMPLE_INTERVAL, 
 use super::{tcp_scale, windows_tun};
 
 pub(super) fn run_self_check() -> Result<String, String> {
-    const MUTATION_COUNT: u64 = 56;
+    const MUTATION_COUNT: u64 = 57;
     windows_tun::run_self_check()?;
+    let structural: serde_json::Value =
+        serde_json::from_str(&StructuralMetrics::dns_listener(32, 8, 0, 0).json())
+            .map_err(|_| "structural metrics did not encode as JSON".to_owned())?;
+    let closed = structural["closed"]
+        .as_object()
+        .ok_or_else(|| "structural metrics closure map is absent".to_owned())?;
+    for field in [
+        "request_count",
+        "inflight_peak",
+        "drop_count",
+        "encode_failure_count",
+    ] {
+        if structural[field].is_null() || closed.contains_key(field) {
+            return Err("observed structural metric remained closed".to_owned());
+        }
+    }
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let good = EnvironmentIdentity {
         github_actions: "true".to_owned(),
@@ -93,6 +110,9 @@ pub(super) fn run_self_check() -> Result<String, String> {
         "tcp-request-1k",
         "tcp-request-4k",
         "tcp-request-16k",
+        "socks-direct-request-1k",
+        "socks-direct-request-4k",
+        "socks-direct-request-16k",
         "udp-small-high",
         "udp-mtu-1200",
         "udp-payload-1472",
@@ -101,12 +121,36 @@ pub(super) fn run_self_check() -> Result<String, String> {
         "udp-max-wire-65507",
         "udp-direct-small-128",
         "udp-direct-max-65497",
+        "udp-response-concurrency-1",
+        "udp-response-concurrency-8",
+        "udp-response-concurrency-32",
+        "udp-replay-sequential",
+        "dns-udp-concurrency",
+        "dns-cache-size-64",
+        "dns-cache-size-4096",
+        "dns-cache-size-65536",
     ] {
         let mut fixed = profile_arguments.clone();
         fixed[1] = OsString::from(scenario);
         if parse_profile_args(&fixed)?.scenario.label() != scenario {
             return Err("fixed M18 profile scenario was not preserved".to_owned());
         }
+    }
+    if ProfileScenario::DnsUdpConcurrency.application_payload_bytes()
+        != Some(super::profile_contract::PROFILE_DNS_QUERY_BYTES)
+        || ProfileScenario::DnsUdpConcurrency.workload_scale() != Some(32)
+        || ProfileScenario::UdpReplaySequential
+            .application_payload_bytes()
+            .is_some()
+        || ProfileScenario::UdpReplaySequential.workload_scale() != Some(1)
+        || ProfileScenario::DnsCacheSize64
+            .application_payload_bytes()
+            .is_some()
+        || ProfileScenario::DnsCacheSize64.workload_scale() != Some(64)
+        || ProfileScenario::DnsCacheSize4096.workload_scale() != Some(4_096)
+        || ProfileScenario::DnsCacheSize65536.workload_scale() != Some(65_536)
+    {
+        return Err("profile payload and workload-scale identities are invalid".to_owned());
     }
     let mut scale_arguments = profile_arguments.clone();
     scale_arguments[1] = OsString::from("tcp-scale-10k");
@@ -259,9 +303,10 @@ pub(super) fn run_self_check() -> Result<String, String> {
     {
         return Err("valid raw profile arguments were not preserved".to_owned());
     }
-    if !profile_raw_prefix(&raw_profile, raw)
-        .starts_with("\"schema_version\":4,\"kind\":\"m18_profile_trial\"")
-    {
+    if !profile_raw_prefix(&raw_profile, raw).starts_with(&format!(
+        "\"schema_version\":{},\"kind\":\"m18_profile_trial\"",
+        super::profile_contract::PROFILE_TRIAL_SCHEMA_VERSION
+    )) {
         return Err("raw profile trial omitted its explicit schema version".to_owned());
     }
     expect_rejected("incomplete raw profile identity", || {
@@ -637,11 +682,35 @@ ferrum2_tcp_replay_entries 0\n\
     let mut responder = DnsResponder::start(DNS_DIRECT_NAME)?;
     let mut load = DnsLoad::start(responder.address, DNS_DIRECT_NAME)?;
     load.wait_started(Instant::now() + STARTUP_TIMEOUT)?;
+    let inflight_peak = load.peak();
+    if inflight_peak == 0 || inflight_peak > DNS_LOAD_WORKERS {
+        return Err("typed DNS load inflight observation is invalid".to_owned());
+    }
     let completed = load.finish()?;
+    if load.active() != 0 {
+        return Err("typed DNS load inflight accounting did not drain".to_owned());
+    }
     let observed = responder.finish()?;
-    if completed < DNS_LOAD_WORKERS || observed < completed {
+    if completed < DNS_LOAD_WORKERS || observed != completed || load.completed() != completed {
         return Err("typed DNS load self-check is incomplete".to_owned());
     }
+    let blackhole = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
+    let blackhole_address = v4(blackhole.local_addr().map_err(clean_io)?)?;
+    let mut dropped_tail =
+        DnsLoad::start_with_workers(blackhole_address, DNS_DIRECT_NAME, 1, None)?;
+    let tail_deadline = Instant::now() + STARTUP_TIMEOUT;
+    while dropped_tail.active() == 0 {
+        dropped_tail.ensure_running()?;
+        if Instant::now() >= tail_deadline {
+            return Err("DNS tail-loss self-check did not send a query".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    expect_rejected("DNS tail response loss", || dropped_tail.finish())?;
+    if dropped_tail.active() != 0 || dropped_tail.completed() != 0 || dropped_tail.peak() != 1 {
+        return Err("DNS tail-loss accounting did not close".to_owned());
+    }
+    drop(blackhole);
     expect_rejected("leaked owner", || validate_owner_counts(1, 0))?;
     expect_rejected("secret output", || ensure_redacted(PSK))?;
     let tls = m14_tls_client_hello()?;

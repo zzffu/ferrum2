@@ -3,6 +3,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
 use ferrum2_core::Datagram;
 use ferrum2_crypto::{
     Clock, MethodKeyProvider, MonotonicInstant, SecureRandom, UdpCrypto, UdpOutboundSession,
@@ -10,7 +11,9 @@ use ferrum2_crypto::{
 };
 
 use super::replay::UdpReplayWindow;
-use super::wire::{encode_packet, open_packet, udp_crypto};
+use super::wire::{
+    encode_packet, open_packet, open_packet_in_place, open_packet_owned, udp_crypto,
+};
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
 use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE};
 
@@ -116,6 +119,7 @@ struct ServerState {
     // Removal uses the inverse order and rechecks both indexes before unlinking.
     sessions: HashMap<UdpSessionId, ServerSessionEntry>,
     capability_sessions: HashMap<ServerResponseCapability, UdpSessionId>,
+    outbound_sessions: HashMap<UdpSessionId, ServerResponseCapability>,
     next_generation: u64,
 }
 
@@ -124,6 +128,7 @@ impl Default for ServerState {
         Self {
             sessions: HashMap::new(),
             capability_sessions: HashMap::new(),
+            outbound_sessions: HashMap::new(),
             next_generation: 1,
         }
     }
@@ -187,12 +192,92 @@ impl UdpServer {
         wire: &[u8],
         scratch: &mut UdpPacketScratch,
     ) -> Result<PendingUdpRequest, UdpPacketError> {
-        let opened = open_packet(&self.crypto, clock, wire, scratch, REQUEST_TYPE, None)?;
+        let opened = open_packet(
+            &self.crypto,
+            clock,
+            wire,
+            scratch,
+            REQUEST_TYPE,
+            None,
+            |session_id, packet_id| self.check_request_replay(session_id, packet_id),
+        )?;
         Ok(PendingUdpRequest {
             session_id: opened.session_id,
             packet_id: opened.packet_id,
             datagram: opened.datagram,
         })
+    }
+
+    /// Destructively authenticates and validates one exclusively owned request wire.
+    ///
+    /// The semantic body remains guarded inside the owned wire through target,
+    /// timestamp, and current replay validation. Successful materialization
+    /// splits the payload from that allocation without copying it.
+    pub fn prepare_request_owned(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: BytesMut,
+    ) -> Result<PendingUdpRequest, UdpPacketError> {
+        let opened = open_packet_owned(&self.crypto, clock, wire, REQUEST_TYPE, None)?;
+        self.check_request_replay(opened.session_id(), opened.packet_id())?;
+        let opened = opened.into_opened_packet()?;
+        Ok(PendingUdpRequest {
+            session_id: opened.session_id,
+            packet_id: opened.packet_id,
+            datagram: opened.datagram,
+        })
+    }
+
+    /// Destructively authenticates an exclusive receive wire and materializes
+    /// only the authenticated payload bytes.
+    ///
+    /// The receive allocation remains caller-owned and is cleared on every
+    /// outcome, while accepted replay/session state still changes only in
+    /// [`Self::commit_request`].
+    pub fn prepare_request_in_place(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: &mut BytesMut,
+    ) -> Result<PendingUdpRequest, UdpPacketError> {
+        let opened = open_packet_in_place(
+            &self.crypto,
+            clock,
+            wire,
+            REQUEST_TYPE,
+            None,
+            |session_id, packet_id| self.check_request_replay(session_id, packet_id),
+        )?;
+        Ok(PendingUdpRequest {
+            session_id: opened.session_id,
+            packet_id: opened.packet_id,
+            datagram: opened.datagram,
+        })
+    }
+
+    fn check_request_replay(
+        &self,
+        session_id: &UdpSessionId,
+        packet_id: u64,
+    ) -> Result<(), UdpPacketError> {
+        let protocol = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| UdpPacketError::StateUnavailable)?;
+            state
+                .sessions
+                .get(session_id)
+                .map(|entry| Arc::clone(&entry.protocol))
+        };
+        if let Some(protocol) = protocol {
+            let session = protocol
+                .lock()
+                .map_err(|_| UdpPacketError::StateUnavailable)?;
+            if session.live {
+                session.replay.check(packet_id)?;
+            }
+        }
+        Ok(())
     }
 
     /// Looks up only the authenticated request identity without mutation.
@@ -242,10 +327,7 @@ impl UdpServer {
                         .crypto
                         .generate_distinct_outbound_session(random, &session_id, |candidate| {
                             state.sessions.contains_key(candidate)
-                                || state
-                                    .sessions
-                                    .values()
-                                    .any(|entry| entry.outbound_session_id == *candidate)
+                                || state.outbound_sessions.contains_key(candidate)
                         })
                         .map_err(|_| UdpPacketError::Random)?;
                     let outbound_session_id = outbound.session_id().clone();
@@ -270,13 +352,18 @@ impl UdpServer {
                         session_id.clone(),
                         ServerSessionEntry {
                             capability,
-                            outbound_session_id,
+                            outbound_session_id: outbound_session_id.clone(),
                             protocol,
                         },
                     );
+                    let previous_outbound = state
+                        .outbound_sessions
+                        .insert(outbound_session_id, capability);
                     debug_assert!(previous_capability.is_none());
                     debug_assert!(previous_session.is_none());
+                    debug_assert!(previous_outbound.is_none());
                     debug_assert_eq!(state.capability_sessions.len(), state.sessions.len());
+                    debug_assert_eq!(state.outbound_sessions.len(), state.sessions.len());
                     return Ok(AcceptedUdpRequest { capability });
                 }
             };
@@ -305,7 +392,6 @@ impl UdpServer {
         datagram: &Datagram,
         padding_len: usize,
         output: &mut [u8],
-        scratch: &mut UdpPacketScratch,
     ) -> Result<EncodedUdpResponse, UdpPacketError> {
         let ServerSessionLookup { binding, protocol } = self
             .session_by_capability(capability)?
@@ -327,7 +413,6 @@ impl UdpServer {
             datagram.payload(),
             padding_len,
             output,
-            scratch,
         )?;
         Ok(EncodedUdpResponse {
             wire_len,
@@ -372,11 +457,28 @@ impl UdpServer {
             return Ok(false);
         }
 
+        let outbound_session_id = state
+            .sessions
+            .get(&binding)
+            .expect("validated server session entry")
+            .outbound_session_id
+            .clone();
+        let outbound_matches = state
+            .outbound_sessions
+            .get(&outbound_session_id)
+            .is_some_and(|current| *current == capability);
+        if !outbound_matches {
+            return Err(UdpPacketError::StateUnavailable);
+        }
+
         let removed_capability = state.capability_sessions.remove(&capability);
         let removed_session = state.sessions.remove(&binding);
+        let removed_outbound = state.outbound_sessions.remove(&outbound_session_id);
         debug_assert!(removed_capability.is_some());
         debug_assert!(removed_session.is_some());
+        debug_assert_eq!(removed_outbound, Some(capability));
         debug_assert_eq!(state.capability_sessions.len(), state.sessions.len());
+        debug_assert_eq!(state.outbound_sessions.len(), state.sessions.len());
         session.live = false;
         Ok(true)
     }

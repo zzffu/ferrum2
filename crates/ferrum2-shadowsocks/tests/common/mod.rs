@@ -446,10 +446,11 @@ impl RecordingIo {
 impl TransportIo for RecordingIo {
     type IoError = SourceSentinel;
 
-    fn poll_read(
+    fn poll_read_buf(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        destination: &mut [u8],
+        destination: &mut BytesMut,
+        limit: usize,
     ) -> Poll<Result<usize, Self::IoError>> {
         if self.pending_reads > 0 {
             self.pending_reads -= 1;
@@ -458,7 +459,7 @@ impl TransportIo for RecordingIo {
         }
         let mut observation = self.observation.lock().expect("observation lock");
         observation.read_calls += 1;
-        observation.read_lengths.push(destination.len());
+        observation.read_lengths.push(limit);
         if self.fail_read
             || self
                 .fail_read_after
@@ -468,12 +469,31 @@ impl TransportIo for RecordingIo {
         }
         drop(observation);
         let source = self.reads.pop_front().unwrap_or_default();
-        let copied = source.len().min(destination.len());
-        destination[..copied].copy_from_slice(&source[..copied]);
+        let copied = source.len().min(limit);
+        destination.extend_from_slice(&source[..copied]);
         if copied < source.len() {
             self.reads.push_front(source[copied..].to_vec());
         }
         Poll::Ready(Ok(copied))
+    }
+
+    fn poll_read_initialized(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let mut temporary = BytesMut::with_capacity(destination.len());
+        match self
+            .as_mut()
+            .poll_read_buf(cx, &mut temporary, destination.len())
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(read)) => {
+                destination[..read].copy_from_slice(&temporary);
+                Poll::Ready(Ok(read))
+            }
+        }
     }
 
     fn poll_write(

@@ -1,11 +1,12 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ferrum2_config::{ClientOutboundConfig, DirectDomainResolver};
 use ferrum2_dns::{
     ApplicationResolveOutcome, ApplicationResolver, ApplicationResolverAdapter,
     ApplicationResolverMode, DnsCache, DnsPolicyCompileError, DnsPolicyObserver, DnsPolicyProgram,
-    DnsProxy, DnsProxyListeners, DnsStrategy, TaggedResolver, TaggedResolverOwner,
-    TaggedServerApplicationResolveBackend,
+    DnsProxy, DnsProxyListeners, DnsStrategy, DnsUdpEvent, DnsUdpObserver, TaggedResolver,
+    TaggedResolverOwner, TaggedServerApplicationResolveBackend,
 };
 use ferrum2_observability::Metrics;
 use ferrum2_rule::RuleEngineRegistry;
@@ -169,9 +170,67 @@ struct ClientDnsProxyPolicy {
     ordinary_count: usize,
 }
 
+struct ClientDnsUdpObserver {
+    metrics: Arc<Metrics>,
+    inflight: AtomicU64,
+    peak: AtomicU64,
+    peak_publication: Mutex<()>,
+}
+
+impl ClientDnsUdpObserver {
+    fn new(metrics: Arc<Metrics>) -> Self {
+        Self {
+            metrics,
+            inflight: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+            peak_publication: Mutex::new(()),
+        }
+    }
+}
+
+impl DnsUdpObserver for ClientDnsUdpObserver {
+    fn record(&self, event: DnsUdpEvent) {
+        match event {
+            DnsUdpEvent::Acquired => {
+                let inflight = self.metrics_inflight_increment();
+                let prior = self.peak.fetch_max(inflight, Ordering::Relaxed);
+                self.metrics.dns_udp_request_started();
+                if inflight > prior {
+                    let _publication = self
+                        .peak_publication
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    self.metrics
+                        .set_dns_udp_inflight_peak(self.peak.load(Ordering::Relaxed));
+                }
+            }
+            DnsUdpEvent::Completed => {
+                let previous = self
+                    .inflight
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                        value.checked_sub(1)
+                    })
+                    .unwrap_or(0);
+                if previous > 0 {
+                    self.metrics.dns_udp_request_completed();
+                }
+            }
+            DnsUdpEvent::PoolDrop => self.metrics.dns_udp_pool_drop(),
+            DnsUdpEvent::EncodeFailure => self.metrics.dns_udp_encode_failure(),
+        }
+    }
+}
+
+impl ClientDnsUdpObserver {
+    fn metrics_inflight_increment(&self) -> u64 {
+        self.inflight.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
 pub(super) struct ClientDnsProxyRuntime {
     policy: ClientDnsProxyPolicy,
     observer: Arc<dyn DnsPolicyObserver>,
+    udp_observer: Arc<dyn DnsUdpObserver>,
     cache: Option<DnsCache>,
 }
 
@@ -213,6 +272,7 @@ impl ClientDnsProxyRuntime {
         Ok(Self {
             policy,
             observer: dns_policy_observer(metrics),
+            udp_observer: Arc::new(ClientDnsUdpObserver::new(Arc::clone(metrics))),
             cache,
         })
     }
@@ -226,7 +286,8 @@ impl ClientDnsProxyRuntime {
             policy.listener_count,
             policy.ordinary_count,
         )
-        .with_policy_observer(self.observer);
+        .with_policy_observer(self.observer)
+        .with_udp_observer(self.udp_observer);
         if let Some(cache) = self.cache {
             proxy = proxy.with_cache(cache);
         }
@@ -249,6 +310,60 @@ mod tests {
     use super::*;
     use crate::run::report_result;
     use crate::run::test_support::*;
+
+    #[test]
+    fn dns_udp_observer_balances_instances_and_preserves_peak() {
+        let first_metrics = Arc::new(Metrics::new());
+        let first = ClientDnsUdpObserver::new(Arc::clone(&first_metrics));
+        first.record(DnsUdpEvent::Acquired);
+        first.record(DnsUdpEvent::Acquired);
+        first.record(DnsUdpEvent::Completed);
+        first.record(DnsUdpEvent::Completed);
+        first.record(DnsUdpEvent::Completed);
+        first.record(DnsUdpEvent::PoolDrop);
+        first.record(DnsUdpEvent::EncodeFailure);
+        let output = first_metrics.encode_text().expect("first observer metrics");
+        assert!(output.contains("ferrum2_dns_udp_requests_total 2"));
+        assert!(output.contains("ferrum2_dns_udp_inflight 0"));
+        assert!(output.contains("ferrum2_dns_udp_inflight_peak 2"));
+
+        let second_metrics = Arc::new(Metrics::new());
+        let second = ClientDnsUdpObserver::new(Arc::clone(&second_metrics));
+        second.record(DnsUdpEvent::Acquired);
+        second.record(DnsUdpEvent::Completed);
+        let output = second_metrics
+            .encode_text()
+            .expect("second observer metrics");
+        assert!(output.contains("ferrum2_dns_udp_inflight_peak 1"));
+    }
+
+    #[test]
+    fn dns_udp_observer_publishes_concurrent_peak_monotonically() {
+        const WORKERS: usize = 32;
+        let metrics = Arc::new(Metrics::new());
+        let observer = Arc::new(ClientDnsUdpObserver::new(Arc::clone(&metrics)));
+        let barrier = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+        let mut workers = Vec::with_capacity(WORKERS);
+        for _ in 0..WORKERS {
+            let observer = Arc::clone(&observer);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                observer.record(DnsUdpEvent::Acquired);
+                barrier.wait();
+                observer.record(DnsUdpEvent::Completed);
+            }));
+        }
+        barrier.wait();
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("DNS observer worker");
+        }
+        let output = metrics.encode_text().expect("concurrent observer metrics");
+        assert!(output.contains("ferrum2_dns_udp_requests_total 32"));
+        assert!(output.contains("ferrum2_dns_udp_inflight_peak 32"));
+        assert!(output.contains("ferrum2_dns_udp_inflight 0"));
+    }
 
     #[tokio::test]
     async fn dns_proxy_prepare_cancellation_awaits_owner_and_rebinds() {

@@ -4,6 +4,7 @@ mod candidate;
 mod compiled_program;
 mod dns_blueprint;
 mod error;
+mod hybrid_index;
 mod match_set;
 mod program;
 mod registry;

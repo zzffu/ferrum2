@@ -84,7 +84,7 @@ async fn assert_registration_failure_rolls_back_setup<K: MethodKeyProvider>(
         .reserve_session(Instant::now())
         .expect("setup session");
     let budget = manager.buffer_budget();
-    let fixed = (0..3)
+    let fixed = (0..2)
         .map(|_| budget.reserve(MAX_UDP_WIRE_LEN).expect("fixed capacity"))
         .collect::<Vec<_>>();
     let application = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -103,7 +103,7 @@ async fn assert_registration_failure_rolls_back_setup<K: MethodKeyProvider>(
     assert!(register_udp_session(&keys, random, &live_ids).is_err());
     assert!(live_ids.lock().expect("live IDs").is_empty());
     assert_eq!(manager.session_count(), 1);
-    assert_eq!(budget.reserved_bytes(), 3 * MAX_UDP_WIRE_LEN);
+    assert_eq!(budget.reserved_bytes(), 2 * MAX_UDP_WIRE_LEN);
 
     drop((application, upstream, fixed, session));
     assert_eq!(manager.session_count(), 0);

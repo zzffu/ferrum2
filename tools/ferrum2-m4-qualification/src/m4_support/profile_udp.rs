@@ -2,7 +2,7 @@ use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::dns_resource::{prove_tcp_rebind, prove_tcp_udp_rebind, prove_udp_rebind};
@@ -12,14 +12,16 @@ use super::process_support::{
     wait_for_listener,
 };
 use super::profile_contract::{
-    PROFILE_UDP_MAX_BUFFERED_BYTES, PROFILE_UDP_WORKERS, ProfileArgs, ProfileOutcome,
-    ProfileUdpTopology, ReadyFile, Topology,
+    PROFILE_UDP_MAX_BUFFERED_BYTES, ProfileArgs, ProfileOutcome, ProfileUdpTopology, ReadyFile,
+    Topology,
 };
 use super::profile_output::{
     ensure_profile_workers_running, wait_for_profile_phase_optional_server,
 };
+use super::profile_structural::StructuralMetrics;
 use super::proxy_config::{
-    m14_udp_server_config, profile_direct_udp_client_config, profile_shadowsocks_udp_client_config,
+    profile_direct_udp_client_config, profile_shadowsocks_udp_client_config,
+    profile_udp_server_config,
 };
 use super::resource::{M14UdpRoundTripBuffers, m14_udp_associate, m14_udp_round_trip_reused};
 use super::throughput::{rate_per_second, transfer_is_measured};
@@ -36,6 +38,11 @@ pub(super) fn run_profile_udp(
         .scenario
         .udp_payload_bytes()
         .expect("UDP scenario has a payload size");
+    let udp_workers = arguments
+        .scenario
+        .udp_workers()
+        .expect("UDP scenario has a worker count");
+    let max_sessions = udp_workers.max(16);
     let mut directory = Some(
         tempfile::Builder::new()
             .prefix("profile-udp-")
@@ -64,24 +71,26 @@ pub(super) fn run_profile_udp(
         .join("server.toml");
     let mut server_process = None;
     let mut client_process = None;
-    let mut prepared = Vec::with_capacity(PROFILE_UDP_WORKERS);
-    let mut target_addresses = Vec::with_capacity(PROFILE_UDP_WORKERS);
-    let mut application_addresses = Vec::with_capacity(PROFILE_UDP_WORKERS);
-    let mut relay_addresses = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let mut prepared = Vec::with_capacity(udp_workers);
+    let mut target_addresses = Vec::with_capacity(udp_workers);
+    let mut application_addresses = Vec::with_capacity(udp_workers);
+    let mut relay_addresses = Vec::with_capacity(udp_workers);
     let gate = Arc::new(StartGate::default());
     let stop = Arc::new(AtomicBool::new(false));
     let warmup = Duration::from_secs(arguments.warmup_seconds);
     let active = Duration::from_secs(arguments.active_seconds);
-    let mut workers = Vec::with_capacity(PROFILE_UDP_WORKERS);
+    let active_inflight = Arc::new(AtomicUsize::new(0));
+    let active_peak = Arc::new(AtomicUsize::new(0));
+    let mut workers = Vec::with_capacity(udp_workers);
     let mut errors = Vec::new();
     let mut ready = None;
     let execution = (|| -> Result<(), String> {
         let client_source = match topology {
             ProfileUdpTopology::Shadowsocks => {
                 let server = server.expect("Shadowsocks UDP server address");
-                profile_shadowsocks_udp_client_config(proxy, server)
+                profile_shadowsocks_udp_client_config(proxy, server, max_sessions)
             }
-            ProfileUdpTopology::Direct => profile_direct_udp_client_config(proxy),
+            ProfileUdpTopology::Direct => profile_direct_udp_client_config(proxy, max_sessions),
         };
         fs::write(&client_config, client_source).map_err(clean_io)?;
         let client_binary = profile_binary(&arguments.binary_dir, "ferrum2-client")?;
@@ -89,7 +98,7 @@ pub(super) fn run_profile_udp(
             let server = server.expect("Shadowsocks UDP server address");
             fs::write(
                 &server_config,
-                m14_udp_server_config(server, PROFILE_UDP_MAX_BUFFERED_BYTES),
+                profile_udp_server_config(server, PROFILE_UDP_MAX_BUFFERED_BYTES, max_sessions),
             )
             .map_err(clean_io)?;
             let server_binary = profile_binary(&arguments.binary_dir, "ferrum2-server")?;
@@ -116,7 +125,7 @@ pub(super) fn run_profile_udp(
             &client_config,
         )?);
         wait_for_listener(client_process.as_mut().expect("client process"), proxy)?;
-        for worker_index in 0..PROFILE_UDP_WORKERS {
+        for worker_index in 0..udp_workers {
             let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
             target
                 .set_read_timeout(Some(IO_TIMEOUT))
@@ -146,6 +155,8 @@ pub(super) fn run_profile_udp(
             let worker_stop = Arc::clone(&stop);
             let failure_gate = Arc::clone(&gate);
             let failure_stop = Arc::clone(&stop);
+            let worker_inflight = Arc::clone(&active_inflight);
+            let worker_peak = Arc::clone(&active_peak);
             workers.push(spawn_worker(move || {
                 let result = profile_udp_load(
                     worker_index,
@@ -159,6 +170,8 @@ pub(super) fn run_profile_udp(
                     warmup,
                     active,
                     payload_bytes,
+                    worker_inflight,
+                    worker_peak,
                 );
                 if result.is_err() {
                     failure_stop.store(true, Ordering::SeqCst);
@@ -167,7 +180,7 @@ pub(super) fn run_profile_udp(
                 result
             })?);
         }
-        let start = gate.start_when_ready(PROFILE_UDP_WORKERS, Instant::now() + STARTUP_TIMEOUT)?;
+        let start = gate.start_when_ready(udp_workers, Instant::now() + STARTUP_TIMEOUT)?;
         let warm_end = start + warmup;
         let active_end = warm_end + active;
         wait_for_profile_phase_optional_server(
@@ -178,7 +191,7 @@ pub(super) fn run_profile_udp(
             warm_end,
             true,
         )?;
-        gate.require_validated(PROFILE_UDP_WORKERS)?;
+        gate.require_validated(udp_workers)?;
         client_process
             .as_mut()
             .expect("client process")
@@ -268,7 +281,7 @@ pub(super) fn run_profile_udp(
     }
     let summary = format!(
         "m18_profile_workload_completion status=PASS scenario={} topology={} \
-         datagrams={datagrams} workers={PROFILE_UDP_WORKERS} \
+         datagrams={datagrams} workers={udp_workers} \
          application_payload_bytes={payload_bytes} socks_datagram_bytes={} \
          upstream_wire_bytes={} warmup_seconds={} active_seconds={} drain=PASS rebind=PASS",
         arguments.scenario.label(),
@@ -294,6 +307,11 @@ pub(super) fn run_profile_udp(
         p99_nanoseconds: None,
         io_completions: checked_units.saturating_mul(4),
         scale_json: None,
+        structural_metrics: StructuralMetrics::network(
+            u64::try_from(active_peak.load(Ordering::SeqCst))
+                .map_err(|_| "profile UDP peak inflight overflow".to_owned())?,
+            0,
+        ),
     })
 }
 
@@ -310,6 +328,8 @@ pub(super) fn profile_udp_load(
     warmup: Duration,
     active: Duration,
     payload_bytes: usize,
+    active_inflight: Arc<AtomicUsize>,
+    active_peak: Arc<AtomicUsize>,
 ) -> Result<usize, String> {
     let mut payload = vec![0x5a; payload_bytes];
     payload[8] = u8::try_from(worker_index).expect("profile UDP worker index");
@@ -323,7 +343,17 @@ pub(super) fn profile_udp_load(
     while Instant::now() < active_end && !stop.load(Ordering::SeqCst) {
         payload[..8].copy_from_slice(&sequence.to_be_bytes());
         let transfer_start = Instant::now();
-        m14_udp_round_trip_reused(&application, relay, &target, &payload, &mut buffers)?;
+        let measured = transfer_start >= warm_end && transfer_start < active_end;
+        if measured {
+            let inflight = active_inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            active_peak.fetch_max(inflight, Ordering::SeqCst);
+        }
+        let round_trip =
+            m14_udp_round_trip_reused(&application, relay, &target, &payload, &mut buffers);
+        if measured {
+            active_inflight.fetch_sub(1, Ordering::SeqCst);
+        }
+        round_trip?;
         let completion = Instant::now();
         if !reported_valid {
             gate.worker_validated()?;

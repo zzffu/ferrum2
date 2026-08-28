@@ -337,7 +337,6 @@ async fn udp_generation_termination_retention_and_replacement_cleanup() {
                 &late_response,
                 0,
                 &mut lifecycle_wire,
-                &mut lifecycle_scratch,
             )
             .expect_err("retired A capability"),
         UdpPacketError::Generation

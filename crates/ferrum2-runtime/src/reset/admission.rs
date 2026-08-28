@@ -1,14 +1,14 @@
 use std::fmt;
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
 use ferrum2_net::{InterfaceResolutionError, InterfaceSelectionSource, ResolvedInterface};
 use tokio::sync::watch;
 
 use crate::owner::OwnerGuard;
 
-use super::transition::{CoordinatorInner, lock_unpoisoned};
+use super::transition::{CoordinatorInner, RuntimeOwnerHandle, lock_unpoisoned};
 use super::{
-    NetworkResetHookStage, NetworkResetIntent, NetworkRuntimeOwnerKind,
+    NetworkResetHookStage, NetworkResetIntent, NetworkRuntimeOwnerCloser, NetworkRuntimeOwnerKind,
     NetworkRuntimeOwnerRegistrationError,
 };
 
@@ -227,7 +227,7 @@ impl Drop for NetworkResetHookRegistration {
 #[must_use = "dropping the owner acknowledges completion to the reset coordinator"]
 pub struct NetworkRuntimeOwner {
     pub(super) coordinator: Weak<CoordinatorInner>,
-    pub(super) id: u64,
+    pub(super) handle: RuntimeOwnerHandle,
     pub(super) generation: u64,
     pub(super) kind: NetworkRuntimeOwnerKind,
     pub(super) cancellation: watch::Receiver<Option<NetworkResetSignal>>,
@@ -264,6 +264,32 @@ impl NetworkRuntimeOwner {
     pub async fn cancelled(&mut self) -> NetworkRuntimeOwnerCancellation {
         wait_for_runtime_owner_cancellation(&mut self.cancellation).await
     }
+
+    /// Attaches one synchronous closer to the exact central-registry generation.
+    pub(crate) fn attach_closer(
+        &self,
+        closer: Arc<dyn NetworkRuntimeOwnerCloser>,
+    ) -> Result<(), NetworkRuntimeOwnerCancellation> {
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return Err(NetworkRuntimeOwnerCancellation::CoordinatorDropped);
+        };
+        let mut state = lock_unpoisoned(&coordinator.state);
+        let Some(entry) = state.runtime_owner_mut(self.handle) else {
+            return Err(NetworkRuntimeOwnerCancellation::CoordinatorDropped);
+        };
+        if entry.network_generation != self.generation || entry.kind != self.kind {
+            return Err(NetworkRuntimeOwnerCancellation::CoordinatorDropped);
+        }
+        if let Some(signal) = *entry.cancellation.borrow() {
+            return Err(NetworkRuntimeOwnerCancellation::Reset(signal));
+        }
+        if entry.closer.is_some() {
+            debug_assert!(false, "one runtime owner accepts exactly one closer");
+            return Err(NetworkRuntimeOwnerCancellation::CoordinatorDropped);
+        }
+        entry.closer = Some(closer);
+        Ok(())
+    }
 }
 
 pub(super) async fn wait_for_runtime_owner_cancellation(
@@ -295,10 +321,7 @@ impl Drop for NetworkRuntimeOwner {
         let Some(coordinator) = self.coordinator.upgrade() else {
             return;
         };
-        let removed = lock_unpoisoned(&coordinator.state)
-            .runtime_owners
-            .remove(&self.id)
-            .is_some();
+        let removed = lock_unpoisoned(&coordinator.state).remove_runtime_owner(self.handle);
         if removed {
             coordinator
                 .owner_changes

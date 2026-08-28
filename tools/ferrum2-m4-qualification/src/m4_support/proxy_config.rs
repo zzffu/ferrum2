@@ -35,6 +35,35 @@ pub(super) fn ferrum_client_config(
     )
 }
 
+pub(super) fn profile_direct_tcp_client_config(listen: SocketAddrV4) -> String {
+    format!(
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"client-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\n\
+         [[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\n\n\
+         [runtime]\nmax_connections = 128\nlisten_backlog = 1024\n\
+         idle_timeout_ms = 60000\n\n[udp]\nenabled = false\n\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
+
+pub(super) fn profile_dns_udp_client_config(
+    listen: SocketAddrV4,
+    dns_listen: SocketAddrV4,
+    upstream: SocketAddrV4,
+    metrics: SocketAddrV4,
+) -> String {
+    format!(
+        "schema_version = 2\n\n[[inbounds]]\ntag = \"client-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\n\
+         [[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\n\n\
+         [dns]\ntimeout_ms = 5000\nmax_inflight = 32\n\
+         [[dns.inbounds]]\ntag = \"profile-dns\"\nlisten = \"{dns_listen}\"\n\
+         [[dns.servers]]\ntag = \"profile-upstream\"\ntransport = \"udp\"\naddress = \"{upstream}\"\n\
+         [dns.route]\nfinal = \"profile-upstream\"\n\n\
+         [runtime]\nmax_connections = 128\nlisten_backlog = 1024\nidle_timeout_ms = 60000\n\n\
+         [udp]\nenabled = false\n\n[logging]\nlevel = \"error\"\n\n\
+         [metrics]\nlisten = \"{metrics}\"\n"
+    )
+}
+
 pub(super) fn ferrum_server_config(listen: SocketAddrV4, metrics: Option<SocketAddrV4>) -> String {
     let metrics = metrics
         .map(|address| format!("\n[metrics]\nlisten = \"{address}\"\n"))
@@ -79,13 +108,16 @@ pub(super) fn ferrum_dns_resource_client_config(
     )
 }
 
-pub(super) fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
+pub(super) fn profile_direct_udp_client_config(
+    listen: SocketAddrV4,
+    max_sessions: usize,
+) -> String {
     format!(
         "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
          outbound = \"profile-direct\"\n\
          [[outbounds]]\ntag = \"profile-direct\"\ntype = \"direct\"\n\
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
+         [udp]\nenabled = true\nmax_sessions = {max_sessions}\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
          [logging]\nlevel = \"error\"\n"
     )
 }
@@ -93,6 +125,7 @@ pub(super) fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
 pub(super) fn profile_shadowsocks_udp_client_config(
     listen: SocketAddrV4,
     server: SocketAddrV4,
+    max_sessions: usize,
 ) -> String {
     let outbound = render_client_shadowsocks_outbound("profile-proxy", server);
     format!(
@@ -100,7 +133,7 @@ pub(super) fn profile_shadowsocks_udp_client_config(
          {outbound}\
          [route]\nfinal = \"profile-proxy\"\n\
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
-         [udp]\nenabled = true\nmax_sessions = 16\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
+         [udp]\nenabled = true\nmax_sessions = {max_sessions}\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
          [logging]\nlevel = \"error\"\n"
     )
 }
@@ -165,6 +198,17 @@ pub(super) fn m14_udp_server_config(listen: SocketAddrV4, max_buffered_bytes: us
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
          [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
          [logging]\nlevel = \"error\"\n"
+    )
+}
+
+pub(super) fn profile_udp_server_config(
+    listen: SocketAddrV4,
+    max_buffered_bytes: usize,
+    max_sessions: usize,
+) -> String {
+    m14_udp_server_config(listen, max_buffered_bytes).replace(
+        "max_sessions = 16",
+        &format!("max_sessions = {max_sessions}"),
     )
 }
 

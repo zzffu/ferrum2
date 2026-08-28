@@ -7,8 +7,8 @@ use ferrum2_core::route::Network;
 use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
     ApplicationResolveContext, ApplicationResolveRequest, DnsError, DnsPolicyProgram,
-    DnsPolicyRoute, DnsProxy, DnsProxyListeners, DnsServerId, DnsStrategy, DnsUpstreamSpec,
-    DnsUpstreamTransport, ProxyIngress, ProxyTransport, TaggedResolver,
+    DnsPolicyRoute, DnsProxy, DnsProxyListeners, DnsServerId, DnsStrategy, DnsUdpEvent,
+    DnsUpstreamSpec, DnsUpstreamTransport, ProxyIngress, ProxyTransport, TaggedResolver,
 };
 use ferrum2_rule::{RuleEngineRegistry, RuleEngineSnapshotBuilder};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
@@ -155,6 +155,370 @@ fn reserve_paired_addresses(count: usize) -> Vec<SocketAddr> {
         .into_iter()
         .map(|(address, _, _)| address)
         .collect()
+}
+
+fn udp_query(id: u16, name: &str) -> Vec<u8> {
+    let mut request = Message::new(id, MessageType::Query, OpCode::Query);
+    request.add_query(Query::query(
+        Name::from_ascii(name).expect("UDP concurrency query name"),
+        RecordType::A,
+    ));
+    request.to_vec().expect("UDP concurrency query")
+}
+
+fn udp_answer(request: &Message, octet: u8) -> Vec<u8> {
+    let question = request
+        .queries
+        .first()
+        .expect("UDP concurrency question")
+        .clone();
+    let mut response = Message::response(request.metadata.id, OpCode::Query);
+    response
+        .add_query(question.clone())
+        .add_answer(Record::from_rdata(
+            question.name().clone(),
+            30,
+            RData::A(A(Ipv4Addr::new(192, 0, 2, octet))),
+        ));
+    response.to_vec().expect("UDP concurrency answer")
+}
+
+#[tokio::test]
+async fn udp_listener_fast_query_overtakes_a_slow_query() {
+    let _network = TEST_NETWORK.lock().await;
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("concurrent upstream bind");
+    let upstream_address = upstream.local_addr().expect("concurrent upstream address");
+    let upstream_task = tokio::spawn(async move {
+        let mut wire = [0_u8; 4096];
+        let mut requests = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let (length, peer) = upstream
+                .recv_from(&mut wire)
+                .await
+                .expect("concurrent query");
+            requests.push((
+                Message::from_vec(&wire[..length]).expect("typed concurrent query"),
+                peer,
+            ));
+        }
+        let (fast, fast_peer) = requests
+            .iter()
+            .find(|(request, _)| request.metadata.id == 0x6102)
+            .expect("fast query");
+        upstream
+            .send_to(&udp_answer(fast, 2), *fast_peer)
+            .await
+            .expect("fast answer send");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (slow, slow_peer) = requests
+            .iter()
+            .find(|(request, _)| request.metadata.id == 0x6101)
+            .expect("slow query");
+        upstream
+            .send_to(&udp_answer(slow, 1), *slow_peer)
+            .await
+            .expect("slow answer send");
+    });
+    let (resolver, mut owner) = TaggedResolver::direct(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            target: TargetAddr::ip(upstream_address).expect("concurrent upstream target"),
+            resolved_targets: Box::new([]),
+            detour: None,
+        }],
+        Duration::from_secs(1),
+        NonZeroU16::new(2).expect("two concurrent queries"),
+    )
+    .expect("concurrent resolver");
+    owner.ready().await.expect("concurrent resolver ready");
+    let resolver = Arc::new(resolver);
+    let listen = reserve_paired_addresses(1)[0];
+    let listeners = DnsProxyListeners::bind(
+        vec![listen],
+        8,
+        NonZeroU16::new(2).expect("two inflight UDP requests"),
+        Duration::from_secs(1),
+        Arc::new(final_proxy(
+            Arc::clone(&resolver),
+            DnsStrategy::PreferIpv4,
+            1,
+            0,
+        )),
+    )
+    .await
+    .expect("concurrent listeners");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(listeners.run(async move {
+        let _ = stopped.await;
+    }));
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("concurrent client");
+    client
+        .send_to(&udp_query(0x6101, "slow.concurrent.example."), listen)
+        .await
+        .expect("slow query send");
+    client
+        .send_to(&udp_query(0x6102, "fast.concurrent.example."), listen)
+        .await
+        .expect("fast query send");
+
+    let mut wire = [0_u8; 4096];
+    let (length, _) = tokio::time::timeout(Duration::from_millis(200), client.recv_from(&mut wire))
+        .await
+        .expect("fast response was blocked by slow query")
+        .expect("fast response receive");
+    assert_eq!(
+        Message::from_vec(&wire[..length])
+            .expect("typed fast response")
+            .metadata
+            .id,
+        0x6102
+    );
+    let (length, _) = tokio::time::timeout(Duration::from_millis(400), client.recv_from(&mut wire))
+        .await
+        .expect("slow response timeout")
+        .expect("slow response receive");
+    assert_eq!(
+        Message::from_vec(&wire[..length])
+            .expect("typed slow response")
+            .metadata
+            .id,
+        0x6101
+    );
+
+    stop.send(()).expect("stop concurrent listener");
+    assert!(running.await.expect("concurrent listener join").is_ok());
+    upstream_task.await.expect("concurrent upstream join");
+    drop(resolver);
+    assert_eq!(
+        owner
+            .shutdown()
+            .await
+            .expect("concurrent resolver shutdown")
+            .runtime_tasks,
+        0
+    );
+}
+
+#[tokio::test]
+async fn udp_listener_drops_new_datagrams_when_the_inflight_pool_is_saturated() {
+    let _network = TEST_NETWORK.lock().await;
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("saturation upstream bind");
+    let upstream_address = upstream.local_addr().expect("saturation upstream address");
+    let (first_seen, first_seen_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = tokio::sync::oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let mut wire = [0_u8; 4096];
+        let (length, peer) = upstream.recv_from(&mut wire).await.expect("first query");
+        let first = Message::from_vec(&wire[..length]).expect("typed first query");
+        first_seen.send(()).expect("announce first query");
+        release_rx.await.expect("release first query");
+        upstream
+            .send_to(&udp_answer(&first, 1), peer)
+            .await
+            .expect("first answer send");
+        tokio::time::timeout(Duration::from_millis(100), upstream.recv_from(&mut wire))
+            .await
+            .is_ok()
+    });
+    let (resolver, mut owner) = TaggedResolver::direct(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            target: TargetAddr::ip(upstream_address).expect("saturation upstream target"),
+            resolved_targets: Box::new([]),
+            detour: None,
+        }],
+        Duration::from_secs(1),
+        NonZeroU16::new(2).expect("resolver admission"),
+    )
+    .expect("saturation resolver");
+    owner.ready().await.expect("saturation resolver ready");
+    let resolver = Arc::new(resolver);
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observer_events = Arc::clone(&events);
+    let listen = reserve_paired_addresses(1)[0];
+    let listeners = DnsProxyListeners::bind(
+        vec![listen],
+        8,
+        NonZeroU16::new(1).expect("one inflight UDP request"),
+        Duration::from_secs(1),
+        Arc::new(
+            final_proxy(Arc::clone(&resolver), DnsStrategy::PreferIpv4, 1, 0).with_udp_observer(
+                Arc::new(move |event| {
+                    observer_events
+                        .lock()
+                        .expect("DNS event observer")
+                        .push(event);
+                }),
+            ),
+        ),
+    )
+    .await
+    .expect("saturation listeners");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(listeners.run(async move {
+        let _ = stopped.await;
+    }));
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("saturation client");
+    client
+        .send_to(&udp_query(0x6201, "first.saturated.example."), listen)
+        .await
+        .expect("first query send");
+    first_seen_rx.await.expect("first query reached upstream");
+    client
+        .send_to(&udp_query(0x6202, "dropped.saturated.example."), listen)
+        .await
+        .expect("saturated query send");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.send(()).expect("release first answer");
+
+    let mut wire = [0_u8; 4096];
+    let (length, _) = tokio::time::timeout(Duration::from_millis(200), client.recv_from(&mut wire))
+        .await
+        .expect("first response timeout")
+        .expect("first response receive");
+    assert_eq!(
+        Message::from_vec(&wire[..length])
+            .expect("typed first response")
+            .metadata
+            .id,
+        0x6201
+    );
+    assert!(
+        !upstream_task.await.expect("saturation upstream join"),
+        "saturated query reached the upstream"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), client.recv_from(&mut wire))
+            .await
+            .is_err(),
+        "saturated query unexpectedly received a response"
+    );
+
+    stop.send(()).expect("stop saturation listener");
+    assert!(running.await.expect("saturation listener join").is_ok());
+    {
+        let events = events.lock().expect("DNS event observations");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == DnsUdpEvent::Acquired)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == DnsUdpEvent::Completed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == DnsUdpEvent::PoolDrop)
+                .count(),
+            1
+        );
+        assert!(!events.contains(&DnsUdpEvent::EncodeFailure));
+    }
+    drop(resolver);
+    assert_eq!(
+        owner
+            .shutdown()
+            .await
+            .expect("saturation resolver shutdown")
+            .runtime_tasks,
+        0
+    );
+}
+
+#[tokio::test]
+async fn udp_listener_shutdown_aborts_and_joins_active_requests() {
+    let _network = TEST_NETWORK.lock().await;
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("shutdown upstream bind");
+    let upstream_address = upstream.local_addr().expect("shutdown upstream address");
+    let (seen, seen_rx) = tokio::sync::oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let mut wire = [0_u8; 4096];
+        upstream.recv_from(&mut wire).await.expect("active query");
+        seen.send(()).expect("announce active query");
+        std::future::pending::<()>().await;
+    });
+    let (resolver, mut owner) = TaggedResolver::direct(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            target: TargetAddr::ip(upstream_address).expect("shutdown upstream target"),
+            resolved_targets: Box::new([]),
+            detour: None,
+        }],
+        Duration::from_secs(30),
+        NonZeroU16::new(1).expect("one active query"),
+    )
+    .expect("shutdown resolver");
+    owner.ready().await.expect("shutdown resolver ready");
+    let resolver = Arc::new(resolver);
+    let listen = reserve_paired_addresses(1)[0];
+    let listeners = DnsProxyListeners::bind(
+        vec![listen],
+        8,
+        NonZeroU16::new(1).expect("one active UDP request"),
+        Duration::from_secs(1),
+        Arc::new(final_proxy(
+            Arc::clone(&resolver),
+            DnsStrategy::PreferIpv4,
+            1,
+            0,
+        )),
+    )
+    .await
+    .expect("shutdown listeners");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(listeners.run(async move {
+        let _ = stopped.await;
+    }));
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("shutdown client");
+    client
+        .send_to(&udp_query(0x6301, "active.shutdown.example."), listen)
+        .await
+        .expect("active query send");
+    seen_rx.await.expect("active query reached upstream");
+    stop.send(()).expect("stop active listener");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("active listener did not converge")
+            .expect("active listener join")
+            .is_ok()
+    );
+
+    upstream_task.abort();
+    assert!(
+        upstream_task
+            .await
+            .expect_err("abort stalled upstream")
+            .is_cancelled()
+    );
+    drop(resolver);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), owner.shutdown())
+            .await
+            .expect("active resolver shutdown did not converge")
+            .expect("active resolver shutdown")
+            .runtime_tasks,
+        0
+    );
 }
 
 #[tokio::test]

@@ -32,15 +32,15 @@ const SESSION_ID_LEN: usize = 8;
 const PADDING_LEN: usize = 2;
 const COMMON_HEADER_LEN: usize = 1 + TIMESTAMP_LEN + PADDING_LEN;
 const RESPONSE_BINDING_LEN: usize = SESSION_ID_LEN;
-const REPLAY_WORDS: usize = 129;
+const REPLAY_WORDS: usize = 128;
 
-/// Fixed caller-reusable plaintext storage for packet construction and opening.
+/// Fixed caller-reusable storage for the legacy borrowed-wire open path.
 pub struct UdpPacketScratch {
     pub(super) body: BytesMut,
 }
 
 impl UdpPacketScratch {
-    /// Allocates the one fixed hard-bounded protocol scratch.
+    /// Allocates the one fixed hard-bounded borrowed-open scratch.
     pub fn new() -> Self {
         Self {
             body: BytesMut::with_capacity(MAX_UDP_WIRE_LEN),

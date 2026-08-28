@@ -34,7 +34,7 @@ use ferrum2_runtime::MAX_RESOLVED_CANDIDATES;
 #[cfg(all(not(windows), not(test)))]
 use ferrum2_runtime::RuntimeTcpStream;
 #[cfg(any(windows, test))]
-use ferrum2_runtime::{DirectUdpSocket, GenerationBoundUdpSocket};
+use ferrum2_runtime::{DirectUdpSocket, NetworkUdpSocket};
 use tokio::net::UdpSocket;
 use tokio::time::Instant as TokioInstant;
 
@@ -47,7 +47,7 @@ use super::network::{
 const MAX_DNS_UDP_DATAGRAM_BYTES: usize = 65_535;
 
 #[cfg(any(windows, test))]
-type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
+type ServerPhysicalUdpSocket = NetworkUdpSocket<UdpSocket>;
 #[cfg(all(not(windows), not(test)))]
 type ServerPhysicalUdpSocket = UdpSocket;
 

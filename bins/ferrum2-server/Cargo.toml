@@ -25,6 +25,7 @@ ferrum2-shadowsocks = { workspace = true, features = ["tokio"] }
 ferrum2-sniff.workspace = true
 ferrum2-platform-windows = { workspace = true, features = ["live-backend"] }
 clap.workspace = true
+socket2 = { workspace = true, features = ["all"] }
 tokio.workspace = true
 tracing.workspace = true
 

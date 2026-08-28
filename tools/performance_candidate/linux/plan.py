@@ -7,13 +7,32 @@ import json
 import pathlib
 
 from tools.performance_candidate.json_contract import CandidateControlError, read_bounded_closed_json
-from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, MODES, PAIR_COUNTS, PAIR_SCHEDULE, QUALIFICATION_GROUPS, QUALIFICATION_ONLY_SELECTIONS, SCENARIO_CATALOG, SCENARIO_EVIDENCE, TCP_REQUEST_SCENARIOS, UDP_DIRECT_PAYLOAD_BOUNDS, UDP_SS_PAYLOAD_MATRIX, WARMUP_SECONDS
+from tools.performance_candidate.linux.catalog import (
+    ACTIVE_SECONDS,
+    DNS_CACHE_SIZE_SCENARIOS,
+    MODES,
+    PAIR_COUNTS,
+    PAIR_SCHEDULE,
+    QUALIFICATION_GROUPS,
+    QUALIFICATION_ONLY_SELECTIONS,
+    RUN_KINDS,
+    SCENARIO_CATALOG,
+    SCENARIO_EVIDENCE,
+    SCENARIO_WORKLOAD_SCALE,
+    SOCKS_DIRECT_REQUEST_SCENARIOS,
+    STRUCTURAL_MATRIX_SCENARIOS,
+    TCP_REQUEST_SCENARIOS,
+    UDP_DIRECT_PAYLOAD_BOUNDS,
+    UDP_RESPONSE_CONCURRENCY_SCENARIOS,
+    UDP_SS_PAYLOAD_MATRIX,
+    WARMUP_SECONDS,
+)
 from tools.performance_candidate.linux.evidence_contract import scenario_evidence_contract
 from tools.performance_candidate.linux.policy import MEASUREMENT_ENVIRONMENT, UNCALIBRATED_POLICY, _scenario_policy_is_applicable, validate_decision_policy
 from tools.performance_candidate.linux.scale import SCALE_SCENARIO, _scale_scenario_entry, validate_scale_lineage_shape, validate_scale_safety_policy
 from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_SELECTION
 
-PLAN_SCHEMA_VERSION = 6
+PLAN_SCHEMA_VERSION = 10
 PLAN_MAX_BYTES = 1024 * 1024
 
 
@@ -51,6 +70,7 @@ def _scenario_entry(scenario: str, role: str) -> dict[str, object]:
         "direction": direction,
         "topology": topology,
         "application_payload_bytes": payload_bytes,
+        "workload_scale": SCENARIO_WORKLOAD_SCALE.get(scenario),
         "socks_datagram_bytes": socks_bytes,
         "upstream_wire_bytes": upstream_bytes,
     }
@@ -87,6 +107,14 @@ def _qualification_scenarios(
                 for index, scenario in enumerate(UDP_DIRECT_PAYLOAD_BOUNDS)
             ],
         )
+    if selected == "structural-baseline-matrix":
+        return (
+            selected,
+            [
+                _scenario_entry(scenario, "primary" if index == 0 else "guard")
+                for index, scenario in enumerate(STRUCTURAL_MATRIX_SCENARIOS)
+            ],
+        )
     family = SCENARIO_CATALOG[selected][2]
     if family == "tcp-throughput":
         guard = "tcp-bulk" if selected == "tcp-stream-64k" else "tcp-stream-64k"
@@ -120,6 +148,23 @@ def _qualification_scenarios(
             _scenario_entry(selected, "primary"),
             _scenario_entry(guard, "guard"),
         ]
+    if family == "udp-response-concurrency":
+        return "udp-response-concurrency", [
+            _scenario_entry(scenario, "primary" if scenario == selected else "guard")
+            for scenario in UDP_RESPONSE_CONCURRENCY_SCENARIOS
+        ]
+    if family == "socks-direct-request":
+        return "socks-direct-request", [
+            _scenario_entry(scenario, "primary" if scenario == selected else "guard")
+            for scenario in SOCKS_DIRECT_REQUEST_SCENARIOS
+        ]
+    if family == "dns-cache":
+        return "dns-cache", [
+            _scenario_entry(scenario, "primary" if scenario == selected else "guard")
+            for scenario in DNS_CACHE_SIZE_SCENARIOS
+        ]
+    if family in {"udp-replay", "dns-udp"}:
+        return family, [_scenario_entry(selected, "primary")]
     raise AssertionError(f"unhandled scenario family: {family}")
 
 
@@ -130,6 +175,7 @@ def create_plan(
     warmup_seconds: str,
     active_seconds: str,
     pairs: str,
+    run_kind: str = "comparison",
     decision_policy: dict[str, object] | None = None,
     scale_safety_policy: dict[str, object] | None = None,
     scale_lineage: dict[str, object] | None = None,
@@ -138,6 +184,10 @@ def create_plan(
 
     if mode not in MODES:
         raise CandidateControlError("mode must be diagnostic or qualification")
+    if run_kind not in RUN_KINDS:
+        raise CandidateControlError("run_kind must be comparison or calibration-aa")
+    if run_kind == "calibration-aa" and mode != "qualification":
+        raise CandidateControlError("calibration-aa requires qualification mode")
     if selection in QUALIFICATION_ONLY_SELECTIONS:
         raise CandidateControlError(
             "Windows TUN lifecycle selection is qualification-only; use "
@@ -162,6 +212,8 @@ def create_plan(
     validate_decision_policy(policy)
     is_scale = selection == SCALE_SCENARIO
     if is_scale:
+        if run_kind != "comparison":
+            raise CandidateControlError("tcp-scale-10k does not support calibration-aa")
         if mode != "qualification":
             raise CandidateControlError("tcp-scale-10k is qualification-only")
         if (warmup, active, pair_count) != (10, 30, 6):
@@ -190,6 +242,7 @@ def create_plan(
         )
     return {
         "schema_version": PLAN_SCHEMA_VERSION,
+        "run_kind": run_kind,
         "mode": mode,
         "selection": selection,
         "selected_scenario": (
@@ -203,7 +256,8 @@ def create_plan(
         "decision_policy": policy,
         "scale_safety_policy": copy.deepcopy(scale_safety_policy),
         "scale_lineage": copy.deepcopy(scale_lineage),
-        "adoption_eligible": not is_scale
+        "adoption_eligible": run_kind == "comparison"
+        and not is_scale
         and mode == "qualification"
         and _plan_has_complete_applicable_policy(
             scenarios=scenarios,
@@ -268,6 +322,7 @@ def load_plan(
             warmup_seconds=str(plan["warmup_seconds"]),
             active_seconds=str(plan["active_seconds"]),
             pairs=str(plan["pairs"]),
+            run_kind=plan["run_kind"],
             decision_policy=policy,
             scale_safety_policy=selected_scale_policy,
             scale_lineage=plan.get("scale_lineage"),

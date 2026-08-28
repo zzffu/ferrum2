@@ -270,3 +270,30 @@ async fn direct_response_readiness_drain_is_bounded_and_yields() {
     assert_eq!(response_match, DirectUdpResponseMatch::OutstandingPeer(0));
     assert_eq!(&payload[..], b"accepted");
 }
+
+#[tokio::test]
+async fn direct_response_would_block_retains_receive_scratch_storage() {
+    let socket = ScriptedDirectUdpSocket {
+        awaited: Mutex::new(VecDeque::new()),
+        ready: Mutex::new(VecDeque::new()),
+        awaited_calls: AtomicUsize::new(0),
+        try_calls: AtomicUsize::new(0),
+    };
+    let mut scratch = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
+    scratch.extend_from_slice(b"previous packet");
+    let identity = scratch.as_ptr();
+
+    let error = receive_direct_response(
+        &socket,
+        &VecDeque::new(),
+        DirectUdpResponsePolicy::TunSink(DirectUdpFamily::Ipv4),
+        &mut scratch,
+    )
+    .await
+    .expect_err("empty socket would block");
+
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(scratch.as_ptr(), identity);
+    assert_eq!(scratch.capacity(), MAX_UDP_WIRE_DATAGRAM_BYTES);
+    assert!(scratch.is_empty());
+}

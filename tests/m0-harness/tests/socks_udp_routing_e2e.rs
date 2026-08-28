@@ -328,7 +328,7 @@ fn three_methods_cover_ipv4_with_three_public_datagrams() {
         }
         let samples = [
             "ferrum2_udp_sessions_active{role=\"client\"} 1",
-            "ferrum2_udp_buffered_bytes{role=\"client\"} 196521",
+            "ferrum2_udp_buffered_bytes{role=\"client\"} 65507",
             "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"} 3",
             "ferrum2_udp_datagrams_total{role=\"client\",direction=\"target_to_client\",outcome=\"accepted\"} 3",
         ];

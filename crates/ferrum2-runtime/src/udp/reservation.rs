@@ -1,20 +1,48 @@
+use std::collections::VecDeque;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use ferrum2_core::Datagram;
-use tokio::sync::Notify;
+use tokio::sync::oneshot;
 
 use crate::OwnerRegistry;
 
 use super::{MAX_UDP_WIRE_DATAGRAM_BYTES, UdpRuntimeError};
 
-#[derive(Debug)]
 pub(super) struct BufferBudgetInner {
     limit: usize,
     reserved: AtomicUsize,
-    released: Notify,
+    waiters: StdMutex<BudgetWaiters>,
     registry: OwnerRegistry,
+}
+
+const MAX_BUDGET_GRANTS_PER_PASS: usize = 8;
+const MAX_OLDEST_WAITER_BYPASSES: u8 = 8;
+
+#[derive(Default)]
+struct BudgetWaiters {
+    entries: VecDeque<BudgetWaiter>,
+    next_sequence: u64,
+}
+
+struct BudgetWaiter {
+    requested_capacity: usize,
+    sequence: u64,
+    bypasses: u8,
+    grant: oneshot::Sender<UdpBufferReservation>,
+}
+
+type BudgetGrant = (oneshot::Sender<UdpBufferReservation>, UdpBufferReservation);
+
+impl fmt::Debug for BufferBudgetInner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BufferBudgetInner")
+            .field("limit", &self.limit)
+            .field("reserved", &self.reserved.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Cloneable global allocated-capacity budget.
@@ -29,7 +57,7 @@ impl UdpBufferBudget {
             inner: Arc::new(BufferBudgetInner {
                 limit,
                 reserved: AtomicUsize::new(0),
-                released: Notify::new(),
+                waiters: StdMutex::new(BudgetWaiters::default()),
                 registry,
             }),
         }
@@ -45,56 +73,203 @@ impl UdpBufferBudget {
 
     /// Reserves exact allocated capacity before accepted protocol state advances.
     pub fn reserve(&self, capacity: usize) -> Result<UdpBufferReservation, UdpRuntimeError> {
-        if capacity > MAX_UDP_WIRE_DATAGRAM_BYTES {
-            return Err(UdpRuntimeError::Bounds);
+        validate_capacity(capacity)?;
+        if capacity == 0 {
+            return Ok(zero_capacity_reservation(&self.inner));
         }
-        let mut current = self.inner.reserved.load(Ordering::Relaxed);
-        loop {
-            let Some(next) = current.checked_add(capacity) else {
-                return Err(UdpRuntimeError::BufferLimit);
+        let (reservation, grants) = {
+            let mut waiters = lock_unpoisoned(&self.inner.waiters);
+            let grants = grant_waiters_locked(&self.inner, &mut waiters);
+            let reservation = if waiters.entries.is_empty() {
+                try_reserve_locked(&self.inner, capacity)
+            } else {
+                // An immediate caller must not repeatedly steal capacity from
+                // older async waiters. It retains the existing fail-fast API.
+                Err(UdpRuntimeError::BufferLimit)
             };
-            if next > self.inner.limit {
-                return Err(UdpRuntimeError::BufferLimit);
-            }
-            match self.inner.reserved.compare_exchange_weak(
-                current,
-                next,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    self.inner.registry.add_udp_buffered_bytes(capacity);
-                    return Ok(UdpBufferReservation {
-                        charge: UdpBufferCharge::Metered(Arc::clone(&self.inner)),
-                        capacity,
-                    });
-                }
-                Err(observed) => current = observed,
-            }
-        }
+            (reservation, grants)
+        };
+        dispatch_grants(grants);
+        reservation
     }
 
     pub(super) async fn reserve_when_available(
         &self,
         capacity: usize,
     ) -> Result<UdpBufferReservation, UdpRuntimeError> {
-        loop {
-            let notified = self.inner.released.notified();
-            tokio::pin!(notified);
-            match self.reserve(capacity) {
-                Ok(reservation) => return Ok(reservation),
-                Err(UdpRuntimeError::BufferLimit) => {
-                    notified.as_mut().enable();
-                    match self.reserve(capacity) {
-                        Ok(reservation) => return Ok(reservation),
-                        Err(UdpRuntimeError::BufferLimit) => notified.as_mut().await,
-                        Err(error) => return Err(error),
+        validate_capacity(capacity)?;
+        if capacity == 0 {
+            return Ok(zero_capacity_reservation(&self.inner));
+        }
+        let (immediate, receiver, grants) = {
+            let mut waiters = lock_unpoisoned(&self.inner.waiters);
+            if waiters.entries.is_empty() {
+                match try_reserve_locked(&self.inner, capacity) {
+                    Ok(reservation) => (Some(reservation), None, Vec::new()),
+                    Err(UdpRuntimeError::BufferLimit) => {
+                        let receiver = enqueue_waiter(&mut waiters, capacity);
+                        let grants = grant_waiters_locked(&self.inner, &mut waiters);
+                        (None, Some(receiver), grants)
                     }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
+            } else {
+                let receiver = enqueue_waiter(&mut waiters, capacity);
+                let grants = grant_waiters_locked(&self.inner, &mut waiters);
+                (None, Some(receiver), grants)
             }
+        };
+        dispatch_grants(grants);
+        if let Some(reservation) = immediate {
+            return Ok(reservation);
+        }
+        let reservation = receiver
+            .expect("queued UDP budget waiter")
+            .await
+            .map_err(|_| UdpRuntimeError::Cancelled)?;
+        // Continue a bounded handoff chain when one release made enough room
+        // for more than a single grant batch. Every receiver is targeted, so
+        // this does not turn back into a broadcast wakeup.
+        wake_available_waiters(&self.inner);
+        Ok(reservation)
+    }
+}
+
+fn validate_capacity(capacity: usize) -> Result<(), UdpRuntimeError> {
+    if capacity > MAX_UDP_WIRE_DATAGRAM_BYTES {
+        Err(UdpRuntimeError::Bounds)
+    } else {
+        Ok(())
+    }
+}
+
+fn zero_capacity_reservation(inner: &Arc<BufferBudgetInner>) -> UdpBufferReservation {
+    UdpBufferReservation {
+        charge: UdpBufferCharge::Metered(Arc::clone(inner)),
+        capacity: 0,
+    }
+}
+
+fn enqueue_waiter(
+    waiters: &mut BudgetWaiters,
+    requested_capacity: usize,
+) -> oneshot::Receiver<UdpBufferReservation> {
+    if waiters.next_sequence == u64::MAX {
+        for (sequence, waiter) in waiters.entries.iter_mut().enumerate() {
+            waiter.sequence = sequence as u64;
+        }
+        waiters.next_sequence = waiters.entries.len() as u64;
+    }
+    let sequence = waiters.next_sequence;
+    waiters.next_sequence += 1;
+    let (grant, receiver) = oneshot::channel();
+    waiters.entries.push_back(BudgetWaiter {
+        requested_capacity,
+        sequence,
+        bypasses: 0,
+        grant,
+    });
+    receiver
+}
+
+fn try_reserve_locked(
+    inner: &Arc<BufferBudgetInner>,
+    capacity: usize,
+) -> Result<UdpBufferReservation, UdpRuntimeError> {
+    let current = inner.reserved.load(Ordering::Relaxed);
+    let Some(next) = current.checked_add(capacity) else {
+        return Err(UdpRuntimeError::BufferLimit);
+    };
+    if next > inner.limit {
+        return Err(UdpRuntimeError::BufferLimit);
+    }
+    inner.reserved.store(next, Ordering::Relaxed);
+    inner.registry.add_udp_buffered_bytes(capacity);
+    Ok(UdpBufferReservation {
+        charge: UdpBufferCharge::Metered(Arc::clone(inner)),
+        capacity,
+    })
+}
+
+fn grant_waiters_locked(
+    inner: &Arc<BufferBudgetInner>,
+    waiters: &mut BudgetWaiters,
+) -> Vec<BudgetGrant> {
+    waiters.entries.retain(|waiter| !waiter.grant.is_closed());
+    let mut grants = Vec::new();
+    while grants.len() < MAX_BUDGET_GRANTS_PER_PASS && !waiters.entries.is_empty() {
+        let available = inner
+            .limit
+            .saturating_sub(inner.reserved.load(Ordering::Relaxed));
+        let grant_index = if waiters.entries[0].requested_capacity <= available {
+            Some(0)
+        } else if waiters.entries[0].bypasses < MAX_OLDEST_WAITER_BYPASSES {
+            waiters
+                .entries
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, waiter)| waiter.requested_capacity <= available)
+                .min_by_key(|(_, waiter)| waiter.sequence)
+                .map(|(index, _)| index)
+        } else {
+            None
+        };
+        let Some(grant_index) = grant_index else {
+            break;
+        };
+        if grant_index != 0 {
+            waiters.entries[0].bypasses += 1;
+        }
+        let waiter = waiters
+            .entries
+            .remove(grant_index)
+            .expect("selected UDP budget waiter");
+        let reservation = try_reserve_locked(inner, waiter.requested_capacity)
+            .expect("selected UDP waiter fits available capacity");
+        grants.push((waiter.grant, reservation));
+    }
+    grants
+}
+
+fn dispatch_grants(grants: Vec<BudgetGrant>) {
+    let mut grants = VecDeque::from(grants);
+    while let Some((grant, reservation)) = grants.pop_front() {
+        if let Err(unclaimed) = grant.send(reservation) {
+            let (inner, capacity) = unclaimed
+                .take_metered_charge()
+                .expect("budget queue grants only metered reservations");
+            grants.extend(release_metered_capacity(&inner, capacity));
         }
     }
+}
+
+fn wake_available_waiters(inner: &Arc<BufferBudgetInner>) {
+    let grants = {
+        let mut waiters = lock_unpoisoned(&inner.waiters);
+        grant_waiters_locked(inner, &mut waiters)
+    };
+    dispatch_grants(grants);
+}
+
+fn release_metered_capacity(inner: &Arc<BufferBudgetInner>, capacity: usize) -> Vec<BudgetGrant> {
+    if capacity == 0 {
+        return Vec::new();
+    }
+    let mut waiters = lock_unpoisoned(&inner.waiters);
+    let previous = inner.reserved.load(Ordering::Relaxed);
+    debug_assert!(previous >= capacity, "UDP buffer reservation underflow");
+    inner
+        .reserved
+        .store(previous.saturating_sub(capacity), Ordering::Relaxed);
+    inner.registry.remove_udp_buffered_bytes(capacity);
+    grant_waiters_locked(inner, &mut waiters)
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Ownership token for one exact allocated buffer capacity.
@@ -139,6 +314,15 @@ impl UdpBufferReservation {
             reservation: self,
         })
     }
+
+    fn take_metered_charge(mut self) -> Option<(Arc<BufferBudgetInner>, usize)> {
+        let charge = std::mem::replace(&mut self.charge, UdpBufferCharge::Unmetered);
+        let capacity = std::mem::replace(&mut self.capacity, 0);
+        match charge {
+            UdpBufferCharge::Metered(inner) => Some((inner, capacity)),
+            UdpBufferCharge::Unmetered => None,
+        }
+    }
 }
 
 impl fmt::Debug for UdpBufferReservation {
@@ -155,15 +339,8 @@ impl Drop for UdpBufferReservation {
         let UdpBufferCharge::Metered(inner) = &self.charge else {
             return;
         };
-        let previous = inner.reserved.fetch_sub(self.capacity, Ordering::Relaxed);
-        debug_assert!(
-            previous >= self.capacity,
-            "UDP buffer reservation underflow"
-        );
-        inner.registry.remove_udp_buffered_bytes(self.capacity);
-        if self.capacity != 0 {
-            inner.released.notify_waiters();
-        }
+        let grants = release_metered_capacity(inner, self.capacity);
+        dispatch_grants(grants);
     }
 }
 
@@ -208,6 +385,7 @@ mod tests {
 
     use bytes::BytesMut;
 
+    use tokio::sync::Notify;
     use tokio::time::Instant;
 
     use super::super::{
@@ -227,6 +405,17 @@ mod tests {
             remaining -= capacity;
         }
         held
+    }
+
+    async fn wait_for_waiter_count(budget: &UdpBufferBudget, expected: usize) {
+        for _ in 0..200 {
+            let count = lock_unpoisoned(&budget.inner.waiters).entries.len();
+            if count == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("UDP budget waiter count did not reach {expected}");
     }
 
     fn test_datagram(capacity: usize) -> Datagram {
@@ -363,6 +552,143 @@ mod tests {
             .expect("waiter task")
             .expect("capacity reservation");
         drop(acquired);
+        drop(held);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn one_release_grants_only_a_bounded_satisfiable_waiter_batch() {
+        let registry = OwnerRegistry::new();
+        let budget = UdpBufferBudget::new(MIN_UDP_MAX_BUFFERED_BYTES, registry.clone());
+        let released = budget.reserve(8).expect("controlled release capacity");
+        let held = exhaust_budget(&budget, MIN_UDP_MAX_BUFFERED_BYTES);
+
+        let large_budget = budget.clone();
+        let large = tokio::spawn(async move {
+            large_budget
+                .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
+                .await
+        });
+        wait_for_waiter_count(&budget, 1).await;
+
+        let mut small = Vec::new();
+        for _ in 0..20 {
+            let small_budget = budget.clone();
+            small.push(tokio::spawn(async move {
+                small_budget.reserve_when_available(1).await
+            }));
+        }
+        wait_for_waiter_count(&budget, 21).await;
+
+        drop(released);
+        assert_eq!(budget.reserved_bytes(), MIN_UDP_MAX_BUFFERED_BYTES);
+        assert_eq!(
+            lock_unpoisoned(&budget.inner.waiters).entries.len(),
+            13,
+            "one release grants only the fixed batch of eight satisfiable waiters"
+        );
+
+        large.abort();
+        let _ = large.await;
+        for waiter in small {
+            waiter.abort();
+            if let Ok(Ok(reservation)) = waiter.await {
+                drop(reservation);
+            }
+        }
+        drop(held);
+        for _ in 0..200 {
+            if budget.reserved_bytes() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn oldest_large_waiter_is_protected_after_bounded_small_bypasses() {
+        let registry = OwnerRegistry::new();
+        let budget = UdpBufferBudget::new(MIN_UDP_MAX_BUFFERED_BYTES, registry.clone());
+        let mut released = Vec::new();
+        for _ in 0..40 {
+            released.push(budget.reserve(1_024).expect("controlled release chunk"));
+        }
+        let held = exhaust_budget(&budget, MIN_UDP_MAX_BUFFERED_BYTES);
+
+        let large_budget = budget.clone();
+        let large = tokio::spawn(async move { large_budget.reserve_when_available(32_768).await });
+        wait_for_waiter_count(&budget, 1).await;
+        let mut small = Vec::new();
+        for _ in 0..16 {
+            let small_budget = budget.clone();
+            small.push(tokio::spawn(async move {
+                small_budget.reserve_when_available(1_024).await
+            }));
+        }
+        wait_for_waiter_count(&budget, 17).await;
+
+        for reservation in released.drain(..) {
+            drop(reservation);
+        }
+        let large_reservation = tokio::time::timeout(Duration::from_secs(1), large)
+            .await
+            .expect("oldest large waiter is eventually granted")
+            .expect("large waiter task")
+            .expect("large capacity reservation");
+
+        for waiter in small {
+            waiter.abort();
+            if let Ok(Ok(reservation)) = waiter.await {
+                drop(reservation);
+            }
+        }
+        drop(large_reservation);
+        drop(held);
+        for _ in 0..200 {
+            if budget.reserved_bytes() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn satisfiable_new_waiter_can_use_spare_capacity_behind_a_large_waiter() {
+        let registry = OwnerRegistry::new();
+        let budget = UdpBufferBudget::new(MIN_UDP_MAX_BUFFERED_BYTES, registry.clone());
+        let mut remaining = MIN_UDP_MAX_BUFFERED_BYTES - 1_024;
+        let mut held = Vec::new();
+        while remaining != 0 {
+            let capacity = remaining.min(MAX_UDP_WIRE_DATAGRAM_BYTES);
+            held.push(budget.reserve(capacity).expect("controlled held capacity"));
+            remaining -= capacity;
+        }
+
+        let large_budget = budget.clone();
+        let large = tokio::spawn(async move { large_budget.reserve_when_available(2_048).await });
+        wait_for_waiter_count(&budget, 1).await;
+        drop(
+            budget
+                .reserve(0)
+                .expect("zero capacity never waits behind byte consumers"),
+        );
+
+        let small =
+            tokio::time::timeout(Duration::from_secs(1), budget.reserve_when_available(1_024))
+                .await
+                .expect("satisfiable waiter receives the existing spare capacity")
+                .expect("small capacity reservation");
+        assert_eq!(small.capacity(), 1_024);
+        assert!(!large.is_finished());
+
+        large.abort();
+        let _ = large.await;
+        drop(small);
         drop(held);
         assert_eq!(budget.reserved_bytes(), 0);
         assert_eq!(registry.snapshot().udp_buffered_bytes, 0);

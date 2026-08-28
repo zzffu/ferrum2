@@ -42,7 +42,7 @@ where
     ) -> Poll<Result<usize, ShadowsocksError>> {
         match &mut *self {
             Self::Direct(stream) => Pin::new(stream)
-                .poll_read(context, destination)
+                .poll_read_initialized(context, destination)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Read)),
             Self::Proxy(flow) => Pin::new(flow).poll_read_plain(context, destination),
         }

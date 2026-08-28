@@ -13,7 +13,7 @@ use ferrum2_runtime::{
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, UdpBufferReservation, UdpRuntimeError,
     UdpRuntimeLimits, UdpSessionManager,
 };
-use ferrum2_shadowsocks::{UdpPacketError, UdpPacketScratch, UdpServer};
+use ferrum2_shadowsocks::{UdpPacketError, UdpServer};
 
 use crate::run::network::ServerNetworkSocketService;
 use crate::run::routing::ServerRouting;
@@ -27,6 +27,7 @@ use super::listener::{
 use super::physical::ServerSystemUdpSocketFactory;
 use super::physical::{ServerNetworkUdpSocketFactory, ServerUdpNetworkPolicy};
 use super::response_codec::ResponseCodecPool;
+use super::response_codec::maximum_response_codec_reservation_bytes;
 
 pub(in crate::run) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
     UdpRuntimeLimits::new(
@@ -35,6 +36,28 @@ pub(in crate::run) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntim
         config.idle_timeout,
     )
     .ok()
+}
+
+pub(in crate::run) fn validate_udp_listener_budget(
+    config: &UdpConfig,
+    inbound_count: usize,
+) -> Result<(), RunError> {
+    if !config.enabled {
+        return Ok(());
+    }
+    let roots = inbound_count
+        .checked_mul(config.receive_workers)
+        .ok_or(RunError::StartupProtocol)?;
+    let per_root = maximum_response_codec_reservation_bytes(config.max_sessions)
+        .and_then(|codec| codec.checked_add(MAX_UDP_WIRE_DATAGRAM_BYTES))
+        .ok_or(RunError::StartupProtocol)?;
+    let fixed = roots
+        .checked_mul(per_root)
+        .ok_or(RunError::StartupProtocol)?;
+    if fixed > config.max_buffered_bytes {
+        return Err(RunError::StartupProtocol);
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -63,10 +86,8 @@ where
     pub(super) mappings: Arc<UdpMappings>,
     pub(super) admission: Arc<tokio::sync::Mutex<()>>,
     pub(super) route_scratch: RuleEvaluationScratch,
-    pub(super) scratch: UdpPacketScratch,
     pub(super) wire: BytesMut,
     pub(super) maintenance: tokio::time::Interval,
-    pub(super) _receive_scratch: UdpBufferReservation,
     pub(super) _receive_wire: UdpBufferReservation,
 }
 
@@ -166,8 +187,10 @@ where
         metrics,
     } = shared;
     let budget = sessions.buffer_budget();
-    let response_codec =
-        Arc::new(ResponseCodecPool::new(budget.clone()).map_err(|_| RunError::StartupProtocol)?);
+    let response_codec = Arc::new(
+        ResponseCodecPool::new(budget.clone(), config.max_sessions)
+            .map_err(|_| RunError::StartupProtocol)?,
+    );
     let handler = ServerUdpResponseHandler {
         listener: Arc::clone(&listener),
         protocol: Arc::clone(&protocol),
@@ -188,9 +211,6 @@ where
         handler,
         registry.clone(),
     );
-    let receive_scratch = budget
-        .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
-        .map_err(|_| RunError::StartupProtocol)?;
     let receive_wire = budget
         .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
         .map_err(|_| RunError::StartupProtocol)?;
@@ -219,10 +239,8 @@ where
         mappings,
         admission,
         route_scratch,
-        scratch: UdpPacketScratch::new(),
         wire,
         maintenance,
-        _receive_scratch: receive_scratch,
         _receive_wire: receive_wire,
     })
 }

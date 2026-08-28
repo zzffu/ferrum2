@@ -13,10 +13,10 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use local_support::{
     ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, active_child_count, bind_loopback_listener,
-    run_binary, start_dns_answer, start_dns_script, unused_loopback, unused_tcp_udp_loopback,
-    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
-    wait_for_tcp_udp_bound, write_server_config, write_tagged_dns_server_config,
-    write_udp_client_config,
+    metric_value, run_binary, start_dns_answer, start_dns_script, unused_loopback,
+    unused_tcp_udp_loopback, wait_for_bound, wait_for_listener, wait_for_metrics,
+    wait_for_metrics_sample, wait_for_tcp_udp_bound, write_server_config,
+    write_tagged_dns_server_config, write_udp_client_config,
 };
 
 // ponytail: file-wide lock; use socket inheritance if these tests need parallel throughput.
@@ -100,7 +100,7 @@ fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
     const CLIENT_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
     const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
     const SERVER_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
-    const SERVER_ROOT_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"} 262028";
+    const SERVER_ROOT_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"}";
     const SERVER_ONE_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 1";
 
     let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
@@ -170,10 +170,13 @@ fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
         ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
     wait_for_tcp_udp_bound(&mut server, server_address);
     let server_baseline = wait_for_metrics_sample(server_metrics, SERVER_ZERO_SESSION);
-    assert!(
-        server_baseline
-            .windows(SERVER_ROOT_BUFFER.len())
-            .any(|window| window == SERVER_ROOT_BUFFER.as_bytes())
+    let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
+    let shard_target = parallelism.clamp(1, 4);
+    let response_shards = 1_usize << shard_target.ilog2();
+    let expected_root_bytes = (2 * response_shards + 1) * 65_507;
+    assert_eq!(
+        metric_value(&server_baseline, SERVER_ROOT_BUFFER),
+        Some(expected_root_bytes as u64)
     );
     let mut client =
         ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);

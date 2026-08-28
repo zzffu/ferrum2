@@ -6,10 +6,12 @@ use bytes::BytesMut;
 use ferrum2_core::{AbortiveClose, LocalEndpoint};
 use ferrum2_crypto::{Clock, MethodTcpSalt, TcpOpener, TcpSealer};
 
-use super::io::{DataPoll, poll_data_read, poll_flush, poll_shutdown, poll_write_open};
+use super::io::{
+    DataPoll, DataRead, PollBudget, poll_data_fill, poll_flush, poll_shutdown, poll_write_open,
+};
 use super::{
-    ClientRx, DataRx, Lifecycle, PlainDuplex, StagedWrite, TransportIo, TxState, copy_ready,
-    reset_decrypt,
+    ClientRx, DataRx, Lifecycle, PlainBufferedDuplex, PlainDuplex, StagedWrite, TransportIo,
+    TxState, prepare_decrypt,
 };
 use crate::tcp::error::{
     DetectionReason, FlowTerminal, ShadowsocksError, TransportPhase, detection_from_aead,
@@ -50,6 +52,11 @@ impl<'a, S, K, T> ClientFlow<'a, S, K, T> {
         decrypt: BytesMut,
         observers: Observers<'a>,
     ) -> Self {
+        let mut decrypt = decrypt;
+        prepare_decrypt(
+            &mut decrypt,
+            request_salt.profile().initial_response_read_bytes(),
+        );
         Self {
             io,
             keys,
@@ -76,14 +83,14 @@ impl<S, K, T> Drop for ClientFlow<'_, S, K, T> {
 
 /// Type-erased owner used only to nest a bounded sequence of client flows.
 pub struct BoxedClientFlow<'a> {
-    inner: Box<dyn PlainDuplex + 'a>,
+    inner: Box<dyn PlainBufferedDuplex + 'a>,
     local_socket_addr: SocketAddr,
 }
 
 impl<'a> BoxedClientFlow<'a> {
     fn new<F>(flow: F) -> Self
     where
-        F: PlainDuplex + LocalEndpoint + 'a,
+        F: PlainBufferedDuplex + LocalEndpoint + 'a,
     {
         let local_socket_addr = flow.local_socket_addr();
         Self {
@@ -95,7 +102,7 @@ impl<'a> BoxedClientFlow<'a> {
 
 impl<'a, S, K, T> ClientFlow<'a, S, K, T>
 where
-    Self: PlainDuplex,
+    Self: PlainBufferedDuplex,
     S: LocalEndpoint + 'a,
     K: 'a,
     T: 'a,
@@ -123,7 +130,26 @@ impl AbortiveClose for BoxedClientFlow<'_> {
 impl TransportIo for BoxedClientFlow<'_> {
     type IoError = ShadowsocksError;
 
-    fn poll_read(
+    fn poll_read_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let result = Pin::new(&mut *self.inner).poll_fill_plain_buf(cx);
+        match result {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(source)) => {
+                let copied = source.len().min(limit);
+                destination.extend_from_slice(&source[..copied]);
+                Pin::new(&mut *self.inner).consume_plain(copied);
+                Poll::Ready(Ok(copied))
+            }
+        }
+    }
+
+    fn poll_read_initialized(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         destination: &mut [u8],
@@ -166,163 +192,219 @@ where
     K: TcpKeyProvider + Sync,
     T: Clock + Sync,
 {
+    fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<Result<&[u8], ShadowsocksError>> {
+        if let Some(error) = self.lifecycle.fatal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
+            return Poll::Ready(Ok(&[]));
+        }
+
+        let mut budget = PollBudget::new();
+        loop {
+            let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
+            match state {
+                ClientRx::ResponseFixed => {
+                    let response_first_read_len =
+                        self.request_salt.profile().initial_response_read_bytes();
+                    match Pin::new(&mut self.io).poll_read_buf(
+                        cx,
+                        &mut self.decrypt,
+                        response_first_read_len,
+                    ) {
+                        Poll::Pending => {
+                            self.rx = ClientRx::ResponseFixed;
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Err(_)) => {
+                            let error = self.lifecycle.install_detection(
+                                &mut self.io,
+                                self.observers.flow,
+                                DetectionReason::ReadFailed,
+                            );
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(read))
+                            if read != response_first_read_len
+                                || self.decrypt.len() != response_first_read_len =>
+                        {
+                            let error = self.lifecycle.install_detection(
+                                &mut self.io,
+                                self.observers.flow,
+                                DetectionReason::ShortRead,
+                            );
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(read)) => {
+                            budget.record_io(read);
+                            match self.open_response_fixed() {
+                                Ok(wire_len) => {
+                                    prepare_decrypt(&mut self.decrypt, wire_len);
+                                    self.rx = ClientRx::ResponsePayload {
+                                        wire_len,
+                                        filled: 0,
+                                    };
+                                    if budget.yield_if_exhausted(cx) {
+                                        return Poll::Pending;
+                                    }
+                                }
+                                Err(reason) => {
+                                    let error = self.lifecycle.install_detection(
+                                        &mut self.io,
+                                        self.observers.flow,
+                                        reason,
+                                    );
+                                    return Poll::Ready(Err(error));
+                                }
+                            }
+                        }
+                    }
+                }
+                ClientRx::ResponsePayload {
+                    wire_len,
+                    mut filled,
+                } => {
+                    match Pin::new(&mut self.io).poll_read_buf(
+                        cx,
+                        &mut self.decrypt,
+                        wire_len - filled,
+                    ) {
+                        Poll::Pending => {
+                            self.rx = ClientRx::ResponsePayload { wire_len, filled };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Err(_)) => {
+                            let error = self.lifecycle.install_detection(
+                                &mut self.io,
+                                self.observers.flow,
+                                DetectionReason::ReadFailed,
+                            );
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(0)) => {
+                            let error = self.lifecycle.install_detection(
+                                &mut self.io,
+                                self.observers.flow,
+                                DetectionReason::ShortRead,
+                            );
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(read)) => {
+                            budget.record_io(read);
+                            filled += read;
+                            if filled > wire_len || self.decrypt.len() != filled {
+                                let error = self.lifecycle.install_detection(
+                                    &mut self.io,
+                                    self.observers.flow,
+                                    DetectionReason::FrameBounds,
+                                );
+                                return Poll::Ready(Err(error));
+                            }
+                            if filled < wire_len {
+                                self.rx = ClientRx::ResponsePayload { wire_len, filled };
+                                if budget.yield_if_exhausted(cx) {
+                                    return Poll::Pending;
+                                }
+                                continue;
+                            }
+                            let opened = self
+                                .response_opener
+                                .as_mut()
+                                .expect("fixed response installed opener")
+                                .open_in_place(&mut self.decrypt);
+                            if let Err(error) = opened {
+                                let error = self.lifecycle.install_detection(
+                                    &mut self.io,
+                                    self.observers.flow,
+                                    detection_from_aead(error),
+                                );
+                                return Poll::Ready(Err(error));
+                            }
+                            budget.record_frame();
+                            self.rx = ClientRx::Data(DataRx::Ready { position: 0 });
+                            return Poll::Ready(Ok(&self.decrypt));
+                        }
+                    }
+                }
+                ClientRx::Data(state) => {
+                    let result = poll_data_fill(
+                        &mut self.io,
+                        self.response_opener
+                            .as_mut()
+                            .expect("response opener exists in data state"),
+                        &mut self.decrypt,
+                        state,
+                        &mut self.lifecycle,
+                        self.observers.flow,
+                        cx,
+                        &mut budget,
+                    );
+                    match result {
+                        DataPoll::Pending(state) => {
+                            self.rx = ClientRx::Data(state);
+                            return Poll::Pending;
+                        }
+                        DataPoll::Ready(state, result) => {
+                            self.rx = ClientRx::Data(state);
+                            return match result {
+                                Ok(DataRead::Buffered) => Poll::Ready(Ok(self.current_plaintext())),
+                                Ok(DataRead::Eof) => Poll::Ready(Ok(&[])),
+                                Err(error) => Poll::Ready(Err(error)),
+                            };
+                        }
+                    }
+                }
+                ClientRx::Poison => {
+                    unreachable!("client RX state is restored before returning")
+                }
+            }
+        }
+    }
+
+    fn current_plaintext(&self) -> &[u8] {
+        let ClientRx::Data(DataRx::Ready { position }) = self.rx else {
+            unreachable!("plaintext view requires ready data state")
+        };
+        &self.decrypt[position..]
+    }
+
+    fn consume(&mut self, amount: usize) {
+        let complete = match &mut self.rx {
+            ClientRx::Data(DataRx::Ready { position }) => {
+                assert!(amount <= self.decrypt.len() - *position);
+                *position += amount;
+                *position == self.decrypt.len()
+            }
+            _ => {
+                assert_eq!(amount, 0, "consume requires a current plaintext view");
+                false
+            }
+        };
+        if complete {
+            self.decrypt.clear();
+            self.rx = ClientRx::Data(DataRx::Length { filled: 0 });
+        }
+    }
+
     fn poll_read(
         &mut self,
         cx: &mut Context<'_>,
         destination: &mut [u8],
     ) -> Poll<Result<usize, ShadowsocksError>> {
-        if let Some(error) = self.lifecycle.fatal_error() {
-            return Poll::Ready(Err(error));
-        }
         if destination.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
-            return Poll::Ready(Ok(0));
-        }
-
-        let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
-        match state {
-            ClientRx::ResponseFixed => {
-                reset_decrypt(&mut self.decrypt);
-                let response_first_read_len =
-                    self.request_salt.profile().initial_response_read_bytes();
-                match Pin::new(&mut self.io)
-                    .poll_read(cx, &mut self.decrypt[..response_first_read_len])
-                {
-                    Poll::Pending => {
-                        self.rx = ClientRx::ResponseFixed;
-                        Poll::Pending
-                    }
-                    Poll::Ready(Err(_)) => {
-                        let error = self.lifecycle.install_detection(
-                            &mut self.io,
-                            self.observers.flow,
-                            DetectionReason::ReadFailed,
-                        );
-                        Poll::Ready(Err(error))
-                    }
-                    Poll::Ready(Ok(read)) if read != response_first_read_len => {
-                        let error = self.lifecycle.install_detection(
-                            &mut self.io,
-                            self.observers.flow,
-                            DetectionReason::ShortRead,
-                        );
-                        Poll::Ready(Err(error))
-                    }
-                    Poll::Ready(Ok(_)) => {
-                        let result = self.open_response_fixed();
-                        match result {
-                            Ok(wire_len) => {
-                                reset_decrypt(&mut self.decrypt);
-                                self.rx = ClientRx::ResponsePayload {
-                                    wire_len,
-                                    filled: 0,
-                                };
-                                cx.waker().wake_by_ref();
-                                Poll::Pending
-                            }
-                            Err(reason) => {
-                                let error = self.lifecycle.install_detection(
-                                    &mut self.io,
-                                    self.observers.flow,
-                                    reason,
-                                );
-                                Poll::Ready(Err(error))
-                            }
-                        }
-                    }
+        match self.poll_fill(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(source)) => {
+                let copied = source.len().min(destination.len());
+                destination[..copied].copy_from_slice(&source[..copied]);
+                if copied != 0 {
+                    self.consume(copied);
                 }
+                Poll::Ready(Ok(copied))
             }
-            ClientRx::ResponsePayload {
-                wire_len,
-                mut filled,
-            } => match Pin::new(&mut self.io).poll_read(cx, &mut self.decrypt[filled..wire_len]) {
-                Poll::Pending => {
-                    self.rx = ClientRx::ResponsePayload { wire_len, filled };
-                    Poll::Pending
-                }
-                Poll::Ready(Err(_)) => {
-                    let error = self.lifecycle.install_detection(
-                        &mut self.io,
-                        self.observers.flow,
-                        DetectionReason::ReadFailed,
-                    );
-                    Poll::Ready(Err(error))
-                }
-                Poll::Ready(Ok(0)) => {
-                    let error = self.lifecycle.install_detection(
-                        &mut self.io,
-                        self.observers.flow,
-                        DetectionReason::ShortRead,
-                    );
-                    Poll::Ready(Err(error))
-                }
-                Poll::Ready(Ok(read)) => {
-                    filled += read;
-                    if filled > wire_len {
-                        let error = self.lifecycle.install_detection(
-                            &mut self.io,
-                            self.observers.flow,
-                            DetectionReason::FrameBounds,
-                        );
-                        return Poll::Ready(Err(error));
-                    }
-                    if filled < wire_len {
-                        self.rx = ClientRx::ResponsePayload { wire_len, filled };
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                    self.decrypt.truncate(wire_len);
-                    let opened = self
-                        .response_opener
-                        .as_mut()
-                        .expect("fixed response installed opener")
-                        .open_in_place(&mut self.decrypt);
-                    if let Err(error) = opened {
-                        let error = self.lifecycle.install_detection(
-                            &mut self.io,
-                            self.observers.flow,
-                            detection_from_aead(error),
-                        );
-                        return Poll::Ready(Err(error));
-                    }
-                    let mut position = 0;
-                    let (copied, complete) = copy_ready(&self.decrypt, &mut position, destination);
-                    self.rx = if complete {
-                        reset_decrypt(&mut self.decrypt);
-                        ClientRx::Data(DataRx::Length { filled: 0 })
-                    } else {
-                        ClientRx::Data(DataRx::Ready { position })
-                    };
-                    Poll::Ready(Ok(copied))
-                }
-            },
-            ClientRx::Data(state) => {
-                let result = poll_data_read(
-                    &mut self.io,
-                    self.response_opener
-                        .as_mut()
-                        .expect("response opener exists in data state"),
-                    &mut self.decrypt,
-                    state,
-                    &mut self.lifecycle,
-                    self.observers.flow,
-                    cx,
-                    destination,
-                );
-                match result {
-                    DataPoll::Pending(state) => {
-                        self.rx = ClientRx::Data(state);
-                        Poll::Pending
-                    }
-                    DataPoll::Ready(state, result) => {
-                        self.rx = ClientRx::Data(state);
-                        Poll::Ready(result)
-                    }
-                }
-            }
-            ClientRx::Poison => unreachable!("client RX state is restored before returning"),
         }
     }
 
@@ -474,6 +556,27 @@ where
     }
 }
 
+impl<S, K, T> PlainBufferedDuplex for ClientFlow<'_, S, K, T>
+where
+    S: TransportIo,
+    K: TcpKeyProvider + Sync,
+    T: Clock + Sync,
+{
+    fn poll_fill_plain_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<&[u8], ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        this.poll_fill(cx)
+    }
+
+    fn consume_plain(self: Pin<&mut Self>, amount: usize) {
+        self.get_mut().consume(amount);
+    }
+}
+
 impl PlainDuplex for BoxedClientFlow<'_> {
     fn poll_read_plain(
         mut self: Pin<&mut Self>,
@@ -511,5 +614,19 @@ impl PlainDuplex for BoxedClientFlow<'_> {
 
     fn terminal(&self) -> Option<FlowTerminal> {
         self.inner.terminal()
+    }
+}
+
+impl PlainBufferedDuplex for BoxedClientFlow<'_> {
+    fn poll_fill_plain_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<&[u8], ShadowsocksError>> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.inner).poll_fill_plain_buf(cx)
+    }
+
+    fn consume_plain(mut self: Pin<&mut Self>, amount: usize) {
+        Pin::new(&mut *self.inner).consume_plain(amount);
     }
 }

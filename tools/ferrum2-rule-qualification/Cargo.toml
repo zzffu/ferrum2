@@ -10,6 +10,12 @@ publish.workspace = true
 name = "ferrum2-rule-qualification"
 path = "src/main.rs"
 
+[features]
+default = []
+candidate-domain-suffix-trie = ["ferrum2-rule/candidate-domain-suffix-trie"]
+candidate-cidr-radix = ["ferrum2-rule/candidate-cidr-radix"]
+candidate-atomic-snapshot = ["ferrum2-rule/candidate-atomic-snapshot"]
+
 [dependencies]
 clap.workspace = true
 ferrum2-core.workspace = true

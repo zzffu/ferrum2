@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn dns_only_udp_budget_holds_multi_hop_fixed_wires_and_responses() {
+    const MAX_INFLIGHT: usize = 16;
+
+    let limit = dns_only_udp_buffered_bytes(MAX_INFLIGHT).expect("bounded DNS UDP budget");
+    assert_eq!(limit, 3 * MAX_INFLIGHT * MAX_UDP_WIRE_LEN);
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(MAX_INFLIGHT, limit, MIN_UDP_IDLE_TIMEOUT).expect("DNS UDP limits"),
+        OwnerRegistry::new(),
+    );
+    let budget = manager.buffer_budget();
+    let fixed_wires = (0..2 * MAX_INFLIGHT)
+        .map(|_| {
+            budget
+                .reserve(MAX_UDP_WIRE_LEN)
+                .expect("persistent association wire")
+        })
+        .collect::<Vec<_>>();
+    let sessions = (0..MAX_INFLIGHT)
+        .map(|_| {
+            manager
+                .reserve_session(tokio::time::Instant::now())
+                .expect("DNS UDP session")
+        })
+        .collect::<Vec<_>>();
+    let responses = sessions
+        .iter()
+        .map(|session| {
+            session
+                .reserve_datagram(ferrum2_runtime::UdpDirection::ToClient, MAX_UDP_WIRE_LEN)
+                .expect("simultaneous DNS UDP response")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(budget.reserved_bytes(), limit);
+    assert!(budget.reserve(1).is_err(), "modeled peak is exact");
+
+    drop(responses);
+    drop(sessions);
+    drop(fixed_wires);
+    assert_eq!(budget.reserved_bytes(), 0);
+}
+
+#[test]
+fn dns_only_udp_budget_rejects_arithmetic_overflow_and_runtime_limit_overflow() {
+    assert_eq!(
+        dns_only_udp_buffered_bytes(usize::MAX),
+        Err(RunError::StartupProtocol)
+    );
+    let first_over_limit = MAX_UDP_MAX_BUFFERED_BYTES / (3 * MAX_UDP_WIRE_LEN) + 1;
+    assert_eq!(
+        dns_only_udp_buffered_bytes(first_over_limit),
+        Err(RunError::StartupProtocol)
+    );
+}
+
 #[tokio::test]
 async fn tagged_udp_uses_static_outbounds_and_no_fallback() {
     let listens = [reserve_address(), reserve_address()];
@@ -103,7 +159,7 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
     let (path, mut config) =
         tagged_client_test_config(&listens.map(|listen| (listen, server)), true);
     let udp = config.udp.as_mut().expect("UDP config");
-    udp.max_sessions = 8;
+    udp.max_sessions = 32;
     udp.max_buffered_bytes = 1024 * 1024;
     config.runtime.shutdown_grace = Duration::from_secs(1);
     let registry = OwnerRegistry::new();
@@ -120,7 +176,7 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
     let mut request = [0; 64];
     let request_len = encode_udp_datagram(&target, b"activate", &mut request).expect("request");
     let mut upstream_wire = [0; MAX_UDP_WIRE_LEN];
-    for _ in 0..5 {
+    for _ in 0..16 {
         let (control, application, relay) = udp_association(listens[0]).await;
         application
             .send_to(&request[..request_len], relay)
@@ -135,10 +191,10 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
         relays.push(relay);
     }
     let saturated = registry.snapshot();
-    assert_eq!(saturated.udp_sessions, baseline.udp_sessions + 5);
+    assert_eq!(saturated.udp_sessions, baseline.udp_sessions + 16);
     assert_eq!(
         saturated.udp_buffered_bytes,
-        baseline.udp_buffered_bytes + 15 * MAX_UDP_WIRE_LEN
+        baseline.udp_buffered_bytes + 16 * MAX_UDP_WIRE_LEN
     );
     let (mut rejected, rejected_application, rejected_relay) = udp_association(listens[1]).await;
     rejected_application
@@ -162,14 +218,14 @@ async fn tagged_udp_shares_byte_budget_across_listeners() {
         .is_err(),
         "rejected association reached upstream"
     );
-    assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 5);
+    assert_eq!(registry.snapshot().udp_sessions, baseline.udp_sessions + 16);
 
     drop(controls.remove(0));
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let released = registry.snapshot();
-        if released.udp_sessions == baseline.udp_sessions + 4
-            && released.udp_buffered_bytes == baseline.udp_buffered_bytes + 12 * MAX_UDP_WIRE_LEN
+        if released.udp_sessions == baseline.udp_sessions + 15
+            && released.udp_buffered_bytes == baseline.udp_buffered_bytes + 15 * MAX_UDP_WIRE_LEN
         {
             break;
         }

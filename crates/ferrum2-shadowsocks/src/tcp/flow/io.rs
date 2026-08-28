@@ -4,8 +4,8 @@ use std::task::{Context, Poll};
 use bytes::BytesMut;
 
 use super::{
-    DataRx, Lifecycle, StagedKind, StagedWrite, TransportIo, TxState, copy_ready,
-    protocol_cipher_boundary, reset_decrypt,
+    DataRx, Lifecycle, StagedKind, StagedWrite, TransportIo, TxState, prepare_decrypt,
+    protocol_cipher_boundary,
 };
 use crate::tcp::error::{
     DetectionReason, FlowTerminal, ProtocolReason, ShadowsocksError, TransportPhase,
@@ -18,13 +18,59 @@ use crate::tcp::wire::{
 };
 use ferrum2_crypto::{TcpOpener, TcpSealer};
 
+// Bound both useful bulk work and pathological tiny-ready fragmentation per outer poll.
+const POLL_FRAME_BUDGET: usize = 8;
+const POLL_BYTE_BUDGET: usize = 256 * 1024;
+const POLL_READY_IO_BUDGET: usize = 64;
+
+/// Per-outer-poll fairness budget shared across ready state transitions.
+pub(super) struct PollBudget {
+    frames: usize,
+    bytes: usize,
+    ready_io: usize,
+}
+
+impl PollBudget {
+    pub(super) const fn new() -> Self {
+        Self {
+            frames: 0,
+            bytes: 0,
+            ready_io: 0,
+        }
+    }
+
+    pub(super) fn record_io(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.ready_io = self.ready_io.saturating_add(1);
+    }
+
+    pub(super) fn record_frame(&mut self) {
+        self.frames = self.frames.saturating_add(1);
+    }
+
+    pub(super) fn yield_if_exhausted(&self, cx: &mut Context<'_>) -> bool {
+        let exhausted = self.frames >= POLL_FRAME_BUDGET
+            || self.bytes >= POLL_BYTE_BUDGET
+            || self.ready_io >= POLL_READY_IO_BUDGET;
+        if exhausted {
+            cx.waker().wake_by_ref();
+        }
+        exhausted
+    }
+}
+
 pub(super) enum DataPoll {
     Pending(DataRx),
-    Ready(DataRx, Result<usize, ShadowsocksError>),
+    Ready(DataRx, Result<DataRead, ShadowsocksError>),
+}
+
+pub(super) enum DataRead {
+    Buffered,
+    Eof,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn poll_data_read<S: TransportIo>(
+pub(super) fn poll_data_fill<S: TransportIo>(
     io: &mut S,
     opener: &mut TcpOpener,
     scratch: &mut BytesMut,
@@ -32,131 +78,144 @@ pub(super) fn poll_data_read<S: TransportIo>(
     lifecycle: &mut Lifecycle,
     observer: &dyn FlowObserver,
     cx: &mut Context<'_>,
-    destination: &mut [u8],
+    budget: &mut PollBudget,
 ) -> DataPoll {
-    match state {
-        DataRx::Length { mut filled } => {
-            if filled == 0 {
-                reset_decrypt(scratch);
+    let mut state = state;
+    loop {
+        state = match state {
+            DataRx::Length { mut filled } => {
+                if filled == 0 {
+                    prepare_decrypt(scratch, ENCRYPTED_LENGTH_LEN);
+                }
+                let remaining = ENCRYPTED_LENGTH_LEN - filled;
+                match Pin::new(&mut *io).poll_read_buf(cx, scratch, remaining) {
+                    Poll::Pending => return DataPoll::Pending(DataRx::Length { filled }),
+                    Poll::Ready(Err(_)) => {
+                        let error = lifecycle.install_transport(observer, TransportPhase::Read);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    Poll::Ready(Ok(0)) if filled == 0 => {
+                        scratch.clear();
+                        lifecycle.close_rx(observer);
+                        return DataPoll::Ready(DataRx::Closed, Ok(DataRead::Eof));
+                    }
+                    Poll::Ready(Ok(0)) => {
+                        let error =
+                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    Poll::Ready(Ok(read)) => {
+                        budget.record_io(read);
+                        filled += read;
+                        if filled > ENCRYPTED_LENGTH_LEN || scratch.len() != filled {
+                            let error =
+                                lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                        }
+                        if filled < ENCRYPTED_LENGTH_LEN {
+                            let next = DataRx::Length { filled };
+                            if budget.yield_if_exhausted(cx) {
+                                return DataPoll::Pending(next);
+                            }
+                            next
+                        } else {
+                            if let Err(error) =
+                                protocol_cipher_boundary(lifecycle, observer, || {
+                                    opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                                })
+                            {
+                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            }
+                            if scratch.len() != 2 {
+                                let error = lifecycle
+                                    .install_protocol(observer, ProtocolReason::FrameBounds);
+                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            }
+                            let payload_len =
+                                usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
+                            let Some(wire_len) = payload_len.checked_add(TAG_LEN) else {
+                                let error = lifecycle
+                                    .install_protocol(observer, ProtocolReason::FrameBounds);
+                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            };
+                            if wire_len > MAX_DECRYPT_WIRE_LEN {
+                                let error = lifecycle
+                                    .install_protocol(observer, ProtocolReason::FrameBounds);
+                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            }
+                            prepare_decrypt(scratch, wire_len);
+                            let next = DataRx::Payload {
+                                wire_len,
+                                filled: 0,
+                            };
+                            if budget.yield_if_exhausted(cx) {
+                                return DataPoll::Pending(next);
+                            }
+                            next
+                        }
+                    }
+                }
             }
-            match Pin::new(io).poll_read(cx, &mut scratch[filled..ENCRYPTED_LENGTH_LEN]) {
-                Poll::Pending => DataPoll::Pending(DataRx::Length { filled }),
+            DataRx::Payload {
+                wire_len,
+                mut filled,
+            } => match Pin::new(&mut *io).poll_read_buf(cx, scratch, wire_len - filled) {
+                Poll::Pending => return DataPoll::Pending(DataRx::Payload { wire_len, filled }),
                 Poll::Ready(Err(_)) => {
                     let error = lifecycle.install_transport(observer, TransportPhase::Read);
-                    DataPoll::Ready(DataRx::Poison, Err(error))
-                }
-                Poll::Ready(Ok(0)) if filled == 0 => {
-                    lifecycle.close_rx(observer);
-                    DataPoll::Ready(DataRx::Closed, Ok(0))
+                    return DataPoll::Ready(DataRx::Poison, Err(error));
                 }
                 Poll::Ready(Ok(0)) => {
                     let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                    DataPoll::Ready(DataRx::Poison, Err(error))
+                    return DataPoll::Ready(DataRx::Poison, Err(error));
                 }
                 Poll::Ready(Ok(read)) => {
+                    budget.record_io(read);
                     filled += read;
-                    if filled > ENCRYPTED_LENGTH_LEN {
+                    if filled > wire_len || scratch.len() != filled {
                         let error =
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                         return DataPoll::Ready(DataRx::Poison, Err(error));
                     }
-                    if filled < ENCRYPTED_LENGTH_LEN {
-                        cx.waker().wake_by_ref();
-                        return DataPoll::Pending(DataRx::Length { filled });
+                    if filled < wire_len {
+                        let next = DataRx::Payload { wire_len, filled };
+                        if budget.yield_if_exhausted(cx) {
+                            return DataPoll::Pending(next);
+                        }
+                        next
+                    } else {
+                        if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                            opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                        }) {
+                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                        }
+                        budget.record_frame();
+                        if scratch.is_empty() {
+                            let next = DataRx::Length { filled: 0 };
+                            if budget.yield_if_exhausted(cx) {
+                                return DataPoll::Pending(next);
+                            }
+                            next
+                        } else {
+                            return DataPoll::Ready(
+                                DataRx::Ready { position: 0 },
+                                Ok(DataRead::Buffered),
+                            );
+                        }
                     }
-                    scratch.truncate(ENCRYPTED_LENGTH_LEN);
-                    if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
-                        opener.open_in_place(scratch).map_err(frame_from_open_aead)
-                    }) {
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
-                    }
-                    if scratch.len() != 2 {
-                        let error =
-                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
-                    }
-                    let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
-                    let Some(wire_len) = payload_len.checked_add(TAG_LEN) else {
-                        let error =
-                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
-                    };
-                    if wire_len > MAX_DECRYPT_WIRE_LEN {
-                        let error =
-                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
-                    }
-                    reset_decrypt(scratch);
-                    cx.waker().wake_by_ref();
-                    DataPoll::Pending(DataRx::Payload {
-                        wire_len,
-                        filled: 0,
-                    })
                 }
+            },
+            DataRx::Ready { position } => {
+                return DataPoll::Ready(DataRx::Ready { position }, Ok(DataRead::Buffered));
             }
-        }
-        DataRx::Payload {
-            wire_len,
-            mut filled,
-        } => match Pin::new(io).poll_read(cx, &mut scratch[filled..wire_len]) {
-            Poll::Pending => DataPoll::Pending(DataRx::Payload { wire_len, filled }),
-            Poll::Ready(Err(_)) => {
-                let error = lifecycle.install_transport(observer, TransportPhase::Read);
-                DataPoll::Ready(DataRx::Poison, Err(error))
+            DataRx::Closed => return DataPoll::Ready(DataRx::Closed, Ok(DataRead::Eof)),
+            DataRx::Poison => {
+                let error = lifecycle
+                    .fatal_error()
+                    .expect("poison state only exists after fatal installation");
+                return DataPoll::Ready(DataRx::Poison, Err(error));
             }
-            Poll::Ready(Ok(0)) => {
-                let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                DataPoll::Ready(DataRx::Poison, Err(error))
-            }
-            Poll::Ready(Ok(read)) => {
-                filled += read;
-                if filled > wire_len {
-                    let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                    return DataPoll::Ready(DataRx::Poison, Err(error));
-                }
-                if filled < wire_len {
-                    cx.waker().wake_by_ref();
-                    return DataPoll::Pending(DataRx::Payload { wire_len, filled });
-                }
-                scratch.truncate(wire_len);
-                if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
-                    opener.open_in_place(scratch).map_err(frame_from_open_aead)
-                }) {
-                    return DataPoll::Ready(DataRx::Poison, Err(error));
-                }
-                if scratch.is_empty() {
-                    reset_decrypt(scratch);
-                    cx.waker().wake_by_ref();
-                    return DataPoll::Pending(DataRx::Length { filled: 0 });
-                }
-                let mut position = 0;
-                let (copied, complete) = copy_ready(scratch, &mut position, destination);
-                let next = if complete {
-                    reset_decrypt(scratch);
-                    DataRx::Length { filled: 0 }
-                } else {
-                    DataRx::Ready { position }
-                };
-                DataPoll::Ready(next, Ok(copied))
-            }
-        },
-        DataRx::Ready { mut position } => {
-            let (copied, complete) = copy_ready(scratch, &mut position, destination);
-            let next = if complete {
-                reset_decrypt(scratch);
-                DataRx::Length { filled: 0 }
-            } else {
-                DataRx::Ready { position }
-            };
-            DataPoll::Ready(next, Ok(copied))
-        }
-        DataRx::Closed => DataPoll::Ready(DataRx::Closed, Ok(0)),
-        DataRx::Poison => {
-            let error = lifecycle
-                .fatal_error()
-                .expect("poison state only exists after fatal installation");
-            DataPoll::Ready(DataRx::Poison, Err(error))
-        }
+        };
     }
 }
 
@@ -216,44 +275,53 @@ pub(super) fn drain_staged<S: TransportIo>(
     observer: &dyn FlowObserver,
     cx: &mut Context<'_>,
 ) -> Poll<Result<(), ShadowsocksError>> {
-    let current = staged.as_mut().expect("caller checked staged wire");
-    let source = &scratch[current.position..];
-    match Pin::new(&mut *io).poll_write(cx, source) {
-        Poll::Pending => Poll::Pending,
-        Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
-            let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
-            Poll::Ready(Err(error))
-        }
-        Poll::Ready(Err(_)) => {
-            let error = lifecycle.install_transport(observer, TransportPhase::Write);
-            Poll::Ready(Err(error))
-        }
-        Poll::Ready(Ok(written)) if current.kind == StagedKind::First => {
-            if written != source.len() {
-                let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+    let mut budget = PollBudget::new();
+    loop {
+        let current = staged.as_mut().expect("caller checked staged wire");
+        let source = &scratch[current.position..];
+        match Pin::new(&mut *io).poll_write(cx, source) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
+                let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
                 return Poll::Ready(Err(error));
             }
-            scratch.clear();
-            *staged = None;
-            Poll::Ready(Ok(()))
-        }
-        Poll::Ready(Ok(0)) => {
-            let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
-            Poll::Ready(Err(error))
-        }
-        Poll::Ready(Ok(written)) => {
-            current.position += written;
-            if current.position > scratch.len() {
+            Poll::Ready(Err(_)) => {
                 let error = lifecycle.install_transport(observer, TransportPhase::Write);
                 return Poll::Ready(Err(error));
             }
-            if current.position == scratch.len() {
+            Poll::Ready(Ok(written)) if current.kind == StagedKind::First => {
+                if written != source.len() {
+                    let error =
+                        lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+                    return Poll::Ready(Err(error));
+                }
                 scratch.clear();
                 *staged = None;
-                Poll::Ready(Ok(()))
-            } else {
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Ok(0)) => {
+                let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
+                return Poll::Ready(Err(error));
+            }
+            Poll::Ready(Ok(written)) => {
+                budget.record_io(written);
+                current.position += written;
+                if current.position > scratch.len() {
+                    let error = lifecycle.install_transport(observer, TransportPhase::Write);
+                    return Poll::Ready(Err(error));
+                }
+                if current.position == scratch.len() {
+                    scratch.clear();
+                    *staged = None;
+                    budget.record_frame();
+                    if budget.yield_if_exhausted(cx) {
+                        return Poll::Pending;
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                if budget.yield_if_exhausted(cx) {
+                    return Poll::Pending;
+                }
             }
         }
     }
@@ -276,13 +344,11 @@ pub(super) fn poll_flush<S: TransportIo>(
         return Poll::Ready(Ok(()));
     }
     if staged.is_some() {
-        return match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
-            Poll::Ready(Ok(())) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            other => other,
-        };
+        match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
     }
     if tx == TxState::ResponsePending {
         return Poll::Ready(Ok(()));
@@ -314,13 +380,11 @@ pub(super) fn poll_shutdown<S: TransportIo>(
         return Poll::Ready(Ok(()));
     }
     if staged.is_some() {
-        return match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
-            Poll::Ready(Ok(())) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            other => other,
-        };
+        match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
     }
     match Pin::new(io).poll_shutdown(cx) {
         Poll::Pending => Poll::Pending,

@@ -13,7 +13,7 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 
-use super::dns_resource::{DNS_LOAD_WORKERS, DNS_UPSTREAM_DELAY};
+use super::dns_resource::{DNS_LOAD_WORKERS, DNS_MAX_INFLIGHT, DNS_UPSTREAM_DELAY};
 use super::process_support::{ProcessGuard, clean_io, join_worker, remaining, spawn_worker, v4};
 use super::profile_contract::{EVIDENCE_LINE_MAX_BYTES, Topology};
 use super::self_check::ensure_redacted;
@@ -259,19 +259,60 @@ impl Drop for DnsResponder {
 pub(super) struct DnsLoad {
     pub(super) stop: Arc<AtomicBool>,
     pub(super) completed: Arc<AtomicUsize>,
+    pub(super) active: Arc<AtomicUsize>,
+    pub(super) peak: Arc<AtomicUsize>,
+    pub(super) expected_workers: usize,
     pub(super) workers: Vec<JoinHandle<Result<usize, String>>>,
+}
+
+struct DnsInflight<'a> {
+    active: &'a AtomicUsize,
+}
+
+impl<'a> DnsInflight<'a> {
+    fn start(active: &'a AtomicUsize, peak: &AtomicUsize) -> Self {
+        let current = active
+            .fetch_add(1, Ordering::SeqCst)
+            .checked_add(1)
+            .expect("bounded DNS inflight count");
+        peak.fetch_max(current, Ordering::SeqCst);
+        Self { active }
+    }
+}
+
+impl Drop for DnsInflight<'_> {
+    fn drop(&mut self) {
+        let previous = self.active.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0, "DNS inflight accounting underflowed");
+    }
 }
 
 impl DnsLoad {
     pub(super) fn start(address: SocketAddrV4, name: &'static str) -> Result<Self, String> {
+        Self::start_with_workers(address, name, DNS_LOAD_WORKERS, None)
+    }
+
+    pub(super) fn start_with_workers(
+        address: SocketAddrV4,
+        name: &'static str,
+        worker_count: usize,
+        expected_wire_bytes: Option<usize>,
+    ) -> Result<Self, String> {
+        if !(1..=usize::from(DNS_MAX_INFLIGHT)).contains(&worker_count) {
+            return Err("DNS load worker count exceeds the bounded inflight limit".to_owned());
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
         let typed_name =
             Name::from_ascii(name).map_err(|_| "DNS load name is invalid".to_owned())?;
-        let mut workers = Vec::with_capacity(DNS_LOAD_WORKERS);
-        for worker_index in 0..DNS_LOAD_WORKERS {
+        let mut workers = Vec::with_capacity(worker_count);
+        for worker_index in 0..worker_count {
             let worker_stop = Arc::clone(&stop);
             let worker_completed = Arc::clone(&completed);
+            let worker_active = Arc::clone(&active);
+            let worker_peak = Arc::clone(&peak);
             let worker_name = typed_name.clone();
             let worker = spawn_worker(move || {
                 let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
@@ -290,24 +331,18 @@ impl DnsLoad {
                         ^ 1;
                     let mut request = Message::new(id, MessageType::Query, OpCode::Query);
                     request.add_query(Query::query(worker_name.clone(), RecordType::A));
-                    socket
-                        .send(
-                            &request
-                                .to_vec()
-                                .map_err(|_| "DNS load could not encode a query".to_owned())?,
-                        )
-                        .map_err(clean_io)?;
-                    let length = match socket.recv(&mut response_wire) {
+                    let request_wire = request
+                        .to_vec()
+                        .map_err(|_| "DNS load could not encode a query".to_owned())?;
+                    if expected_wire_bytes.is_some_and(|expected| request_wire.len() != expected) {
+                        return Err("DNS load query wire length changed".to_owned());
+                    }
+                    socket.send(&request_wire).map_err(clean_io)?;
+                    let inflight = DnsInflight::start(&worker_active, &worker_peak);
+                    let received = socket.recv(&mut response_wire);
+                    drop(inflight);
+                    let length = match received {
                         Ok(length) => length,
-                        Err(error)
-                            if worker_stop.load(Ordering::SeqCst)
-                                && matches!(
-                                    error.kind(),
-                                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                                ) =>
-                        {
-                            break;
-                        }
                         Err(error) => return Err(clean_io(error)),
                     };
                     let response = Message::from_vec(&response_wire[..length])
@@ -339,13 +374,38 @@ impl DnsLoad {
         Ok(Self {
             stop,
             completed,
+            active,
+            peak,
+            expected_workers: worker_count,
             workers,
         })
     }
 
     pub(super) fn wait_started(&self, deadline: Instant) -> Result<(), String> {
-        while self.completed.load(Ordering::SeqCst) < DNS_LOAD_WORKERS {
+        while self.completed.load(Ordering::SeqCst) < self.expected_workers {
+            if self.workers.iter().any(JoinHandle::is_finished) {
+                return Err("DNS load worker ended before startup completed".to_owned());
+            }
             thread::sleep(remaining(deadline)?.min(Duration::from_millis(20)));
+        }
+        Ok(())
+    }
+
+    pub(super) fn completed(&self) -> usize {
+        self.completed.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn active(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn ensure_running(&self) -> Result<(), String> {
+        if self.workers.iter().any(JoinHandle::is_finished) {
+            return Err("DNS load worker ended early".to_owned());
         }
         Ok(())
     }
@@ -362,11 +422,15 @@ impl DnsLoad {
                 }
             }
         }
-        if let Some(error) = first_error {
-            return Err(error);
+        if self.active() != 0 {
+            first_error
+                .get_or_insert_with(|| "DNS load inflight accounting did not drain".to_owned());
         }
         if total != self.completed.load(Ordering::SeqCst) {
-            return Err("DNS load completion accounting mismatch".to_owned());
+            first_error.get_or_insert_with(|| "DNS load completion accounting mismatch".to_owned());
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(total)
     }

@@ -18,8 +18,8 @@ use crate::measurement::statistics::{
 };
 use crate::measurement::timing::{MIN_SAMPLE_WINDOW_NANOSECONDS, WARMUP_BATCHES};
 use crate::report::{
-    EnvironmentFingerprint, MeasurementPolicy, REPORT_SCHEMA, Report, RepositoryFingerprint,
-    RunConfiguration, RunnerFingerprint,
+    CandidateEvidence, EnvironmentFingerprint, MeasurementPolicy, REPORT_SCHEMA, Report,
+    RepositoryFingerprint, RunConfiguration, RunnerFingerprint,
 };
 use crate::route_program::run_route_programs;
 
@@ -92,6 +92,7 @@ pub fn execute(args: Args) -> Result<()> {
         environment,
         repository,
         runner,
+        candidate: candidate_evidence(),
         configuration: RunConfiguration {
             match_sizes,
             route_sizes,
@@ -144,6 +145,21 @@ pub fn execute(args: Args) -> Result<()> {
         Err(QualificationError::new(
             "allocation-free MatchSet/Route hot-path gate failed; JSON evidence was emitted",
         ))
+    }
+}
+
+fn candidate_evidence() -> CandidateEvidence {
+    let enabled_features = [
+        cfg!(feature = "candidate-atomic-snapshot").then_some("candidate-atomic-snapshot"),
+        cfg!(feature = "candidate-cidr-radix").then_some("candidate-cidr-radix"),
+        cfg!(feature = "candidate-domain-suffix-trie").then_some("candidate-domain-suffix-trie"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    CandidateEvidence {
+        adoption_claim: false,
+        enabled_features,
     }
 }
 
@@ -273,4 +289,31 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_evidence_is_sorted_explicit_and_never_claims_adoption() {
+        let evidence = candidate_evidence();
+        let expected = [
+            cfg!(feature = "candidate-atomic-snapshot").then_some("candidate-atomic-snapshot"),
+            cfg!(feature = "candidate-cidr-radix").then_some("candidate-cidr-radix"),
+            cfg!(feature = "candidate-domain-suffix-trie")
+                .then_some("candidate-domain-suffix-trie"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        assert!(!evidence.adoption_claim);
+        assert_eq!(evidence.enabled_features, expected);
+        assert!(
+            evidence
+                .enabled_features
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+    }
 }

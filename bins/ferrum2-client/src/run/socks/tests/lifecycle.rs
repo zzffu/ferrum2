@@ -53,7 +53,7 @@ async fn active_idle_and_generation_cancel_return_every_owner_and_socket() {
             live.active_supervisor_children,
             live.connection_tasks,
         );
-        let expected = (1, 3 * MAX_UDP_WIRE_LEN, 0, 1, 1);
+        let expected = (1, MAX_UDP_WIRE_LEN, 0, 1, 1);
         assert_eq!(actual, expected, "{terminal}");
         if terminal == "idle" {
             tokio::time::advance(Duration::from_secs(300)).await;

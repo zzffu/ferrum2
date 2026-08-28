@@ -239,7 +239,13 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         .collect();
     assert_eq!(
         rule_dependencies,
-        BTreeSet::from(["aho-corasick", "ferrum2-core", "flate2", "ipnet"])
+        BTreeSet::from([
+            "aho-corasick",
+            "arc-swap",
+            "ferrum2-core",
+            "flate2",
+            "ipnet",
+        ])
     );
     assert!(
         core_dependencies

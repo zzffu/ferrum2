@@ -12,7 +12,7 @@ pub use tcp::{
     BoxedClientFlow, BufferObserver, BufferRole, ClientFlow, ClientTcpOutbound,
     ConnectedClientOpen, DetectionReason, FlowObserver, FlowTerminal, FrameError,
     MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN, MAX_ENCRYPT_WIRE_LEN, MAX_PADDING_LEN,
-    MAX_PAYLOAD_LEN, MethodKeyAdapter, NoReply, PlainDuplex, ProtocolReason,
+    MAX_PAYLOAD_LEN, MethodKeyAdapter, NoReply, PlainBufferedDuplex, PlainDuplex, ProtocolReason,
     REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, ReplayCapacityError, ServerFlow,
     ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN, TCP_SALT_LEN, TcpKeyError, TcpKeyProvider,
     TcpReplayStore, TransportIo, TransportPhase, encode_request_first_write,

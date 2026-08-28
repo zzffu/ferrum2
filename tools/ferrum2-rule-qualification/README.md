@@ -12,10 +12,11 @@ cargo run --release -p ferrum2-rule-qualification --locked -- \
   --profile smoke --workspace-root .
 ```
 
-The qualification profile covers generated MatchSets at 100, 1,000, and
-10,000 values; route programs at 1, 32, 64, 1,000, and 10,000 rules; and DNS
-query programs at 1, 64, 65, 100, 1,000, and 10,000 rules. Add `--include-100k` to include the
-explicitly expensive 100,000-value MatchSet scale:
+The qualification profile covers generated MatchSets at 64, 65, 100, 1,000,
+and 10,000 values; route programs at 1, 32, 64, 1,000, and 10,000 rules; and
+DNS query programs at 1, 64, 65, 100, 1,000, and 10,000 rules. The smoke
+profile also retains the MatchSet 64/65 candidate boundary. Add `--include-100k`
+to include the explicitly expensive 100,000-value MatchSet scale:
 
 ```text
 cargo run --release -p ferrum2-rule-qualification --locked -- \
@@ -94,6 +95,47 @@ false because the 5%/15% matcher gate does not apply to whole-program dispatch.
 The top-level `thresholds_passed` is true only when every applicable latency and
 allocation gate passes. The runner emits complete JSON before returning
 failure, so a failed qualification retains its evidence.
+
+## Default-off rule candidates
+
+The product and qualification runner default to the established sorted matcher
+indexes and locked snapshot store. Three compile-time candidates are available
+only for evidence collection:
+
+- `candidate-domain-suffix-trie`
+- `candidate-cidr-radix`
+- `candidate-atomic-snapshot`
+
+The runner forwards each feature to `ferrum2-rule`. Report schema v2 records the
+sorted exact feature list under `candidate.enabled_features` and always records
+`candidate.adoption_claim` as `false`. There is no production configuration
+switch and a qualification result does not adopt a candidate.
+
+Build the parent and candidates into separate directories so executable hashes
+and feature identities stay bound to their reports:
+
+```text
+cargo build --release -p ferrum2-rule-qualification --locked \
+  --target-dir target/performance-rule-parent
+cargo build --release -p ferrum2-rule-qualification --locked \
+  --features candidate-domain-suffix-trie \
+  --target-dir target/performance-rule-domain-suffix-trie
+cargo build --release -p ferrum2-rule-qualification --locked \
+  --features candidate-cidr-radix \
+  --target-dir target/performance-rule-cidr-radix
+cargo build --release -p ferrum2-rule-qualification --locked \
+  --features candidate-atomic-snapshot \
+  --target-dir target/performance-rule-atomic-snapshot
+cargo build --release -p ferrum2-rule-qualification --locked \
+  --all-features --target-dir target/performance-rule-all-candidates
+```
+
+Use each candidate binary as a separate `--candidate` in the six-pair
+controller flow below. Parent and candidate reports must have identical
+scenarios, including the 64/65 boundary, and the controller rejects unknown,
+duplicate, or unsorted feature identities. Adoption or rejection remains a
+separate reviewed source change after calibrated evidence; thresholds and
+decision semantics are unchanged.
 
 External release evidence is generated with the following command, then
 retained in the approved immutable evidence store and recorded by

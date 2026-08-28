@@ -12,7 +12,7 @@ use crate::{
     DEFAULT_ROUTE_SNIFF_TIMEOUT_MS, DEFAULT_SHUTDOWN_GRACE_MS, DEFAULT_TUN_MAX_TCP_FLOWS,
     DEFAULT_TUN_MAX_UDP_MAPPINGS, DEFAULT_TUN_MTU, DEFAULT_TUN_READY_TIMEOUT_MS,
     DEFAULT_TUN_RING_CAPACITY, DEFAULT_TUN_TCP_BUFFER_BYTES, DEFAULT_UDP_IDLE_TIMEOUT_MS,
-    DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
+    DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS, DEFAULT_UDP_RECEIVE_WORKERS,
 };
 
 #[derive(Deserialize)]
@@ -104,6 +104,8 @@ pub(super) struct RawUdp {
     pub(super) max_buffered_bytes: usize,
     #[serde(default = "default_udp_idle_timeout_ms")]
     pub(super) idle_timeout_ms: u64,
+    #[serde(default = "default_udp_receive_workers")]
+    pub(super) receive_workers: usize,
 }
 
 impl Default for RawUdp {
@@ -113,6 +115,7 @@ impl Default for RawUdp {
             max_sessions: default_udp_max_sessions(),
             max_buffered_bytes: default_udp_max_buffered_bytes(),
             idle_timeout_ms: default_udp_idle_timeout_ms(),
+            receive_workers: default_udp_receive_workers(),
         }
     }
 }
@@ -346,6 +349,8 @@ pub(super) struct RawShadowsocks {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRuntime {
+    #[serde(default = "default_network_generation")]
+    pub(super) network_generation: String,
     #[serde(default = "default_max_connections")]
     pub(super) max_connections: u32,
     #[serde(default = "default_listen_backlog")]
@@ -363,6 +368,7 @@ pub(super) struct RawRuntime {
 impl Default for RawRuntime {
     fn default() -> Self {
         Self {
+            network_generation: default_network_generation(),
             max_connections: default_max_connections(),
             listen_backlog: default_listen_backlog(),
             handshake_timeout_ms: default_handshake_timeout_ms(),
@@ -371,6 +377,10 @@ impl Default for RawRuntime {
             shutdown_grace_ms: default_shutdown_grace_ms(),
         }
     }
+}
+
+fn default_network_generation() -> String {
+    "dynamic".to_owned()
 }
 
 #[derive(Deserialize)]
@@ -492,6 +502,10 @@ const fn default_udp_max_buffered_bytes() -> usize {
 
 const fn default_udp_idle_timeout_ms() -> u64 {
     DEFAULT_UDP_IDLE_TIMEOUT_MS
+}
+
+const fn default_udp_receive_workers() -> usize {
+    DEFAULT_UDP_RECEIVE_WORKERS
 }
 
 const fn default_dns_timeout_ms() -> u64 {

@@ -1,5 +1,4 @@
 use super::*;
-use ferrum2_core::SessionReply as _;
 
 #[tokio::test]
 async fn local_endpoint_failure_sends_one_general_failure_and_has_no_transport() {
@@ -28,11 +27,11 @@ async fn local_endpoint_failure_sends_one_general_failure_and_has_no_transport()
         .accept_command(application)
         .await
         .expect("accepted SOCKS request");
-    let SocksCommand::Connect(session) = command else {
+    let SocksCommand::Connect(connect) = command else {
         panic!("CONNECT request")
     };
-    session
-        .reply
+    let (_, pending) = connect.into_parts();
+    pending
         .failed(ConnectErrorKind::Other)
         .await
         .expect("failure reply");

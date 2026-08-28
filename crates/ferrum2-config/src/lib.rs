@@ -13,6 +13,10 @@ const DEFAULT_REPLAY_CAPACITY: usize = 65_536;
 const DEFAULT_UDP_MAX_SESSIONS: usize = 4_096;
 const DEFAULT_UDP_MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_UDP_IDLE_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_UDP_RECEIVE_WORKERS: usize = 1;
+
+/// Hard ceiling for explicitly configured Linux UDP receive workers.
+pub const MAX_UDP_RECEIVE_WORKERS: usize = 32;
 const DEFAULT_DNS_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_DNS_MAX_INFLIGHT: u32 = 256;
 const DEFAULT_ROUTE_SNIFF_TIMEOUT_MS: u64 = 300;
@@ -39,10 +43,11 @@ pub use model::{
     ClientDnsRoute, ClientInboundConfig, ClientOutboundConfig, CompiledRoute, DirectDomainResolver,
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsIngressId,
     DnsPolicyBlueprintBinding, DnsQueryType, DnsRuntimeConfig, DnsServerConfig, DnsStrategy,
-    DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, OutboundDialOptions, ReplayConfig,
-    ResolverRef, RouteAction, RouteNetworkConfig, RouteProtocol, RouteSniffConfig, RuntimeConfig,
-    SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig,
-    UdpConfig, UdpFiltering, ValidatedClientConfig, ValidatedServerConfig,
+    DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, NetworkGenerationMode,
+    OutboundDialOptions, ReplayConfig, ResolverRef, RouteAction, RouteNetworkConfig, RouteProtocol,
+    RouteSniffConfig, RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig,
+    ServerOutboundConfig, Sniffers, TunConfig, UdpConfig, UdpFiltering, ValidatedClientConfig,
+    ValidatedServerConfig,
 };
 pub use prepared::{
     ClientV2Resources, CompiledRuleSetResource, DialEndpoint, PreparedClientOutboundDescriptor,

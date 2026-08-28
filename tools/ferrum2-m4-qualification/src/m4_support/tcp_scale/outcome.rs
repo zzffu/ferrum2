@@ -16,6 +16,7 @@ use crate::m4_support::process_support::{REAP_TIMEOUT, clean_io, remaining, v4, 
 use crate::m4_support::profile_contract::{
     ProfileArgs, ProfileOutcome, TCP_SCALE_EVIDENCE_LINE_MAX_BYTES, Topology,
 };
+use crate::m4_support::profile_structural::StructuralMetrics;
 use crate::m4_support::proxy_config::{ferrum_client_config, ferrum_server_config};
 use crate::m4_support::resource_sampling::{
     PairSample, proc_sample, sample_pair, validate_drain, wait_for_sessions,
@@ -213,6 +214,7 @@ pub(crate) fn build_outcome(
             .checked_mul(2)
             .ok_or_else(|| "scale I/O completion count overflow".to_owned())?,
         scale_json: Some(scale_json),
+        structural_metrics: StructuralMetrics::unavailable(),
     })
 }
 

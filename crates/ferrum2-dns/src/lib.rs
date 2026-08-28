@@ -25,7 +25,7 @@ pub use application::{
 pub use application_adapter::ApplicationResolverAdapter;
 pub use cache::{
     DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheError, DnsCacheKey, DnsCacheLookup,
-    DnsCacheObserver, DnsCacheQtype, DnsServerId, ResolverGeneration,
+    DnsCacheObserver, DnsCacheQtype, DnsCacheWorkSnapshot, DnsServerId, ResolverGeneration,
 };
 pub use channel_datagram::ChannelDnsDatagram;
 pub use endpoint::{
@@ -43,7 +43,10 @@ pub use policy::{
     DnsPolicyRule, DnsPolicyScratch, DnsPolicyStage, DnsPolicyStateError, DnsPolicyStep,
     DnsPortRange,
 };
-pub use proxy::{DnsProxy, DnsProxyListeners, DnsProxySockets, ProxyIngress, ProxyTransport};
+pub use proxy::{
+    DnsProxy, DnsProxyListeners, DnsProxySockets, DnsUdpEvent, DnsUdpObserver, ProxyIngress,
+    ProxyTransport,
+};
 pub use resolver::{DnsUpstreamSpec, DnsUpstreamTransport};
 pub use runtime_owner::{RuntimeStats, ShutdownReport, TaggedResolver, TaggedResolverOwner};
 pub use runtime_provider::{

@@ -51,6 +51,7 @@ hickory-proto = { version = "=0.26.1", default-features = false, features = ["st
 hickory-server = { version = "=0.26.1", default-features = false }
 ipnet = { version = "=2.12.1", default-features = false }
 aho-corasick = "=1.1.4"
+arc-swap = "=1.9.2"
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 sha2 = { version = "=0.11.0", default-features = false }
 stats_alloc = "=0.1.10"
@@ -100,3 +101,13 @@ unsafe_code = "forbid"
 inherits = "release"
 debug = 1
 strip = "none"
+
+[profile.performance-thin-lto]
+inherits = "profiling"
+lto = "thin"
+codegen-units = 1
+
+[profile.performance-panic-abort-strip]
+inherits = "profiling"
+panic = "abort"
+strip = "symbols"

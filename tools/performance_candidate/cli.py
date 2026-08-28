@@ -9,9 +9,13 @@ import pathlib
 import sys
 from collections.abc import Sequence
 
+from tools.performance_candidate import build_experiment
+from tools.performance_candidate import evidence_matrix
+from tools.performance_candidate.linux import baseline
 from tools.performance_candidate.identity import validate_git_relation
 from tools.performance_candidate.json_contract import CandidateControlError, _strict_json
 from tools.performance_candidate.linux.decision import run_summary_command
+from tools.performance_candidate.linux.calibration import create_calibration_candidate
 from tools.performance_candidate.linux.policy import load_decision_policy
 from tools.performance_candidate.linux.plan import create_plan, load_plan, validate_measurement_inputs, write_plan
 from tools.performance_candidate.linux.scale import load_scale_safety_policy
@@ -39,12 +43,18 @@ def _parser() -> argparse.ArgumentParser:
     relation.add_argument("--repository", required=True, type=pathlib.Path)
     relation.add_argument("--parent-sha", required=True)
     relation.add_argument("--candidate-sha", required=True)
+    relation.add_argument(
+        "--run-kind", choices=("comparison", "calibration-aa"), default="comparison"
+    )
     plan = commands.add_parser("plan", help="write a canonical scenario plan")
     plan.add_argument("--mode", required=True)
     plan.add_argument("--selection", required=True)
     plan.add_argument("--warmup-seconds", required=True)
     plan.add_argument("--active-seconds", required=True)
     plan.add_argument("--pairs", required=True)
+    plan.add_argument(
+        "--run-kind", choices=("comparison", "calibration-aa"), default="comparison"
+    )
     plan.add_argument("--policy", required=True, type=pathlib.Path)
     plan.add_argument("--scale-policy", type=pathlib.Path)
     plan.add_argument("--scale-lineage", type=pathlib.Path)
@@ -79,6 +89,14 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--repository", type=pathlib.Path)
     summary.add_argument("--output", required=True, type=pathlib.Path)
     summary.add_argument("--markdown", required=True, type=pathlib.Path)
+    calibration = commands.add_parser(
+        "linux-calibration-candidate",
+        help="aggregate repeated same-commit A/A summaries for explicit review",
+    )
+    calibration.add_argument(
+        "--summary", action="append", required=True, type=pathlib.Path
+    )
+    calibration.add_argument("--output", required=True, type=pathlib.Path)
     lineage = commands.add_parser(
         "scale-lineage", help="verify and bind H -> P16 -> C32 scale lineage"
     )
@@ -171,6 +189,9 @@ def _parser() -> argparse.ArgumentParser:
         windows_command.add_argument(
             "--controller-bundle-sha256", required=True
         )
+    build_experiment.add_cli_commands(commands)
+    evidence_matrix.add_cli_commands(commands)
+    baseline.add_cli_commands(commands)
     return parser
 
 
@@ -181,9 +202,22 @@ def main(arguments: Sequence[str] | None = None) -> int:
     if parsed.command == "windows-tun-summarize":
         return run_windows_tun_summary_command(parsed)
     try:
+        if parsed.command in build_experiment.COMMANDS:
+            return build_experiment.run_cli_command(parsed)
+        if parsed.command in evidence_matrix.COMMANDS:
+            return evidence_matrix.run_cli_command(parsed)
+        if parsed.command in baseline.COMMANDS:
+            return baseline.run_cli_command(parsed)
         if parsed.command == "validate-inputs":
             validate_measurement_inputs(
                 parsed.warmup_seconds, parsed.active_seconds, parsed.pairs
+            )
+            return 0
+        if parsed.command == "linux-calibration-candidate":
+            candidate = create_calibration_candidate(parsed.summary)
+            _atomic_text(
+                parsed.output,
+                json.dumps(candidate, sort_keys=True, indent=2, allow_nan=False) + "\n",
             )
             return 0
         if parsed.command == "plan":
@@ -204,6 +238,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 warmup_seconds=parsed.warmup_seconds,
                 active_seconds=parsed.active_seconds,
                 pairs=parsed.pairs,
+                run_kind=parsed.run_kind,
                 decision_policy=decision_policy,
                 scale_safety_policy=scale_policy,
                 scale_lineage=scale_lineage,
@@ -263,7 +298,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return 0
         if parsed.command == "validate-git":
             validate_git_relation(
-                parsed.repository, parsed.parent_sha, parsed.candidate_sha
+                parsed.repository,
+                parsed.parent_sha,
+                parsed.candidate_sha,
+                run_kind=parsed.run_kind,
             )
             return 0
         if parsed.command == "scale-lineage":

@@ -12,6 +12,23 @@ from tools.performance_candidate.linux import plan as linux_plan
 from tools.performance_candidate.linux import policy as linux_policy
 
 class LinuxSummaryTests(LinuxSummaryFixture):
+    def test_same_commit_aa_summary_is_review_only_and_never_an_adoption_claim(
+        self,
+    ) -> None:
+        plan = self.plan(
+            "qualification", "tcp-bulk", run_kind="calibration-aa"
+        )
+        _root, parent, candidate = self.roots()
+        self.populate(plan, parent, candidate)
+
+        summary = self.summarize(plan, parent, candidate)
+
+        self.assertEqual(summary["run_kind"], "calibration-aa")
+        self.assertEqual(summary["parent_sha"], summary["candidate_sha"])
+        self.assertEqual(summary["status"], "CALIBRATION_REQUIRED")
+        self.assertFalse(summary["adoption_claim"])
+        self.assertIsNone(summary["workflow_failure_reason"])
+
     def test_diagnostic_result_is_inconclusive_without_adoption_claim(self) -> None:
         plan, parent, candidate = self.fresh_diagnostic()
         summary = self.summarize(plan, parent, candidate)
@@ -550,6 +567,10 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                 candidate / "tcp-bulk-candidate-1.jsonl",
                 lambda row: row.update(application_payload_bytes=65_507),
             ),
+            "unexpected workload scale": lambda _plan, _parent, candidate: self.rewrite(
+                candidate / "tcp-bulk-candidate-1.jsonl",
+                lambda row: row.update(workload_scale=1),
+            ),
             "unexpected UDP wire bound": lambda _plan, _parent, candidate: self.rewrite(
                 candidate / "tcp-bulk-candidate-1.jsonl",
                 lambda row: row.update(upstream_wire_bytes=65_507),
@@ -801,3 +822,26 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                     json.loads(output.read_text(encoding="utf-8"))["status"],
                     expected_status,
                 )
+
+    def test_structural_metrics_are_closed_and_preserved_without_affecting_decision(self) -> None:
+        plan = self.plan("diagnostic", "dns-udp-concurrency")
+        _root, parent, candidate = self.roots()
+        self.populate(plan, parent, candidate)
+
+        summary = self.summarize(plan, parent, candidate)
+        pair = summary["scenarios"][0]["pairs"][0]
+        self.assertEqual(
+            pair["parent_structural_metrics"]["request_count"], 1_000
+        )
+        self.assertEqual(pair["candidate_structural_metrics"]["drop_count"], 0)
+        self.assertEqual(summary["status"], "INCONCLUSIVE")
+
+        path = candidate / "dns-udp-concurrency-candidate-1.jsonl"
+        self.rewrite(
+            path,
+            lambda row: row["structural_metrics"]["closed"].pop("copy_bytes"),
+        )
+        with self.assertRaisesRegex(
+            json_contract.CandidateControlError, "exactly explain null fields"
+        ):
+            self.summarize(plan, parent, candidate)

@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn listener_fixed_capacity_is_validated_before_any_root_is_prepared() {
+    let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+    let (path, mut config) = server_test_config(listen);
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+
+    config.udp.receive_workers = ferrum2_config::MAX_UDP_RECEIVE_WORKERS;
+    assert_eq!(
+        validate_udp_listener_budget(&config.udp, 1),
+        Err(crate::run::RunError::StartupProtocol)
+    );
+    assert_eq!(registry.snapshot(), baseline);
+
+    config.udp.max_buffered_bytes = MAX_UDP_MAX_BUFFERED_BYTES;
+    assert_eq!(validate_udp_listener_budget(&config.udp, 2), Ok(()));
+    assert_eq!(registry.snapshot(), baseline);
+    std::fs::remove_file(path).expect("remove listener budget config");
+}
+
 #[tokio::test]
 async fn slow_socket_opens_for_distinct_sessions_run_concurrently() {
     let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);

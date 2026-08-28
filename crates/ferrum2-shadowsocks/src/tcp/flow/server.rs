@@ -6,10 +6,12 @@ use ferrum2_crypto::{
     Clock, MethodTcpSalt, SecureRandom, TcpOpener, TcpSealer, generate_method_response_salt,
 };
 
-use super::io::{DataPoll, drain_staged, poll_data_read, poll_flush, poll_shutdown};
+use super::io::{
+    DataPoll, DataRead, PollBudget, drain_staged, poll_data_fill, poll_flush, poll_shutdown,
+};
 use super::{
-    DataRx, Lifecycle, PlainDuplex, StagedKind, StagedWrite, TransportIo, TxState,
-    protocol_cipher_boundary,
+    DataRx, Lifecycle, PlainBufferedDuplex, PlainDuplex, StagedKind, StagedWrite, TransportIo,
+    TxState, protocol_cipher_boundary,
 };
 use crate::tcp::error::{
     DetectionReason, FlowTerminal, ShadowsocksError, TransportPhase, detection_from_frame,
@@ -75,22 +77,16 @@ where
     T: Clock + Sync,
     R: SecureRandom,
 {
-    fn poll_read(
-        &mut self,
-        cx: &mut Context<'_>,
-        destination: &mut [u8],
-    ) -> Poll<Result<usize, ShadowsocksError>> {
+    fn poll_fill(&mut self, cx: &mut Context<'_>) -> Poll<Result<&[u8], ShadowsocksError>> {
         if let Some(error) = self.lifecycle.fatal_error() {
             return Poll::Ready(Err(error));
         }
-        if destination.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
         if self.lifecycle.terminal == Some(FlowTerminal::Normal) || self.lifecycle.rx_closed {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(&[]));
         }
         let state = std::mem::replace(&mut self.rx, DataRx::Poison);
-        match poll_data_read(
+        let mut budget = PollBudget::new();
+        match poll_data_fill(
             &mut self.io,
             &mut self.request_opener,
             &mut self.decrypt,
@@ -98,7 +94,7 @@ where
             &mut self.lifecycle,
             self.observers.flow,
             cx,
-            destination,
+            &mut budget,
         ) {
             DataPoll::Pending(state) => {
                 self.rx = state;
@@ -106,7 +102,58 @@ where
             }
             DataPoll::Ready(state, result) => {
                 self.rx = state;
-                Poll::Ready(result)
+                match result {
+                    Ok(DataRead::Buffered) => Poll::Ready(Ok(self.current_plaintext())),
+                    Ok(DataRead::Eof) => Poll::Ready(Ok(&[])),
+                    Err(error) => Poll::Ready(Err(error)),
+                }
+            }
+        }
+    }
+
+    fn current_plaintext(&self) -> &[u8] {
+        let DataRx::Ready { position } = self.rx else {
+            unreachable!("plaintext view requires ready data state")
+        };
+        &self.decrypt[position..]
+    }
+
+    fn consume(&mut self, amount: usize) {
+        let complete = match &mut self.rx {
+            DataRx::Ready { position } => {
+                assert!(amount <= self.decrypt.len() - *position);
+                *position += amount;
+                *position == self.decrypt.len()
+            }
+            _ => {
+                assert_eq!(amount, 0, "consume requires a current plaintext view");
+                false
+            }
+        };
+        if complete {
+            self.decrypt.clear();
+            self.rx = DataRx::Length { filled: 0 };
+        }
+    }
+
+    fn poll_read(
+        &mut self,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, ShadowsocksError>> {
+        if destination.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        match self.poll_fill(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(source)) => {
+                let copied = source.len().min(destination.len());
+                destination[..copied].copy_from_slice(&source[..copied]);
+                if copied != 0 {
+                    self.consume(copied);
+                }
+                Poll::Ready(Ok(copied))
             }
         }
     }
@@ -284,5 +331,27 @@ where
 
     fn terminal(&self) -> Option<FlowTerminal> {
         self.lifecycle.terminal
+    }
+}
+
+impl<S, K, T, R> PlainBufferedDuplex for ServerFlow<'_, S, K, T, R>
+where
+    S: TransportIo,
+    K: TcpKeyProvider + Sync,
+    T: Clock + Sync,
+    R: SecureRandom,
+{
+    fn poll_fill_plain_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<&[u8], ShadowsocksError>> {
+        let this = self.get_mut();
+        inspect_scratch(BufferRole::Encrypt, &this.encrypt, this.observers.buffer);
+        inspect_scratch(BufferRole::Decrypt, &this.decrypt, this.observers.buffer);
+        this.poll_fill(cx)
+    }
+
+    fn consume_plain(self: Pin<&mut Self>, amount: usize) {
+        self.get_mut().consume(amount);
     }
 }

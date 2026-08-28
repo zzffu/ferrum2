@@ -7,7 +7,12 @@ use super::{REPLAY_WORDS, UDP_REPLAY_LAG, UdpPacketError};
 pub struct UdpReplayWindow {
     highest: Option<u64>,
     bits: [u64; REPLAY_WORDS],
+    head: usize,
+    last_advance_word_clears: u16,
 }
+
+const REPLAY_PHYSICAL_BITS: usize = REPLAY_WORDS * u64::BITS as usize;
+const REPLAY_PHYSICAL_MASK: usize = REPLAY_PHYSICAL_BITS - 1;
 
 impl UdpReplayWindow {
     /// Creates an empty replay window.
@@ -15,12 +20,22 @@ impl UdpReplayWindow {
         Self {
             highest: None,
             bits: [0; REPLAY_WORDS],
+            head: 0,
+            last_advance_word_clears: 0,
         }
     }
 
     /// Returns the highest accepted ID, if any.
     pub const fn highest(&self) -> Option<u64> {
         self.highest
+    }
+
+    /// Returns physical bitmap words cleared by the last forward advance.
+    ///
+    /// This deterministic qualification seam is zero for first/out-of-order
+    /// commits, one for the common sequential advance, and at most 128.
+    pub const fn last_advance_word_clears(&self) -> u16 {
+        self.last_advance_word_clears
     }
 
     /// Checks an ID without changing accepted state.
@@ -46,16 +61,17 @@ impl UdpReplayWindow {
     /// Atomically rechecks and marks an ID under the caller's serialized owner.
     pub fn commit(&mut self, packet_id: u64) -> Result<(), UdpPacketError> {
         self.check(packet_id)?;
+        self.last_advance_word_clears = 0;
         match self.highest {
             None => {
                 self.highest = Some(packet_id);
-                self.bits[0] = 1;
+                self.set_bit(0);
             }
             Some(highest) if packet_id > highest => {
                 let advance = packet_id - highest;
-                self.shift(advance);
+                self.advance(advance);
                 self.highest = Some(packet_id);
-                self.bits[0] |= 1;
+                self.set_bit(0);
             }
             Some(highest) => {
                 let distance =
@@ -67,31 +83,40 @@ impl UdpReplayWindow {
     }
 
     fn bit(&self, index: usize) -> bool {
-        self.bits[index / 64] & (1_u64 << (index % 64)) != 0
+        let physical = (self.head + index) & REPLAY_PHYSICAL_MASK;
+        self.bits[physical / 64] & (1_u64 << (physical % 64)) != 0
     }
 
     fn set_bit(&mut self, index: usize) {
-        self.bits[index / 64] |= 1_u64 << (index % 64);
+        let physical = (self.head + index) & REPLAY_PHYSICAL_MASK;
+        self.bits[physical / 64] |= 1_u64 << (physical % 64);
     }
 
-    fn shift(&mut self, advance: u64) {
+    fn advance(&mut self, advance: u64) {
         if advance > UDP_REPLAY_LAG {
             self.bits.fill(0);
+            self.head = 0;
+            self.last_advance_word_clears = REPLAY_WORDS as u16;
             return;
         }
         let advance = usize::try_from(advance).expect("replay advance is at most 8128");
-        let word_shift = advance / 64;
-        let bit_shift = advance % 64;
-        let old = self.bits;
-        self.bits.fill(0);
-        for destination in word_shift..REPLAY_WORDS {
-            let source = destination - word_shift;
-            self.bits[destination] |= old[source] << bit_shift;
-            if bit_shift != 0 && source > 0 {
-                self.bits[destination] |= old[source - 1] >> (64 - bit_shift);
-            }
+        self.head = self.head.wrapping_sub(advance) & REPLAY_PHYSICAL_MASK;
+        let mut cleared = 0_u16;
+        let mut logical = 0_usize;
+        while logical < advance {
+            let physical = (self.head + logical) & REPLAY_PHYSICAL_MASK;
+            let bit = physical % 64;
+            let count = (advance - logical).min(64 - bit);
+            let mask = if count == 64 {
+                u64::MAX
+            } else {
+                ((1_u64 << count) - 1) << bit
+            };
+            self.bits[physical / 64] &= !mask;
+            cleared += 1;
+            logical += count;
         }
-        self.bits[REPLAY_WORDS - 1] &= 1;
+        self.last_advance_word_clears = cleared;
     }
 }
 

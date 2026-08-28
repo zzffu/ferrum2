@@ -74,7 +74,7 @@ async fn udp_process_shutdown_drains_an_active_association_without_forcing() {
     assert_eq!(live.udp_sessions, baseline.udp_sessions + 1);
     assert_eq!(
         live.udp_buffered_bytes,
-        baseline.udp_buffered_bytes + 3 * MAX_UDP_WIRE_LEN
+        baseline.udp_buffered_bytes + MAX_UDP_WIRE_LEN
     );
     assert_eq!(
         live.active_supervisor_children,
@@ -228,7 +228,7 @@ async fn zero_grace_counts_each_of_two_forced_udp_associations_once() {
     assert_eq!(active.udp_sessions, baseline.udp_sessions + 2);
     assert_eq!(
         active.udp_buffered_bytes,
-        baseline.udp_buffered_bytes + 6 * MAX_UDP_WIRE_LEN
+        baseline.udp_buffered_bytes + 2 * MAX_UDP_WIRE_LEN
     );
     assert_eq!(
         active.active_supervisor_children,
@@ -426,7 +426,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
             .expect("committed upstream request");
     let live = registry.snapshot();
     assert_eq!(live.udp_sessions, baseline.udp_sessions + 1);
-    assert_eq!(live.udp_buffered_bytes, 3 * MAX_UDP_WIRE_LEN);
+    assert_eq!(live.udp_buffered_bytes, MAX_UDP_WIRE_LEN);
     assert_eq!(live.active_supervisor_children, 1);
     assert_eq!(live.connection_tasks, 1);
     assert_eq!(live.owned_permits, 2);

@@ -23,8 +23,23 @@ pub trait TransportIo: AbortiveClose + Send + Unpin {
     /// Underlying error type. It is immediately erased into a closed phase.
     type IoError;
 
-    /// Polls one transport read operation.
-    fn poll_read(
+    /// Appends at most `limit` transport bytes to `destination`.
+    ///
+    /// `Pending` and `Err` leave the visible length unchanged. Implementations
+    /// may write directly into spare capacity, but only a successful read may
+    /// expose newly initialized bytes.
+    fn poll_read_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>>;
+
+    /// Reads into an already initialized caller-owned plaintext slice.
+    ///
+    /// Protocol receive state uses [`Self::poll_read_buf`]; this operation is
+    /// retained for direct transports that do not own a reusable receive view.
+    fn poll_read_initialized(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         destination: &mut [u8],
@@ -80,6 +95,21 @@ pub trait PlainDuplex: Send + Unpin {
 
     /// Returns the flow's sole immutable terminal latch.
     fn terminal(&self) -> Option<FlowTerminal>;
+}
+
+/// Plaintext duplex whose receive side exposes its authenticated backing view.
+pub trait PlainBufferedDuplex: PlainDuplex {
+    /// Polls the current authenticated plaintext view without copying it.
+    ///
+    /// The returned view remains valid until bytes are consumed or the flow is
+    /// mutably polled again. An empty view denotes authenticated EOF.
+    fn poll_fill_plain_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<&[u8], ShadowsocksError>>;
+
+    /// Releases bytes from the current plaintext view.
+    fn consume_plain(self: Pin<&mut Self>, amount: usize);
 }
 
 #[derive(Default)]
@@ -200,17 +230,11 @@ pub(super) struct StagedWrite {
     position: usize,
 }
 
-pub(super) fn reset_decrypt(scratch: &mut BytesMut) {
+/// Exposes exactly one receive stage while retaining the fixed backing allocation.
+pub(super) fn prepare_decrypt(scratch: &mut BytesMut, exact_len: usize) {
+    debug_assert!(exact_len <= MAX_DECRYPT_WIRE_LEN);
+    debug_assert!(exact_len <= scratch.capacity());
     scratch.clear();
-    scratch.resize(MAX_DECRYPT_WIRE_LEN, 0);
-}
-
-fn copy_ready(scratch: &BytesMut, position: &mut usize, destination: &mut [u8]) -> (usize, bool) {
-    let remaining = scratch.len().saturating_sub(*position);
-    let copied = remaining.min(destination.len());
-    destination[..copied].copy_from_slice(&scratch[*position..*position + copied]);
-    *position += copied;
-    (copied, *position == scratch.len())
 }
 
 pub(super) fn protocol_cipher_boundary(

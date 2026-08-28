@@ -6,6 +6,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use ferrum2_core::CanonicalDomain;
 use ipnet::IpNet;
 
+use crate::hybrid_index::{RadixTrie, SuffixTrie, use_cidr_radix, use_suffix_trie};
 use crate::{CompiledMatchSet, RuleCompileError};
 
 #[derive(Clone, Copy)]
@@ -178,46 +179,127 @@ impl KeywordCandidateIndex {
     }
 }
 
+enum SuffixCandidateIndex {
+    Sorted(SparseValueIndex<CanonicalDomain>),
+    Trie(SuffixTrie<Box<[u32]>>),
+}
+
+impl SuffixCandidateIndex {
+    fn build(builder: SparseValueIndexBuilder<CanonicalDomain>) -> Result<Self, RuleCompileError> {
+        let index = builder.build()?;
+        if !use_suffix_trie(index.postings.len()) {
+            return Ok(Self::Sorted(index));
+        }
+        let entries = index
+            .postings
+            .into_vec()
+            .into_iter()
+            .map(|posting| (Box::<str>::from(posting.key.as_str()), posting.candidates));
+        Ok(Self::Trie(SuffixTrie::try_build(entries)?))
+    }
+
+    fn visit(&self, domain: &CanonicalDomain, mut visit: impl FnMut(u32)) {
+        self.visit_candidate_lists(domain, |candidates| {
+            for candidate in candidates.iter().copied() {
+                visit(candidate);
+            }
+        });
+    }
+
+    fn visit_candidate_lists(&self, domain: &CanonicalDomain, mut visit: impl FnMut(&[u32])) {
+        match self {
+            Self::Sorted(index) => {
+                let mut suffix = domain.as_str();
+                loop {
+                    index.visit_candidate_list_by(
+                        |candidate| candidate.as_str().cmp(suffix),
+                        &mut visit,
+                    );
+                    let Some(boundary) = suffix.find('.') else {
+                        break;
+                    };
+                    suffix = &suffix[boundary + 1..];
+                }
+            }
+            Self::Trie(trie) => trie.visit(domain.as_str(), |candidates| visit(candidates)),
+        }
+    }
+}
+
+enum IpCandidateV4 {
+    Sorted(SparseValueIndex<(u8, u32)>),
+    Radix(RadixTrie<Box<[u32]>, 32>),
+}
+
+enum IpCandidateV6 {
+    Sorted(SparseValueIndex<(u8, u128)>),
+    Radix(RadixTrie<Box<[u32]>, 128>),
+}
+
 struct IpCandidateIndex {
-    v4: SparseValueIndex<(u8, u32)>,
-    v6: SparseValueIndex<(u8, u128)>,
+    v4: IpCandidateV4,
+    v6: IpCandidateV6,
 }
 
 impl IpCandidateIndex {
+    fn build(
+        v4: SparseValueIndexBuilder<(u8, u32)>,
+        v6: SparseValueIndexBuilder<(u8, u128)>,
+    ) -> Result<Self, RuleCompileError> {
+        let v4 = v4.build()?;
+        let v4 = if use_cidr_radix(v4.postings.len()) {
+            IpCandidateV4::Radix(RadixTrie::try_build(
+                v4.postings
+                    .into_vec()
+                    .into_iter()
+                    .map(|posting| (posting.key.0, u128::from(posting.key.1), posting.candidates)),
+            )?)
+        } else {
+            IpCandidateV4::Sorted(v4)
+        };
+        let v6 = v6.build()?;
+        let v6 = if use_cidr_radix(v6.postings.len()) {
+            IpCandidateV6::Radix(RadixTrie::try_build(
+                v6.postings
+                    .into_vec()
+                    .into_iter()
+                    .map(|posting| (posting.key.0, posting.key.1, posting.candidates)),
+            )?)
+        } else {
+            IpCandidateV6::Sorted(v6)
+        };
+        Ok(Self { v4, v6 })
+    }
+
     fn visit(&self, address: IpAddr, mut visit: impl FnMut(u32)) {
-        match address {
-            IpAddr::V4(address) => {
-                let address = u32::from(address);
-                for length in 0..=32 {
-                    self.v4
-                        .visit(&(length, address & mask_v4(length)), &mut visit);
-                }
+        self.visit_candidate_lists(address, |candidates| {
+            for candidate in candidates.iter().copied() {
+                visit(candidate);
             }
-            IpAddr::V6(address) => {
-                let address = u128::from(address);
-                for length in 0..=128 {
-                    self.v6
-                        .visit(&(length, address & mask_v6(length)), &mut visit);
-                }
-            }
-        }
+        });
     }
 
     fn visit_candidate_lists(&self, address: IpAddr, mut visit: impl FnMut(&[u32])) {
-        match address {
-            IpAddr::V4(address) => {
+        match (address, &self.v4, &self.v6) {
+            (IpAddr::V4(address), IpCandidateV4::Sorted(index), _) => {
                 let address = u32::from(address);
                 for length in 0..=32 {
-                    self.v4
-                        .visit_candidate_list(&(length, address & mask_v4(length)), &mut visit);
+                    index.visit_candidate_list(&(length, address & mask_v4(length)), &mut visit);
                 }
             }
-            IpAddr::V6(address) => {
+            (IpAddr::V4(address), IpCandidateV4::Radix(trie), _) => {
+                trie.visit(u128::from(u32::from(address)), |candidates| {
+                    visit(candidates)
+                });
+            }
+            (IpAddr::V6(address), _, IpCandidateV6::Sorted(index)) => {
                 let address = u128::from(address);
                 for length in 0..=128 {
-                    self.v6
-                        .visit_candidate_list(&(length, address & mask_v6(length)), &mut visit);
+                    index.visit_candidate_list(&(length, address & mask_v6(length)), &mut visit);
                 }
+            }
+            (IpAddr::V6(address), _, IpCandidateV6::Radix(trie)) => {
+                trie.visit(u128::from(address), |candidates| visit(candidates));
             }
         }
     }
@@ -226,7 +308,7 @@ impl IpCandidateIndex {
 /// Input-side index shared by inline composite match sets and snapshot RuleSets.
 pub struct MatchCandidateIndex {
     exact: SparseValueIndex<CanonicalDomain>,
-    suffix: SparseValueIndex<CanonicalDomain>,
+    suffix: SuffixCandidateIndex,
     keyword: KeywordCandidateIndex,
     ip: IpCandidateIndex,
 }
@@ -240,15 +322,7 @@ impl MatchCandidateIndex {
     ) {
         if let Some(domain) = domain {
             self.exact.visit(domain, &mut visit);
-            let mut suffix = domain.as_str();
-            loop {
-                self.suffix
-                    .visit_by(|candidate| candidate.as_str().cmp(suffix), &mut visit);
-                let Some(boundary) = suffix.find('.') else {
-                    break;
-                };
-                suffix = &suffix[boundary + 1..];
-            }
+            self.suffix.visit(domain, &mut visit);
             self.keyword.visit(domain.as_str(), &mut visit);
         }
         if let Some(address) = address {
@@ -265,17 +339,7 @@ impl MatchCandidateIndex {
     ) {
         if let Some(domain) = domain {
             self.exact.visit_candidate_list(domain, &mut visit);
-            let mut suffix = domain.as_str();
-            loop {
-                self.suffix.visit_candidate_list_by(
-                    |candidate| candidate.as_str().cmp(suffix),
-                    &mut visit,
-                );
-                let Some(boundary) = suffix.find('.') else {
-                    break;
-                };
-                suffix = &suffix[boundary + 1..];
-            }
+            self.suffix.visit_candidate_lists(domain, &mut visit);
             self.keyword
                 .visit_candidate_lists(domain.as_str(), &mut visit);
         }
@@ -345,12 +409,9 @@ impl MatchCandidateIndexBuilder {
     pub fn build(self) -> Result<MatchCandidateIndex, RuleCompileError> {
         Ok(MatchCandidateIndex {
             exact: self.exact.build()?,
-            suffix: self.suffix.build()?,
+            suffix: SuffixCandidateIndex::build(self.suffix)?,
             keyword: KeywordCandidateIndex::build(self.keyword)?,
-            ip: IpCandidateIndex {
-                v4: self.v4.build()?,
-                v6: self.v6.build()?,
-            },
+            ip: IpCandidateIndex::build(self.v4, self.v6)?,
         })
     }
 }

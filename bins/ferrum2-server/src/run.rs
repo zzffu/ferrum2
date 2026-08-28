@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 
@@ -13,7 +12,6 @@ use ferrum2_runtime::{
     ProcessSupervisor, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
-use tokio::net::UdpSocket;
 
 mod dns;
 #[path = "dns_egress.rs"]
@@ -39,7 +37,10 @@ use tcp::{ServerContext, ServerTcpListeners, ServerTcpRoot};
 use tokio_io::{bind_listener, shutdown_signal};
 #[cfg(all(windows, not(test)))]
 use udp::ServerUdpNetworkReset;
-use udp::{ServerUdpShared, UdpMappings, prepare_udp_server_with_network, udp_runtime_limits};
+use udp::{
+    ServerUdpShared, UdpMappings, bind_server_udp_listener, prepare_udp_server_with_network,
+    udp_runtime_limits, validate_udp_listener_budget, validate_udp_receive_workers,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunError {
@@ -181,10 +182,12 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
         #[cfg(all(windows, not(test)))]
-        let (network_sockets, network_change_monitor) =
-            prepare_server_network_runtime(&registry, &metrics)?;
+        let network_generation = prepared.runtime().network_generation;
         #[cfg(all(windows, not(test)))]
-        let mut network_change_monitor = Some(network_change_monitor);
+        let (network_sockets, network_change_monitor) =
+            prepare_server_network_runtime(network_generation, &registry, &metrics)?;
+        #[cfg(all(windows, not(test)))]
+        let mut network_change_monitor = network_change_monitor;
         #[cfg(any(not(windows), test))]
         let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
         let result = async {
@@ -222,9 +225,7 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
                     materialized: true,
                     network_sockets: Some(network_sockets),
                     #[cfg(all(windows, not(test)))]
-                    network_change_monitor: network_change_monitor
-                        .take()
-                        .ok_or(RunError::StartupRuntime)?,
+                    network_change_monitor: network_change_monitor.take(),
                 },
             )
             .await
@@ -249,8 +250,10 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
         #[cfg(all(windows, not(test)))]
+        let network_generation = prepared.runtime().network_generation;
+        #[cfg(all(windows, not(test)))]
         let (network_sockets, network_change_monitor) =
-            prepare_server_network_runtime(&registry, &metrics)?;
+            prepare_server_network_runtime(network_generation, &registry, &metrics)?;
         #[cfg(any(not(windows), test))]
         let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
         let materializer =
@@ -260,7 +263,9 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
             Err(error) => Err(error),
         };
         #[cfg(all(windows, not(test)))]
-        network::close_server_network_change_monitor(network_change_monitor)?;
+        if let Some(monitor) = network_change_monitor {
+            network::close_server_network_change_monitor(monitor)?;
+        }
         result
     })
 }
@@ -272,7 +277,7 @@ struct ServerRunResources {
     materialized: bool,
     network_sockets: Option<Arc<ServerNetworkSocketService>>,
     #[cfg(all(windows, not(test)))]
-    network_change_monitor: ferrum2_platform_windows::WindowsNetworkChangeMonitor,
+    network_change_monitor: Option<ferrum2_platform_windows::WindowsNetworkChangeMonitor>,
 }
 
 impl ServerRunResources {
@@ -331,9 +336,11 @@ where
         network_change_monitor,
     } = resources;
     #[cfg(all(windows, not(test)))]
-    let mut network_change_monitor = Some(network_change_monitor);
+    let mut network_change_monitor = network_change_monitor;
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
+        #[cfg(all(windows, not(test)))]
+        let network_generation = config.runtime.network_generation;
         let route_network = Arc::new(runtime_route_network(&config.route_network));
         let outbound_dial_options: Arc<[DialOptions]> = config
             .outbounds
@@ -394,6 +401,8 @@ where
         let shutdown_grace = config.runtime.shutdown_grace;
         let connect_timeout = config.runtime.connect_timeout;
         let udp_config = config.udp;
+        validate_udp_receive_workers(udp_config.receive_workers)?;
+        validate_udp_listener_budget(&udp_config, config.inbounds.len())?;
         let clock = Arc::new(SystemClock::new());
         let routing = Arc::new(ServerRouting {
             program: config.route,
@@ -418,7 +427,7 @@ where
             .collect::<Vec<_>>()
             .into();
         let mut roots = Vec::with_capacity(
-            config.inbounds.len() * usize::from(config.udp.enabled)
+            config.inbounds.len() * udp_config.receive_workers * usize::from(udp_config.enabled)
                 + 2
                 + usize::from(dns.is_some())
                 + usize::from(config.metrics.is_some())
@@ -511,7 +520,7 @@ where
             let mappings = Arc::new(UdpMappings::new(udp_config.max_sessions));
             let admission = Arc::new(tokio::sync::Mutex::new(()));
             #[cfg(all(windows, not(test)))]
-            {
+            if network_generation == ferrum2_config::NetworkGenerationMode::Dynamic {
                 udp_network_reset = Some(Arc::new(ServerUdpNetworkReset::new(
                     network_sockets
                         .coordinator()
@@ -536,28 +545,28 @@ where
                 metrics: Arc::clone(&metrics),
             };
             for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
-                let listen = inbound.listen;
-                let shared = shared.clone();
-                let udp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
-                let udp_network_sockets = Arc::clone(&network_sockets);
-                let udp_outbound_dial_options = Arc::clone(&outbound_dial_options);
-                let udp_route_network = Arc::clone(&route_network);
-                roots.push(ProcessRoot::new(move || async move {
-                    let listener = Arc::new(
-                        UdpSocket::bind(SocketAddr::V4(listen))
-                            .await
-                            .map_err(|_| RunError::StartupBind)?,
-                    );
-                    prepare_udp_server_with_network(
-                        inbound_id,
-                        listener,
-                        shared,
-                        udp_network_sockets,
-                        udp_outbound_dial_options,
-                        udp_route_network,
-                    )
-                    .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
-                }));
+                for _worker in 0..udp_config.receive_workers {
+                    let listen = inbound.listen;
+                    let receive_workers = udp_config.receive_workers;
+                    let shared = shared.clone();
+                    let udp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
+                    let udp_network_sockets = Arc::clone(&network_sockets);
+                    let udp_outbound_dial_options = Arc::clone(&outbound_dial_options);
+                    let udp_route_network = Arc::clone(&route_network);
+                    roots.push(ProcessRoot::new(move || async move {
+                        let listener =
+                            Arc::new(bind_server_udp_listener(listen, receive_workers).await?);
+                        prepare_udp_server_with_network(
+                            inbound_id,
+                            listener,
+                            shared,
+                            udp_network_sockets,
+                            udp_outbound_dial_options,
+                            udp_route_network,
+                        )
+                        .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
+                    }));
+                }
             }
         }
         let tcp_registry = registry.clone();
@@ -605,17 +614,17 @@ where
         // This must be the first required root. If any later root cannot prepare,
         // its rollback explicitly closes the pre-start network-change monitor.
         #[cfg(all(windows, not(test)))]
-        roots.insert(
-            0,
-            network::network_change_process_root(
-                network_change_monitor
-                    .take()
-                    .ok_or(RunError::StartupRuntime)?,
-                Arc::clone(&network_sockets),
-                network_change_metrics,
-                udp_network_reset,
-            ),
-        );
+        if let Some(monitor) = network_change_monitor.take() {
+            roots.insert(
+                0,
+                network::network_change_process_root(
+                    monitor,
+                    Arc::clone(&network_sockets),
+                    network_change_metrics,
+                    udp_network_reset,
+                ),
+            );
+        }
         let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry)
             .map_err(|_| RunError::StartupProtocol)?;
         report_result(supervisor.run_until(shutdown).await)

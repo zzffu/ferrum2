@@ -9,8 +9,15 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+candidate-domain-suffix-trie = []
+candidate-cidr-radix = []
+candidate-atomic-snapshot = ["dep:arc-swap"]
+
 [dependencies]
 aho-corasick.workspace = true
+arc-swap = { workspace = true, optional = true }
 ferrum2-core.workspace = true
 flate2.workspace = true
 ipnet.workspace = true

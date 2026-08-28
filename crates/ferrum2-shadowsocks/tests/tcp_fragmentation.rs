@@ -36,6 +36,15 @@ async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte
     ];
 
     for fragments in [one_byte, mixed] {
+        let mut remaining = request.len() - REQUEST_FIRST_READ_LEN;
+        let expected_read_lengths = std::iter::once(REQUEST_FIRST_READ_LEN)
+            .chain(fragments.iter().map(|fragment| {
+                let exposed = remaining;
+                remaining -= fragment.len();
+                exposed
+            }))
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, 0);
         let replay = TcpReplayStore::new(1024).expect("capacity");
         let mut reads = vec![request[..REQUEST_FIRST_READ_LEN].to_vec()];
         let fragment_count = fragments.len();
@@ -46,7 +55,7 @@ async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte
         inbound.accept_stream(io).await.expect("fragmented request");
 
         let observed = observation.lock().expect("observation");
-        assert_eq!(observed.read_lengths[0], REQUEST_FIRST_READ_LEN);
+        assert_eq!(observed.read_lengths, expected_read_lengths);
         assert_eq!(observed.read_calls, 1 + fragment_count);
     }
 }
@@ -67,6 +76,15 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
     ];
 
     for fragments in [one_byte, mixed] {
+        let mut remaining = response.len() - RESPONSE_FIRST_READ_LEN;
+        let expected_read_lengths = std::iter::once(RESPONSE_FIRST_READ_LEN)
+            .chain(fragments.iter().map(|fragment| {
+                let exposed = remaining;
+                remaining -= fragment.len();
+                exposed
+            }))
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, 0);
         let mut reads = vec![response[..RESPONSE_FIRST_READ_LEN].to_vec()];
         let fragment_count = fragments.len();
         reads.extend(fragments);
@@ -89,7 +107,7 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
 
         assert_eq!(&destination[..read], b"fragmented");
         let observed = observation.lock().expect("observation");
-        assert_eq!(observed.read_lengths[0], RESPONSE_FIRST_READ_LEN);
+        assert_eq!(observed.read_lengths, expected_read_lengths);
         assert_eq!(observed.read_calls, 1 + fragment_count);
     }
 }
@@ -111,7 +129,7 @@ async fn subsequent_length_and_payload_accept_one_byte_and_mixed_fragmentation()
     reads.push(frames[2][5..].to_vec());
     reads.push(frames[3][..2].to_vec());
     reads.push(frames[3][2..].to_vec());
-    let (io, _) = RecordingIo::new(reads);
+    let (io, observation) = RecordingIo::new(reads);
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
     let mut flow = inbound.accept_stream(io).await.expect("request").stream;
     let mut destination = [0_u8; 32];
@@ -124,6 +142,19 @@ async fn subsequent_length_and_payload_accept_one_byte_and_mixed_fragmentation()
         .await
         .expect("second");
     assert_eq!(&destination[..second], b"mixed");
+
+    let mut expected_read_lengths = vec![
+        REQUEST_FIRST_READ_LEN,
+        request.len() - REQUEST_FIRST_READ_LEN,
+    ];
+    expected_read_lengths.extend((1..=frames[0].len()).rev());
+    expected_read_lengths.extend((1..=frames[1].len()).rev());
+    expected_read_lengths.extend([frames[2].len(), frames[2].len() - 5]);
+    expected_read_lengths.extend([frames[3].len(), frames[3].len() - 2]);
+    assert_eq!(
+        observation.lock().expect("observation").read_lengths,
+        expected_read_lengths
+    );
 }
 
 #[tokio::test]
@@ -147,7 +178,7 @@ async fn client_subsequent_length_and_payload_accept_one_byte_and_mixed_fragment
     reads.push(frames[3][..1].to_vec());
     reads.push(frames[3][1..4].to_vec());
     reads.push(frames[3][4..].to_vec());
-    let (io, _) = RecordingIo::new(reads);
+    let (io, observation) = RecordingIo::new(reads);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
@@ -172,6 +203,19 @@ async fn client_subsequent_length_and_payload_accept_one_byte_and_mixed_fragment
         .await
         .expect("mixed fragmented subsequent response");
     assert_eq!(&destination[..mixed], b"mixed");
+
+    let mut expected_read_lengths = vec![
+        RESPONSE_FIRST_READ_LEN,
+        response.len() - RESPONSE_FIRST_READ_LEN,
+    ];
+    expected_read_lengths.extend((1..=frames[0].len()).rev());
+    expected_read_lengths.extend((1..=frames[1].len()).rev());
+    expected_read_lengths.extend([frames[2].len(), frames[2].len() - 3]);
+    expected_read_lengths.extend([frames[3].len(), frames[3].len() - 1, frames[3].len() - 4]);
+    assert_eq!(
+        observation.lock().expect("observation").read_lengths,
+        expected_read_lengths
+    );
 }
 
 struct WakeCounter(AtomicUsize);
@@ -187,7 +231,7 @@ impl Wake for WakeCounter {
 }
 
 #[tokio::test]
-async fn authenticated_zero_length_frame_self_wakes_and_never_looks_like_eof() {
+async fn authenticated_zero_length_frame_continues_same_poll_without_self_wake() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -197,7 +241,36 @@ async fn authenticated_zero_length_frame_self_wakes_and_never_looks_like_eof() {
     let frames = request_data_frames(&salt, &[b"", b"after-zero"]);
     let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
     reads.extend(frames);
-    let (io, _) = RecordingIo::new(reads);
+    let (io, observation) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 32];
+
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("ready empty frame must advance to the next nonempty frame");
+    };
+    assert_eq!(&destination[..read], b"after-zero");
+    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn empty_frame_budget_self_wakes_only_after_eight_ready_frames() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(912);
+    let request = valid_request_wire(NOW, &salt);
+    let mut payloads = vec![b"".as_slice(); 9];
+    payloads.push(b"after-budget");
+    let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
+    reads.extend(request_data_frames(&salt, &payloads));
+    let (io, observation) = RecordingIo::new(reads);
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
     let mut flow = inbound.accept_stream(io).await.expect("request").stream;
     let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
@@ -209,20 +282,18 @@ async fn authenticated_zero_length_frame_self_wakes_and_never_looks_like_eof() {
         Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
         Poll::Pending
     ));
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        2 + 2 * 8
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("next nonempty frame must become visible");
+        panic!("next poll resumes after the frame budget");
     };
-    assert_eq!(&destination[..read], b"after-zero");
-    assert!(wake_counter.0.load(Ordering::SeqCst) >= 3);
+    assert_eq!(&destination[..read], b"after-budget");
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

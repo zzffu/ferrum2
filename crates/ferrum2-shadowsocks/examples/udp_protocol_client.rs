@@ -77,14 +77,7 @@ fn run() -> Result<(), &'static str> {
         )
         .map_err(|_| "payload-bounds")?;
         let wire_len = session
-            .encode_request(
-                &clock,
-                &random,
-                &datagram,
-                sequence,
-                &mut wire,
-                &mut scratch,
-            )
+            .encode_request(&clock, &random, &datagram, sequence, &mut wire)
             .map_err(|_| "request-encode")?;
         socket
             .set_write_timeout(Some(remaining(end)?))

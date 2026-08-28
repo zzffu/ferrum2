@@ -27,9 +27,9 @@ pub use network::{
     ResetNetwork,
 };
 pub use network_socket::{
-    GenerationBoundSocketError, GenerationBoundTcpStream, GenerationBoundUdpSocket,
-    NetworkSocketOperations, NetworkSocketService, NetworkSocketServiceError,
-    SystemNetworkSocketError, SystemNetworkSocketOperations,
+    GenerationBoundSocketError, NetworkSocketMode, NetworkSocketOperations, NetworkSocketService,
+    NetworkSocketServiceError, NetworkTcpStream, NetworkUdpSocket, SystemNetworkSocketError,
+    SystemNetworkSocketOperations,
 };
 pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
 pub use process::{
@@ -40,8 +40,10 @@ pub use process::{
     ProcessTransition,
 };
 pub use relay::{
-    RELAY_BUFFER_BYTES, RelayFailure, RelayRunError, RelayStats, relay_bidirectional,
-    relay_bidirectional_tracked, relay_bidirectional_with_idle_timeout, relay_lifecycle,
+    BUFFERED_RELAY_BUFFERS_PER_CONNECTION, RELAY_BUFFER_BYTES, RelayFailure, RelayRunError,
+    RelayStats, relay_bidirectional, relay_bidirectional_tracked,
+    relay_bidirectional_with_idle_timeout, relay_lifecycle, relay_lifecycle_buffered_inbound,
+    relay_lifecycle_buffered_outbound,
 };
 pub use reset::{
     AdmittedNetworkRuntimeResource, DEFAULT_NETWORK_RESET_HOOKS, DEFAULT_NETWORK_RUNTIME_OWNERS,

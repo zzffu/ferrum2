@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-RUNNER_SCHEMA = "ferrum2.rule-qualification.v1"
+RUNNER_SCHEMA = "ferrum2.rule-qualification.v2"
 CONTROL_SCHEMA = "ferrum2.rule-qualification-control.v6"
 CALIBRATION_SCHEMA = "ferrum2.rule-qualification-calibration.v2"
 THRESHOLD_POLICY_VERSION = "section-5.7-match-set-median-gates.v5"

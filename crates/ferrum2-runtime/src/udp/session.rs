@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::fmt;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 use ferrum2_core::Datagram;
@@ -7,7 +8,9 @@ use tokio::time::Instant;
 
 use crate::owner::OwnerGuard;
 
-use super::manager::{UdpSessionManagerInner, matching_entry_mut};
+use super::manager::{
+    UdpSessionManagerInner, lock_session_shard, matching_entry_mut, update_session_activity,
+};
 use super::reservation::{AccountedDatagram, UdpBufferReservation};
 use super::{
     UDP_SESSION_QUEUE_DEPTH, UdpCommitError, UdpDirection, UdpRuntimeError, UdpSessionHandle,
@@ -287,29 +290,34 @@ impl PendingUdpDatagram {
             .attach(datagram)
             .map_err(UdpCommitError::Runtime)?;
         let notify = {
-            let mut state = manager
-                .state
-                .lock()
-                .expect("UDP session state lock poisoned");
-            if state.shutting_down {
+            let mut shard = lock_session_shard(&manager, self.handle);
+            if manager.shutting_down.load(Ordering::Acquire) {
                 return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
             }
-            let entry =
-                matching_entry_mut(&mut state, self.handle).map_err(UdpCommitError::Runtime)?;
-            if entry.committed == activate_session {
-                return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
-            }
-            protocol_commit().map_err(UdpCommitError::Protocol)?;
-            let index = self.direction.index();
-            debug_assert!(entry.pending[index] > 0);
-            entry.pending[index] -= 1;
-            entry.committed = true;
-            entry.last_activity = now;
-            entry.queues[index].push_back(QueuedDatagram {
-                datagram: accounted,
-                _guard: manager.registry.track_udp_queue_entry(),
-            });
-            Arc::clone(&entry.notify)
+            let notify = {
+                let entry =
+                    matching_entry_mut(&mut shard, self.handle).map_err(UdpCommitError::Runtime)?;
+                if entry.committed == activate_session {
+                    return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+                }
+                protocol_commit().map_err(UdpCommitError::Protocol)?;
+                let index = self.direction.index();
+                debug_assert!(entry.pending[index] > 0);
+                entry.pending[index] -= 1;
+                entry.queues[index].push_back(QueuedDatagram {
+                    datagram: accounted,
+                    _guard: manager.registry.track_udp_queue_entry(),
+                });
+                Arc::clone(&entry.notify)
+            };
+            update_session_activity(
+                &mut shard,
+                self.handle,
+                now,
+                manager.limits.idle_timeout(),
+                activate_session,
+            );
+            notify
         };
         self.pending = false;
         notify.notify_one();
@@ -338,24 +346,28 @@ impl PendingUdpDatagram {
             .attach(datagram)
             .map_err(UdpCommitError::Runtime)?;
         {
-            let mut state = manager
-                .state
-                .lock()
-                .expect("UDP session state lock poisoned");
-            if state.shutting_down {
+            let mut shard = lock_session_shard(&manager, self.handle);
+            if manager.shutting_down.load(Ordering::Acquire) {
                 return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
             }
-            let entry =
-                matching_entry_mut(&mut state, self.handle).map_err(UdpCommitError::Runtime)?;
-            if entry.committed == activate_session {
-                return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+            {
+                let entry =
+                    matching_entry_mut(&mut shard, self.handle).map_err(UdpCommitError::Runtime)?;
+                if entry.committed == activate_session {
+                    return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+                }
+                protocol_commit().map_err(UdpCommitError::Protocol)?;
+                let index = self.direction.index();
+                debug_assert!(entry.pending[index] > 0);
+                entry.pending[index] -= 1;
             }
-            protocol_commit().map_err(UdpCommitError::Protocol)?;
-            let index = self.direction.index();
-            debug_assert!(entry.pending[index] > 0);
-            entry.pending[index] -= 1;
-            entry.committed = true;
-            entry.last_activity = now;
+            update_session_activity(
+                &mut shard,
+                self.handle,
+                now,
+                manager.limits.idle_timeout(),
+                activate_session,
+            );
         }
         self.pending = false;
         Ok(accounted)
@@ -376,11 +388,8 @@ impl Drop for PendingUdpDatagram {
         let Some(manager) = self.manager.upgrade() else {
             return;
         };
-        let mut state = manager
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
-        if let Ok(entry) = matching_entry_mut(&mut state, self.handle) {
+        let mut shard = lock_session_shard(&manager, self.handle);
+        if let Ok(entry) = matching_entry_mut(&mut shard, self.handle) {
             let pending = &mut entry.pending[self.direction.index()];
             debug_assert!(*pending > 0);
             *pending -= 1;
@@ -401,14 +410,11 @@ pub(super) fn reserve_datagram(
     } else {
         UdpBufferReservation::unmetered(allocated_capacity)?
     };
-    let mut state = manager
-        .state
-        .lock()
-        .expect("UDP session state lock poisoned");
-    if state.shutting_down {
+    let mut shard = lock_session_shard(manager, handle);
+    if manager.shutting_down.load(Ordering::Acquire) {
         return Err(UdpRuntimeError::Cancelled);
     }
-    let entry = matching_entry_mut(&mut state, handle)?;
+    let entry = matching_entry_mut(&mut shard, handle)?;
     if entry.committed != require_committed {
         return Err(UdpRuntimeError::Cancelled);
     }

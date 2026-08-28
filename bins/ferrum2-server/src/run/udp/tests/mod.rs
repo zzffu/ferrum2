@@ -10,9 +10,9 @@ use ferrum2_core::{Datagram, TargetAddr};
 use ferrum2_crypto::{SystemClock, SystemRandom};
 use ferrum2_observability::Metrics;
 use ferrum2_runtime::{
-    AccountedDatagram, DirectUdpPacketHandler, DirectUdpSocketFactory, MAX_UDP_WIRE_DATAGRAM_BYTES,
-    OwnerRegistry, UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
-    UdpSessionManager,
+    AccountedDatagram, DirectUdpPacketHandler, DirectUdpSocketFactory, MAX_UDP_MAX_BUFFERED_BYTES,
+    MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, UdpDirection, UdpRuntimeError, UdpRuntimeLimits,
+    UdpSessionHandle, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{
     ServerResponseCapability, UdpClientSession, UdpPacketError, UdpPacketScratch, UdpServer,
@@ -21,7 +21,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Notify, Semaphore};
 
 use super::admission::{
-    ServerUdpShared, prepare_udp_server, prepare_udp_server_with_socket_factory, udp_runtime_limits,
+    ServerUdpShared, prepare_udp_server, prepare_udp_server_with_socket_factory,
+    udp_runtime_limits, validate_udp_listener_budget,
 };
 use super::identity::{FrozenUdpIdentity, ServerUdpNetworkReset, UdpMappings};
 use super::listener::{

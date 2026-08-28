@@ -192,45 +192,82 @@ pub(super) fn encode_request_state_into<K: TcpKeyProvider>(
         .and_then(|length| length.checked_add(initial_payload.len()))
         .ok_or(FrameError::Bounds)?;
     let variable_u16 = u16::try_from(variable_len).map_err(|_| FrameError::Bounds)?;
-
-    scratch.clear();
-    scratch.extend_from_slice(&[REQUEST_TYPE]);
-    scratch.extend_from_slice(&timestamp.to_be_bytes());
-    scratch.extend_from_slice(&variable_u16.to_be_bytes());
-    let mut sealer = sealer_for(keys, salt)?;
-    sealer
-        .seal_in_place(scratch)
-        .map_err(frame_from_seal_aead)?;
-    let fixed: [u8; REQUEST_FIXED_PLAINTEXT_LEN + TAG_LEN] = scratch[..]
-        .try_into()
-        .expect("fixed encrypted request width");
-
-    scratch.clear();
-    encode_target_into(target, scratch)?;
-    scratch.extend_from_slice(
-        &u16::try_from(padding.len())
-            .map_err(|_| FrameError::PaddingBounds)?
-            .to_be_bytes(),
-    );
-    scratch.extend_from_slice(padding);
-    scratch.extend_from_slice(initial_payload);
-    sealer
-        .seal_in_place(scratch)
-        .map_err(frame_from_seal_aead)?;
-    let variable_wire_len = scratch.len();
     let request_first_read_len = salt.profile().initial_request_read_bytes();
     let salt_len = salt.profile().salt_bytes();
+    let variable_wire_len = variable_len
+        .checked_add(TAG_LEN)
+        .ok_or(FrameError::Bounds)?;
     let total = request_first_read_len
         .checked_add(variable_wire_len)
         .ok_or(FrameError::Bounds)?;
     if total > scratch.capacity() {
         return Err(FrameError::Bounds);
     }
+    let mut sealer = sealer_for(keys, salt)?;
+
+    scratch.clear();
     scratch.resize(total, 0);
-    scratch.copy_within(0..variable_wire_len, request_first_read_len);
     scratch[..salt_len].copy_from_slice(salt.as_bytes());
-    scratch[salt_len..request_first_read_len].copy_from_slice(&fixed);
+
+    let fixed_end = salt_len + REQUEST_FIXED_PLAINTEXT_LEN;
+    scratch[salt_len] = REQUEST_TYPE;
+    scratch[salt_len + 1..salt_len + 9].copy_from_slice(&timestamp.to_be_bytes());
+    scratch[salt_len + 9..fixed_end].copy_from_slice(&variable_u16.to_be_bytes());
+
+    let variable_end = request_first_read_len + variable_len;
+    encode_target_into_slice(
+        target,
+        &mut scratch[request_first_read_len..request_first_read_len + address_len],
+    )?;
+    let padding_length_start = request_first_read_len + address_len;
+    let padding_start = padding_length_start + 2;
+    let payload_start = padding_start + padding.len();
+    scratch[padding_length_start..padding_start].copy_from_slice(
+        &u16::try_from(padding.len())
+            .map_err(|_| FrameError::PaddingBounds)?
+            .to_be_bytes(),
+    );
+    scratch[padding_start..payload_start].copy_from_slice(padding);
+    scratch[payload_start..variable_end].copy_from_slice(initial_payload);
+
+    seal_wire_region(
+        &mut sealer,
+        &mut scratch[salt_len..request_first_read_len],
+        REQUEST_FIXED_PLAINTEXT_LEN,
+    )?;
+    seal_wire_region(
+        &mut sealer,
+        &mut scratch[request_first_read_len..total],
+        variable_len,
+    )?;
     Ok(sealer)
+}
+
+fn encode_target_into_slice(target: &TargetAddr, destination: &mut [u8]) -> Result<(), FrameError> {
+    if destination.len() != encoded_target_len(target)? {
+        return Err(FrameError::Bounds);
+    }
+    match target.host() {
+        ferrum2_core::TargetHostRef::Ip(IpAddr::V4(address)) => {
+            destination[0] = IPV4_ATYP;
+            destination[1..5].copy_from_slice(&address.octets());
+            destination[5..].copy_from_slice(&target.port().get().to_be_bytes());
+        }
+        ferrum2_core::TargetHostRef::Ip(IpAddr::V6(address)) => {
+            destination[0] = IPV6_ATYP;
+            destination[1..17].copy_from_slice(&address.octets());
+            destination[17..].copy_from_slice(&target.port().get().to_be_bytes());
+        }
+        ferrum2_core::TargetHostRef::Domain(host) => {
+            let host_len = u8::try_from(host.len()).map_err(|_| FrameError::AddressUnsupported)?;
+            destination[0] = DOMAIN_ATYP;
+            destination[1] = host_len;
+            let host_end = 2 + host.len();
+            destination[2..host_end].copy_from_slice(host.as_bytes());
+            destination[host_end..].copy_from_slice(&target.port().get().to_be_bytes());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn encoded_target_len(target: &TargetAddr) -> Result<usize, FrameError> {
@@ -241,29 +278,6 @@ pub(crate) fn encoded_target_len(target: &TargetAddr) -> Result<usize, FrameErro
             4_usize.checked_add(host.len()).ok_or(FrameError::Bounds)
         }
     }
-}
-
-pub(crate) fn encode_target_into(
-    target: &TargetAddr,
-    scratch: &mut BytesMut,
-) -> Result<(), FrameError> {
-    match target.host() {
-        ferrum2_core::TargetHostRef::Ip(IpAddr::V4(address)) => {
-            scratch.extend_from_slice(&[IPV4_ATYP]);
-            scratch.extend_from_slice(&address.octets());
-        }
-        ferrum2_core::TargetHostRef::Ip(IpAddr::V6(address)) => {
-            scratch.extend_from_slice(&[IPV6_ATYP]);
-            scratch.extend_from_slice(&address.octets());
-        }
-        ferrum2_core::TargetHostRef::Domain(host) => {
-            let length = u8::try_from(host.len()).map_err(|_| FrameError::AddressUnsupported)?;
-            scratch.extend_from_slice(&[DOMAIN_ATYP, length]);
-            scratch.extend_from_slice(host.as_bytes());
-        }
-    }
-    scratch.extend_from_slice(&target.port().get().to_be_bytes());
-    Ok(())
 }
 
 /// Builds a deterministic contiguous response first-write for reviewed fixtures.
@@ -309,38 +323,43 @@ pub(super) fn encode_response_state_into<K: TcpKeyProvider>(
         return Err(FrameError::KeyUnavailable);
     }
     let payload_len = u16::try_from(first_payload.len()).map_err(|_| FrameError::Bounds)?;
-
-    scratch.clear();
-    scratch.extend_from_slice(&[RESPONSE_TYPE]);
-    scratch.extend_from_slice(&timestamp.to_be_bytes());
-    scratch.extend_from_slice(request_salt.as_bytes());
-    scratch.extend_from_slice(&payload_len.to_be_bytes());
-    let mut sealer = sealer_for(keys, response_salt)?;
-    sealer
-        .seal_in_place(scratch)
-        .map_err(frame_from_seal_aead)?;
-    let fixed_len = response_fixed_plaintext_len(response_salt.profile()) + TAG_LEN;
-    let mut fixed = [0_u8; MAX_RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN];
-    fixed[..fixed_len].copy_from_slice(scratch);
-
-    scratch.clear();
-    scratch.extend_from_slice(first_payload);
-    sealer
-        .seal_in_place(scratch)
-        .map_err(frame_from_seal_aead)?;
-    let payload_wire_len = scratch.len();
+    let fixed_plaintext_len = response_fixed_plaintext_len(response_salt.profile());
     let response_first_read_len = response_salt.profile().initial_response_read_bytes();
     let salt_len = response_salt.profile().salt_bytes();
+    let payload_wire_len = first_payload
+        .len()
+        .checked_add(TAG_LEN)
+        .ok_or(FrameError::Bounds)?;
     let total = response_first_read_len
         .checked_add(payload_wire_len)
         .ok_or(FrameError::Bounds)?;
-    if total > MAX_ENCRYPT_WIRE_LEN {
+    if total > MAX_ENCRYPT_WIRE_LEN || total > scratch.capacity() {
         return Err(FrameError::Bounds);
     }
+    let mut sealer = sealer_for(keys, response_salt)?;
+
+    scratch.clear();
     scratch.resize(total, 0);
-    scratch.copy_within(0..payload_wire_len, response_first_read_len);
     scratch[..salt_len].copy_from_slice(response_salt.as_bytes());
-    scratch[salt_len..response_first_read_len].copy_from_slice(&fixed[..fixed_len]);
+    let fixed_end = salt_len + fixed_plaintext_len;
+    scratch[salt_len] = RESPONSE_TYPE;
+    scratch[salt_len + 1..salt_len + 9].copy_from_slice(&timestamp.to_be_bytes());
+    let binding_end = salt_len + 9 + request_salt.as_bytes().len();
+    scratch[salt_len + 9..binding_end].copy_from_slice(request_salt.as_bytes());
+    scratch[binding_end..fixed_end].copy_from_slice(&payload_len.to_be_bytes());
+    let payload_end = response_first_read_len + first_payload.len();
+    scratch[response_first_read_len..payload_end].copy_from_slice(first_payload);
+
+    seal_wire_region(
+        &mut sealer,
+        &mut scratch[salt_len..response_first_read_len],
+        fixed_plaintext_len,
+    )?;
+    seal_wire_region(
+        &mut sealer,
+        &mut scratch[response_first_read_len..total],
+        first_payload.len(),
+    )?;
     Ok(sealer)
 }
 
@@ -353,30 +372,48 @@ pub(super) fn seal_data_chunk_into(
         return Err(FrameError::Bounds);
     }
     let payload_len = u16::try_from(payload.len()).map_err(|_| FrameError::Bounds)?;
-    scratch.clear();
-    scratch.extend_from_slice(&payload_len.to_be_bytes());
-    sealer
-        .seal_in_place(scratch)
-        .map_err(frame_from_seal_aead)?;
-    let length: [u8; ENCRYPTED_LENGTH_LEN] =
-        scratch[..].try_into().expect("encrypted length width");
-
-    scratch.clear();
-    scratch.extend_from_slice(payload);
-    sealer
-        .seal_in_place(scratch)
-        .map_err(frame_from_seal_aead)?;
-    let payload_wire_len = scratch.len();
+    let payload_wire_len = payload
+        .len()
+        .checked_add(TAG_LEN)
+        .ok_or(FrameError::Bounds)?;
     let total = ENCRYPTED_LENGTH_LEN
         .checked_add(payload_wire_len)
         .ok_or(FrameError::Bounds)?;
-    if total > MAX_ENCRYPT_WIRE_LEN {
+    if total > MAX_ENCRYPT_WIRE_LEN || total > scratch.capacity() {
         return Err(FrameError::Bounds);
     }
+
+    scratch.clear();
     scratch.resize(total, 0);
-    scratch.copy_within(0..payload_wire_len, ENCRYPTED_LENGTH_LEN);
-    scratch[..ENCRYPTED_LENGTH_LEN].copy_from_slice(&length);
+    scratch[..2].copy_from_slice(&payload_len.to_be_bytes());
+    let payload_end = ENCRYPTED_LENGTH_LEN + payload.len();
+    scratch[ENCRYPTED_LENGTH_LEN..payload_end].copy_from_slice(payload);
+
+    seal_wire_region(sealer, &mut scratch[..ENCRYPTED_LENGTH_LEN], 2)?;
+    seal_wire_region(
+        sealer,
+        &mut scratch[ENCRYPTED_LENGTH_LEN..total],
+        payload.len(),
+    )?;
     Ok(())
+}
+
+fn seal_wire_region(
+    sealer: &mut TcpSealer,
+    wire: &mut [u8],
+    plaintext_len: usize,
+) -> Result<(), FrameError> {
+    let expected_len = plaintext_len
+        .checked_add(TAG_LEN)
+        .ok_or(FrameError::Bounds)?;
+    if wire.len() != expected_len {
+        return Err(FrameError::Bounds);
+    }
+    let (plaintext, tag) = wire.split_at_mut(plaintext_len);
+    let tag: &mut [u8; TAG_LEN] = tag.try_into().map_err(|_| FrameError::Bounds)?;
+    sealer
+        .seal_in_place_detached(plaintext, tag)
+        .map_err(frame_from_seal_aead)
 }
 
 /// Authenticates one complete subsequent frame for deterministic codec tests.

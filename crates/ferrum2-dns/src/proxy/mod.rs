@@ -23,7 +23,7 @@ use crate::{
     MAX_APPLICATION_RESOLVED_CANDIDATES, ResolverGeneration, TaggedResolver,
 };
 
-use loops::{bind_tcp, encode_response, tcp_loop, udp_loop};
+use loops::{UdpRequestPool, bind_tcp, encode_response, tcp_loop, udp_loop};
 use policy_cache::{
     append_application_records, bind_response, cache_application_response, cache_qtype,
     cached_application_negative_response, cached_application_response, error_response,
@@ -48,11 +48,40 @@ pub enum ProxyIngress {
     Ordinary(usize),
 }
 
+/// Closed, identity-free UDP listener lifecycle events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsUdpEvent {
+    /// One datagram acquired a bounded request slot.
+    Acquired,
+    /// One acquired request released its slot after completion or cancellation.
+    Completed,
+    /// One datagram was dropped because every request slot was occupied.
+    PoolDrop,
+    /// One response could not be encoded within the advertised wire bound.
+    EncodeFailure,
+}
+
+/// Low-cardinality observer for DNS UDP listener structural work.
+pub trait DnsUdpObserver: Send + Sync + 'static {
+    /// Records one closed listener lifecycle event.
+    fn record(&self, event: DnsUdpEvent);
+}
+
+impl<F> DnsUdpObserver for F
+where
+    F: Fn(DnsUdpEvent) + Send + Sync + 'static,
+{
+    fn record(&self, event: DnsUdpEvent) {
+        self(event);
+    }
+}
+
 /// Hickory-backed DNS proxy request seam.
 pub struct DnsProxy {
     resolver: Arc<TaggedResolver>,
     policy: ProxyPolicy,
     policy_observer: Option<Arc<dyn DnsPolicyObserver>>,
+    udp_observer: Option<Arc<dyn DnsUdpObserver>>,
     pub(super) cache: Option<ProxyCache>,
 }
 
@@ -95,6 +124,7 @@ pub struct DnsProxyListeners {
     tcp: Vec<TcpListener>,
     proxy: Arc<DnsProxy>,
     connections: Arc<Semaphore>,
+    udp_requests: UdpRequestPool,
     idle_timeout: Duration,
 }
 
@@ -103,11 +133,16 @@ pub struct DnsProxySockets {
     udp: Vec<UdpSocket>,
     tcp: Vec<TcpListener>,
     connections: Arc<Semaphore>,
+    udp_requests: UdpRequestPool,
     idle_timeout: Duration,
 }
 
 impl DnsProxyListeners {
     /// Atomically binds one UDP and one bounded-backlog TCP listener per address.
+    ///
+    /// `max_connections` independently bounds aggregate TCP connections and
+    /// aggregate in-flight UDP requests. UDP datagrams received while that
+    /// request limit is saturated are dropped.
     pub async fn bind(
         inbounds: Vec<SocketAddr>,
         backlog: u32,
@@ -131,7 +166,13 @@ impl DnsProxyListeners {
         let (cancel, cancel_rx) = watch::channel(false);
         for (inbound, socket) in self.udp.into_iter().enumerate() {
             let proxy = Arc::clone(&self.proxy);
-            listeners.spawn(udp_loop(socket, inbound, proxy, cancel_rx.clone()));
+            listeners.spawn(udp_loop(
+                socket,
+                inbound,
+                proxy,
+                self.udp_requests.clone(),
+                cancel_rx.clone(),
+            ));
         }
         for (inbound, listener) in self.tcp.into_iter().enumerate() {
             let proxy = Arc::clone(&self.proxy);
@@ -162,6 +203,9 @@ impl DnsProxyListeners {
 
 impl DnsProxySockets {
     /// Binds all paired sockets without starting a resolver or service task.
+    ///
+    /// `max_connections` independently bounds aggregate TCP connections and
+    /// aggregate in-flight UDP requests.
     pub async fn bind(
         inbounds: Vec<SocketAddr>,
         backlog: u32,
@@ -178,6 +222,7 @@ impl DnsProxySockets {
             udp,
             tcp,
             connections: Arc::new(Semaphore::new(usize::from(max_connections.get()))),
+            udp_requests: UdpRequestPool::new(usize::from(max_connections.get())),
             idle_timeout,
         })
     }
@@ -189,6 +234,7 @@ impl DnsProxySockets {
             tcp: self.tcp,
             proxy,
             connections: self.connections,
+            udp_requests: self.udp_requests,
             idle_timeout: self.idle_timeout,
         }
     }
@@ -215,6 +261,7 @@ impl DnsProxy {
                 ordinary_count,
             },
             policy_observer: None,
+            udp_observer: None,
             cache: None,
         }
     }
@@ -223,6 +270,22 @@ impl DnsProxy {
     pub fn with_policy_observer(mut self, observer: Arc<dyn DnsPolicyObserver>) -> Self {
         self.policy_observer = Some(observer);
         self
+    }
+
+    /// Adds one identity-free observer for bounded UDP listener work.
+    pub fn with_udp_observer(mut self, observer: Arc<dyn DnsUdpObserver>) -> Self {
+        self.udp_observer = Some(observer);
+        self
+    }
+
+    pub(super) fn observe_udp(&self, event: DnsUdpEvent) {
+        if let Some(observer) = &self.udp_observer {
+            observer.record(event);
+        }
+    }
+
+    pub(super) fn udp_observer(&self) -> Option<Arc<dyn DnsUdpObserver>> {
+        self.udp_observer.as_ref().map(Arc::clone)
     }
 
     /// Enables one shared, generation-scoped cache for application A/AAAA lookups.
@@ -358,8 +421,27 @@ impl DnsProxy {
         wire: &[u8],
     ) -> Option<Vec<u8>> {
         let request = Message::from_vec(wire).ok()?;
+        let capacity = match transport {
+            ProxyTransport::Udp => usize::from(request.max_payload()).min(4096),
+            ProxyTransport::Tcp => 512,
+        };
+        let advertised = request.max_payload();
         let response = self.response(ingress, transport, &request).await;
-        encode_response(response, transport, request.max_payload())
+        let mut wire = Vec::with_capacity(capacity);
+        encode_response(&response, transport, advertised, &mut wire)?;
+        Some(wire)
+    }
+
+    pub(super) async fn answer_message_into(
+        &self,
+        ingress: ProxyIngress,
+        transport: ProxyTransport,
+        request: Message,
+        wire: &mut Vec<u8>,
+    ) -> Option<()> {
+        let advertised = request.max_payload();
+        let response = self.response(ingress, transport, &request).await;
+        encode_response(&response, transport, advertised, wire)
     }
 
     async fn response(

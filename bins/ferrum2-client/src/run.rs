@@ -76,6 +76,7 @@ fn initial_network_snapshot() -> Result<Arc<NetworkSnapshot>, RunError> {
 
 #[cfg(all(windows, not(test)))]
 fn client_network_runtime(
+    network_generation: ferrum2_config::NetworkGenerationMode,
     registry: OwnerRegistry,
     metrics: Arc<Metrics>,
 ) -> Result<
@@ -92,7 +93,14 @@ fn client_network_runtime(
         .map_err(|_| RunError::StartupProtocol)?;
     let coordinator = tun::network_reset_coordinator(snapshot, registry);
     metrics.set_network_generation(coordinator.status().published_generation());
+    let mode = match network_generation {
+        ferrum2_config::NetworkGenerationMode::Dynamic => {
+            ferrum2_runtime::NetworkSocketMode::Dynamic
+        }
+        ferrum2_config::NetworkGenerationMode::Static => ferrum2_runtime::NetworkSocketMode::Static,
+    };
     let service = Arc::new(egress::ClientNetworkSocketService::new(
+        mode,
         coordinator.clone(),
         catalog.clone(),
         metrics,
@@ -119,6 +127,25 @@ pub(crate) enum RunError {
     RuntimeChild,
     RuntimeRoot,
     ShutdownCleanup,
+}
+
+fn dns_only_udp_buffered_bytes(max_inflight: usize) -> Result<usize, RunError> {
+    // A DNS UDP query routed through a multi-hop detour can keep two
+    // association wires live while response materialization additionally owns
+    // one MAX_UDP_WIRE_LEN-bounded AccountedDatagram. The DNS admission
+    // semaphore caps all three populations at max_inflight.
+    let fixed_wires = max_inflight
+        .checked_mul(2)
+        .and_then(|count| count.checked_mul(MAX_UDP_WIRE_LEN))
+        .ok_or(RunError::StartupProtocol)?;
+    let response_headroom = max_inflight
+        .checked_mul(MAX_UDP_WIRE_LEN)
+        .ok_or(RunError::StartupProtocol)?;
+    let required = fixed_wires
+        .checked_add(response_headroom)
+        .filter(|required| *required <= MAX_UDP_MAX_BUFFERED_BYTES)
+        .ok_or(RunError::StartupProtocol)?;
+    Ok(required.max(MIN_UDP_MAX_BUFFERED_BYTES))
 }
 
 impl std::fmt::Display for RunError {
@@ -247,7 +274,11 @@ pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
         #[cfg(all(windows, not(test)))]
-        let mut network_change_monitor = if prepared.has_tun() {
+        let network_generation = prepared.runtime().network_generation;
+        #[cfg(all(windows, not(test)))]
+        let mut network_change_monitor = if prepared.has_tun()
+            || network_generation == ferrum2_config::NetworkGenerationMode::Static
+        {
             None
         } else {
             Some(
@@ -257,7 +288,8 @@ pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
         };
         #[cfg(all(windows, not(test)))]
         let (network_reset_coordinator, network_interface_catalog, network_socket_service) =
-            match client_network_runtime(registry.clone(), Arc::clone(&metrics)) {
+            match client_network_runtime(network_generation, registry.clone(), Arc::clone(&metrics))
+            {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     if let Some(monitor) = network_change_monitor.take() {
@@ -359,7 +391,11 @@ pub(crate) fn validate_prepared_materialization(
         #[cfg(all(windows, not(test)))]
         let network_socket_service = {
             let registry = OwnerRegistry::new();
-            let (_, _, service) = client_network_runtime(registry, Arc::clone(&metrics))?;
+            let (_, _, service) = client_network_runtime(
+                prepared.runtime().network_generation,
+                registry,
+                Arc::clone(&metrics),
+            )?;
             service
         };
         let materializer = materialize::ClientV2Materializer::new(
@@ -500,6 +536,8 @@ where
         ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system();
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
+        #[cfg(all(windows, not(test)))]
+        let network_generation = config.runtime.network_generation;
         let selector = config.selector_control();
         let tun_config = config.tun;
         let tun_direct = tun_config.is_some()
@@ -580,10 +618,7 @@ where
             Some(defaults)
         } else if let Some(dns) = dns.as_ref().filter(|dns| dns.6) {
             let sessions = usize::from(dns.4.get());
-            let bytes = sessions
-                .checked_mul(3 * MAX_UDP_WIRE_LEN)
-                .ok_or(RunError::StartupProtocol)?
-                .clamp(MIN_UDP_MAX_BUFFERED_BYTES, MAX_UDP_MAX_BUFFERED_BYTES);
+            let bytes = dns_only_udp_buffered_bytes(sessions)?;
             Some((sessions, bytes, dns.3.max(MIN_UDP_IDLE_TIMEOUT)))
         } else {
             None
@@ -637,7 +672,11 @@ where
         )
         .with_route_network(runtime_route_network(&config.route_network));
         #[cfg(all(windows, not(test)))]
-        let egress = egress.with_shared_network_reset(&network_socket_service)?;
+        let egress = if network_generation == ferrum2_config::NetworkGenerationMode::Dynamic {
+            egress.with_shared_network_reset(&network_socket_service)?
+        } else {
+            egress
+        };
         let egress = Arc::new(egress);
         let context = Arc::new(ClientContext {
             inbound: Socks5Inbound::new(),
@@ -675,7 +714,9 @@ where
         let tcp_routing = Arc::clone(&routing);
         let mut roots = ClientProcessRoots::default();
         #[cfg(all(windows, not(test)))]
-        if tun_config.is_none() {
+        if tun_config.is_none()
+            && network_generation == ferrum2_config::NetworkGenerationMode::Dynamic
+        {
             let monitor = network_change_monitor
                 .take()
                 .ok_or(RunError::StartupProtocol)?;

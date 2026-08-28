@@ -15,9 +15,7 @@ pub(in crate::run) use ferrum2_runtime::{
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, OwnerSnapshot, ProcessCause, ProcessRoot,
     ProcessRootExit, ProcessSupervisor, RuntimeTcpStream, TcpConnector,
 };
-pub(in crate::run) use ferrum2_shadowsocks::{
-    MethodKeyAdapter, UdpClientSession, UdpPacketScratch,
-};
+pub(in crate::run) use ferrum2_shadowsocks::{MethodKeyAdapter, UdpClientSession};
 pub(in crate::run) use tokio::net::{TcpListener, UdpSocket};
 
 pub(in crate::run) use super::RunError;
@@ -215,10 +213,9 @@ pub(in crate::run) fn encoded_udp_request(
     payload: &[u8],
 ) -> Vec<u8> {
     let request = Datagram::new(target, payload.into(), payload.len()).expect("UDP request");
-    let mut scratch = UdpPacketScratch::new();
     let mut wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
     let length = client
-        .encode_request(clock, &SystemRandom, &request, 0, &mut wire, &mut scratch)
+        .encode_request(clock, &SystemRandom, &request, 0, &mut wire)
         .expect("encode UDP request");
     wire.truncate(length);
     wire

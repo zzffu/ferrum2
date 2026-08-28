@@ -162,8 +162,15 @@ def summarize_evidence(
         raise CandidateControlError("summary identities must be full commit SHAs")
     parent_sha = parent_sha.lower()
     candidate_sha = candidate_sha.lower()
-    if parent_sha == candidate_sha:
-        raise CandidateControlError("summary parent and candidate must be different")
+    run_kind = plan["run_kind"]
+    if run_kind == "calibration-aa":
+        if parent_sha != candidate_sha:
+            raise CandidateControlError("calibration-aa summary commits must be identical")
+    elif run_kind == "comparison":
+        if parent_sha == candidate_sha:
+            raise CandidateControlError("summary parent and candidate must be different")
+    else:
+        raise CandidateControlError("summary run_kind is unsupported")
     is_scale = plan["selection"] == SCALE_SCENARIO
     if is_scale:
         lineage = plan["scale_lineage"]
@@ -270,6 +277,11 @@ def summarize_evidence(
             missing_scenarios=sorted({key[0] for key in missing}),
         )
 
+    if run_kind == "calibration-aa" and member_identity["parent"] != member_identity["candidate"]:
+        raise CandidateControlError(
+            "calibration-aa parent and candidate build identities must be identical"
+        )
+
     if is_scale:
         return _summarize_scale_evidence(
             plan=plan,
@@ -310,6 +322,12 @@ def summarize_evidence(
                     "candidate_order": candidate["order"],
                     "parent_value": parent_value,
                     "candidate_value": candidate_value,
+                    "parent_structural_metrics": copy.deepcopy(
+                        parent["structural_metrics"]
+                    ),
+                    "candidate_structural_metrics": copy.deepcopy(
+                        candidate["structural_metrics"]
+                    ),
                     "improvement_percent": _display_decimal(improvement),
                 }
             )
@@ -342,6 +360,7 @@ def summarize_evidence(
                 "application_payload_bytes": scenario_plan[
                     "application_payload_bytes"
                 ],
+                "workload_scale": scenario_plan["workload_scale"],
                 "socks_datagram_bytes": scenario_plan["socks_datagram_bytes"],
                 "upstream_wire_bytes": scenario_plan["upstream_wire_bytes"],
                 "evidence_contract": copy.deepcopy(scenario_plan["evidence_contract"]),
@@ -368,7 +387,10 @@ def summarize_evidence(
         threshold_availability = "complete"
     else:
         threshold_availability = "partial"
-    if plan["mode"] == "diagnostic":
+    if run_kind == "calibration-aa":
+        status = CALIBRATION_REQUIRED
+        decision_reason = "A/A calibration evidence requires explicit review"
+    elif plan["mode"] == "diagnostic":
         status = INCONCLUSIVE
         decision_reason = "diagnostic mode reports measurements only"
     elif any(result["status"] == REGRESSION for result in scenario_summaries):
@@ -430,6 +452,7 @@ def summarize_evidence(
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "kind": "performance_candidate_summary",
+        "run_kind": run_kind,
         "mode": plan["mode"],
         "selection": plan["selection"],
         "selected_scenario": plan["selected_scenario"],
@@ -454,7 +477,8 @@ def summarize_evidence(
         "status": status,
         "workflow_failure_reason": (
             decision_reason
-            if summary_exit_code(mode=plan["mode"], status=status)
+            if run_kind != "calibration-aa"
+            and summary_exit_code(mode=plan["mode"], status=status)
             else None
         ),
         "mandatory_scenarios": list(planned),
@@ -483,6 +507,7 @@ def invalid_summary(
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "kind": "performance_candidate_summary",
+        "run_kind": plan["run_kind"] if plan is not None else None,
         "mode": plan["mode"] if plan is not None else None,
         "selection": plan["selection"] if plan is not None else None,
         "selected_scenario": plan["selected_scenario"] if plan is not None else None,
@@ -629,14 +654,15 @@ def summary_markdown(summary: dict[str, object]) -> str:
     lines.extend(
         [
             "",
-            "| Scenario | Role | Topology | Application payload B | SOCKS datagram B | Upstream wire B | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Spread % | Warnings | Threshold decision | Status |",
-            "|---|---|---|---:|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
+            "| Scenario | Role | Topology | Application payload B | Workload scale | SOCKS datagram B | Upstream wire B | Metric | Direction | Observed | Wins | Losses | Ties | Median % | Min % | Max % | Spread % | Warnings | Threshold decision | Status |",
+            "|---|---|---|---:|---:|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
         ]
     )
     for scenario in summary["scenarios"]:
         lines.append(
             f"| {scenario['scenario']} | {scenario['role']} | {scenario['topology']} | "
-            f"{scenario['application_payload_bytes']} | "
+            f"{scenario['application_payload_bytes'] if scenario['application_payload_bytes'] is not None else '-'} | "
+            f"{scenario['workload_scale'] if scenario['workload_scale'] is not None else '-'} | "
             f"{scenario['socks_datagram_bytes'] if scenario['socks_datagram_bytes'] is not None else '-'} | "
             f"{scenario['upstream_wire_bytes'] if scenario['upstream_wire_bytes'] is not None else '-'} | "
             f"{scenario['metric']} | "
@@ -716,7 +742,11 @@ def run_summary_command(parsed: argparse.Namespace) -> int:
         print(f"performance-candidate: {error}", file=sys.stderr)
         return 2
     write_summary_outputs(summary, output=parsed.output, markdown=parsed.markdown)
-    exit_code = summary_exit_code(mode=plan["mode"], status=summary["status"])
+    exit_code = (
+        0
+        if plan["run_kind"] == "calibration-aa" and summary["status"] != INVALID
+        else summary_exit_code(mode=plan["mode"], status=summary["status"])
+    )
     if exit_code:
         print(
             f"performance-candidate: qualification status={summary['status']}",

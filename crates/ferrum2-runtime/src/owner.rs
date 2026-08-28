@@ -42,7 +42,7 @@ pub struct OwnerSnapshot {
     pub udp_queued_datagrams: usize,
     /// Allocated-capacity bytes held by UDP runtime owners.
     pub udp_buffered_bytes: usize,
-    /// UDP receive scratch buffers currently owned by session tasks.
+    /// UDP receive scratch buffers currently owned by direct admissions or session tasks.
     pub udp_scratch_buffers: usize,
     /// UDP session tasks terminated after their graceful deadline.
     pub udp_forced_shutdowns: usize,

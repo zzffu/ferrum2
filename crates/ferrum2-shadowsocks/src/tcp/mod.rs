@@ -8,7 +8,9 @@ pub(crate) mod wire;
 pub use error::{
     DetectionReason, FlowTerminal, FrameError, ProtocolReason, ShadowsocksError, TransportPhase,
 };
-pub use flow::{BoxedClientFlow, ClientFlow, PlainDuplex, ServerFlow, TransportIo};
+pub use flow::{
+    BoxedClientFlow, ClientFlow, PlainBufferedDuplex, PlainDuplex, ServerFlow, TransportIo,
+};
 pub use handshake::{
     ClientTcpOutbound, ConnectedClientOpen, MethodKeyAdapter, NoReply, ShadowsocksTcpInbound,
     TcpKeyError, TcpKeyProvider,

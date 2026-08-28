@@ -162,14 +162,14 @@ async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_p
     let mut cx = Context::from_waker(waker);
     assert!(matches!(
         Pin::new(&mut flow).poll_write_plain(&mut cx, &[2; MAX_ENCODE_PAYLOAD_LEN]),
-        Poll::Pending
+        Poll::Ready(Ok(MAX_ENCODE_PAYLOAD_LEN))
     ));
-    assert_eq!(observation.lock().expect("observation").write_calls, 2);
-
     assert_eq!(
-        write_plain(&mut flow, &[2; MAX_ENCODE_PAYLOAD_LEN]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN)
+        observation.lock().expect("observation").write_calls,
+        1 + 2 + 16 + 1 + 16,
+        "ready one-byte writes drain the prior frame in the same poll"
     );
+
     assert_eq!(
         write_plain(&mut flow, &[3; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
         Ok(MAX_ENCODE_PAYLOAD_LEN)

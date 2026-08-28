@@ -5,10 +5,11 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use ::tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use ::tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+use bytes::{BufMut, BytesMut};
 use ferrum2_core::{AbortiveClose, ConnectError, Connector, LocalEndpoint, TargetAddr};
 
-use crate::{FlowTerminal, PlainDuplex, ShadowsocksError, TransportIo};
+use crate::{FlowTerminal, PlainBufferedDuplex, PlainDuplex, ShadowsocksError, TransportIo};
 
 /// Adapts a core connector so its streams implement [`TransportIo`].
 pub struct TokioConnector<C> {
@@ -72,7 +73,18 @@ where
 {
     type IoError = io::Error;
 
-    fn poll_read(
+    fn poll_read_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let mut limited = (&mut *destination).limit(limit);
+        tokio_util::io::poll_read_buf(Pin::new(&mut self.inner), cx, &mut limited)
+            .map_err(|_| io::ErrorKind::Other.into())
+    }
+
+    fn poll_read_initialized(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         destination: &mut [u8],
@@ -159,6 +171,22 @@ where
             Poll::Ready(Ok(_)) => Poll::Ready(Err(io::ErrorKind::InvalidData.into())),
             Poll::Ready(Err(error)) => Poll::Ready(Err(framed_error(error))),
         }
+    }
+}
+
+impl<F> AsyncBufRead for TokioFramed<F>
+where
+    F: PlainBufferedDuplex,
+{
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner)
+            .poll_fill_plain_buf(cx)
+            .map_err(framed_error)
+    }
+
+    fn consume(mut self: Pin<&mut Self>, amount: usize) {
+        Pin::new(&mut self.inner).consume_plain(amount);
     }
 }
 

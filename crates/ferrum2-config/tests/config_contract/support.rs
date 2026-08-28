@@ -9,9 +9,10 @@ pub(super) use std::time::Duration;
 pub(super) use ferrum2_config::{
     ClientOutboundConfig, ClientV2Resources, CompiledRoute, CompiledRuleSetResource, ConfigError,
     ConfigErrorKind, ConfigField, DialEndpoint, DnsStrategy, LoggingLevel, MAX_CONFIG_BYTES,
-    PreparedClientV2, PreparedFixedEndpointTarget, PreparedServerV2, ResolvedDnsEndpoint,
-    ResolvedOutboundEndpoint, RouteAction, RuntimeConfig, ServerV2Resources, UdpFiltering,
-    finish_client_v2, finish_server_v2, prepare_client, prepare_server,
+    MAX_UDP_RECEIVE_WORKERS, NetworkGenerationMode, PreparedClientV2, PreparedFixedEndpointTarget,
+    PreparedServerV2, ResolvedDnsEndpoint, ResolvedOutboundEndpoint, RouteAction, RuntimeConfig,
+    ServerV2Resources, UdpFiltering, finish_client_v2, finish_server_v2, prepare_client,
+    prepare_server,
 };
 pub(super) use ferrum2_core::TargetAddr;
 pub(super) use ferrum2_core::route::{EgressPlanSnapshot, Network};
@@ -328,6 +329,11 @@ pub(super) fn tun_client(tun: &str) -> String {
 }
 
 pub(super) fn assert_runtime(actual: RuntimeConfig, expected: [u64; 6], name: &str) {
+    assert_eq!(
+        actual.network_generation,
+        NetworkGenerationMode::Dynamic,
+        "{name}"
+    );
     let actual = (
         u64::from(actual.max_connections.get()),
         u64::from(actual.listen_backlog.get()),

@@ -10,7 +10,10 @@ use ferrum2_crypto::{
 };
 
 use super::replay::UdpReplayWindow;
-use super::wire::{encode_packet, open_packet_borrowed, udp_crypto};
+use super::wire::{
+    encode_packet, open_packet_borrowed, open_packet_in_place_borrowed, open_packet_owned,
+    udp_crypto,
+};
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
 use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE, ValidatedTarget};
 
@@ -90,7 +93,6 @@ impl UdpClientSession {
         datagram: &Datagram,
         padding_len: usize,
         output: &mut [u8],
-        scratch: &mut UdpPacketScratch,
     ) -> Result<usize, UdpPacketError> {
         self.encode_request_parts(
             clock,
@@ -99,7 +101,6 @@ impl UdpClientSession {
             datagram.payload(),
             padding_len,
             output,
-            scratch,
         )
     }
 
@@ -113,7 +114,6 @@ impl UdpClientSession {
         payload: &[u8],
         padding_len: usize,
         output: &mut [u8],
-        scratch: &mut UdpPacketScratch,
     ) -> Result<usize, UdpPacketError> {
         encode_packet(
             &self.crypto,
@@ -126,7 +126,6 @@ impl UdpClientSession {
             payload,
             padding_len,
             output,
-            scratch,
         )
     }
 
@@ -140,6 +139,33 @@ impl UdpClientSession {
     ) -> Result<PendingUdpResponse, UdpPacketError> {
         self.prepare_response_borrowed(clock, wire, scratch)
             .map(BorrowedPendingUdpResponse::materialize)
+    }
+
+    /// Destructively authenticates and validates an exclusively owned response wire.
+    ///
+    /// The semantic body stays inside the owned wire until timestamp, binding,
+    /// target, and current replay checks pass. Payload materialization then
+    /// splits the original allocation without a wire-to-scratch copy.
+    pub fn prepare_response_owned(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: BytesMut,
+    ) -> Result<PendingUdpResponse, UdpPacketError> {
+        let opened = open_packet_owned(
+            &self.crypto,
+            clock,
+            wire,
+            RESPONSE_TYPE,
+            Some(self.outbound.session_id()),
+        )?;
+        self.check_response_replay(opened.session_id(), opened.packet_id())?;
+        let opened = opened.into_opened_packet()?;
+        Ok(PendingUdpResponse {
+            owner_id: self.outbound.session_id().clone(),
+            session_id: opened.session_id,
+            packet_id: opened.packet_id,
+            datagram: opened.datagram,
+        })
     }
 
     /// Authenticates and validates a response without materializing its target or payload.
@@ -156,6 +182,7 @@ impl UdpClientSession {
             scratch,
             RESPONSE_TYPE,
             Some(self.outbound.session_id()),
+            |session_id, packet_id| self.check_response_replay(session_id, packet_id),
         )?;
         Ok(BorrowedPendingUdpResponse {
             owner_id: self.outbound.session_id().clone(),
@@ -164,6 +191,58 @@ impl UdpClientSession {
             target: opened.target,
             payload: opened.payload,
         })
+    }
+
+    /// Destructively authenticates an exclusive response wire and returns guarded views.
+    ///
+    /// No association or replay state changes until the returned commit token is
+    /// committed. Every authentication, semantic, binding, or replay failure
+    /// clears the received wire before returning.
+    pub fn prepare_response_in_place<'a>(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: &'a mut BytesMut,
+    ) -> Result<BorrowedPendingUdpResponse<'a>, UdpPacketError> {
+        let opened = open_packet_in_place_borrowed(
+            &self.crypto,
+            clock,
+            wire,
+            RESPONSE_TYPE,
+            Some(self.outbound.session_id()),
+            |session_id, packet_id| self.check_response_replay(session_id, packet_id),
+        )?;
+        Ok(BorrowedPendingUdpResponse {
+            owner_id: self.outbound.session_id().clone(),
+            session_id: opened.session_id,
+            packet_id: opened.packet_id,
+            target: opened.target,
+            payload: opened.payload,
+        })
+    }
+
+    fn check_response_replay(
+        &self,
+        session_id: &UdpSessionId,
+        packet_id: u64,
+    ) -> Result<(), UdpPacketError> {
+        let associations = self
+            .associations
+            .lock()
+            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        if let Some(association) = associations
+            .current
+            .as_ref()
+            .filter(|association| association.session_id == *session_id)
+            .or_else(|| {
+                associations
+                    .old
+                    .as_ref()
+                    .filter(|association| association.session_id == *session_id)
+            })
+        {
+            association.replay.check(packet_id)?;
+        }
+        Ok(())
     }
 
     /// Atomically rechecks and commits a reserved response transition.

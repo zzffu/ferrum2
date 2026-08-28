@@ -468,6 +468,11 @@ pub(super) struct RulesDnsMetrics {
     dns_resolves: DnsResolveFamily,
     dns_cache_hits: DnsQueryTypeFamily,
     dns_cache_misses: DnsQueryTypeFamily,
+    dns_udp_requests: Counter,
+    dns_udp_inflight: Gauge,
+    dns_udp_inflight_peak: Gauge,
+    dns_udp_pool_drops: Counter,
+    dns_udp_encode_failures: Counter,
     dns_explicit_system_resolves: DnsResolvePurposeFamily,
     dns_implicit_system_fallbacks: Counter,
     target_resolutions: TargetResolutionFamily,
@@ -536,6 +541,11 @@ impl RulesDnsMetrics {
         let dns_cache_misses = DnsQueryTypeFamily::new(single_labels(DNS_QUERY_TYPES, |qtype| {
             DnsQueryTypeLabels { qtype }
         }));
+        let dns_udp_requests = Counter::default();
+        let dns_udp_inflight = Gauge::default();
+        let dns_udp_inflight_peak = Gauge::default();
+        let dns_udp_pool_drops = Counter::default();
+        let dns_udp_encode_failures = Counter::default();
         let dns_explicit_system_resolves =
             DnsResolvePurposeFamily::new(single_labels(DNS_RESOLVE_PURPOSES, |purpose| {
                 DnsResolvePurposeLabels { purpose }
@@ -623,6 +633,31 @@ impl RulesDnsMetrics {
             dns_cache_misses.clone(),
         );
         registry.register(
+            "ferrum2_dns_udp_requests",
+            "DNS UDP requests admitted by the bounded listener pool",
+            dns_udp_requests.clone(),
+        );
+        registry.register(
+            "ferrum2_dns_udp_inflight",
+            "Current admitted DNS UDP listener requests",
+            dns_udp_inflight.clone(),
+        );
+        registry.register(
+            "ferrum2_dns_udp_inflight_peak",
+            "Lifetime peak admitted DNS UDP listener requests",
+            dns_udp_inflight_peak.clone(),
+        );
+        registry.register(
+            "ferrum2_dns_udp_pool_drops",
+            "DNS UDP datagrams dropped at the bounded listener pool",
+            dns_udp_pool_drops.clone(),
+        );
+        registry.register(
+            "ferrum2_dns_udp_encode_failures",
+            "DNS UDP responses rejected by bounded wire encoding",
+            dns_udp_encode_failures.clone(),
+        );
+        registry.register(
             "ferrum2_dns_explicit_system_resolve",
             "Explicitly authorized system DNS resolutions by closed purpose",
             dns_explicit_system_resolves.clone(),
@@ -653,6 +688,11 @@ impl RulesDnsMetrics {
             dns_resolves,
             dns_cache_hits,
             dns_cache_misses,
+            dns_udp_requests,
+            dns_udp_inflight,
+            dns_udp_inflight_peak,
+            dns_udp_pool_drops,
+            dns_udp_encode_failures,
             dns_explicit_system_resolves,
             dns_implicit_system_fallbacks,
             target_resolutions,
@@ -861,6 +901,32 @@ impl Metrics {
     /// Records a shared DNS cache miss without accepting a server identity.
     pub fn dns_cache_miss(&self, qtype: DnsQueryType) {
         self.rules_dns.dns_cache_misses.metric(qtype as usize).inc();
+    }
+
+    /// Records one admitted DNS UDP request and its identity-free pool depth.
+    pub fn dns_udp_request_started(&self) {
+        self.rules_dns.dns_udp_requests.inc();
+        self.rules_dns.dns_udp_inflight.inc();
+    }
+
+    /// Reconciles the monotonic DNS UDP lifetime peak after concurrent starts.
+    pub fn set_dns_udp_inflight_peak(&self, peak: u64) {
+        self.rules_dns.dns_udp_inflight_peak.set(u64_gauge(peak));
+    }
+
+    /// Records release of one admitted DNS UDP request slot.
+    pub fn dns_udp_request_completed(&self) {
+        self.rules_dns.dns_udp_inflight.dec();
+    }
+
+    /// Records one DNS UDP datagram rejected by a saturated request pool.
+    pub fn dns_udp_pool_drop(&self) {
+        self.rules_dns.dns_udp_pool_drops.inc();
+    }
+
+    /// Records one bounded DNS UDP response encoding failure.
+    pub fn dns_udp_encode_failure(&self) {
+        self.rules_dns.dns_udp_encode_failures.inc();
     }
 
     /// Records an authorized use of the system resolver.

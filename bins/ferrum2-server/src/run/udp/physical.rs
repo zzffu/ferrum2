@@ -6,7 +6,7 @@ use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_observability::Metrics;
 use ferrum2_runtime::DirectUdpSocketFactory;
 #[cfg(any(windows, test))]
-use ferrum2_runtime::GenerationBoundUdpSocket;
+use ferrum2_runtime::NetworkUdpSocket;
 #[cfg(any(not(windows), test))]
 use ferrum2_runtime::{SystemDirectUdpSocket, SystemDirectUdpSocketFactory};
 #[cfg(any(windows, test))]
@@ -30,7 +30,7 @@ pub(in crate::run) struct ServerNetworkUdpSocketFactory {
 }
 
 #[cfg(any(windows, test))]
-pub(super) type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
+pub(super) type ServerPhysicalUdpSocket = NetworkUdpSocket<UdpSocket>;
 #[cfg(all(not(windows), not(test)))]
 pub(super) type ServerPhysicalUdpSocket = SystemDirectUdpSocket;
 

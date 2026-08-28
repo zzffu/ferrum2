@@ -1,16 +1,27 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use ferrum2_crypto::{SystemClock, SystemRandom};
 use ferrum2_runtime::{
     MAX_UDP_WIRE_DATAGRAM_BYTES, UdpBufferBudget, UdpBufferReservation, UdpRuntimeError,
 };
-use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpPacketScratch, UdpServer};
+use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpServer};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-pub(super) struct ResponseCodec {
-    pub(super) scratch: UdpPacketScratch,
-    pub(super) available_wires: Vec<ResponseWire>,
-    pub(super) _scratch_reservation: UdpBufferReservation,
+pub(super) const MAX_RESPONSE_CODEC_SHARDS: usize = 4;
+const RESPONSE_WIRES_PER_SHARD: usize = 2;
+
+struct ResponseCodec {
+    available_wires: Vec<ResponseWire>,
+}
+
+struct CodecShard {
+    state: Mutex<ResponseCodec>,
+    available: Arc<Semaphore>,
 }
 
 pub(super) struct ResponseWire {
@@ -19,7 +30,7 @@ pub(super) struct ResponseWire {
 }
 
 impl ResponseWire {
-    pub(super) fn reserve(budget: &UdpBufferBudget) -> Result<Self, UdpRuntimeError> {
+    fn reserve(budget: &UdpBufferBudget) -> Result<Self, UdpRuntimeError> {
         let reservation = budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)?;
         let wire = vec![0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];
         if wire.capacity() != reservation.capacity() {
@@ -33,44 +44,81 @@ impl ResponseWire {
 }
 
 pub(super) struct ResponseCodecPool {
-    pub(super) state: Mutex<ResponseCodec>,
-    pub(super) budget: UdpBufferBudget,
-    pub(super) returned: tokio::sync::Notify,
+    shards: Box<[CodecShard]>,
+    immediate_leases: AtomicU64,
+    waited_leases: AtomicU64,
+    wait_nanoseconds: AtomicU64,
 }
 
 impl ResponseCodecPool {
-    pub(super) fn new(budget: UdpBufferBudget) -> Result<Self, UdpRuntimeError> {
-        let scratch_reservation = budget.reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)?;
-        let initial_wire = ResponseWire::reserve(&budget)?;
+    pub(super) fn new(
+        budget: UdpBufferBudget,
+        maximum_sessions: usize,
+    ) -> Result<Self, UdpRuntimeError> {
+        let shard_count = response_codec_shards(maximum_sessions);
+        let mut shards = Vec::new();
+        shards
+            .try_reserve_exact(shard_count)
+            .map_err(|_| UdpRuntimeError::BufferLimit)?;
+        for _ in 0..shard_count {
+            let mut available_wires = Vec::new();
+            available_wires
+                .try_reserve_exact(RESPONSE_WIRES_PER_SHARD)
+                .map_err(|_| UdpRuntimeError::BufferLimit)?;
+            for _ in 0..RESPONSE_WIRES_PER_SHARD {
+                available_wires.push(ResponseWire::reserve(&budget)?);
+            }
+            shards.push(CodecShard {
+                state: Mutex::new(ResponseCodec { available_wires }),
+                available: Arc::new(Semaphore::new(RESPONSE_WIRES_PER_SHARD)),
+            });
+        }
         Ok(Self {
-            state: Mutex::new(ResponseCodec {
-                scratch: UdpPacketScratch::new(),
-                available_wires: vec![initial_wire],
-                _scratch_reservation: scratch_reservation,
-            }),
-            budget,
-            returned: tokio::sync::Notify::new(),
+            shards: shards.into_boxed_slice(),
+            immediate_leases: AtomicU64::new(0),
+            waited_leases: AtomicU64::new(0),
+            wait_nanoseconds: AtomicU64::new(0),
         })
     }
 
-    pub(super) fn try_encode(
+    pub(super) async fn encode(
         self: &Arc<Self>,
         protocol: &UdpServer,
         capability: ServerResponseCapability,
         clock: &SystemClock,
         datagram: &ferrum2_core::Datagram,
-    ) -> Result<Option<EncodedResponseWire>, ResponseEncodeError> {
-        let mut codec = self
-            .state
-            .lock()
-            .map_err(|_| ResponseEncodeError::Protocol(UdpPacketError::StateUnavailable))?;
-        let mut response_wire = match codec.available_wires.pop() {
-            Some(wire) => wire,
-            None => match ResponseWire::reserve(&self.budget) {
-                Ok(wire) => wire,
-                Err(UdpRuntimeError::BufferLimit) => return Ok(None),
-                Err(error) => return Err(ResponseEncodeError::Runtime(error)),
-            },
+    ) -> Result<EncodedResponseWire, ResponseEncodeError> {
+        let shard_index = self.shard_index(capability);
+        let shard = &self.shards[shard_index];
+        let permit = match Arc::clone(&shard.available).try_acquire_owned() {
+            Ok(permit) => {
+                self.immediate_leases.fetch_add(1, Ordering::Relaxed);
+                permit
+            }
+            Err(TryAcquireError::NoPermits) => {
+                self.waited_leases.fetch_add(1, Ordering::Relaxed);
+                let started = Instant::now();
+                let permit = Arc::clone(&shard.available)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ResponseEncodeError::Runtime(UdpRuntimeError::Cancelled))?;
+                let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.wait_nanoseconds.fetch_add(elapsed, Ordering::Relaxed);
+                permit
+            }
+            Err(TryAcquireError::Closed) => {
+                return Err(ResponseEncodeError::Runtime(UdpRuntimeError::Cancelled));
+            }
+        };
+        let mut response_wire = {
+            let mut codec = shard
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            codec
+                .available_wires
+                .pop()
+                .expect("response wire permit owns one fixed wire")
         };
         let encoded = protocol.encode_response(
             capability,
@@ -79,46 +127,92 @@ impl ResponseCodecPool {
             datagram,
             0,
             &mut response_wire.wire,
-            &mut codec.scratch,
         );
-        drop(codec);
         match encoded {
-            Ok(encoded) => Ok(Some(EncodedResponseWire {
+            Ok(encoded) => Ok(EncodedResponseWire {
                 wire: ResponseWireLease {
                     pool: Arc::clone(self),
+                    shard_index,
                     wire: Some(response_wire),
+                    permit: Some(permit),
                 },
                 wire_len: encoded.wire_len(),
                 peer: encoded.peer(),
-            })),
+            }),
             Err(error) => {
-                self.release(response_wire);
+                self.release(shard_index, response_wire);
+                drop(permit);
                 Err(ResponseEncodeError::Protocol(error))
             }
         }
     }
 
-    pub(super) fn release(&self, response_wire: ResponseWire) {
-        let mut response_wire = Some(response_wire);
-        if let Ok(mut codec) = self.state.lock()
-            && codec.available_wires.is_empty()
-        {
-            codec
-                .available_wires
-                .push(response_wire.take().expect("response wire is available"));
-        }
-        drop(response_wire);
-        self.returned.notify_waiters();
+    fn shard_index(&self, capability: ServerResponseCapability) -> usize {
+        let mut hasher = DefaultHasher::new();
+        capability.hash(&mut hasher);
+        hasher.finish() as usize & (self.shards.len() - 1)
     }
 
-    pub(super) fn notify_capacity_change(&self) {
-        self.returned.notify_waiters();
+    fn release(&self, shard_index: usize, response_wire: ResponseWire) {
+        let mut codec = self.shards[shard_index]
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        codec.available_wires.push(response_wire);
     }
+
+    #[cfg(test)]
+    pub(super) fn observations(&self) -> (u64, u64, u64) {
+        (
+            self.immediate_leases.load(Ordering::Relaxed),
+            self.waited_leases.load(Ordering::Relaxed),
+            self.wait_nanoseconds.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn available_wire_count(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .available_wires
+                    .len()
+            })
+            .sum()
+    }
+}
+
+pub(super) fn response_codec_shards(maximum_sessions: usize) -> usize {
+    let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
+    let target = maximum_sessions
+        .max(1)
+        .min(parallelism)
+        .min(MAX_RESPONSE_CODEC_SHARDS);
+    1_usize << target.ilog2()
+}
+
+pub(super) fn maximum_response_codec_reservation_bytes(maximum_sessions: usize) -> Option<usize> {
+    let target = maximum_sessions.clamp(1, MAX_RESPONSE_CODEC_SHARDS);
+    let maximum_shards = 1_usize << target.ilog2();
+    maximum_shards
+        .checked_mul(RESPONSE_WIRES_PER_SHARD)
+        .and_then(|wires| wires.checked_mul(MAX_UDP_WIRE_DATAGRAM_BYTES))
 }
 
 pub(super) struct ResponseWireLease {
     pub(super) pool: Arc<ResponseCodecPool>,
+    pub(super) shard_index: usize,
     pub(super) wire: Option<ResponseWire>,
+    pub(super) permit: Option<OwnedSemaphorePermit>,
 }
 
 impl ResponseWireLease {
@@ -134,8 +228,9 @@ impl ResponseWireLease {
 impl Drop for ResponseWireLease {
     fn drop(&mut self) {
         if let Some(wire) = self.wire.take() {
-            self.pool.release(wire);
+            self.pool.release(self.shard_index, wire);
         }
+        drop(self.permit.take());
     }
 }
 

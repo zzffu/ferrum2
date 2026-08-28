@@ -69,6 +69,24 @@ class GitRelationTests(unittest.TestCase):
         with self.assertRaisesRegex(json_contract.CandidateControlError, "different"):
             git_identity.validate_git_relation(self.repository, self.base, self.base)
 
+    def test_calibration_requires_and_accepts_exactly_one_same_commit(self) -> None:
+        self.assertEqual(
+            git_identity.validate_git_relation(
+                self.repository,
+                self.base,
+                self.base,
+                run_kind="calibration-aa",
+            ),
+            (self.base, self.base),
+        )
+        with self.assertRaisesRegex(json_contract.CandidateControlError, "identical"):
+            git_identity.validate_git_relation(
+                self.repository,
+                self.base,
+                self.direct,
+                run_kind="calibration-aa",
+            )
+
     def test_unrelated_history_is_rejected(self) -> None:
         with self.assertRaisesRegex(json_contract.CandidateControlError, "not an ancestor"):
             git_identity.validate_git_relation(self.repository, self.base, self.unrelated)

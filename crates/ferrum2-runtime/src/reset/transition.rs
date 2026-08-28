@@ -9,12 +9,13 @@ use crate::owner::OwnerRegistry;
 
 use super::{
     NetworkResetCoordinatorError, NetworkResetHookStage, NetworkResetIntent, NetworkResetLimits,
-    NetworkResetRequestDisposition, NetworkResetSignal, NetworkResetState, NetworkRuntimeOwnerKind,
+    NetworkResetRequestDisposition, NetworkResetSignal, NetworkResetState,
+    NetworkRuntimeOwnerCloser, NetworkRuntimeOwnerKind,
 };
 
 pub(super) fn owner_is_stale(owner: &RuntimeOwnerEntry, signal: NetworkResetSignal) -> bool {
-    owner.generation < signal.target_generation
-        || (owner.generation == signal.target_generation
+    owner.network_generation < signal.target_generation
+        || (owner.network_generation == signal.target_generation
             && matches!(signal.intent, NetworkResetIntent::FullRebuild(_)))
 }
 
@@ -107,9 +108,11 @@ pub(super) struct CoordinatorInner {
 pub(super) struct CoordinatorState {
     pub(super) phase: NetworkResetState,
     pub(super) hooks: BTreeMap<u64, HookEntry>,
-    pub(super) runtime_owners: BTreeMap<u64, RuntimeOwnerEntry>,
+    runtime_owner_slots: Vec<RuntimeOwnerSlot>,
+    free_runtime_owner_slots: Vec<u32>,
+    registered_runtime_owners: usize,
     pub(super) next_hook_id: u64,
-    pub(super) next_runtime_owner_id: u64,
+    pub(super) next_runtime_owner_generation: u64,
     pub(super) pending: Option<PendingReset>,
     pub(super) active: Option<ActiveReset>,
     pub(super) full_rebuild: Option<PendingReset>,
@@ -120,9 +123,11 @@ impl CoordinatorState {
         Self {
             phase: NetworkResetState::Active,
             hooks: BTreeMap::new(),
-            runtime_owners: BTreeMap::new(),
+            runtime_owner_slots: Vec::new(),
+            free_runtime_owner_slots: Vec::new(),
+            registered_runtime_owners: 0,
             next_hook_id: 1,
-            next_runtime_owner_id: 1,
+            next_runtime_owner_generation: 0,
             pending: None,
             active: None,
             full_rebuild: None,
@@ -132,6 +137,69 @@ impl CoordinatorState {
     pub(super) fn admission_open(&self) -> bool {
         self.phase == NetworkResetState::Active
     }
+
+    pub(super) const fn runtime_owner_count(&self) -> usize {
+        self.registered_runtime_owners
+    }
+
+    pub(super) fn runtime_owners(&self) -> impl Iterator<Item = &RuntimeOwnerEntry> {
+        self.runtime_owner_slots
+            .iter()
+            .filter_map(|slot| slot.entry.as_ref())
+    }
+
+    pub(super) fn runtime_owner_mut(
+        &mut self,
+        handle: RuntimeOwnerHandle,
+    ) -> Option<&mut RuntimeOwnerEntry> {
+        self.runtime_owner_slots
+            .get_mut(handle.slot as usize)
+            .filter(|slot| slot.generation == handle.generation)
+            .and_then(|slot| slot.entry.as_mut())
+    }
+
+    pub(super) fn insert_runtime_owner(
+        &mut self,
+        generation: u64,
+        entry: RuntimeOwnerEntry,
+    ) -> Option<RuntimeOwnerHandle> {
+        let slot = if let Some(slot) = self.free_runtime_owner_slots.pop() {
+            let owner_slot = &mut self.runtime_owner_slots[slot as usize];
+            debug_assert!(owner_slot.entry.is_none());
+            owner_slot.generation = generation;
+            owner_slot.entry = Some(entry);
+            slot
+        } else {
+            let slot = u32::try_from(self.runtime_owner_slots.len()).ok()?;
+            self.runtime_owner_slots.push(RuntimeOwnerSlot {
+                generation,
+                entry: Some(entry),
+            });
+            slot
+        };
+        self.registered_runtime_owners += 1;
+        Some(RuntimeOwnerHandle { slot, generation })
+    }
+
+    pub(super) fn remove_runtime_owner(&mut self, handle: RuntimeOwnerHandle) -> bool {
+        let Some(slot) = self.runtime_owner_slots.get_mut(handle.slot as usize) else {
+            return false;
+        };
+        if slot.generation != handle.generation || slot.entry.is_none() {
+            return false;
+        }
+        slot.entry = None;
+        self.free_runtime_owner_slots.push(handle.slot);
+        self.registered_runtime_owners -= 1;
+        true
+    }
+
+    pub(super) fn take_runtime_owner_closers(&mut self) -> Vec<Arc<dyn NetworkRuntimeOwnerCloser>> {
+        self.runtime_owner_slots
+            .iter_mut()
+            .filter_map(|slot| slot.entry.as_mut()?.closer.take())
+            .collect()
+    }
 }
 
 pub(super) struct HookEntry {
@@ -140,9 +208,21 @@ pub(super) struct HookEntry {
 }
 
 pub(super) struct RuntimeOwnerEntry {
-    pub(super) generation: u64,
+    pub(super) network_generation: u64,
     pub(super) kind: NetworkRuntimeOwnerKind,
     pub(super) cancellation: watch::Sender<Option<NetworkResetSignal>>,
+    pub(super) closer: Option<Arc<dyn NetworkRuntimeOwnerCloser>>,
+}
+
+struct RuntimeOwnerSlot {
+    generation: u64,
+    entry: Option<RuntimeOwnerEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RuntimeOwnerHandle {
+    pub(super) slot: u32,
+    pub(super) generation: u64,
 }
 
 #[derive(Clone)]

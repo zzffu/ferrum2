@@ -668,6 +668,8 @@ pub struct UdpConfig {
     pub max_sessions: usize,
     pub max_buffered_bytes: usize,
     pub idle_timeout: Duration,
+    /// Number of server inbound UDP receive roots. Values above one are Linux-only.
+    pub receive_workers: usize,
 }
 
 impl ValidatedServerConfig {
@@ -691,6 +693,15 @@ pub struct RuntimeConfig {
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     pub shutdown_grace: Duration,
+    pub network_generation: NetworkGenerationMode,
+}
+
+/// Whether Windows non-TUN physical sockets follow network changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NetworkGenerationMode {
+    #[default]
+    Dynamic,
+    Static,
 }
 
 /// Validated exact replay capacity.

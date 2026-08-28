@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use bytes::BytesMut;
 use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Session, TargetAddr,
 };
@@ -62,7 +63,16 @@ impl LocalEndpoint for ControlledClientIo {
 impl TransportIo for ControlledClientIo {
     type IoError = SourceSentinel;
 
-    fn poll_read(
+    fn poll_read_buf(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _destination: &mut BytesMut,
+        _limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Poll::Ready(Ok(0))
+    }
+
+    fn poll_read_initialized(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         _destination: &mut [u8],

@@ -140,7 +140,7 @@ async fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     let before_failure = registry.snapshot();
     assert_eq!(
         second
-            .reserve_session(Instant::now(), 465, (), selection_destination())
+            .reserve_session(Instant::now(), 464, (), selection_destination())
             .await
             .unwrap_err(),
         UdpRuntimeError::BufferLimit
@@ -153,7 +153,7 @@ async fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     assert_eq!(budget.reserved_bytes(), 982_605);
     drop(
         second
-            .reserve_session(Instant::now(), 465, (), selection_destination())
+            .reserve_session(Instant::now(), 464, (), selection_destination())
             .await
             .expect("shared bytes returned"),
     );

@@ -62,6 +62,11 @@ pub(super) fn wait_for_metrics(
 }
 
 pub(super) fn active_metric(address: SocketAddrV4, deadline: Instant) -> Result<u64, String> {
+    let response = fetch_metrics_response(address, deadline)?;
+    parse_active_metric_response(&response)
+}
+
+fn fetch_metrics_response(address: SocketAddrV4, deadline: Instant) -> Result<Vec<u8>, String> {
     let timeout = remaining(deadline)?.min(IO_TIMEOUT);
     let mut stream = TcpStream::connect_timeout(&SocketAddr::V4(address), timeout)
         .map_err(|_| "metrics connection failed".to_owned())?;
@@ -86,9 +91,8 @@ pub(super) fn active_metric(address: SocketAddrV4, deadline: Instant) -> Result<
             Err(error) => return Err(clean_io(error)),
         }
     }
-    let active = parse_active_metric_response(&response)?;
     remaining(deadline)?;
-    Ok(active)
+    Ok(response)
 }
 
 pub(super) fn parse_active_metric_response(response: &[u8]) -> Result<u64, String> {
@@ -100,29 +104,7 @@ pub(super) fn parse_active_metric_response(response: &[u8]) -> Result<u64, Strin
     const REPLAY: &str = "ferrum2_tcp_replay_entries";
     const REPLAY_TYPE: &str = "# TYPE ferrum2_tcp_replay_entries gauge";
 
-    let header_end = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "metrics response is malformed".to_owned())?;
-    let headers = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| "metrics response is malformed".to_owned())?;
-    let mut status = headers
-        .lines()
-        .next()
-        .ok_or_else(|| "metrics response is malformed".to_owned())?
-        .split_whitespace();
-    if !status
-        .next()
-        .is_some_and(|value| value.starts_with("HTTP/"))
-        || status.next() != Some("200")
-    {
-        return Err("metrics response status is not 200".to_owned());
-    }
-    let body = &response[header_end + 4..];
-    let body = std::str::from_utf8(body).map_err(|_| "metrics body is not UTF-8".to_owned())?;
-    if !body.ends_with("# EOF\n") || body.lines().filter(|line| *line == "# EOF").count() != 1 {
-        return Err("metrics exposition is incomplete".to_owned());
-    }
+    let body = metrics_body(response)?;
 
     let mut active = None;
     let mut replay_type = 0;
@@ -158,6 +140,34 @@ pub(super) fn parse_active_metric_response(response: &[u8]) -> Result<u64, Strin
     active
         .or_else(|| (replay_type == 1 && replay_sample).then_some(0))
         .ok_or_else(|| "active metric is absent from an unidentified exposition".to_owned())
+}
+
+fn metrics_body(response: &[u8]) -> Result<&str, String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "metrics response is malformed".to_owned())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "metrics response is malformed".to_owned())?;
+    let mut status = headers
+        .lines()
+        .next()
+        .ok_or_else(|| "metrics response is malformed".to_owned())?
+        .split_whitespace();
+    if !status
+        .next()
+        .is_some_and(|value| value.starts_with("HTTP/"))
+        || status.next() != Some("200")
+    {
+        return Err("metrics response status is not 200".to_owned());
+    }
+    let body = std::str::from_utf8(&response[header_end + 4..])
+        .map_err(|_| "metrics body is not UTF-8".to_owned())?;
+    if !body.ends_with("# EOF\n") || body.lines().filter(|line| *line == "# EOF").count() != 1 {
+        return Err("metrics exposition is incomplete".to_owned());
+    }
+
+    Ok(body)
 }
 
 pub(super) fn socks_connect(

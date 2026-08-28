@@ -248,7 +248,6 @@ async fn one_proxy_tun_udp_association_serves_multiple_targets_without_global_bu
                 &response,
                 0,
                 &mut response_wire,
-                &mut server_scratch,
             )
             .expect("proxy response encode");
         proxy_socket
@@ -321,6 +320,15 @@ async fn ordinary_udp_fixed_request_and_response_buffers_remain_globally_metered
         MAX_UDP_WIRE_DATAGRAM_BYTES,
         "ordinary fixed buffer remains globally metered"
     );
+    assert_eq!(
+        association
+            .direct_wire
+            .as_ref()
+            .expect("direct fixed wire")
+            .capacity(),
+        budget.reserved_bytes(),
+        "fixed reservation exactly matches allocator capacity"
+    );
     association.activate(&engine).expect("ordinary activation");
     let request_len = association
         .prepare_application_request(
@@ -340,13 +348,20 @@ async fn ordinary_udp_fixed_request_and_response_buffers_remain_globally_metered
     echo.send_to(b"ordinary-response", peer)
         .await
         .expect("ordinary response send");
+    let held_budget = exhaust_budget(&budget, budget_limit);
+    assert_eq!(budget.reserved_bytes(), budget_limit);
     let response_wire_len = association
         .receive_response_wire()
         .await
         .expect("ordinary response receive");
-
-    let held_budget = exhaust_budget(&budget, budget_limit);
-    assert_eq!(budget.reserved_bytes(), budget_limit);
+    assert!(
+        association
+            .direct_wire
+            .as_ref()
+            .expect("reservation failure retains reusable direct wire")
+            .is_empty(),
+        "reservation failure clears the received payload instead of preserving buffer contents"
+    );
     for origin in [
         ClientRequestOrigin::Socks,
         ClientRequestOrigin::Dns,
@@ -423,6 +438,11 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         )
         .await
         .expect("direct association");
+    let direct_scratch_identity = association
+        .direct_wire
+        .as_ref()
+        .expect("direct receive scratch")
+        .as_ptr();
     association.activate(&engine).expect("direct activation");
     let provisional = registry.snapshot();
     assert_eq!(
@@ -479,6 +499,15 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         .receive_response_wire()
         .await
         .expect("direct receive");
+    assert!(
+        association.direct_wire.is_none(),
+        "successful receive transfers the original allocation into the pending response"
+    );
+    assert_eq!(
+        registry.snapshot().udp_buffered_bytes,
+        provisional.udp_buffered_bytes + b"raw-reply".len(),
+        "pending direct response reserves only its initialized length"
+    );
     let response = association
         .prepare_application_response(&engine, &engine.outbounds, response_len)
         .unwrap_or_else(|_| panic!("direct response"));
@@ -494,6 +523,10 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         provisional.udp_buffered_bytes + b"raw-reply".len(),
         "the direct response owns only its initialized prefix"
     );
+    assert!(
+        association.direct_wire.is_none(),
+        "the accounted response retains the direct allocation until recycling"
+    );
     association.recycle_application_response(response);
     assert_eq!(registry.snapshot(), provisional);
     let recycled = association
@@ -502,6 +535,53 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         .expect("recycled direct wire buffer");
     assert!(recycled.is_empty());
     assert_eq!(recycled.capacity(), MAX_UDP_WIRE_DATAGRAM_BYTES);
+    assert_eq!(recycled.as_ptr(), direct_scratch_identity);
+
+    let mismatch_target = TargetAddr::ip(echo.local_addr().unwrap()).unwrap();
+    let mismatch_request_len = association
+        .prepare_application_request(
+            &engine,
+            &engine.outbounds,
+            mismatch_target,
+            b"mismatch-request",
+            Instant::now(),
+        )
+        .unwrap_or_else(|_| panic!("mismatch request"));
+    association
+        .send_encoded_request(mismatch_request_len)
+        .await
+        .expect("mismatch request send");
+    let (_, peer) = echo
+        .recv_from(&mut raw)
+        .await
+        .expect("mismatch request receive");
+    echo.send_to(b"mismatch-response", peer)
+        .await
+        .expect("mismatch response send");
+    let mismatch_response_len = association
+        .receive_response_wire()
+        .await
+        .expect("mismatch response receive");
+    assert!(association.direct_wire.is_none());
+    assert!(matches!(
+        association.prepare_application_response(
+            &engine,
+            &engine.outbounds,
+            mismatch_response_len + 1,
+        ),
+        Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds))
+    ));
+    let restored_after_mismatch = association
+        .direct_wire
+        .as_ref()
+        .expect("length mismatch restores the direct allocation");
+    assert!(restored_after_mismatch.is_empty());
+    assert_eq!(
+        restored_after_mismatch.capacity(),
+        MAX_UDP_WIRE_DATAGRAM_BYTES
+    );
+    assert_eq!(restored_after_mismatch.as_ptr(), direct_scratch_identity);
+    assert_eq!(registry.snapshot(), provisional);
     assert!(live_ids.lock().expect("live IDs").is_empty());
     drop(association);
     assert_eq!(registry.snapshot(), baseline);

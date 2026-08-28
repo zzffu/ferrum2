@@ -8,6 +8,7 @@ use super::profile_contract::{
     EVIDENCE_LINE_MAX_BYTES, ProfileArgs, ProfileOutcome, ProfileRawIdentity, ProfileScenario,
     TCP_SCALE_EVIDENCE_LINE_MAX_BYTES, profile_raw_prefix, resolve_profile_ready_file,
 };
+use super::profile_micro::{run_profile_dns_cache, run_profile_replay};
 use super::profile_tcp::run_profile_tcp;
 use super::profile_udp::run_profile_udp;
 use super::self_check::assert_no_owners;
@@ -20,7 +21,10 @@ pub(super) fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOut
         | ProfileScenario::TcpStream64k
         | ProfileScenario::TcpRequest1k
         | ProfileScenario::TcpRequest4k
-        | ProfileScenario::TcpRequest16k => run_profile_tcp(arguments, &ready_file),
+        | ProfileScenario::TcpRequest16k
+        | ProfileScenario::SocksDirectRequest1k
+        | ProfileScenario::SocksDirectRequest4k
+        | ProfileScenario::SocksDirectRequest16k => run_profile_tcp(arguments, &ready_file),
         ProfileScenario::TcpScale10k => tcp_scale::run_scale(arguments, &ready_file),
         ProfileScenario::UdpSmallHigh
         | ProfileScenario::UdpMtu1200
@@ -29,7 +33,17 @@ pub(super) fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOut
         | ProfileScenario::UdpPayload8192
         | ProfileScenario::UdpMaxWire65507
         | ProfileScenario::UdpDirectSmall128
-        | ProfileScenario::UdpDirectMax65497 => run_profile_udp(arguments, &ready_file),
+        | ProfileScenario::UdpDirectMax65497
+        | ProfileScenario::UdpResponseConcurrency1
+        | ProfileScenario::UdpResponseConcurrency8
+        | ProfileScenario::UdpResponseConcurrency32 => run_profile_udp(arguments, &ready_file),
+        ProfileScenario::UdpReplaySequential => run_profile_replay(arguments, &ready_file),
+        ProfileScenario::DnsCacheSize64
+        | ProfileScenario::DnsCacheSize4096
+        | ProfileScenario::DnsCacheSize65536 => run_profile_dns_cache(arguments, &ready_file),
+        ProfileScenario::DnsUdpConcurrency => {
+            super::profile_dns::run_profile_dns(arguments, &ready_file)
+        }
     }
 }
 
@@ -79,12 +93,14 @@ pub(super) fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String,
         match &result {
             Ok(outcome) => {
                 let scale = outcome.scale_json.as_deref().unwrap_or("null");
+                let structural_metrics = outcome.structural_metrics.json();
                 let line = format!(
                     "{{{prefix},\"sha\":{},\"tree\":{},\"runner_sha256\":{},\
                  \"client_sha256\":{},\"server_sha256\":{},\"rustc\":{},\"kernel\":{},\
                  \"cpu_model\":{},\"cpu_count\":{},\"memory_kib\":{},\"metric\":{},\
                  \"value\":{},\"checked_units\":{},\"p99_nanoseconds\":{},\
                  \"io_completions\":{},\"scale\":{scale},\
+                 \"structural_metrics\":{structural_metrics},\
                  \"environment_identity\":{{\"runner_image\":{},\"rustc\":{},\"kernel\":{},\
                  \"cpu_model\":{},\"cpu_count\":{},\"memory_kib\":{},\"build_profile\":{}}},\
                  \"cleanup\":{{\"active_processes\":0,\"active_workers\":0,\
@@ -143,31 +159,6 @@ pub(super) fn run_profile_workload(mut arguments: ProfileArgs) -> Result<String,
         evidence.finish()?;
     }
     result.map(|outcome| outcome.summary)
-}
-
-pub(super) fn wait_for_profile_phase<T>(
-    client: &mut ProcessGuard,
-    server: &mut ProcessGuard,
-    gate: &StartGate,
-    workers: &[JoinHandle<Result<T, String>>],
-    deadline: Instant,
-    require_running_at_deadline: bool,
-) -> Result<(), String> {
-    loop {
-        client.ensure_running()?;
-        server.ensure_running()?;
-        let workers_running = ensure_profile_workers_running(gate, workers);
-        let now = Instant::now();
-        if now >= deadline && !require_running_at_deadline {
-            gate.require_active()?;
-            return Ok(());
-        }
-        workers_running?;
-        if now >= deadline {
-            return Ok(());
-        }
-        thread::sleep((deadline - now).min(Duration::from_millis(20)));
-    }
 }
 
 pub(super) fn wait_for_profile_phase_optional_server<T>(

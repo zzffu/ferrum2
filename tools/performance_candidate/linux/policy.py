@@ -7,8 +7,13 @@ import re
 
 from tools.performance_candidate.json_contract import CandidateControlError, SHA256, _exact_fields, _policy_percent, read_bounded_closed_json
 from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, PAIR_COUNTS, PAIR_SCHEDULE, SCENARIO_CATALOG, WARMUP_SECONDS
+from tools.performance_candidate.linux.environment import (
+    MEMORY_CAPACITY_QUANTUM_KIB,
+    calibration_environments_match,
+)
 
 DECISION_POLICY_MAX_BYTES = 256 * 1024
+DECISION_POLICY_SCHEMA_VERSION = 3
 
 MEASUREMENT_ENVIRONMENT = {
     "runner_image": "ubuntu-24.04",
@@ -65,7 +70,7 @@ CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
 
 
 UNCALIBRATED_POLICY = {
-    "schema_version": 2,
+    "schema_version": DECISION_POLICY_SCHEMA_VERSION,
     "policy_id": "in-memory-uncalibrated-policy",
     "policy_sha256": None,
     "scenarios": {
@@ -110,15 +115,22 @@ def _calibration_environment_matches(
     }
     if observed_environment is None:
         return all(environment.get(field) == value for field, value in expected.items())
-    return environment == {**expected, **observed_environment}
+    return calibration_environments_match(
+        environment, {**expected, **observed_environment}
+    )
 
 
 def validate_decision_policy(policy: dict[str, object]) -> None:
     if type(policy) is not dict:
         raise CandidateControlError("decision policy must be a JSON object")
     _exact_fields(policy, POLICY_RUNTIME_FIELDS, "decision policy")
-    if type(policy["schema_version"]) is not int or policy["schema_version"] != 2:
-        raise CandidateControlError("decision policy schema_version must be 2")
+    if (
+        type(policy["schema_version"]) is not int
+        or policy["schema_version"] != DECISION_POLICY_SCHEMA_VERSION
+    ):
+        raise CandidateControlError(
+            f"decision policy schema_version must be {DECISION_POLICY_SCHEMA_VERSION}"
+        )
     if type(policy["policy_id"]) is not str or not policy["policy_id"].strip():
         raise CandidateControlError("decision policy_id must be a non-empty string")
     digest = policy["policy_sha256"]
@@ -236,6 +248,11 @@ def validate_decision_policy(policy: dict[str, object]) -> None:
                 raise CandidateControlError(
                     f"policy scenario {scenario} calibration_environment {field} is invalid"
                 )
+        if environment["memory_kib"] % MEMORY_CAPACITY_QUANTUM_KIB != 0:
+            raise CandidateControlError(
+                f"policy scenario {scenario} calibration_environment memory_kib "
+                "must be a 64 MiB capacity anchor"
+            )
 
 
 def load_decision_policy(path: pathlib.Path) -> dict[str, object]:

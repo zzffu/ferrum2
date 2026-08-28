@@ -10,8 +10,8 @@ from functools import lru_cache
 from tools.performance_candidate.json_contract import CandidateControlError
 
 
-EVIDENCE_CONTRACT_SCHEMA_VERSION = 1
-PROFILE_TRIAL_SCHEMA_VERSION = 4
+EVIDENCE_CONTRACT_SCHEMA_VERSION = 3
+PROFILE_TRIAL_SCHEMA_VERSION = 6
 RUNNER_IMAGE = "ubuntu-24.04"
 
 
@@ -73,6 +73,8 @@ def metric_unit(metric: str) -> str:
         return {
             "bytes_per_second": "bytes_per_second",
             "datagrams_per_second": "datagrams_per_second",
+            "operations_per_second": "operations_per_second",
+            "queries_per_second": "queries_per_second",
             "p99_nanoseconds": "nanoseconds",
         }[metric]
     except KeyError as error:
@@ -89,6 +91,7 @@ def scenario_evidence_contract(
         "direction": scenario["direction"],
         "topology": scenario["topology"],
         "application_payload_bytes": scenario["application_payload_bytes"],
+        "workload_scale": scenario["workload_scale"],
         "socks_datagram_bytes": scenario["socks_datagram_bytes"],
         "upstream_wire_bytes": scenario["upstream_wire_bytes"],
         "warmup_seconds": warmup_seconds,
@@ -122,7 +125,11 @@ def scenario_evidence_contract(
 def catalog_evidence_contract(
     scenario: str, *, warmup_seconds: int, active_seconds: int, pair_schedule: str
 ) -> dict[str, object]:
-    from tools.performance_candidate.linux.catalog import SCENARIO_CATALOG, SCENARIO_EVIDENCE
+    from tools.performance_candidate.linux.catalog import (
+        SCENARIO_CATALOG,
+        SCENARIO_EVIDENCE,
+        SCENARIO_WORKLOAD_SCALE,
+    )
 
     try:
         metric, direction, _family = SCENARIO_CATALOG[scenario]
@@ -136,6 +143,7 @@ def catalog_evidence_contract(
             "direction": direction,
             "topology": topology,
             "application_payload_bytes": payload,
+            "workload_scale": SCENARIO_WORKLOAD_SCALE.get(scenario),
             "socks_datagram_bytes": socks_bytes,
             "upstream_wire_bytes": upstream_bytes,
         },
@@ -155,6 +163,7 @@ def scale_evidence_contract() -> dict[str, object]:
             "direction": "higher_is_better",
             "topology": "shadowsocks",
             "application_payload_bytes": SCALE_RECIPE["payload_bytes"],
+            "workload_scale": None,
             "socks_datagram_bytes": None,
             "upstream_wire_bytes": None,
         },

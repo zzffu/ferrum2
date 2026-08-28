@@ -71,10 +71,8 @@ where
             mappings,
             admission,
             mut route_scratch,
-            mut scratch,
             mut wire,
             mut maintenance,
-            _receive_scratch,
             _receive_wire,
         } = self;
         maintenance.tick().await;
@@ -142,8 +140,7 @@ where
                 }
             };
             readiness_drain += 1;
-            let wire = wire.as_ref();
-            let pending = match protocol.prepare_request(clock.as_ref(), wire, &mut scratch) {
+            let pending = match protocol.prepare_request_in_place(clock.as_ref(), &mut wire) {
                 Ok(pending) => pending,
                 Err(error) => {
                     record_udp_protocol_failure(&metrics, error);
@@ -153,11 +150,11 @@ where
             // The shared gate protects only protocol/mapping observations and their
             // synchronous commit. In particular, it is never held while a provisional
             // runtime session opens its socket below.
-            let admission_guard = tokio::select! {
+            let mut admission_guard = Some(tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
                 guard = admission.lock() => guard,
-            };
+            });
             let existing = match protocol.existing_capability(&pending) {
                 Ok(existing) => existing,
                 Err(error) => {
@@ -237,6 +234,15 @@ where
                     unreachable!("rejected UDP route returned before direct session reuse")
                 };
                 let handle = binding.handle;
+                // A live Direct binding no longer needs the process-wide identity
+                // admission gate. The runtime reservation rechecks the exact
+                // generation under its session shard and performs the protocol
+                // commit before publishing the queue entry. Reset/removal first
+                // invalidates that runtime generation, so a stale binding fails
+                // before protocol state can change. Rejected and orphaned
+                // identities retain the gate because maintenance may prune their
+                // protocol generation.
+                drop(admission_guard.take());
                 let reserved =
                     runtime.reserve_datagram(handle, pending.datagram().allocated_capacity());
                 match reserved {
@@ -274,7 +280,7 @@ where
                 }
             }
 
-            drop(admission_guard);
+            drop(admission_guard.take());
             let ServerTerminalRoute::Direct(outbound) = terminal else {
                 unreachable!("rejected UDP route returned before direct session admission")
             };

@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::cli::Profile;
 
-pub(crate) const REPORT_SCHEMA: &str = "ferrum2.rule-qualification.v1";
+pub(crate) const REPORT_SCHEMA: &str = "ferrum2.rule-qualification.v2";
 
 #[derive(Serialize)]
 pub(crate) struct Report {
@@ -14,6 +14,7 @@ pub(crate) struct Report {
     pub(crate) environment: EnvironmentFingerprint,
     pub(crate) repository: RepositoryFingerprint,
     pub(crate) runner: RunnerFingerprint,
+    pub(crate) candidate: CandidateEvidence,
     pub(crate) configuration: RunConfiguration,
     pub(crate) measurement_policy: MeasurementPolicy,
     pub(crate) fixtures: Vec<FixtureEvidence>,
@@ -51,6 +52,12 @@ pub(crate) struct RepositoryFingerprint {
 pub(crate) struct RunnerFingerprint {
     pub(crate) sha256: String,
     pub(crate) bytes: u64,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct CandidateEvidence {
+    pub(crate) adoption_claim: bool,
+    pub(crate) enabled_features: Vec<&'static str>,
 }
 
 #[derive(Serialize)]

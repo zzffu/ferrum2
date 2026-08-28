@@ -79,7 +79,7 @@ impl UdpIoFaultPlan {
 pub(super) enum ClientDirectUdpSocket {
     System(SystemDirectUdpSocket),
     #[cfg(all(windows, not(test)))]
-    Network(ferrum2_runtime::GenerationBoundUdpSocket<UdpSocket>),
+    Network(ferrum2_runtime::NetworkUdpSocket<UdpSocket>),
     #[cfg(test)]
     Injected(InjectedDirectUdpSocket),
 }

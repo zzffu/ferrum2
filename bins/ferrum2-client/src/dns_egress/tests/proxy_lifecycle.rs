@@ -333,7 +333,7 @@ final = "upstream"
         .expect("detoured hop receive signal");
     let held = active(registry.snapshot());
     assert_eq!(held.udp_sessions, 1);
-    assert_eq!(held.udp_buffered_bytes, 3 * MAX_UDP_WIRE_LEN);
+    assert_eq!(held.udp_buffered_bytes, MAX_UDP_WIRE_LEN);
     let dns_held = resolver.stats();
     assert_eq!(dns_held.queries, 1);
     assert_eq!(dns_held.udp_sockets, 1);

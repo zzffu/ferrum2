@@ -72,6 +72,38 @@ fn match_set_and_matcher_accept_more_than_sixty_four_values() {
 }
 
 #[test]
+fn large_suffix_and_cidr_sets_preserve_label_and_address_family_semantics() {
+    let mut suffixes = MatchSetBuilder::new();
+    for index in 0..65 {
+        suffixes
+            .add_domain_suffix(&format!("suffix-{index}.example"))
+            .unwrap();
+    }
+    let suffixes = suffixes.build().unwrap();
+    assert!(suffixes.matches_domain(domain("child.suffix-64.example").canonical().unwrap()));
+    assert!(!suffixes.matches_domain(domain("xsuffix-64.example").canonical().unwrap()));
+
+    let mut v4 = MatchSetBuilder::new();
+    for index in 0..65_u8 {
+        v4.add_ip_cidr(format!("198.18.{index}.0/24").parse().unwrap())
+            .unwrap();
+    }
+    let v4 = v4.build().unwrap();
+    assert!(v4.matches_ip("198.18.64.7".parse().unwrap()));
+    assert!(!v4.matches_ip("198.18.65.7".parse().unwrap()));
+    assert!(!v4.matches_ip("::ffff:198.18.64.7".parse().unwrap()));
+
+    let mut v6 = MatchSetBuilder::new();
+    for index in 0..65_u16 {
+        v6.add_ip_cidr(format!("2001:db8:{index:x}::/48").parse().unwrap())
+            .unwrap();
+    }
+    let v6 = v6.build().unwrap();
+    assert!(v6.matches_ip("2001:db8:40::7".parse().unwrap()));
+    assert!(!v6.matches_ip("2001:db8:41::7".parse().unwrap()));
+}
+
+#[test]
 fn ordinary_fields_are_anded_while_one_compiled_set_is_ored() {
     let matcher = RouteMatcher::<()>::try_new(vec![
         RouteMatchField::Domain(vec![domain("www.example.test")]),
@@ -289,6 +321,46 @@ fn ten_thousand_exact_and_scalar_constraints_visit_only_matching_postings() {
     );
     drop(evaluation);
     assert_eq!(scratch.candidate_visits(), 0);
+}
+
+#[test]
+fn indexed_bitmap_work_is_limited_to_each_active_field_span() {
+    let mut rules = Vec::new();
+    for inbound in 0..64 {
+        let matcher =
+            RouteMatcher::<()>::try_new(vec![RouteMatchField::Inbound(vec![inbound])]).unwrap();
+        rules.push(OrderedRouteRule::new(
+            matcher,
+            RouteRuleAction::Terminal(inbound),
+        ));
+    }
+    for index in 64..128 {
+        let matcher = RouteMatcher::<()>::try_new(vec![RouteMatchField::Domain(vec![domain(
+            &format!("host-{index}.example"),
+        )])])
+        .unwrap();
+        rules.push(OrderedRouteRule::new(
+            matcher,
+            RouteRuleAction::Terminal(index),
+        ));
+    }
+    let program = OrderedRouteProgram::try_new(rules, usize::MAX).unwrap();
+    let mut scratch = program.evaluation_scratch().unwrap();
+    let target = TargetAddr::domain("host-127.example", 443).unwrap();
+
+    let mut evaluation = program.evaluate_with_scratch(63, Network::Tcp, &target, &mut scratch);
+    assert_eq!(
+        evaluation.next(RouteMetadata::new(None, None)),
+        Some(RouteProgramAction::Terminal(&63))
+    );
+    drop(evaluation);
+
+    assert_eq!(scratch.bitmap_word_operations(), (2, 2));
+    assert_eq!(
+        scratch.candidate_word_initializations(),
+        2,
+        "each candidate word is initialized exactly once"
+    );
 }
 
 #[test]

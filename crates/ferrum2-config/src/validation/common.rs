@@ -13,7 +13,7 @@ use crate::error::{ConfigError, ConfigField};
 use crate::model::{
     DirectDomainResolver, DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig,
     DnsRuntimeConfig, DnsServerConfig, DnsStrategy, DnsTransport, LoggingConfig, LoggingLevel,
-    MetricsConfig, ReplayConfig, RuntimeConfig, UdpConfig,
+    MetricsConfig, NetworkGenerationMode, ReplayConfig, RuntimeConfig, UdpConfig,
 };
 use crate::raw::{RawDns, RawLogging, RawMetrics, RawReplay, RawRuntime, RawUdp, SecretString};
 
@@ -406,6 +406,11 @@ pub(super) fn parse_psk(
 }
 
 pub(super) fn validate_runtime(raw: RawRuntime) -> Result<RuntimeConfig, ConfigError> {
+    let network_generation = match raw.network_generation.as_str() {
+        "dynamic" => NetworkGenerationMode::Dynamic,
+        "static" => NetworkGenerationMode::Static,
+        _ => return Err(ConfigError::semantic(ConfigField::RuntimeNetworkGeneration)),
+    };
     let max_connections =
         bounded_nonzero_u16(raw.max_connections, ConfigField::RuntimeMaxConnections)?;
     let listen_backlog =
@@ -441,6 +446,7 @@ pub(super) fn validate_runtime(raw: RawRuntime) -> Result<RuntimeConfig, ConfigE
         connect_timeout,
         idle_timeout,
         shutdown_grace,
+        network_generation,
     })
 }
 
@@ -488,11 +494,15 @@ pub(super) fn validate_udp(raw: RawUdp) -> Result<UdpConfig, ConfigError> {
         86_400_000,
         ConfigField::UdpIdleTimeout,
     )?;
+    if !(1..=crate::MAX_UDP_RECEIVE_WORKERS).contains(&raw.receive_workers) {
+        return Err(ConfigError::semantic(ConfigField::UdpReceiveWorkers));
+    }
     Ok(UdpConfig {
         enabled: raw.enabled,
         max_sessions: raw.max_sessions,
         max_buffered_bytes: raw.max_buffered_bytes,
         idle_timeout,
+        receive_workers: raw.receive_workers,
     })
 }
 

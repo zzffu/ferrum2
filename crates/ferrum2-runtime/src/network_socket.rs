@@ -2,10 +2,8 @@ mod generation;
 mod operations;
 mod service;
 
-pub use generation::{
-    GenerationBoundSocketError, GenerationBoundTcpStream, GenerationBoundUdpSocket,
-};
+pub use generation::{GenerationBoundSocketError, NetworkTcpStream, NetworkUdpSocket};
 pub use operations::{
     NetworkSocketOperations, SystemNetworkSocketError, SystemNetworkSocketOperations,
 };
-pub use service::{NetworkSocketService, NetworkSocketServiceError};
+pub use service::{NetworkSocketMode, NetworkSocketService, NetworkSocketServiceError};

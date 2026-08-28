@@ -62,6 +62,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -566,6 +575,7 @@ dependencies = [
  "ferrum2-config",
  "ferrum2-core",
  "ferrum2-crypto",
+ "ferrum2-dns",
  "ferrum2-shadowsocks",
  "ferrum2-socks5",
  "hickory-proto",
@@ -609,6 +619,7 @@ name = "ferrum2-rule"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "arc-swap",
  "ferrum2-core",
  "flate2",
  "ipnet",
@@ -691,6 +702,7 @@ dependencies = [
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
  "hickory-proto",
+ "socket2",
  "tokio",
  "tracing",
 ]
@@ -706,6 +718,8 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-util",
+ "zeroize",
 ]
 
 [[package]]
@@ -721,7 +735,6 @@ dependencies = [
 name = "ferrum2-socks5"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "ferrum2-core",
  "thiserror",
  "tokio",

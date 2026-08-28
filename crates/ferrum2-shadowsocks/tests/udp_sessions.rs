@@ -1,6 +1,7 @@
 mod common;
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
@@ -22,6 +23,34 @@ struct BlockingRandomState {
 struct BlockingRandom {
     state: Mutex<BlockingRandomState>,
     changed: Condvar,
+}
+
+struct CountingFillRandom {
+    next: Mutex<u8>,
+    calls: AtomicUsize,
+}
+
+impl CountingFillRandom {
+    fn new(first: u8) -> Self {
+        Self {
+            next: Mutex::new(first),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl SecureRandom for CountingFillRandom {
+    fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
+        let mut next = self.next.lock().expect("counting random");
+        destination.fill(*next);
+        *next = next.wrapping_add(1);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl BlockingRandom {
@@ -77,17 +106,9 @@ fn request_wire(
     random: &FillRandom,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut scratch = UdpPacketScratch::new();
     let mut wire = vec![0_u8; 65_507];
     let length = client
-        .encode_request(
-            clock,
-            random,
-            &datagram(payload),
-            0,
-            &mut wire,
-            &mut scratch,
-        )
+        .encode_request(clock, random, &datagram(payload), 0, &mut wire)
         .expect("request encodes");
     wire.truncate(length);
     wire
@@ -96,7 +117,7 @@ fn request_wire(
 fn accept(
     server: &UdpServer,
     clock: &FakeClock,
-    random: &FillRandom,
+    random: &(impl SecureRandom + ?Sized),
     wire: &[u8],
     peer: SocketAddr,
     now_millis: u64,
@@ -119,18 +140,9 @@ fn response_wire(
     random: &FillRandom,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut scratch = UdpPacketScratch::new();
     let mut wire = vec![0_u8; 65_507];
     let encoded = server
-        .encode_response(
-            capability,
-            clock,
-            random,
-            &datagram(payload),
-            0,
-            &mut wire,
-            &mut scratch,
-        )
+        .encode_response(capability, clock, random, &datagram(payload), 0, &mut wire)
         .expect("response encodes");
     wire.truncate(encoded.wire_len());
     wire
@@ -413,7 +425,6 @@ fn server_routes_by_authenticated_id_supports_roaming_and_rejects_stale_generati
             &datagram(b"late"),
             0,
             &mut output,
-            &mut scratch,
         ),
         Err(UdpPacketError::Generation)
     );
@@ -425,10 +436,74 @@ fn server_routes_by_authenticated_id_supports_roaming_and_rejects_stale_generati
             &datagram(b"new"),
             0,
             &mut output,
-            &mut scratch,
         )
         .expect("replacement response");
     assert_eq!(encoded.peer(), peer_one);
+}
+
+#[test]
+fn outbound_session_index_reuses_removed_ids_without_stale_generation_cleanup() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let server = UdpServer::new(&keys).expect("server");
+    let peer: SocketAddr = "127.0.0.1:49152".parse().expect("peer");
+
+    let mut first_client =
+        UdpClientSession::new(&keys, &FillRandom::new(0x10), |_| false).expect("first client");
+    let first_client_random = FillRandom::new(0x20);
+    let first_wire = request_wire(&mut first_client, &clock, &first_client_random, b"first");
+    let first_random = CountingFillRandom::new(0x80);
+    let first = accept(&server, &clock, &first_random, &first_wire, peer, 0);
+    assert_eq!(first_random.calls(), 1);
+
+    let mut second_client =
+        UdpClientSession::new(&keys, &FillRandom::new(0x30), |_| false).expect("second client");
+    let second_client_random = FillRandom::new(0x40);
+    let second_wire = request_wire(&mut second_client, &clock, &second_client_random, b"second");
+    let colliding_random = CountingFillRandom::new(0x80);
+    let second = accept(&server, &clock, &colliding_random, &second_wire, peer, 0);
+    assert_ne!(second, first);
+    assert_eq!(colliding_random.calls(), 2, "live outbound ID retries once");
+
+    assert!(
+        server
+            .remove_session(first, instant(60_000))
+            .expect("first removal")
+    );
+
+    let mut third_client =
+        UdpClientSession::new(&keys, &FillRandom::new(0x50), |_| false).expect("third client");
+    let third_client_random = FillRandom::new(0x60);
+    let third_wire = request_wire(&mut third_client, &clock, &third_client_random, b"third");
+    let reused_random = CountingFillRandom::new(0x80);
+    let third = accept(&server, &clock, &reused_random, &third_wire, peer, 60_000);
+    assert_eq!(reused_random.calls(), 1, "removed outbound ID is reusable");
+    assert!(
+        !server
+            .remove_session(first, instant(120_000))
+            .expect("stale removal")
+    );
+
+    let mut fourth_client =
+        UdpClientSession::new(&keys, &FillRandom::new(0x70), |_| false).expect("fourth client");
+    let fourth_client_random = FillRandom::new(0x71);
+    let fourth_wire = request_wire(&mut fourth_client, &clock, &fourth_client_random, b"fourth");
+    let generation_safe_random = CountingFillRandom::new(0x80);
+    let fourth = accept(
+        &server,
+        &clock,
+        &generation_safe_random,
+        &fourth_wire,
+        peer,
+        120_000,
+    );
+    assert_ne!(fourth, third);
+    assert_eq!(
+        generation_safe_random.calls(),
+        3,
+        "stale cleanup must retain both reused and independently live outbound IDs"
+    );
+    assert_eq!(server.session_count().expect("live index count"), 3);
 }
 
 #[test]
@@ -502,7 +577,6 @@ fn capability_index_survives_middle_removal_and_generation_replacement() {
     );
 
     let mut output = vec![0_u8; 65_507];
-    let mut scratch = UdpPacketScratch::new();
     assert_eq!(
         server.encode_response(
             stale,
@@ -511,7 +585,6 @@ fn capability_index_survives_middle_removal_and_generation_replacement() {
             &datagram(b"stale"),
             0,
             &mut output,
-            &mut scratch,
         ),
         Err(UdpPacketError::Generation)
     );
@@ -557,7 +630,6 @@ fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_orde
         let first_blocking_random = &blocking_random;
         let first_worker = scope.spawn(move || -> Result<Vec<u8>, UdpPacketError> {
             let mut output = vec![0_u8; 65_507];
-            let mut scratch = UdpPacketScratch::new();
             let encoded = first_server.encode_response(
                 first_capability,
                 first_clock,
@@ -565,7 +637,6 @@ fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_orde
                 &datagram(b"first response"),
                 0,
                 &mut output,
-                &mut scratch,
             )?;
             output.truncate(encoded.wire_len());
             Ok(output)
@@ -580,7 +651,6 @@ fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_orde
             different_start.wait();
             let random = FillRandom::new(0xb0);
             let mut output = vec![0_u8; 65_507];
-            let mut scratch = UdpPacketScratch::new();
             let result = different_server
                 .encode_response(
                     second_capability,
@@ -589,7 +659,6 @@ fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_orde
                     &datagram(b"different session"),
                     0,
                     &mut output,
-                    &mut scratch,
                 )
                 .map(|encoded| {
                     output.truncate(encoded.wire_len());
@@ -608,7 +677,6 @@ fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_orde
             same_start.wait();
             let random = FillRandom::new(0xc0);
             let mut output = vec![0_u8; 65_507];
-            let mut scratch = UdpPacketScratch::new();
             let result = same_server
                 .encode_response(
                     first_capability,
@@ -617,7 +685,6 @@ fn different_sessions_encode_concurrently_while_one_session_preserves_nonce_orde
                     &datagram(b"same session"),
                     0,
                     &mut output,
-                    &mut scratch,
                 )
                 .map(|encoded| {
                     output.truncate(encoded.wire_len());

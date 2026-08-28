@@ -207,7 +207,6 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
                     &response,
                     0,
                     &mut response_wire,
-                    &mut scratch,
                 )
                 .expect("exact response encode");
             let response_wire_len = encoded.wire_len();
@@ -261,8 +260,7 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
                 "response queue: {label}"
             );
             assert_eq!(
-                client_state.udp_buffered_bytes,
-                3 * MAX_UDP_WIRE_LEN,
+                client_state.udp_buffered_bytes, MAX_UDP_WIRE_LEN,
                 "allocation: {label}"
             );
 
@@ -276,7 +274,6 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
                         &oversized,
                         0,
                         &mut response_wire,
-                        &mut scratch,
                     )
                     .expect_err("SS response max+1 rejected before emission"),
                 UdpPacketError::Bounds,

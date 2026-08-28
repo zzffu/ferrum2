@@ -105,14 +105,7 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
             let mut request_wire = vec![0_u8; 65_507];
 
             let request_len = client
-                .encode_request(
-                    &clock,
-                    &client_random,
-                    &request,
-                    7,
-                    &mut request_wire,
-                    &mut request_scratch,
-                )
+                .encode_request(&clock, &client_random, &request, 7, &mut request_wire)
                 .expect("request encodes");
             let pending = server
                 .prepare_request(&clock, &request_wire[..request_len], &mut request_scratch)
@@ -142,7 +135,6 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
                     &response,
                     5,
                     &mut response_wire,
-                    &mut response_scratch,
                 )
                 .expect("response encodes");
             assert_eq!(encoded.peer(), peer);
@@ -177,7 +169,6 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
                     &datagram(target.clone(), &vec![0xa5; maximum + 1]),
                     0,
                     &mut response_wire,
-                    &mut response_scratch,
                 ),
                 Err(UdpPacketError::Bounds)
             );
@@ -190,7 +181,6 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
                     &datagram(target.clone(), &vec![0x5a; maximum]),
                     0,
                     &mut response_wire,
-                    &mut response_scratch,
                 )
                 .expect("exact response");
             assert_eq!(encoded.wire_len(), MAX_UDP_WIRE_LEN);
@@ -214,6 +204,200 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
 }
 
 #[test]
+fn owned_wire_open_is_zero_copy_and_rejects_auth_binding_timestamp_and_replay() {
+    for profile in MethodProfile::ALL {
+        let keys = MethodKeyAdapter::new(udp_provider(profile));
+        let client_random = FillRandom::new(0x10);
+        let server_random = FillRandom::new(0x80);
+        let clock = FakeClock::new(NOW, 0);
+        let stale_clock = FakeClock::new(NOW + 31, 0);
+        let mut client =
+            UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
+        let other_client_random = FillRandom::new(0x11);
+        let other_client = UdpClientSession::new(&keys, &other_client_random, |_| false)
+            .expect("other client session");
+        let server = UdpServer::new(&keys).expect("server protocol");
+        let target = fixture_target("domain");
+        let request = datagram(target.clone(), b"owned request");
+        let mut request_wire = BytesMut::from(&vec![0_u8; MAX_UDP_WIRE_LEN][..]);
+        let request_len = client
+            .encode_request(&clock, &client_random, &request, 3, &mut request_wire)
+            .expect("request encodes directly in final wire");
+        request_wire.truncate(request_len);
+        let request_allocation =
+            request_wire.as_ptr() as usize..request_wire.as_ptr() as usize + request_wire.len();
+        let duplicate_request = request_wire.clone();
+        let mut tampered_request = request_wire.clone();
+        *tampered_request.last_mut().expect("request tag") ^= 1;
+
+        assert!(matches!(
+            server.prepare_request_owned(&stale_clock, request_wire.clone()),
+            Err(UdpPacketError::Timestamp)
+        ));
+        assert!(matches!(
+            server.prepare_request_owned(&clock, tampered_request),
+            Err(UdpPacketError::Authentication)
+        ));
+        assert_eq!(server.session_count().expect("no failure mutation"), 0);
+
+        let pending = server
+            .prepare_request_owned(&clock, request_wire)
+            .expect("owned request authenticates");
+        let request_payload_pointer = pending.datagram().payload().as_ptr() as usize;
+        assert!(request_allocation.contains(&request_payload_pointer));
+        assert_eq!(pending.datagram().target(), &target);
+        assert_eq!(pending.datagram().payload(), b"owned request");
+        let (_, request_commit) = pending.into_parts();
+        let peer = "127.0.0.1:49152".parse().expect("peer");
+        let accepted = server
+            .commit_request(request_commit, peer, MonotonicInstant::ZERO, &server_random)
+            .expect("request commits");
+        assert!(matches!(
+            server.prepare_request_owned(&clock, duplicate_request),
+            Err(UdpPacketError::Duplicate)
+        ));
+
+        let response = datagram(target.clone(), b"owned response");
+        let mut response_wire = BytesMut::from(&vec![0_u8; MAX_UDP_WIRE_LEN][..]);
+        let encoded = server
+            .encode_response(
+                accepted.capability(),
+                &clock,
+                &server_random,
+                &response,
+                4,
+                &mut response_wire,
+            )
+            .expect("response encodes directly in final wire");
+        response_wire.truncate(encoded.wire_len());
+        let response_allocation =
+            response_wire.as_ptr() as usize..response_wire.as_ptr() as usize + response_wire.len();
+        let duplicate_response = response_wire.clone();
+        assert!(matches!(
+            other_client.prepare_response_owned(&clock, response_wire.clone()),
+            Err(UdpPacketError::Binding)
+        ));
+
+        let pending = client
+            .prepare_response_owned(&clock, response_wire)
+            .expect("owned response authenticates");
+        let response_payload_pointer = pending.datagram().payload().as_ptr() as usize;
+        assert!(response_allocation.contains(&response_payload_pointer));
+        assert_eq!(pending.datagram().target(), &target);
+        assert_eq!(pending.datagram().payload(), b"owned response");
+        let (_, response_commit) = pending.into_parts();
+        client
+            .commit_response(response_commit, MonotonicInstant::ZERO)
+            .expect("response commits");
+        assert!(matches!(
+            client.prepare_response_owned(&clock, duplicate_response),
+            Err(UdpPacketError::Duplicate)
+        ));
+    }
+}
+
+#[test]
+fn in_place_receive_clears_failures_and_materializes_only_actual_payload() {
+    for profile in MethodProfile::ALL {
+        let keys = MethodKeyAdapter::new(udp_provider(profile));
+        let client_random = FillRandom::new(0x10);
+        let other_random = FillRandom::new(0x20);
+        let server_random = FillRandom::new(0x80);
+        let clock = FakeClock::new(NOW, 0);
+        let mut client =
+            UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
+        let other_client =
+            UdpClientSession::new(&keys, &other_random, |_| false).expect("other client");
+        let server = UdpServer::new(&keys).expect("server");
+        let target = fixture_target("domain");
+
+        let mut request_wire = BytesMut::from(&vec![0_u8; MAX_UDP_WIRE_LEN][..]);
+        let request_len = client
+            .encode_request(
+                &clock,
+                &client_random,
+                &datagram(target.clone(), b"small request"),
+                0,
+                &mut request_wire,
+            )
+            .expect("request");
+        request_wire.truncate(request_len);
+        let mut tampered_request = request_wire.clone();
+        *tampered_request.last_mut().expect("request tag") ^= 1;
+        assert!(matches!(
+            server.prepare_request_in_place(&clock, &mut tampered_request),
+            Err(UdpPacketError::Authentication)
+        ));
+        assert!(tampered_request.iter().all(|byte| *byte == 0));
+
+        let request_capacity = request_wire.capacity();
+        let pending = server
+            .prepare_request_in_place(&clock, &mut request_wire)
+            .expect("in-place request");
+        assert_eq!(request_wire.capacity(), request_capacity);
+        assert!(request_wire.iter().all(|byte| *byte == 0));
+        assert_eq!(
+            pending.datagram().allocated_capacity(),
+            b"small request".len()
+        );
+        let (_, request_commit) = pending.into_parts();
+        let accepted = server
+            .commit_request(
+                request_commit,
+                "127.0.0.1:49152".parse().expect("peer"),
+                MonotonicInstant::ZERO,
+                &server_random,
+            )
+            .expect("request commit");
+
+        let mut response_wire = BytesMut::from(&vec![0_u8; MAX_UDP_WIRE_LEN][..]);
+        let encoded = server
+            .encode_response(
+                accepted.capability(),
+                &clock,
+                &server_random,
+                &datagram(target.clone(), b"small response"),
+                0,
+                &mut response_wire,
+            )
+            .expect("response");
+        response_wire.truncate(encoded.wire_len());
+        let duplicate_response = response_wire.clone();
+        let mut wrong_binding = response_wire.clone();
+        assert!(matches!(
+            other_client.prepare_response_in_place(&clock, &mut wrong_binding),
+            Err(UdpPacketError::Binding)
+        ));
+        assert!(wrong_binding.iter().all(|byte| *byte == 0));
+
+        let response_allocation =
+            response_wire.as_ptr() as usize..response_wire.as_ptr() as usize + response_wire.len();
+        let pending = client
+            .prepare_response_in_place(&clock, &mut response_wire)
+            .expect("in-place response");
+        assert!(response_allocation.contains(&(pending.payload().as_ptr() as usize)));
+        let (response, response_commit) = pending.materialize().into_parts();
+        assert_eq!(response.payload(), b"small response");
+        assert_eq!(
+            response.allocated_capacity(),
+            b"small response".len(),
+            "materialization owns only actual payload bytes"
+        );
+        response_wire.fill(0);
+        client
+            .commit_response(response_commit, MonotonicInstant::ZERO)
+            .expect("response commit");
+
+        let mut duplicate_response = duplicate_response;
+        assert!(matches!(
+            client.prepare_response_in_place(&clock, &mut duplicate_response),
+            Err(UdpPacketError::Duplicate)
+        ));
+        assert!(duplicate_response.iter().all(|byte| *byte == 0));
+    }
+}
+
+#[test]
 fn borrowed_response_plans_domain_capacity_before_single_materialization() {
     let profile = MethodProfile::ALL[0];
     let keys = udp_provider(profile);
@@ -226,7 +410,7 @@ fn borrowed_response_plans_domain_capacity_before_single_materialization() {
     let mut wire = vec![0; MAX_UDP_WIRE_LEN];
     let mut scratch = UdpPacketScratch::new();
     let request_len = client
-        .encode_request(&clock, &random, &request, 0, &mut wire, &mut scratch)
+        .encode_request(&clock, &random, &request, 0, &mut wire)
         .expect("request");
     let (_, commit) = server
         .prepare_request(&clock, &wire[..request_len], &mut scratch)
@@ -249,7 +433,6 @@ fn borrowed_response_plans_domain_capacity_before_single_materialization() {
             &response,
             0,
             &mut wire,
-            &mut scratch,
         )
         .expect("encode response");
     let pending = client
@@ -283,27 +466,13 @@ fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id()
         let identity = scratch.storage_identity();
         let mut short = vec![0_u8; MAX_UDP_WIRE_LEN - 1];
         assert_eq!(
-            client.encode_request(
-                &clock,
-                &random,
-                &maximum_datagram,
-                0,
-                &mut short,
-                &mut scratch,
-            ),
+            client.encode_request(&clock, &random, &maximum_datagram, 0, &mut short,),
             Err(UdpPacketError::Bounds)
         );
 
         let mut wire = vec![0_u8; MAX_UDP_WIRE_LEN];
         let wire_len = client
-            .encode_request(
-                &clock,
-                &random,
-                &maximum_datagram,
-                0,
-                &mut wire,
-                &mut scratch,
-            )
+            .encode_request(&clock, &random, &maximum_datagram, 0, &mut wire)
             .expect("exact maximum");
         assert_eq!(wire_len, MAX_UDP_WIRE_LEN);
         assert_eq!(scratch.storage_identity(), identity);
@@ -331,8 +500,62 @@ fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id()
 
         let oversized = datagram(target, &vec![0x5a; maximum + 1]);
         assert_eq!(
-            client.encode_request(&clock, &random, &oversized, 0, &mut wire, &mut scratch,),
+            client.encode_request(&clock, &random, &oversized, 0, &mut wire),
             Err(UdpPacketError::Bounds)
+        );
+    }
+}
+
+#[test]
+fn final_wire_builder_failure_clears_reservation_and_preserves_first_packet_id() {
+    for profile in MethodProfile::ALL {
+        let keys = udp_provider(profile);
+        let session_random = FillRandom::new(0x20);
+        let good_random = FillRandom::new(0x30);
+        let clock = FakeClock::new(NOW, 0);
+        let mut client =
+            UdpClientSession::new(&keys, &session_random, |_| false).expect("client session");
+        let server = UdpServer::new(&keys).expect("server");
+        let request = datagram(fixture_target("ipv4"), b"body");
+        let padding_len = 3;
+        let reserved_len =
+            11 + padding_len + 7 + request.payload().len() + profile.udp_wire_overhead_bytes();
+        let mut wire = vec![0xa5; MAX_UDP_WIRE_LEN];
+        assert_eq!(
+            client.encode_request(
+                &clock,
+                &ScriptedRandom::failing(),
+                &request,
+                padding_len,
+                &mut wire,
+            ),
+            Err(UdpPacketError::Random)
+        );
+        assert!(wire[..reserved_len].iter().all(|byte| *byte == 0));
+        assert!(wire[reserved_len..].iter().all(|byte| *byte == 0xa5));
+
+        let wire_len = client
+            .encode_request(&clock, &good_random, &request, padding_len, &mut wire)
+            .expect("retry encodes");
+        let pending = server
+            .prepare_request_owned(&clock, BytesMut::from(&wire[..wire_len]))
+            .expect("retry opens");
+        let (_, commit) = pending.into_parts();
+        let accepted = server
+            .commit_request(
+                commit,
+                "127.0.0.1:49152".parse().expect("peer"),
+                MonotonicInstant::ZERO,
+                &FillRandom::new(0x80),
+            )
+            .expect("retry commits");
+        assert_eq!(
+            server
+                .session_snapshot(accepted.capability())
+                .expect("snapshot")
+                .expect("live")
+                .highest_packet_id(),
+            Some(0)
         );
     }
 }
@@ -502,7 +725,6 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
                     &datagram(target.clone(), b"prior"),
                     0,
                     &mut output,
-                    &mut scratch,
                 )
                 .expect("preceding request");
         }
@@ -513,7 +735,6 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
                 &datagram(target.clone(), &request_payload),
                 padding.len(),
                 &mut output,
-                &mut scratch,
             )
             .expect("fixture request");
         assert_eq!(
@@ -562,7 +783,6 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
                     &datagram(target.clone(), b"prior"),
                     0,
                     &mut output,
-                    &mut scratch,
                 )
                 .expect("preceding response");
         }
@@ -574,7 +794,6 @@ fn independent_three_method_composite_fixture_matches_exact_request_and_response
                 &datagram(target.clone(), &response_payload),
                 padding.len(),
                 &mut output,
-                &mut scratch,
             )
             .expect("fixture response");
         assert_eq!(
@@ -606,7 +825,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
         target: &TargetAddr,
         inner: &[u8],
         wire: &mut [u8],
-        scratch: &mut UdpPacketScratch,
     ) -> Vec<u8> {
         let encoded = server
             .encode_response(
@@ -616,7 +834,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
                 &datagram(target.clone(), inner),
                 0,
                 wire,
-                scratch,
             )
             .expect("outer response");
         wire[..encoded.wire_len()].to_vec()
@@ -629,19 +846,15 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
         application: &TargetAddr,
         outer_wire: &[u8],
         scratch: &mut UdpPacketScratch,
-    ) -> [UdpResponseCommit; 2] {
-        let outer = clients[0]
-            .prepare_response_borrowed(clock, outer_wire, scratch)
-            .expect("open outer");
+    ) -> Result<[UdpResponseCommit; 2], UdpPacketError> {
+        let outer = clients[0].prepare_response_borrowed(clock, outer_wire, scratch)?;
         assert!(outer.target_matches(next));
         let mut inner_wire = vec![0; outer.payload().len()];
         outer.copy_payload_to(&mut inner_wire).expect("copy inner");
         let outer_commit = outer.into_commit();
-        let inner = clients[1]
-            .prepare_response_borrowed(clock, &inner_wire, scratch)
-            .expect("open inner");
+        let inner = clients[1].prepare_response_borrowed(clock, &inner_wire, scratch)?;
         assert!(inner.target_matches(application));
-        [outer_commit, inner.into_commit()]
+        Ok([outer_commit, inner.into_commit()])
     }
 
     for profiles in [
@@ -681,7 +894,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
                 &datagram(application.clone(), b"request"),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("inner request");
         let inner_wire = wire[..inner_len].to_vec();
@@ -700,15 +912,7 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
             .expect("commit inner request")
             .capability();
         let outer_len = clients[0]
-            .encode_request_parts(
-                &clock,
-                &client_random[0],
-                &next,
-                &inner_wire,
-                0,
-                &mut wire,
-                &mut scratch,
-            )
+            .encode_request_parts(&clock, &client_random[0], &next, &inner_wire, 0, &mut wire)
             .expect("outer request");
         let outer = servers[0]
             .prepare_request(&clock, &wire[..outer_len], &mut scratch)
@@ -735,7 +939,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
                 &datagram(application.clone(), b"response"),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("inner response");
         let replayed_inner = wire[..inner.wire_len()].to_vec();
@@ -748,7 +951,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
             &next,
             &replayed_inner,
             &mut wire,
-            &mut scratch,
         );
         UdpClientSession::commit_responses(
             &[&clients[0], &clients[1]],
@@ -760,6 +962,7 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
                 &first_outer,
                 &mut scratch,
             )
+            .expect("open first nested response")
             .into(),
             MonotonicInstant::from_duration(Duration::from_millis(1)),
         )
@@ -776,24 +979,18 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
             &next,
             &replayed_inner,
             &mut wire,
-            &mut scratch,
         );
-        assert_eq!(
-            UdpClientSession::commit_responses(
-                &[&clients[0], &clients[1]],
-                open_commits(
-                    &clients,
-                    &clock,
-                    &next,
-                    &application,
-                    &fresh_outer,
-                    &mut scratch
-                )
-                .into(),
-                MonotonicInstant::from_duration(Duration::from_millis(2)),
+        assert!(matches!(
+            open_commits(
+                &clients,
+                &clock,
+                &next,
+                &application,
+                &fresh_outer,
+                &mut scratch
             ),
             Err(UdpPacketError::Duplicate)
-        );
+        ));
         assert_eq!(
             clients
                 .each_ref()
@@ -809,7 +1006,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
                 &datagram(application.clone(), b"fresh"),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("fresh inner");
         let next_inner = wire[..next_inner.wire_len()].to_vec();
@@ -821,7 +1017,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
             &next,
             &next_inner,
             &mut wire,
-            &mut scratch,
         );
         UdpClientSession::commit_responses(
             &[&clients[0], &clients[1]],
@@ -833,6 +1028,7 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
                 &valid_outer,
                 &mut scratch,
             )
+            .expect("open valid nested response")
             .into(),
             MonotonicInstant::from_duration(Duration::from_millis(3)),
         )
@@ -864,7 +1060,6 @@ fn reversed_overlapping_response_batches_use_one_lock_order() {
                 &datagram(target.clone(), b"request"),
                 0,
                 &mut wire,
-                &mut scratch,
             )
             .expect("request");
         let request = server
@@ -894,7 +1089,6 @@ fn reversed_overlapping_response_batches_use_one_lock_order() {
                     &datagram(target.clone(), b"response"),
                     0,
                     &mut wire,
-                    &mut scratch,
                 )
                 .expect("response");
             batch.push(

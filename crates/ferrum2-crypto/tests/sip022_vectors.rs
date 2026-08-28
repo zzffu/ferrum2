@@ -145,7 +145,8 @@ fn sip022_kdf_aead_nonce_and_authentication_table_covers_every_profile() {
         let original = corrupted.clone();
         let mut corrupted = BytesMut::from(corrupted.as_slice());
         assert!(opener.open_in_place(&mut corrupted).is_err());
-        assert_eq!(corrupted.as_ref(), original);
+        assert!(corrupted[..plaintext.len()].iter().all(|byte| *byte == 0));
+        assert_eq!(&corrupted[plaintext.len()..], &original[plaintext.len()..]);
 
         let mut valid = BytesMut::from(valid.as_slice());
         opener
@@ -221,9 +222,13 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
         ));
         assert!(too_small.iter().all(|byte| *byte == 0xa5));
 
-        let sealed = crypto
-            .seal(&mut outbound, &plaintext, &mut output, &packet_random)
-            .expect("fixture packet seals");
+        let mut reservation = crypto
+            .reserve_seal(&mut outbound, plaintext.len(), &mut output)
+            .expect("fixture final wire reserves");
+        reservation.body_mut().copy_from_slice(&plaintext);
+        let sealed = reservation
+            .seal(&packet_random)
+            .expect("fixture packet seals in final layout");
         assert_eq!(sealed.packet_id(), target_packet_id);
         let expected_wire = hex::decode(case["wire"].as_str().expect("wire")).expect("wire");
         assert_eq!(&output[..sealed.wire_len()], expected_wire);
@@ -235,6 +240,21 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
         assert_eq!(opened.session_id(), outbound.session_id());
         assert_eq!(opened.packet_id(), target_packet_id);
         assert_eq!(&opened_body[..opened.plaintext_len()], plaintext);
+
+        let mut owned_wire = BytesMut::from(expected_wire.as_slice());
+        let owned = crypto
+            .open_in_place(&mut owned_wire)
+            .expect("fixture owned wire authenticates in place");
+        assert_eq!(owned.session_id(), outbound.session_id());
+        assert_eq!(owned.packet_id(), target_packet_id);
+        assert_eq!(&owned_wire[owned.plaintext_range()], plaintext);
+        assert_eq!(
+            owned.plaintext_range().start,
+            match profile {
+                MethodProfile::Blake3Aes128Gcm2022 | MethodProfile::Blake3Aes256Gcm2022 => 16,
+                MethodProfile::Blake3ChaCha20Poly13052022 => 40,
+            }
+        );
 
         let mut corrupted = expected_wire.clone();
         *corrupted.last_mut().expect("tag byte") ^= 1;

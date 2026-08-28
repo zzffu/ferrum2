@@ -14,12 +14,15 @@ use super::host_identity::linux_capacity;
 use super::process_support::{
     PROBE_TIMEOUT, clean_io, first_line, json, probe_text, repository_root, sha256,
 };
+use super::profile_structural::StructuralMetrics;
 use super::tcp_scale::SCALE_PAYLOAD_BYTES;
 use super::{PAYLOAD_BYTES, STREAMS};
 
 pub(super) const PROFILE_WARMUP_SECONDS: std::ops::RangeInclusive<u64> = 1..=60;
 pub(super) const PROFILE_ACTIVE_SECONDS: std::ops::RangeInclusive<u64> = 10..=900;
 pub(super) const PROFILE_UDP_WORKERS: usize = 4;
+pub(super) const PROFILE_DNS_UDP_WORKERS: usize = 32;
+pub(super) const PROFILE_DNS_QUERY_BYTES: usize = 40;
 pub(super) const PROFILE_UDP_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const PROFILE_UDP_PAYLOAD_BYTES: usize = 128;
 pub(super) const PROFILE_UDP_MTU_PAYLOAD_BYTES: usize = 1_200;
@@ -37,7 +40,7 @@ pub(super) const PROFILE_TCP_STREAM_BATCH: usize = 4;
 pub(super) const PROFILE_TCP_LATENCY_WORKERS: usize = 1;
 pub(super) const PROFILE_TCP_LATENCY_ACTIVE_MAX_SECONDS: u64 = 60;
 pub(super) const PROFILE_TCP_LATENCY_SAMPLE_CAP: usize = 2_000_000;
-pub(super) const PROFILE_TRIAL_SCHEMA_VERSION: u8 = 4;
+pub(super) const PROFILE_TRIAL_SCHEMA_VERSION: u8 = 6;
 pub(super) const EVIDENCE_LINE_MAX_BYTES: usize = 16 * 1024;
 pub(super) const TCP_SCALE_EVIDENCE_LINE_MAX_BYTES: usize = 512 * 1024;
 
@@ -119,6 +122,9 @@ pub(super) enum ProfileScenario {
     TcpRequest1k,
     TcpRequest4k,
     TcpRequest16k,
+    SocksDirectRequest1k,
+    SocksDirectRequest4k,
+    SocksDirectRequest16k,
     UdpSmallHigh,
     UdpMtu1200,
     UdpPayload1472,
@@ -127,6 +133,14 @@ pub(super) enum ProfileScenario {
     UdpMaxWire65507,
     UdpDirectSmall128,
     UdpDirectMax65497,
+    UdpResponseConcurrency1,
+    UdpResponseConcurrency8,
+    UdpResponseConcurrency32,
+    UdpReplaySequential,
+    DnsUdpConcurrency,
+    DnsCacheSize64,
+    DnsCacheSize4096,
+    DnsCacheSize65536,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +167,9 @@ impl ProfileScenario {
             Some("tcp-request-1k") => Ok(Self::TcpRequest1k),
             Some("tcp-request-4k") => Ok(Self::TcpRequest4k),
             Some("tcp-request-16k") => Ok(Self::TcpRequest16k),
+            Some("socks-direct-request-1k") => Ok(Self::SocksDirectRequest1k),
+            Some("socks-direct-request-4k") => Ok(Self::SocksDirectRequest4k),
+            Some("socks-direct-request-16k") => Ok(Self::SocksDirectRequest16k),
             Some("udp-small-high") => Ok(Self::UdpSmallHigh),
             Some("udp-mtu-1200") => Ok(Self::UdpMtu1200),
             Some("udp-payload-1472") => Ok(Self::UdpPayload1472),
@@ -161,12 +178,25 @@ impl ProfileScenario {
             Some("udp-max-wire-65507") => Ok(Self::UdpMaxWire65507),
             Some("udp-direct-small-128") => Ok(Self::UdpDirectSmall128),
             Some("udp-direct-max-65497") => Ok(Self::UdpDirectMax65497),
+            Some("udp-response-concurrency-1") => Ok(Self::UdpResponseConcurrency1),
+            Some("udp-response-concurrency-8") => Ok(Self::UdpResponseConcurrency8),
+            Some("udp-response-concurrency-32") => Ok(Self::UdpResponseConcurrency32),
+            Some("udp-replay-sequential") => Ok(Self::UdpReplaySequential),
+            Some("dns-udp-concurrency") => Ok(Self::DnsUdpConcurrency),
+            Some("dns-cache-size-64") => Ok(Self::DnsCacheSize64),
+            Some("dns-cache-size-4096") => Ok(Self::DnsCacheSize4096),
+            Some("dns-cache-size-65536") => Ok(Self::DnsCacheSize65536),
             _ => Err(
                 "profile scenario must be tcp-bulk, tcp-stream-64k, tcp-scale-10k, \
                  tcp-request-1k, \
                  tcp-request-4k, tcp-request-16k, udp-small-high, udp-mtu-1200, \
                  udp-payload-1472, udp-payload-1500, udp-payload-8192, \
-                 udp-max-wire-65507, udp-direct-small-128, or udp-direct-max-65497"
+                 udp-max-wire-65507, udp-direct-small-128, udp-direct-max-65497, \
+                 udp-response-concurrency-1, udp-response-concurrency-8, \
+                 udp-response-concurrency-32, udp-replay-sequential, dns-udp-concurrency, \
+                 dns-cache-size-64, dns-cache-size-4096, dns-cache-size-65536, \
+                 socks-direct-request-1k, socks-direct-request-4k, or \
+                 socks-direct-request-16k"
                     .to_owned(),
             ),
         }
@@ -180,6 +210,9 @@ impl ProfileScenario {
             Self::TcpRequest1k => "tcp-request-1k",
             Self::TcpRequest4k => "tcp-request-4k",
             Self::TcpRequest16k => "tcp-request-16k",
+            Self::SocksDirectRequest1k => "socks-direct-request-1k",
+            Self::SocksDirectRequest4k => "socks-direct-request-4k",
+            Self::SocksDirectRequest16k => "socks-direct-request-16k",
             Self::UdpSmallHigh => "udp-small-high",
             Self::UdpMtu1200 => "udp-mtu-1200",
             Self::UdpPayload1472 => "udp-payload-1472",
@@ -188,6 +221,14 @@ impl ProfileScenario {
             Self::UdpMaxWire65507 => "udp-max-wire-65507",
             Self::UdpDirectSmall128 => "udp-direct-small-128",
             Self::UdpDirectMax65497 => "udp-direct-max-65497",
+            Self::UdpResponseConcurrency1 => "udp-response-concurrency-1",
+            Self::UdpResponseConcurrency8 => "udp-response-concurrency-8",
+            Self::UdpResponseConcurrency32 => "udp-response-concurrency-32",
+            Self::UdpReplaySequential => "udp-replay-sequential",
+            Self::DnsUdpConcurrency => "dns-udp-concurrency",
+            Self::DnsCacheSize64 => "dns-cache-size-64",
+            Self::DnsCacheSize4096 => "dns-cache-size-4096",
+            Self::DnsCacheSize65536 => "dns-cache-size-65536",
         }
     }
 
@@ -195,9 +236,12 @@ impl ProfileScenario {
         match self {
             Self::TcpBulk | Self::TcpStream64k => Some(STREAMS),
             Self::TcpScale10k => None,
-            Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => {
-                Some(PROFILE_TCP_LATENCY_WORKERS)
-            }
+            Self::TcpRequest1k
+            | Self::TcpRequest4k
+            | Self::TcpRequest16k
+            | Self::SocksDirectRequest1k
+            | Self::SocksDirectRequest4k
+            | Self::SocksDirectRequest16k => Some(PROFILE_TCP_LATENCY_WORKERS),
             Self::UdpSmallHigh
             | Self::UdpMtu1200
             | Self::UdpPayload1472
@@ -205,7 +249,15 @@ impl ProfileScenario {
             | Self::UdpPayload8192
             | Self::UdpMaxWire65507
             | Self::UdpDirectSmall128
-            | Self::UdpDirectMax65497 => None,
+            | Self::UdpDirectMax65497
+            | Self::UdpResponseConcurrency1
+            | Self::UdpResponseConcurrency8
+            | Self::UdpResponseConcurrency32
+            | Self::UdpReplaySequential
+            | Self::DnsUdpConcurrency
+            | Self::DnsCacheSize64
+            | Self::DnsCacheSize4096
+            | Self::DnsCacheSize65536 => None,
         }
     }
 
@@ -214,6 +266,9 @@ impl ProfileScenario {
             Self::TcpRequest1k => Some(1_024),
             Self::TcpRequest4k => Some(4_096),
             Self::TcpRequest16k => Some(16_384),
+            Self::SocksDirectRequest1k => Some(1_024),
+            Self::SocksDirectRequest4k => Some(4_096),
+            Self::SocksDirectRequest16k => Some(16_384),
             _ => None,
         }
     }
@@ -228,6 +283,9 @@ impl ProfileScenario {
             Self::UdpMaxWire65507 => Some(PROFILE_UDP_SS_MAX_APPLICATION_PAYLOAD_BYTES),
             Self::UdpDirectSmall128 => Some(PROFILE_UDP_PAYLOAD_BYTES),
             Self::UdpDirectMax65497 => Some(PROFILE_UDP_DIRECT_MAX_APPLICATION_PAYLOAD_BYTES),
+            Self::UdpResponseConcurrency1
+            | Self::UdpResponseConcurrency8
+            | Self::UdpResponseConcurrency32 => Some(PROFILE_UDP_PAYLOAD_BYTES),
             _ => None,
         }
     }
@@ -241,31 +299,74 @@ impl ProfileScenario {
             | Self::UdpPayload8192
             | Self::UdpMaxWire65507 => Some(ProfileUdpTopology::Shadowsocks),
             Self::UdpDirectSmall128 | Self::UdpDirectMax65497 => Some(ProfileUdpTopology::Direct),
+            Self::UdpResponseConcurrency1
+            | Self::UdpResponseConcurrency8
+            | Self::UdpResponseConcurrency32 => Some(ProfileUdpTopology::Shadowsocks),
             _ => None,
         }
     }
 
-    pub(super) const fn application_payload_bytes(self) -> usize {
+    pub(super) const fn application_payload_bytes(self) -> Option<usize> {
         match self {
-            Self::TcpBulk | Self::TcpStream64k => PAYLOAD_BYTES,
-            Self::TcpScale10k => SCALE_PAYLOAD_BYTES,
-            Self::TcpRequest1k => 1_024,
-            Self::TcpRequest4k => 4_096,
-            Self::TcpRequest16k => 16_384,
-            _ => self.udp_payload_bytes().expect("UDP scenario payload"),
+            Self::TcpBulk | Self::TcpStream64k => Some(PAYLOAD_BYTES),
+            Self::TcpScale10k => Some(SCALE_PAYLOAD_BYTES),
+            Self::TcpRequest1k => Some(1_024),
+            Self::TcpRequest4k => Some(4_096),
+            Self::TcpRequest16k => Some(16_384),
+            Self::SocksDirectRequest1k => Some(1_024),
+            Self::SocksDirectRequest4k => Some(4_096),
+            Self::SocksDirectRequest16k => Some(16_384),
+            Self::DnsUdpConcurrency => Some(PROFILE_DNS_QUERY_BYTES),
+            Self::UdpReplaySequential
+            | Self::DnsCacheSize64
+            | Self::DnsCacheSize4096
+            | Self::DnsCacheSize65536 => None,
+            _ => self.udp_payload_bytes(),
+        }
+    }
+
+    pub(super) const fn workload_scale(self) -> Option<usize> {
+        match self {
+            Self::UdpResponseConcurrency1 | Self::UdpReplaySequential => Some(1),
+            Self::UdpResponseConcurrency8 => Some(8),
+            Self::UdpResponseConcurrency32 | Self::DnsUdpConcurrency => Some(32),
+            Self::DnsCacheSize64 => Some(64),
+            Self::DnsCacheSize4096 => Some(4_096),
+            Self::DnsCacheSize65536 => Some(65_536),
+            _ => None,
         }
     }
 
     pub(super) const fn topology_label(self) -> &'static str {
         match self.udp_topology() {
             Some(topology) => topology.label(),
+            None if self.is_socks_direct() => "direct",
+            None if matches!(
+                self,
+                Self::UdpReplaySequential
+                    | Self::DnsCacheSize64
+                    | Self::DnsCacheSize4096
+                    | Self::DnsCacheSize65536
+            ) =>
+            {
+                "in-process"
+            }
+            None if matches!(self, Self::DnsUdpConcurrency) => "direct",
             None => "shadowsocks",
         }
     }
 
     pub(super) const fn unit(self) -> &'static str {
         match self {
-            Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => "nanoseconds",
+            Self::TcpRequest1k
+            | Self::TcpRequest4k
+            | Self::TcpRequest16k
+            | Self::SocksDirectRequest1k
+            | Self::SocksDirectRequest4k
+            | Self::SocksDirectRequest16k
+            | Self::DnsCacheSize64
+            | Self::DnsCacheSize4096
+            | Self::DnsCacheSize65536 => "nanoseconds",
             Self::UdpSmallHigh
             | Self::UdpMtu1200
             | Self::UdpPayload1472
@@ -273,7 +374,12 @@ impl ProfileScenario {
             | Self::UdpPayload8192
             | Self::UdpMaxWire65507
             | Self::UdpDirectSmall128
-            | Self::UdpDirectMax65497 => "datagrams_per_second",
+            | Self::UdpDirectMax65497
+            | Self::UdpResponseConcurrency1
+            | Self::UdpResponseConcurrency8
+            | Self::UdpResponseConcurrency32 => "datagrams_per_second",
+            Self::UdpReplaySequential => "operations_per_second",
+            Self::DnsUdpConcurrency => "queries_per_second",
             _ => "bytes_per_second",
         }
     }
@@ -287,12 +393,40 @@ impl ProfileScenario {
 
     pub(super) const fn upstream_wire_bytes(self) -> Option<usize> {
         match self.udp_topology() {
-            Some(ProfileUdpTopology::Shadowsocks) => {
-                Some(self.application_payload_bytes() + PROFILE_SS_AES_RESPONSE_OVERHEAD_BYTES)
-            }
-            Some(ProfileUdpTopology::Direct) => Some(self.application_payload_bytes()),
+            Some(ProfileUdpTopology::Shadowsocks) => Some(
+                self.application_payload_bytes()
+                    .expect("UDP scenario payload")
+                    + PROFILE_SS_AES_RESPONSE_OVERHEAD_BYTES,
+            ),
+            Some(ProfileUdpTopology::Direct) => self.application_payload_bytes(),
             None => None,
         }
+    }
+
+    pub(super) const fn udp_workers(self) -> Option<usize> {
+        match self {
+            Self::UdpResponseConcurrency1 => Some(1),
+            Self::UdpResponseConcurrency8 => Some(8),
+            Self::UdpResponseConcurrency32 => Some(32),
+            scenario if scenario.udp_payload_bytes().is_some() => Some(PROFILE_UDP_WORKERS),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn dns_cache_capacity(self) -> Option<usize> {
+        match self {
+            Self::DnsCacheSize64 => Some(64),
+            Self::DnsCacheSize4096 => Some(4_096),
+            Self::DnsCacheSize65536 => Some(65_536),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn is_socks_direct(self) -> bool {
+        matches!(
+            self,
+            Self::SocksDirectRequest1k | Self::SocksDirectRequest4k | Self::SocksDirectRequest16k
+        )
     }
 }
 
@@ -692,6 +826,7 @@ pub(super) struct ProfileOutcome {
     pub(super) p99_nanoseconds: Option<u64>,
     pub(super) io_completions: u64,
     pub(super) scale_json: Option<String>,
+    pub(super) structural_metrics: StructuralMetrics,
 }
 
 pub(super) struct ProfileRawIdentity {
@@ -786,7 +921,8 @@ pub(super) fn profile_raw_prefix(arguments: &ProfileArgs, raw: &ProfileRawArgs) 
          \"kind\":\"m18_profile_trial\",\"parent_sha\":{},\"candidate_sha\":{},\
          \"member\":{},\"pair\":{},\"order\":{},\"build_profile\":{},\"scenario\":{},\
          \"warmup_seconds\":{},\"active_seconds\":{},\"topology\":{},\
-         \"application_payload_bytes\":{},\"socks_datagram_bytes\":{},\
+         \"application_payload_bytes\":{},\"workload_scale\":{},\
+         \"socks_datagram_bytes\":{},\
          \"upstream_wire_bytes\":{},\"unit\":{},\"producer_source_sha256\":{},\
          \"controller_source_sha256\":{},\"semantic_recipe_sha256\":{},\
          \"evidence_bundle_sha256\":{}",
@@ -800,7 +936,14 @@ pub(super) fn profile_raw_prefix(arguments: &ProfileArgs, raw: &ProfileRawArgs) 
         arguments.warmup_seconds,
         arguments.active_seconds,
         json(arguments.scenario.topology_label()),
-        arguments.scenario.application_payload_bytes(),
+        arguments
+            .scenario
+            .application_payload_bytes()
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        arguments
+            .scenario
+            .workload_scale()
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         arguments
             .scenario
             .socks_datagram_bytes()

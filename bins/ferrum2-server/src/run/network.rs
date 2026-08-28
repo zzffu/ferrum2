@@ -22,12 +22,14 @@ use ferrum2_platform_windows::{
     WindowsResolvedSocketBinder,
 };
 #[cfg(all(windows, not(test)))]
+use ferrum2_runtime::NetworkSocketMode;
+#[cfg(all(windows, not(test)))]
 use ferrum2_runtime::SystemNetworkSocketOperations;
 #[cfg(any(windows, test))]
 use ferrum2_runtime::{
-    GenerationBoundTcpStream, NetworkResetCoordinator, NetworkResetLimits,
-    NetworkRuntimeResourceAdmissionError, NetworkSnapshotPublisher, NetworkSocketService,
-    NetworkSocketServiceError, SystemNetworkSocketError,
+    NetworkResetCoordinator, NetworkResetLimits, NetworkRuntimeResourceAdmissionError,
+    NetworkSnapshotPublisher, NetworkSocketService, NetworkSocketServiceError, NetworkTcpStream,
+    SystemNetworkSocketError,
 };
 #[cfg(all(windows, not(test)))]
 use ferrum2_runtime::{
@@ -56,22 +58,36 @@ pub(super) type ServerNetworkSocketService =
 pub(super) struct ServerNetworkSocketService;
 
 #[cfg(any(windows, test))]
-pub(super) type ServerPhysicalTcpStream = GenerationBoundTcpStream<RuntimeTcpStream>;
+pub(super) type ServerPhysicalTcpStream = NetworkTcpStream<RuntimeTcpStream>;
 #[cfg(all(not(windows), not(test)))]
 pub(super) type ServerPhysicalTcpStream = RuntimeTcpStream;
 
 #[cfg(all(windows, not(test)))]
 pub(super) fn prepare_server_network_runtime(
+    network_generation: ferrum2_config::NetworkGenerationMode,
     registry: &OwnerRegistry,
     metrics: &Metrics,
-) -> Result<(Arc<ServerNetworkSocketService>, WindowsNetworkChangeMonitor), RunError> {
+) -> Result<
+    (
+        Arc<ServerNetworkSocketService>,
+        Option<WindowsNetworkChangeMonitor>,
+    ),
+    RunError,
+> {
     // Subscribe before generation 1 is captured so changes racing startup remain observable.
-    let monitor = WindowsNetworkChangeMonitor::new().map_err(|_| RunError::StartupRuntime)?;
+    let monitor = match network_generation {
+        ferrum2_config::NetworkGenerationMode::Dynamic => {
+            Some(WindowsNetworkChangeMonitor::new().map_err(|_| RunError::StartupRuntime)?)
+        }
+        ferrum2_config::NetworkGenerationMode::Static => None,
+    };
     let catalog = WindowsNetworkInterfaceCatalog::system();
     let initial = match NetworkSnapshot::capture(1, &catalog) {
         Ok(initial) => Arc::new(initial),
         Err(_) => {
-            close_server_network_change_monitor(monitor)?;
+            if let Some(monitor) = monitor {
+                close_server_network_change_monitor(monitor)?;
+            }
             return Err(RunError::StartupRuntime);
         }
     };
@@ -81,8 +97,13 @@ pub(super) fn prepare_server_network_runtime(
         NetworkResetLimits::default(),
         registry.clone(),
     );
+    let mode = match network_generation {
+        ferrum2_config::NetworkGenerationMode::Dynamic => NetworkSocketMode::Dynamic,
+        ferrum2_config::NetworkGenerationMode::Static => NetworkSocketMode::Static,
+    };
     Ok((
-        Arc::new(ServerNetworkSocketService::new(
+        Arc::new(ServerNetworkSocketService::with_mode(
+            mode,
             coordinator,
             NetworkInterfaceResolver::new(catalog),
             SystemNetworkSocketOperations::new(WindowsResolvedSocketBinder),
