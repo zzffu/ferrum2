@@ -634,7 +634,7 @@ fn underlay_refresh_is_transactional_and_temporary_capture_failure_is_recoverabl
 }
 
 #[test]
-fn managed_generation_and_underlay_post_capture_use_frozen_physical_route() {
+fn managed_generation_and_underlay_post_capture_select_current_physical_route() {
     let physical = InterfaceIdentity { luid: 7, index: 17 };
     let wintun = InterfaceIdentity { luid: 9, index: 19 };
     let route = RouteFingerprint {
@@ -667,7 +667,30 @@ fn managed_generation_and_underlay_post_capture_use_frozen_physical_route() {
     assert!(underlay_matches_with(&policy, wintun, &mut operations).unwrap());
     assert_eq!(
         operations.best_calls, 1,
-        "post-capture cannot re-run best-interface"
+        "post-capture selects from eligible interfaces without the managed TUN"
+    );
+
+    let alternate = InterfaceIdentity {
+        luid: 11,
+        index: 21,
+    };
+    let mut changed_selection = operations.clone();
+    changed_selection.interfaces.push(alternate);
+    changed_selection.routes.push((
+        endpoint.ip(),
+        RouteFingerprint {
+            interface_luid: alternate.luid,
+            interface_index: alternate.index,
+            destination: endpoint.ip(),
+            prefix_length: 32,
+            next_hop: "0.0.0.0".parse().unwrap(),
+            metric: 4094,
+            source: Some("192.0.2.4".parse().unwrap()),
+        },
+    ));
+    assert!(
+        !underlay_matches_with(&policy, wintun, &mut changed_selection).unwrap(),
+        "a better route on another eligible interface changes the underlay"
     );
 
     for changed in [

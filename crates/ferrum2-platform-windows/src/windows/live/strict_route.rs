@@ -8,11 +8,11 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0,
     FWP_MATCH_EQUAL, FWP_UINT8, FWP_UINT16, FWP_UINT64, FWP_VALUE0, FWP_VALUE0_0, FWPM_ACTION0,
     FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_PROTOCOL,
-    FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0, FWPM_FILTER_CONDITION0, FWPM_FILTER0,
-    FWPM_SESSION_FLAG_DYNAMIC, FWPM_SESSION0, FWPM_SUBLAYER0, FwpmEngineClose0, FwpmEngineOpen0,
-    FwpmFilterAdd0, FwpmFilterGetById0, FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
-    FwpmSubLayerAdd0, FwpmSubLayerGetByKey0, FwpmTransactionAbort0, FwpmTransactionBegin0,
-    FwpmTransactionCommit0,
+    FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0, FWPM_FILTER_CONDITION0,
+    FWPM_FILTER_FLAG_INDEXED, FWPM_FILTER0, FWPM_SESSION_FLAG_DYNAMIC, FWPM_SESSION0,
+    FWPM_SUBLAYER0, FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterGetById0,
+    FwpmFreeMemory0, FwpmGetAppIdFromFileName0, FwpmSubLayerAdd0, FwpmSubLayerGetByKey0,
+    FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 use windows_sys::core::GUID;
@@ -30,7 +30,8 @@ pub(super) const STRICT_ROUTE_SESSION_KEY: GUID =
     GUID::from_u128(0x8ea35b4e_6629_4e26_9776_95c5bf9c6b01);
 pub(super) const STRICT_ROUTE_SUBLAYER_KEY: GUID =
     GUID::from_u128(0xddbc2fa2_d52f_4a79_8a63_8446c308cf02);
-pub(super) const STRICT_ROUTE_SUBLAYER_WEIGHT: u16 = 0x7fff;
+// Windows 10 BFE canonicalizes a requested 0x7fff custom sublayer to 0x7ffe.
+pub(super) const STRICT_ROUTE_SUBLAYER_WEIGHT: u16 = 0x7ffe;
 pub(super) const STRICT_ROUTE_SESSION_NAME: &str = "Ferrum2 strict route dynamic session";
 pub(super) const STRICT_ROUTE_SUBLAYER_NAME: &str = "Ferrum2 strict route";
 
@@ -178,7 +179,9 @@ pub(super) unsafe fn raw_strict_route_filter_matches(
     if raw.filterId != id
         || !guid_matches(&raw.filterKey, &expected.kind.key())
         || !unsafe { raw_wide_matches(raw.displayData.name, expected.kind.name()) }
-        || raw.flags != 0
+        // BFE owns the INDEXED bit and sets it only for filters it can index. No other returned
+        // flag belongs to this dynamic transaction.
+        || raw.flags & !FWPM_FILTER_FLAG_INDEXED != 0
         || !raw.providerKey.is_null()
         || raw.providerData.size != 0
         || !raw.providerData.data.is_null()

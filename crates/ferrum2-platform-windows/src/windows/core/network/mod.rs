@@ -235,6 +235,17 @@ pub(in crate::windows) fn bind_target_with(
     }
     let generation = policy.begin_binding()?;
     let owned = policy.owned_identity()?;
+    let route = select_target_route_with(target, owned, underlay)?.ok_or(Error)?;
+    policy.require_generation(generation)?;
+    binder.bind(target.ip(), route.interface_index)?;
+    policy.require_generation(generation)
+}
+
+fn select_target_route_with(
+    target: std::net::SocketAddr,
+    owned: InterfaceIdentity,
+    underlay: &mut impl UnderlayOperations,
+) -> Result<Option<RouteFingerprint>, Error> {
     let interfaces = underlay.eligible_interfaces(Some(owned))?;
     let mut selected = None::<(RouteFingerprint, u64)>;
     for identity in interfaces {
@@ -263,10 +274,7 @@ pub(in crate::windows) fn bind_target_with(
             selected = Some((route, effective_metric));
         }
     }
-    let (route, _) = selected.ok_or(Error)?;
-    policy.require_generation(generation)?;
-    binder.bind(target.ip(), route.interface_index)?;
-    policy.require_generation(generation)
+    Ok(selected.map(|(route, _)| route))
 }
 
 pub(in crate::windows) const fn same_ip_family(
@@ -377,13 +385,8 @@ pub(in crate::windows) fn underlay_matches_with(
     owned: InterfaceIdentity,
     operations: &mut impl UnderlayOperations,
 ) -> Result<bool, Error> {
-    let interfaces = operations.eligible_interfaces(Some(owned))?;
     for (endpoint, expected) in policy.fixed.iter() {
-        if !interfaces.iter().any(|candidate| {
-            candidate.index == expected.interface_index && candidate.luid == expected.interface_luid
-        }) || operations.constrained_route(*endpoint, expected.interface_index, true)?
-            != *expected
-        {
+        if select_target_route_with(*endpoint, owned, operations)? != Some(*expected) {
             return Ok(false);
         }
     }
