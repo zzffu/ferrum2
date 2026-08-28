@@ -6,9 +6,7 @@ use ferrum2_crypto::{
     Clock, MethodTcpSalt, SecureRandom, TcpOpener, TcpSealer, generate_method_response_salt,
 };
 
-use super::io::{
-    DataPoll, DataRead, PollBudget, drain_staged, poll_data_fill, poll_flush, poll_shutdown,
-};
+use super::io::{DataPoll, DataRead, drain_staged, poll_data_fill, poll_flush, poll_shutdown};
 use super::{
     DataRx, Lifecycle, PlainBufferedDuplex, PlainDuplex, StagedKind, StagedWrite, TransportIo,
     TxState, protocol_cipher_boundary,
@@ -85,7 +83,6 @@ where
             return Poll::Ready(Ok(&[]));
         }
         let state = std::mem::replace(&mut self.rx, DataRx::Poison);
-        let mut budget = PollBudget::new();
         match poll_data_fill(
             &mut self.io,
             &mut self.request_opener,
@@ -94,7 +91,6 @@ where
             &mut self.lifecycle,
             self.observers.flow,
             cx,
-            &mut budget,
         ) {
             DataPoll::Pending(state) => {
                 self.rx = state;

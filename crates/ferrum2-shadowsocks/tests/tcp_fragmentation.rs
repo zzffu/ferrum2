@@ -231,7 +231,7 @@ impl Wake for WakeCounter {
 }
 
 #[tokio::test]
-async fn authenticated_zero_length_frame_continues_same_poll_without_self_wake() {
+async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -249,34 +249,7 @@ async fn authenticated_zero_length_frame_continues_same_poll_without_self_wake()
     let mut cx = Context::from_waker(&waker);
     let mut destination = [0_u8; 32];
 
-    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
-    else {
-        panic!("ready empty frame must advance to the next nonempty frame");
-    };
-    assert_eq!(&destination[..read], b"after-zero");
-    assert_eq!(observation.lock().expect("observation").read_calls, 6);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn empty_frame_budget_self_wakes_only_after_eight_ready_frames() {
-    let keys = provider();
-    let clock = FakeClock::new(NOW, 0);
-    let random = ScriptedRandom::new([]);
-    let replay = TcpReplayStore::new(1024).expect("capacity");
-    let salt = salt_from_u64(912);
-    let request = valid_request_wire(NOW, &salt);
-    let mut payloads = vec![b"".as_slice(); 9];
-    payloads.push(b"after-budget");
-    let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
-    reads.extend(request_data_frames(&salt, &payloads));
-    let (io, observation) = RecordingIo::new(reads);
-    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
-    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
-    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let waker = Waker::from(Arc::clone(&wake_counter));
-    let mut cx = Context::from_waker(&waker);
-    let mut destination = [0_u8; 32];
+    let baseline = observation.lock().expect("observation").read_calls;
 
     assert!(matches!(
         Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
@@ -284,16 +257,94 @@ async fn empty_frame_budget_self_wakes_only_after_eight_ready_frames() {
     ));
     assert_eq!(
         observation.lock().expect("observation").read_calls,
-        2 + 2 * 8
+        baseline + 1
     );
     assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 2
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 3
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("next poll resumes after the frame budget");
+        panic!("the nonempty payload is ready after its final receive stage");
     };
-    assert_eq!(&destination[..read], b"after-budget");
+    assert_eq!(&destination[..read], b"after-zero");
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 4
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn length_and_partial_payload_reads_each_yield_before_plaintext() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(912);
+    let request = valid_request_wire(NOW, &salt);
+    let frames = request_data_frames(&salt, &[b"fragmented"]);
+    let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
+    reads.push(frames[0].clone());
+    reads.push(frames[1][..3].to_vec());
+    reads.push(frames[1][3..].to_vec());
+    let (io, observation) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 32];
+    let baseline = observation.lock().expect("observation").read_calls;
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 1
+    );
     assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 2
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("the final payload fragment produces plaintext");
+    };
+    assert_eq!(&destination[..read], b"fragmented");
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 3
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

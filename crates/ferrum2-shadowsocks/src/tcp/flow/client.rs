@@ -337,7 +337,6 @@ where
                         &mut self.lifecycle,
                         self.observers.flow,
                         cx,
-                        &mut budget,
                     );
                     match result {
                         DataPoll::Pending(state) => {

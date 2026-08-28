@@ -222,18 +222,19 @@ impl Wake for WakeCounter {
 }
 
 #[tokio::test]
-async fn always_ready_chain_completes_in_one_poll_without_self_wake() {
+async fn subsequent_rx_stage_yields_once_while_ready_writes_stay_in_one_poll() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(807);
     let response_salt = salt_from_u64(808);
-    let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"x", &[]);
-    let mut reads = vec![response[..RESPONSE_FIRST_READ_LEN].to_vec()];
-    reads.extend(
-        response[RESPONSE_FIRST_READ_LEN..]
-            .iter()
-            .map(|byte| vec![*byte]),
-    );
+    let (response, frames) =
+        response_wire_and_frames(&request_salt, &response_salt, b"first", &[b"x"]);
+    let reads = vec![
+        response[..RESPONSE_FIRST_READ_LEN].to_vec(),
+        response[RESPONSE_FIRST_READ_LEN..].to_vec(),
+        frames[0].clone(),
+        frames[1].clone(),
+    ];
     let (io, observation) = RecordingIo::new(reads);
     let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 1));
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
@@ -245,10 +246,26 @@ async fn always_ready_chain_completes_in_one_poll_without_self_wake() {
         .write_request(&target())
         .await
         .expect("client");
+    let mut first = [0_u8; 8];
+    let first_read = read_plain(&mut flow, &mut first)
+        .await
+        .expect("first response payload");
+    assert_eq!(&first[..first_read], b"first");
     let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wake_counter));
     let mut cx = Context::from_waker(&waker);
     let mut destination = [0_u8; 8];
+
+    let baseline = observation.lock().expect("observation").read_calls;
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 1
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 
     assert!(matches!(
         Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
@@ -257,10 +274,9 @@ async fn always_ready_chain_completes_in_one_poll_without_self_wake() {
     assert_eq!(destination[0], b'x');
     assert_eq!(
         observation.lock().expect("observation").read_calls,
-        1 + response.len() - RESPONSE_FIRST_READ_LEN,
-        "fixed response and one-byte payload fragments complete together"
+        baseline + 2
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 
     assert!(matches!(
         Pin::new(&mut flow).poll_write_plain(&mut cx, b"u"),
@@ -273,19 +289,20 @@ async fn always_ready_chain_completes_in_one_poll_without_self_wake() {
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.write_calls, 1 + 2 + 16 + 1 + 16);
     assert_eq!(observed.flush_calls, 1);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn ready_read_budget_bounds_one_byte_fragments_and_self_wakes_once() {
+async fn each_nonfinal_fragmented_read_yields_and_self_wakes_once() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
     let replay = TcpReplayStore::new(1024).expect("capacity");
     let request_salt = salt_from_u64(809);
     let request = valid_request_wire(NOW, &request_salt);
-    let payload = vec![0x5a; 256];
+    let payload = vec![0x5a; 4];
     let frames = request_data_frames(&request_salt, &[payload.as_slice()]);
+    let wire_len = frames.iter().map(Vec::len).sum::<usize>();
     let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
     reads.extend(frames.into_iter().flatten().map(|byte| vec![byte]));
     let (io, observation) = RecordingIo::new(reads);
@@ -294,34 +311,36 @@ async fn ready_read_budget_bounds_one_byte_fragments_and_self_wakes_once() {
     let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wake_counter));
     let mut cx = Context::from_waker(&waker);
-    let mut destination = [0_u8; 256];
+    let mut destination = [0_u8; 4];
     let baseline = observation.lock().expect("observation").read_calls;
 
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 64
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    for successful_read in 1..wire_len {
+        assert!(matches!(
+            Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+            Poll::Pending
+        ));
+        assert_eq!(
+            observation.lock().expect("observation").read_calls,
+            baseline + successful_read
+        );
+        assert_eq!(
+            wake_counter.0.load(Ordering::SeqCst),
+            successful_read,
+            "each successful non-final receive stage self-wakes exactly once"
+        );
+    }
 
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 128
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
-
-    let read = read_plain(&mut flow, &mut destination)
-        .await
-        .expect("budgeted frame completes");
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("the final payload byte produces plaintext");
+    };
     assert_eq!(read, payload.len());
     assert_eq!(&destination[..read], payload);
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + wire_len
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), wire_len - 1);
 }
 
 #[tokio::test]
