@@ -1,17 +1,18 @@
 use std::convert::Infallible;
+use std::future::Future;
 use std::hint::black_box;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use ferrum2_core::{AbortiveClose, LocalEndpoint};
 use ferrum2_shadowsocks::{ClientTcpOutbound, PlainDuplex, TransportIo};
 
-use crate::common::{
-    FakeClock, FillRandom, NOW, flush_plain, provider, server_target, target, write_plain,
-};
+use crate::common::{FakeClock, FillRandom, NOW, provider, server_target, target};
 
 pub const PAYLOAD_LENGTHS: [usize; 3] = [1, 1_024, 32_768];
+const MAX_HANDSHAKE_POLLS: usize = 8;
+const MAX_FLOW_POLLS: usize = 8;
 
 pub struct Measurement<R> {
     pub observation: R,
@@ -69,7 +70,7 @@ impl TransportIo for SinkIo {
 /// Exercises only steady-state client-side TCP data-frame admission and drain
 /// inside the supplied measurement guard. Flow construction, request first
 /// write, payload allocation, and warm-up all happen before measurement.
-pub async fn measure_steady_frames<G, R>(
+pub fn measure_steady_frames<G, R>(
     payload_len: usize,
     warmup_frames: usize,
     measured_frames: usize,
@@ -84,30 +85,27 @@ pub async fn measure_steady_frames<G, R>(
     let random = FillRandom::new(0x51);
     let connector = ();
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
-    let mut flow = outbound
-        .write_request_on(SinkIo, &target())
-        .await
+    let mut flow = run_bounded(outbound.write_request_on(SinkIo, &target()))
         .expect("measurement request first-write");
     let payload = (0..payload_len)
         .map(|index| (index % 251) as u8 + 1)
         .collect::<Vec<_>>();
+    let mut context = Context::from_waker(Waker::noop());
 
     for _ in 0..warmup_frames {
-        let written = write_plain(&mut flow, &payload)
-            .await
-            .expect("warm-up frame admission");
+        let written =
+            poll_write_ready(&mut flow, &mut context, &payload).expect("warm-up frame admission");
         assert_eq!(written, payload_len);
-        flush_plain(&mut flow).await.expect("warm-up frame drain");
+        poll_flush_ready(&mut flow, &mut context).expect("warm-up frame drain");
     }
 
     let guard = start_measurement();
     let mut checksum = 0_u64;
     for frame in 0..measured_frames {
-        let written = write_plain(&mut flow, &payload)
-            .await
-            .expect("measured frame admission");
+        let written =
+            poll_write_ready(&mut flow, &mut context, &payload).expect("measured frame admission");
         assert_eq!(written, payload_len);
-        flush_plain(&mut flow).await.expect("measured frame drain");
+        poll_flush_ready(&mut flow, &mut context).expect("measured frame drain");
         checksum = checksum
             .wrapping_add(written as u64)
             .wrapping_add(u64::from(payload[frame % payload_len]));
@@ -120,4 +118,44 @@ pub async fn measure_steady_frames<G, R>(
         observation,
         checksum,
     }
+}
+
+fn run_bounded<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+
+    for _ in 0..MAX_HANDSHAKE_POLLS {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+    }
+
+    panic!("measurement handshake exceeded {MAX_HANDSHAKE_POLLS} polls");
+}
+
+fn poll_write_ready(
+    flow: &mut (impl PlainDuplex + ?Sized),
+    context: &mut Context<'_>,
+    source: &[u8],
+) -> Result<usize, ferrum2_shadowsocks::ShadowsocksError> {
+    for _ in 0..MAX_FLOW_POLLS {
+        if let Poll::Ready(result) = Pin::new(&mut *flow).poll_write_plain(context, source) {
+            return result;
+        }
+    }
+
+    panic!("measurement write exceeded {MAX_FLOW_POLLS} polls");
+}
+
+fn poll_flush_ready(
+    flow: &mut (impl PlainDuplex + ?Sized),
+    context: &mut Context<'_>,
+) -> Result<(), ferrum2_shadowsocks::ShadowsocksError> {
+    for _ in 0..MAX_FLOW_POLLS {
+        if let Poll::Ready(result) = Pin::new(&mut *flow).poll_flush_plain(context) {
+            return result;
+        }
+    }
+
+    panic!("measurement flush exceeded {MAX_FLOW_POLLS} polls");
 }

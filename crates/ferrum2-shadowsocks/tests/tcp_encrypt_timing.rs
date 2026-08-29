@@ -15,9 +15,9 @@ const SAMPLES: usize = 5;
 ///
 /// `cargo test --release -p ferrum2-shadowsocks --test tcp_encrypt_timing
 /// --locked -- --ignored --exact --nocapture --test-threads=1`
-#[tokio::test(flavor = "current_thread")]
+#[test]
 #[ignore = "release-only performance diagnostic"]
-async fn release_timing_for_steady_tcp_frame_encrypt() {
+fn release_timing_for_steady_tcp_frame_encrypt() {
     require_release_build();
 
     for payload_len in PAYLOAD_LENGTHS {
@@ -29,8 +29,7 @@ async fn release_timing_for_steady_tcp_frame_encrypt() {
                 MEASURED_FRAMES,
                 Instant::now,
                 |started| started.elapsed(),
-            )
-            .await;
+            );
             let elapsed = measurement.observation;
             print_sample(payload_len, sample, elapsed, measurement.checksum);
             samples.push(elapsed);

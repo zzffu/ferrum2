@@ -18,8 +18,8 @@ const MEASURED_FRAMES: usize = 128;
 ///
 /// `cargo test -p ferrum2-shadowsocks --test tcp_encrypt_allocations --locked
 /// -- --nocapture --test-threads=1`
-#[tokio::test(flavor = "current_thread")]
-async fn steady_tcp_frame_encrypt_allocates_nothing() {
+#[test]
+fn steady_tcp_frame_encrypt_allocates_nothing() {
     for payload_len in PAYLOAD_LENGTHS {
         let measurement = measure_steady_frames(
             payload_len,
@@ -27,8 +27,7 @@ async fn steady_tcp_frame_encrypt_allocates_nothing() {
             MEASURED_FRAMES,
             || Region::new(&GLOBAL_ALLOCATOR),
             |region| region.change(),
-        )
-        .await;
+        );
         let stats = measurement.observation;
         print_stats(payload_len, stats, measurement.checksum);
 
