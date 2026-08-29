@@ -108,9 +108,7 @@ class SchemaAndRunnerTests(unittest.TestCase):
 
     def test_snapshot_lifecycle_and_required_contention_rows_fail_closed(self):
         lifecycle = report("abc")
-        lifecycle["snapshot_lifecycle"][
-            "old_snapshot_released_after_reader_release"
-        ] = False
+        lifecycle["snapshot_lifecycle"]["all_old_snapshots_released"] = False
         with self.assertRaisesRegex(ControlError, "snapshot lifecycle"):
             validate_report(lifecycle, "abc")
 
@@ -125,9 +123,75 @@ class SchemaAndRunnerTests(unittest.TestCase):
             validate_report(missing, "abc")
 
         inconsistent = report("abc")
-        inconsistent["snapshot_lifecycle"]["fresh_action"] = 1
-        with self.assertRaisesRegex(ControlError, "generations"):
+        inconsistent["snapshot_lifecycle"]["publish_records"][1]["fresh_generation"] = 9
+        with self.assertRaisesRegex(ControlError, "publish record"):
             validate_report(inconsistent, "abc")
+
+    def test_snapshot_lifecycle_aggregates_are_recomputed_from_raw_records(self):
+        for mutate, message in (
+            (
+                lambda lifecycle: lifecycle.update(
+                    peak_live_old_snapshots=lifecycle["peak_live_old_snapshots"] - 1
+                ),
+                "aggregate",
+            ),
+            (
+                lambda lifecycle: lifecycle.update(
+                    peak_retained_bytes=lifecycle["peak_retained_bytes"] + 1
+                ),
+                "aggregate",
+            ),
+            (
+                lambda lifecycle: lifecycle.update(
+                    retained_bytes_measurement="process-rss"
+                ),
+                "aggregate",
+            ),
+            (
+                lambda lifecycle: lifecycle["publish_records"][0].update(
+                    retained_bytes=901
+                ),
+                "publish record",
+            ),
+            (
+                lambda lifecycle: lifecycle.update(
+                    release_ns=lifecycle["release_deadline_ns"] + 1
+                ),
+                "aggregate",
+            ),
+            (
+                lambda lifecycle: lifecycle.update(live_old_snapshots_after_release=1),
+                "aggregate",
+            ),
+        ):
+            malformed = report("abc")
+            mutate(malformed["snapshot_lifecycle"])
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ControlError, message):
+                    validate_report(malformed, "abc")
+
+    def test_snapshot_lifecycle_publish_records_are_closed_and_preregistered(self):
+        for mutate, message in (
+            (
+                lambda lifecycle: lifecycle["publish_records"][0].update(extra=True),
+                "fields",
+            ),
+            (
+                lambda lifecycle: lifecycle["publish_records"].pop(),
+                "publish count",
+            ),
+            (
+                lambda lifecycle: lifecycle["publish_records"][2].update(
+                    live_old_snapshots=2
+                ),
+                "publish record",
+            ),
+        ):
+            malformed = report("abc")
+            mutate(malformed["snapshot_lifecycle"])
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ControlError, message):
+                    validate_report(malformed, "abc")
 
     def test_closed_json_rejects_duplicate_nonfinite_and_oversize_input(self):
         for payload, message in (

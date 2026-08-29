@@ -74,22 +74,38 @@ pub(crate) struct RunConfiguration {
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SnapshotPublishRecord {
+    pub(crate) sequence: usize,
+    pub(crate) reader_generation: u64,
+    pub(crate) published_generation: u64,
+    pub(crate) returned_old_generation: u64,
+    pub(crate) returned_old_matches_reader: bool,
+    pub(crate) fresh_generation: u64,
+    pub(crate) live_old_snapshots: usize,
+    pub(crate) bytes_allocated: u64,
+    pub(crate) bytes_deallocated: u64,
+    pub(crate) retained_bytes: u64,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct SnapshotLifecycleEvidence {
     pub(crate) reader_threads: usize,
+    pub(crate) publish_count: usize,
+    pub(crate) publish_records: Vec<SnapshotPublishRecord>,
     pub(crate) initial_generation: u64,
     pub(crate) published_generation: u64,
-    pub(crate) reader_generation: u64,
-    pub(crate) reader_action: u8,
-    pub(crate) fresh_generation: u64,
-    pub(crate) fresh_action: u8,
-    pub(crate) returned_old_generation: u64,
-    pub(crate) returned_old_matches_initial: bool,
-    pub(crate) old_snapshot_alive_before_reader_release: bool,
-    pub(crate) old_snapshot_released_after_reader_release: bool,
     pub(crate) generation_action_consistent: bool,
     pub(crate) publish_monotonic: bool,
     pub(crate) watch_observed_generation: u64,
     pub(crate) watch_no_missed_publication: bool,
+    pub(crate) peak_live_old_snapshots: usize,
+    pub(crate) peak_retained_bytes: u64,
+    pub(crate) retained_bytes_measurement: &'static str,
+    pub(crate) release_ns: u64,
+    pub(crate) release_deadline_ns: u64,
+    pub(crate) live_old_snapshots_after_release: usize,
+    pub(crate) release_within_deadline: bool,
+    pub(crate) all_old_snapshots_released: bool,
 }
 
 #[derive(Serialize)]

@@ -120,10 +120,24 @@ class CompactReleaseEvidenceContractTests(unittest.TestCase):
         lifecycle = self.qualification["snapshot_lifecycle"]
         self.assertTrue(self.qualification["snapshot_lifecycle_passed"])
         self.assertEqual(lifecycle["reader_threads"], 4)
-        self.assertEqual(lifecycle["reader_generation"], 1)
-        self.assertEqual(lifecycle["published_generation"], 2)
-        self.assertTrue(lifecycle["old_snapshot_alive_before_reader_release"])
-        self.assertTrue(lifecycle["old_snapshot_released_after_reader_release"])
+        self.assertEqual(lifecycle["publish_count"], 4)
+        self.assertEqual(lifecycle["published_generation"], 5)
+        self.assertEqual(
+            lifecycle["peak_live_old_snapshots"],
+            max(row["live_old_snapshots"] for row in lifecycle["publish_records"]),
+        )
+        self.assertEqual(
+            lifecycle["peak_retained_bytes"],
+            max(row["retained_bytes"] for row in lifecycle["publish_records"]),
+        )
+        self.assertEqual(
+            lifecycle["retained_bytes_measurement"],
+            "stats_alloc-0.1.10-isolated-lifecycle-region",
+        )
+        self.assertLessEqual(lifecycle["release_ns"], lifecycle["release_deadline_ns"])
+        self.assertEqual(lifecycle["live_old_snapshots_after_release"], 0)
+        self.assertTrue(lifecycle["release_within_deadline"])
+        self.assertTrue(lifecycle["all_old_snapshots_released"])
         self.assertTrue(lifecycle["generation_action_consistent"])
         self.assertTrue(lifecycle["publish_monotonic"])
         self.assertTrue(lifecycle["watch_no_missed_publication"])

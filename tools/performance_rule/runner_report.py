@@ -14,7 +14,9 @@ from tools.performance_rule.schema import (
     ControlError,
     P99_TARGET_PERCENT,
     RUNNER_SCHEMA,
+    SNAPSHOT_LIFECYCLE_PUBLISH_COUNT,
     SNAPSHOT_READER_THREADS,
+    SNAPSHOT_RELEASE_DEADLINE_NS,
     SNAPSHOT_REGISTRY_SUITE,
     SUITE_POLICY,
     expected_profile_sizes,
@@ -184,20 +186,36 @@ PARITY_FIELDS = frozenset(
 SNAPSHOT_LIFECYCLE_FIELDS = frozenset(
     {
         "reader_threads",
+        "publish_count",
+        "publish_records",
         "initial_generation",
         "published_generation",
-        "reader_generation",
-        "reader_action",
-        "fresh_generation",
-        "fresh_action",
-        "returned_old_generation",
-        "returned_old_matches_initial",
-        "old_snapshot_alive_before_reader_release",
-        "old_snapshot_released_after_reader_release",
         "generation_action_consistent",
         "publish_monotonic",
         "watch_observed_generation",
         "watch_no_missed_publication",
+        "peak_live_old_snapshots",
+        "peak_retained_bytes",
+        "retained_bytes_measurement",
+        "release_ns",
+        "release_deadline_ns",
+        "live_old_snapshots_after_release",
+        "release_within_deadline",
+        "all_old_snapshots_released",
+    }
+)
+SNAPSHOT_PUBLISH_RECORD_FIELDS = frozenset(
+    {
+        "sequence",
+        "reader_generation",
+        "published_generation",
+        "returned_old_generation",
+        "returned_old_matches_reader",
+        "fresh_generation",
+        "live_old_snapshots",
+        "bytes_allocated",
+        "bytes_deallocated",
+        "retained_bytes",
     }
 )
 SNAPSHOT_MEASUREMENTS = {
@@ -236,6 +254,15 @@ def _validate_closed_report_shape(report: Any) -> dict[str, Any]:
         SNAPSHOT_LIFECYCLE_FIELDS,
         label="runner snapshot lifecycle",
     )
+    publish_records = report["snapshot_lifecycle"]["publish_records"]
+    if not isinstance(publish_records, list):
+        raise ControlError("runner snapshot lifecycle publish records are not a list")
+    for record in publish_records:
+        exact_fields(
+            record,
+            SNAPSHOT_PUBLISH_RECORD_FIELDS,
+            label="runner snapshot lifecycle publish record",
+        )
     exact_fields(
         report["measurement_policy"],
         MEASUREMENT_POLICY_FIELDS,
@@ -279,14 +306,15 @@ def _validate_snapshot_lifecycle(report: dict[str, Any]) -> None:
     reader_threads = report["configuration"]["snapshot_reader_threads"]
     integer_fields = (
         "reader_threads",
+        "publish_count",
         "initial_generation",
         "published_generation",
-        "reader_generation",
-        "reader_action",
-        "fresh_generation",
-        "fresh_action",
-        "returned_old_generation",
         "watch_observed_generation",
+        "peak_live_old_snapshots",
+        "peak_retained_bytes",
+        "release_ns",
+        "release_deadline_ns",
+        "live_old_snapshots_after_release",
     )
     if any(type(lifecycle[field]) is not int for field in integer_fields):
         raise ControlError("runner snapshot lifecycle integers are invalid")
@@ -294,23 +322,75 @@ def _validate_snapshot_lifecycle(report: dict[str, Any]) -> None:
         type(reader_threads) is not int
         or reader_threads != SNAPSHOT_READER_THREADS
         or lifecycle["reader_threads"] != reader_threads
+        or lifecycle["publish_count"] != SNAPSHOT_LIFECYCLE_PUBLISH_COUNT
         or lifecycle["initial_generation"] <= 0
-        or lifecycle["published_generation"] != lifecycle["initial_generation"] + 1
-        or lifecycle["reader_generation"] != lifecycle["initial_generation"]
-        or lifecycle["returned_old_generation"] != lifecycle["initial_generation"]
-        or lifecycle["fresh_generation"] != lifecycle["published_generation"]
+        or lifecycle["published_generation"]
+        != lifecycle["initial_generation"] + lifecycle["publish_count"]
         or lifecycle["watch_observed_generation"] != lifecycle["published_generation"]
-        or lifecycle["reader_action"] != lifecycle["reader_generation"] % 2
-        or lifecycle["fresh_action"] != lifecycle["fresh_generation"] % 2
     ):
         raise ControlError("runner snapshot lifecycle generations are inconsistent")
+    records = lifecycle["publish_records"]
+    if len(records) != lifecycle["publish_count"]:
+        raise ControlError("runner snapshot lifecycle publish count is inconsistent")
+    previous_allocated = 0
+    previous_deallocated = 0
+    for sequence, record in enumerate(records, 1):
+        record_integers = (
+            "sequence",
+            "reader_generation",
+            "published_generation",
+            "returned_old_generation",
+            "fresh_generation",
+            "live_old_snapshots",
+            "bytes_allocated",
+            "bytes_deallocated",
+            "retained_bytes",
+        )
+        if any(type(record[field]) is not int for field in record_integers):
+            raise ControlError("runner snapshot lifecycle publish integers are invalid")
+        reader_generation = lifecycle["initial_generation"] + sequence - 1
+        if (
+            record["sequence"] != sequence
+            or record["reader_generation"] != reader_generation
+            or record["published_generation"] != reader_generation + 1
+            or record["returned_old_generation"] != reader_generation
+            or record["fresh_generation"] != record["published_generation"]
+            or record["live_old_snapshots"] != sequence
+            or record["returned_old_matches_reader"] is not True
+            or record["bytes_allocated"] < previous_allocated
+            or record["bytes_deallocated"] < previous_deallocated
+            or record["bytes_allocated"] < record["bytes_deallocated"]
+            or record["retained_bytes"]
+            != record["bytes_allocated"] - record["bytes_deallocated"]
+        ):
+            raise ControlError(
+                "runner snapshot lifecycle publish record is inconsistent"
+            )
+        previous_allocated = record["bytes_allocated"]
+        previous_deallocated = record["bytes_deallocated"]
+    peak_live = max(record["live_old_snapshots"] for record in records)
+    peak_retained = max(record["retained_bytes"] for record in records)
+    if (
+        lifecycle["peak_live_old_snapshots"] != peak_live
+        or peak_live != lifecycle["publish_count"]
+        or lifecycle["peak_retained_bytes"] != peak_retained
+        or peak_retained <= 0
+        or lifecycle["retained_bytes_measurement"]
+        != "stats_alloc-0.1.10-isolated-lifecycle-region"
+        or lifecycle["release_deadline_ns"] != SNAPSHOT_RELEASE_DEADLINE_NS
+        or lifecycle["release_ns"] < 0
+        or lifecycle["release_ns"] > lifecycle["release_deadline_ns"]
+        or lifecycle["live_old_snapshots_after_release"] != 0
+    ):
+        raise ControlError(
+            "runner snapshot lifecycle aggregate evidence is inconsistent"
+        )
     for field in (
-        "returned_old_matches_initial",
-        "old_snapshot_alive_before_reader_release",
-        "old_snapshot_released_after_reader_release",
         "generation_action_consistent",
         "publish_monotonic",
         "watch_no_missed_publication",
+        "release_within_deadline",
+        "all_old_snapshots_released",
     ):
         if lifecycle[field] is not True:
             raise ControlError(f"runner snapshot lifecycle {field} did not pass")

@@ -22,12 +22,17 @@ use crate::measurement::allocation::{
 };
 use crate::measurement::statistics::measurement;
 use crate::measurement::timing::MIN_SAMPLE_WINDOW_NANOSECONDS;
-use crate::report::{BenchResult, BuildEvidence, Measurement, SnapshotLifecycleEvidence};
+use crate::report::{
+    BenchResult, BuildEvidence, Measurement, SnapshotLifecycleEvidence, SnapshotPublishRecord,
+};
 
 #[cfg(test)]
 use crate::measurement::allocation::allocator_test_lock;
 
 pub(crate) const SNAPSHOT_READER_THREADS: usize = 4;
+const SNAPSHOT_LIFECYCLE_PUBLISH_COUNT: usize = SNAPSHOT_READER_THREADS;
+const SNAPSHOT_RELEASE_DEADLINE: Duration = Duration::from_secs(5);
+const SNAPSHOT_RELEASE_DEADLINE_NS: u64 = 5_000_000_000;
 const INITIAL_READS_PER_READER: usize = 256;
 const INITIAL_PUBLISHES_PER_SAMPLE: usize = 256;
 const MAX_READS_PER_READER: usize = 65_536;
@@ -755,126 +760,128 @@ fn reader_scratches(fixture: &SnapshotFixture) -> Result<Vec<RuleEvaluationScrat
 
 fn verify_snapshot_lifecycle() -> Result<SnapshotLifecycleEvidence> {
     let fixture = Arc::new(build_snapshot_fixture()?);
-    let initial = fixture.registry.snapshot();
-    let initial_generation = initial.generation();
-    let weak = Arc::downgrade(&initial);
-    let mut successors = prebuild_successors(&fixture, 1)?;
-    let successor = successors
-        .pop()
-        .ok_or_else(|| QualificationError::new("snapshot successor is missing"))?;
-    let published_generation = successor.generation();
-    let stale = initial
-        .builder_for_generation(published_generation)
+    let mut current = fixture.registry.snapshot();
+    let initial_generation = current.generation();
+    let stale = current
+        .builder_for_generation(initial_generation + 1)
         .and_then(RuleEngineSnapshotBuilder::build)
         .map_err(|error| QualificationError::new(format!("snapshot lifecycle failed: {error}")))?;
-
-    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
-    let reader_fixture = Arc::clone(&fixture);
-    let (captured_sender, captured_receiver) = std::sync::mpsc::sync_channel(1);
-    let reader = thread::spawn(move || {
-        let outcome = (|| {
-            let mut scratch = reader_fixture
-                .program
-                .evaluation_scratch()
-                .map_err(|error| {
-                    QualificationError::new(format!("snapshot lifecycle scratch failed: {error}"))
-                })?;
-            let mut evaluation = reader_fixture.program.evaluate_with_registry_and_scratch(
-                0,
-                Network::Tcp,
-                &reader_fixture.target,
-                &reader_fixture.registry,
-                &mut scratch,
-            );
-            let generation = evaluation.snapshot_generation().ok_or_else(|| {
-                QualificationError::new("snapshot lifecycle captured no generation")
-            })?;
-            let action = match evaluation.next(RouteMetadata::new(None, None)) {
-                Some(RouteProgramAction::Terminal(action))
-                | Some(RouteProgramAction::Final(action)) => *action,
-                Some(RouteProgramAction::Continue(_)) | None => {
-                    return Err(QualificationError::new(
-                        "snapshot lifecycle returned an incomplete action",
-                    ));
-                }
-            };
-            captured_sender
-                .send(Ok((generation, action)))
-                .map_err(|_| QualificationError::new("snapshot lifecycle channel closed"))?;
-            release_receiver.recv().map_err(|_| {
-                QualificationError::new("snapshot lifecycle release channel closed")
-            })?;
-            drop(evaluation);
-            Ok(())
-        })();
-        if let Err(error) = outcome {
-            let _ = captured_sender.send(Err(error));
-            let _ = release_receiver.recv();
-        }
-    });
-
-    let captured = captured_receiver
-        .recv()
-        .map_err(|_| QualificationError::new("snapshot lifecycle reader stopped"));
-    let outcome = (|| {
-        let (reader_generation, reader_action) = captured??;
-        let returned_old = fixture.registry.publish(successor).map_err(|error| {
+    let mut scratch = fixture.program.evaluation_scratch().map_err(|error| {
+        QualificationError::new(format!("snapshot lifecycle scratch failed: {error}"))
+    })?;
+    let mut records = Vec::with_capacity(SNAPSHOT_LIFECYCLE_PUBLISH_COUNT);
+    let mut weak_snapshots = Vec::with_capacity(SNAPSHOT_LIFECYCLE_PUBLISH_COUNT);
+    let mut releases = Vec::with_capacity(SNAPSHOT_LIFECYCLE_PUBLISH_COUNT);
+    let mut readers = Vec::with_capacity(SNAPSHOT_LIFECYCLE_PUBLISH_COUNT);
+    let mut generation_action_consistent = true;
+    let allocation = allocation_region();
+    for sequence in 1..=SNAPSHOT_LIFECYCLE_PUBLISH_COUNT {
+        weak_snapshots.push(Arc::downgrade(&current));
+        let (release, reader, reader_generation) = start_lifecycle_reader(Arc::clone(&fixture))?;
+        let successor = prebuild_successors(&fixture, 1)?
+            .pop()
+            .ok_or_else(|| QualificationError::new("snapshot successor is missing"))?;
+        let published_generation = successor.generation();
+        let returned = fixture.registry.publish(successor).map_err(|error| {
             QualificationError::new(format!("snapshot lifecycle publish failed: {error}"))
         })?;
-        let returned_old_generation = returned_old.generation();
-        let returned_old_matches_initial = Arc::ptr_eq(&initial, &returned_old);
-        let publish_monotonic = matches!(
-            fixture.registry.publish(stale),
-            Err(RegistryPublishError::StaleGeneration)
-        ) && fixture.registry.generation() == published_generation;
-        let mut scratch = fixture.program.evaluation_scratch().map_err(|error| {
-            QualificationError::new(format!("snapshot lifecycle scratch failed: {error}"))
-        })?;
+        let returned_old_generation = returned.generation();
+        let returned_old_matches_reader = Arc::ptr_eq(&current, &returned);
+        drop(returned);
+        drop(current);
         let (fresh_generation, fresh_action) = evaluate_once(&fixture, &mut scratch)?;
-        let mut watch = fixture.registry.watch_generation_from(initial_generation);
-        let watch_observed_generation = poll_generation(&mut watch).ok_or_else(|| {
-            QualificationError::new("snapshot lifecycle watch missed publication")
-        })?;
-        drop(returned_old);
-        drop(initial);
-        let old_snapshot_alive_before_reader_release = weak.upgrade().is_some();
-        Ok((
+        generation_action_consistent &= fresh_generation == published_generation
+            && u64::from(fresh_action) == fresh_generation % 2;
+        let live_old_snapshots = weak_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.strong_count() != 0)
+            .count();
+        let change = allocation.change();
+        let bytes_allocated = usize_to_u64(change.bytes_allocated);
+        let bytes_deallocated = usize_to_u64(change.bytes_deallocated);
+        let retained_bytes = bytes_allocated
+            .checked_sub(bytes_deallocated)
+            .ok_or_else(|| {
+                QualificationError::new("snapshot lifecycle released pre-existing allocations")
+            })?;
+        records.push(SnapshotPublishRecord {
+            sequence,
             reader_generation,
-            reader_action,
-            fresh_generation,
-            fresh_action,
+            published_generation,
             returned_old_generation,
-            returned_old_matches_initial,
-            publish_monotonic,
-            watch_observed_generation,
-            old_snapshot_alive_before_reader_release,
-        ))
-    })();
-    let _ = release_sender.send(());
-    reader
-        .join()
-        .map_err(|_| QualificationError::new("snapshot lifecycle reader panicked"))?;
-    let old_snapshot_released_after_reader_release = weak.upgrade().is_none();
-    let (
-        reader_generation,
-        reader_action,
-        fresh_generation,
-        fresh_action,
-        returned_old_generation,
-        returned_old_matches_initial,
-        publish_monotonic,
-        watch_observed_generation,
-        old_snapshot_alive_before_reader_release,
-    ) = outcome?;
-    let generation_action_consistent = reader_generation == initial_generation
-        && u64::from(reader_action) == reader_generation % 2
-        && fresh_generation == published_generation
-        && u64::from(fresh_action) == fresh_generation % 2;
+            returned_old_matches_reader,
+            fresh_generation,
+            live_old_snapshots,
+            bytes_allocated,
+            bytes_deallocated,
+            retained_bytes,
+        });
+        releases.push(release);
+        readers.push(reader);
+        current = fixture.registry.snapshot();
+    }
+    drop(current);
+    let old_snapshot_alive_before_reader_release = weak_snapshots
+        .iter()
+        .all(|snapshot| snapshot.strong_count() != 0);
+    let release_started = Instant::now();
+    for release in releases {
+        release
+            .send(())
+            .map_err(|_| QualificationError::new("snapshot lifecycle reader stopped"))?;
+    }
+    for reader in readers {
+        reader
+            .join()
+            .map_err(|_| QualificationError::new("snapshot lifecycle reader panicked"))??;
+    }
+    while weak_snapshots
+        .iter()
+        .any(|snapshot| snapshot.strong_count() != 0)
+        && release_started.elapsed() < SNAPSHOT_RELEASE_DEADLINE
+    {
+        thread::yield_now();
+    }
+    let release_ns = elapsed_nanoseconds(release_started);
+    let live_old_snapshots_after_release = weak_snapshots
+        .iter()
+        .filter(|snapshot| snapshot.strong_count() != 0)
+        .count();
+    let all_old_snapshots_released = live_old_snapshots_after_release == 0;
+    let published_generation = records
+        .last()
+        .ok_or_else(|| QualificationError::new("snapshot lifecycle records are empty"))?
+        .published_generation;
+    let mut watch = fixture.registry.watch_generation_from(initial_generation);
+    let watch_observed_generation = poll_generation(&mut watch)
+        .ok_or_else(|| QualificationError::new("snapshot lifecycle watch missed publication"))?;
+    let publish_monotonic = records.iter().all(|record| {
+        record.published_generation == record.reader_generation + 1
+            && record.returned_old_generation == record.reader_generation
+            && record.fresh_generation == record.published_generation
+            && record.returned_old_matches_reader
+    }) && matches!(
+        fixture.registry.publish(stale),
+        Err(RegistryPublishError::StaleGeneration)
+    ) && fixture.registry.generation() == published_generation;
     let watch_no_missed_publication = watch_observed_generation == published_generation;
-    if !returned_old_matches_initial
-        || returned_old_generation != initial_generation
+    let peak_live_old_snapshots = records
+        .iter()
+        .map(|record| record.live_old_snapshots)
+        .max()
+        .unwrap_or(0);
+    let peak_retained_bytes = records
+        .iter()
+        .map(|record| record.retained_bytes)
+        .max()
+        .unwrap_or(0);
+    let release_within_deadline = release_ns <= SNAPSHOT_RELEASE_DEADLINE_NS;
+    if records.len() != SNAPSHOT_LIFECYCLE_PUBLISH_COUNT
+        || peak_live_old_snapshots != SNAPSHOT_LIFECYCLE_PUBLISH_COUNT
+        || peak_retained_bytes == 0
         || !old_snapshot_alive_before_reader_release
-        || !old_snapshot_released_after_reader_release
+        || !all_old_snapshots_released
+        || !release_within_deadline
         || !generation_action_consistent
         || !publish_monotonic
         || !watch_no_missed_publication
@@ -885,21 +892,50 @@ fn verify_snapshot_lifecycle() -> Result<SnapshotLifecycleEvidence> {
     }
     Ok(SnapshotLifecycleEvidence {
         reader_threads: SNAPSHOT_READER_THREADS,
+        publish_count: SNAPSHOT_LIFECYCLE_PUBLISH_COUNT,
         initial_generation,
         published_generation,
-        reader_generation,
-        reader_action,
-        fresh_generation,
-        fresh_action,
-        returned_old_generation,
-        returned_old_matches_initial,
-        old_snapshot_alive_before_reader_release,
-        old_snapshot_released_after_reader_release,
         generation_action_consistent,
         publish_monotonic,
         watch_observed_generation,
         watch_no_missed_publication,
+        peak_live_old_snapshots,
+        peak_retained_bytes,
+        retained_bytes_measurement: "stats_alloc-0.1.10-isolated-lifecycle-region",
+        release_ns,
+        release_deadline_ns: SNAPSHOT_RELEASE_DEADLINE_NS,
+        live_old_snapshots_after_release,
+        release_within_deadline,
+        all_old_snapshots_released,
+        publish_records: records,
     })
+}
+
+fn start_lifecycle_reader(
+    fixture: Arc<SnapshotFixture>,
+) -> Result<(
+    std::sync::mpsc::SyncSender<()>,
+    thread::JoinHandle<Result<()>>,
+    u64,
+)> {
+    let (captured_sender, captured_receiver) = std::sync::mpsc::sync_channel(1);
+    let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let snapshot = fixture.registry.snapshot();
+        let generation = snapshot.generation();
+        captured_sender
+            .send(generation)
+            .map_err(|_| QualificationError::new("snapshot lifecycle channel closed"))?;
+        release_receiver
+            .recv()
+            .map_err(|_| QualificationError::new("snapshot lifecycle release channel closed"))?;
+        drop(snapshot);
+        Ok(())
+    });
+    let generation = captured_receiver
+        .recv()
+        .map_err(|_| QualificationError::new("snapshot lifecycle reader stopped"))?;
+    Ok((release_sender, reader, generation))
 }
 
 fn poll_generation(change: &mut GenerationChange) -> Option<u64> {
@@ -959,41 +995,5 @@ fn failure<T>(message: &'static str) -> Result<T> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lifecycle_evidence_proves_reader_retention_release_and_watch_delivery() {
-        let _guard = allocator_test_lock();
-        let evidence = verify_snapshot_lifecycle().expect("snapshot lifecycle");
-        assert_eq!(evidence.reader_threads, SNAPSHOT_READER_THREADS);
-        assert!(evidence.returned_old_matches_initial);
-        assert!(evidence.old_snapshot_alive_before_reader_release);
-        assert!(evidence.old_snapshot_released_after_reader_release);
-        assert!(evidence.generation_action_consistent);
-        assert!(evidence.publish_monotonic);
-        assert!(evidence.watch_no_missed_publication);
-        assert_eq!(evidence.reader_generation, evidence.initial_generation);
-        assert_eq!(evidence.fresh_generation, evidence.published_generation);
-    }
-
-    #[test]
-    fn successors_are_prebuilt_monotonic_and_action_consistent() {
-        let _guard = allocator_test_lock();
-        let fixture = build_snapshot_fixture().expect("snapshot fixture");
-        let successors = prebuild_successors(&fixture, 3).expect("successors");
-        assert_eq!(
-            successors
-                .iter()
-                .map(RuleEngineSnapshot::generation)
-                .collect::<Vec<_>>(),
-            vec![2, 3, 4]
-        );
-        publish_all(&fixture.registry, successors, false).expect("publish successors");
-        let mut scratch = fixture.program.evaluation_scratch().expect("scratch");
-        assert_eq!(
-            evaluate_once(&fixture, &mut scratch).expect("evaluate"),
-            (4, 0)
-        );
-    }
-}
+#[path = "snapshot_registry/tests.rs"]
+mod tests;
