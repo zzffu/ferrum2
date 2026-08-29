@@ -439,7 +439,20 @@ fused carried 上界，并在测量前提交、推送。唯一固定 4 CPU、3 �
 下一尝试仍直接从 `d874d3dd` 开始，完整保留每帧 length 后的 scheduling boundary。候选只能减少
 payload decrypt 周围的 worker-local copy-in/copyback/zeroize 或等价 transport 数据搬运，不能再次
 合并 length→payload poll，不能继承 `7e3f137a`/`0ad5cab5`，不能扩大到 initial payload、TUN、
-Windows/SOCKS 锁或 runtime shard。具体 seam 先由代码路径和历史尝试审查确定，再建立分支。
+Windows/SOCKS 锁或 runtime shard。
+
+Design It Twice 比较了三个 interface：最小 fused hook、通用 `AuthenticatedRx + Consumer` 深模块、
+以及为常见 fused caller 定制的 forwarding seam。长期通用模块 depth 最高，但会同时重写普通 read、
+buffered view、client/server/fused，无法保持单变量。本轮选择私有 `FusedProtocolFlow` seam，分支
+`codex/tcp-hot-path-stage3-fused-decrypt-forward` 直接从 `d874d3dd` 创建；公共
+`PlainBufferedDuplex` interface 和非 fused adapter 不变。
+
+稳态 payload 在 worker-local staging 中认证成功后、zeroize 前直接 poll 真实 plain socket：full write
+立即转回 Length，删除完整 TLS→flow-scratch copyback；partial 只 materialize 未写 suffix；Pending、
+write-zero/error 为保持既有状态而 materialize 全量。sink 只在认证成功后可见明文，auth failure 不调用
+sink、不提交 nonce并安装原 terminal；TLS borrow 不跨 poll。client initial response、TLS reentrant fallback、
+多跳 buffered path 继续走 `d874d3dd` 实现。历史 `c24f512d` 只把 TLS plaintext 写到旧 generic relay
+destination，之后仍需 socket write；当前 fused 下直接 poll 真实 sink 尚未尝试，因此是独立机制。
 
 ## 13. 停止条件与后续
 
