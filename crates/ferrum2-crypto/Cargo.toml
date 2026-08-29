@@ -9,6 +9,10 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+__ring-rekey-diagnostic = ["shadowsocks-crypto/v2-ring-rekey-diagnostic"]
+
 [dependencies]
 bytes.workspace = true
 getrandom.workspace = true

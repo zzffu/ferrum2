@@ -1,14 +1,44 @@
 //! AEAD 2022 TCP ciphers with explicit caller-owned nonces.
 
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+#[cfg(not(feature = "v2-ring-rekey-diagnostic"))]
+use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(not(feature = "v2-ring-rekey-diagnostic"))]
+use crate::v2::crypto::{Aes128Gcm, Aes256Gcm};
 use crate::{
     kind::{CipherCategory, CipherKind},
-    v2::{
-        crypto::{Aes128Gcm, Aes256Gcm, ChaCha20Poly1305},
-        CryptoError, BLAKE3_KEY_DERIVE_CONTEXT,
-    },
+    v2::{crypto::ChaCha20Poly1305, CryptoError, BLAKE3_KEY_DERIVE_CONTEXT},
 };
+#[cfg(feature = "v2-ring-rekey-diagnostic")]
+use ring_rekey::{Aes128Gcm, Aes256Gcm};
+
+#[cfg(feature = "v2-ring-rekey-diagnostic")]
+mod ring_rekey;
+
+/// Stable TCP AES-GCM backend identity for security and performance evidence.
+#[cfg(feature = "v2-ring-rekey-diagnostic")]
+pub const V2_TCP_AES_GCM_BUILD_SECURITY_IDENTITY: &str =
+    "diagnostic-only:ring-0.17.14:per-operation-rekey:raw-subkey-zeroized:transient-expanded-key-not-proven-zeroized";
+
+/// Stable TCP AES-GCM backend identity for security and performance evidence.
+#[cfg(not(feature = "v2-ring-rekey-diagnostic"))]
+pub const V2_TCP_AES_GCM_BUILD_SECURITY_IDENTITY: &str = "rustcrypto:persistent-expanded-keys-zeroized-on-drop";
+
+/// The diagnostic's complete persistent AES owner is a drop-zeroized raw subkey.
+#[cfg(feature = "v2-ring-rekey-diagnostic")]
+pub const V2_RING_REKEY_RAW_SUBKEY_ZEROIZE_ON_DROP: bool = true;
+
+/// The diagnostic stores no ring expanded key between synchronous operations.
+#[cfg(feature = "v2-ring-rekey-diagnostic")]
+pub const V2_RING_REKEY_PERSISTENT_EXPANDED_KEY_BYTES: usize = 0;
+
+/// ring 0.17.14 does not prove erasure of its transient expanded key on drop.
+#[cfg(feature = "v2-ring-rekey-diagnostic")]
+pub const V2_RING_REKEY_TRANSIENT_EXPANDED_KEYS_ZEROIZE_ON_DROP: bool = false;
+
+/// Whether the complete TCP cipher owner claims the production zeroize-on-drop contract.
+pub const V2_TCP_CIPHER_ZEROIZE_ON_DROP_CONTRACT: bool = !cfg!(feature = "v2-ring-rekey-diagnostic");
 
 enum CipherVariant {
     Aes128Gcm(Aes128Gcm),
@@ -57,6 +87,7 @@ impl CipherVariant {
     }
 }
 
+#[cfg(not(feature = "v2-ring-rekey-diagnostic"))]
 impl ZeroizeOnDrop for CipherVariant {}
 
 /// A checked AEAD2022 TCP primitive owner.
@@ -131,6 +162,7 @@ impl TcpCipher {
     }
 }
 
+#[cfg(not(feature = "v2-ring-rekey-diagnostic"))]
 impl ZeroizeOnDrop for TcpCipher {}
 
 #[cfg(test)]

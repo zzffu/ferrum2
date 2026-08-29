@@ -88,6 +88,10 @@ v2-extra = [
     "cfg-if",
     "chacha20poly1305/reduced-round",
 ]
+v2-ring-rekey-diagnostic = [
+    "v2",
+    "dep:ring",
+]
 
 [lib]
 name = "shadowsocks_crypto"
@@ -206,6 +210,11 @@ optional = true
 [dependencies.rand]
 version = "0.10"
 optional = true
+
+[dependencies.ring]
+version = "=0.17.14"
+optional = true
+default-features = false
 
 [dependencies.ring-compat]
 version = "0.8"

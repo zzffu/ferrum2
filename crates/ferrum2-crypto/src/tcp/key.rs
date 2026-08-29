@@ -1,5 +1,7 @@
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+#[cfg(not(feature = "__ring-rekey-diagnostic"))]
+use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::method::{AES_128_KEY_BYTES, MethodProfile, WIDE_KEY_BYTES};
 
@@ -48,4 +50,5 @@ impl Zeroize for TcpSubkey {
     }
 }
 
+#[cfg(not(feature = "__ring-rekey-diagnostic"))]
 impl ZeroizeOnDrop for TcpSubkey {}
