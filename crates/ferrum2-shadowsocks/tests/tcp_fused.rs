@@ -20,7 +20,7 @@ use ferrum2_shadowsocks::tokio::{
 };
 use ferrum2_shadowsocks::{
     BufferRole, ClientFlow, ClientTcpOutbound, FlowTerminal, MethodKeyAdapter, PlainBufferedDuplex,
-    PlainDuplex, ProtocolReason, ServerFlow, ShadowsocksError, ShadowsocksTcpInbound,
+    PlainDuplex, ProtocolReason, ServerFlow, ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN,
     TcpReplayStore, TransportIo,
 };
 #[cfg(feature = "structural-metrics")]
@@ -559,7 +559,7 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
     assert_eq!(sink_observation.accepted, payload);
     assert_ne!(sink_observation.pointers[0], decrypt_pointer);
     assert_eq!(progressed.load(Ordering::SeqCst), payload.len());
-    assert_eq!(transport.lock().expect("transport").read_calls, 4);
+    assert_eq!(transport.lock().expect("transport").read_calls, 5);
     drop(sink_observation);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
@@ -575,6 +575,57 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
         );
         assert_eq!(snapshot.get(StructuralCounter::FtbrPartialWrites), 0);
     }
+}
+
+#[tokio::test]
+async fn fresh_download_completion_polls_only_the_next_encrypted_length() {
+    let request_salt = salt_from_u64(1_004);
+    let first = b"first fresh frame";
+    let second = b"second fresh frame";
+    let frames = request_data_frames(&request_salt, &[first, second]);
+    let (mut flow, _, transport) = observed_server_flow(request_salt, frames).await;
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All, SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(transport.lock().expect("transport").read_calls, 3);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    {
+        let transport = transport.lock().expect("transport");
+        assert_eq!(transport.read_calls, 5);
+        assert_eq!(
+            &transport.read_lengths[2..],
+            &[2 + TAG_LEN, first.len() + TAG_LEN, 2 + TAG_LEN],
+            "one outer poll writes frame one and reads only frame two's encrypted length"
+        );
+    }
+    {
+        let sink = sink.lock().expect("sink observation");
+        assert_eq!(sink.polls, 1);
+        assert_eq!(sink.accepted, first);
+    }
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    let expected = first
+        .iter()
+        .chain(second.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let sink = sink.lock().expect("sink observation");
+    assert_eq!(sink.polls, 2);
+    assert_eq!(sink.accepted, expected);
 }
 
 #[tokio::test]
@@ -820,7 +871,7 @@ async fn fused_zero_frame_preserves_the_length_boundary_without_polling_sink() {
         assert_eq!(sink.lock().expect("sink observation").polls, 0);
     }
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 6);
+    assert_eq!(transport.lock().expect("transport").read_calls, 7);
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.accepted, payload);
@@ -864,7 +915,7 @@ async fn fused_client_initial_response_keeps_the_buffered_flow_view() {
     let mut cx = Context::from_waker(Waker::noop());
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 2);
+    assert_eq!(transport.lock().expect("transport").read_calls, 3);
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.sources, [payload.to_vec()]);
@@ -1078,7 +1129,7 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(write_polls.load(Ordering::SeqCst), 3);
-    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    assert_eq!(observation.lock().expect("observation").read_calls, 7);
     let expected = first
         .iter()
         .chain(second.iter())

@@ -277,15 +277,13 @@ where
         if self.download_eof {
             return self.poll_download_shutdown(cx);
         }
-        let carried = self.download_plaintext_carried;
         match self.poll_download_once(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(DownloadStep::DirectionDone)) => return Poll::Ready(Ok(())),
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) if carried => {}
             Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
+                // Advance one receive step after either a carried or fresh
+                // frame completes; the inner length/payload yields stay intact.
             }
         }
 
