@@ -18,7 +18,8 @@ from tools.performance_rule.evidence import (
     review_calibration_source,
 )
 from tools.performance_rule.pairing import (
-    calibrated_limit,
+    calibrated_limits,
+    calibration_ceiling_limits,
     pair_execution_order,
     summarize,
 )
@@ -35,7 +36,6 @@ from tools.performance_rule.schema import (
     REGRESSION,
     RUNNER_PRIORITY_HIGH,
     RUNNER_PRIORITY_NORMAL,
-    THRESHOLD_POLICY_VERSION,
     WITHIN_CALIBRATED_BAND,
     ControlError,
     runner_creation_flags,
@@ -163,7 +163,9 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             args.calibration, "reviewed A/A calibration"
         )
         if calibration_document.get("schema") != CALIBRATION_SCHEMA:
-            raise ControlError("only the current reviewed calibration schema is accepted")
+            raise ControlError(
+                "only the current reviewed calibration schema is accepted"
+            )
 
     creation_flags = runner_creation_flags(args.runner_priority)
     expected_scenarios: dict[str, str] | None = None
@@ -197,14 +199,19 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
     assert expected_scenarios is not None
 
     if same_binary:
-        comparisons = summarize(expected_scenarios, pairs, True, 10.0)
-        effective_limit = calibrated_limit(comparisons)
+        comparisons = summarize(
+            expected_scenarios,
+            pairs,
+            True,
+            calibration_ceiling_limits(),
+        )
+        effective_limits = calibrated_limits(comparisons)
         calibration_source = None
         calibration_sha256 = None
         reviewed = False
     else:
         calibration_path = args.calibration.resolve(strict=True)
-        _, effective_limit, calibration_sha256 = load_calibration(
+        _, effective_limits, calibration_sha256 = load_calibration(
             calibration_path,
             parent_sha,
             expected_scenarios,
@@ -212,13 +219,16 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             args.runner_priority,
         )
         comparisons = summarize(
-            expected_scenarios, pairs, False, effective_limit
+            expected_scenarios,
+            pairs,
+            False,
+            effective_limits,
         )
         calibration_source = str(calibration_path)
         reviewed = True
     policy = threshold_policy(
         comparisons,
-        effective_limit,
+        effective_limits,
         calibration_source,
         calibration_sha256,
         reviewed=reviewed,
@@ -246,7 +256,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
         "decision_reason": (
             "A/A evidence requires explicit review into a separate calibration artifact"
             if not reviewed
-            else "reviewed match_set median gate evaluated"
+            else "reviewed match_set and conditional snapshot_registry median gates evaluated"
         ),
     }
     emit_result(result, args.output)

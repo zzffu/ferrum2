@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::cli::Profile;
 
-pub(crate) const REPORT_SCHEMA: &str = "ferrum2.rule-qualification.v2";
+pub(crate) const REPORT_SCHEMA: &str = "ferrum2.rule-qualification.v3";
 
 #[derive(Serialize)]
 pub(crate) struct Report {
@@ -20,8 +20,10 @@ pub(crate) struct Report {
     pub(crate) fixtures: Vec<FixtureEvidence>,
     pub(crate) measurements: Vec<Measurement>,
     pub(crate) parity_observations: Vec<ParityObservation>,
+    pub(crate) snapshot_lifecycle: SnapshotLifecycleEvidence,
     pub(crate) scenario_count: usize,
     pub(crate) correctness_passed: bool,
+    pub(crate) snapshot_lifecycle_passed: bool,
     pub(crate) allocation_gate_passed: bool,
     pub(crate) parity_gate_passed: bool,
     pub(crate) thresholds_passed: bool,
@@ -65,9 +67,29 @@ pub(crate) struct RunConfiguration {
     pub(crate) match_sizes: Vec<usize>,
     pub(crate) route_sizes: Vec<usize>,
     pub(crate) dns_rule_sizes: Vec<usize>,
+    pub(crate) snapshot_reader_threads: usize,
     pub(crate) samples: usize,
     pub(crate) base_iterations_per_sample: u64,
     pub(crate) includes_100k: bool,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SnapshotLifecycleEvidence {
+    pub(crate) reader_threads: usize,
+    pub(crate) initial_generation: u64,
+    pub(crate) published_generation: u64,
+    pub(crate) reader_generation: u64,
+    pub(crate) reader_action: u8,
+    pub(crate) fresh_generation: u64,
+    pub(crate) fresh_action: u8,
+    pub(crate) returned_old_generation: u64,
+    pub(crate) returned_old_matches_initial: bool,
+    pub(crate) old_snapshot_alive_before_reader_release: bool,
+    pub(crate) old_snapshot_released_after_reader_release: bool,
+    pub(crate) generation_action_consistent: bool,
+    pub(crate) publish_monotonic: bool,
+    pub(crate) watch_observed_generation: u64,
+    pub(crate) watch_no_missed_publication: bool,
 }
 
 #[derive(Serialize)]

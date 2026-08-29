@@ -77,7 +77,7 @@ fn generated_binary_srs_rows_are_paired_and_gated() {
     let evidence = run_generated_binary_srs(&[10], 5, 1, &mut measurements)
         .expect("run generated binary SRS matrix");
     assert_eq!(evidence.len(), MatcherKind::ALL.len());
-    assert_eq!(measurements.len(), 28);
+    assert_eq!(measurements.len(), 34);
     assert!(measurements.iter().all(|row| {
         row.suite == "match_set"
             && row.fixture.is_some()
@@ -87,13 +87,48 @@ fn generated_binary_srs_rows_are_paired_and_gated() {
             && row.timing_pair_id.is_some()
     }));
     let parity = collect_parity_observations(&measurements).expect("collect SRS parity");
-    assert_eq!(parity.len(), 14);
+    assert_eq!(parity.len(), 17);
     assert!(parity.iter().all(|row| {
         row.performance_gate_applicable
             && matches!(row.decision, "passed" | "failed")
             && row.baseline_id.contains("/synthetic_srs/")
             && row.candidate_id.contains("/binary_srs/")
     }));
+}
+
+#[test]
+fn domain_boundary_catalog_covers_exact_suffix_miss_deep_label_and_idna() {
+    let _guard = allocator_test_lock();
+    let exact = compile_generated_match_set(MatcherKind::Exact, 8).expect("exact MatchSet");
+    let suffix = compile_generated_match_set(MatcherKind::Suffix, 8).expect("suffix MatchSet");
+    let exact_cases = match_probe_cases(MatcherKind::Exact, 8).expect("exact probes");
+    let suffix_cases = match_probe_cases(MatcherKind::Suffix, 8).expect("suffix probes");
+    assert_eq!(
+        exact_cases.iter().map(|case| case.name).collect::<Vec<_>>(),
+        vec!["hit", "idna_alabel_normalized_hit", "miss"]
+    );
+    assert_eq!(
+        suffix_cases
+            .iter()
+            .map(|case| case.name)
+            .collect::<Vec<_>>(),
+        vec![
+            "hit",
+            "deep_label_hit",
+            "idna_alabel_normalized_hit",
+            "miss"
+        ]
+    );
+    assert!(
+        exact_cases
+            .iter()
+            .all(|case| probe_matches(&exact, &case.probe) == case.expected)
+    );
+    assert!(
+        suffix_cases
+            .iter()
+            .all(|case| probe_matches(&suffix, &case.probe) == case.expected)
+    );
 }
 
 #[test]

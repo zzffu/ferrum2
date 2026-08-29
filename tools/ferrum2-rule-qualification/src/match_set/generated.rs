@@ -95,8 +95,8 @@ pub(crate) fn add_generated_value(
 ) -> Result<()> {
     let selected = selected_matcher_kind(kind, index);
     let result = match selected {
-        MatcherKind::Exact => builder.add_exact_domain(&format!("exact-{index}.bench.invalid")),
-        MatcherKind::Suffix => builder.add_domain_suffix(&format!("suffix-{index}.bench.invalid")),
+        MatcherKind::Exact => builder.add_exact_domain(&generated_exact_domain(index)),
+        MatcherKind::Suffix => builder.add_domain_suffix(&generated_suffix_domain(index)),
         MatcherKind::Keyword => builder.add_domain_keyword(&format!("needle{index}x")),
         MatcherKind::CidrV4 => builder.add_ip_cidr(IpNet::V4(generated_v4(index)?)),
         MatcherKind::CidrV6 => builder.add_ip_cidr(IpNet::V6(generated_v6(index)?)),
@@ -105,6 +105,22 @@ pub(crate) fn add_generated_value(
     result
         .map(|_| ())
         .map_err(|error| QualificationError::new(format!("MatchSet value failed: {error}")))
+}
+
+pub(crate) fn generated_exact_domain(index: usize) -> String {
+    if index == 0 {
+        "xn--bcher-kva.bench.invalid".to_owned()
+    } else {
+        format!("exact-{index}.bench.invalid")
+    }
+}
+
+pub(crate) fn generated_suffix_domain(index: usize) -> String {
+    if index == 0 {
+        "xn--bcher-kva.suffix.invalid".to_owned()
+    } else {
+        format!("suffix-{index}.bench.invalid")
+    }
 }
 
 pub(crate) const fn selected_matcher_kind(kind: MatcherKind, index: usize) -> MatcherKind {

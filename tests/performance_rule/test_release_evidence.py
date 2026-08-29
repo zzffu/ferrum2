@@ -8,14 +8,13 @@ from tests.performance_rule.archive_verifier import validate_archived_controller
 from tools.performance_rule.evidence import validate_control_document
 from tools.performance_rule.runner_report import validate_report
 
-
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = ROOT / "tests" / "performance_rule" / "fixtures"
 CONTRACT_FIXTURE = FIXTURE_ROOT / "release-evidence-contract-v1.json"
 EXTERNAL_MANIFEST = FIXTURE_ROOT / "external-evidence-manifest-v1.json"
-RUNNER_SCHEMA = "ferrum2.rule-qualification.v2"
-CONTROL_SCHEMA = "ferrum2.rule-qualification-control.v6"
-THRESHOLD_POLICY_VERSION = "section-5.7-match-set-median-gates.v5"
+RUNNER_SCHEMA = "ferrum2.rule-qualification.v3"
+CONTROL_SCHEMA = "ferrum2.rule-qualification-control.v7"
+THRESHOLD_POLICY_VERSION = "section-5.7-and-rule-04-conditional-median-gates.v6"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -72,19 +71,23 @@ class CompactReleaseEvidenceContractTests(unittest.TestCase):
             + statistics["ip_cidrs"],
             100,
         )
-        self.assertEqual(
-            fixtures["ads.srs"]["provenance"], "pinned_repository_fixture"
-        )
+        self.assertEqual(fixtures["ads.srs"]["provenance"], "pinned_repository_fixture")
 
     def test_representative_pair_retains_allocation_and_parity_contracts(self):
         measurements = self.qualification["measurements"]
-        self.assertEqual(len(measurements), 2)
-        self.assertEqual({row["suite"] for row in measurements}, {"match_set"})
+        self.assertEqual(len(measurements), 4)
         self.assertEqual(
-            {row["timing_pair_id"] for row in measurements},
+            {row["suite"] for row in measurements},
+            {"match_set", "snapshot_registry"},
+        )
+        match_measurements = [
+            row for row in measurements if row["suite"] == "match_set"
+        ]
+        self.assertEqual(
+            {row["timing_pair_id"] for row in match_measurements},
             {"match_set/generated-exact-100/exact-hit"},
         )
-        for row in measurements:
+        for row in match_measurements:
             self.assertTrue(row["allocation_gate_applicable"])
             self.assertTrue(row["allocation_gate_passed"])
             self.assertEqual(row["allocations_per_op"], 0.0)
@@ -98,6 +101,33 @@ class CompactReleaseEvidenceContractTests(unittest.TestCase):
         self.assertEqual(observation["median_limit_percent"], 5.0)
         self.assertEqual(observation["p99_limit_percent"], 15.0)
         self.assertEqual(observation["decision"], "passed")
+
+        snapshot = [row for row in measurements if row["suite"] == "snapshot_registry"]
+        self.assertEqual(
+            {row["scenario"] for row in snapshot},
+            {"read_under_publish", "publish_under_readers"},
+        )
+        self.assertTrue(
+            all(
+                row["scale"] == 4
+                and row["allocation_gate_applicable"] is False
+                and row["allocation_gate_passed"] is None
+                for row in snapshot
+            )
+        )
+
+    def test_snapshot_lifecycle_contract_is_explicit_and_non_adopting(self):
+        lifecycle = self.qualification["snapshot_lifecycle"]
+        self.assertTrue(self.qualification["snapshot_lifecycle_passed"])
+        self.assertEqual(lifecycle["reader_threads"], 4)
+        self.assertEqual(lifecycle["reader_generation"], 1)
+        self.assertEqual(lifecycle["published_generation"], 2)
+        self.assertTrue(lifecycle["old_snapshot_alive_before_reader_release"])
+        self.assertTrue(lifecycle["old_snapshot_released_after_reader_release"])
+        self.assertTrue(lifecycle["generation_action_consistent"])
+        self.assertTrue(lifecycle["publish_monotonic"])
+        self.assertTrue(lifecycle["watch_no_missed_publication"])
+        self.assertFalse(self.qualification["candidate"]["adoption_claim"])
 
     def test_qualification_identity_is_bound_to_current_ab_candidate(self):
         runner = self.qualification["runner"]

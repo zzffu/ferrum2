@@ -7,16 +7,19 @@ from pathlib import Path
 from typing import Any
 
 from tools.performance_rule.schema import (
+    ATOMIC_SNAPSHOT_FEATURE,
     ControlError,
-    DNS_POLICY_SUITE,
     LOCAL_TARGET_PERCENT,
     MATCH_SET_SUITE,
     NOISY_GATE_CEILING_PERCENT,
     P99_CLASSIFICATION,
     P99_TARGET_PERCENT,
-    ROUTE_PROGRAM_SUITE,
+    SNAPSHOT_REGISTRY_SUITE,
     SUITE_POLICY,
 )
+
+CALIBRATED_SUITES = (MATCH_SET_SUITE, SNAPSHOT_REGISTRY_SUITE)
+
 
 def pair_execution_order(
     pair_index: int, parent: Path, candidate: Path
@@ -34,6 +37,27 @@ def percent_delta(parent: float, candidate: float) -> float | None:
 
 def rows_by_id(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {row["id"]: row for row in report["measurements"]}
+
+
+def candidate_features(paired_reports: list[dict[str, Any]]) -> frozenset[str]:
+    expected: list[str] | None = None
+    for pair in paired_reports:
+        features = pair["candidate"]["candidate"]["enabled_features"]
+        if not isinstance(features, list) or any(
+            not isinstance(feature, str) for feature in features
+        ):
+            raise ControlError("candidate feature evidence is invalid")
+        if expected is None:
+            expected = features
+        elif features != expected:
+            raise ControlError("candidate feature evidence changed between pairs")
+    if expected is None:
+        raise ControlError("paired reports are empty")
+    return frozenset(expected)
+
+
+def calibration_ceiling_limits() -> dict[str, float]:
+    return {suite: NOISY_GATE_CEILING_PERCENT for suite in CALIBRATED_SUITES}
 
 
 def collect_observations(
@@ -105,15 +129,24 @@ def summarize(
     scenario_suites: dict[str, str],
     paired_reports: list[dict[str, Any]],
     same_binary: bool,
-    median_limit_percent: float,
+    median_limits_percent: dict[str, float],
 ) -> list[dict[str, Any]]:
+    features = candidate_features(paired_reports)
     summaries: list[dict[str, Any]] = []
     for observation in collect_observations(
         scenario_suites, paired_reports, same_binary
     ):
         suite = observation["suite"]
         suite_policy = SUITE_POLICY[suite]
-        hard_gate = suite_policy["median_classification"] == "hard_gate"
+        classification = suite_policy["median_classification"]
+        conditional_feature = suite_policy.get("candidate_feature")
+        conditional_enabled = (
+            conditional_feature in features if conditional_feature is not None else None
+        )
+        hard_gate = classification == "hard_gate" or (
+            classification == "candidate_conditional"
+            and (same_binary or conditional_enabled is True)
+        )
         if hard_gate and same_binary:
             aa_noise = observation["aa_noise_median_absolute_percent"]
             median_passed = (
@@ -123,8 +156,10 @@ def summarize(
             median_gate_metric = "aa_pair_median_absolute_p50_delta_percent"
         elif hard_gate:
             median_delta = observation["median_p50_delta_percent"]
-            median_passed = median_delta is not None and median_delta <= median_limit_percent
-            median_limit = median_limit_percent
+            median_limit = median_limits_percent.get(suite)
+            if type(median_limit) not in (int, float) or median_limit <= 0:
+                raise ControlError(f"{suite} reviewed calibration limit is invalid")
+            median_passed = median_delta is not None and median_delta <= median_limit
             median_gate_metric = "median_of_run_p50_delta_percent"
         else:
             median_passed = None
@@ -134,7 +169,9 @@ def summarize(
             decision = "observed"
         elif not median_passed:
             decision = "failed"
-        elif not same_binary and observation["median_p50_delta_percent"] < -median_limit:
+        elif (
+            not same_binary and observation["median_p50_delta_percent"] < -median_limit
+        ):
             decision = "improved"
         else:
             decision = "passed"
@@ -142,7 +179,9 @@ def summarize(
         summary.update(
             {
                 "scope_authority": suite_policy["scope_authority"],
-                "median_classification": suite_policy["median_classification"],
+                "median_classification": classification,
+                "conditional_gate_feature": conditional_feature,
+                "conditional_gate_enabled": conditional_enabled,
                 "median_limit_percent": median_limit,
                 "median_gate_metric": median_gate_metric,
                 "median_gate_applicable": hard_gate,
@@ -158,14 +197,26 @@ def summarize(
     return summaries
 
 
-def calibrated_limit(comparisons: list[dict[str, Any]]) -> float:
-    applicable = [
-        comparison["aa_noise_median_absolute_percent"]
-        for comparison in comparisons
-        if comparison.get("median_gate_applicable") is True
-        and comparison.get("suite") == MATCH_SET_SUITE
-    ]
-    if not applicable or any(value is None for value in applicable):
-        raise ControlError("A/A report has no complete match_set calibration evidence")
-    observed = max(applicable)
-    return max(LOCAL_TARGET_PERCENT, min(NOISY_GATE_CEILING_PERCENT, observed))
+def calibrated_limits(comparisons: list[dict[str, Any]]) -> dict[str, float]:
+    limits: dict[str, float] = {}
+    for suite in CALIBRATED_SUITES:
+        applicable = [
+            comparison["aa_noise_median_absolute_percent"]
+            for comparison in comparisons
+            if comparison.get("median_gate_applicable") is True
+            and comparison.get("suite") == suite
+        ]
+        if not applicable or any(value is None for value in applicable):
+            raise ControlError(
+                f"A/A report has no complete {suite} calibration evidence"
+            )
+        if any(
+            type(value) not in (int, float)
+            or value < 0
+            or value > NOISY_GATE_CEILING_PERCENT
+            for value in applicable
+        ):
+            raise ControlError(f"A/A {suite} noise exceeds the reviewed ceiling")
+        observed = max(applicable)
+        limits[suite] = max(LOCAL_TARGET_PERCENT, observed)
+    return limits

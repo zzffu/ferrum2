@@ -22,6 +22,7 @@ use crate::report::{
     RepositoryFingerprint, RunConfiguration, RunnerFingerprint,
 };
 use crate::route_program::run_route_programs;
+use crate::snapshot_registry::{SNAPSHOT_READER_THREADS, run_snapshot_registry};
 
 pub fn execute(args: Args) -> Result<()> {
     let samples = args.samples.unwrap_or(args.profile.default_samples());
@@ -73,6 +74,8 @@ pub fn execute(args: Args) -> Result<()> {
     )?);
     run_route_programs(&route_sizes, samples, base_iterations, &mut measurements)?;
     run_dns_policy(&dns_rule_sizes, samples, base_iterations, &mut measurements)?;
+    let snapshot_lifecycle = run_snapshot_registry(samples, base_iterations, &mut measurements)?;
+    let snapshot_lifecycle_passed = true;
     ensure_unique_measurement_ids(&measurements)?;
     let parity_observations = collect_parity_observations(&measurements)?;
     let parity_gate_passed = parity_observations.iter().all(|observation| {
@@ -97,6 +100,7 @@ pub fn execute(args: Args) -> Result<()> {
             match_sizes,
             route_sizes,
             dns_rule_sizes,
+            snapshot_reader_threads: SNAPSHOT_READER_THREADS,
             samples,
             base_iterations_per_sample: base_iterations,
             includes_100k: args.include_100k,
@@ -115,18 +119,22 @@ pub fn execute(args: Args) -> Result<()> {
             p99_parity_target_percent: P99_PARITY_TARGET_PERCENT,
             thresholds_enforced_by_runner: true,
             parity_gate_scope: "CompiledMatchSet ordinary-inline/synthetic and synthetic/binary-SRS rows only",
-            paired_observation_scope: "Route and DNS program ordinary/RuleSet rows retain paired latency and correctness but are not subject to the MatchSet 5%/15% gate",
+            paired_observation_scope: "Route and DNS program ordinary/RuleSet rows retain paired latency; snapshot registry read-under-publish and publish-under-readers rows are compared by the reviewed external conditional gate",
             allocation_gate_scope: "CompiledMatchSet matches and Route evaluation with reusable scratch",
-            note: "DNS end-to-end rows include query construction and report allocations without applying the matcher hot-path gate",
+            note: "snapshot registry successors are fully prebuilt before timing; four readers reuse per-thread evaluation scratch and lifecycle evidence is always fail-closed",
         },
         scenario_count: measurements.len(),
         fixtures,
         measurements,
         parity_observations,
+        snapshot_lifecycle,
         correctness_passed: true,
+        snapshot_lifecycle_passed,
         allocation_gate_passed,
         parity_gate_passed,
-        thresholds_passed: allocation_gate_passed && parity_gate_passed,
+        thresholds_passed: allocation_gate_passed
+            && parity_gate_passed
+            && snapshot_lifecycle_passed,
     };
     let mut encoded = serde_json::to_vec_pretty(&report)
         .map_err(|error| QualificationError::new(format!("JSON encoding failed: {error}")))?;

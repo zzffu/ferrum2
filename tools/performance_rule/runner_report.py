@@ -14,7 +14,10 @@ from tools.performance_rule.schema import (
     ControlError,
     P99_TARGET_PERCENT,
     RUNNER_SCHEMA,
+    SNAPSHOT_READER_THREADS,
+    SNAPSHOT_REGISTRY_SUITE,
     SUITE_POLICY,
+    expected_profile_sizes,
 )
 
 RUNNER_STDOUT_MAX_BYTES = 64 * 1024 * 1024
@@ -22,14 +25,38 @@ RUNNER_STDERR_MAX_BYTES = 64 * 1024
 RUNNER_CAPTURE_DRAIN_TIMEOUT_SECONDS = 5
 REPORT_FIELDS = frozenset(
     {
-        "schema", "generated_unix_millis", "profile", "environment", "repository",
-        "runner", "candidate", "configuration", "measurement_policy", "fixtures", "measurements",
-        "parity_observations", "scenario_count", "correctness_passed",
-        "allocation_gate_passed", "parity_gate_passed", "thresholds_passed",
+        "schema",
+        "generated_unix_millis",
+        "profile",
+        "environment",
+        "repository",
+        "runner",
+        "candidate",
+        "configuration",
+        "measurement_policy",
+        "fixtures",
+        "measurements",
+        "parity_observations",
+        "snapshot_lifecycle",
+        "scenario_count",
+        "correctness_passed",
+        "snapshot_lifecycle_passed",
+        "allocation_gate_passed",
+        "parity_gate_passed",
+        "thresholds_passed",
     }
 )
 ENVIRONMENT_FIELDS = frozenset(
-    {"os", "architecture", "family", "logical_cpus", "cpu_model", "rustc_version", "timer", "build_profile"}
+    {
+        "os",
+        "architecture",
+        "family",
+        "logical_cpus",
+        "cpu_model",
+        "rustc_version",
+        "timer",
+        "build_profile",
+    }
 )
 REPOSITORY_FIELDS = frozenset(
     {"git_head", "git_tree", "tree_state", "changed_entries", "status_sha256"}
@@ -44,20 +71,46 @@ CANDIDATE_FEATURES = frozenset(
     }
 )
 CONFIGURATION_FIELDS = frozenset(
-    {"match_sizes", "route_sizes", "dns_rule_sizes", "samples", "base_iterations_per_sample", "includes_100k"}
+    {
+        "match_sizes",
+        "route_sizes",
+        "dns_rule_sizes",
+        "snapshot_reader_threads",
+        "samples",
+        "base_iterations_per_sample",
+        "includes_100k",
+    }
 )
 MEASUREMENT_POLICY_FIELDS = frozenset(
     {
-        "latency_source", "minimum_reported_batch_nanoseconds", "calibration",
-        "warmup_batches", "paired_order", "retained_samples", "allocation_measurement",
-        "compiled_memory_measurement", "local_parity_target_percent",
-        "noisy_gate_ceiling_percent", "p99_parity_target_percent",
-        "thresholds_enforced_by_runner", "parity_gate_scope", "paired_observation_scope",
-        "allocation_gate_scope", "note",
+        "latency_source",
+        "minimum_reported_batch_nanoseconds",
+        "calibration",
+        "warmup_batches",
+        "paired_order",
+        "retained_samples",
+        "allocation_measurement",
+        "compiled_memory_measurement",
+        "local_parity_target_percent",
+        "noisy_gate_ceiling_percent",
+        "p99_parity_target_percent",
+        "thresholds_enforced_by_runner",
+        "parity_gate_scope",
+        "paired_observation_scope",
+        "allocation_gate_scope",
+        "note",
     }
 )
 FIXTURE_FIELDS = frozenset(
-    {"name", "provenance", "bytes", "sha256", "srs_version", "statistics", "capabilities"}
+    {
+        "name",
+        "provenance",
+        "bytes",
+        "sha256",
+        "srs_version",
+        "statistics",
+        "capabilities",
+    }
 )
 STATISTICS_FIELDS = frozenset(
     {"rules", "exact_domains", "domain_suffixes", "domain_keywords", "ip_cidrs"}
@@ -67,28 +120,96 @@ CAPABILITIES_FIELDS = frozenset(
 )
 MEASUREMENT_FIELDS = frozenset(
     {
-        "id", "suite", "source", "scenario", "scale", "fixture", "rule_program_mode",
-        "query_candidate_visits", "requested_min_iterations_per_sample",
-        "actual_iterations_per_sample", "sample_batch_nanoseconds", "timing_pair_id",
-        "paired_sample_order", "samples_ns_per_op", "p50_ns_per_op", "p99_ns_per_op",
-        "queries_per_second_from_p50", "build_nanoseconds", "compiled_allocations",
-        "compiled_reallocations", "compiled_entries", "compiled_bytes_per_entry",
-        "allocation_samples", "allocations_per_op", "reallocations_per_op",
-        "bytes_allocated_per_op", "bytes_deallocated_per_op", "compiled_memory_bytes",
-        "allocation_status", "compiled_memory_status", "allocation_gate_applicable",
-        "allocation_gate_passed", "correctness", "outcome_checksum",
+        "id",
+        "suite",
+        "source",
+        "scenario",
+        "scale",
+        "fixture",
+        "rule_program_mode",
+        "query_candidate_visits",
+        "requested_min_iterations_per_sample",
+        "actual_iterations_per_sample",
+        "sample_batch_nanoseconds",
+        "timing_pair_id",
+        "paired_sample_order",
+        "samples_ns_per_op",
+        "p50_ns_per_op",
+        "p99_ns_per_op",
+        "queries_per_second_from_p50",
+        "build_nanoseconds",
+        "compiled_allocations",
+        "compiled_reallocations",
+        "compiled_entries",
+        "compiled_bytes_per_entry",
+        "allocation_samples",
+        "allocations_per_op",
+        "reallocations_per_op",
+        "bytes_allocated_per_op",
+        "bytes_deallocated_per_op",
+        "compiled_memory_bytes",
+        "allocation_status",
+        "compiled_memory_status",
+        "allocation_gate_applicable",
+        "allocation_gate_passed",
+        "correctness",
+        "outcome_checksum",
     }
 )
 ALLOCATION_SAMPLE_FIELDS = frozenset(
-    {"iterations", "allocations", "deallocations", "reallocations", "bytes_allocated", "bytes_deallocated"}
+    {
+        "iterations",
+        "allocations",
+        "deallocations",
+        "reallocations",
+        "bytes_allocated",
+        "bytes_deallocated",
+    }
 )
 PARITY_FIELDS = frozenset(
     {
-        "suite", "scenario", "scale", "baseline_id", "candidate_id",
-        "median_delta_percent", "p99_delta_percent", "median_limit_percent",
-        "p99_limit_percent", "performance_gate_applicable", "decision",
+        "suite",
+        "scenario",
+        "scale",
+        "baseline_id",
+        "candidate_id",
+        "median_delta_percent",
+        "p99_delta_percent",
+        "median_limit_percent",
+        "p99_limit_percent",
+        "performance_gate_applicable",
+        "decision",
     }
 )
+SNAPSHOT_LIFECYCLE_FIELDS = frozenset(
+    {
+        "reader_threads",
+        "initial_generation",
+        "published_generation",
+        "reader_generation",
+        "reader_action",
+        "fresh_generation",
+        "fresh_action",
+        "returned_old_generation",
+        "returned_old_matches_initial",
+        "old_snapshot_alive_before_reader_release",
+        "old_snapshot_released_after_reader_release",
+        "generation_action_consistent",
+        "publish_monotonic",
+        "watch_observed_generation",
+        "watch_no_missed_publication",
+    }
+)
+SNAPSHOT_MEASUREMENTS = {
+    "snapshot_registry/registry_read/read_under_publish": (
+        "registry_read",
+        "read_under_publish",
+    ),
+    "snapshot_registry/registry_publish/publish_under_readers": (
+        "registry_publish",
+        "publish_under_readers",
+    ),
+}
 
 
 def _finite_number(value: Any, *, positive: bool) -> bool:
@@ -104,8 +225,17 @@ def _validate_closed_report_shape(report: Any) -> dict[str, Any]:
     exact_fields(report["environment"], ENVIRONMENT_FIELDS, label="runner environment")
     exact_fields(report["repository"], REPOSITORY_FIELDS, label="runner repository")
     exact_fields(report["runner"], RUNNER_FIELDS, label="runner identity")
-    exact_fields(report["candidate"], CANDIDATE_FIELDS, label="runner candidate evidence")
-    exact_fields(report["configuration"], CONFIGURATION_FIELDS, label="runner configuration")
+    exact_fields(
+        report["candidate"], CANDIDATE_FIELDS, label="runner candidate evidence"
+    )
+    exact_fields(
+        report["configuration"], CONFIGURATION_FIELDS, label="runner configuration"
+    )
+    exact_fields(
+        report["snapshot_lifecycle"],
+        SNAPSHOT_LIFECYCLE_FIELDS,
+        label="runner snapshot lifecycle",
+    )
     exact_fields(
         report["measurement_policy"],
         MEASUREMENT_POLICY_FIELDS,
@@ -116,8 +246,14 @@ def _validate_closed_report_shape(report: Any) -> dict[str, Any]:
         raise ControlError("runner fixtures are not a list")
     for fixture in fixtures:
         exact_fields(fixture, FIXTURE_FIELDS, label="runner fixture")
-        exact_fields(fixture["statistics"], STATISTICS_FIELDS, label="runner fixture statistics")
-        exact_fields(fixture["capabilities"], CAPABILITIES_FIELDS, label="runner fixture capabilities")
+        exact_fields(
+            fixture["statistics"], STATISTICS_FIELDS, label="runner fixture statistics"
+        )
+        exact_fields(
+            fixture["capabilities"],
+            CAPABILITIES_FIELDS,
+            label="runner fixture capabilities",
+        )
     rows = report["measurements"]
     if not isinstance(rows, list):
         raise ControlError("runner measurements are not a list")
@@ -127,13 +263,59 @@ def _validate_closed_report_shape(report: Any) -> dict[str, Any]:
         if not isinstance(samples, list):
             raise ControlError("runner allocation samples are not a list")
         for sample in samples:
-            exact_fields(sample, ALLOCATION_SAMPLE_FIELDS, label="runner allocation sample")
+            exact_fields(
+                sample, ALLOCATION_SAMPLE_FIELDS, label="runner allocation sample"
+            )
     parity = report["parity_observations"]
     if not isinstance(parity, list):
         raise ControlError("runner parity observations are not a list")
     for observation in parity:
         exact_fields(observation, PARITY_FIELDS, label="runner parity observation")
     return report
+
+
+def _validate_snapshot_lifecycle(report: dict[str, Any]) -> None:
+    lifecycle = report["snapshot_lifecycle"]
+    reader_threads = report["configuration"]["snapshot_reader_threads"]
+    integer_fields = (
+        "reader_threads",
+        "initial_generation",
+        "published_generation",
+        "reader_generation",
+        "reader_action",
+        "fresh_generation",
+        "fresh_action",
+        "returned_old_generation",
+        "watch_observed_generation",
+    )
+    if any(type(lifecycle[field]) is not int for field in integer_fields):
+        raise ControlError("runner snapshot lifecycle integers are invalid")
+    if (
+        type(reader_threads) is not int
+        or reader_threads != SNAPSHOT_READER_THREADS
+        or lifecycle["reader_threads"] != reader_threads
+        or lifecycle["initial_generation"] <= 0
+        or lifecycle["published_generation"] != lifecycle["initial_generation"] + 1
+        or lifecycle["reader_generation"] != lifecycle["initial_generation"]
+        or lifecycle["returned_old_generation"] != lifecycle["initial_generation"]
+        or lifecycle["fresh_generation"] != lifecycle["published_generation"]
+        or lifecycle["watch_observed_generation"] != lifecycle["published_generation"]
+        or lifecycle["reader_action"] != lifecycle["reader_generation"] % 2
+        or lifecycle["fresh_action"] != lifecycle["fresh_generation"] % 2
+    ):
+        raise ControlError("runner snapshot lifecycle generations are inconsistent")
+    for field in (
+        "returned_old_matches_initial",
+        "old_snapshot_alive_before_reader_release",
+        "old_snapshot_released_after_reader_release",
+        "generation_action_consistent",
+        "publish_monotonic",
+        "watch_no_missed_publication",
+    ):
+        if lifecycle[field] is not True:
+            raise ControlError(f"runner snapshot lifecycle {field} did not pass")
+    if report.get("snapshot_lifecycle_passed") is not True:
+        raise ControlError("runner snapshot lifecycle did not pass")
 
 
 def validate_report(report: Any, expected_sha256: str) -> dict[str, str]:
@@ -151,11 +333,27 @@ def validate_report(report: Any, expected_sha256: str) -> dict[str, str]:
         or not set(enabled_features).issubset(CANDIDATE_FEATURES)
     ):
         raise ControlError("runner candidate feature identity is invalid")
+    configuration = report["configuration"]
+    includes_100k = configuration["includes_100k"]
+    match_sizes, route_sizes, dns_rule_sizes = expected_profile_sizes(
+        report["profile"], includes_100k
+    )
+    if (
+        configuration["match_sizes"] != match_sizes
+        or configuration["route_sizes"] != route_sizes
+        or configuration["dns_rule_sizes"] != dns_rule_sizes
+        or type(configuration["samples"]) is not int
+        or configuration["samples"] < 5
+        or type(configuration["base_iterations_per_sample"]) is not int
+        or configuration["base_iterations_per_sample"] <= 0
+    ):
+        raise ControlError("runner profile size or iteration configuration changed")
     runner = report.get("runner")
     if not isinstance(runner, dict) or runner.get("sha256") != expected_sha256:
         raise ControlError("runner-reported SHA-256 does not match the executed binary")
     if report.get("correctness_passed") is not True:
         raise ControlError("runner did not report successful correctness checks")
+    _validate_snapshot_lifecycle(report)
     if report.get("allocation_gate_passed") is not True:
         raise ControlError("runner did not pass the allocation-free hot-path gate")
     if report.get("parity_gate_passed") is not True:
@@ -197,12 +395,18 @@ def validate_report(report: Any, expected_sha256: str) -> dict[str, str]:
         scenario_suites[identifier] = suite
         for metric in ("p50_ns_per_op", "p99_ns_per_op"):
             if not _finite_number(row.get(metric), positive=True):
-                raise ControlError(f"runner measurement {identifier} has invalid {metric}")
+                raise ControlError(
+                    f"runner measurement {identifier} has invalid {metric}"
+                )
         samples = row.get("samples_ns_per_op")
-        if not isinstance(samples, list) or len(samples) < 5:
-            raise ControlError(f"runner measurement {identifier} has too few raw samples")
+        if not isinstance(samples, list) or len(samples) != configuration["samples"]:
+            raise ControlError(
+                f"runner measurement {identifier} has an inconsistent raw sample count"
+            )
         if any(not _finite_number(value, positive=True) for value in samples):
-            raise ControlError(f"runner measurement {identifier} has invalid raw samples")
+            raise ControlError(
+                f"runner measurement {identifier} has invalid raw samples"
+            )
         requested_iterations = row.get("requested_min_iterations_per_sample")
         if type(requested_iterations) is not int or requested_iterations <= 0:
             raise ControlError(
@@ -261,15 +465,20 @@ def validate_report(report: Any, expected_sha256: str) -> dict[str, str]:
         ):
             value = row.get(metric)
             if not _finite_number(value, positive=False):
-                raise ControlError(f"runner measurement {identifier} has invalid {metric}")
-        if type(row.get("compiled_memory_bytes")) is not int or row[
-            "compiled_memory_bytes"
-        ] < 0:
+                raise ControlError(
+                    f"runner measurement {identifier} has invalid {metric}"
+                )
+        if (
+            type(row.get("compiled_memory_bytes")) is not int
+            or row["compiled_memory_bytes"] < 0
+        ):
             raise ControlError(
                 f"runner measurement {identifier} has invalid compiled memory"
             )
         bytes_per_entry = row.get("compiled_bytes_per_entry")
-        if bytes_per_entry is not None and not _finite_number(bytes_per_entry, positive=False):
+        if bytes_per_entry is not None and not _finite_number(
+            bytes_per_entry, positive=False
+        ):
             raise ControlError(
                 f"runner measurement {identifier} has invalid memory per entry"
             )
@@ -299,13 +508,34 @@ def validate_report(report: Any, expected_sha256: str) -> dict[str, str]:
                 raise ControlError(
                     f"runner measurement {identifier} allocation sample is not per-operation"
                 )
-        if row.get("allocation_gate_applicable") is True and row.get(
-            "allocation_gate_passed"
-        ) is not True:
+        if (
+            row.get("allocation_gate_applicable") is True
+            and row.get("allocation_gate_passed") is not True
+        ):
             raise ControlError(
                 f"runner measurement {identifier} failed its allocation gate"
             )
-    if type(report["scenario_count"]) is not int or report["scenario_count"] != len(rows):
+        if row.get("correctness") != "passed":
+            raise ControlError(
+                f"runner measurement {identifier} failed its correctness contract"
+            )
+    for identifier, (source, scenario) in SNAPSHOT_MEASUREMENTS.items():
+        if scenario_suites.get(identifier) != SNAPSHOT_REGISTRY_SUITE:
+            raise ControlError(f"runner snapshot measurement {identifier} is missing")
+        row = next(row for row in rows if row["id"] == identifier)
+        if (
+            row.get("source") != source
+            or row.get("scenario") != scenario
+            or row.get("scale") != SNAPSHOT_READER_THREADS
+            or row.get("allocation_gate_applicable") is not False
+            or row.get("allocation_gate_passed") is not None
+        ):
+            raise ControlError(
+                f"runner snapshot measurement {identifier} contract changed"
+            )
+    if type(report["scenario_count"]) is not int or report["scenario_count"] != len(
+        rows
+    ):
         raise ControlError("runner scenario count does not match its measurements")
     return scenario_suites
 
@@ -372,7 +602,9 @@ def _run_bounded(
             while block := stream.read(64 * 1024):
                 target = captured[name]
                 if len(target) + len(block) > maximum_bytes:
-                    failures.append(f"runner {name} exceeds the {maximum_bytes}-byte bound")
+                    failures.append(
+                        f"runner {name} exceeds the {maximum_bytes}-byte bound"
+                    )
                     process.kill()
                     return
                 target.extend(block)

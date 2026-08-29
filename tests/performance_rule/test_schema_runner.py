@@ -41,7 +41,7 @@ class SchemaAndRunnerTests(unittest.TestCase):
             validate_report(report("wrong"), "abc")
         malformed = report("abc")
         malformed["measurements"][0]["samples_ns_per_op"] = [1] * 4
-        with self.assertRaisesRegex(ControlError, "too few"):
+        with self.assertRaisesRegex(ControlError, "sample count"):
             validate_report(malformed, "abc")
         extra = report("abc")
         extra["measurements"][0]["invented"] = True
@@ -51,6 +51,17 @@ class SchemaAndRunnerTests(unittest.TestCase):
         nonfinite["measurements"][0]["p50_ns_per_op"] = float("nan")
         with self.assertRaisesRegex(ControlError, "p50"):
             validate_report(nonfinite, "abc")
+
+    def test_profile_size_matrix_is_exact_and_100k_is_append_only(self):
+        malformed = report("abc")
+        malformed["configuration"]["match_sizes"] = [64, 65, 100]
+        with self.assertRaisesRegex(ControlError, "profile size"):
+            validate_report(malformed, "abc")
+
+        qualification = report("abc")
+        qualification["configuration"]["includes_100k"] = True
+        qualification["configuration"]["match_sizes"].append(100_000)
+        self.assertEqual(validate_report(qualification, "abc"), SCENARIO_SUITES)
 
     def test_candidate_identity_is_closed_sorted_and_non_adopting(self):
         enabled = report("abc")
@@ -67,14 +78,20 @@ class SchemaAndRunnerTests(unittest.TestCase):
             (
                 {
                     "adoption_claim": False,
-                    "enabled_features": ["candidate-domain-suffix-trie", "candidate-cidr-radix"],
+                    "enabled_features": [
+                        "candidate-domain-suffix-trie",
+                        "candidate-cidr-radix",
+                    ],
                 },
                 "identity",
             ),
             (
                 {
                     "adoption_claim": False,
-                    "enabled_features": ["candidate-cidr-radix", "candidate-cidr-radix"],
+                    "enabled_features": [
+                        "candidate-cidr-radix",
+                        "candidate-cidr-radix",
+                    ],
                 },
                 "identity",
             ),
@@ -88,6 +105,29 @@ class SchemaAndRunnerTests(unittest.TestCase):
             with self.subTest(candidate=candidate):
                 with self.assertRaisesRegex(ControlError, message):
                     validate_report(malformed, "abc")
+
+    def test_snapshot_lifecycle_and_required_contention_rows_fail_closed(self):
+        lifecycle = report("abc")
+        lifecycle["snapshot_lifecycle"][
+            "old_snapshot_released_after_reader_release"
+        ] = False
+        with self.assertRaisesRegex(ControlError, "snapshot lifecycle"):
+            validate_report(lifecycle, "abc")
+
+        missing = report("abc")
+        missing["measurements"] = [
+            row
+            for row in missing["measurements"]
+            if row["id"] != "snapshot_registry/registry_publish/publish_under_readers"
+        ]
+        missing["scenario_count"] = len(missing["measurements"])
+        with self.assertRaisesRegex(ControlError, "snapshot measurement"):
+            validate_report(missing, "abc")
+
+        inconsistent = report("abc")
+        inconsistent["snapshot_lifecycle"]["fresh_action"] = 1
+        with self.assertRaisesRegex(ControlError, "generations"):
+            validate_report(inconsistent, "abc")
 
     def test_closed_json_rejects_duplicate_nonfinite_and_oversize_input(self):
         for payload, message in (

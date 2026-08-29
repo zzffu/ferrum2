@@ -666,7 +666,9 @@ fn validate_windows_non_tun_gate(platform: &WorkflowJob) -> Result<(), String> {
         .map(String::as_str)
         != Some("120")
     {
-        return Err("platform job does not reserve the reviewed Windows evidence deadline".to_owned());
+        return Err(
+            "platform job does not reserve the reviewed Windows evidence deadline".to_owned(),
+        );
     }
     let compile_steps: Vec<_> = platform
         .steps

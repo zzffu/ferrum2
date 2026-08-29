@@ -9,12 +9,14 @@ fn mutate_first(source: &str, from: &str, to: &str) -> String {
     source.replacen(from, to, 1)
 }
 
-fn move_block_before(source: &str, block_start: &str, block_end: &str, destination: &str) -> String {
+fn move_block_before(
+    source: &str,
+    block_start: &str,
+    block_end: &str,
+    destination: &str,
+) -> String {
     let start = source.find(block_start).expect("moving block start");
-    let end = start
-        + source[start..]
-            .find(block_end)
-            .expect("moving block end");
+    let end = start + source[start..].find(block_end).expect("moving block end");
     let block = &source[start..end];
     let mut remaining = String::with_capacity(source.len());
     remaining.push_str(&source[..start]);
@@ -145,11 +147,7 @@ fn hosted_execution_mutations_fail_closed() {
             "        timeout-minutes: 15",
             "        timeout-minutes: 30",
         ),
-        mutate_first(
-            &main,
-            "    timeout-minutes: 120",
-            "    timeout-minutes: 60",
-        ),
+        mutate_first(&main, "    timeout-minutes: 120", "    timeout-minutes: 60"),
         mutate_first(
             &main,
             "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",

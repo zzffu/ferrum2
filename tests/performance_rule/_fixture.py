@@ -3,33 +3,54 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.performance_rule.pairing import calibrated_limit, summarize
+from tools.performance_rule.pairing import (
+    calibrated_limits,
+    calibration_ceiling_limits,
+    summarize,
+)
 from tools.performance_rule.policy import threshold_policy
 from tools.performance_rule.schema import (
     CALIBRATION_REQUIRED,
     CONTROL_SCHEMA,
     RUNNER_PRIORITY_HIGH,
     RUNNER_SCHEMA,
+    expected_profile_sizes,
 )
-
 
 IDENTIFIERS = (
     "dns_policy/one",
     "match_set/one",
     "route_program/one",
+    "snapshot_registry/registry_publish/publish_under_readers",
+    "snapshot_registry/registry_read/read_under_publish",
 )
 SCENARIO_SUITES = {
     identifier: identifier.split("/", 1)[0] for identifier in IDENTIFIERS
 }
 RUNNER_SHA256 = "a" * 64
-RUNNER_ARGUMENTS = ["--profile", "smoke", "--samples", "501"]
+RUNNER_ARGUMENTS = [
+    "--profile",
+    "qualification",
+    "--samples",
+    "101",
+    "--workspace-root",
+    ".",
+]
 
 
-def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
+def report(
+    sha256: str,
+    identifiers=IDENTIFIERS,
+    value: int | dict[str, int] = 10,
+    enabled_features: tuple[str, ...] = (),
+):
+    match_sizes, route_sizes, dns_rule_sizes = expected_profile_sizes(
+        "qualification", False
+    )
     return {
         "schema": RUNNER_SCHEMA,
         "generated_unix_millis": 1,
-        "profile": "smoke",
+        "profile": "qualification",
         "environment": {
             "os": "test",
             "architecture": "x86_64",
@@ -50,17 +71,19 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
         "runner": {"sha256": sha256, "bytes": 1},
         "candidate": {
             "adoption_claim": False,
-            "enabled_features": [],
+            "enabled_features": list(enabled_features),
         },
         "configuration": {
-            "match_sizes": [100],
-            "route_sizes": [1],
-            "dns_rule_sizes": [1],
+            "match_sizes": match_sizes,
+            "route_sizes": route_sizes,
+            "dns_rule_sizes": dns_rule_sizes,
+            "snapshot_reader_threads": 4,
             "samples": 5,
             "base_iterations_per_sample": 10,
             "includes_100k": False,
         },
         "correctness_passed": True,
+        "snapshot_lifecycle_passed": True,
         "allocation_gate_passed": True,
         "parity_gate_passed": True,
         "thresholds_passed": True,
@@ -87,20 +110,44 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
             {
                 "id": identifier,
                 "suite": identifier.split("/", 1)[0],
-                "source": "synthetic",
-                "scenario": identifier,
-                "scale": 1,
+                "source": (
+                    "registry_read"
+                    if "/registry_read/" in identifier
+                    else (
+                        "registry_publish"
+                        if "/registry_publish/" in identifier
+                        else "synthetic"
+                    )
+                ),
+                "scenario": (
+                    "read_under_publish"
+                    if identifier.endswith("/read_under_publish")
+                    else (
+                        "publish_under_readers"
+                        if identifier.endswith("/publish_under_readers")
+                        else identifier
+                    )
+                ),
+                "scale": 4 if identifier.startswith("snapshot_registry/") else 1,
                 "fixture": None,
                 "rule_program_mode": None,
                 "query_candidate_visits": None,
-                "p50_ns_per_op": value,
-                "p99_ns_per_op": value + 2,
+                "p50_ns_per_op": (
+                    value.get(identifier, 10) if isinstance(value, dict) else value
+                ),
+                "p99_ns_per_op": (
+                    value.get(identifier, 10) if isinstance(value, dict) else value
+                )
+                + 2,
                 "queries_per_second_from_p50": None,
                 "build_nanoseconds": 1,
                 "compiled_allocations": 0,
                 "compiled_reallocations": 0,
                 "compiled_entries": 1,
-                "samples_ns_per_op": [value] * 5,
+                "samples_ns_per_op": [
+                    value.get(identifier, 10) if isinstance(value, dict) else value
+                ]
+                * 5,
                 "requested_min_iterations_per_sample": 10,
                 "actual_iterations_per_sample": [10] * 5,
                 "sample_batch_nanoseconds": [250_000] * 5,
@@ -123,15 +170,38 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
                     }
                 ]
                 * 5,
-                "allocation_gate_applicable": True,
-                "allocation_gate_passed": True,
+                "allocation_gate_applicable": identifier.startswith(
+                    ("match_set/", "route_program/")
+                ),
+                "allocation_gate_passed": (
+                    True
+                    if identifier.startswith(("match_set/", "route_program/"))
+                    else None
+                ),
                 "allocation_status": "measured",
                 "compiled_memory_status": "measured",
-                "correctness": "PASS",
+                "correctness": "passed",
                 "outcome_checksum": 1,
             }
             for identifier in identifiers
         ],
+        "snapshot_lifecycle": {
+            "reader_threads": 4,
+            "initial_generation": 1,
+            "published_generation": 2,
+            "reader_generation": 1,
+            "reader_action": 1,
+            "fresh_generation": 2,
+            "fresh_action": 0,
+            "returned_old_generation": 1,
+            "returned_old_matches_initial": True,
+            "old_snapshot_alive_before_reader_release": True,
+            "old_snapshot_released_after_reader_release": True,
+            "generation_action_consistent": True,
+            "publish_monotonic": True,
+            "watch_observed_generation": 2,
+            "watch_no_missed_publication": True,
+        },
         "parity_observations": [],
         "scenario_count": len(identifiers),
     }
@@ -145,9 +215,7 @@ def aa_source_report() -> dict[str, object]:
         candidate = report(RUNNER_SHA256, value=104)
         pairs.append({"parent": parent, "candidate": candidate})
         roles = (
-            ("parent", "candidate")
-            if pair_index % 2 == 0
-            else ("candidate", "parent")
+            ("parent", "candidate") if pair_index % 2 == 0 else ("candidate", "parent")
         )
         for order_index, role in enumerate(roles, 1):
             execution_trace.append(
@@ -158,8 +226,13 @@ def aa_source_report() -> dict[str, object]:
                     "runner_sha256": RUNNER_SHA256,
                 }
             )
-    comparisons = summarize(SCENARIO_SUITES, pairs, True, 10.0)
-    limit = calibrated_limit(comparisons)
+    comparisons = summarize(
+        SCENARIO_SUITES,
+        pairs,
+        True,
+        calibration_ceiling_limits(),
+    )
+    limits = calibrated_limits(comparisons)
     return {
         "schema": CONTROL_SCHEMA,
         "generated_unix_millis": 1,
@@ -179,7 +252,7 @@ def aa_source_report() -> dict[str, object]:
         "execution_trace": execution_trace,
         "comparisons": comparisons,
         "threshold_policy": threshold_policy(
-            comparisons, limit, None, None, reviewed=False
+            comparisons, limits, None, None, reviewed=False
         ),
         "raw_pairs": pairs,
         "decision_reason": "A/A evidence requires explicit review",

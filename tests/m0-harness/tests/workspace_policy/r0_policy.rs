@@ -313,7 +313,7 @@ mod workflow_contract;
 
 use workflow_contract::{
     validate_fuzz_workflow_execution, validate_hosted_library_execution,
-    validate_lifecycle_triggers, validate_read_only_permissions, validate_required_job,
+    validate_lifecycle_triggers, validate_required_job, validate_workflow_permissions,
 };
 #[test]
 fn shared_dns_tls_fixtures_match_provenance_and_consumers() {
@@ -594,7 +594,12 @@ fn root_workflows_pin_actions_and_required_contexts_are_stable() {
             continue;
         }
         let source = fs::read_to_string(&path).expect("workflow source");
-        validate_read_only_permissions(&source)
+        let workflow_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("workflow filename");
+        let workflow_path = format!(".github/workflows/{workflow_name}");
+        validate_workflow_permissions(&workflow_path, &source)
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         for line in source.lines().map(str::trim) {
             if let Some(reference) = line.strip_prefix("uses:") {

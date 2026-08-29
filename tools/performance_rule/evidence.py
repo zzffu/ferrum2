@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from tools.performance_rule.json_contract import closed_json_bytes, exact_fields
-from tools.performance_rule.pairing import calibrated_limit, summarize
+from tools.performance_rule.pairing import (
+    calibrated_limits,
+    calibration_ceiling_limits,
+    summarize,
+)
 from tools.performance_rule.policy import threshold_policy
 from tools.performance_rule.runner_report import require_same_scenarios, validate_report
 from tools.performance_rule.schema import (
@@ -21,7 +25,6 @@ from tools.performance_rule.schema import (
     sha256_file,
     validate_pairs,
 )
-
 
 EVIDENCE_MAX_BYTES = 64 * 1024 * 1024
 
@@ -81,9 +84,7 @@ def validate_control_raw_evidence(
     expected_trace: list[dict[str, Any]] = []
     for pair_index in range(pair_count):
         roles = (
-            ("parent", "candidate")
-            if pair_index % 2 == 0
-            else ("candidate", "parent")
+            ("parent", "candidate") if pair_index % 2 == 0 else ("candidate", "parent")
         )
         for order_index, role in enumerate(roles, 1):
             expected_trace.append(
@@ -162,7 +163,9 @@ def validate_control_document(report: Any) -> dict[str, Any]:
     if not isinstance(trace, list):
         raise ControlError("controller execution trace is not a list")
     for entry in trace:
-        exact_fields(entry, EXECUTION_TRACE_FIELDS, label="controller execution trace row")
+        exact_fields(
+            entry, EXECUTION_TRACE_FIELDS, label="controller execution trace row"
+        )
     if report["status"] == CALIBRATION_REQUIRED and not report["raw_pairs"]:
         exact_fields(
             report["threshold_policy"],
@@ -178,7 +181,7 @@ def load_calibration(
     scenario_suites: dict[str, str],
     runner_arguments: list[str],
     runner_priority: str,
-) -> tuple[dict[str, Any], float, str]:
+) -> tuple[dict[str, Any], dict[str, float], str]:
     calibration_path, calibration, calibration_sha256 = read_json_report(
         path, "reviewed A/A calibration"
     )
@@ -193,9 +196,12 @@ def load_calibration(
         "runner_arguments",
         "scenario_suites",
         "execution_policy",
-        "effective_median_limit_percent",
+        "effective_median_limits_percent",
     }
-    if set(calibration) != expected_fields or calibration.get("schema") != CALIBRATION_SCHEMA:
+    if (
+        set(calibration) != expected_fields
+        or calibration.get("schema") != CALIBRATION_SCHEMA
+    ):
         raise ControlError("reviewed calibration schema is invalid")
     if (
         calibration.get("review_status") != "APPROVED"
@@ -218,10 +224,15 @@ def load_calibration(
     ):
         raise ControlError("reviewed calibration source identity changed")
     source_suites, raw_pairs = validate_control_raw_evidence(source_report, "aa")
-    comparisons = summarize(source_suites, raw_pairs, True, 10.0)
-    effective_limit = calibrated_limit(comparisons)
+    comparisons = summarize(
+        source_suites,
+        raw_pairs,
+        True,
+        calibration_ceiling_limits(),
+    )
+    effective_limits = calibrated_limits(comparisons)
     expected_source_policy = threshold_policy(
-        comparisons, effective_limit, None, None, reviewed=False
+        comparisons, effective_limits, None, None, reviewed=False
     )
     if (
         source_report.get("status") != CALIBRATION_REQUIRED
@@ -241,10 +252,10 @@ def load_calibration(
             "raw_reports_retained": True,
             "runner_process_priority": runner_priority,
         }
-        or calibration.get("effective_median_limit_percent") != effective_limit
+        or calibration.get("effective_median_limits_percent") != effective_limits
     ):
         raise ControlError("reviewed calibration does not apply to this run")
-    return calibration, float(effective_limit), calibration_sha256
+    return calibration, effective_limits, calibration_sha256
 
 
 def review_calibration_source(
@@ -254,10 +265,15 @@ def review_calibration_source(
         source_path, "A/A calibration candidate"
     )
     scenario_suites, raw_pairs = validate_control_raw_evidence(source_report, "aa")
-    comparisons = summarize(scenario_suites, raw_pairs, True, 10.0)
-    effective_limit = calibrated_limit(comparisons)
+    comparisons = summarize(
+        scenario_suites,
+        raw_pairs,
+        True,
+        calibration_ceiling_limits(),
+    )
+    effective_limits = calibrated_limits(comparisons)
     expected_policy = threshold_policy(
-        comparisons, effective_limit, None, None, reviewed=False
+        comparisons, effective_limits, None, None, reviewed=False
     )
     if (
         source_report.get("status") != CALIBRATION_REQUIRED
@@ -278,5 +294,5 @@ def review_calibration_source(
         "runner_arguments": source_report["runner_arguments"],
         "scenario_suites": source_report["scenario_suites"],
         "execution_policy": source_report["execution_policy"],
-        "effective_median_limit_percent": effective_limit,
+        "effective_median_limits_percent": effective_limits,
     }

@@ -12,8 +12,9 @@ cargo run --release -p ferrum2-rule-qualification --locked -- \
   --profile smoke --workspace-root .
 ```
 
-The qualification profile covers generated MatchSets at 64, 65, 100, 1,000,
-and 10,000 values; route programs at 1, 32, 64, 1,000, and 10,000 rules; and
+The qualification profile covers generated MatchSets at 8, 32, 64, 65, 100,
+128, 1,000, and 10,000 values; route programs at 1, 8, 32, 64, 128, 1,000,
+and 10,000 rules; and
 DNS query programs at 1, 64, 65, 100, 1,000, and 10,000 rules. The smoke
 profile also retains the MatchSet 64/65 candidate boundary. Add `--include-100k`
 to include the explicitly expensive 100,000-value MatchSet scale:
@@ -28,6 +29,11 @@ and mixed generated inputs for ordinary inline and synthetic RuleSet sources.
 Both sources are measured through `CompiledMatchSet`. The pinned `ads`, `ai`,
 `cn`, and `cnip` binary SRS fixtures are strictly decoded and compiled, with
 their hashes, versions, capabilities, and recovered entry counts recorded.
+Exact and suffix catalogs include stable hit/miss IDs, deep-label suffix hits,
+and uppercase/trailing-dot normalization of a canonical IDNA A-label. Dedicated
+CIDR boundary rows cover IPv4/IPv6 default routes, `/32` and `/128` hosts,
+overlapping prefixes, varied prefix-length distributions, and deterministic
+mixed-family pseudo-random sets at stable small/large scenario IDs.
 
 The qualification profile additionally constructs deterministic canonical SRS
 v2 inputs for each of those six matcher categories at every configured
@@ -61,6 +67,15 @@ indexed boundary and 1,000/10,000 indexed scales; every row records the actual
 program mode and query candidate visits, and indexed last-hit/miss probes must
 remain sublinear. Response, cache, and continuation rows retain their bounded
 1, 100, and 1,000 scales. All DNS rows report p50, p99, and queries/second.
+
+The `snapshot_registry` suite uses the real `RuleEngineRegistry` publication
+interface. Four fixed readers reuse one evaluation scratch each while the
+runner records read-under-publish and publish-under-readers latency. Every
+successor snapshot is fully built before timing. Separate lifecycle evidence
+holds one old generation behind a reader barrier, proves it remains reachable
+through `Weak` and the `publish` return value, then proves release after the
+reader exits. Generation/action consistency, monotonic publication, and a
+post-selection generation watch are always fail-closed correctness contracts.
 
 Every latency sample, p50, p99, build time, environment fingerprint, git HEAD,
 git tree and dirty-state digest, and runner SHA-256 is retained in JSON. Each
@@ -106,7 +121,7 @@ only for evidence collection:
 - `candidate-cidr-radix`
 - `candidate-atomic-snapshot`
 
-The runner forwards each feature to `ferrum2-rule`. Report schema v2 records the
+The runner forwards each feature to `ferrum2-rule`. Report schema v3 records the
 sorted exact feature list under `candidate.enabled_features` and always records
 `candidate.adoption_claim` as `false`. There is no production configuration
 switch and a qualification result does not adopt a candidate.
@@ -153,10 +168,12 @@ The only controller entry point is `python -B -m tools.performance_rule`.
 The `run` command enforces exactly six pairs so parent/candidate process order
 is one closed, balanced ABBA schedule. It validates every runner-reported
 SHA-256 and scenario suite, retains all raw reports, and applies the outer median
-gate only to `match_set`. Route/DNS medians and all cross-process p99 values
-remain observations.
+gate to `match_set` and conditionally to `snapshot_registry` only when the
+candidate enables `candidate-atomic-snapshot`. Route/DNS medians, snapshot rows
+for domain/CIDR-only candidates, and all cross-process p99 values remain
+observations.
 
-Production accepts only controller v6 and reviewed-calibration v2. A current A/A
+Production accepts only controller v7 and reviewed-calibration v3. A current A/A
 run always returns `CALIBRATION_REQUIRED`; it cannot approve itself. Historical
 v2/v3/v4 reports are immutable provenance and are understood only by the
 test-owned archive verifier after complete-file hash verification.
@@ -167,17 +184,17 @@ Collect a current A/A calibration candidate:
 python3 -B -m tools.performance_rule run \
   --parent target/performance-rule-parent/ferrum2-rule-qualification.exe \
   --pairs 6 --runner-priority high \
-  --output tests/performance_rule/release-aa-v6.json \
-  -- --profile smoke --samples 501 --workspace-root .
+  --output tests/performance_rule/release-aa-v7.json \
+  -- --profile qualification --samples 101 --workspace-root .
 ```
 
 After explicit review, create a separate source-hash-bound calibration artifact:
 
 ```text
 python3 -B -m tools.performance_rule review-calibration \
-  --source-report tests/performance_rule/release-aa-v6.json \
+  --source-report tests/performance_rule/release-aa-v7.json \
   --reviewed-by REVIEWER_ID --reviewed-utc YYYY-MM-DDTHH:MM:SSZ \
-  --output tests/performance_rule/reviewed-aa-v2.json
+  --output tests/performance_rule/reviewed-aa-v3.json
 ```
 
 Then run A/B with the same parent runner, arguments, priority, and scenario suite:
@@ -186,16 +203,17 @@ Then run A/B with the same parent runner, arguments, priority, and scenario suit
 python3 -B -m tools.performance_rule run \
   --parent /path/to/parent/ferrum2-rule-qualification \
   --candidate /path/to/candidate/ferrum2-rule-qualification \
-  --calibration tests/performance_rule/reviewed-aa-v2.json \
+  --calibration tests/performance_rule/reviewed-aa-v3.json \
   --pairs 6 --runner-priority high \
-  --output tests/performance_rule/release-ab-v6.json \
-  -- --profile smoke --samples 501 --workspace-root .
+  --output tests/performance_rule/release-ab-v7.json \
+  -- --profile qualification --samples 101 --workspace-root .
 ```
 
 Without a reviewed current-schema calibration, A/B stops before runner execution.
-The MatchSet median limit remains bounded by 10%; route/DNS and cross-process p99
-remain diagnostic observations. The candidate-only qualification matrix remains
-a separate runner invocation and must not be mixed with smoke calibration.
+MatchSet and snapshot-registry A/A noise limits are calibrated separately and
+remain bounded by 10%; an atomic/all A/B uses both reviewed limits. Route/DNS,
+domain/CIDR-only snapshot rows, and cross-process p99 remain diagnostic
+observations. Candidate-only qualification remains a separate runner invocation.
 
 Run ordinary controller and compact evidence-contract tests with:
 

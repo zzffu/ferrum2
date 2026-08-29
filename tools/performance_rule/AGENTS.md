@@ -9,8 +9,8 @@ policy, calibration evidence, and schema contracts stay with their named owners.
 
 ## Evidence and calibration
 
-Production accepts only the current v6 controller report and current reviewed
-calibration v2 schema. Historical v2/v3/v4 verification is test-owned under
+Production accepts only the current runner v3, controller v7, and reviewed
+calibration v3 schemas. Historical controller v2/v3/v4 verification is test-owned under
 `tests/performance_rule/archive_verifier.py` and must never be imported by the
 active package. A newly collected A/A report remains `CALIBRATION_REQUIRED` until
 an operator explicitly reviews it into a separate artifact bound to the source

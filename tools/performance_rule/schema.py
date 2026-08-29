@@ -9,11 +9,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
-RUNNER_SCHEMA = "ferrum2.rule-qualification.v2"
-CONTROL_SCHEMA = "ferrum2.rule-qualification-control.v6"
-CALIBRATION_SCHEMA = "ferrum2.rule-qualification-calibration.v2"
-THRESHOLD_POLICY_VERSION = "section-5.7-match-set-median-gates.v5"
+RUNNER_SCHEMA = "ferrum2.rule-qualification.v3"
+CONTROL_SCHEMA = "ferrum2.rule-qualification-control.v7"
+CALIBRATION_SCHEMA = "ferrum2.rule-qualification-calibration.v3"
+THRESHOLD_POLICY_VERSION = "section-5.7-and-rule-04-conditional-median-gates.v6"
 PAIR_COUNT = 6
 LOCAL_TARGET_PERCENT = 5.0
 NOISY_GATE_CEILING_PERCENT = 10.0
@@ -25,6 +24,17 @@ RUNNER_PRIORITY_HIGH = "high"
 MATCH_SET_SUITE = "match_set"
 ROUTE_PROGRAM_SUITE = "route_program"
 DNS_POLICY_SUITE = "dns_policy"
+SNAPSHOT_REGISTRY_SUITE = "snapshot_registry"
+ATOMIC_SNAPSHOT_FEATURE = "candidate-atomic-snapshot"
+SNAPSHOT_READER_THREADS = 4
+SMOKE_MATCH_SIZES = (64, 65, 100)
+SMOKE_ROUTE_SIZES = (1, 32, 64)
+SMOKE_DNS_RULE_SIZES = (1,)
+QUALIFICATION_MATCH_SIZES = (8, 32, 64, 65, 100, 128, 1_000, 10_000)
+QUALIFICATION_ROUTE_SIZES = (1, 8, 32, 64, 128, 1_000, 10_000)
+QUALIFICATION_DNS_RULE_SIZES = (1, 64, 65, 100, 1_000, 10_000)
+WORKFLOW_SAMPLES = 101
+WORKFLOW_BASE_ITERATIONS = 8_192
 
 CALIBRATION_REQUIRED = "CALIBRATION_REQUIRED"
 CANDIDATE_WIN = "CANDIDATE_WIN"
@@ -46,11 +56,36 @@ SUITE_POLICY = {
         "scope_authority": "plan.section_17_3",
         "median_classification": "observed_cross_process",
     },
+    SNAPSHOT_REGISTRY_SUITE: {
+        "scope_authority": "plan.rule_04",
+        "median_classification": "candidate_conditional",
+        "candidate_feature": ATOMIC_SNAPSHOT_FEATURE,
+    },
 }
 
 
 class ControlError(RuntimeError):
     """Closed controller input or evidence failure."""
+
+
+def expected_profile_sizes(
+    profile: str, includes_100k: bool
+) -> tuple[list[int], list[int], list[int]]:
+    if type(includes_100k) is not bool:
+        raise ControlError("runner 100k configuration is invalid")
+    if profile == "smoke":
+        match_sizes = list(SMOKE_MATCH_SIZES)
+        route_sizes = list(SMOKE_ROUTE_SIZES)
+        dns_rule_sizes = list(SMOKE_DNS_RULE_SIZES)
+    elif profile == "qualification":
+        match_sizes = list(QUALIFICATION_MATCH_SIZES)
+        route_sizes = list(QUALIFICATION_ROUTE_SIZES)
+        dns_rule_sizes = list(QUALIFICATION_DNS_RULE_SIZES)
+    else:
+        raise ControlError("runner profile is invalid")
+    if includes_100k:
+        match_sizes.append(100_000)
+    return match_sizes, route_sizes, dns_rule_sizes
 
 
 def sha256_file(path: Path) -> str:

@@ -16,6 +16,7 @@ from tools.performance_rule.schema import (
     P99_TARGET_PERCENT,
     REGRESSION,
     ROUTE_PROGRAM_SUITE,
+    SNAPSHOT_REGISTRY_SUITE,
     SUITE_POLICY,
     THRESHOLD_POLICY_VERSION,
     WITHIN_CALIBRATED_BAND,
@@ -32,7 +33,7 @@ def observed_suite_summary(
     comparisons: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for suite in (ROUTE_PROGRAM_SUITE, DNS_POLICY_SUITE):
+    for suite in (ROUTE_PROGRAM_SUITE, DNS_POLICY_SUITE, SNAPSHOT_REGISTRY_SUITE):
         rows = [row for row in comparisons if row.get("suite") == suite]
         result[suite] = {
             "comparison_count": len(rows),
@@ -65,19 +66,47 @@ def calibration_required_policy() -> dict[str, Any]:
 
 def threshold_policy(
     comparisons: list[dict[str, Any]],
-    effective_median_limit: float,
+    effective_median_limits: dict[str, float],
     calibration_source: str | None,
     calibration_sha256: str | None,
     *,
     reviewed: bool,
 ) -> dict[str, Any]:
+    if set(effective_median_limits) != {
+        MATCH_SET_SUITE,
+        SNAPSHOT_REGISTRY_SUITE,
+    } or any(
+        type(limit) not in (int, float) or not 0 < limit <= NOISY_GATE_CEILING_PERCENT
+        for limit in effective_median_limits.values()
+    ):
+        raise ControlError("reviewed median calibration limits are invalid")
     hard_gate_rows = [
         row for row in comparisons if row.get("median_gate_applicable") is True
     ]
-    if not hard_gate_rows or any(
-        row.get("suite") != MATCH_SET_SUITE for row in hard_gate_rows
+    match_rows = [row for row in comparisons if row.get("suite") == MATCH_SET_SUITE]
+    snapshot_rows = [
+        row for row in comparisons if row.get("suite") == SNAPSHOT_REGISTRY_SUITE
+    ]
+    if (
+        not match_rows
+        or not snapshot_rows
+        or any(row.get("median_gate_applicable") is not True for row in match_rows)
+        or any(
+            row.get("suite") not in {MATCH_SET_SUITE, SNAPSHOT_REGISTRY_SUITE}
+            for row in hard_gate_rows
+        )
     ):
-        raise ControlError("outer median gate scope is not exactly match_set")
+        raise ControlError("outer median gate scope is incomplete")
+    conditional_states = {row.get("conditional_gate_enabled") for row in snapshot_rows}
+    if len(conditional_states) != 1 or not conditional_states.issubset({True, False}):
+        raise ControlError("snapshot conditional feature evidence is inconsistent")
+    snapshot_gate_expected = not reviewed or conditional_states == {True}
+    if any(
+        row.get("median_gate_applicable") is not snapshot_gate_expected
+        or row.get("median_classification") != "candidate_conditional"
+        for row in snapshot_rows
+    ):
+        raise ControlError("snapshot conditional gate applicability is invalid")
     observed_rows = [
         row for row in comparisons if row.get("median_gate_applicable") is False
     ]
@@ -89,23 +118,29 @@ def threshold_policy(
     observed_candidate_win = observed_gate_passed and any(
         row["median_decision"] == "improved" for row in hard_gate_rows
     )
+    hard_gate_suites = [MATCH_SET_SUITE]
+    if snapshot_gate_expected:
+        hard_gate_suites.append(SNAPSHOT_REGISTRY_SUITE)
+    observed_suites = [ROUTE_PROGRAM_SUITE, DNS_POLICY_SUITE]
+    if not snapshot_gate_expected:
+        observed_suites.append(SNAPSHOT_REGISTRY_SUITE)
     status = (
         CALIBRATION_REQUIRED
         if not reviewed
-        else REGRESSION
-        if not observed_gate_passed
-        else CANDIDATE_WIN
-        if observed_candidate_win
-        else WITHIN_CALIBRATED_BAND
+        else (
+            REGRESSION
+            if not observed_gate_passed
+            else CANDIDATE_WIN if observed_candidate_win else WITHIN_CALIBRATED_BAND
+        )
     )
     return {
         "version": THRESHOLD_POLICY_VERSION,
         "status": status,
         "reviewed": reviewed,
-        "gate_metric": "cross_process_median_p50_match_set_only",
+        "gate_metric": "cross_process_median_p50_by_reviewed_suite",
         "suite_policy": {suite: dict(policy) for suite, policy in SUITE_POLICY.items()},
-        "hard_gate_suites": [MATCH_SET_SUITE],
-        "observed_suites": [ROUTE_PROGRAM_SUITE, DNS_POLICY_SUITE],
+        "hard_gate_suites": hard_gate_suites,
+        "observed_suites": observed_suites,
         "hard_gate_comparison_count": len(hard_gate_rows),
         "observed_comparison_count": len(observed_rows),
         "observed_suite_summary": observed_suite_summary(comparisons),
@@ -115,7 +150,9 @@ def threshold_policy(
         "p99_classification": P99_CLASSIFICATION,
         "p99_gate_applicable": False,
         "p99_gate_owner": P99_GATE_OWNER,
-        "calibrated_median_limit_percent": effective_median_limit,
+        "calibrated_median_limits_percent": dict(
+            sorted(effective_median_limits.items())
+        ),
         "calibration_source": calibration_source,
         "calibration_sha256": calibration_sha256,
         "enforced": reviewed,
@@ -123,10 +160,10 @@ def threshold_policy(
         "decision": (
             "calibration_required"
             if not reviewed
-            else "improved"
-            if observed_candidate_win
-            else "passed"
-            if observed_gate_passed
-            else "failed"
+            else (
+                "improved"
+                if observed_candidate_win
+                else "passed" if observed_gate_passed else "failed"
+            )
         ),
     }

@@ -1,8 +1,42 @@
 name: performance-rule
 
 on:
+  workflow_call:
+    inputs:
+      stage:
+        description: "Collect same-binary calibration or compare one reviewed candidate"
+        required: true
+        type: string
+      candidate_sha:
+        description: "Exact full commit SHA containing the candidate and this workflow"
+        required: true
+        type: string
+      calibration_run_id:
+        description: "Successful calibration caller run ID (comparison only)"
+        required: false
+        type: number
+        default: 0
+      reviewed_by:
+        description: "Explicit calibration reviewer identity (comparison only)"
+        required: false
+        type: string
+        default: ""
+      reviewed_utc:
+        description: "Explicit calibration review time as YYYY-MM-DDTHH:MM:SSZ"
+        required: false
+        type: string
+        default: ""
+      candidate_feature:
+        description: "Default-off candidate compiled only for comparison"
+        required: false
+        type: string
+        default: domain
   workflow_dispatch:
     inputs:
+      candidate_sha:
+        description: "Exact full commit SHA containing the candidate and this workflow"
+        required: true
+        type: string
       stage:
         description: "Collect same-binary calibration or compare one reviewed candidate"
         required: true
@@ -14,7 +48,8 @@ on:
       calibration_run_id:
         description: "Successful performance-rule calibration workflow run ID (comparison only)"
         required: false
-        type: string
+        type: number
+        default: 0
       reviewed_by:
         description: "Explicit calibration reviewer identity (comparison only)"
         required: false
@@ -40,10 +75,41 @@ permissions:
 
 env:
   RUSTUP_TOOLCHAIN: "1.97.1"
+  CANDIDATE_SHA: ${{ inputs.candidate_sha }}
 
 jobs:
+  invocation:
+    name: invocation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      STAGE: ${{ inputs.stage }}
+      CALIBRATION_RUN_ID: ${{ inputs.calibration_run_id }}
+      REVIEWED_BY: ${{ inputs.reviewed_by }}
+      REVIEWED_UTC: ${{ inputs.reviewed_utc }}
+      FEATURE_KEY: ${{ inputs.candidate_feature }}
+    steps:
+      - name: Validate exact reusable workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$STAGE" in
+            calibration-aa)
+              test "$CALIBRATION_RUN_ID" = 0
+              test -z "$REVIEWED_BY" && test -z "$REVIEWED_UTC"
+              ;;
+            comparison)
+              [[ "$CALIBRATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              test -n "$REVIEWED_BY" && test -n "$REVIEWED_UTC"
+              [[ "$FEATURE_KEY" =~ ^(domain|cidr|atomic|all)$ ]]
+              ;;
+            *) exit 2 ;;
+          esac
+
   calibration-aa:
     name: calibration-aa
+    needs: invocation
     if: ${{ inputs.stage == 'calibration-aa' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -51,7 +117,7 @@ jobs:
       - name: Checkout exact calibration source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.candidate_sha }}
           fetch-depth: 1
           clean: true
           persist-credentials: false
@@ -63,13 +129,12 @@ jobs:
           evidence="$RUNNER_TEMP/performance-rule/calibration"
           parent_target="$RUNNER_TEMP/performance-rule/parent-target"
           parent_binary="$evidence/parent/ferrum2-rule-qualification"
-          aa_report="$evidence/release-aa-v6.json"
           mkdir -p "$evidence/parent"
           {
             printf 'CALIBRATION_EVIDENCE=%s\n' "$evidence"
             printf 'PARENT_TARGET=%s\n' "$parent_target"
             printf 'PARENT_BINARY=%s\n' "$parent_binary"
-            printf 'AA_REPORT=%s\n' "$aa_report"
+            printf 'AA_REPORT=%s\n' "$evidence/release-aa-v7.json"
             printf 'HOST_IDENTITY=%s\n' "$evidence/host-identity.json"
           } >>"$GITHUB_ENV"
 
@@ -77,70 +142,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test "$(git status --porcelain=v1 --untracked-files=normal)" = ""
-          test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
-          python3 -B - <<'PY'
-          import json
-          import os
-          import pathlib
-          import re
-          import subprocess
-
-
-          cpuinfo = pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8")
-          vendor_ids = sorted(
-              set(re.findall(r"^vendor_id\s*:\s*(.+?)\s*$", cpuinfo, re.MULTILINE))
-          )
-          cpu_models = sorted(
-              set(re.findall(r"^model name\s*:\s*(.+?)\s*$", cpuinfo, re.MULTILINE))
-          )
-          meminfo = pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
-          memory_match = re.search(r"^MemTotal:\s*([0-9]+)\s+kB$", meminfo, re.MULTILINE)
-          identity = {
-              "schema": "ferrum2.performance-rule-host.v1",
-              "cpu_vendor": vendor_ids[0] if len(vendor_ids) == 1 else "UNKNOWN",
-              "cpu_model": cpu_models[0] if len(cpu_models) == 1 else "UNKNOWN",
-              "logical_cpus": os.cpu_count() or 0,
-              "memory_kib": int(memory_match.group(1)) if memory_match else 0,
-              "kernel": subprocess.check_output(
-                  ["uname", "-srvmo"], text=True, encoding="utf-8"
-              ).strip(),
-              "runner_os": os.environ.get("RUNNER_OS", ""),
-              "runner_arch": os.environ.get("RUNNER_ARCH", ""),
-              "runner_environment": os.environ.get("RUNNER_ENVIRONMENT", ""),
-              "image_os": os.environ.get("ImageOS", ""),
-              "image_version": os.environ.get("ImageVersion", ""),
-          }
-          output = pathlib.Path(os.environ["HOST_IDENTITY"])
-          output.write_text(
-              json.dumps(identity, indent=2, sort_keys=True, allow_nan=False) + "\n",
-              encoding="utf-8",
-          )
-          if identity["cpu_vendor"] != "AuthenticAMD":
-              raise SystemExit(
-                  "AMD preflight failed before Rust install/build/workload: "
-                  f"{identity['cpu_vendor']} / {identity['cpu_model']}"
-              )
-          required = (
-              "cpu_model",
-              "logical_cpus",
-              "memory_kib",
-              "kernel",
-              "runner_os",
-              "runner_arch",
-              "runner_environment",
-              "image_os",
-              "image_version",
-          )
-          if any(identity[field] in ("", 0, "UNKNOWN") for field in required):
-              raise SystemExit("AMD host identity is incomplete")
-          print(
-              "AMD preflight passed before Rust install/build/workload: "
-              f"{identity['cpu_model']} / {identity['image_os']} "
-              f"{identity['image_version']}"
-          )
-          PY
+          python3 -B -m tools.ci.performance_rule_workflow capture-host \
+            --output "$HOST_IDENTITY"
 
       - name: Install pinned Rust toolchain
         shell: bash
@@ -163,17 +168,17 @@ jobs:
             "$PARENT_BINARY"
           test -x "$PARENT_BINARY"
 
-      - name: Collect controller v6 six-pair A/A smoke evidence
+      - name: Collect controller v7 six-pair A/A qualification evidence
         shell: bash
         run: |
           set -euo pipefail
-          aa_stdout="$RUNNER_TEMP/performance-rule/release-aa-v6.stdout.json"
+          aa_stdout="$RUNNER_TEMP/performance-rule/release-aa-v7.stdout.json"
           set +e
           python3 -B -m tools.performance_rule run \
             --parent "$PARENT_BINARY" \
             --pairs 6 \
             --output "$AA_REPORT" \
-            -- --profile smoke --samples 501 --workspace-root . \
+            -- --profile qualification --samples 101 --workspace-root . \
             >"$aa_stdout"
           controller_status=$?
           set -e
@@ -186,123 +191,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B - <<'PY'
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import subprocess
-
-          from tools.performance_rule.evidence import (
-              read_json_report,
-              validate_control_raw_evidence,
-          )
-
-
-          evidence = pathlib.Path(os.environ["CALIBRATION_EVIDENCE"])
-          parent = pathlib.Path(os.environ["PARENT_BINARY"])
-          aa_path = pathlib.Path(os.environ["AA_REPORT"])
-          host_path = pathlib.Path(os.environ["HOST_IDENTITY"])
-          source_sha = subprocess.check_output(
-              ["git", "rev-parse", "HEAD"], text=True, encoding="utf-8"
-          ).strip()
-          source_tree = subprocess.check_output(
-              ["git", "rev-parse", "HEAD^{tree}"], text=True, encoding="utf-8"
-          ).strip()
-          if source_sha != os.environ["GITHUB_SHA"]:
-              raise SystemExit("calibration source SHA changed")
-          _, aa_report, _ = read_json_report(aa_path, "workflow A/A evidence")
-          _, raw_pairs = validate_control_raw_evidence(aa_report, "aa")
-          expected_arguments = [
-              "--profile",
-              "smoke",
-              "--samples",
-              "501",
-              "--workspace-root",
-              ".",
-          ]
-          def sha256_file(path: pathlib.Path) -> str:
-              digest = hashlib.sha256()
-              with path.open("rb") as source:
-                  for block in iter(lambda: source.read(64 * 1024), b""):
-                      digest.update(block)
-              return digest.hexdigest()
-
-
-          parent_sha256 = sha256_file(parent)
-          if (
-              aa_report["schema"] != "ferrum2.rule-qualification-control.v6"
-              or aa_report["status"] != "CALIBRATION_REQUIRED"
-              or aa_report["pairs"] != 6
-              or aa_report["runner_arguments"] != expected_arguments
-              or aa_report["parent_runner_sha256"] != parent_sha256
-              or aa_report["candidate_runner_sha256"] != parent_sha256
-          ):
-              raise SystemExit("A/A controller identity is not the registered v6 contract")
-          expected_repository = {
-              "git_head": source_sha,
-              "git_tree": source_tree,
-              "tree_state": "clean",
-              "changed_entries": 0,
-              "status_sha256": hashlib.sha256(b"").hexdigest(),
-          }
-          runner_environment = None
-          for pair in raw_pairs:
-              for role in ("parent", "candidate"):
-                  runner = pair[role]
-                  if (
-                      runner["repository"] != expected_repository
-                      or runner["runner"]["sha256"] != parent_sha256
-                      or runner["runner"]["bytes"] != parent.stat().st_size
-                      or runner["candidate"]
-                      != {"adoption_claim": False, "enabled_features": []}
-                      or runner["profile"] != "smoke"
-                      or runner["configuration"]["samples"] != 501
-                      or runner["configuration"]["includes_100k"] is not False
-                  ):
-                      raise SystemExit("A/A raw runner identity is inconsistent")
-                  if runner_environment is None:
-                      runner_environment = runner["environment"]
-                  elif runner["environment"] != runner_environment:
-                      raise SystemExit("A/A runner environment changed within the schedule")
-
-          def artifact(path: pathlib.Path, relative: str) -> dict[str, object]:
-              return {
-                  "path": relative,
-                  "bytes": path.stat().st_size,
-                  "sha256": sha256_file(path),
-              }
-
-
-          manifest = {
-              "schema": "ferrum2.performance-rule-calibration-bundle.v1",
-              "artifact_name": (
-                  f"performance-rule-calibration-{os.environ['GITHUB_RUN_ID']}-"
-                  f"{os.environ['GITHUB_RUN_ATTEMPT']}"
-              ),
-              "repository": os.environ["GITHUB_REPOSITORY"],
-              "workflow_path": ".github/workflows/performance-rule.yml",
-              "calibration_run_id": int(os.environ["GITHUB_RUN_ID"]),
-              "calibration_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-              "source_sha": source_sha,
-              "source_tree": source_tree,
-              "controller_schema": "ferrum2.rule-qualification-control.v6",
-              "pairs": 6,
-              "runner_arguments": expected_arguments,
-              "controller_exit": artifact(
-                  evidence / "controller-exit-code.txt", "controller-exit-code.txt"
-              ),
-              "parent_binary": artifact(
-                  parent, "parent/ferrum2-rule-qualification"
-              ),
-              "aa_report": artifact(aa_path, "release-aa-v6.json"),
-              "host_identity": artifact(host_path, "host-identity.json"),
-          }
-          (evidence / "calibration-manifest.json").write_text(
-              json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          python3 -B -m tools.ci.performance_rule_workflow calibration-manifest \
+            --evidence "$CALIBRATION_EVIDENCE" \
+            --parent "$PARENT_BINARY" \
+            --aa-report "$AA_REPORT" \
+            --host-identity "$HOST_IDENTITY" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --expected-sha "$CANDIDATE_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$CALIBRATION_EVIDENCE/calibration-manifest.json"
 
       - name: Upload calibration evidence and exact parent
         if: ${{ always() }}
@@ -315,6 +214,7 @@ jobs:
 
   comparison:
     name: comparison
+    needs: invocation
     if: ${{ inputs.stage == 'comparison' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -327,7 +227,7 @@ jobs:
       - name: Checkout exact comparison source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.candidate_sha }}
           fetch-depth: 1
           clean: true
           persist-credentials: false
@@ -336,133 +236,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B - <<'PY'
-          import datetime
-          import os
-          import re
-
-
-          run_id = os.environ["CALIBRATION_RUN_ID"]
-          reviewed_by = os.environ["REVIEWED_BY"]
-          reviewed_utc = os.environ["REVIEWED_UTC"]
-          if not re.fullmatch(r"[1-9][0-9]*", run_id):
-              raise SystemExit("comparison requires one positive calibration_run_id")
-          if run_id == os.environ["GITHUB_RUN_ID"]:
-              raise SystemExit("comparison cannot consume its own workflow run")
-          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@:/-]{0,127}", reviewed_by):
-              raise SystemExit("reviewed_by is not a bounded reviewer identity")
-          if not re.fullmatch(
-              r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
-              reviewed_utc,
-          ):
-              raise SystemExit("reviewed_utc is not canonical UTC")
-          datetime.datetime.strptime(reviewed_utc, "%Y-%m-%dT%H:%M:%SZ")
-          PY
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
           test "$(git status --porcelain=v1 --untracked-files=normal)" = ""
-          root="$RUNNER_TEMP/performance-rule"
-          downloaded="$root/downloaded-calibration"
-          comparison="$root/comparison"
-          mkdir -p "$downloaded" "$comparison/parent" "$comparison/candidate"
-          case "$FEATURE_KEY" in
-            domain)
-              candidate_features="candidate-domain-suffix-trie"
-              expected_features='["candidate-domain-suffix-trie"]'
-              ;;
-            cidr)
-              candidate_features="candidate-cidr-radix"
-              expected_features='["candidate-cidr-radix"]'
-              ;;
-            atomic)
-              candidate_features="candidate-atomic-snapshot"
-              expected_features='["candidate-atomic-snapshot"]'
-              ;;
-            all)
-              candidate_features="candidate-atomic-snapshot,candidate-cidr-radix,candidate-domain-suffix-trie"
-              expected_features='["candidate-atomic-snapshot","candidate-cidr-radix","candidate-domain-suffix-trie"]'
-              ;;
-            *) exit 1 ;;
-          esac
-          {
-            printf 'DOWNLOADED_CALIBRATION=%s\n' "$downloaded"
-            printf 'COMPARISON_EVIDENCE=%s\n' "$comparison"
-            printf 'COMPARISON_HOST_IDENTITY=%s\n' "$comparison/host-identity.json"
-            printf 'CANDIDATE_TARGET=%s\n' "$root/candidate-target"
-            printf 'CALIBRATED_PARENT=%s\n' "$comparison/parent/ferrum2-rule-qualification"
-            printf 'CANDIDATE_BINARY=%s\n' "$comparison/candidate/ferrum2-rule-qualification"
-            printf 'REVIEWED_CALIBRATION=%s\n' "$comparison/reviewed-aa-v2.json"
-            printf 'AB_REPORT=%s\n' "$comparison/release-ab-v6.json"
-            printf 'QUALIFICATION_REPORT=%s\n' "$comparison/candidate-qualification.json"
-            printf 'CANDIDATE_FEATURES=%s\n' "$candidate_features"
-            printf 'EXPECTED_FEATURES_JSON=%s\n' "$expected_features"
-          } >>"$GITHUB_ENV"
+          python3 -B -m tools.ci.performance_rule_workflow prepare-comparison \
+            --root "$RUNNER_TEMP/performance-rule" \
+            --github-env "$GITHUB_ENV" \
+            --run-id "$CALIBRATION_RUN_ID" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --reviewed-by "$REVIEWED_BY" \
+            --reviewed-utc "$REVIEWED_UTC" \
+            --feature "$FEATURE_KEY"
 
       - name: Require exact AMD comparison host identity
         shell: bash
         run: |
           set -euo pipefail
-          test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
-          python3 -B - <<'PY'
-          import json
-          import os
-          import pathlib
-          import re
-          import subprocess
-
-
-          cpuinfo = pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8")
-          vendor_ids = sorted(
-              set(re.findall(r"^vendor_id\s*:\s*(.+?)\s*$", cpuinfo, re.MULTILINE))
-          )
-          cpu_models = sorted(
-              set(re.findall(r"^model name\s*:\s*(.+?)\s*$", cpuinfo, re.MULTILINE))
-          )
-          meminfo = pathlib.Path("/proc/meminfo").read_text(encoding="utf-8")
-          memory_match = re.search(r"^MemTotal:\s*([0-9]+)\s+kB$", meminfo, re.MULTILINE)
-          identity = {
-              "schema": "ferrum2.performance-rule-host.v1",
-              "cpu_vendor": vendor_ids[0] if len(vendor_ids) == 1 else "UNKNOWN",
-              "cpu_model": cpu_models[0] if len(cpu_models) == 1 else "UNKNOWN",
-              "logical_cpus": os.cpu_count() or 0,
-              "memory_kib": int(memory_match.group(1)) if memory_match else 0,
-              "kernel": subprocess.check_output(
-                  ["uname", "-srvmo"], text=True, encoding="utf-8"
-              ).strip(),
-              "runner_os": os.environ.get("RUNNER_OS", ""),
-              "runner_arch": os.environ.get("RUNNER_ARCH", ""),
-              "runner_environment": os.environ.get("RUNNER_ENVIRONMENT", ""),
-              "image_os": os.environ.get("ImageOS", ""),
-              "image_version": os.environ.get("ImageVersion", ""),
-          }
-          output = pathlib.Path(os.environ["COMPARISON_HOST_IDENTITY"])
-          output.write_text(
-              json.dumps(identity, indent=2, sort_keys=True, allow_nan=False) + "\n",
-              encoding="utf-8",
-          )
-          if identity["cpu_vendor"] != "AuthenticAMD":
-              raise SystemExit(
-                  "comparison AMD preflight failed before Rust install/build/workload: "
-                  f"{identity['cpu_vendor']} / {identity['cpu_model']}"
-              )
-          required = (
-              "cpu_model",
-              "logical_cpus",
-              "memory_kib",
-              "kernel",
-              "runner_os",
-              "runner_arch",
-              "runner_environment",
-              "image_os",
-              "image_version",
-          )
-          if any(identity[field] in ("", 0, "UNKNOWN") for field in required):
-              raise SystemExit("comparison AMD host identity is incomplete")
-          print(
-              "comparison AMD preflight passed before Rust install/build/workload: "
-              f"{identity['cpu_model']} / {identity['image_os']} "
-              f"{identity['image_version']}"
-          )
-          PY
+          python3 -B -m tools.ci.performance_rule_workflow capture-host \
+            --output "$COMPARISON_HOST_IDENTITY"
 
       - name: Resolve one successful calibration workflow attempt
         shell: bash
@@ -470,58 +260,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 -B - <<'PY'
-          import json
-          import os
-          import pathlib
-          import subprocess
-          import urllib.request
-
-
-          run_id = int(os.environ["CALIBRATION_RUN_ID"])
-          local_sha = subprocess.check_output(
-              ["git", "rev-parse", "HEAD"], text=True, encoding="utf-8"
-          ).strip()
-          api_url = (
-              f"{os.environ['GITHUB_API_URL']}/repos/"
-              f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}"
-          )
-          request = urllib.request.Request(
-              api_url,
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
-          )
-          with urllib.request.urlopen(request, timeout=30) as response:
-              source_bytes = response.read(1024 * 1024 + 1)
-          if len(source_bytes) > 1024 * 1024:
-              raise SystemExit("calibration workflow API response is oversized")
-          source_run = json.loads(source_bytes)
-          attempt = source_run.get("run_attempt")
-          if (
-              source_run.get("id") != run_id
-              or source_run.get("event") != "workflow_dispatch"
-              or source_run.get("status") != "completed"
-              or source_run.get("conclusion") != "success"
-              or source_run.get("head_sha") != local_sha
-              or source_run.get("path") != ".github/workflows/performance-rule.yml"
-              or type(attempt) is not int
-              or attempt <= 0
-              or source_run.get("repository", {}).get("full_name")
-              != os.environ["GITHUB_REPOSITORY"]
-          ):
-              raise SystemExit("calibration workflow run identity is not approved")
-          with pathlib.Path(os.environ["GITHUB_ENV"]).open(
-              "a", encoding="utf-8", newline="\n"
-          ) as environment:
-              environment.write(f"CALIBRATION_RUN_ATTEMPT={attempt}\n")
-              environment.write(
-                  f"CALIBRATION_ARTIFACT_NAME=performance-rule-calibration-"
-                  f"{run_id}-{attempt}\n"
-              )
-          PY
+          python3 -B -m tools.ci.performance_rule_workflow resolve-calibration \
+            --run-id "$CALIBRATION_RUN_ID" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --expected-sha "$CANDIDATE_SHA" \
+            --api-url "$GITHUB_API_URL" \
+            --github-env "$GITHUB_ENV"
 
       - name: Download exact calibration run artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -536,203 +281,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B - <<'PY'
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import subprocess
-
-          from tools.performance_rule.evidence import (
-              read_json_report,
-              validate_control_raw_evidence,
-          )
-
-
-          def strict_object(pairs):
-              value = {}
-              for key, item in pairs:
-                  if key in value:
-                      raise ValueError(f"duplicate JSON field: {key}")
-                  value[key] = item
-              return value
-
-
-          def strict_json(path: pathlib.Path, maximum: int):
-              if path.is_symlink() or not path.is_file() or path.stat().st_size > maximum:
-                  raise SystemExit(f"invalid bounded artifact: {path.name}")
-              return json.loads(
-                  path.read_text(encoding="utf-8"), object_pairs_hook=strict_object
-              )
-
-
-          def sha256_file(path: pathlib.Path) -> str:
-              digest = hashlib.sha256()
-              with path.open("rb") as source:
-                  for block in iter(lambda: source.read(64 * 1024), b""):
-                      digest.update(block)
-              return digest.hexdigest()
-
-
-          root = pathlib.Path(os.environ["DOWNLOADED_CALIBRATION"]).resolve(strict=True)
-          expected_files = {
-              "calibration-manifest.json",
-              "host-identity.json",
-              "release-aa-v6.json",
-              "parent/ferrum2-rule-qualification",
-              "controller-exit-code.txt",
-          }
-          observed_files = set()
-          for path in root.rglob("*"):
-              if path.is_symlink():
-                  raise SystemExit("calibration artifact contains a symbolic link")
-              if path.is_file():
-                  observed_files.add(path.relative_to(root).as_posix())
-          if observed_files != expected_files:
-              raise SystemExit(
-                  f"calibration artifact file closure changed: {sorted(observed_files)}"
-              )
-          manifest_path = root / "calibration-manifest.json"
-          manifest = strict_json(manifest_path, 64 * 1024)
-          expected_manifest_fields = {
-              "schema",
-              "artifact_name",
-              "repository",
-              "workflow_path",
-              "calibration_run_id",
-              "calibration_run_attempt",
-              "source_sha",
-              "source_tree",
-              "controller_schema",
-              "pairs",
-              "runner_arguments",
-              "controller_exit",
-              "parent_binary",
-              "aa_report",
-              "host_identity",
-          }
-          if set(manifest) != expected_manifest_fields:
-              raise SystemExit("calibration manifest fields changed")
-          run_id = int(os.environ["CALIBRATION_RUN_ID"])
-          run_attempt = int(os.environ["CALIBRATION_RUN_ATTEMPT"])
-          local_sha = subprocess.check_output(
-              ["git", "rev-parse", "HEAD"], text=True, encoding="utf-8"
-          ).strip()
-          local_tree = subprocess.check_output(
-              ["git", "rev-parse", "HEAD^{tree}"], text=True, encoding="utf-8"
-          ).strip()
-          expected_arguments = [
-              "--profile",
-              "smoke",
-              "--samples",
-              "501",
-              "--workspace-root",
-              ".",
-          ]
-          if (
-              manifest["schema"]
-              != "ferrum2.performance-rule-calibration-bundle.v1"
-              or manifest["artifact_name"]
-              != f"performance-rule-calibration-{run_id}-{run_attempt}"
-              or manifest["repository"] != os.environ["GITHUB_REPOSITORY"]
-              or manifest["workflow_path"] != ".github/workflows/performance-rule.yml"
-              or manifest["calibration_run_id"] != run_id
-              or type(manifest["calibration_run_attempt"]) is not int
-              or manifest["calibration_run_attempt"] != run_attempt
-              or manifest["source_sha"] != local_sha
-              or manifest["source_sha"] != os.environ["GITHUB_SHA"]
-              or manifest["source_tree"] != local_tree
-              or manifest["controller_schema"]
-              != "ferrum2.rule-qualification-control.v6"
-              or manifest["pairs"] != 6
-              or manifest["runner_arguments"] != expected_arguments
-          ):
-              raise SystemExit("calibration manifest does not apply to this checkout")
-
-          expected_record_paths = {
-              "controller_exit": "controller-exit-code.txt",
-              "parent_binary": "parent/ferrum2-rule-qualification",
-              "aa_report": "release-aa-v6.json",
-              "host_identity": "host-identity.json",
-          }
-          maximum_record_bytes = {
-              "controller_exit": 32,
-              "parent_binary": 256 * 1024 * 1024,
-              "aa_report": 64 * 1024 * 1024,
-              "host_identity": 64 * 1024,
-          }
-          for field, expected_path in expected_record_paths.items():
-              record = manifest[field]
-              if set(record) != {"path", "bytes", "sha256"}:
-                  raise SystemExit(f"{field} manifest record is not closed")
-              if record["path"] != expected_path:
-                  raise SystemExit(f"{field} manifest path changed")
-              path = root / record["path"]
-              if (
-                  type(record["bytes"]) is not int
-                  or not 0 < record["bytes"] <= maximum_record_bytes[field]
-                  or path.stat().st_size != record["bytes"]
-                  or sha256_file(path) != record["sha256"]
-              ):
-                  raise SystemExit(f"{field} artifact identity changed")
-
-          calibration_host = strict_json(root / "host-identity.json", 64 * 1024)
-          comparison_host = strict_json(
-              pathlib.Path(os.environ["COMPARISON_HOST_IDENTITY"]), 64 * 1024
-          )
-          if calibration_host != comparison_host:
-              raise SystemExit(
-                  "comparison AMD CPU model or exact runner identity differs from calibration"
-              )
-          if calibration_host.get("cpu_vendor") != "AuthenticAMD":
-              raise SystemExit("calibration host is not AuthenticAMD")
-
-          parent = root / manifest["parent_binary"]["path"]
-          aa_path = root / manifest["aa_report"]["path"]
-          _, aa_report, _ = read_json_report(aa_path, "downloaded A/A evidence")
-          _, raw_pairs = validate_control_raw_evidence(aa_report, "aa")
-          expected_repository = {
-              "git_head": local_sha,
-              "git_tree": local_tree,
-              "tree_state": "clean",
-              "changed_entries": 0,
-              "status_sha256": hashlib.sha256(b"").hexdigest(),
-          }
-          if (
-              aa_report["status"] != "CALIBRATION_REQUIRED"
-              or aa_report["pairs"] != 6
-              or aa_report["runner_arguments"] != expected_arguments
-              or aa_report["parent_runner_sha256"] != manifest["parent_binary"]["sha256"]
-              or aa_report["candidate_runner_sha256"]
-              != manifest["parent_binary"]["sha256"]
-              or (root / "controller-exit-code.txt").read_text(encoding="utf-8")
-              != "4\n"
-          ):
-              raise SystemExit("downloaded A/A controller evidence is inconsistent")
-          runner_environment = None
-          for pair in raw_pairs:
-              for role in ("parent", "candidate"):
-                  runner = pair[role]
-                  if (
-                      runner["repository"] != expected_repository
-                      or runner["runner"]["sha256"]
-                      != manifest["parent_binary"]["sha256"]
-                      or runner["runner"]["bytes"] != parent.stat().st_size
-                      or runner["candidate"]
-                      != {"adoption_claim": False, "enabled_features": []}
-                  ):
-                      raise SystemExit("downloaded A/A raw identity changed")
-                  if runner_environment is None:
-                      runner_environment = runner["environment"]
-                  elif runner["environment"] != runner_environment:
-                      raise SystemExit("downloaded A/A runner environment is inconsistent")
-          PY
+          python3 -B -m tools.ci.performance_rule_workflow verify-calibration \
+            --artifact "$DOWNLOADED_CALIBRATION" \
+            --comparison-host "$COMPARISON_HOST_IDENTITY" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --expected-sha "$CANDIDATE_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CALIBRATION_RUN_ID" \
+            --run-attempt "$CALIBRATION_RUN_ATTEMPT"
           install -m 0755 \
             "$DOWNLOADED_CALIBRATION/parent/ferrum2-rule-qualification" \
             "$CALIBRATED_PARENT"
           install -m 0644 \
-            "$DOWNLOADED_CALIBRATION/release-aa-v6.json" \
-            "$COMPARISON_EVIDENCE/release-aa-v6.json"
+            "$DOWNLOADED_CALIBRATION/release-aa-v7.json" \
+            "$COMPARISON_EVIDENCE/release-aa-v7.json"
           install -m 0644 \
             "$DOWNLOADED_CALIBRATION/calibration-manifest.json" \
             "$COMPARISON_EVIDENCE/calibration-manifest.json"
@@ -745,9 +307,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          reviewed_stdout="$RUNNER_TEMP/performance-rule/reviewed-aa-v2.stdout.json"
+          reviewed_stdout="$RUNNER_TEMP/performance-rule/reviewed-aa-v3.stdout.json"
           python3 -B -m tools.performance_rule review-calibration \
-            --source-report "$COMPARISON_EVIDENCE/release-aa-v6.json" \
+            --source-report "$COMPARISON_EVIDENCE/release-aa-v7.json" \
             --reviewed-by "$REVIEWED_BY" \
             --reviewed-utc "$REVIEWED_UTC" \
             --output "$REVIEWED_CALIBRATION" \
@@ -779,12 +341,11 @@ jobs:
           test "$(sha256sum "$CALIBRATED_PARENT" | awk '{print $1}')" \
             != "$(sha256sum "$CANDIDATE_BINARY" | awk '{print $1}')"
 
-      - name: Collect reviewed six-pair A/B smoke evidence
-        id: collect-ab
+      - name: Collect reviewed six-pair A/B qualification evidence
         shell: bash
         run: |
           set -euo pipefail
-          ab_stdout="$RUNNER_TEMP/performance-rule/release-ab-v6.stdout.json"
+          ab_stdout="$RUNNER_TEMP/performance-rule/release-ab-v7.stdout.json"
           set +e
           python3 -B -m tools.performance_rule run \
             --parent "$CALIBRATED_PARENT" \
@@ -792,7 +353,7 @@ jobs:
             --calibration "$REVIEWED_CALIBRATION" \
             --pairs 6 \
             --output "$AB_REPORT" \
-            -- --profile smoke --samples 501 --workspace-root . \
+            -- --profile qualification --samples 101 --workspace-root . \
             >"$ab_stdout"
           controller_status=$?
           set -e
@@ -803,7 +364,6 @@ jobs:
           rm -f -- "$ab_stdout"
 
       - name: Collect candidate qualification including 100k
-        id: qualify-candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -828,190 +388,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B - <<'PY'
-          import hashlib
-          import json
-          import os
-          import pathlib
-          import subprocess
-
-          from tools.performance_rule.evidence import (
-              read_json_report,
-              validate_control_raw_evidence,
-          )
-          from tools.performance_rule.runner_report import validate_report
-
-
-          evidence = pathlib.Path(os.environ["COMPARISON_EVIDENCE"])
-          parent = pathlib.Path(os.environ["CALIBRATED_PARENT"])
-          candidate = pathlib.Path(os.environ["CANDIDATE_BINARY"])
-          calibration_path = pathlib.Path(os.environ["REVIEWED_CALIBRATION"])
-          ab_path = pathlib.Path(os.environ["AB_REPORT"])
-          qualification_path = pathlib.Path(os.environ["QUALIFICATION_REPORT"])
-          source_sha = subprocess.check_output(
-              ["git", "rev-parse", "HEAD"], text=True, encoding="utf-8"
-          ).strip()
-          source_tree = subprocess.check_output(
-              ["git", "rev-parse", "HEAD^{tree}"], text=True, encoding="utf-8"
-          ).strip()
-
-          def sha256_file(path: pathlib.Path) -> str:
-              digest = hashlib.sha256()
-              with path.open("rb") as source:
-                  for block in iter(lambda: source.read(64 * 1024), b""):
-                      digest.update(block)
-              return digest.hexdigest()
-
-
-          parent_sha256 = sha256_file(parent)
-          candidate_sha256 = sha256_file(candidate)
-          expected_features = json.loads(os.environ["EXPECTED_FEATURES_JSON"])
-          expected_arguments = [
-              "--profile",
-              "smoke",
-              "--samples",
-              "501",
-              "--workspace-root",
-              ".",
-          ]
-          expected_repository = {
-              "git_head": source_sha,
-              "git_tree": source_tree,
-              "tree_state": "clean",
-              "changed_entries": 0,
-              "status_sha256": hashlib.sha256(b"").hexdigest(),
-          }
-          _, calibration, _ = read_json_report(
-              calibration_path, "workflow reviewed calibration"
-          )
-          if (
-              calibration.get("review_status") != "APPROVED"
-              or calibration.get("reviewed_by") != os.environ["REVIEWED_BY"]
-              or calibration.get("reviewed_utc") != os.environ["REVIEWED_UTC"]
-              or calibration.get("source_report") != "release-aa-v6.json"
-              or calibration.get("runner_sha256") != parent_sha256
-              or calibration.get("runner_arguments") != expected_arguments
-          ):
-              raise SystemExit("reviewed calibration identity is inconsistent")
-
-          _, ab_report, _ = read_json_report(ab_path, "workflow A/B evidence")
-          _, raw_pairs = validate_control_raw_evidence(ab_report, "parent_candidate")
-          if (
-              ab_report["schema"] != "ferrum2.rule-qualification-control.v6"
-              or ab_report["pairs"] != 6
-              or ab_report["runner_arguments"] != expected_arguments
-              or ab_report["parent_runner_sha256"] != parent_sha256
-              or ab_report["candidate_runner_sha256"] != candidate_sha256
-              or ab_report["threshold_policy"].get("reviewed") is not True
-          ):
-              raise SystemExit("A/B controller identity is inconsistent")
-          runner_environment = None
-          for pair in raw_pairs:
-              for role, binary_sha, features in (
-                  ("parent", parent_sha256, []),
-                  ("candidate", candidate_sha256, expected_features),
-              ):
-                  runner = pair[role]
-                  if (
-                      runner["repository"] != expected_repository
-                      or runner["runner"]["sha256"] != binary_sha
-                      or runner["candidate"]
-                      != {"adoption_claim": False, "enabled_features": features}
-                      or runner["profile"] != "smoke"
-                      or runner["configuration"]["samples"] != 501
-                      or runner["configuration"]["includes_100k"] is not False
-                  ):
-                      raise SystemExit("A/B raw runner identity is inconsistent")
-                  if runner_environment is None:
-                      runner_environment = runner["environment"]
-                  elif runner["environment"] != runner_environment:
-                      raise SystemExit("A/B runner environment changed within the schedule")
-
-          _, qualification, _ = read_json_report(
-              qualification_path, "candidate qualification evidence"
-          )
-          validate_report(qualification, candidate_sha256)
-          if (
-              qualification["repository"] != expected_repository
-              or qualification["runner"]["bytes"] != candidate.stat().st_size
-              or qualification["candidate"]
-              != {"adoption_claim": False, "enabled_features": expected_features}
-              or qualification["profile"] != "qualification"
-              or qualification["configuration"]["includes_100k"] is not True
-              or 100_000 not in qualification["configuration"]["match_sizes"]
-          ):
-              raise SystemExit("candidate 100k qualification identity is inconsistent")
-
-          ab_status = int((evidence / "ab-exit-code.txt").read_text(encoding="utf-8"))
-          expected_exit = {
-              "CANDIDATE_WIN": 0,
-              "WITHIN_CALIBRATED_BAND": 0,
-              "REGRESSION": 3,
-              "INCONCLUSIVE": 4,
-          }.get(ab_report["status"])
-          if expected_exit is None or ab_status != expected_exit:
-              raise SystemExit("A/B exit status does not match its evidence")
-          qualification_status = int(
-              (evidence / "qualification-exit-code.txt").read_text(encoding="utf-8")
-          )
-          if qualification_status != 0:
-              raise SystemExit("candidate qualification did not pass")
-
-          artifact_paths = (
-              "ab-exit-code.txt",
-              "calibration-host-identity.json",
-              "calibration-manifest.json",
-              "candidate-qualification.json",
-              "candidate/ferrum2-rule-qualification",
-              "host-identity.json",
-              "parent/ferrum2-rule-qualification",
-              "qualification-exit-code.txt",
-              "release-aa-v6.json",
-              "release-ab-v6.json",
-              "reviewed-aa-v2.json",
-          )
-          observed = {
-              path.relative_to(evidence).as_posix()
-              for path in evidence.rglob("*")
-              if path.is_file()
-          }
-          if observed != set(artifact_paths):
-              raise SystemExit(f"comparison evidence file closure changed: {sorted(observed)}")
-          artifacts = []
-          for relative in artifact_paths:
-              path = evidence / relative
-              if path.is_symlink():
-                  raise SystemExit("comparison evidence contains a symbolic link")
-              artifacts.append(
-                  {
-                      "path": relative,
-                      "bytes": path.stat().st_size,
-                      "sha256": sha256_file(path),
-                  }
-              )
-          manifest = {
-              "schema": "ferrum2.performance-rule-comparison-bundle.v1",
-              "artifact_name": (
-                  f"performance-rule-comparison-{os.environ['GITHUB_RUN_ID']}-"
-                  f"{os.environ['GITHUB_RUN_ATTEMPT']}"
-              ),
-              "repository": os.environ["GITHUB_REPOSITORY"],
-              "workflow_path": ".github/workflows/performance-rule.yml",
-              "comparison_run_id": int(os.environ["GITHUB_RUN_ID"]),
-              "comparison_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-              "calibration_run_id": int(os.environ["CALIBRATION_RUN_ID"]),
-              "source_sha": source_sha,
-              "source_tree": source_tree,
-              "candidate_feature": os.environ["FEATURE_KEY"],
-              "enabled_features": expected_features,
-              "adoption_claim": False,
-              "artifacts": artifacts,
-          }
-          (evidence / "comparison-manifest.json").write_text(
-              json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          python3 -B -m tools.ci.performance_rule_workflow validate-comparison \
+            --evidence "$COMPARISON_EVIDENCE" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --parent "$CALIBRATED_PARENT" \
+            --candidate "$CANDIDATE_BINARY" \
+            --calibration "$REVIEWED_CALIBRATION" \
+            --ab-report "$AB_REPORT" \
+            --qualification-report "$QUALIFICATION_REPORT" \
+            --reviewed-by "$REVIEWED_BY" \
+            --reviewed-utc "$REVIEWED_UTC" \
+            --feature "$FEATURE_KEY" \
+            --repository "$GITHUB_REPOSITORY" \
+            --expected-sha "$CANDIDATE_SHA" \
+            --comparison-run-id "$GITHUB_RUN_ID" \
+            --comparison-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --calibration-run-id "$CALIBRATION_RUN_ID" \
+            --output "$COMPARISON_EVIDENCE/comparison-manifest.json"
 
       - name: Upload comparison raw evidence
         if: ${{ always() }}

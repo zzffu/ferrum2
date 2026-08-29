@@ -18,7 +18,8 @@ use crate::match_set::benchmark::{
     CompiledSetOwner, MatchProbe, MatcherKind, match_probe_cases, probe_matches,
 };
 use crate::match_set::generated::{
-    compile_generated_match_set, generated_v4, generated_v6, selected_matcher_kind,
+    compile_generated_match_set, generated_exact_domain, generated_suffix_domain, generated_v4,
+    generated_v6, selected_matcher_kind,
 };
 use crate::measurement::allocation::{allocation_region, finish_build};
 use crate::measurement::statistics::measurement;
@@ -265,8 +266,8 @@ pub(crate) fn encode_generated_srs(kind: MatcherKind, scale: usize) -> Result<Ve
         for index in 0..scale {
             let selected = selected_matcher_kind(kind, index);
             let value = match selected {
-                MatcherKind::Exact => Some(format!("exact-{index}.bench.invalid")),
-                MatcherKind::Suffix => Some(format!("suffix-{index}.bench.invalid")),
+                MatcherKind::Exact => Some(generated_exact_domain(index)),
+                MatcherKind::Suffix => Some(generated_suffix_domain(index)),
                 _ => None,
             };
             if let Some(value) = value {

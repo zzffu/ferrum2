@@ -1,10 +1,10 @@
 # Rule performance evidence
 
-This directory separates ordinary controller/schema tests from large release evidence. Current production accepts only controller v6 and reviewed-calibration v2. Historical controller v2/v3/v4 validation is test-owned in `archive_verifier.py` and is invoked only by the explicit external verifier.
+This directory separates ordinary controller/schema tests from large release evidence. Current production accepts only runner v3, controller v7, and reviewed-calibration v3. Historical controller v2/v3/v4 validation is test-owned in `archive_verifier.py` and is invoked only by the explicit external verifier.
 
 ## Ordinary tracked fixtures
 
-`fixtures/release-evidence-contract-v1.json` is a small, explicitly synthetic contract fixture. It covers the current runner/control schemas, runner-to-A/B identity binding, representative generated and pinned SRS provenance, allocation-free matching, paired MatchSet evidence, and the 5% median/15% p99 local gate. It is not benchmark evidence and cannot support a performance claim.
+`fixtures/release-evidence-contract-v1.json` is a small, explicitly synthetic contract fixture. It covers the current runner/control schemas, runner-to-A/B identity binding, representative generated and pinned SRS provenance, allocation-free matching, paired MatchSet evidence, snapshot contention rows and lifecycle evidence, and the 5% median/15% p99 local gate. It is not benchmark evidence and cannot support a performance claim.
 
 `fixtures/external-evidence-manifest-v1.json` is the tracked content-addressed inventory for the seven release artifacts. It records exact filenames, roles, byte lengths, SHA-256 digests, and the total 315,725,820-byte boundary. The manifest is evidence metadata, not a substitute for the raw JSON.
 

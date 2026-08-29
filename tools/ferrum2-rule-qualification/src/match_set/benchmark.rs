@@ -5,7 +5,11 @@ use ferrum2_core::CanonicalDomain;
 use ferrum2_rule::{CompiledMatchSet, MatchSetId, RuleEngineSnapshot};
 
 use crate::cli::{QualificationError, Result};
-use crate::match_set::generated::{build_generated_match_set_pair, generated_v4, generated_v6};
+use crate::match_set::boundaries::run_cidr_boundary_scenarios;
+use crate::match_set::generated::{
+    build_generated_match_set_pair, generated_exact_domain, generated_suffix_domain, generated_v4,
+    generated_v6,
+};
 use crate::measurement::statistics::measurement;
 use crate::measurement::timing::benchmark_pair;
 use crate::report::Measurement;
@@ -141,6 +145,7 @@ pub(crate) fn run_generated_match_sets(
             }
         }
     }
+    run_cidr_boundary_scenarios(sizes, samples, base_iterations, measurements)?;
     Ok(())
 }
 
@@ -150,11 +155,30 @@ pub(crate) fn match_probe_cases(kind: MatcherKind, scale: usize) -> Result<Vec<P
         .ok_or_else(|| QualificationError::new("MatchSet scale is zero"))?;
     let cases = match kind {
         MatcherKind::Exact => vec![
-            domain_case("hit", &format!("exact-{last}.bench.invalid"), true)?,
+            domain_case("hit", &generated_exact_domain(last), true)?,
+            domain_case(
+                "idna_alabel_normalized_hit",
+                "XN--BCHER-KVA.BENCH.INVALID.",
+                true,
+            )?,
             domain_case("miss", "exact-miss.bench.invalid", false)?,
         ],
         MatcherKind::Suffix => vec![
-            domain_case("hit", &format!("child.suffix-{last}.bench.invalid"), true)?,
+            domain_case(
+                "hit",
+                &format!("child.{}", generated_suffix_domain(last)),
+                true,
+            )?,
+            domain_case(
+                "deep_label_hit",
+                &format!("a.b.c.d.e.f.g.h.{}", generated_suffix_domain(last)),
+                true,
+            )?,
+            domain_case(
+                "idna_alabel_normalized_hit",
+                "child.XN--BCHER-KVA.SUFFIX.INVALID.",
+                true,
+            )?,
             domain_case("miss", "suffix-miss.example", false)?,
         ],
         MatcherKind::Keyword => vec![

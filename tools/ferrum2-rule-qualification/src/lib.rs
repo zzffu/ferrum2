@@ -5,6 +5,7 @@ mod dns_policy;
 mod execute;
 mod match_set {
     pub(crate) mod benchmark;
+    pub(crate) mod boundaries;
     pub(crate) mod generated;
     pub(crate) mod srs;
     #[cfg(test)]
@@ -17,6 +18,7 @@ mod measurement {
 }
 mod report;
 mod route_program;
+mod snapshot_registry;
 
 pub use cli::{Args, Profile, QualificationError};
 pub use execute::execute;

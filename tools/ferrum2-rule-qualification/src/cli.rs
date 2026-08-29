@@ -25,14 +25,14 @@ impl Profile {
     pub(crate) fn match_sizes(self) -> Vec<usize> {
         match self {
             Self::Smoke => vec![64, 65, 100],
-            Self::Qualification => vec![64, 65, 100, 1_000, 10_000],
+            Self::Qualification => vec![8, 32, 64, 65, 100, 128, 1_000, 10_000],
         }
     }
 
     pub(crate) fn route_sizes(self) -> Vec<usize> {
         match self {
             Self::Smoke => vec![1, 32, 64],
-            Self::Qualification => vec![1, 32, 64, 1_000, 10_000],
+            Self::Qualification => vec![1, 8, 32, 64, 128, 1_000, 10_000],
         }
     }
 
@@ -119,12 +119,12 @@ mod tests {
         assert_eq!(Profile::Smoke.match_sizes(), vec![64, 65, 100]);
         assert_eq!(
             Profile::Qualification.match_sizes(),
-            vec![64, 65, 100, 1_000, 10_000]
+            vec![8, 32, 64, 65, 100, 128, 1_000, 10_000]
         );
         assert!(!Profile::Qualification.match_sizes().contains(&100_000));
         assert_eq!(
             Profile::Qualification.route_sizes(),
-            vec![1, 32, 64, 1_000, 10_000]
+            vec![1, 8, 32, 64, 128, 1_000, 10_000]
         );
         assert_eq!(Profile::Smoke.dns_rule_sizes(), vec![1]);
         assert_eq!(
