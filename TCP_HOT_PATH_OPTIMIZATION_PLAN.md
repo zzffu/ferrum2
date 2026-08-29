@@ -778,3 +778,46 @@ EOF、partial sink、双向轮换和结构计数合同。
 若失败，先用该唯一候选二进制的 poll/wake/ready-state 计数与 CPU 调度证据区分“下一 length 大多
 真实 Pending、因此 continuation 没有命中”与“命中但方向轮换/idle-progress 开销仍主导”；诊断不用于
 性能排名。解决根因的新产品尝试仍从 `bf4cd4a6` 开 sibling，绝不从失败提交叠加。
+
+### 15.1 唯一正式样本、失败判定与根因方向
+
+候选在 workload 前提交并推送：
+
+- commit：`d27f96ce4cacd87c9ba7c2508540249274392261`；
+- tree：`561af4c1e4349a134d0b65d6fc2e5ce88b84c522`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-bounded-frame-drain`。
+
+生产 diff 只有 `flow/fused.rs` 的 fresh-completion 控制流；另一文件为机制测试。两路独立审查为
+PASS、无 blocker。Shadowsocks all-features 全套、no-default check、client/server all-features、
+Clippy `-D warnings`、fmt、diff-check，以及真实进程三密码套件 bytes + half-close 矩阵均通过。
+
+clean、pushed HEAD 的候选专属 profiling 二进制只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒
+active、8-stream `tcp-bulk` 正式样本；合同为 `status=PASS`、`sample_count=1`、
+`runner_exit_status=0`、47,491 transactions、`3,112,370,176` checked bytes，即
+`207,491,345 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `5108b3e04e0297fdd280759c02f55a723e78da46f1dd682f2c53abc765895900` |
+| `ferrum2-client` | `13100bcac679733060431b825103178efa1c1cf8984d53319b8d76d638cb06b2` |
+| `ferrum2-server` | `87c546901f89eb20c97365c968ad2395e6df473d1c7c8fb795d13939c52b15d5` |
+
+相对 `bf4cd4a6` 的 `234,378,581 B/s` 下降 `26,887,236 B/s`（`-11.4717%`）；proxy CPU
+从 `23,180 ms` 降至 `22,260 ms`（`-3.9689%`），吞吐/proxy CPU 效率从 `10,111.242` 降至
+`9,321.264 B/s/ms`（`-7.8129%`）；migrations 从 `123,973` 增至 `130,897`
+（`+5.5851%`），context switches 从 `505,073` 降至 `481,740`（`-4.6197%`），mean CPU busy
+从 `47.156%` 降至 `44.517%`（`-2.639` 个百分点）。
+
+按预声明门槛立即判失败：提交与分支永久保留并冻结，不重跑、不触发 hosted CI、不作为后续产品
+祖先。吞吐、proxy CPU 和全机 busy 同时下降，排除“增加 ready work 导致 CPU 饱和”；migrations
+反而增加，也不支持改善 cache ownership。当前最强、尚待 exact-binary 计数闭合的假设是：fresh
+completion 后的 eager next-length poll 经常得到真实 transport `Pending`，候选随即只依赖 reactor
+wake，删除了基线 frame-completion 的 synthetic local-queue retry，因而降低 runnable pipeline 填充。
+该形态与 `7e3f137a` 删除 transition retry 后的大回归、以及 `0ad5cab5` 补 retry 后恢复大部分缺口一致。
+
+下一步只对 `d27f96c` 的固定二进制或 diagnostic-only descendant 量化第二次 poll 的
+Ready/Pending/EOF/error outcome；诊断吞吐不得用于排名。若 Pending 占主导，新产品 sibling 从
+`bf4cd4a6` 开始：保留一次 next-length 尝试，但在该第二次调用返回 Pending 时补一次有界
+`wake_by_ref`，让 ready 命中合并、真实 Pending 保留基线 retry。若证据不支持该分支，则回到
+generic diagnostic 揭示的 lifecycle/progress/direction engine 成本，不叠加 `d27f96c`。
