@@ -91,7 +91,7 @@ class PerformanceUdpWorkerWorkflowTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            binary_dir = root / "target/udp-worker/profiling"
+            binary_dir = root / "target/profiling"
             binary_dir.mkdir(parents=True)
             for name in ("m4-qualification", "ferrum2-client", "ferrum2-server"):
                 (binary_dir / name).write_bytes(name.encode("ascii"))

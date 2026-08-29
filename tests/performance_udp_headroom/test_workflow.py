@@ -37,16 +37,19 @@ class UdpHeadroomWorkflowTests(unittest.TestCase):
             "for scenario in udp-small-high udp-mtu-1200 udp-payload-8192 udp-max-wire-65507 udp-response-concurrency-32; do",
             workflow,
         )
-        self.assertIn('--destination "$UDP_HEADROOM_TIMED_STAGE"', workflow)
-        self.assertIn('--destination "$UDP_HEADROOM_DIAGNOSTIC_STAGE"', workflow)
+        self.assertEqual(
+            workflow.count('--destination "$UDP_HEADROOM_STAGE"'),
+            2,
+        )
         self.assertIn(
-            '"$UDP_HEADROOM_TIMED_STAGE/m4-qualification" profile-workload',
+            '"$UDP_HEADROOM_STAGE/m4-qualification" profile-workload',
             workflow,
         )
         self.assertIn(
-            '"$UDP_HEADROOM_DIAGNOSTIC_STAGE/m4-qualification" udp-worker-workload',
+            '"$UDP_HEADROOM_STAGE/m4-qualification" udp-worker-workload',
             workflow,
         )
+        self.assertEqual(workflow.count('--binary-dir "$UDP_HEADROOM_STAGE"'), 2)
         default_diagnostic = workflow.index(
             'run_diagnostic diagnostic-default "$UDP_HEADROOM_DIAGNOSTIC_DEFAULT_BUILD"'
         )

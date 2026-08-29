@@ -338,11 +338,11 @@ fn parse_args(arguments: &[OsString]) -> Result<UdpWorkerArgs, String> {
     let repository_root = canonical_directory(required("--repository-root")?, "repository root")?;
     let binary_dir = canonical_directory(required("--binary-dir")?, "binary directory")?;
     let expected_binary_dir = repository_root
-        .join("target/udp-worker/profiling")
+        .join("target/profiling")
         .canonicalize()
         .map_err(|_| "UDP worker exact target directory is unavailable".to_owned())?;
     if binary_dir != expected_binary_dir {
-        return Err("--binary-dir must use target/udp-worker/profiling".to_owned());
+        return Err("--binary-dir must use target/profiling".to_owned());
     }
     let relative = |name: &'static str| -> Result<PathBuf, String> {
         let value = PathBuf::from(required(name)?);
@@ -709,6 +709,63 @@ pub(super) fn run_self_check() -> Result<(), String> {
         || validate_digest(&"a".repeat(39), 40, "SHA").is_ok()
     {
         return Err("UDP worker digest mutation survived".to_owned());
+    }
+    let root = tempfile::tempdir()
+        .map_err(|_| "UDP worker self-check root could not be created".to_owned())?;
+    let binary_dir = root.path().join("target/profiling");
+    let isolated_build_dir = root.path().join("target/udp-worker/profiling");
+    fs::create_dir_all(&binary_dir)
+        .map_err(|_| "UDP worker self-check binary directory could not be created".to_owned())?;
+    fs::create_dir_all(&isolated_build_dir)
+        .map_err(|_| "UDP worker self-check isolated directory could not be created".to_owned())?;
+    let mut arguments = vec![
+        OsString::from("--server-receive-workers"),
+        OsString::from("1"),
+        OsString::from("--comparison-receive-workers"),
+        OsString::from("1"),
+        OsString::from("--session-topology"),
+        OsString::from("same-session"),
+        OsString::from("--phase"),
+        OsString::from("calibration-aa"),
+        OsString::from("--member"),
+        OsString::from("baseline"),
+        OsString::from("--round"),
+        OsString::from("1"),
+        OsString::from("--pair"),
+        OsString::from("1"),
+        OsString::from("--order"),
+        OsString::from("1"),
+        OsString::from("--output"),
+        OsString::from("profiles/udp-workers/evidence/self-check.json"),
+        OsString::from("--ready-file"),
+        OsString::from("profiles/udp-workers/ready/self-check.ready"),
+        OsString::from("--repository-root"),
+        root.path().as_os_str().to_owned(),
+        OsString::from("--binary-dir"),
+        binary_dir.as_os_str().to_owned(),
+        OsString::from("--candidate-sha"),
+        OsString::from("a".repeat(40)),
+        OsString::from("--runner-image"),
+        OsString::from(UDP_WORKER_RUNNER_IMAGE),
+        OsString::from("--producer-source-sha256"),
+        OsString::from("b".repeat(64)),
+        OsString::from("--controller-source-sha256"),
+        OsString::from("c".repeat(64)),
+        OsString::from("--semantic-recipe-sha256"),
+        OsString::from("d".repeat(64)),
+        OsString::from("--evidence-bundle-sha256"),
+        OsString::from("e".repeat(64)),
+    ];
+    parse_args(&arguments)?;
+    let binary_value = arguments
+        .iter()
+        .position(|value| value == "--binary-dir")
+        .ok_or_else(|| "UDP worker self-check binary option is absent".to_owned())?
+        + 1;
+    arguments[binary_value] = isolated_build_dir.into_os_string();
+    if !parse_args(&arguments).is_err_and(|error| error == "--binary-dir must use target/profiling")
+    {
+        return Err("UDP worker isolated build path mutation survived".to_owned());
     }
     let mut p99 = (1..=100).collect::<Vec<u64>>();
     if super::profile_udp::nearest_rank_p99(&mut p99)? != 99 {

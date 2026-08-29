@@ -9,9 +9,27 @@ from tools.performance_udp_workers.runner import trial_command
 
 
 class RunnerTests(unittest.TestCase):
+    def test_workflow_materializes_isolated_build_at_the_exact_m4_seam(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/performance-udp-workers.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "UDP_WORKER_TARGET: ${{ github.workspace }}/target/udp-worker", workflow
+        )
+        self.assertIn(
+            "UDP_WORKER_BINARIES: ${{ github.workspace }}/target/profiling",
+            workflow,
+        )
+        self.assertIn("-p ferrum2-rule-qualification", workflow)
+        self.assertIn("materialize-profile-artifacts", workflow)
+        self.assertIn('--source-dir "$UDP_WORKER_TARGET/profiling"', workflow)
+        self.assertIn('--repository "$GITHUB_WORKSPACE"', workflow)
+        self.assertIn('test "$profile_bin_dir" = "$UDP_WORKER_BINARIES"', workflow)
+
     def test_command_binds_exact_axis_and_source_contract(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[2]
-        binary_dir = root / "target/udp-worker/profiling"
+        binary_dir = root / "target/profiling"
         trial = next(
             trial
             for trial in build_trials()

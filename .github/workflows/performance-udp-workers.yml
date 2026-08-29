@@ -29,7 +29,7 @@ jobs:
     env:
       REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
       UDP_WORKER_TARGET: ${{ github.workspace }}/target/udp-worker
-      UDP_WORKER_BINARIES: ${{ github.workspace }}/target/udp-worker/profiling
+      UDP_WORKER_BINARIES: ${{ github.workspace }}/target/profiling
       UDP_WORKER_HOST: ${{ github.workspace }}/profiles/udp-workers/host.json
       UDP_WORKER_MANIFEST: ${{ github.workspace }}/profiles/udp-workers/manifest.json
     steps:
@@ -93,7 +93,15 @@ jobs:
             -p ferrum2-client \
             -p ferrum2-server \
             -p ferrum2-m4-qualification \
+            -p ferrum2-rule-qualification \
             --features ferrum2-client/structural-metrics,ferrum2-server/structural-metrics,ferrum2-m4-qualification/structural-diagnostic
+          profile_bin_dir="$(
+            python3 -B -m tools.ci.performance_build_workflow \
+              materialize-profile-artifacts \
+              --source-dir "$UDP_WORKER_TARGET/profiling" \
+              --repository "$GITHUB_WORKSPACE"
+          )"
+          test "$profile_bin_dir" = "$UDP_WORKER_BINARIES"
           "$UDP_WORKER_BINARIES/m4-qualification" self-check
           test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"
           test "$(git status --porcelain=v1 --untracked-files=normal)" = ""

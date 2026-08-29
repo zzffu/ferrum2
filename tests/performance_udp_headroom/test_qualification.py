@@ -316,11 +316,14 @@ class UdpHeadroomQualificationTests(BuildExperimentFixture):
                 self.write_json("mutated-headroom-policy.json", policy)
             )
 
-    def test_materialize_hash_binds_exact_m4_directory_and_rejects_artifact_mutation(
+    def test_materialize_binds_timed_and_diagnostic_to_exact_m4_directory(
         self,
     ) -> None:
         plan_path, plan, environment = self.plan()
         candidate_path = self.build_record(plan_path, plan, environment, "candidate")
+        diagnostic_path = self.build_record(
+            plan_path, plan, environment, "diagnostic-candidate"
+        )
         staged = build.materialize(
             plan_path=plan_path,
             build_path=candidate_path,
@@ -331,13 +334,37 @@ class UdpHeadroomQualificationTests(BuildExperimentFixture):
             staged["destination"], str(self.repository / "target/profiling")
         )
         self.assertEqual(len(staged["artifacts"]), 3)
+        diagnostic_staged = build.materialize(
+            plan_path=plan_path,
+            build_path=diagnostic_path,
+            variant_name="diagnostic-candidate",
+            destination=self.repository / "target/profiling",
+        )
+        self.assertEqual(
+            diagnostic_staged["destination"],
+            str(self.repository / "target/profiling"),
+        )
+        self.assertEqual(
+            [
+                pathlib.Path(row["path"]).read_bytes()
+                for row in diagnostic_staged["artifacts"]
+            ],
+            [
+                f"diagnostic-candidate-{name}".encode("ascii")
+                for name in contract.ARTIFACT_NAMES
+            ],
+        )
         with self.assertRaisesRegex(CandidateControlError, "destination is invalid"):
             build.materialize(
                 plan_path=plan_path,
-                build_path=candidate_path,
-                variant_name="candidate",
-                destination=self.root / "runner-temp/profiling",
+                build_path=diagnostic_path,
+                variant_name="diagnostic-candidate",
+                destination=self.repository / "target/udp-worker/profiling",
             )
+
+    def test_materialize_rejects_artifact_mutation(self) -> None:
+        plan_path, plan, environment = self.plan()
+        candidate_path = self.build_record(plan_path, plan, environment, "candidate")
         record = json.loads(candidate_path.read_text(encoding="utf-8"))
         pathlib.Path(record["artifacts"][0]["path"]).write_bytes(b"tampered")
         with self.assertRaisesRegex(CandidateControlError, "changed after build"):

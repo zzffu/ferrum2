@@ -103,11 +103,9 @@ def run_schedule(
         raise UdpWorkerControlError(
             "qualification root or binary directory is unavailable"
         ) from error
-    expected_binary_dir = (root / "target/udp-worker/profiling").resolve(strict=True)
+    expected_binary_dir = (root / "target/profiling").resolve(strict=True)
     if binary_dir != expected_binary_dir:
-        raise UdpWorkerControlError(
-            "UDP worker binaries must use target/udp-worker/profiling"
-        )
+        raise UdpWorkerControlError("UDP worker binaries must use target/profiling")
     runner = binary_dir / "m4-qualification"
     client = binary_dir / "ferrum2-client"
     server = binary_dir / "ferrum2-server"

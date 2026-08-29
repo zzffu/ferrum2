@@ -477,9 +477,7 @@ def materialize(
     )
     selected = variant(plan, variant_name)
     repository = pathlib.Path(selected["repository"]).resolve()
-    expected = repository / (
-        "target/profiling" if selected["timed"] else "target/udp-worker/profiling"
-    )
+    expected = repository / "target/profiling"
     destination_absolute = destination.absolute()
     expected_absolute = expected.absolute()
     ancestor = repository
