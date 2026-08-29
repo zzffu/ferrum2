@@ -60,6 +60,8 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         // BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
         #[cfg(feature = "structural-diagnostic")]
         "structural-diagnostic" => structural_diagnostic::run(&rest),
+        #[cfg(feature = "structural-diagnostic")]
+        "udp-worker-workload" => udp_worker::run(&rest),
         // END M18 STRUCTURAL DIAGNOSTIC
         "windows-tun-workload" => windows_tun::run_workload(&rest),
         "windows-tun-probe" => windows_tun::run_probe(&rest),
@@ -96,5 +98,7 @@ mod self_check;
 mod structural_contract;
 #[cfg(feature = "structural-diagnostic")]
 mod structural_diagnostic;
+#[cfg(feature = "structural-diagnostic")]
+mod udp_worker;
 // END M18 STRUCTURAL DIAGNOSTIC
 mod throughput;

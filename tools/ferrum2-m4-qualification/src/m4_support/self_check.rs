@@ -49,6 +49,7 @@ pub(super) fn run_self_check() -> Result<String, String> {
     {
         super::structural_contract::run_self_check()?;
         super::structural_diagnostic::run_self_check()?;
+        super::udp_worker::run_self_check()?;
     }
     // END M18 STRUCTURAL DIAGNOSTIC
     let structural: serde_json::Value =

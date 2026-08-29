@@ -1,0 +1,178 @@
+name: performance-udp-workers
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact candidate SHA; blank uses the dispatched ref SHA"
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: "Exact lowercase 40-character candidate SHA"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.97.1"
+
+jobs:
+  udp-worker-qualification:
+    name: udp-worker-qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+      UDP_WORKER_TARGET: ${{ github.workspace }}/target/udp-worker
+      UDP_WORKER_BINARIES: ${{ github.workspace }}/target/udp-worker/profiling
+      UDP_WORKER_HOST: ${{ github.workspace }}/profiles/udp-workers/host.json
+      UDP_WORKER_MANIFEST: ${{ github.workspace }}/profiles/udp-workers/manifest.json
+    steps:
+      - name: Checkout exact requested candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Require exact clean SHA and preferred AMD host
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=normal)" = ""
+          test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
+          vendor_id="$(awk -F ': ' '/^vendor_id[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)"
+          cpu_model="$(awk -F ': ' '/^model name[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)"
+          if [ "$vendor_id" != AuthenticAMD ]; then
+            echo "::error::GATE-05 requires the preferred AMD host; observed ${vendor_id:-unknown} / ${cpu_model:-unknown}. Re-run to obtain an AMD runner."
+            exit 1
+          fi
+          for process in ferrum2-client ferrum2-server; do
+            ! pgrep -x "$process" >/dev/null
+          done
+          exclude="$(git rev-parse --git-path info/exclude)"
+          printf '/profiles/\n' >>"$exclude"
+          printf 'Selected provisional AMD host: %s\n' "$cpu_model"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc +1.97.1 -Vv
+
+      - name: Capture exact AMD host identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.ci.performance_udp_worker_workflow capture-host \
+            --output "$UDP_WORKER_HOST"
+
+      - name: Compile exact feature-on binaries and safe contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain=v1 --untracked-files=normal)" = ""
+          test ! -e "$UDP_WORKER_TARGET"
+          cargo +1.97.1 test -p ferrum2-m4-qualification \
+            --features structural-diagnostic \
+            --test proxy_config_contract --no-run --locked
+          cargo +1.97.1 test -p ferrum2-client -p ferrum2-server \
+            --all-features --no-run --locked
+          cargo +1.97.1 build --profile profiling \
+            --target-dir "$UDP_WORKER_TARGET" \
+            --locked \
+            -p ferrum2-client \
+            -p ferrum2-server \
+            -p ferrum2-m4-qualification \
+            --features ferrum2-client/structural-metrics,ferrum2-server/structural-metrics,ferrum2-m4-qualification/structural-diagnostic
+          "$UDP_WORKER_BINARIES/m4-qualification" self-check
+          test "$(git rev-parse HEAD)" = "$REQUESTED_CANDIDATE_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=normal)" = ""
+
+      - name: Run two A/A rounds and fixed six-pair ABBA worker matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_udp_workers run \
+            --repository "$GITHUB_WORKSPACE" \
+            --binary-dir "$UDP_WORKER_BINARIES" \
+            --candidate-sha "$REQUESTED_CANDIDATE_SHA"
+
+      - name: Recompute closed artifact manifest and deferred decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.ci.performance_udp_worker_workflow manifest \
+            --workspace "$GITHUB_WORKSPACE" \
+            --binary-dir "$UDP_WORKER_BINARIES" \
+            --candidate-sha "$REQUESTED_CANDIDATE_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$UDP_WORKER_MANIFEST"
+
+      - name: Upload provisional AMD GATE-05 evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-udp-workers-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/profiles/udp-workers
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce complete non-authoritative closure
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$UDP_WORKER_MANIFEST"
+          python3 -B - "$UDP_WORKER_MANIFEST" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+          assert manifest["status"] == "PASS"
+          assert manifest["decision"] == "DEFERRED"
+          assert manifest["default_receive_workers"] == 1
+          assert manifest["default_changed"] is False
+          assert manifest["authority"] == {
+              "scope": "github-hosted-amd-provisional",
+              "performance_authoritative": False,
+              "bare_metal_gate": False,
+              "adoption_claim": False,
+          }
+          assert manifest["retention"]["durable_provenance"] is False
+          PY
+
+      - name: Reap qualification processes and prove ready-file cleanup
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
+          cleanup_status=0
+          for signal in TERM KILL; do
+            for process in ferrum2-client ferrum2-server; do
+              status=0
+              pkill "-$signal" -x "$process" 2>/dev/null || status=$?
+              if [ "$status" -gt 1 ]; then cleanup_status=1; fi
+            done
+            sleep 1
+          done
+          for process in ferrum2-client ferrum2-server; do
+            if pgrep -x "$process" >/dev/null; then cleanup_status=1; fi
+          done
+          if [ -d profiles/udp-workers/ready ] \
+            && find profiles/udp-workers/ready -type f -print -quit | grep -q .; then
+            cleanup_status=1
+          fi
+          test "$cleanup_status" -eq 0

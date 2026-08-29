@@ -108,33 +108,41 @@ pub(super) fn ferrum_dns_resource_client_config(
     )
 }
 
-pub(super) fn profile_direct_udp_client_config(
+pub(super) fn profile_direct_udp_client_axis_config(
     listen: SocketAddrV4,
     max_sessions: usize,
+    metrics: Option<SocketAddrV4>,
 ) -> String {
+    let metrics = metrics
+        .map(|address| format!("[metrics]\nlisten = \"{address}\"\n"))
+        .unwrap_or_default();
     format!(
         "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
          outbound = \"profile-direct\"\n\
          [[outbounds]]\ntag = \"profile-direct\"\ntype = \"direct\"\n\
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
          [udp]\nenabled = true\nmax_sessions = {max_sessions}\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
-         [logging]\nlevel = \"error\"\n"
+         [logging]\nlevel = \"error\"\n{metrics}"
     )
 }
 
-pub(super) fn profile_shadowsocks_udp_client_config(
+pub(super) fn profile_shadowsocks_udp_client_axis_config(
     listen: SocketAddrV4,
     server: SocketAddrV4,
     max_sessions: usize,
+    metrics: Option<SocketAddrV4>,
 ) -> String {
     let outbound = render_client_shadowsocks_outbound("profile-proxy", server);
+    let metrics = metrics
+        .map(|address| format!("[metrics]\nlisten = \"{address}\"\n"))
+        .unwrap_or_default();
     format!(
         "schema_version = 2\n[[inbounds]]\ntag = \"profile-in\"\nlisten = \"{listen}\"\n\
          {outbound}\
          [route]\nfinal = \"profile-proxy\"\n\
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
          [udp]\nenabled = true\nmax_sessions = {max_sessions}\nmax_buffered_bytes = {PROFILE_UDP_MAX_BUFFERED_BYTES}\nidle_timeout_ms = 60000\n\
-         [logging]\nlevel = \"error\"\n"
+         [logging]\nlevel = \"error\"\n{metrics}"
     )
 }
 
@@ -198,6 +206,26 @@ pub(super) fn m14_udp_server_config(listen: SocketAddrV4, max_buffered_bytes: us
          [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
          [udp]\nmax_sessions = 16\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\n\
          [logging]\nlevel = \"error\"\n"
+    )
+}
+
+pub(super) fn profile_udp_server_axis_config(
+    listen: SocketAddrV4,
+    max_buffered_bytes: usize,
+    max_sessions: usize,
+    receive_workers: usize,
+    metrics: Option<SocketAddrV4>,
+) -> String {
+    let metrics = metrics
+        .map(|address| format!("[metrics]\nlisten = \"{address}\"\n"))
+        .unwrap_or_default();
+    format!(
+        "schema_version = 2\n[[inbounds]]\ntag = \"server-in\"\nlisten = \"{listen}\"\noutbound = \"direct\"\n\
+         [[outbounds]]\ntag = \"direct\"\n\
+         [shadowsocks]\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{PSK}\"\n\
+         [runtime]\nmax_connections = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nmax_sessions = {max_sessions}\nmax_buffered_bytes = {max_buffered_bytes}\nidle_timeout_ms = 60000\nreceive_workers = {receive_workers}\n\
+         [logging]\nlevel = \"error\"\n{metrics}"
     )
 }
 

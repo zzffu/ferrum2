@@ -36,8 +36,13 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
     let proxy = address(10_800);
     let server = address(8_388);
     let unselected = address(8_389);
-    let direct = proxy_config::profile_direct_udp_client_config(address(10_801), 32);
+    let direct = proxy_config::profile_direct_udp_client_axis_config(
+        address(10_801),
+        32,
+        Some(address(9_093)),
+    );
     assert!(direct.contains("max_sessions = 32"));
+    assert!(direct.contains("[metrics]\nlisten = \"127.0.0.1:9093\""));
     let direct_tcp = proxy_config::profile_direct_tcp_client_config(address(10_805));
     let profile_dns = proxy_config::profile_dns_udp_client_config(
         address(10_806),
@@ -56,7 +61,7 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
         address(9_091),
     );
     let profile_shadowsocks =
-        proxy_config::profile_shadowsocks_udp_client_config(address(10_802), server, 16);
+        proxy_config::profile_shadowsocks_udp_client_axis_config(address(10_802), server, 16, None);
     let m14_udp = proxy_config::m14_udp_client_config(
         address(10_803),
         server,
@@ -126,6 +131,16 @@ fn generated_server_configs_keep_the_real_v2_server_contract() {
     let dns_resource =
         proxy_config::ferrum_dns_resource_server_config(server, address(5_355), address(9_091));
     let m14_udp = proxy_config::m14_udp_server_config(server, 1_048_576);
+    let worker_axis = proxy_config::profile_udp_server_axis_config(
+        address(8_390),
+        8 * 1024 * 1024,
+        32,
+        8,
+        Some(address(9_092)),
+    );
+    assert!(worker_axis.contains("receive_workers = 8"));
+    assert!(worker_axis.contains("max_sessions = 32"));
+    assert!(worker_axis.contains("[metrics]\nlisten = \"127.0.0.1:9092\""));
     let m14_rules =
         proxy_config::m14_tcp_server_config(server, proxy_config::M14TcpProfile::Rules64);
     let m14_http =
@@ -137,6 +152,7 @@ fn generated_server_configs_keep_the_real_v2_server_contract() {
         ("ordinary", ordinary),
         ("DNS resource", dns_resource),
         ("M14 UDP", m14_udp),
+        ("UDP worker axis", worker_axis),
         ("M14 TCP 64 rules", m14_rules),
         ("M14 TCP HTTP sniff", m14_http),
         ("M14 TCP TLS sniff", m14_tls),
