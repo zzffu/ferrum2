@@ -73,12 +73,13 @@ impl PreparedProcessRoot<RunError> for ServerTcpRoot {
                                 return;
                             };
                             let stream = if reregister_accepted_stream {
-                                let stream = stream
-                                    .into_std()
-                                    .expect("accepted TCP stream must detach from its reactor");
-                                tokio::net::TcpStream::from_std(stream).expect(
-                                    "accepted TCP stream must register on its connection shard",
-                                )
+                                let Ok(stream) = stream.into_std() else {
+                                    return;
+                                };
+                                let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+                                    return;
+                                };
+                                stream
                             } else {
                                 stream
                             };

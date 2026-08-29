@@ -1,6 +1,8 @@
 use std::{
     fmt,
+    marker::PhantomData,
     num::NonZeroUsize,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -28,6 +30,10 @@ pub struct ConnectionRuntimePoolStartupError;
 pub struct ConnectionRuntimePool {
     dispatcher: ConnectionRuntimeDispatcher,
     workers: Vec<ShardWorker>,
+    // The owner joins every worker synchronously on drop. Keeping it on its
+    // constructing thread makes moving it into one of those workers impossible;
+    // only the dispatcher is intended to cross thread boundaries.
+    _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl ConnectionRuntimePool {
@@ -60,6 +66,7 @@ impl ConnectionRuntimePool {
                 }),
             },
             workers,
+            _not_send_or_sync: PhantomData,
         })
     }
 
