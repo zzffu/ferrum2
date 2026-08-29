@@ -706,6 +706,6 @@ I/O `Pending` 或 cooperative budget 生效。这一差异能够直接放大已�
 
 只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 正式本地样本，
 不重跑、不挑样本。判定预先固定：相对 `bf4cd4a6` 的 `234,378,581 B/s`，不高于父节点即冻结；
-正向但低于 `10%` 只记为不足；达到 `+10%` 且没有用更多 proxy CPU 换吞吐，才认为 fused 调度语义
+正向但低于 `10%` 只记为不足；达到 `+10%` 且吞吐/proxy CPU 效率不下降，才认为 fused 调度语义
 得到足够强的产品级根因支持。命中后仍从 `bf4cd4a6` 另开 sibling，在 protocol-owned buffer 内实现
 同 poll 连续推进，保留 fused 的 buffer/copy 优势；不得从 generic diagnostic 叠加产品修改。
