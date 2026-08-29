@@ -1,3 +1,6 @@
+use std::convert::Infallible;
+#[cfg(feature = "tokio")]
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -17,6 +20,8 @@ use crate::tcp::wire::{
     ENCRYPTED_LENGTH_LEN, EncodeFrameSizer, MAX_DECRYPT_WIRE_LEN, TAG_LEN, seal_data_chunk_into,
 };
 use ferrum2_crypto::{TcpOpener, TcpSealer};
+#[cfg(feature = "tokio")]
+use tokio::io::AsyncWrite;
 
 // Bound both useful bulk work and pathological tiny-ready fragmentation per outer poll.
 const POLL_FRAME_BUDGET: usize = 8;
@@ -69,6 +74,113 @@ pub(super) enum DataRead {
     Eof,
 }
 
+#[cfg(feature = "tokio")]
+pub(super) enum FusedDataPoll {
+    Pending(DataRx),
+    Ready(DataRx, Result<FusedDataRead, ShadowsocksError>),
+}
+
+#[cfg(feature = "tokio")]
+pub(crate) enum FusedDataRead {
+    Buffered,
+    Eof,
+    Forwarded(FusedSinkPoll),
+}
+
+#[cfg(feature = "tokio")]
+pub(crate) enum FusedSinkPoll {
+    Pending,
+    Written { bytes: usize, frame_complete: bool },
+    Error(io::Error),
+}
+
+enum InnerDataPoll<F> {
+    Pending(DataRx),
+    Ready(DataRx, Result<InnerDataRead<F>, ShadowsocksError>),
+}
+
+enum InnerDataRead<F> {
+    Buffered,
+    Eof,
+    #[cfg_attr(not(feature = "tokio"), allow(dead_code))]
+    Forwarded {
+        result: F,
+        frame_complete: bool,
+    },
+}
+
+trait PayloadDelivery {
+    type Forwarded;
+
+    fn deliver(
+        &mut self,
+        cx: &mut Context<'_>,
+        plaintext: &[u8],
+        scratch: &mut BytesMut,
+    ) -> InnerDataRead<Self::Forwarded>;
+}
+
+struct BufferedDelivery;
+
+impl PayloadDelivery for BufferedDelivery {
+    type Forwarded = Infallible;
+
+    fn deliver(
+        &mut self,
+        _cx: &mut Context<'_>,
+        plaintext: &[u8],
+        scratch: &mut BytesMut,
+    ) -> InnerDataRead<Self::Forwarded> {
+        scratch[..plaintext.len()].copy_from_slice(plaintext);
+        scratch.truncate(plaintext.len());
+        InnerDataRead::Buffered
+    }
+}
+
+#[cfg(feature = "tokio")]
+struct FusedDelivery<'a, W>(&'a mut W);
+
+#[cfg(feature = "tokio")]
+impl<W> PayloadDelivery for FusedDelivery<'_, W>
+where
+    W: AsyncWrite + Unpin,
+{
+    type Forwarded = FusedSinkPoll;
+
+    fn deliver(
+        &mut self,
+        cx: &mut Context<'_>,
+        plaintext: &[u8],
+        scratch: &mut BytesMut,
+    ) -> InnerDataRead<Self::Forwarded> {
+        let result = match Pin::new(&mut *self.0).poll_write(cx, plaintext) {
+            Poll::Pending => FusedSinkPoll::Pending,
+            Poll::Ready(Err(error)) => FusedSinkPoll::Error(error),
+            Poll::Ready(Ok(0)) => FusedSinkPoll::Error(io::ErrorKind::WriteZero.into()),
+            Poll::Ready(Ok(written)) if written <= plaintext.len() => FusedSinkPoll::Written {
+                bytes: written,
+                frame_complete: written == plaintext.len(),
+            },
+            Poll::Ready(Ok(_)) => FusedSinkPoll::Error(io::ErrorKind::InvalidData.into()),
+        };
+        let consumed = match &result {
+            FusedSinkPoll::Written { bytes, .. } => *bytes,
+            FusedSinkPoll::Pending | FusedSinkPoll::Error(_) => 0,
+        };
+        let remaining = plaintext.len() - consumed;
+        if remaining == 0 {
+            scratch.clear();
+        } else {
+            scratch[..remaining].copy_from_slice(&plaintext[consumed..]);
+            scratch.truncate(remaining);
+        }
+        InnerDataRead::Forwarded {
+            result,
+            frame_complete: remaining == 0,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poll_data_fill<S: TransportIo>(
     io: &mut S,
@@ -79,6 +191,83 @@ pub(super) fn poll_data_fill<S: TransportIo>(
     observer: &dyn FlowObserver,
     cx: &mut Context<'_>,
 ) -> DataPoll {
+    let mut delivery = BufferedDelivery;
+    match poll_data_fill_inner(
+        io,
+        opener,
+        scratch,
+        state,
+        lifecycle,
+        observer,
+        cx,
+        &mut delivery,
+    ) {
+        InnerDataPoll::Pending(state) => DataPoll::Pending(state),
+        InnerDataPoll::Ready(state, result) => DataPoll::Ready(
+            state,
+            result.map(|read| match read {
+                InnerDataRead::Buffered => DataRead::Buffered,
+                InnerDataRead::Eof => DataRead::Eof,
+                InnerDataRead::Forwarded { result, .. } => match result {},
+            }),
+        ),
+    }
+}
+
+#[cfg(feature = "tokio")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poll_data_forward<S, W>(
+    io: &mut S,
+    opener: &mut TcpOpener,
+    scratch: &mut BytesMut,
+    state: DataRx,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+    sink: &mut W,
+) -> FusedDataPoll
+where
+    S: TransportIo,
+    W: AsyncWrite + Unpin,
+{
+    let mut delivery = FusedDelivery(sink);
+    match poll_data_fill_inner(
+        io,
+        opener,
+        scratch,
+        state,
+        lifecycle,
+        observer,
+        cx,
+        &mut delivery,
+    ) {
+        InnerDataPoll::Pending(state) => FusedDataPoll::Pending(state),
+        InnerDataPoll::Ready(state, result) => FusedDataPoll::Ready(
+            state,
+            result.map(|read| match read {
+                InnerDataRead::Buffered => FusedDataRead::Buffered,
+                InnerDataRead::Eof => FusedDataRead::Eof,
+                InnerDataRead::Forwarded { result, .. } => FusedDataRead::Forwarded(result),
+            }),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_data_fill_inner<S, D>(
+    io: &mut S,
+    opener: &mut TcpOpener,
+    scratch: &mut BytesMut,
+    state: DataRx,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+    delivery: &mut D,
+) -> InnerDataPoll<D::Forwarded>
+where
+    S: TransportIo,
+    D: PayloadDelivery,
+{
     // Yield after every successful transport read that has not produced
     // plaintext. On edge-triggered transports a partial read may clear
     // readiness; the one-read scheduling boundary and explicit self-wake
@@ -90,19 +279,19 @@ pub(super) fn poll_data_fill<S: TransportIo>(
             }
             let remaining = ENCRYPTED_LENGTH_LEN - filled;
             match Pin::new(&mut *io).poll_read_buf(cx, scratch, remaining) {
-                Poll::Pending => DataPoll::Pending(DataRx::Length { filled }),
+                Poll::Pending => InnerDataPoll::Pending(DataRx::Length { filled }),
                 Poll::Ready(Err(_)) => {
                     let error = lifecycle.install_transport(observer, TransportPhase::Read);
-                    DataPoll::Ready(DataRx::Poison, Err(error))
+                    InnerDataPoll::Ready(DataRx::Poison, Err(error))
                 }
                 Poll::Ready(Ok(0)) if filled == 0 => {
                     scratch.clear();
                     lifecycle.close_rx(observer);
-                    DataPoll::Ready(DataRx::Closed, Ok(DataRead::Eof))
+                    InnerDataPoll::Ready(DataRx::Closed, Ok(InnerDataRead::Eof))
                 }
                 Poll::Ready(Ok(0)) => {
                     let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                    DataPoll::Ready(DataRx::Poison, Err(error))
+                    InnerDataPoll::Ready(DataRx::Poison, Err(error))
                 }
                 Poll::Ready(Ok(read)) => {
                     let Some(next) = filled
@@ -111,39 +300,39 @@ pub(super) fn poll_data_fill<S: TransportIo>(
                     else {
                         let error =
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                        return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                     };
                     if scratch.len() != next {
                         let error =
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                        return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                     }
                     filled = next;
                     if filled < ENCRYPTED_LENGTH_LEN {
                         let next = DataRx::Length { filled };
                         cx.waker().wake_by_ref();
-                        DataPoll::Pending(next)
+                        InnerDataPoll::Pending(next)
                     } else {
                         if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
                             opener.open_in_place(scratch).map_err(frame_from_open_aead)
                         }) {
-                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                            return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                         }
                         if scratch.len() != 2 {
                             let error =
                                 lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                            return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                         }
                         let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
                         let Some(wire_len) = payload_len.checked_add(TAG_LEN) else {
                             let error =
                                 lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                            return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                         };
                         if wire_len > MAX_DECRYPT_WIRE_LEN {
                             let error =
                                 lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                            return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                         }
                         prepare_decrypt(scratch, wire_len);
                         let next = DataRx::Payload {
@@ -151,7 +340,7 @@ pub(super) fn poll_data_fill<S: TransportIo>(
                             filled: 0,
                         };
                         cx.waker().wake_by_ref();
-                        DataPoll::Pending(next)
+                        InnerDataPoll::Pending(next)
                     }
                 }
             }
@@ -160,29 +349,29 @@ pub(super) fn poll_data_fill<S: TransportIo>(
             wire_len,
             mut filled,
         } => match Pin::new(&mut *io).poll_read_buf(cx, scratch, wire_len - filled) {
-            Poll::Pending => DataPoll::Pending(DataRx::Payload { wire_len, filled }),
+            Poll::Pending => InnerDataPoll::Pending(DataRx::Payload { wire_len, filled }),
             Poll::Ready(Err(_)) => {
                 let error = lifecycle.install_transport(observer, TransportPhase::Read);
-                DataPoll::Ready(DataRx::Poison, Err(error))
+                InnerDataPoll::Ready(DataRx::Poison, Err(error))
             }
             Poll::Ready(Ok(0)) => {
                 let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                DataPoll::Ready(DataRx::Poison, Err(error))
+                InnerDataPoll::Ready(DataRx::Poison, Err(error))
             }
             Poll::Ready(Ok(read)) => {
                 let Some(next) = filled.checked_add(read).filter(|next| *next <= wire_len) else {
                     let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                    return DataPoll::Ready(DataRx::Poison, Err(error));
+                    return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                 };
                 if scratch.len() != next {
                     let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                    return DataPoll::Ready(DataRx::Poison, Err(error));
+                    return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                 }
                 filled = next;
                 if filled < wire_len {
                     let next = DataRx::Payload { wire_len, filled };
                     cx.waker().wake_by_ref();
-                    DataPoll::Pending(next)
+                    InnerDataPoll::Pending(next)
                 } else {
                     let payload_len = wire_len - TAG_LEN;
                     let opened = try_with_wire_staging(wire_len, |worker_wire| {
@@ -192,14 +381,36 @@ pub(super) fn poll_data_fill<S: TransportIo>(
                                 .open_slice_in_place(worker_wire)
                                 .map_err(frame_from_open_aead)
                         })?;
-                        scratch[..payload_len].copy_from_slice(&worker_wire[..payload_len]);
-                        scratch.truncate(payload_len);
-                        Ok(())
+                        if payload_len == 0 {
+                            scratch.clear();
+                            return Ok(InnerDataRead::Buffered);
+                        }
+                        Ok(delivery.deliver(cx, &worker_wire[..payload_len], scratch))
                     });
                     match opened {
-                        Some(Ok(())) => {}
+                        Some(Ok(InnerDataRead::Forwarded {
+                            result,
+                            frame_complete,
+                        })) => {
+                            let state = if frame_complete {
+                                DataRx::Length { filled: 0 }
+                            } else {
+                                DataRx::Ready { position: 0 }
+                            };
+                            return InnerDataPoll::Ready(
+                                state,
+                                Ok(InnerDataRead::Forwarded {
+                                    result,
+                                    frame_complete,
+                                }),
+                            );
+                        }
+                        Some(Ok(InnerDataRead::Buffered)) => {}
+                        Some(Ok(InnerDataRead::Eof)) => {
+                            unreachable!("payload open cannot report EOF")
+                        }
                         Some(Err(error)) => {
-                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                            return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                         }
                         None => {
                             if let Err(error) =
@@ -207,34 +418,37 @@ pub(super) fn poll_data_fill<S: TransportIo>(
                                     opener.open_in_place(scratch).map_err(frame_from_open_aead)
                                 })
                             {
-                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                                return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                             }
                             if scratch.len() != payload_len {
                                 let error = lifecycle
                                     .install_protocol(observer, ProtocolReason::FrameBounds);
-                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                                return InnerDataPoll::Ready(DataRx::Poison, Err(error));
                             }
                         }
                     }
                     if payload_len == 0 {
                         let next = DataRx::Length { filled: 0 };
                         cx.waker().wake_by_ref();
-                        DataPoll::Pending(next)
+                        InnerDataPoll::Pending(next)
                     } else {
-                        DataPoll::Ready(DataRx::Ready { position: 0 }, Ok(DataRead::Buffered))
+                        InnerDataPoll::Ready(
+                            DataRx::Ready { position: 0 },
+                            Ok(InnerDataRead::Buffered),
+                        )
                     }
                 }
             }
         },
         DataRx::Ready { position } => {
-            DataPoll::Ready(DataRx::Ready { position }, Ok(DataRead::Buffered))
+            InnerDataPoll::Ready(DataRx::Ready { position }, Ok(InnerDataRead::Buffered))
         }
-        DataRx::Closed => DataPoll::Ready(DataRx::Closed, Ok(DataRead::Eof)),
+        DataRx::Closed => InnerDataPoll::Ready(DataRx::Closed, Ok(InnerDataRead::Eof)),
         DataRx::Poison => {
             let error = lifecycle
                 .fatal_error()
                 .expect("poison state only exists after fatal installation");
-            DataPoll::Ready(DataRx::Poison, Err(error))
+            InnerDataPoll::Ready(DataRx::Poison, Err(error))
         }
     }
 }

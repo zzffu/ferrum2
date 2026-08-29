@@ -11,10 +11,10 @@ use ferrum2_crypto::{Clock, SecureRandom, generate_method_response_salt};
 use ferrum2_structural::{StructuralCounter, StructuralLocal};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::io::drain_staged;
+use super::io::{FusedDataPoll, FusedDataRead, FusedSinkPoll, drain_staged, poll_data_forward};
 use super::{
-    ClientFlow, PlainBufferedDuplex, ServerFlow, StagedKind, StagedWrite, TransportIo, TxState,
-    protocol_cipher_boundary,
+    ClientFlow, ClientRx, DataRx, PlainBufferedDuplex, ServerFlow, StagedKind, StagedWrite,
+    TransportIo, TxState, protocol_cipher_boundary,
 };
 use crate::tcp::error::{DetectionReason, ShadowsocksError, detection_from_frame};
 use crate::tcp::handshake::TcpKeyProvider;
@@ -303,6 +303,66 @@ where
     }
 
     fn poll_download_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<DownloadStep>> {
+        let download = self
+            .flow
+            .poll_fused_download(cx, self.plain)
+            .map_err(framed_error);
+        match download {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(FusedDataRead::Eof)) => {
+                self.download_eof = true;
+                return match self.poll_download_shutdown(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(DownloadStep::DirectionDone)),
+                };
+            }
+            Poll::Ready(Ok(FusedDataRead::Buffered)) => {}
+            Poll::Ready(Ok(FusedDataRead::Forwarded(result))) => {
+                #[cfg(feature = "structural-metrics")]
+                {
+                    debug_assert!(!self.structural_stats.download_frame_open);
+                    self.structural_stats.borrowed_download_frames = self
+                        .structural_stats
+                        .borrowed_download_frames
+                        .saturating_add(1);
+                    self.structural_stats.download_frame_open = true;
+                }
+                return match result {
+                    FusedSinkPoll::Pending => {
+                        self.download_plaintext_carried = true;
+                        Poll::Pending
+                    }
+                    FusedSinkPoll::Error(error) => {
+                        self.download_plaintext_carried = true;
+                        Poll::Ready(Err(error))
+                    }
+                    FusedSinkPoll::Written {
+                        bytes,
+                        frame_complete,
+                    } => {
+                        debug_assert_ne!(bytes, 0);
+                        (self.observe)(FusedRelayDirection::TunnelToPlain, bytes);
+                        self.download_plaintext_carried = !frame_complete;
+                        #[cfg(feature = "structural-metrics")]
+                        if frame_complete {
+                            self.structural_stats.download_frame_open = false;
+                        } else {
+                            self.structural_stats.partial_writes =
+                                self.structural_stats.partial_writes.saturating_add(1);
+                        }
+                        if frame_complete {
+                            Poll::Ready(Ok(DownloadStep::PlaintextWritten))
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }
+                };
+            }
+        }
+
         let fill = Pin::new(&mut *self.flow)
             .poll_fill_plain_buf(cx)
             .map_err(framed_error);
@@ -311,14 +371,10 @@ where
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(source)) => source,
         };
-        if source.is_empty() {
-            self.download_eof = true;
-            return match self.poll_download_shutdown(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(DownloadStep::DirectionDone)),
-            };
-        }
+        debug_assert!(
+            !source.is_empty(),
+            "buffered download must expose plaintext"
+        );
         #[cfg(feature = "structural-metrics")]
         if !self.structural_stats.download_frame_open {
             self.structural_stats.borrowed_download_frames = self
@@ -375,6 +431,13 @@ where
 }
 
 pub(crate) trait FusedProtocolFlow: PlainBufferedDuplex {
+    fn poll_fused_download<W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        sink: &mut W,
+    ) -> Poll<Result<FusedDataRead, ShadowsocksError>>
+    where
+        W: AsyncWrite + Unpin;
     fn inspect_buffers(&self);
     fn has_staged_upload(&self) -> bool;
     fn prepare_upload_read(&mut self) -> Result<(), ShadowsocksError>;
@@ -471,6 +534,56 @@ where
     K: TcpKeyProvider + Sync,
     T: Clock + Sync,
 {
+    fn poll_fused_download<W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        sink: &mut W,
+    ) -> Poll<Result<FusedDataRead, ShadowsocksError>>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        if !matches!(self.rx, ClientRx::Data(_)) {
+            return match Pin::new(&mut *self).poll_fill_plain_buf(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok([])) => Poll::Ready(Ok(FusedDataRead::Eof)),
+                Poll::Ready(Ok(_)) => Poll::Ready(Ok(FusedDataRead::Buffered)),
+            };
+        }
+        if let Some(error) = self.lifecycle.fatal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if self.lifecycle.terminal == Some(crate::tcp::FlowTerminal::Normal)
+            || self.lifecycle.rx_closed
+        {
+            return Poll::Ready(Ok(FusedDataRead::Eof));
+        }
+        let ClientRx::Data(state) = std::mem::replace(&mut self.rx, ClientRx::Poison) else {
+            unreachable!("client data state was checked")
+        };
+        match poll_data_forward(
+            &mut self.io,
+            self.response_opener
+                .as_mut()
+                .expect("response opener exists in data state"),
+            &mut self.decrypt,
+            state,
+            &mut self.lifecycle,
+            self.observers.flow,
+            cx,
+            sink,
+        ) {
+            FusedDataPoll::Pending(state) => {
+                self.rx = ClientRx::Data(state);
+                Poll::Pending
+            }
+            FusedDataPoll::Ready(state, result) => {
+                self.rx = ClientRx::Data(state);
+                Poll::Ready(result)
+            }
+        }
+    }
+
     fn inspect_buffers(&self) {
         inspect_scratch(BufferRole::Encrypt, &self.encrypt, self.observers.buffer);
         inspect_scratch(BufferRole::Decrypt, &self.decrypt, self.observers.buffer);
@@ -567,6 +680,44 @@ where
     T: Clock + Sync,
     R: SecureRandom,
 {
+    fn poll_fused_download<W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        sink: &mut W,
+    ) -> Poll<Result<FusedDataRead, ShadowsocksError>>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        if let Some(error) = self.lifecycle.fatal_error() {
+            return Poll::Ready(Err(error));
+        }
+        if self.lifecycle.terminal == Some(crate::tcp::FlowTerminal::Normal)
+            || self.lifecycle.rx_closed
+        {
+            return Poll::Ready(Ok(FusedDataRead::Eof));
+        }
+        let state = std::mem::replace(&mut self.rx, DataRx::Poison);
+        match poll_data_forward(
+            &mut self.io,
+            &mut self.request_opener,
+            &mut self.decrypt,
+            state,
+            &mut self.lifecycle,
+            self.observers.flow,
+            cx,
+            sink,
+        ) {
+            FusedDataPoll::Pending(state) => {
+                self.rx = state;
+                Poll::Pending
+            }
+            FusedDataPoll::Ready(state, result) => {
+                self.rx = state;
+                Poll::Ready(result)
+            }
+        }
+    }
+
     fn inspect_buffers(&self) {
         inspect_scratch(BufferRole::Encrypt, &self.encrypt, self.observers.buffer);
         inspect_scratch(BufferRole::Decrypt, &self.decrypt, self.observers.buffer);
