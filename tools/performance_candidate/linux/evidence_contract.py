@@ -25,6 +25,55 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("ascii")
 
 
+# BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+_DIAGNOSTIC_BEGIN = b"BEGIN M18 " + b"STRUCTURAL DIAGNOSTIC"
+_DIAGNOSTIC_END = b"END M18 " + b"STRUCTURAL DIAGNOSTIC"
+_DIAGNOSTIC_BOUNDARIES = {
+    "tools/ferrum2-m4-qualification/Cargo.toml": 2,
+    "tools/ferrum2-m4-qualification/src/m4_support/mod.rs": 2,
+    "tools/ferrum2-m4-qualification/src/m4_support/self_check.rs": 1,
+    "tools/performance_candidate/cli.py": 3,
+    "tools/performance_candidate/linux/evidence_contract.py": 4,
+}
+_TIMED_V6_EXCLUDED_CONTROLLER_FILES = frozenset(
+    {
+        "build_experiment.py",
+        "build_qualification.py",
+        "conditional_decision.py",
+        "evidence_matrix.py",
+        "structural_diagnostic.py",
+    }
+)
+
+
+def _timed_v6_source_bytes(relative: str, raw: bytes) -> bytes:
+    """Project independent diagnostic additions out of the timed-v6 identity."""
+
+    expected = _DIAGNOSTIC_BOUNDARIES.get(relative, 0)
+    if raw.count(_DIAGNOSTIC_BEGIN) != expected or raw.count(_DIAGNOSTIC_END) != expected:
+        raise CandidateControlError(
+            f"diagnostic source boundary count is invalid: {relative}"
+        )
+    while True:
+        marker = raw.find(_DIAGNOSTIC_BEGIN)
+        if marker < 0:
+            break
+        line_start = raw.rfind(b"\n", 0, marker) + 1
+        end = raw.find(_DIAGNOSTIC_END, marker + len(_DIAGNOSTIC_BEGIN))
+        if end < 0:
+            raise CandidateControlError(
+                f"unterminated diagnostic source boundary: {relative}"
+            )
+        line_end = raw.find(b"\n", end + len(_DIAGNOSTIC_END))
+        if line_end < 0:
+            line_end = len(raw) - 1
+        raw = raw[:line_start] + raw[line_end + 1 :]
+    if _DIAGNOSTIC_END in raw:
+        raise CandidateControlError(f"orphan diagnostic source boundary: {relative}")
+    return raw
+
+
+# END M18 STRUCTURAL DIAGNOSTIC
 def _source_bundle(root: pathlib.Path, paths: tuple[pathlib.Path, ...]) -> str:
     entries: list[dict[str, object]] = []
     for path in paths:
@@ -32,6 +81,9 @@ def _source_bundle(root: pathlib.Path, paths: tuple[pathlib.Path, ...]) -> str:
             relative = path.relative_to(root).as_posix()
             metadata = path.lstat()
             raw = path.read_bytes()
+            # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+            raw = _timed_v6_source_bytes(relative, raw)
+            # END M18 STRUCTURAL DIAGNOSTIC
         except (OSError, ValueError) as error:
             raise CandidateControlError("unable to identify performance source bundle") from error
         if path.is_symlink() or not metadata.st_mode:
@@ -55,6 +107,11 @@ def controller_source_sha256() -> str:
     root = _repository_root()
     package = root / "tools" / "performance_candidate"
     paths = tuple(sorted(package.rglob("*.py")))
+    # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+    paths = tuple(
+        path for path in paths if path.name not in _TIMED_V6_EXCLUDED_CONTROLLER_FILES
+    )
+    # END M18 STRUCTURAL DIAGNOSTIC
     if not paths:
         raise CandidateControlError("performance controller source bundle is empty")
     return _source_bundle(root, paths)
@@ -65,6 +122,9 @@ def producer_source_sha256() -> str:
     root = _repository_root()
     package = root / "tools" / "ferrum2-m4-qualification"
     paths = (package / "Cargo.toml", *sorted((package / "src").rglob("*.rs")))
+    # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+    paths = tuple(path for path in paths if not path.name.startswith("structural_"))
+    # END M18 STRUCTURAL DIAGNOSTIC
     return _source_bundle(root, tuple(paths))
 
 

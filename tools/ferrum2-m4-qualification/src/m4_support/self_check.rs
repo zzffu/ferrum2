@@ -44,6 +44,13 @@ use super::{tcp_scale, windows_tun};
 pub(super) fn run_self_check() -> Result<String, String> {
     const MUTATION_COUNT: u64 = 57;
     windows_tun::run_self_check()?;
+    // BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+    #[cfg(feature = "structural-diagnostic")]
+    {
+        super::structural_contract::run_self_check()?;
+        super::structural_diagnostic::run_self_check()?;
+    }
+    // END M18 STRUCTURAL DIAGNOSTIC
     let structural: serde_json::Value =
         serde_json::from_str(&StructuralMetrics::dns_listener(32, 8, 0, 0).json())
             .map_err(|_| "structural metrics did not encode as JSON".to_owned())?;

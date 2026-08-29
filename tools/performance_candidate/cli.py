@@ -11,6 +11,9 @@ from collections.abc import Sequence
 
 from tools.performance_candidate import build_experiment
 from tools.performance_candidate import evidence_matrix
+# BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+from tools.performance_candidate import structural_diagnostic
+# END M18 STRUCTURAL DIAGNOSTIC
 from tools.performance_candidate.linux import baseline
 from tools.performance_candidate.identity import validate_git_relation
 from tools.performance_candidate.json_contract import CandidateControlError, _strict_json
@@ -118,6 +121,18 @@ def _parser() -> argparse.ArgumentParser:
     source_lineage.add_argument("--head-sha", required=True)
     source_lineage.add_argument("--parent-sha", required=True)
     source_lineage.add_argument("--candidate-sha", required=True)
+    # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+    structural = commands.add_parser(
+        "validate-structural-diagnostic",
+        help="recompute one bounded non-authoritative structural diagnostic",
+    )
+    structural.add_argument("--evidence", required=True, type=pathlib.Path)
+    structural.add_argument("--repository", required=True, type=pathlib.Path)
+    structural.add_argument("--runner", required=True, type=pathlib.Path)
+    structural.add_argument("--client", required=True, type=pathlib.Path)
+    structural.add_argument("--server", required=True, type=pathlib.Path)
+    structural.add_argument("--candidate-sha", required=True)
+    # END M18 STRUCTURAL DIAGNOSTIC
     windows_tun_plan = commands.add_parser(
         "windows-tun-plan",
         help="write the fixed nine-scenario Windows TUN paired plan",
@@ -329,6 +344,22 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 parsed.candidate_sha,
             )
             return 0
+        # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+        if parsed.command == "validate-structural-diagnostic":
+            row = structural_diagnostic.validate_structural_diagnostic(
+                parsed.evidence,
+                repository=parsed.repository,
+                runner=parsed.runner,
+                client=parsed.client,
+                server=parsed.server,
+                candidate_sha=parsed.candidate_sha,
+            )
+            print(
+                f"{row['kind']}\t{row['status']}\t"
+                "performance_authoritative=false\tperformance_adoption_allowed=false"
+            )
+            return 0
+        # END M18 STRUCTURAL DIAGNOSTIC
         if parsed.command == "windows-tun-plan":
             policy = load_windows_tun_policy(
                 parsed.policy,

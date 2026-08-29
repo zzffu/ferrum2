@@ -304,7 +304,7 @@ class DecisionPolicyTests(unittest.TestCase):
                     expected_contracts[scenario],
                 )
 
-    def test_repository_policy_statically_enables_every_calibrated_selection(
+    def test_repository_policy_is_stale_after_timed_controller_closure_correction(
         self,
     ) -> None:
         policy = linux_policy.load_decision_policy(POLICY_PATH)
@@ -322,7 +322,7 @@ class DecisionPolicyTests(unittest.TestCase):
                     pairs="6",
                     decision_policy=policy,
                 )
-                self.assertTrue(plan["adoption_eligible"])
+                self.assertFalse(plan["adoption_eligible"])
                 for scenario in plan["scenarios"]:
                     contract = scenario["evidence_contract"]
                     for field in (

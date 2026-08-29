@@ -595,3 +595,95 @@ jobs:
             fi
           done
           test "$cleanup_status" -eq 0
+
+  structural-diagnostic:
+    name: structural-diagnostic
+    needs: paired-profile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
+      STRUCTURAL_TARGET_DIR: ${{ github.workspace }}/target/structural-diagnostic
+      STRUCTURAL_EVIDENCE: ${{ github.workspace }}/profiles/structural/m18-structural-trial-v7.json
+    steps:
+      - name: Checkout exact structural candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Require preferred AMD structural host
+        shell: bash
+        run: |
+          set -euo pipefail
+          vendor_id="$(awk -F ': ' '/^vendor_id[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)"
+          cpu_model="$(awk -F ': ' '/^model name[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo)"
+          if [ "$vendor_id" != AuthenticAMD ]; then
+            echo "::error::Structural diagnostics prefer an AMD host; observed ${vendor_id:-unknown} / ${cpu_model:-unknown}. Re-run this workflow to obtain an AMD runner."
+            exit 1
+          fi
+          printf 'Selected preferred AMD structural host: %s\n' "$cpu_model"
+      - name: Build isolated feature-on structural binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git status --porcelain)" = ""
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustup toolchain install 1.97.1 --profile minimal
+          cargo +1.97.1 build \
+            --profile profiling \
+            --target-dir "$STRUCTURAL_TARGET_DIR" \
+            --locked \
+            -p ferrum2-client \
+            -p ferrum2-server \
+            -p ferrum2-m4-qualification \
+            --features ferrum2-client/structural-metrics,ferrum2-server/structural-metrics,ferrum2-m4-qualification/structural-diagnostic
+      - name: Collect non-authoritative structural evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$STRUCTURAL_EVIDENCE")"
+          "$STRUCTURAL_TARGET_DIR/profiling/m4-qualification" structural-diagnostic \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --binary-dir "$STRUCTURAL_TARGET_DIR/profiling" \
+            --output "$STRUCTURAL_EVIDENCE" \
+            --candidate-sha "$GITHUB_SHA" \
+            --warmup-seconds 1 \
+            --active-seconds 15
+      - name: Recompute schema-v7 structural evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate validate-structural-diagnostic \
+            --evidence "$STRUCTURAL_EVIDENCE" \
+            --repository "$GITHUB_WORKSPACE" \
+            --runner "$STRUCTURAL_TARGET_DIR/profiling/m4-qualification" \
+            --client "$STRUCTURAL_TARGET_DIR/profiling/ferrum2-client" \
+            --server "$STRUCTURAL_TARGET_DIR/profiling/ferrum2-server" \
+            --candidate-sha "$GITHUB_SHA"
+      - name: Upload validated structural evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: structural-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/profiles/structural/m18-structural-trial-v7.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reap structural diagnostic processes
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -u
+          cleanup_status=0
+          for signal in TERM KILL; do
+            for process in ferrum2-client ferrum2-server; do
+              pkill "-$signal" -x "$process" 2>/dev/null || status=$?
+              if [ "${status:-0}" -gt 1 ]; then cleanup_status=1; fi
+              status=0
+            done
+            sleep 1
+          done
+          for process in ferrum2-client ferrum2-server; do
+            if pgrep -x "$process" >/dev/null; then cleanup_status=1; fi
+          done
+          test "$cleanup_status" -eq 0

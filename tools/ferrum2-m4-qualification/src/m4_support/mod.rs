@@ -57,6 +57,10 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         "profile-workload" => {
             profile_output::run_profile_workload(profile_contract::parse_profile_args(&rest)?)
         }
+        // BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+        #[cfg(feature = "structural-diagnostic")]
+        "structural-diagnostic" => structural_diagnostic::run(&rest),
+        // END M18 STRUCTURAL DIAGNOSTIC
         "windows-tun-workload" => windows_tun::run_workload(&rest),
         "windows-tun-probe" => windows_tun::run_probe(&rest),
         "windows-tun-support" => windows_tun::run_support(&rest),
@@ -87,4 +91,10 @@ mod proxy_config;
 mod resource;
 mod resource_sampling;
 mod self_check;
+// BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+#[cfg(feature = "structural-diagnostic")]
+mod structural_contract;
+#[cfg(feature = "structural-diagnostic")]
+mod structural_diagnostic;
+// END M18 STRUCTURAL DIAGNOSTIC
 mod throughput;
