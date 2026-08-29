@@ -16,6 +16,7 @@ pub(in crate::run) use network::io_error_from_network_service;
 pub(in crate::run) use network::system_application_resolver;
 #[cfg(all(windows, not(test)))]
 pub(in crate::run) use network::{ClientNetworkSocketService, NetworkServiceConnector};
+#[cfg(feature = "structural-metrics")]
 pub(in crate::run) use tcp::ClientTcpFlow;
 pub(super) use udp::{
     ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, UdpSendError,

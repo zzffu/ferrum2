@@ -6,22 +6,18 @@ use ferrum2_core::{ConnectErrorKind, LocalEndpoint, SessionReply as _};
 use ferrum2_observability::{
     Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
-#[cfg(feature = "structural-metrics")]
-use ferrum2_runtime::RELAY_BUFFER_BYTES;
-use ferrum2_runtime::{
-    CancellationToken, RelayDirection, relay_lifecycle, relay_lifecycle_with_engine,
-};
+use ferrum2_runtime::{CancellationToken, relay_lifecycle};
 use ferrum2_shadowsocks::ShadowsocksError;
-use ferrum2_shadowsocks::tokio::{FusedRelayDirection, TokioFramed, relay_client_flow};
+use ferrum2_shadowsocks::tokio::TokioFramed;
 use ferrum2_socks5::SocksCommand;
 #[cfg(feature = "structural-metrics")]
-use ferrum2_structural::{FtbrFallbackReason, StructuralCounter};
+use ferrum2_structural::FtbrFallbackReason;
 use tokio::net::UdpSocket;
 
 use crate::run::context::{ClientContext, ClientRouting};
-use crate::run::egress::{
-    ClientOpenFailure, ClientPlanFailure, ClientRequestOrigin, ClientTcpFlow,
-};
+#[cfg(feature = "structural-metrics")]
+use crate::run::egress::ClientTcpFlow;
+use crate::run::egress::{ClientOpenFailure, ClientPlanFailure, ClientRequestOrigin};
 use crate::run::observation::{finish_relay, observation_for_error, record_failure};
 use crate::run::routing::{ClientTerminalRoute, relay_hijacked_tcp};
 
@@ -227,15 +223,9 @@ pub(super) async fn client_connection(
     ));
     #[cfg(feature = "structural-metrics")]
     match &flow {
-        ClientTcpFlow::SingleProxy(_) => {
-            context
-                .structural
-                .add(StructuralCounter::FtbrFastPathConnections, 1);
-            context.structural.add(
-                StructuralCounter::FtbrRelayBufferCapacityRemovedBytes,
-                2 * RELAY_BUFFER_BYTES as u64,
-            );
-        }
+        ClientTcpFlow::SingleProxy(_) => context
+            .structural
+            .add(FtbrFallbackReason::UnsupportedFlow.counter(), 1),
         ClientTcpFlow::Direct(_) => context
             .structural
             .add(FtbrFallbackReason::Direct.counter(), 1),
@@ -243,44 +233,6 @@ pub(super) async fn client_connection(
             .structural
             .add(FtbrFallbackReason::MultiHop.counter(), 1),
     }
-    let flow = match flow {
-        ClientTcpFlow::SingleProxy(mut flow) => {
-            let relay = relay_lifecycle_with_engine(
-                context.runtime.idle_timeout,
-                cancellation.cancelled(),
-                |progress| {
-                    relay_client_flow(
-                        &mut stream,
-                        &mut flow,
-                        move |direction, bytes| {
-                            progress.record(
-                                match direction {
-                                    FusedRelayDirection::PlainToTunnel => {
-                                        RelayDirection::InboundToOutbound
-                                    }
-                                    FusedRelayDirection::TunnelToPlain => {
-                                        RelayDirection::OutboundToInbound
-                                    }
-                                },
-                                bytes,
-                            );
-                        },
-                        #[cfg(feature = "structural-metrics")]
-                        &context.structural,
-                    )
-                },
-            )
-            .await;
-            let framed = TokioFramed::new(flow);
-            context
-                .metrics
-                .active_connections_dec(Role::Client, Inbound::Socks5);
-            finish_relay(&context, &framed, relay);
-            return;
-        }
-        flow => flow,
-    };
-
     let mut framed = TokioFramed::new(flow);
     let relay = relay_lifecycle(
         &mut stream,

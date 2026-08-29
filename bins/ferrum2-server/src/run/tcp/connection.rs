@@ -4,17 +4,11 @@ use ferrum2_core::{ConnectErrorKind, Inbound as _, LocalEndpoint, SessionReply a
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
-#[cfg(feature = "structural-metrics")]
-use ferrum2_runtime::RELAY_BUFFER_BYTES;
-use ferrum2_runtime::{
-    CancellationToken, RelayDirection, RelayRunError, RuntimeTcpStream, relay_lifecycle_with_engine,
-};
+use ferrum2_runtime::{CancellationToken, RelayRunError, RuntimeTcpStream, relay_lifecycle};
 use ferrum2_shadowsocks::ShadowsocksTcpInbound;
-use ferrum2_shadowsocks::tokio::{
-    FusedRelayDirection, TokioFramed, TokioTransport, relay_server_flow,
-};
+use ferrum2_shadowsocks::tokio::{TokioFramed, TokioTransport};
 #[cfg(feature = "structural-metrics")]
-use ferrum2_structural::{FtbrFallbackReason, StructuralCounter};
+use ferrum2_structural::FtbrFallbackReason;
 
 use super::ServerContext;
 use super::outbound::{DirectFlowError, ServerNetworkTcpOutbound, open_and_prefix};
@@ -209,38 +203,18 @@ pub(super) async fn server_connection(
         .succeeded_socket(target_stream.local_socket_addr())
         .await;
     #[cfg(feature = "structural-metrics")]
-    {
-        context
-            .structural
-            .add(StructuralCounter::FtbrFastPathConnections, 1);
-        context.structural.add(
-            StructuralCounter::FtbrRelayBufferCapacityRemovedBytes,
-            2 * RELAY_BUFFER_BYTES as u64,
-        );
-    }
-    let relay = relay_lifecycle_with_engine(
+    context
+        .structural
+        .add(FtbrFallbackReason::UnsupportedFlow.counter(), 1);
+    let mut framed = TokioFramed::new(stream);
+    let relay = relay_lifecycle(
+        &mut framed,
+        &mut target_stream,
         context.runtime.idle_timeout,
+        &context.registry,
         cancellation.cancelled(),
-        |progress| {
-            relay_server_flow(
-                &mut target_stream,
-                &mut stream,
-                move |direction, bytes| {
-                    progress.record(
-                        match direction {
-                            FusedRelayDirection::PlainToTunnel => RelayDirection::OutboundToInbound,
-                            FusedRelayDirection::TunnelToPlain => RelayDirection::InboundToOutbound,
-                        },
-                        bytes,
-                    );
-                },
-                #[cfg(feature = "structural-metrics")]
-                &context.structural,
-            )
-        },
     )
     .await;
-    let framed = TokioFramed::new(stream);
     context
         .metrics
         .active_connections_dec(Role::Server, Inbound::Shadowsocks);
