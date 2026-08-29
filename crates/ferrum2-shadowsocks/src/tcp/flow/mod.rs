@@ -16,7 +16,6 @@ use super::error::{
     protocol_from_frame,
 };
 use super::observe::FlowObserver;
-use super::wire::MAX_DECRYPT_WIRE_LEN;
 
 /// Executor-neutral transport capability owned by one opaque flow.
 pub trait TransportIo: AbortiveClose + Send + Unpin {
@@ -177,7 +176,7 @@ pub(super) enum ClientRx {
 pub(super) enum DataRx {
     Length { filled: usize },
     Payload { wire_len: usize, filled: usize },
-    Ready { position: usize },
+    Ready { position: usize, end: usize },
     Closed,
     Poison,
 }
@@ -200,24 +199,26 @@ pub(super) struct StagedWrite {
     position: usize,
 }
 
-pub(super) fn reset_decrypt(scratch: &mut BytesMut) {
-    scratch.clear();
-    scratch.resize(MAX_DECRYPT_WIRE_LEN, 0);
-}
-
-fn copy_ready(scratch: &BytesMut, position: &mut usize, destination: &mut [u8]) -> (usize, bool) {
-    let remaining = scratch.len().saturating_sub(*position);
+fn copy_ready(
+    scratch: &BytesMut,
+    position: &mut usize,
+    end: usize,
+    destination: &mut [u8],
+) -> (usize, bool) {
+    debug_assert!(*position <= end);
+    debug_assert!(end <= scratch.len());
+    let remaining = end.saturating_sub(*position);
     let copied = remaining.min(destination.len());
     destination[..copied].copy_from_slice(&scratch[*position..*position + copied]);
     *position += copied;
-    (copied, *position == scratch.len())
+    (copied, *position == end)
 }
 
-pub(super) fn protocol_cipher_boundary(
+pub(super) fn protocol_cipher_boundary<T>(
     lifecycle: &mut Lifecycle,
     observer: &dyn FlowObserver,
-    operation: impl FnOnce() -> Result<(), FrameError>,
-) -> Result<(), ShadowsocksError> {
+    operation: impl FnOnce() -> Result<T, FrameError>,
+) -> Result<T, ShadowsocksError> {
     if let Some(error) = lifecycle.fatal_error() {
         return Err(error);
     }

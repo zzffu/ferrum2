@@ -3,7 +3,6 @@ use std::fmt;
 
 use bytes::BytesMut;
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
-use zeroize::Zeroizing;
 
 use super::{NonceCounter, TcpSubkey};
 #[cfg(test)]
@@ -60,23 +59,37 @@ impl TcpOpener {
         }
     }
 
-    /// Authenticates and decrypts in place with empty associated data.
-    pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
+    /// Authenticates and decrypts a ciphertext-and-tag slice in place.
+    ///
+    /// Returns the plaintext length on success. After authentication failure,
+    /// the contents of `buffer` are unspecified and callers must discard them.
+    /// The nonce is committed only after successful authentication. Nonce
+    /// exhaustion is checked before touching `buffer`.
+    pub fn open_slice_in_place(&mut self, buffer: &mut [u8]) -> Result<usize, AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
         let tag_start = buffer
             .len()
             .checked_sub(AEAD_TAG_BYTES)
             .ok_or(AeadError::AuthenticationFailed)?;
-        let tag: [u8; AEAD_TAG_BYTES] = buffer[tag_start..]
+        let (ciphertext, tag) = buffer.split_at_mut(tag_start);
+        let tag: [u8; AEAD_TAG_BYTES] = tag
             .try_into()
             .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
-        let mut plaintext = Zeroizing::new(buffer[..tag_start].to_vec());
         self.cipher
-            .decrypt_packet(&nonce, plaintext.as_mut(), &tag)
+            .decrypt_packet(&nonce, ciphertext, &tag)
             .map_err(|_| AeadError::AuthenticationFailed)?;
-        buffer.truncate(tag_start);
-        buffer.copy_from_slice(plaintext.as_ref());
         self.nonce = next;
+        Ok(tag_start)
+    }
+
+    /// Authenticates and decrypts in place with empty associated data.
+    ///
+    /// After authentication failure, the contents of `buffer` are unspecified
+    /// and callers must discard them. Nonce exhaustion leaves both the buffer
+    /// and counter unchanged.
+    pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
+        let plaintext_len = self.open_slice_in_place(buffer.as_mut())?;
+        buffer.truncate(plaintext_len);
         Ok(())
     }
 }
@@ -159,18 +172,56 @@ mod tests {
             let original_ciphertext = ciphertext.clone();
 
             assert_eq!(
-                opener.open_in_place(&mut ciphertext),
+                opener.open_slice_in_place(ciphertext.as_mut()),
                 Err(AeadError::NonceExhausted)
             );
             assert_eq!(ciphertext, original_ciphertext);
             assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
 
             assert_eq!(
-                opener.open_in_place(&mut ciphertext),
+                opener.open_slice_in_place(ciphertext.as_mut()),
                 Err(AeadError::NonceExhausted)
             );
             assert_eq!(ciphertext, original_ciphertext);
             assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
         }
+    }
+
+    #[test]
+    fn tcp_opener_slice_decrypts_without_replacing_storage() {
+        let subkey = TcpSubkey::from_bytes([0x77; AES_128_KEY_BYTES]);
+        let mut sealer = TcpSealer::new(TcpSubkey::from_bytes([0x77; AES_128_KEY_BYTES]));
+        let mut wire = BytesMut::from(&b"caller-owned fixed backing"[..]);
+        sealer.seal_in_place(&mut wire).expect("fixture seals");
+
+        let storage = wire.as_ptr();
+        let wire_len = wire.len();
+        let mut opener = TcpOpener::new(subkey);
+        let plaintext_len = opener
+            .open_slice_in_place(&mut wire[..wire_len])
+            .expect("fixture authenticates");
+
+        assert_eq!(wire.as_ptr(), storage);
+        assert_eq!(&wire[..plaintext_len], b"caller-owned fixed backing");
+        assert_eq!(plaintext_len + AEAD_TAG_BYTES, wire_len);
+    }
+
+    #[test]
+    fn tcp_opener_slice_short_tag_does_not_consume_nonce() {
+        let subkey = TcpSubkey::from_bytes([0x78; AES_128_KEY_BYTES]);
+        let mut sealer = TcpSealer::new(TcpSubkey::from_bytes([0x78; AES_128_KEY_BYTES]));
+        let mut valid = BytesMut::from(&b"nonce zero remains available"[..]);
+        sealer.seal_in_place(&mut valid).expect("fixture seals");
+        let mut opener = TcpOpener::new(subkey);
+        let mut short = [0xa5; AEAD_TAG_BYTES - 1];
+
+        assert_eq!(
+            opener.open_slice_in_place(&mut short),
+            Err(AeadError::AuthenticationFailed)
+        );
+        let plaintext_len = opener
+            .open_slice_in_place(valid.as_mut())
+            .expect("short input did not consume nonce zero");
+        assert_eq!(&valid[..plaintext_len], b"nonce zero remains available");
     }
 }

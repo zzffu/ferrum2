@@ -174,6 +174,50 @@ async fn client_subsequent_length_and_payload_accept_one_byte_and_mixed_fragment
     assert_eq!(&destination[..mixed], b"mixed");
 }
 
+#[tokio::test]
+async fn ready_plaintext_range_never_exposes_stale_or_unauthenticated_bytes() {
+    const SENTINEL: u8 = 0x6d;
+
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(909);
+    let request = valid_request_wire(NOW, &salt);
+    let large = vec![0xa5; 257];
+    let mut frames = request_data_frames(&salt, &[&large, b"z", b"tampered"]);
+    *frames[5].last_mut().expect("tampered payload tag") ^= 1;
+    let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
+    reads.extend(frames);
+    let (io, _) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let mut destination = [SENTINEL; 7];
+    let mut received = Vec::with_capacity(large.len());
+
+    while received.len() < large.len() {
+        destination.fill(SENTINEL);
+        let read = read_plain(&mut flow, &mut destination)
+            .await
+            .expect("large frame chunk");
+        received.extend_from_slice(&destination[..read]);
+        assert!(destination[read..].iter().all(|byte| *byte == SENTINEL));
+    }
+    assert_eq!(received, large);
+
+    destination.fill(SENTINEL);
+    let read = read_plain(&mut flow, &mut destination)
+        .await
+        .expect("one-byte frame");
+    assert_eq!(read, 1);
+    assert_eq!(destination[0], b'z');
+    assert!(destination[1..].iter().all(|byte| *byte == SENTINEL));
+
+    destination.fill(SENTINEL);
+    assert!(read_plain(&mut flow, &mut destination).await.is_err());
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
+}
+
 struct WakeCounter(AtomicUsize);
 
 impl Wake for WakeCounter {

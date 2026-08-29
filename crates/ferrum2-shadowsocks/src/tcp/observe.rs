@@ -61,7 +61,10 @@ pub(super) fn fixed_scratch(
     limit: usize,
     observer: &dyn BufferObserver,
 ) -> BytesMut {
-    let scratch = BytesMut::with_capacity(limit);
+    let scratch = match role {
+        BufferRole::Encrypt => BytesMut::with_capacity(limit),
+        BufferRole::Decrypt => BytesMut::zeroed(limit),
+    };
     observer.allocated(role, limit, scratch.as_ptr() as usize);
     scratch
 }

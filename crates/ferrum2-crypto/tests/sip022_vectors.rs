@@ -142,10 +142,8 @@ fn sip022_kdf_aead_nonce_and_authentication_table_covers_every_profile() {
         .expect("nonce zero output");
         let mut corrupted = valid.clone();
         *corrupted.last_mut().expect("tag byte") ^= 1;
-        let original = corrupted.clone();
         let mut corrupted = BytesMut::from(corrupted.as_slice());
         assert!(opener.open_in_place(&mut corrupted).is_err());
-        assert_eq!(corrupted.as_ref(), original);
 
         let mut valid = BytesMut::from(valid.as_slice());
         opener
