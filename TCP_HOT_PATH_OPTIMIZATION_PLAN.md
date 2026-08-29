@@ -683,3 +683,29 @@ copyback 的弱正向；不再制造 copy-in、direct receive、same-poll 或自
   只有获得后续阶段授权或新的 profile 证据时，才从 `bf4cd4a6`、`d874d3dd` 或其它已证明节点开
   独立 sibling branch。
 - 不实施 TUN 优化，不用不安全/不零化 ring 结果填补差距。
+
+## 14. 90% 目标续跑：generic relay 调度诊断
+
+代码与历史审计确认，`64cd1410` 同时引入 single-hop fused dispatch、完整 fused state
+machine、Tokio adapter 和 wire final-layout，仓库中没有从后续已证明节点做过“只禁用 fused、恢复
+Tokio 标准 copy loop”的精确 A/B。`relay_client_flow`/`relay_server_flow` 当前每个完整 frame 都
+`wake_by_ref + Pending`；Tokio `copy_bidirectional_with_sizes` 则在同一次 poll 中继续搬运，直到真实
+I/O `Pending` 或 cooperative budget 生效。这一差异能够直接放大已经证实的多 worker task migration，
+且与 AEAD primitive 无关。
+
+新建 diagnostic-only sibling：
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-generic-relay-diagnostic`；
+- 单变量：client/server 的普通 single-hop Shadowsocks TCP 强制经 `TokioFramed`、既有
+  `relay_lifecycle` 和 Tokio bidirectional copy；
+- 有意重新引入每端每连接两块 32 KiB generic relay buffer 及明文 copy，以换掉 fused 的逐帧
+  scheduling boundary；idle、cancel、stats、half-close、backpressure 与 buffer owner accounting 保持；
+- diagnostic commit 必须在 workload 前提交并推送；它无论结果如何都不作为产品祖先，也不触发
+  hosted CI。
+
+只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 正式本地样本，
+不重跑、不挑样本。判定预先固定：相对 `bf4cd4a6` 的 `234,378,581 B/s`，不高于父节点即冻结；
+正向但低于 `10%` 只记为不足；达到 `+10%` 且没有用更多 proxy CPU 换吞吐，才认为 fused 调度语义
+得到足够强的产品级根因支持。命中后仍从 `bf4cd4a6` 另开 sibling，在 protocol-owned buffer 内实现
+同 poll 连续推进，保留 fused 的 buffer/copy 优势；不得从 generic diagnostic 叠加产品修改。
