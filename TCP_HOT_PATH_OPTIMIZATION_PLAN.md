@@ -493,6 +493,26 @@ zero frame、client initial response，以及 TLS reentrant buffered fallback。
 迁移下降也没有转化为同量级吞吐。下一候选应单独处理仍存在的 flow-scratch→worker-local copy-in，
 同时继续保留 length 后公平边界、TLS borrow 不跨 poll 和失败明文不发布契约。
 
+### 12.9 下一 sibling：direct worker receive
+
+针对剩余 copy-in 比较两个独立 interface。方案 A 恢复 out-of-place AEAD，把完整 flow-scratch
+ciphertext 直接解到 worker-local plaintext；它适用于所有 fragmentation，但需要重新扩展
+`ferrum2-crypto` 与 vendored cipher API，而且历史 `160e0f19` 的相近 out-of-place 路径在 4 CPU
+下降 `6.97%`。方案 B 仅在 fused payload 的首次 read 直接使用当前 worker 的 TLS staging；一次 read
+完整时原位认证并沿 `bf4cd4a6` 的 sink seam 发布，Pending/partial/reentrant 则立即回落现有 scratch
+状态机。方案 B 不改 crypto primitive、普通 buffered path 或 length 调度边界，故先选择方案 B。
+
+分支 `codex/tcp-hot-path-stage3-direct-worker-receive` 从 `bf4cd4a6` 新建，以便候选 diff 和正式结果
+只归因于“删除 flow-scratch→worker-local copy-in”。这只是实验 parent，不把单样本 `+1.36%` 的
+`bf4cd4a6` 升格为已证实产品基线；判定时同时比较 `bf4cd4a6` 的 `234,378,581 B/s` 与共同基线
+`d874d3dd` 的 `231,232,853 B/s`。若新候选不超过 `bf4cd4a6`，提交与分支永久保留，后续不从该
+失败链叠加，而回到 `d874d3dd` 开 sibling。
+
+TLS helper 必须支持动态 clear prefix：transport Pending 正常出口清 0 字节，partial 清实际读入前缀，
+full/auth/sink 与 transport error 清完整 exposed range，unwind 保守清完整 range；旧 helper 继续全量
+清理。任何返回前都释放 TLS borrow。合法超大 peer frame、普通 `poll_data_fill`、client initial
+response、multi-hop fallback、TUN/runtime/Windows/SOCKS 均保持现状。
+
 ## 13. 停止条件与后续
 
 - 若 direct ratio `>=90%`：停止热路径改动，保留 scale trade-off，后续另立 connection-sharding任务。
