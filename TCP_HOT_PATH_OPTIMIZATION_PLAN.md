@@ -3,7 +3,7 @@
 状态：阶段 2、阶段 3 已完成实现与本地分轴测量；single-worker 产品候选
 `d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
 `62.9574%`，未达 90%。后续 two-worker、4+4 connection shard 和 2+2 balanced shard
-以及 server-side incoming-CPU shard 候选均已提交、推送并判失败；当前继续从共同成功基线
+以及两代 incoming-CPU shard 候选均已提交、推送并判失败；当前继续从共同成功基线
 `d874d3dd` 开 sibling，不把失败候选作为祖先。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
@@ -66,7 +66,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── 2e938fff  two-worker runtime（失败）
             ├── a1b67079 → 04a83c90  4+4 connection shards（双模态，失败）
             ├── 8ca007fd  2+2 balanced connection shards（失败）
-            └── ce8b2f10  server incoming-CPU pinned shards（本地 ratio 44.655%，失败）
+            ├── ce8b2f10  server incoming-CPU pinned shards（本地 ratio 44.655%，失败）
+            └── 159928d3  dual incoming-CPU pinned shards（首样本 543.7 MB/s，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -353,17 +354,35 @@ affinity 均为 singleton，连接线程迁移为 0，Jain 分别为 `0.9902 / 0
 
 本地 ratio 为 `0.446550540`，远低于 90%，所以 `ce8b2f10` 正式判失败并冻结，不触发 CI。
 
-### 12.4 当前 sibling：双入口 incoming-CPU 对齐
+### 12.4 双入口 incoming-CPU sibling：单变量无收益
 
-下一候选 `codex/tcp-hot-path-stage3-dual-incoming-cpu-shards` 继续直接从 `d874d3dd` 开始；
-`ce8b2f10` 不得成为其祖先。它无提交地重建已审查的 pinned shard/server hint 逻辑，再增加一个单变量：
+`codex/tcp-hot-path-stage3-dual-incoming-cpu-shards` @ `159928d3` 直接从 `d874d3dd` 开始；
+`ce8b2f10` 不是其祖先。它无提交地重建已审查的 pinned shard/server hint 逻辑，再增加一个单变量：
 Linux client SOCKS accept 也读取 `SO_INCOMING_CPU` 并精确选择对应 shard；查询失败、`u32::MAX` 或
 CPU 不在 pool 时仍共享 RR fallback。这样由 source 的初始 RX CPU 选择 client shard，client 在该 CPU
 发起 tunnel connect，server 再按自己的 incoming CPU 选择同核 shard，闭合
 `source → client → server` 初始 CPU 链。Windows、UDP、TUN 继续保持 `d874d3dd` 路径。
 
-若该单变量仍不能消除首样本低档，下一 sibling 才测试窄 partial scheduling：完整 18-byte length read
-后只附带一次 payload poll；不循环 partial read、不跨 frame，也不复用失败的 8-frame/256 KiB ready drain。
+实现通过 Linux/Windows compile、runtime/server tests、client compile-only、三包 clippy、fmt、diff，
+以及 Linux M0 `local_e2e` 6/6；在测量前提交、推送。唯一首个固定 4 CPU、3 秒预热 + 15 秒样本为
+`543,747,822 B/s`，与 server-only incoming-CPU 的首样本 `539,265,160 B/s` 实质相同：client/server
+各四个连接线程仍是 singleton affinity、迁移为 0，连接线程合计 `30.09 CPU-s / 14s`；三进程合计
+`36.87 CPU-s / 14s`，四核容量占用 `65.85%`，runner 发生 `42,315` 次迁移。双入口单变量没有消除
+低档，因此该提交判失败、冻结且不触发 CI。
+
+### 12.5 当前 sibling：length 完成后只 poll payload 一次
+
+下一候选 `codex/tcp-hot-path-stage3-length-payload-poll` 直接从 `d874d3dd` 开始，不继承任何 shard
+失败提交。根因假设是当前 receive 状态机即使已经完整读取并认证 18-byte encrypted length，也无条件
+`wake_by_ref + Pending`；若 payload 已在同一 socket ready 批次中，这会为每个 frame 强制增加一次
+Tokio run-queue 往返。64 KiB lockstep、双向、8 流会放大该等待空档，而 dual 候选仅约 66% 全机 busy
+与调度等待相符。
+
+候选只允许一个额外动作：length 在本次 poll 完成后，紧接着 poll payload 一次。payload Pending 依赖
+底层注册的 waker；partial Ready 只 self-wake 并返回 Pending，不继续读；完整非空 payload 返回 plaintext；
+完整零长度 payload self-wake 回 length 状态，不读取下一 frame。禁止循环、禁止跨 frame、禁止复用
+`fd5a42de` 的 64-ready-I/O/8-frame/256-KiB budget。EOF、transport/protocol/auth 分类、nonce 提交、
+失败不发布 plaintext 以及 destructive decrypt 契约保持不变。
 
 ## 13. 停止条件与后续
 
