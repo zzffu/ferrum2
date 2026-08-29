@@ -92,7 +92,7 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
     .await
     .expect("first typed reject commit deadline");
     {
-        let state = mappings.state.lock().expect("first mapping state");
+        let state = mappings.snapshot();
         assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
         assert_eq!(
             state.orphaned.values().copied().next(),
@@ -151,7 +151,7 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
     assert_eq!(protocol.session_count().expect("reject protocol count"), 1);
     assert_eq!(registry.snapshot().udp_sessions, 0);
     {
-        let state = mappings.state.lock().expect("frozen reject mapping state");
+        let state = mappings.snapshot();
         assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
     }
 
@@ -212,7 +212,7 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
         .expect("shared session ceiling deadline");
         assert_eq!(protocol.session_count().expect("shared ceiling count"), 1);
         assert_eq!(registry.snapshot().udp_sessions, 0);
-        let state = mappings.state.lock().expect("shared ceiling mapping");
+        let state = mappings.snapshot();
         assert_eq!((state.by_capability.len(), state.orphaned.len()), (0, 1));
     }
     assert_pending(
@@ -251,6 +251,456 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
     assert_eq!(server.await.expect("production UDP task"), Ok(()));
     assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
     std::fs::remove_file(path).expect("remove typed reject config");
+}
+
+#[tokio::test]
+async fn publishing_one_runtime_handle_never_wakes_another_and_cancelled_waiters_reclaim_owner() {
+    let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
+    let clock = SystemClock::new();
+    let keys = aes_keys();
+    let protocol = UdpServer::new(&keys).expect("publication server protocol");
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(2, 1_048_576, Duration::from_secs(60)).expect("publication limits"),
+        registry.clone(),
+    );
+    let mappings = Arc::new(UdpMappings::new(2));
+    let now = tokio::time::Instant::now();
+
+    let first = Datagram::new(
+        TargetAddr::ip(target).expect("first publication target"),
+        b"first".as_slice().into(),
+        5,
+    )
+    .expect("first publication datagram");
+    let first_session = manager
+        .reserve_session(now)
+        .expect("first publication session");
+    let first_reserved = first_session
+        .reserve_datagram(UdpDirection::ToTarget, first.allocated_capacity())
+        .expect("first publication reservation");
+    let handle_a = first_session
+        .commit(first_reserved, first, now)
+        .expect("first unpublished handle");
+    drop(
+        manager
+            .pop(handle_a, UdpDirection::ToTarget)
+            .expect("first publication queue")
+            .expect("first publication datagram"),
+    );
+
+    let second = Datagram::new(
+        TargetAddr::ip(target).expect("second publication target"),
+        b"second".as_slice().into(),
+        6,
+    )
+    .expect("second publication datagram");
+    let second_session = manager
+        .reserve_session(now)
+        .expect("second publication session");
+    let second_reserved = second_session
+        .reserve_datagram(UdpDirection::ToTarget, second.allocated_capacity())
+        .expect("second publication reservation");
+    let handle_b = second_session
+        .commit(second_reserved, second, now)
+        .expect("second unpublished handle");
+    drop(
+        manager
+            .pop(handle_b, UdpDirection::ToTarget)
+            .expect("second publication queue")
+            .expect("second publication datagram"),
+    );
+
+    let wait_a = tokio::spawn({
+        let mappings = Arc::clone(&mappings);
+        async move { mappings.capability(handle_a).await }
+    });
+    let wait_b = tokio::spawn({
+        let mappings = Arc::clone(&mappings);
+        async move { mappings.capability(handle_b).await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while mappings.publication_owner_count() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("per-handle publication registration deadline");
+    let signal_b = mappings
+        .publication_signal(handle_b)
+        .expect("handle B publication signal");
+
+    let mut client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("publication client");
+    let mut scratch = UdpPacketScratch::new();
+    let wire = encoded_udp_request(
+        &mut client,
+        &clock,
+        TargetAddr::ip(target).expect("publication request target"),
+        b"publish-a",
+    );
+    let pending = protocol
+        .prepare_request(&clock, &wire, &mut scratch)
+        .expect("prepare publication request");
+    let (_datagram, commit) = pending.into_parts();
+    let capability_a = protocol
+        .commit_request(
+            commit,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_090)),
+            clock.monotonic_now(),
+            &SystemRandom,
+        )
+        .expect("commit publication request")
+        .capability();
+    assert_eq!(
+        mappings.publish(capability_a, handle_a, 0, ServerTerminalRoute::Direct(0),),
+        None
+    );
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), wait_a)
+            .await
+            .expect("handle A publication deadline")
+            .expect("handle A waiter"),
+        Some(capability_a)
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        !wait_b.is_finished(),
+        "publishing handle A completed handle B"
+    );
+    assert!(!*signal_b.borrow(), "handle B was signalled by A");
+    assert!(
+        !signal_b
+            .has_changed()
+            .expect("handle B publication channel remains open")
+    );
+
+    wait_b.abort();
+    assert!(
+        wait_b
+            .await
+            .expect_err("cancel handle B waiter")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while mappings.publication_owner_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled publication owner cleanup deadline");
+    assert!(manager.remove(handle_a));
+    assert!(manager.remove(handle_b));
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[test]
+fn same_shard_tombstones_share_one_global_protection_window() {
+    const TOMBSTONE_LIMIT: usize = 16;
+    let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(1, 1_048_576, Duration::from_secs(60))
+            .expect("tombstone churn limits"),
+        registry.clone(),
+    );
+    let mut by_shard: [Vec<UdpSessionHandle>; super::super::identity::UDP_MAPPING_SHARD_COUNT] =
+        std::array::from_fn(|_| Vec::new());
+
+    for _ in 0..4096 {
+        let now = tokio::time::Instant::now();
+        let datagram = Datagram::new(
+            TargetAddr::ip(target).expect("tombstone target"),
+            b"x".as_slice().into(),
+            1,
+        )
+        .expect("tombstone datagram");
+        let session = manager.reserve_session(now).expect("tombstone session");
+        let reserved = session
+            .reserve_datagram(UdpDirection::ToTarget, datagram.allocated_capacity())
+            .expect("tombstone reservation");
+        let handle = session
+            .commit(reserved, datagram, now)
+            .expect("tombstone handle");
+        drop(
+            manager
+                .pop(handle, UdpDirection::ToTarget)
+                .expect("tombstone queue")
+                .expect("tombstone datagram queue entry"),
+        );
+        assert!(manager.remove(handle));
+        let shard = UdpMappings::handle_shard_index(handle);
+        by_shard[shard].push(handle);
+        if by_shard[shard].len() == TOMBSTONE_LIMIT + 1 {
+            break;
+        }
+    }
+    let handles = by_shard
+        .into_iter()
+        .find(|handles| handles.len() == TOMBSTONE_LIMIT + 1)
+        .expect("same-shard tombstone candidates");
+    let mappings = UdpMappings::new(TOMBSTONE_LIMIT);
+
+    for (index, handle) in handles[..TOMBSTONE_LIMIT].iter().copied().enumerate() {
+        mappings.invalidate_handle(handle);
+        assert_eq!(mappings.retired_handle_count(), index + 1);
+    }
+    mappings.invalidate_handle(handles[0]);
+    assert_eq!(mappings.retired_handle_count(), TOMBSTONE_LIMIT);
+    let state = mappings.snapshot();
+    assert_eq!(state.retired.len(), TOMBSTONE_LIMIT);
+    for handle in &handles[..TOMBSTONE_LIMIT] {
+        assert!(state.retired.contains(handle));
+        let mut lookup = std::pin::pin!(mappings.capability(*handle));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(
+            std::future::Future::poll(lookup.as_mut(), &mut context),
+            std::task::Poll::Ready(None)
+        );
+        assert_eq!(mappings.publication_owner_count(), 0);
+    }
+
+    mappings.invalidate_handle(handles[TOMBSTONE_LIMIT]);
+    assert_eq!(mappings.retired_handle_count(), TOMBSTONE_LIMIT);
+    assert_eq!(mappings.snapshot().retired.len(), TOMBSTONE_LIMIT);
+    assert_eq!(mappings.reset_runtime(), 0);
+    assert_eq!(mappings.retired_handle_count(), TOMBSTONE_LIMIT);
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[tokio::test]
+async fn invalidation_between_publish_phases_cannot_resurrect_a_handle() {
+    let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
+    let clock = SystemClock::new();
+    let keys = aes_keys();
+    let protocol = UdpServer::new(&keys).expect("publication race protocol");
+    let mut client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("publication race client");
+    let mut scratch = UdpPacketScratch::new();
+    let wire = encoded_udp_request(
+        &mut client,
+        &clock,
+        TargetAddr::ip(target).expect("publication race target"),
+        b"publication-race",
+    );
+    let (_, commit) = protocol
+        .prepare_request(&clock, &wire, &mut scratch)
+        .expect("publication race prepare")
+        .into_parts();
+    let capability = protocol
+        .commit_request(
+            commit,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_094)),
+            clock.monotonic_now(),
+            &SystemRandom,
+        )
+        .expect("publication race commit")
+        .capability();
+
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(1, 1_048_576, Duration::from_secs(60))
+            .expect("publication race limits"),
+        registry.clone(),
+    );
+    let now = tokio::time::Instant::now();
+    let datagram = Datagram::new(
+        TargetAddr::ip(target).expect("publication runtime target"),
+        b"runtime".as_slice().into(),
+        7,
+    )
+    .expect("publication runtime datagram");
+    let session = manager
+        .reserve_session(now)
+        .expect("publication runtime session");
+    let reserved = session
+        .reserve_datagram(UdpDirection::ToTarget, datagram.allocated_capacity())
+        .expect("publication runtime reservation");
+    let handle = session
+        .commit(reserved, datagram, now)
+        .expect("publication runtime handle");
+    drop(
+        manager
+            .pop(handle, UdpDirection::ToTarget)
+            .expect("publication runtime queue")
+            .expect("publication runtime queue entry"),
+    );
+
+    let mappings = Arc::new(UdpMappings::new(1));
+    let waiter = tokio::spawn({
+        let mappings = Arc::clone(&mappings);
+        async move { mappings.capability(handle).await }
+    });
+    while mappings.publication_owner_count() != 1 {
+        tokio::task::yield_now().await;
+    }
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    mappings.set_publish_phase_one_barrier(Some(Arc::clone(&barrier)));
+    let publisher = std::thread::spawn({
+        let mappings = Arc::clone(&mappings);
+        move || mappings.publish(capability, handle, 0, ServerTerminalRoute::Direct(0))
+    });
+    barrier.wait();
+    mappings.invalidate_handle(handle);
+    barrier.wait();
+    assert_eq!(
+        publisher.join().expect("publication race thread"),
+        Some(capability)
+    );
+    mappings.set_publish_phase_one_barrier(None);
+
+    assert_eq!(waiter.await.expect("publication race waiter"), None);
+    assert_eq!(mappings.handle(capability), None);
+    let state = mappings.snapshot();
+    assert!(!state.by_capability.contains_key(&capability));
+    assert!(!state.by_handle.contains_key(&handle));
+    assert!(state.retired.contains(&handle));
+    assert_eq!(mappings.retired_handle_count(), 1);
+    assert_eq!(mappings.publication_owner_count(), 0);
+    assert!(manager.remove(handle));
+    assert_eq!(registry.snapshot().udp_sessions, 0);
+}
+
+#[test]
+fn different_udp_mapping_shards_publish_without_cross_shard_blocking() {
+    assert_eq!(super::super::identity::UDP_MAPPING_SHARD_COUNT, 16);
+    assert!(super::super::identity::UDP_MAPPING_SHARD_COUNT.is_power_of_two());
+
+    let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
+    let clock = SystemClock::new();
+    let keys = aes_keys();
+    let protocol = UdpServer::new(&keys).expect("sharded mapping protocol");
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(64, 8_388_608, Duration::from_secs(60))
+            .expect("sharded mapping limits"),
+        registry.clone(),
+    );
+    let mappings = Arc::new(UdpMappings::new(64));
+    let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_093));
+    let mut scratch = UdpPacketScratch::new();
+    let mut generations: Vec<(ServerResponseCapability, UdpSessionHandle)> = Vec::new();
+    let mut pair = None;
+
+    for _ in 0..64 {
+        let mut client =
+            UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("shard client");
+        let generation = commit_lifecycle_generation(
+            &mut client,
+            &protocol,
+            &manager,
+            &mappings,
+            &clock,
+            target,
+            peer,
+            b"shard-generation",
+            ferrum2_crypto::MonotonicInstant::ZERO,
+            &mut scratch,
+        );
+        if let Some(first) = generations.first().copied()
+            && UdpMappings::capability_shard_index(first.0)
+                != UdpMappings::capability_shard_index(generation.0)
+            && UdpMappings::handle_shard_index(first.1)
+                != UdpMappings::handle_shard_index(generation.1)
+        {
+            pair = Some((first, generation));
+        }
+        generations.push(generation);
+        if pair.is_some() {
+            break;
+        }
+    }
+    let ((capability_a, handle_a), (capability_b, handle_b)) =
+        pair.expect("two generations mapped to different shards");
+
+    let (capability_entered_tx, capability_entered_rx) = std::sync::mpsc::channel();
+    let (capability_release_tx, capability_release_rx) = std::sync::mpsc::channel();
+    let capability_holder = std::thread::spawn({
+        let mappings = Arc::clone(&mappings);
+        move || {
+            mappings.with_capability_shard_locked(capability_a, || {
+                capability_entered_tx
+                    .send(())
+                    .expect("signal held capability shard");
+                capability_release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release held capability shard");
+            });
+        }
+    });
+    capability_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("capability shard lock deadline");
+    let (capability_result_tx, capability_result_rx) = std::sync::mpsc::channel();
+    let capability_publisher = std::thread::spawn({
+        let mappings = Arc::clone(&mappings);
+        move || {
+            let result =
+                mappings.publish(capability_b, handle_b, 0, ServerTerminalRoute::Direct(0));
+            capability_result_tx
+                .send(result)
+                .expect("send capability-shard publish result");
+        }
+    });
+    let capability_result = capability_result_rx.recv_timeout(Duration::from_secs(1));
+    capability_release_tx
+        .send(())
+        .expect("release capability shard");
+    capability_holder.join().expect("capability shard holder");
+    capability_publisher
+        .join()
+        .expect("capability shard publisher");
+    assert_eq!(
+        capability_result.expect("different capability shard publish deadline"),
+        None
+    );
+
+    let (handle_entered_tx, handle_entered_rx) = std::sync::mpsc::channel();
+    let (handle_release_tx, handle_release_rx) = std::sync::mpsc::channel();
+    let handle_holder = std::thread::spawn({
+        let mappings = Arc::clone(&mappings);
+        move || {
+            mappings.with_handle_shard_locked(handle_a, || {
+                handle_entered_tx
+                    .send(())
+                    .expect("signal held handle shard");
+                handle_release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release held handle shard");
+            });
+        }
+    });
+    handle_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("handle shard lock deadline");
+    let (handle_result_tx, handle_result_rx) = std::sync::mpsc::channel();
+    let handle_publisher = std::thread::spawn({
+        let mappings = Arc::clone(&mappings);
+        move || {
+            let result =
+                mappings.publish(capability_b, handle_b, 0, ServerTerminalRoute::Direct(0));
+            handle_result_tx
+                .send(result)
+                .expect("send handle-shard publish result");
+        }
+    });
+    let handle_result = handle_result_rx.recv_timeout(Duration::from_secs(1));
+    handle_release_tx.send(()).expect("release handle shard");
+    handle_holder.join().expect("handle shard holder");
+    handle_publisher.join().expect("handle shard publisher");
+    assert_eq!(
+        handle_result.expect("different handle shard publish deadline"),
+        None
+    );
+
+    for (capability, handle) in generations {
+        mappings.invalidate_handle(handle);
+        assert_eq!(mappings.handle(capability), None);
+        assert!(manager.remove(handle));
+    }
+    assert_eq!(registry.snapshot().udp_sessions, 0);
 }
 
 #[tokio::test]
@@ -435,7 +885,7 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
         UdpRuntimeError::Cancelled
     );
     {
-        let state = mappings.state.lock().expect("reset mapping state");
+        let state = mappings.snapshot();
         assert!(state.by_capability.is_empty());
         assert!(state.by_handle.is_empty());
         assert!(state.retired.contains(&old_handle));

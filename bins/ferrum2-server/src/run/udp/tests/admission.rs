@@ -140,6 +140,138 @@ async fn slow_socket_opens_for_distinct_sessions_run_concurrently() {
 }
 
 #[tokio::test]
+async fn established_direct_progresses_while_process_gate_blocks_a_new_identity() {
+    let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
+    let (path, mut config) = server_test_config(listen);
+    config.udp.max_sessions = 2;
+    let target = udp_loopback().await;
+    let target_socket = target.local_addr().expect("target address");
+    let target_address = TargetAddr::ip(target_socket).expect("numeric target");
+    let keys = aes_keys();
+    let clock = Arc::new(SystemClock::new());
+    let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+    let registry = OwnerRegistry::new();
+    let baseline = active(registry.snapshot());
+    let sessions = UdpSessionManager::new(
+        udp_runtime_limits(&config.udp).expect("two-session limits"),
+        registry.clone(),
+    );
+    let mappings = Arc::new(UdpMappings::new(config.udp.max_sessions));
+    let established_peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_110));
+    let mut established_client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("established client");
+    let mut scratch = UdpPacketScratch::new();
+    let (_capability, established_handle) = commit_lifecycle_generation(
+        &mut established_client,
+        &protocol,
+        &sessions,
+        &mappings,
+        &clock,
+        target_socket,
+        established_peer,
+        b"seed",
+        clock.monotonic_now(),
+        &mut scratch,
+    );
+    let established_wire = encoded_udp_request(
+        &mut established_client,
+        clock.as_ref(),
+        target_address.clone(),
+        b"established bypass",
+    );
+    let mut new_client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("new client");
+    let new_wire = encoded_udp_request(
+        &mut new_client,
+        clock.as_ref(),
+        target_address,
+        b"new identity blocked",
+    );
+    let listener = Arc::new(BurstUdpListener {
+        requests: Mutex::new(VecDeque::from([
+            (established_wire, established_peer),
+            (
+                new_wire,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_111)),
+            ),
+        ])),
+        awaited: AtomicUsize::new(0),
+        tried: AtomicUsize::new(0),
+        drain_cap_reached: Notify::new(),
+    });
+    let admission = Arc::new(tokio::sync::Mutex::new(()));
+    let socket_factory = gated_socket_factory();
+    let prepared = prepare_udp_server_with_socket_factory(
+        0,
+        Arc::clone(&listener),
+        ServerUdpShared {
+            routing: Arc::new(ServerRouting {
+                program: config.route,
+                outbound_count: config.outbounds.len(),
+            }),
+            protocol: Arc::clone(&protocol),
+            clock,
+            config: config.udp,
+            sessions: sessions.clone(),
+            mappings,
+            admission: Arc::clone(&admission),
+            connect_timeout: config.runtime.connect_timeout,
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            registry: registry.clone(),
+            metrics: Arc::new(Metrics::new()),
+        },
+        socket_factory.clone(),
+    )
+    .expect("prepared root");
+    let admission_guard = admission.lock().await;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(prepared.run_with_shutdown(
+        async move {
+            let _ = stopped.await;
+        },
+        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+    ));
+
+    let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(datagram) = sessions
+                .pop(established_handle, UdpDirection::ToTarget)
+                .expect("established request queue")
+            {
+                break datagram;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("established fast-path deadline");
+    assert_eq!(forwarded.datagram().payload(), b"established bypass");
+    drop(forwarded);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while listener.tried.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("new identity gate wait deadline");
+    assert_eq!(socket_factory.entered.load(Ordering::SeqCst), 0);
+    assert_eq!(protocol.session_count().expect("protocol count"), 1);
+    assert_eq!(registry.snapshot().udp_sessions, 1);
+
+    stop.send(()).expect("stop gate test root");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("gate test shutdown deadline")
+            .expect("gate test root task"),
+        Ok(())
+    );
+    drop(admission_guard);
+    assert_eq!(active(registry.snapshot()), baseline);
+    std::fs::remove_file(path).expect("remove gate config");
+}
+
+#[tokio::test]
 async fn shutdown_cancels_stalled_socket_open_and_rolls_back_provisional_session() {
     let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1);
     let (path, config) = server_test_config(listen);
@@ -207,7 +339,7 @@ async fn shutdown_cancels_stalled_socket_open_and_rolls_back_provisional_session
     assert_eq!(task.await.expect("stalled root task"), Ok(()));
     assert_eq!(protocol.session_count().expect("protocol count"), 0);
     {
-        let state = mappings.state.lock().expect("empty mappings");
+        let state = mappings.snapshot();
         assert!(state.by_capability.is_empty());
     }
     assert_eq!(active(registry.snapshot()), baseline);
@@ -371,6 +503,10 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
         &mut scratch,
     );
     assert!(sessions.remove(stale_handle));
+    assert_eq!(
+        mappings.handle(capability).map(|binding| binding.handle),
+        Some(stale_handle)
+    );
     let request_wire = encoded_udp_request(
         &mut client,
         clock.as_ref(),
@@ -390,6 +526,7 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
         ))),
     });
     let socket_factory = gated_socket_factory();
+    let admission = Arc::new(tokio::sync::Mutex::new(()));
     let prepared = prepare_udp_server_with_socket_factory(
         0,
         listener,
@@ -403,7 +540,7 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
             config: config.udp,
             sessions: sessions.clone(),
             mappings: Arc::clone(&mappings),
-            admission: Arc::new(tokio::sync::Mutex::new(())),
+            admission: Arc::clone(&admission),
             connect_timeout: config.runtime.connect_timeout,
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
@@ -412,6 +549,7 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
         socket_factory.clone(),
     )
     .expect("prepared root");
+    let admission_guard = admission.lock().await;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(prepared.run_with_shutdown(
         async move {
@@ -420,6 +558,19 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
         |runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while mappings.handle(capability).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stale fast-path invalidation deadline");
+    assert_eq!(
+        socket_factory.entered.load(Ordering::SeqCst),
+        0,
+        "cancelled fast-path handle must re-enter the gated slow path"
+    );
+    drop(admission_guard);
     wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;
     assert_eq!(mappings.handle(capability), None);
     let pending_seed = protocol

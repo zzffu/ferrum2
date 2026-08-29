@@ -45,15 +45,13 @@ pub(super) fn commit_existing_direct_request(
 ) -> Result<(), UdpCommitError<UdpPacketError>> {
     let (datagram, commit) = pending.into_parts();
     let committed = reservation.commit_with(datagram, tokio::time::Instant::now(), || {
-        let accepted =
-            protocol.commit_request(commit, peer, clock.monotonic_now(), &SystemRandom)?;
-        if accepted.capability() == expected {
-            Ok(())
-        } else {
-            Err(UdpPacketError::Generation)
-        }
+        protocol.commit_existing_request(commit, expected, peer, clock.monotonic_now())?;
+        Ok(())
     });
-    if matches!(committed, Err(UdpCommitError::Runtime(_))) {
+    if matches!(
+        committed,
+        Err(UdpCommitError::Runtime(_)) | Err(UdpCommitError::Protocol(UdpPacketError::Generation))
+    ) {
         mappings.invalidate_handle(handle);
     }
     committed

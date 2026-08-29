@@ -147,9 +147,62 @@ where
                     continue;
                 }
             };
-            // The shared gate protects only protocol/mapping observations and their
-            // synchronous commit. In particular, it is never held while a provisional
-            // runtime session opens its socket below.
+            let established = match protocol.existing_capability(&pending) {
+                Ok(existing) => existing,
+                Err(error) => {
+                    record_udp_protocol_failure(&metrics, error);
+                    break Err(RunError::RuntimeRoot);
+                }
+            };
+            if let Some((capability, binding)) = established.and_then(|capability| {
+                mappings
+                    .handle(capability)
+                    .map(|binding| (capability, binding))
+            }) && binding.inbound == inbound
+                && matches!(binding.terminal, ServerTerminalRoute::Direct(_))
+            {
+                let handle = binding.handle;
+                match runtime.reserve_datagram(handle, pending.datagram().allocated_capacity()) {
+                    Ok(reservation) => {
+                        // The exact runtime generation serializes protocol commit,
+                        // activity, and enqueue. Established Direct traffic therefore
+                        // never needs the process-wide first-winner gate.
+                        let committed = commit_existing_direct_request(
+                            &protocol,
+                            &mappings,
+                            reservation,
+                            pending,
+                            capability,
+                            handle,
+                            peer,
+                            &clock,
+                        );
+                        match committed {
+                            Ok(()) => record_udp_request_accepted(&metrics, wire_len),
+                            Err(UdpCommitError::Runtime(error)) => {
+                                record_udp_runtime_failure(&metrics, error);
+                            }
+                            Err(UdpCommitError::Protocol(error)) => {
+                                record_udp_protocol_failure(&metrics, error);
+                            }
+                        }
+                        continue;
+                    }
+                    Err(UdpRuntimeError::Cancelled) => {
+                        // The bound snapshot raced retirement/reset. Invalidate it,
+                        // then enter the gated path and re-read protocol plus mapping
+                        // state before deciding whether this identity is orphaned.
+                        mappings.invalidate_handle(handle);
+                    }
+                    Err(error) => {
+                        record_udp_runtime_failure(&metrics, error);
+                        continue;
+                    }
+                }
+            }
+            // The shared gate protects new, orphaned, and rejected identities and
+            // their synchronous first-winner commit. It is never held while a
+            // provisional runtime session opens its socket below.
             let mut admission_guard = Some(tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),

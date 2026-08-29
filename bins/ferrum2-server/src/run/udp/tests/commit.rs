@@ -110,7 +110,7 @@ async fn concurrent_same_session_rolls_back_losing_socket_before_protocol_commit
         "the losing provisional generation and socket are fully rolled back"
     );
     {
-        let state = mappings.state.lock().expect("winning mapping");
+        let state = mappings.snapshot();
         assert_eq!((state.by_capability.len(), state.by_handle.len()), (1, 1));
         assert_eq!(
             state

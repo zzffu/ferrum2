@@ -175,7 +175,7 @@ async fn udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup()
             })
             .await
             .expect("empty UDP root reap");
-            let state = observed_mappings.state.lock().expect("mapping lock");
+            let state = observed_mappings.snapshot();
             assert_eq!(state.by_capability.len(), 1);
             assert_eq!(state.by_capability.values().next().unwrap().inbound, 0);
             drop(state);
