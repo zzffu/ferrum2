@@ -12,6 +12,10 @@ from collections.abc import Sequence
 from tools.performance_candidate import build_experiment
 from tools.performance_candidate import evidence_matrix
 # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+from tools.performance_candidate import architecture_decision
+from tools.performance_candidate import build_qualification
+from tools.performance_candidate import conditional_decision
+from tools.performance_candidate import frame_qualification
 from tools.performance_candidate import structural_diagnostic
 # END M18 STRUCTURAL DIAGNOSTIC
 from tools.performance_candidate.linux import baseline
@@ -132,6 +136,10 @@ def _parser() -> argparse.ArgumentParser:
     structural.add_argument("--client", required=True, type=pathlib.Path)
     structural.add_argument("--server", required=True, type=pathlib.Path)
     structural.add_argument("--candidate-sha", required=True)
+    architecture_decision.add_cli_commands(commands)
+    build_qualification.add_cli_commands(commands)
+    conditional_decision.add_cli_commands(commands)
+    frame_qualification.add_cli_commands(commands)
     # END M18 STRUCTURAL DIAGNOSTIC
     windows_tun_plan = commands.add_parser(
         "windows-tun-plan",
@@ -345,6 +353,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             return 0
         # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
+        if parsed.command in architecture_decision.COMMANDS:
+            return architecture_decision.run_cli_command(parsed)
+        if parsed.command in build_qualification.COMMANDS:
+            return build_qualification.run_cli_command(parsed)
+        if parsed.command in conditional_decision.COMMANDS:
+            return conditional_decision.run_cli_command(parsed)
+        if parsed.command in frame_qualification.COMMANDS:
+            return frame_qualification.run_cli_command(parsed)
         if parsed.command == "validate-structural-diagnostic":
             row = structural_diagnostic.validate_structural_diagnostic(
                 parsed.evidence,

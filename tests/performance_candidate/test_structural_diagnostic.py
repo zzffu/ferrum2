@@ -308,10 +308,12 @@ class StructuralDiagnosticWorkflowTests(unittest.TestCase):
     def test_timed_v6_controller_closure_excludes_independent_build_owners(self) -> None:
         expected = frozenset(
             {
+                "architecture_decision.py",
                 "build_experiment.py",
                 "build_qualification.py",
                 "conditional_decision.py",
                 "evidence_matrix.py",
+                "frame_qualification.py",
                 "structural_diagnostic.py",
             }
         )
@@ -337,8 +339,8 @@ class StructuralDiagnosticWorkflowTests(unittest.TestCase):
                 "0817dd3cd3082f045ecf4f60013513d447c0755ae254e48cc4e2cf7b8642a151",
             ),
             "tools/ferrum2-m4-qualification/src/m4_support/self_check.rs": (
-                33_863,
-                "7a2edf0a272859d974d4b127932fddbf30ac05fb3bc9ad9d816810c0f215e79d",
+                34_869,
+                "6108e7c52644638d97258205280f200321bbfd70a6323cb8517072df66bb564b",
             ),
             "tools/performance_candidate/cli.py": (
                 19_632,

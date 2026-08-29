@@ -54,7 +54,14 @@ Closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`, `RE
 
 ## Rule qualification evidence
 
-`ferrum2-rule-qualification` emits bounded runner reports. The only Rule controller entry point is `python -B -m tools.performance_rule`; schema, runner-report validation, pairing, policy, evidence, and CLI have separate package owners. Current v6 A/A output is always `CALIBRATION_REQUIRED` until a separately reviewed, source-hash-bound calibration v2 artifact is created. Ordinary tests use the small synthetic fixture under `tests/performance_rule/fixtures`; it proves schema and binding behavior but is never benchmark evidence. Historical v2/v3/v4 readers exist only in the explicit test-owned archive verifier.
+`ferrum2-rule-qualification` emits bounded runner v3 reports. The only Rule controller entry point is `python -B -m tools.performance_rule`; schema, runner-report validation, pairing, policy, evidence, and CLI have separate package owners. Current controller v7 A/A output is always `CALIBRATION_REQUIRED` until a separately reviewed, source-hash-bound calibration v3 artifact is created. MatchSet and snapshot-registry A/A noise are calibrated independently and neither suite may exceed the reviewed 10% ceiling. Ordinary tests use the small synthetic fixture under `tests/performance_rule/fixtures`; it proves schema and binding behavior but is never benchmark evidence. Historical controller v2/v3/v4 readers exist only in the explicit test-owned archive verifier.
+
+The manual Rule workflow is also reusable from the reviewed
+`performance-candidate.yml` caller. Both entry paths require an explicit full
+`candidate_sha`; checkout HEAD, runner reports, reviewed calibration, and both
+artifact manifests are validated against that same commit. The reusable inputs
+are closed to `stage`, `candidate_sha`, `calibration_run_id`, `reviewed_by`,
+`reviewed_utc`, and `candidate_feature`.
 
 Large `release-*.json` reports are ignored by Git. Their exact names, roles, byte lengths, and SHA-256 digests are tracked in `tests/performance_rule/fixtures/external-evidence-manifest-v1.json`. Verify explicitly materialized external evidence with:
 
@@ -64,6 +71,24 @@ python3 -B -m tests.performance_rule.verify_external_evidence \
 ```
 
 External artifact retrieval must use an immutable identity. Missing or changed raw evidence cannot be replaced by a summary, compact fixture, screenshot, or policy document.
+
+## Same-source build artifacts and conditional ideas
+
+Build candidates use a separate v2 identity axis: one clean source SHA/tree produces a generic
+baseline and exactly one ThinLTO, PGO-use, or reviewed `znver3` artifact. Variant identity binds the
+plan, phase record, profile/Rust flags, and client/server/M4/rule hashes. The manual/reusable
+`performance-build.yml` workflow requires an AMD runner, two six-pair A/A rounds, and one six-pair
+ABBA comparison. PGO additionally requires its closed six-command `.profraw` inventory, merged
+profile provenance, and independent validation records.
+
+GitHub-hosted evidence is deliberately provisional. Build and conditional records state
+`performance_authoritative=false`, `bare_metal_gate_satisfied=false`,
+`durable_evidence_gate_satisfied=false`, and either
+`NOT_ADOPTED_FOR_GITHUB_HOSTED_AMD_SCOPE` or a deferred/inconclusive trigger status. Artifact
+retention is useful workflow evidence but does not satisfy the immutable long-term GATE-07
+contract. The closed architecture-decision record separately preserves the TCP fairness invariant,
+deferred Linux/multi-hop prerequisites, busy-poll rejection, and the Windows external-lab ETW
+boundary.
 
 ## Ordinary and privileged boundaries
 

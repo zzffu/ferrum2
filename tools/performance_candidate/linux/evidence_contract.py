@@ -37,10 +37,12 @@ _DIAGNOSTIC_BOUNDARIES = {
 }
 _TIMED_V6_EXCLUDED_CONTROLLER_FILES = frozenset(
     {
+        "architecture_decision.py",
         "build_experiment.py",
         "build_qualification.py",
         "conditional_decision.py",
         "evidence_matrix.py",
+        "frame_qualification.py",
         "structural_diagnostic.py",
     }
 )

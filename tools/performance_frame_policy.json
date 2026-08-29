@@ -1,0 +1,89 @@
+{
+  "axes": [
+    {
+      "adaptive_after_bytes": null,
+      "cargo_features": [],
+      "initial_payload_bytes": 32768,
+      "maximum_payload_bytes": 32768,
+      "name": "default32"
+    },
+    {
+      "adaptive_after_bytes": null,
+      "cargo_features": [
+        "ferrum2-client/__frame-size-16k",
+        "ferrum2-server/__frame-size-16k"
+      ],
+      "initial_payload_bytes": 16384,
+      "maximum_payload_bytes": 16384,
+      "name": "frame16k"
+    },
+    {
+      "adaptive_after_bytes": null,
+      "cargo_features": [
+        "ferrum2-client/__frame-size-65535",
+        "ferrum2-server/__frame-size-65535"
+      ],
+      "initial_payload_bytes": 65535,
+      "maximum_payload_bytes": 65535,
+      "name": "frame65535"
+    },
+    {
+      "adaptive_after_bytes": 524288,
+      "cargo_features": [
+        "ferrum2-client/__frame-size-adaptive",
+        "ferrum2-server/__frame-size-adaptive"
+      ],
+      "initial_payload_bytes": 32768,
+      "maximum_payload_bytes": 65535,
+      "name": "adaptive"
+    }
+  ],
+  "hosted_scope": {
+    "adoption_claim": false,
+    "bare_metal_gate_satisfied": false,
+    "durable_evidence_gate_satisfied": false,
+    "performance_authoritative": false,
+    "scope": "github-hosted-amd-provisional"
+  },
+  "policy_id": "shadowsocks-frame-size-phase5-v1",
+  "scenarios": [
+    {
+      "active_seconds": 15,
+      "direction": "higher_is_better",
+      "metric": "bytes_per_second",
+      "name": "tcp-bulk",
+      "observation_fields": [
+        "value"
+      ],
+      "warmup_seconds": 1
+    },
+    {
+      "active_seconds": 15,
+      "direction": "lower_is_better",
+      "metric": "p99_nanoseconds",
+      "name": "tcp-request-1k",
+      "observation_fields": [
+        "value"
+      ],
+      "warmup_seconds": 1
+    },
+    {
+      "active_seconds": 30,
+      "direction": "higher_is_better",
+      "metric": "bytes_per_second",
+      "name": "tcp-scale-10k",
+      "observation_fields": [
+        "value",
+        "scale.fairness.jain_ppb",
+        "scale.fairness.p01_to_median_ppm"
+      ],
+      "warmup_seconds": 10
+    }
+  ],
+  "schedule": {
+    "a_a_rounds": 2,
+    "pair_count": 6,
+    "pair_schedule": "abba-six-pairs"
+  },
+  "schema_version": "ferrum2-performance-frame-policy-v1"
+}

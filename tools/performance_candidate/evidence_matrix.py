@@ -8,14 +8,14 @@ import json
 import pathlib
 import re
 
-from tools.performance_candidate import build_experiment
+from tools.performance_candidate import build_experiment, conditional_decision
 from tools.performance_candidate.json_contract import (
     CandidateControlError,
     _canonical_json_bytes,
 )
 from tools.performance_candidate.output import _atomic_text
 
-SCHEMA_VERSION = "ferrum2-phase4-evidence-matrix-v1"
+SCHEMA_VERSION = "ferrum2-phase4-evidence-matrix-v2"
 COMMANDS = frozenset({"phase4-experiment-plan"})
 FAMILIES = ("metrics", "runtime", "allocator")
 SAFE_FEATURE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
@@ -111,7 +111,9 @@ def _candidate_environment(values: list[str] | None) -> dict[str, str]:
 
 
 def _prerequisite_evidence(
-    family: str, values: list[str] | None
+    family: str,
+    values: list[str] | None,
+    source_identity: dict[str, object],
 ) -> dict[str, dict[str, object]]:
     evidence: dict[str, dict[str, object]] = {}
     for raw in values or ():
@@ -126,11 +128,26 @@ def _prerequisite_evidence(
             raise CandidateControlError(
                 f"{family} prerequisite evidence must use unique required KIND=PATH entries"
             )
+        record, digest = conditional_decision.load_prerequisite_document(
+            path, expected_kind=kind, source_identity=source_identity
+        )
+        if record["profiler_status"] != "AVAILABLE":
+            raise CandidateControlError(
+                f"{family} prerequisite evidence {kind} is unavailable"
+            )
+        measurement = record["measurement"]
+        if kind in conditional_decision.ASSERTION_KINDS:
+            applicable = measurement["satisfied"]
+        else:
+            applicable = measurement["trigger_present"]
+        if not applicable:
+            raise CandidateControlError(
+                f"{family} prerequisite evidence {kind} does not trigger an experiment"
+            )
         evidence[kind] = {
             "path": str(path),
-            "sha256": build_experiment._file_sha256(
-                path, field=f"{family} prerequisite evidence {kind}"
-            ),
+            "record_id": record["record_id"],
+            "sha256": digest,
             "size_bytes": path.stat().st_size,
         }
     if set(evidence) != PREREQUISITE_EVIDENCE_KEYS[family]:
@@ -293,6 +310,10 @@ def create_evidence_matrix(
     environment, environment_sha256 = build_experiment._load_environment(
         environment_path
     )
+    if environment["source_identity"]["comparison_axis"] != "build-artifact":
+        raise CandidateControlError(
+            "Phase 4 matrices require a same-source build-artifact environment"
+        )
     validation, validation_sha256 = build_experiment._load_workload_set(
         validation_workloads_path, expected_role="validation"
     )
@@ -300,7 +321,9 @@ def create_evidence_matrix(
     target_root = target_root.resolve()
     evidence_root = evidence_root.resolve()
     requested_candidate_environment = _candidate_environment(candidate_environment)
-    gate_evidence = _prerequisite_evidence(family, prerequisite_evidence)
+    gate_evidence = _prerequisite_evidence(
+        family, prerequisite_evidence, environment["source_identity"]
+    )
     baseline_build = _build_command(
         name="baseline",
         repository=repository,

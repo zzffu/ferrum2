@@ -1,0 +1,293 @@
+name: performance-frame
+
+on:
+  workflow_call:
+    inputs:
+      axis:
+        description: "One frame axis or all four closed axes"
+        required: false
+        default: all
+        type: string
+  workflow_dispatch:
+    inputs:
+      axis:
+        description: "One frame axis or all four closed axes"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - default32
+          - frame16k
+          - frame65535
+          - adaptive
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  FRAME_POLICY: ${{ github.workspace }}/tools/performance_frame_policy.json
+
+jobs:
+  frame-size-qualification:
+    name: frame-size-${{ matrix.axis }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      max-parallel: 4
+      matrix:
+        axis: ${{ fromJSON(inputs.axis == 'all' && '["default32","frame16k","frame65535","adaptive"]' || format('["{0}"]', inputs.axis)) }}
+    steps:
+      - name: Checkout exact same-source frame experiment
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Require exact source axis and AuthenticAMD host
+        shell: bash
+        env:
+          FRAME_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+          case "$FRAME_AXIS" in
+            default32|frame16k|frame65535|adaptive) ;;
+            *) exit 2 ;;
+          esac
+          vendor_id="$(awk -F: '/^vendor_id/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' /proc/cpuinfo)"
+          cpu_model="$(awk -F: '/^model name/{sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' /proc/cpuinfo)"
+          if [ "$vendor_id" != AuthenticAMD ] || [ -z "$cpu_model" ]; then
+            echo "::error::Frame qualification requires AuthenticAMD; observed ${vendor_id:-unknown} / ${cpu_model:-unknown}. Re-run for an AMD host."
+            exit 1
+          fi
+          printf 'Selected AuthenticAMD frame host: %s\n' "$cpu_model"
+
+      - name: Initialize one fresh axis evidence root
+        shell: bash
+        env:
+          FRAME_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+          frame_root="$RUNNER_TEMP/performance-frame-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$FRAME_AXIS"
+          profile_root="$GITHUB_WORKSPACE/profiles/frame-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$FRAME_AXIS"
+          execution_dir="$GITHUB_WORKSPACE/target/profiling"
+          test ! -e "$frame_root"
+          test ! -e "$profile_root"
+          test ! -e "$execution_dir"
+          mkdir -p "$frame_root/evidence/builds" "$frame_root/logs" "$frame_root/targets"
+          mkdir -p "$profile_root" "$execution_dir"
+          {
+            printf 'FRAME_AXIS=%s\n' "$FRAME_AXIS"
+            printf 'FRAME_ROOT=%s\n' "$frame_root"
+            printf 'FRAME_EVIDENCE=%s\n' "$frame_root/evidence"
+            printf 'FRAME_ENVIRONMENT=%s\n' "$frame_root/evidence/environment.json"
+            printf 'FRAME_PLAN=%s\n' "$frame_root/evidence/plan.json"
+            printf 'FRAME_EXECUTION_DIR=%s\n' "$execution_dir"
+            printf 'FRAME_PROFILE_ROOT=%s\n' "$profile_root"
+            printf 'FRAME_TARGET_ROOT=%s\n' "$frame_root/targets"
+            printf 'BASELINE_BUILD_RECORD=%s\n' "$frame_root/evidence/builds/default32.json"
+            printf 'CANDIDATE_BUILD_RECORD=%s\n' "$frame_root/evidence/builds/$FRAME_AXIS.json"
+            printf 'FRAME_QUALIFICATION=%s\n' "$frame_root/evidence/qualification-$FRAME_AXIS.json"
+          } >>"$GITHUB_ENV"
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
+
+      - name: Capture same-source build environment and closed frame plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate build-environment \
+            --repository "$GITHUB_WORKSPACE" \
+            --source-sha "$GITHUB_SHA" \
+            --environment-kind github-hosted \
+            --runner-image ubuntu-24.04 \
+            --output "$FRAME_ENVIRONMENT"
+          python3 -B -m tools.performance_candidate frame-plan \
+            --environment "$FRAME_ENVIRONMENT" \
+            --policy "$FRAME_POLICY" \
+            --target-root "$FRAME_TARGET_ROOT" \
+            --output "$FRAME_PLAN"
+          test "$(python3 -B -m tools.performance_candidate frame-plan-items --plan "$FRAME_PLAN" | tr '\n' ' ')" = "default32 frame16k frame65535 adaptive "
+
+      - name: Build and hash-bind default 32 KiB artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate frame-build-run \
+            --plan "$FRAME_PLAN" \
+            --variant default32 \
+            --log "$FRAME_ROOT/logs/default32.log" \
+            --output "$BASELINE_BUILD_RECORD"
+
+      - name: Build and hash-bind selected frame artifacts
+        if: ${{ matrix.axis != 'default32' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate frame-build-run \
+            --plan "$FRAME_PLAN" \
+            --variant "$FRAME_AXIS" \
+            --log "$FRAME_ROOT/logs/$FRAME_AXIS.log" \
+            --output "$CANDIDATE_BUILD_RECORD"
+
+      - name: Reuse the exact baseline record for the default axis
+        if: ${{ matrix.axis == 'default32' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CANDIDATE_BUILD_RECORD" = "$BASELINE_BUILD_RECORD"
+
+      - name: Run two A/A rounds and one six-pair same-source ABBA comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_bin="$FRAME_TARGET_ROOT/default32/profiling"
+          candidate_bin="$FRAME_TARGET_ROOT/$FRAME_AXIS/profiling"
+          test -x "$baseline_bin/m4-qualification"
+          test -x "$candidate_bin/m4-qualification"
+
+          stage_variant() {
+            local source_dir=$1
+            local artifact
+            for artifact in ferrum2-client ferrum2-server m4-qualification; do
+              test -x "$source_dir/$artifact"
+              install -m 0755 "$source_dir/$artifact" "$FRAME_EXECUTION_DIR/$artifact"
+              cmp -s "$source_dir/$artifact" "$FRAME_EXECUTION_DIR/$artifact"
+            done
+          }
+
+          run_trial() {
+            local root=$1
+            local member=$2
+            local pair=$3
+            local binary_dir=$4
+            local scenario=$5
+            local warmup=$6
+            local active=$7
+            local order
+            if { (( pair % 2 == 1 )) && [ "$member" = parent ]; } \
+              || { (( pair % 2 == 0 )) && [ "$member" = candidate ]; }; then
+              order=1
+            else
+              order=2
+            fi
+            mkdir -p "$root/$member"
+            local output="$root/$member/$scenario-$pair.jsonl"
+            local ready="$root/$member/$scenario-$pair.ready"
+            local relative_output="${output#"$GITHUB_WORKSPACE"/}"
+            local relative_ready="${ready#"$GITHUB_WORKSPACE"/}"
+            test "$relative_output" != "$output"
+            test "$relative_ready" != "$ready"
+            IFS=$'\t' read -r unit runner_image producer controller recipe bundle < <(
+              python3 -B -m tools.performance_candidate frame-trial-contract \
+                --plan "$FRAME_PLAN" --scenario "$scenario"
+            )
+            stage_variant "$binary_dir"
+            "$FRAME_EXECUTION_DIR/m4-qualification" profile-workload \
+              --scenario "$scenario" \
+              --warmup-seconds "$warmup" \
+              --active-seconds "$active" \
+              --repository-root "$GITHUB_WORKSPACE" \
+              --binary-dir "$FRAME_EXECUTION_DIR" \
+              --ready-file "$relative_ready" \
+              --output "$relative_output" \
+              --parent-sha "$GITHUB_SHA" \
+              --candidate-sha "$GITHUB_SHA" \
+              --member "$member" \
+              --pair "$pair" \
+              --order "$order" \
+              --build-profile current \
+              --unit "$unit" \
+              --runner-image "$runner_image" \
+              --producer-source-sha256 "$producer" \
+              --controller-source-sha256 "$controller" \
+              --semantic-recipe-sha256 "$recipe" \
+              --evidence-bundle-sha256 "$bundle"
+            test -s "$output"
+            test ! -e "$ready"
+          }
+
+          run_schedule() {
+            local root=$1
+            local parent_bin=$2
+            local candidate_member_bin=$3
+            local scenario warmup active pair
+            for scenario in tcp-bulk tcp-request-1k tcp-scale-10k; do
+              case "$scenario" in
+                tcp-bulk|tcp-request-1k) warmup=1; active=15 ;;
+                tcp-scale-10k) warmup=10; active=30 ;;
+                *) exit 2 ;;
+              esac
+              for pair in 1 2 3 4 5 6; do
+                if (( pair % 2 == 1 )); then
+                  run_trial "$root" parent "$pair" "$parent_bin" "$scenario" "$warmup" "$active"
+                  run_trial "$root" candidate "$pair" "$candidate_member_bin" "$scenario" "$warmup" "$active"
+                else
+                  run_trial "$root" candidate "$pair" "$candidate_member_bin" "$scenario" "$warmup" "$active"
+                  run_trial "$root" parent "$pair" "$parent_bin" "$scenario" "$warmup" "$active"
+                fi
+              done
+            done
+          }
+
+          run_schedule "$FRAME_PROFILE_ROOT/aa-1" "$candidate_bin" "$candidate_bin"
+          run_schedule "$FRAME_PROFILE_ROOT/aa-2" "$candidate_bin" "$candidate_bin"
+          run_schedule "$FRAME_PROFILE_ROOT/comparison" "$baseline_bin" "$candidate_bin"
+
+      - name: Validate closed frame evidence and provisional result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate frame-qualification \
+            --plan "$FRAME_PLAN" \
+            --axis "$FRAME_AXIS" \
+            --baseline-build "$BASELINE_BUILD_RECORD" \
+            --candidate-build "$CANDIDATE_BUILD_RECORD" \
+            --a-a-root "$FRAME_PROFILE_ROOT/aa-1" \
+            --a-a-root "$FRAME_PROFILE_ROOT/aa-2" \
+            --comparison-root "$FRAME_PROFILE_ROOT/comparison" \
+            --output "$FRAME_QUALIFICATION"
+
+      - name: Upload provisional AMD frame evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-frame-${{ matrix.axis }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.FRAME_EVIDENCE }}
+            ${{ env.FRAME_PROFILE_ROOT }}
+            ${{ env.FRAME_ROOT }}/logs
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce non-authoritative hosted closure
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$FRAME_QUALIFICATION" "$FRAME_AXIS" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          row = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert row["axis"] == sys.argv[2]
+          assert row["status"] == "PASS"
+          assert row["scope"] == "github-hosted-amd-provisional"
+          assert row["adoption_decision"] == "NOT_ADOPTED_FOR_GITHUB_HOSTED_AMD_SCOPE"
+          assert row["performance_authoritative"] is False
+          assert row["bare_metal_gate_satisfied"] is False
+          assert row["durable_evidence_gate_satisfied"] is False
+          PY

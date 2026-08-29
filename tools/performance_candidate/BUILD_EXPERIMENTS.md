@@ -12,8 +12,10 @@ claim that a candidate is faster.
 
 ## Environment capture
 
-`build-environment` requires a clean candidate worktree checked out at the supplied candidate SHA.
-It records both commit tree identities, Rust/Cargo and manifest identities, the runner image, CPU and
+`build-environment` requires a clean worktree checked out at the supplied source SHA. Build
+experiments compare artifacts from that one source; they never reuse commit parent/candidate
+identity. The v2 environment records the source tree, `comparison_axis=build-artifact`, Rust/Cargo
+and manifest identities, the runner image, CPU and
 microcode, kernel, frequency governor, NUMA nodes, and a bounded process-name summary. Its stable
 `environment_id` deliberately excludes the transient process snapshot, while `build_identity_id`
 binds the source and toolchain.
@@ -21,8 +23,7 @@ binds the source and toolchain.
 ```text
 python -B -m tools.performance_candidate build-environment \
   --repository <worktree> \
-  --parent-sha <full-parent-sha> \
-  --candidate-sha <full-candidate-sha> \
+  --source-sha <full-source-sha> \
   --environment-kind stable-bare-metal \
   --runner-image <reviewed-runner-image> \
   --output <environment.json>
@@ -49,12 +50,13 @@ Build and Phase 4 plans consume a bounded, closed JSON document:
       "working_directory": "."
     }
   ],
-  "schema_version": "ferrum2-build-workload-set-v1"
+  "schema_version": "ferrum2-build-workload-set-v2"
 }
 ```
 
-PGO training uses `role=training`, `coverage=steady-state`, positive weights totalling 10,000 basis
-points, and all six categories: `tcp-request`, `tcp-bulk`, `udp-small`, `udp-mtu`, `dns`, and `rule`.
+Every scenario also names its reviewed `producer`. PGO training uses `role=training`,
+`coverage=steady-state`, positive weights totalling 10,000 basis points, and the exact six-command
+trusted registry: `tcp-request`, `tcp-bulk`, `udp-small`, `udp-mtu`, `dns`, and `rule`.
 Its scenario names must be disjoint from validation. PGO validation must separately cover
 `representative`, `cold-path`, `error-path`, and `different-cpu`.
 
@@ -67,11 +69,18 @@ or profile-use artifact. Phase 4 workload argv arrays use exactly one `{artifact
 `build-experiment-plan` always creates a `profiling` baseline and a separate candidate phase:
 
 - `thin-lto-cgu1` uses the named `performance-thin-lto` profile.
-- `target-cpu` requires a named CPU, a fixed deployment ID, and
-  `--acknowledge-nonportable`; `native` is rejected.
-- `pgo` emits generate, external training, `llvm-profdata merge`, use, and independent external
-  validation commands. The tool hashes the exact `llvm-profdata` executable and rejects stale raw
-  profile directories.
+- `target-cpu` accepts only the reviewed `znver3` class, a fixed deployment ID, and
+  `--acknowledge-nonportable`; `native` is rejected and the generic baseline remains the fallback
+  artifact.
+- `pgo` emits generate, trusted external training, `llvm-profdata merge`, use, and independent
+  validation commands. It requires the explicit `x86_64-unknown-linux-gnu` Cargo target so profile
+  flags cannot instrument host build scripts or proc macros. Every training command receives a
+  unique `LLVM_PROFILE_FILE`; its record
+  binds before/after inventories and each nonempty `.profraw` path, size, digest, and producer.
+  Merge accepts only the complete six-command record set, enumerates those exact files, hashes the
+  exact `llvm-profdata` executable/version, and rejects stale or modified profiles. Validation runs
+  with inherited profile variables removed. The hosted record explicitly leaves the different-CPU
+  requirement unsatisfied.
 - `panic-abort-strip` uses the named `performance-panic-abort-strip` profile and marks panic,
   backtrace, and crash-diagnostic review as mandatory.
 
@@ -89,9 +98,10 @@ python -B -m tools.performance_candidate build-experiment-run \
   --output <build-record.json>
 ```
 
-A successful record contains elapsed nanoseconds plus the byte size and SHA-256 of every expected
-artifact. PGO records hash-bound raw-profile or merged-profile inputs. A failed command is recorded as
-failed and never claims artifact measurements.
+A successful record contains elapsed nanoseconds, a child-process peak-RSS upper bound when the host
+exposes it, and the byte size and SHA-256 of every expected artifact. PGO records hash-bound
+raw-profile or merged-profile inputs. A failed command is recorded as failed and never claims artifact
+measurements.
 
 ## Evidence-gated Phase 4 matrix
 
@@ -112,3 +122,34 @@ Every planned result seed binds the environment, build, workload-set digest, var
 The result identity contract additionally requires the actual artifact and raw-result hashes. Matrix
 documents always carry `candidate_enabled_by_default=false`, no performance threshold, and no
 adoption claim.
+
+## Hosted AMD qualification boundary
+
+`.github/workflows/performance-build.yml` is manual/reusable and accepts exactly one of
+`thin-lto-cgu1`, `pgo`, or `target-cpu`. It builds all variants from one source into fresh target
+directories, binds client/server/M4/rule artifact hashes, runs two independent six-pair A/A rounds
+and one six-pair ABBA comparison, and retains build cost, binary size, rule diagnostics, raw trials,
+and the build-specific calibration candidate. Its terminal decision is always
+`NOT_ADOPTED_FOR_GITHUB_HOSTED_AMD_SCOPE`: hosted data has
+`performance_authoritative=false`, `bare_metal_gate_satisfied=false`, and
+`durable_evidence_gate_satisfied=false`. BUILD-01/02/03 need separate stable bare-metal review and
+digest-recoverable immutable storage before a release-profile change.
+
+Before each M4 workload, the selected isolated artifact directory is hash-preservingly materialized
+at the runner's reviewed `<repository>/target/profiling` seam. M4 receives only repository-relative
+`profiles/...` ready/output paths; the closed output is then moved into the isolated evidence root.
+
+A reusable-workflow caller passes `experiment_kind` plus the exact `source_sha`, and pins `uses:`
+to that same commit. The conditional reusable workflow likewise receives `candidate` plus the same
+exact source SHA. Manual dispatch may omit `source_sha` and then uses the dispatched commit.
+
+`.github/workflows/performance-conditional.yml` is likewise manual/reusable. It attempts real
+`strace`, `perf stat`, `perf c2c`, and allocation-profile collection for UDP-14, OBS-01, BUILD-04,
+and BUILD-05. Typed prerequisite records distinguish `DEFERRED`, `INCONCLUSIVE`,
+`TRIGGER_PRESENT`, and `NO_TRIGGER`; every hosted result remains not adopted.
+
+The `architecture-decisions` command closes ideas that must not be inferred from hosted results.
+TCP-06 is `SUPERSEDED_BY_FAIRNESS_INVARIANT`: retain at most one successful read transition per
+outer poll and its self-wake boundary; do not restore the measured continuous-RX regression.
+Multi-hop ownership, Linux splice/socket-buffer/GRO-GSO, and Windows ETW lock evidence remain
+deferred or external-lab-only, while busy-poll is not adopted.

@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -9,10 +10,10 @@ from unittest import mock
 from tools.performance_candidate import build_experiment
 from tools.performance_candidate.json_contract import CandidateControlError
 
+SOURCE_SHA = "2" * 40
+SOURCE_TREE = "4" * 40
 PARENT_SHA = "1" * 40
-CANDIDATE_SHA = "2" * 40
-PARENT_TREE = "3" * 40
-CANDIDATE_TREE = "4" * 40
+CANDIDATE_SHA = SOURCE_SHA
 
 
 class BuildExperimentFixture(unittest.TestCase):
@@ -79,7 +80,7 @@ class BuildExperimentFixture(unittest.TestCase):
         if command == ("git", "rev-parse", "--show-toplevel"):
             return 0, str(self.repository)
         if command == ("git", "rev-parse", "HEAD"):
-            return 0, CANDIDATE_SHA
+            return 0, SOURCE_SHA
         if command == (
             "git",
             "status",
@@ -87,17 +88,58 @@ class BuildExperimentFixture(unittest.TestCase):
             "--untracked-files=all",
         ):
             return 0, ""
+        if command == ("git", "rev-parse", f"{SOURCE_SHA}^{{tree}}"):
+            return 0, SOURCE_TREE
         if command == ("git", "rev-parse", f"{PARENT_SHA}^{{tree}}"):
-            return 0, PARENT_TREE
-        if command == ("git", "rev-parse", f"{CANDIDATE_SHA}^{{tree}}"):
-            return 0, CANDIDATE_TREE
+            return 0, "3" * 40
         if command == ("rustc", "-vV"):
             return 0, "rustc 1.97.1\nrelease: 1.97.1\nhost: fixture"
         if command == ("cargo", "-V"):
             return 0, "cargo 1.97.1 (fixture)"
+        if (
+            len(command) == 2
+            and command[1] == "--version"
+            and pathlib.Path(command[0]).name == "llvm-profdata"
+        ):
+            return 0, "LLVM version 22.1.0 fixture"
         self.fail(f"unexpected identity command: {command}, cwd={cwd}")
 
-    def environment(self) -> dict[str, object]:
+    def environment(
+        self, environment_kind: str = "stable-bare-metal"
+    ) -> dict[str, object]:
+        with (
+            mock.patch.object(
+                build_experiment, "_bounded_command", side_effect=self.command_result
+            ),
+            mock.patch.object(
+                build_experiment,
+                "_capture_machine_identity",
+                return_value=(self.machine(), self.background()),
+            ),
+            mock.patch.object(
+                build_experiment, "_utc_now", return_value="2026-08-28T00:00:00Z"
+            ),
+        ):
+            return build_experiment.capture_environment(
+                repository=self.repository,
+                source_sha=SOURCE_SHA,
+                environment_kind=environment_kind,
+                runner_image="bare-metal-fixture-v1",
+            )
+
+    def write_json(self, name: str, value: object) -> pathlib.Path:
+        path = self.root / name
+        path.write_text(
+            json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        return path
+
+    def environment_path(
+        self, environment_kind: str = "stable-bare-metal"
+    ) -> pathlib.Path:
+        return self.write_json("environment.json", self.environment(environment_kind))
+
+    def commit_environment_path(self) -> pathlib.Path:
         with (
             mock.patch.object(
                 build_experiment,
@@ -116,7 +158,7 @@ class BuildExperimentFixture(unittest.TestCase):
                 build_experiment, "_utc_now", return_value="2026-08-28T00:00:00Z"
             ),
         ):
-            return build_experiment.capture_environment(
+            value = build_experiment.capture_environment(
                 repository=self.repository,
                 parent_sha=PARENT_SHA,
                 candidate_sha=CANDIDATE_SHA,
@@ -124,16 +166,7 @@ class BuildExperimentFixture(unittest.TestCase):
                 environment_kind="stable-bare-metal",
                 runner_image="bare-metal-fixture-v1",
             )
-
-    def write_json(self, name: str, value: object) -> pathlib.Path:
-        path = self.root / name
-        path.write_text(
-            json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-        )
-        return path
-
-    def environment_path(self) -> pathlib.Path:
-        return self.write_json("environment.json", self.environment())
+        return self.write_json("commit-environment.json", value)
 
     @staticmethod
     def scenario(
@@ -150,6 +183,9 @@ class BuildExperimentFixture(unittest.TestCase):
             "coverage": "steady-state" if role == "training" else coverage,
             "name": name,
             "platforms": ["linux-x86_64"],
+            "producer": (
+                "rule-qualification" if category == "rule" else "m4-profile-workload"
+            ),
             "weight_basis_points": weight if role == "training" else None,
             "working_directory": ".",
         }
@@ -203,8 +239,13 @@ class BuildExperimentFixture(unittest.TestCase):
             "target_root": self.root / "targets" / kind,
             "artifact_names": ["ferrum2-client", "ferrum2-server"],
         }
+        if kind == "pgo":
+            arguments["target_triple"] = build_experiment.PGO_TARGET_TRIPLE
         arguments.update(overrides)
-        return build_experiment.create_experiment_plan(**arguments)
+        with mock.patch.object(
+            build_experiment, "_bounded_command", side_effect=self.command_result
+        ):
+            return build_experiment.create_experiment_plan(**arguments)
 
 
 class EnvironmentCaptureTests(BuildExperimentFixture):
@@ -216,7 +257,8 @@ class EnvironmentCaptureTests(BuildExperimentFixture):
         self.assertEqual(
             report["schema_version"], build_experiment.ENVIRONMENT_SCHEMA_VERSION
         )
-        self.assertEqual(report["source_identity"]["candidate_tree"], CANDIDATE_TREE)
+        self.assertEqual(report["source_identity"]["source_tree"], SOURCE_TREE)
+        self.assertEqual(report["source_identity"]["comparison_axis"], "build-artifact")
         self.assertEqual(report["build_identity"]["rust_release"], "1.97.1")
         self.assertTrue(report["build_identity"]["locked_dependencies"])
         self.assertEqual(
@@ -242,20 +284,13 @@ class EnvironmentCaptureTests(BuildExperimentFixture):
 
         with (
             mock.patch.object(
-                build_experiment,
-                "validate_git_relation",
-                return_value=(PARENT_SHA, CANDIDATE_SHA),
-            ),
-            mock.patch.object(
                 build_experiment, "_bounded_command", side_effect=dirty_command
             ),
         ):
             with self.assertRaisesRegex(CandidateControlError, "clean worktree"):
                 build_experiment.capture_environment(
                     repository=self.repository,
-                    parent_sha=PARENT_SHA,
-                    candidate_sha=CANDIDATE_SHA,
-                    run_kind="comparison",
+                    source_sha=SOURCE_SHA,
                     environment_kind="github-hosted",
                     runner_image="ubuntu-24.04",
                 )
@@ -290,7 +325,7 @@ class BuildPlanTests(BuildExperimentFixture):
 
     def test_target_cpu_is_named_and_requires_fixed_deployment_opt_in(self) -> None:
         with self.assertRaisesRegex(CandidateControlError, "nonportable"):
-            self.create_plan("target-cpu", target_cpu="x86-64-v3")
+            self.create_plan("target-cpu", target_cpu="znver3")
         with self.assertRaisesRegex(CandidateControlError, "native"):
             self.create_plan(
                 "target-cpu",
@@ -301,17 +336,17 @@ class BuildPlanTests(BuildExperimentFixture):
 
         plan = self.create_plan(
             "target-cpu",
-            target_cpu="x86-64-v3",
+            target_cpu="znver3",
             deployment_id="host-fleet-a",
             acknowledge_nonportable=True,
         )
 
-        self.assertEqual(plan["portability"]["target_cpu"], "x86-64-v3")
+        self.assertEqual(plan["portability"]["target_cpu"], "znver3")
         self.assertTrue(plan["portability"]["nonportable_opt_in"])
         self.assertTrue(plan["portability"]["general_distribution_baseline_unchanged"])
         self.assertEqual(
             plan["phases"][1]["environment_overrides"]["CARGO_ENCODED_RUSTFLAGS"],
-            "-Ctarget-cpu=x86-64-v3",
+            "-Ctarget-cpu=znver3",
         )
 
     def test_pgo_plan_separates_mixed_training_and_independent_validation(self) -> None:
@@ -328,7 +363,7 @@ class BuildPlanTests(BuildExperimentFixture):
             "training",
             [
                 self.pgo_scenario(
-                    f"train-{category}",
+                    f"pgo-train-{category}",
                     category,
                     role="training",
                     weight=1_667 if index < 5 else 1_665,
@@ -352,6 +387,15 @@ class BuildPlanTests(BuildExperimentFixture):
         )
         llvm_profdata = self.root / "llvm-profdata"
         llvm_profdata.write_bytes(b"fixture llvm-profdata")
+
+        with self.assertRaisesRegex(CandidateControlError, "explicit.*target"):
+            self.create_plan(
+                "pgo",
+                training_workloads_path=training,
+                validation_workloads_path=validation,
+                llvm_profdata=llvm_profdata,
+                target_triple=None,
+            )
 
         plan = self.create_plan(
             "pgo",
@@ -389,6 +433,18 @@ class BuildPlanTests(BuildExperimentFixture):
         )
         self.assertEqual(len(plan["pgo"]["training_commands"]), 6)
         self.assertEqual(len(plan["pgo"]["validation_commands"]), 8)
+        self.assertEqual(plan["target_triple"], build_experiment.PGO_TARGET_TRIPLE)
+        self.assertTrue(
+            all(
+                ["--target", build_experiment.PGO_TARGET_TRIPLE]
+                == phase["argv"][
+                    phase["argv"].index("--target") : phase["argv"].index("--target")
+                    + 2
+                ]
+                for phase in plan["phases"]
+                if phase["phase_type"] == "build"
+            )
+        )
         self.assertTrue(
             all(
                 "{artifact:" not in argument
@@ -397,6 +453,22 @@ class BuildPlanTests(BuildExperimentFixture):
             )
         )
 
+        mutated = copy.deepcopy(plan)
+        mutated["target_triple"] = None
+        material = dict(mutated)
+        material.pop("plan_id")
+        material.pop("generated_at_utc")
+        mutated["plan_id"] = build_experiment._json_sha256(material)
+        mutated_path = self.write_json("pgo-target-mutated.json", mutated)
+        with self.assertRaisesRegex(CandidateControlError, "target isolation"):
+            build_experiment._load_plan(mutated_path)
+        profile_files = {
+            command["environment_overrides"]["LLVM_PROFILE_FILE"]
+            for command in plan["pgo"]["training_commands"]
+        }
+        self.assertEqual(len(profile_files), 6)
+        self.assertTrue(all("%p" in path for path in profile_files))
+
     def test_pgo_rejects_training_scenario_reused_for_validation(self) -> None:
         training_categories = sorted(build_experiment.PGO_TRAINING_CATEGORIES)
         training = self.workload_path(
@@ -404,7 +476,7 @@ class BuildPlanTests(BuildExperimentFixture):
             "training",
             [
                 self.pgo_scenario(
-                    "shared-name" if index == 0 else f"train-{category}",
+                    f"pgo-train-{category}",
                     category,
                     role="training",
                     weight=1_667 if index < 5 else 1_665,
@@ -417,7 +489,11 @@ class BuildPlanTests(BuildExperimentFixture):
             "validation",
             [
                 self.pgo_scenario(
-                    "shared-name" if index == 0 else f"validate-{coverage}",
+                    (
+                        f"pgo-train-{training_categories[0]}"
+                        if index == 0
+                        else f"validate-{coverage}"
+                    ),
                     "tcp-request",
                     coverage=coverage,
                 )
@@ -469,6 +545,222 @@ class BuildPlanTests(BuildExperimentFixture):
 
 
 class BuildRunTests(BuildExperimentFixture):
+    def test_pgo_training_records_close_each_profile_producer_before_merge(
+        self,
+    ) -> None:
+        categories = [
+            "tcp-request",
+            "tcp-bulk",
+            "udp-small",
+            "udp-mtu",
+            "dns",
+            "rule",
+        ]
+        training = self.workload_path(
+            "closed-training.json",
+            "training",
+            [
+                self.pgo_scenario(
+                    f"pgo-train-{category}",
+                    category,
+                    role="training",
+                    weight=1_667 if index < 5 else 1_665,
+                )
+                for index, category in enumerate(categories)
+            ],
+        )
+        validation = self.workload_path(
+            "independent-validation.json",
+            "validation",
+            [
+                self.pgo_scenario(
+                    f"pgo-validate-{coverage}",
+                    "tcp-request" if index % 2 == 0 else "udp-small",
+                    coverage=coverage,
+                )
+                for index, coverage in enumerate(
+                    ("representative", "cold-path", "error-path", "different-cpu")
+                )
+            ],
+        )
+        llvm_profdata = self.root / "llvm-profdata"
+        llvm_profdata.write_bytes(b"fixture llvm-profdata")
+        plan = self.create_plan(
+            "pgo",
+            training_workloads_path=training,
+            validation_workloads_path=validation,
+            llvm_profdata=llvm_profdata,
+        )
+        plan_path = self.write_json("closed-pgo-plan.json", plan)
+        generate = next(
+            phase for phase in plan["phases"] if phase["name"] == "pgo-generate"
+        )
+
+        def build_generate(argv, cwd, environment, log):
+            for relative in generate["artifacts"]:
+                artifact = pathlib.Path(generate["target_dir"]) / relative
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_bytes(relative.encode("utf-8"))
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_bytes(b"generate")
+            return 0
+
+        raw_directory = pathlib.Path(plan["pgo"]["raw_profile_directory"])
+
+        def build_generate_with_host_profile(argv, cwd, environment, log):
+            status = build_generate(argv, cwd, environment, log)
+            raw_directory.mkdir(parents=True, exist_ok=True)
+            (raw_directory / "build-script.profraw").write_bytes(b"host profile")
+            return status
+
+        captured = self.environment()
+        with mock.patch.object(
+            build_experiment, "capture_environment", return_value=captured
+        ):
+            with self.assertRaisesRegex(CandidateControlError, "polluted"):
+                build_experiment.run_experiment_phase(
+                    plan_path=plan_path,
+                    phase_name="pgo-generate",
+                    log_path=self.root / "logs" / "contaminated-generate.log",
+                    executor=build_generate_with_host_profile,
+                    clock=iter((1, 2)).__next__,
+                )
+        (raw_directory / "build-script.profraw").unlink()
+        with mock.patch.object(
+            build_experiment, "capture_environment", return_value=captured
+        ):
+            generate_record, status = build_experiment.run_experiment_phase(
+                plan_path=plan_path,
+                phase_name="pgo-generate",
+                log_path=self.root / "logs" / "generate.log",
+                executor=build_generate,
+                clock=iter((10, 20)).__next__,
+            )
+        self.assertEqual(status, 0)
+        generate_record_path = self.write_json(
+            "pgo-generate-record.json", generate_record
+        )
+        workload_records = []
+        for index, command in enumerate(plan["pgo"]["training_commands"]):
+
+            def run_workload(argv, cwd, environment, log, *, ordinal=index):
+                self.assertNotIn("RUSTFLAGS", environment)
+                template = environment["LLVM_PROFILE_FILE"]
+                profile = pathlib.Path(
+                    template.replace("%p", str(1_000 + ordinal)).replace(
+                        "%m", f"module-{ordinal}"
+                    )
+                )
+                profile.parent.mkdir(parents=True, exist_ok=True)
+                profile.write_bytes(f"profile-{ordinal}".encode("ascii"))
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_bytes(f"workload-{ordinal}".encode("ascii"))
+                return 0
+
+            record, status = build_experiment.run_pgo_workload_command(
+                plan_path=plan_path,
+                command_id=command["command_id"],
+                generate_phase_record_path=generate_record_path,
+                log_path=self.root / "logs" / f"workload-{index}.log",
+                executor=run_workload,
+                clock=iter((100, 200)).__next__,
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(len(record["produced_profiles"]), 1)
+            workload_records.append(self.write_json(f"workload-{index}.json", record))
+        merge = next(phase for phase in plan["phases"] if phase["name"] == "pgo-merge")
+
+        def merge_profiles(argv, cwd, environment, log):
+            self.assertNotIn("{profraw-inventory}", argv)
+            self.assertEqual(sum(argument.endswith(".profraw") for argument in argv), 6)
+            output = pathlib.Path(merge["target_dir"]) / merge["artifacts"][0]
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"merged")
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_bytes(b"merge")
+            return 0
+
+        with mock.patch.object(
+            build_experiment, "capture_environment", return_value=captured
+        ):
+            merge_record, status = build_experiment.run_experiment_phase(
+                plan_path=plan_path,
+                phase_name="pgo-merge",
+                training_record_paths=workload_records,
+                log_path=self.root / "logs" / "merge.log",
+                executor=merge_profiles,
+                clock=iter((300, 400)).__next__,
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(merge_record["inputs"][0]["file_count"], 6)
+        self.assertTrue(
+            all(
+                row["producer_command_id"] for row in merge_record["inputs"][0]["files"]
+            )
+        )
+        phase_record_paths = {"pgo-generate": generate_record_path}
+        for phase_name in ("baseline", "pgo-use"):
+            selected = next(
+                phase for phase in plan["phases"] if phase["name"] == phase_name
+            )
+
+            def build_validation_artifacts(
+                argv, cwd, environment, log, *, phase=selected
+            ):
+                for relative in phase["artifacts"]:
+                    artifact = pathlib.Path(phase["target_dir"]) / relative
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.write_bytes(f"{phase['name']}:{relative}".encode("utf-8"))
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_bytes(phase["name"].encode("ascii"))
+                return 0
+
+            with mock.patch.object(
+                build_experiment, "capture_environment", return_value=captured
+            ):
+                phase_record, status = build_experiment.run_experiment_phase(
+                    plan_path=plan_path,
+                    phase_name=phase_name,
+                    log_path=self.root / "logs" / f"{phase_name}.log",
+                    executor=build_validation_artifacts,
+                    clock=iter((500, 600)).__next__,
+                )
+            self.assertEqual(status, 0)
+            phase_record_paths[phase_name] = self.write_json(
+                f"{phase_name}-record.json", phase_record
+            )
+        validation_records = []
+        for index, command in enumerate(plan["pgo"]["validation_commands"]):
+
+            def validate(argv, cwd, environment, log):
+                self.assertNotIn("LLVM_PROFILE_FILE", environment)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_bytes(b"independent validation")
+                return 0
+
+            record, status = build_experiment.run_pgo_validation_command(
+                plan_path=plan_path,
+                command_id=command["command_id"],
+                phase_record_path=phase_record_paths[command["build_phase"]],
+                log_path=self.root / "logs" / f"validation-{index}.log",
+                executor=validate,
+                clock=iter((700, 800)).__next__,
+            )
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                record["external_requirement_satisfied"],
+                record["validation_coverage"] != "different-cpu",
+            )
+            validation_records.append(record)
+        self.assertEqual(len(validation_records), 8)
+        self.assertEqual(
+            sum(
+                record["validation_coverage"] == "different-cpu"
+                for record in validation_records
+            ),
+            2,
+        )
+
     def test_pgo_inputs_require_fresh_raw_data_and_bind_profile_hashes(self) -> None:
         raw = self.root / "pgo-data" / "raw"
         merged = self.root / "pgo-data" / "merged.profdata"
@@ -482,12 +774,15 @@ class BuildRunTests(BuildExperimentFixture):
         self.assertEqual(build_experiment._phase_inputs(plan, "pgo-generate"), [])
         (raw / "first.profraw").write_bytes(b"profile one")
         (raw / "second.profraw").write_bytes(b"profile two")
-        merge_inputs = build_experiment._phase_inputs(plan, "pgo-merge")
-        self.assertEqual(merge_inputs[0]["file_count"], 2)
+        snapshot = build_experiment._profraw_input_snapshot(raw)
+        self.assertEqual(snapshot["file_count"], 2)
         self.assertEqual(
-            merge_inputs[0]["total_size_bytes"],
+            snapshot["total_size_bytes"],
             len(b"profile one") + len(b"profile two"),
         )
+        self.assertEqual(len(snapshot["files"]), 2)
+        with self.assertRaisesRegex(CandidateControlError, "closed per-command"):
+            build_experiment._phase_inputs(plan, "pgo-merge")
         merged.write_bytes(b"merged profile")
         use_inputs = build_experiment._phase_inputs(plan, "pgo-use")
         self.assertEqual(

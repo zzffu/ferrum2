@@ -1,0 +1,65 @@
+{
+  "experiment_kinds": [
+    "pgo",
+    "target-cpu",
+    "thin-lto-cgu1"
+  ],
+  "hosted_scope": {
+    "adoption_claim": false,
+    "bare_metal_gate_satisfied": false,
+    "durable_evidence_gate_satisfied": false,
+    "performance_authoritative": false,
+    "scope": "github-hosted-amd-provisional"
+  },
+  "policy_id": "github-hosted-amd-build-artifact-provisional-v1",
+  "scenarios": [
+    {
+      "direction": "higher_is_better",
+      "metric": "bytes_per_second",
+      "name": "tcp-bulk",
+      "unit": "bytes_per_second"
+    },
+    {
+      "direction": "lower_is_better",
+      "metric": "p99_nanoseconds",
+      "name": "tcp-request-1k",
+      "unit": "nanoseconds"
+    },
+    {
+      "direction": "higher_is_better",
+      "metric": "datagrams_per_second",
+      "name": "udp-small-high",
+      "unit": "datagrams_per_second"
+    },
+    {
+      "direction": "higher_is_better",
+      "metric": "datagrams_per_second",
+      "name": "udp-mtu-1200",
+      "unit": "datagrams_per_second"
+    },
+    {
+      "direction": "higher_is_better",
+      "metric": "queries_per_second",
+      "name": "dns-udp-concurrency",
+      "unit": "queries_per_second"
+    },
+    {
+      "direction": "higher_is_better",
+      "metric": "operations_per_second",
+      "name": "udp-replay-sequential",
+      "unit": "operations_per_second"
+    }
+  ],
+  "schedule": {
+    "a_a_rounds": 2,
+    "active_seconds": 15,
+    "pair_count": 6,
+    "pair_schedule": "abba-six-pairs",
+    "warmup_seconds": 1
+  },
+  "schema_version": "ferrum2-performance-build-policy-v1",
+  "thresholds": {
+    "max_regression_percent": 5.0,
+    "minimum_beneficial_scenarios": 4
+  }
+}

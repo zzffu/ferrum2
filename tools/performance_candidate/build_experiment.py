@@ -14,6 +14,7 @@ import pathlib
 import platform
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -28,15 +29,24 @@ from tools.performance_candidate.json_contract import (
 )
 from tools.performance_candidate.output import _atomic_text
 
-ENVIRONMENT_SCHEMA_VERSION = "ferrum2-build-environment-v1"
-WORKLOAD_SCHEMA_VERSION = "ferrum2-build-workload-set-v1"
-PLAN_SCHEMA_VERSION = "ferrum2-build-experiment-plan-v1"
-RECORD_SCHEMA_VERSION = "ferrum2-build-experiment-record-v1"
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - unavailable on Windows by design.
+    _resource = None
+
+ENVIRONMENT_SCHEMA_VERSION = "ferrum2-build-environment-v2"
+WORKLOAD_SCHEMA_VERSION = "ferrum2-build-workload-set-v2"
+PLAN_SCHEMA_VERSION = "ferrum2-build-experiment-plan-v2"
+RECORD_SCHEMA_VERSION = "ferrum2-build-experiment-record-v2"
+WORKLOAD_RECORD_SCHEMA_VERSION = "ferrum2-pgo-workload-record-v1"
+VALIDATION_RECORD_SCHEMA_VERSION = "ferrum2-pgo-validation-record-v1"
 COMMANDS = frozenset(
     {
         "build-environment",
         "build-experiment-plan",
         "build-experiment-run",
+        "build-experiment-workload-run",
+        "build-experiment-validation-run",
     }
 )
 EXPERIMENT_KINDS = (
@@ -47,6 +57,7 @@ EXPERIMENT_KINDS = (
 )
 ENVIRONMENT_KINDS = ("github-hosted", "self-hosted", "stable-bare-metal")
 PINNED_RUST_RELEASE = "1.97.1"
+PGO_TARGET_TRIPLE = "x86_64-unknown-linux-gnu"
 MAX_JSON_BYTES = 256 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 MAX_BACKGROUND_PROCESSES = 32_768
@@ -58,6 +69,17 @@ SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
 SAFE_TARGET_CPU = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}")
 PGO_TRAINING_CATEGORIES = frozenset(
     {"tcp-request", "tcp-bulk", "udp-small", "udp-mtu", "dns", "rule"}
+)
+PGO_TRAINING_REGISTRY = {
+    "pgo-train-tcp-request": ("tcp-request", "m4-profile-workload"),
+    "pgo-train-tcp-bulk": ("tcp-bulk", "m4-profile-workload"),
+    "pgo-train-udp-small": ("udp-small", "m4-profile-workload"),
+    "pgo-train-udp-mtu": ("udp-mtu", "m4-profile-workload"),
+    "pgo-train-dns": ("dns", "m4-profile-workload"),
+    "pgo-train-rule": ("rule", "rule-qualification"),
+}
+TRUSTED_WORKLOAD_PRODUCERS = frozenset(
+    {"m4-profile-workload", "rule-qualification", "process-contract"}
 )
 WORKLOAD_CATEGORIES = PGO_TRAINING_CATEGORIES | {"startup"}
 VALIDATION_COVERAGE = frozenset(
@@ -72,6 +94,8 @@ CONTROLLED_ENVIRONMENT_REMOVALS = (
     "RUSTC_WRAPPER",
     "RUSTDOCFLAGS",
     "RUSTFLAGS",
+    "LLVM_PROFILE_FILE",
+    "LLVM_PROFILE_VERBOSE_ERRORS",
 )
 CONTROLLED_ENVIRONMENT_PREFIX_REMOVALS = (
     "CARGO_PROFILE_",
@@ -333,9 +357,10 @@ def _manifest_digests(repository: pathlib.Path) -> dict[str, str]:
 def capture_environment(
     *,
     repository: pathlib.Path,
-    parent_sha: str,
-    candidate_sha: str,
-    run_kind: str,
+    source_sha: str | None = None,
+    parent_sha: str | None = None,
+    candidate_sha: str | None = None,
+    run_kind: str | None = None,
     environment_kind: str,
     runner_image: str,
 ) -> dict[str, object]:
@@ -344,9 +369,25 @@ def capture_environment(
         raise CandidateControlError("environment_kind is invalid")
     if not runner_image.strip() or len(runner_image) > 256:
         raise CandidateControlError("runner_image must be a bounded non-empty string")
-    parent, candidate = validate_git_relation(
-        repository, parent_sha, candidate_sha, run_kind=run_kind
-    )
+    artifact_comparison = source_sha is not None
+    if artifact_comparison:
+        if parent_sha is not None or candidate_sha is not None or run_kind is not None:
+            raise CandidateControlError(
+                "build-artifact identity cannot mix commit comparison fields"
+            )
+        source = source_sha.strip().lower()
+        if COMMIT_SHA.fullmatch(source) is None:
+            raise CandidateControlError("source_sha must be a full Git commit SHA")
+        parent = candidate = None
+    else:
+        if parent_sha is None or candidate_sha is None or run_kind is None:
+            raise CandidateControlError(
+                "commit comparison requires parent, candidate, and run_kind"
+            )
+        parent, candidate = validate_git_relation(
+            repository, parent_sha, candidate_sha, run_kind=run_kind
+        )
+        source = candidate
     root = _required_command_output(
         ("git", "rev-parse", "--show-toplevel"), cwd=repository, name="repository root"
     )
@@ -355,10 +396,8 @@ def capture_environment(
     head = _required_command_output(
         ("git", "rev-parse", "HEAD"), cwd=repository, name="worktree HEAD"
     ).lower()
-    if head != candidate:
-        raise CandidateControlError(
-            "candidate_sha must be the checked-out worktree HEAD"
-        )
+    if head != source:
+        raise CandidateControlError("source_sha must be the checked-out worktree HEAD")
     status_returncode, status = _bounded_command(
         ("git", "status", "--porcelain=v1", "--untracked-files=all"),
         cwd=repository,
@@ -367,20 +406,12 @@ def capture_environment(
         raise CandidateControlError("unable to capture worktree status")
     if status:
         raise CandidateControlError("build experiments require a clean worktree")
-    parent_tree = _required_command_output(
-        ("git", "rev-parse", f"{parent}^{{tree}}"),
+    source_tree = _required_command_output(
+        ("git", "rev-parse", f"{source}^{{tree}}"),
         cwd=repository,
-        name="parent tree",
+        name="source tree",
     ).lower()
-    candidate_tree = _required_command_output(
-        ("git", "rev-parse", f"{candidate}^{{tree}}"),
-        cwd=repository,
-        name="candidate tree",
-    ).lower()
-    if (
-        GIT_OBJECT.fullmatch(parent_tree) is None
-        or GIT_OBJECT.fullmatch(candidate_tree) is None
-    ):
+    if GIT_OBJECT.fullmatch(source_tree) is None:
         raise CandidateControlError("Git tree identity is invalid")
     rustc_verbose = _required_command_output(("rustc", "-vV"), name="rustc identity")
     release_lines = [
@@ -393,14 +424,31 @@ def capture_environment(
             f"rustc release must be the pinned {PINNED_RUST_RELEASE}"
         )
     cargo_version = _required_command_output(("cargo", "-V"), name="cargo identity")
-    source_identity = {
-        "candidate_sha": candidate,
-        "candidate_tree": candidate_tree,
-        "parent_sha": parent,
-        "parent_tree": parent_tree,
-        "run_kind": run_kind,
-        "worktree_clean": True,
-    }
+    if artifact_comparison:
+        source_identity = {
+            "comparison_axis": "build-artifact",
+            "source_sha": source,
+            "source_tree": source_tree,
+            "worktree_clean": True,
+        }
+    else:
+        assert parent is not None and candidate is not None and run_kind is not None
+        parent_tree = _required_command_output(
+            ("git", "rev-parse", f"{parent}^{{tree}}"),
+            cwd=repository,
+            name="parent tree",
+        ).lower()
+        if GIT_OBJECT.fullmatch(parent_tree) is None:
+            raise CandidateControlError("parent Git tree identity is invalid")
+        source_identity = {
+            "candidate_sha": candidate,
+            "candidate_tree": source_tree,
+            "comparison_axis": "source-commit",
+            "parent_sha": parent,
+            "parent_tree": parent_tree,
+            "run_kind": run_kind,
+            "worktree_clean": True,
+        }
     build_identity = {
         "cargo_version": cargo_version,
         "locked_dependencies": True,
@@ -479,32 +527,53 @@ def _load_environment(path: pathlib.Path) -> tuple[dict[str, object], str]:
     background = row["background_process_snapshot"]
     if type(source_identity) is not dict:
         raise CandidateControlError("build source_identity is invalid")
-    _exact_fields(
-        source_identity,
-        frozenset(
-            {
-                "candidate_sha",
-                "candidate_tree",
-                "parent_sha",
-                "parent_tree",
-                "run_kind",
-                "worktree_clean",
-            }
-        ),
-        "build source_identity",
-    )
-    if (
-        type(source_identity["candidate_sha"]) is not str
-        or COMMIT_SHA.fullmatch(source_identity["candidate_sha"]) is None
-        or type(source_identity["parent_sha"]) is not str
-        or COMMIT_SHA.fullmatch(source_identity["parent_sha"]) is None
-        or type(source_identity["candidate_tree"]) is not str
-        or GIT_OBJECT.fullmatch(source_identity["candidate_tree"]) is None
-        or type(source_identity["parent_tree"]) is not str
-        or GIT_OBJECT.fullmatch(source_identity["parent_tree"]) is None
-        or source_identity["run_kind"] not in {"comparison", "calibration-aa"}
-        or source_identity["worktree_clean"] is not True
-    ):
+    axis = source_identity.get("comparison_axis")
+    if axis == "build-artifact":
+        _exact_fields(
+            source_identity,
+            frozenset(
+                {"comparison_axis", "source_sha", "source_tree", "worktree_clean"}
+            ),
+            "build source_identity",
+        )
+        valid_source = (
+            type(source_identity["source_sha"]) is str
+            and COMMIT_SHA.fullmatch(source_identity["source_sha"]) is not None
+            and type(source_identity["source_tree"]) is str
+            and GIT_OBJECT.fullmatch(source_identity["source_tree"]) is not None
+        )
+    elif axis == "source-commit":
+        _exact_fields(
+            source_identity,
+            frozenset(
+                {
+                    "candidate_sha",
+                    "candidate_tree",
+                    "comparison_axis",
+                    "parent_sha",
+                    "parent_tree",
+                    "run_kind",
+                    "worktree_clean",
+                }
+            ),
+            "build source_identity",
+        )
+        valid_source = (
+            all(
+                type(source_identity[field]) is str
+                and COMMIT_SHA.fullmatch(source_identity[field]) is not None
+                for field in ("candidate_sha", "parent_sha")
+            )
+            and all(
+                type(source_identity[field]) is str
+                and GIT_OBJECT.fullmatch(source_identity[field]) is not None
+                for field in ("candidate_tree", "parent_tree")
+            )
+            and source_identity["run_kind"] in {"comparison", "calibration-aa"}
+        )
+    else:
+        valid_source = False
+    if not valid_source or source_identity["worktree_clean"] is not True:
         raise CandidateControlError("build source_identity values are invalid")
     if type(build_identity) is not dict:
         raise CandidateControlError("build build_identity is invalid")
@@ -677,6 +746,7 @@ def _load_workload_set(
                     "coverage",
                     "name",
                     "platforms",
+                    "producer",
                     "weight_basis_points",
                     "working_directory",
                 }
@@ -691,6 +761,8 @@ def _load_workload_set(
         names.add(scenario_name)
         if scenario["category"] not in WORKLOAD_CATEGORIES:
             raise CandidateControlError(f"{name} category is invalid")
+        if scenario["producer"] not in TRUSTED_WORKLOAD_PRODUCERS:
+            raise CandidateControlError(f"{name} producer is not trusted")
         _require_argv(scenario["argv"], f"{name} argv")
         _require_relative_directory(
             scenario["working_directory"], f"{name} working_directory"
@@ -796,6 +868,7 @@ def _pgo_workload_commands(
     phase: dict[str, object],
     artifact_names: Sequence[str],
     variant: str,
+    raw_profile_directory: pathlib.Path | None = None,
 ) -> list[dict[str, object]]:
     target_dir = pathlib.Path(phase["target_dir"]).resolve()
     artifact_map = {
@@ -834,11 +907,19 @@ def _pgo_workload_commands(
             "coverage": scenario["coverage"],
             "name": scenario["name"],
             "platforms": scenario["platforms"],
+            "producer": scenario["producer"],
             "variant": variant,
             "weight_basis_points": scenario["weight_basis_points"],
             "working_directory": str(working_directory),
             "workload_set_sha256": workload_sha256,
         }
+        command_seed = _json_sha256(command)
+        environment_overrides: dict[str, str] = {}
+        if raw_profile_directory is not None:
+            environment_overrides["LLVM_PROFILE_FILE"] = str(
+                raw_profile_directory / f"{command_seed}-%p-%m.profraw"
+            )
+        command = {**command, "environment_overrides": environment_overrides}
         commands.append({**command, "command_id": _json_sha256(command)})
     return commands
 
@@ -860,6 +941,10 @@ def create_experiment_plan(
     if kind not in EXPERIMENT_KINDS:
         raise CandidateControlError("build experiment kind is invalid")
     environment, environment_sha256 = _load_environment(environment_path)
+    if environment["source_identity"]["comparison_axis"] != "build-artifact":
+        raise CandidateControlError(
+            "build experiment plans require a same-source build-artifact environment"
+        )
     repository_value = environment["repository"]
     if type(repository_value) is not str:
         raise CandidateControlError("build environment repository is invalid")
@@ -889,6 +974,7 @@ def create_experiment_plan(
     pgo: dict[str, object] | None = None
     portability: dict[str, object] = {
         "deployment_id": None,
+        "fallback_phase": None,
         "general_distribution_baseline_unchanged": True,
         "nonportable_opt_in": False,
         "target_cpu": None,
@@ -915,10 +1001,10 @@ def create_experiment_plan(
         if (
             target_cpu is None
             or SAFE_TARGET_CPU.fullmatch(target_cpu) is None
-            or target_cpu == "native"
+            or target_cpu != "znver3"
         ):
             raise CandidateControlError(
-                "target-cpu requires an explicit named CPU; native is not reproducible"
+                "target-cpu requires the reviewed named znver3 class; native is not reproducible"
             )
         if (
             not acknowledge_nonportable
@@ -931,6 +1017,7 @@ def create_experiment_plan(
         candidate_flags = (f"-Ctarget-cpu={target_cpu}",)
         portability = {
             "deployment_id": deployment_id,
+            "fallback_phase": "baseline",
             "general_distribution_baseline_unchanged": True,
             "nonportable_opt_in": True,
             "target_cpu": target_cpu,
@@ -938,6 +1025,11 @@ def create_experiment_plan(
     elif target_cpu is not None or deployment_id is not None or acknowledge_nonportable:
         raise CandidateControlError("target-cpu options are valid only for target-cpu")
     if kind == "pgo":
+        if target_triple != PGO_TARGET_TRIPLE:
+            raise CandidateControlError(
+                "PGO requires the explicit x86_64-unknown-linux-gnu target to isolate "
+                "profile flags from host build dependencies"
+            )
         if training_workloads_path is None or llvm_profdata is None:
             raise CandidateControlError(
                 "PGO requires separate training workloads and llvm-profdata"
@@ -952,6 +1044,14 @@ def create_experiment_plan(
             missing = sorted(PGO_TRAINING_CATEGORIES - training_categories)
             raise CandidateControlError(
                 f"PGO training categories are missing: {missing}"
+            )
+        registered = {
+            scenario["name"]: (scenario["category"], scenario["producer"])
+            for scenario in training["scenarios"]
+        }
+        if registered != PGO_TRAINING_REGISTRY:
+            raise CandidateControlError(
+                "PGO training workloads must exactly match the trusted six-class registry"
             )
         training_names = {scenario["name"] for scenario in training["scenarios"]}
         validation_names = {scenario["name"] for scenario in validation["scenarios"]}
@@ -970,6 +1070,9 @@ def create_experiment_plan(
         llvm_profdata = llvm_profdata.resolve()
         if not llvm_profdata.is_file():
             raise CandidateControlError("llvm-profdata must be an existing file")
+        llvm_profdata_version = _required_command_output(
+            (str(llvm_profdata), "--version"), name="llvm-profdata version"
+        )
         raw_directory = _phase_target(target_root, "pgo-data") / "raw"
         merged_file = _phase_target(target_root, "pgo-data") / "merged.profdata"
         generate_phase = _build_phase(
@@ -986,9 +1089,10 @@ def create_experiment_plan(
             "argv": [
                 str(llvm_profdata),
                 "merge",
+                "--failure-mode=all",
                 "-o",
                 str(merged_file),
-                str(raw_directory),
+                "{profraw-inventory}",
             ],
             "environment_overrides": {},
             "name": "pgo-merge",
@@ -1022,6 +1126,7 @@ def create_experiment_plan(
             "llvm_profdata": {
                 "path": str(llvm_profdata),
                 "sha256": _file_sha256(llvm_profdata, field="llvm-profdata"),
+                "version": llvm_profdata_version,
             },
             "merged_profile": str(merged_file),
             "profile_input_contract": {
@@ -1036,6 +1141,7 @@ def create_experiment_plan(
                 phase=generate_phase,
                 artifact_names=artifacts,
                 variant="instrumented-training",
+                raw_profile_directory=raw_directory,
             ),
             "training_workloads": _workload_reference(
                 training_workloads_path, training, training_sha256
@@ -1073,6 +1179,7 @@ def create_experiment_plan(
             )
         )
     plan_without_id = {
+        "artifact_names": artifacts,
         "controlled_environment_prefix_removals": list(
             CONTROLLED_ENVIRONMENT_PREFIX_REMOVALS
         ),
@@ -1084,7 +1191,11 @@ def create_experiment_plan(
             "sha256": environment_sha256,
         },
         "evidence_contract": {
+            "adoption_claim": False,
+            "bare_metal_gate_satisfied": False,
             "cross_environment_mixing_forbidden": True,
+            "durable_evidence_gate_satisfied": False,
+            "performance_authoritative": False,
             "performance_conclusions_recorded": False,
             "required_raw_artifact_kinds": [
                 "allocator",
@@ -1094,6 +1205,11 @@ def create_experiment_plan(
                 "summary",
             ],
             "single_scenario_adoption_forbidden": True,
+            "scope": (
+                "github-hosted-amd-provisional"
+                if environment["environment_kind"] == "github-hosted"
+                else "non-authoritative-build-experiment"
+            ),
             "tcp_scale_10k_required_fields": [
                 "fairness",
                 "merged_per_connection_growth",
@@ -1139,6 +1255,7 @@ def _load_plan(path: pathlib.Path) -> tuple[dict[str, object], str]:
         plan,
         frozenset(
             {
+                "artifact_names",
                 "controlled_environment_prefix_removals",
                 "controlled_environment_removals",
                 "environment",
@@ -1161,6 +1278,12 @@ def _load_plan(path: pathlib.Path) -> tuple[dict[str, object], str]:
         raise CandidateControlError("build experiment plan schema_version is invalid")
     if plan["experiment_kind"] not in EXPERIMENT_KINDS:
         raise CandidateControlError("build experiment kind is invalid")
+    if plan["experiment_kind"] == "pgo" and plan["target_triple"] != PGO_TARGET_TRIPLE:
+        raise CandidateControlError(
+            "PGO plan must retain its explicit target isolation"
+        )
+    if _artifact_names(plan["artifact_names"]) != plan["artifact_names"]:
+        raise CandidateControlError("build experiment artifact names are invalid")
     if plan["controlled_environment_removals"] != list(
         CONTROLLED_ENVIRONMENT_REMOVALS
     ) or plan["controlled_environment_prefix_removals"] != list(
@@ -1277,7 +1400,17 @@ def _default_executor(
     return result.returncode
 
 
-def _profraw_input_snapshot(raw_directory: pathlib.Path) -> dict[str, object]:
+def _child_resource_snapshot() -> dict[str, object]:
+    if _resource is None:
+        return {"peak_rss_kib": None, "status": "unavailable", "unit": "kibibytes"}
+    usage = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+    peak = int(usage.ru_maxrss)
+    if sys.platform == "darwin":
+        peak //= 1024
+    return {"peak_rss_kib": peak, "status": "captured", "unit": "kibibytes"}
+
+
+def _profraw_inventory(raw_directory: pathlib.Path) -> list[dict[str, object]]:
     if not raw_directory.is_dir():
         raise CandidateControlError("PGO raw profile directory is unavailable")
     rows: list[dict[str, object]] = []
@@ -1304,9 +1437,15 @@ def _profraw_input_snapshot(raw_directory: pathlib.Path) -> dict[str, object]:
     except OSError as error:
         raise CandidateControlError("unable to inspect PGO raw profiles") from error
     rows.sort(key=lambda row: row["path"])
+    return rows
+
+
+def _profraw_input_snapshot(raw_directory: pathlib.Path) -> dict[str, object]:
+    rows = _profraw_inventory(raw_directory)
     if not rows:
         raise CandidateControlError("PGO merge requires at least one raw profile")
     return {
+        "files": rows,
         "file_count": len(rows),
         "kind": "profraw-set",
         "sha256": _json_sha256(rows),
@@ -1314,7 +1453,163 @@ def _profraw_input_snapshot(raw_directory: pathlib.Path) -> dict[str, object]:
     }
 
 
-def _phase_inputs(plan: dict[str, object], phase_name: str) -> list[dict[str, object]]:
+def _load_phase_record(
+    path: pathlib.Path, *, plan_id: str, plan_sha256: str, phase: str
+) -> tuple[dict[str, object], str]:
+    bounded = read_bounded_closed_json(
+        path, maximum_bytes=MAX_JSON_BYTES, source="build phase record"
+    )
+    row = bounded.value
+    if type(row) is not dict:
+        raise CandidateControlError("build phase record must be an object")
+    required = {
+        "artifacts",
+        "build_identity_id",
+        "command",
+        "elapsed_nanoseconds",
+        "environment_id",
+        "exit_code",
+        "finished_at_utc",
+        "inputs",
+        "log",
+        "phase",
+        "phase_type",
+        "plan_id",
+        "plan_sha256",
+        "record_id",
+        "resource_usage",
+        "schema_version",
+        "started_at_utc",
+        "status",
+    }
+    _exact_fields(row, frozenset(required), "build phase record")
+    if (
+        row["schema_version"] != RECORD_SCHEMA_VERSION
+        or row["plan_id"] != plan_id
+        or row["plan_sha256"] != plan_sha256
+        or row["phase"] != phase
+        or row["status"] != "succeeded"
+        or row["exit_code"] != 0
+    ):
+        raise CandidateControlError("build phase record identity is invalid")
+    material = dict(row)
+    record_id = material.pop("record_id")
+    if type(record_id) is not str or record_id != _json_sha256(material):
+        raise CandidateControlError("build phase record_id does not reconstruct")
+    return row, bounded.sha256
+
+
+def _load_workload_record(
+    path: pathlib.Path, *, plan_id: str, plan_sha256: str
+) -> tuple[dict[str, object], str]:
+    bounded = read_bounded_closed_json(
+        path, maximum_bytes=MAX_JSON_BYTES, source="PGO workload record"
+    )
+    row = bounded.value
+    if type(row) is not dict:
+        raise CandidateControlError("PGO workload record must be an object")
+    fields = frozenset(
+        {
+            "command_id",
+            "elapsed_nanoseconds",
+            "exit_code",
+            "finished_at_utc",
+            "generate_phase_record_sha256",
+            "inventory_after",
+            "inventory_before",
+            "log",
+            "plan_id",
+            "plan_sha256",
+            "produced_profiles",
+            "record_id",
+            "schema_version",
+            "started_at_utc",
+            "status",
+        }
+    )
+    _exact_fields(row, fields, "PGO workload record")
+    if (
+        row["schema_version"] != WORKLOAD_RECORD_SCHEMA_VERSION
+        or row["plan_id"] != plan_id
+        or row["plan_sha256"] != plan_sha256
+        or row["status"] != "succeeded"
+        or row["exit_code"] != 0
+    ):
+        raise CandidateControlError("PGO workload record identity is invalid")
+    material = dict(row)
+    record_id = material.pop("record_id")
+    if type(record_id) is not str or record_id != _json_sha256(material):
+        raise CandidateControlError("PGO workload record_id does not reconstruct")
+    return row, bounded.sha256
+
+
+def _closed_training_inventory(
+    plan: dict[str, object], plan_sha256: str, record_paths: Sequence[pathlib.Path]
+) -> dict[str, object]:
+    pgo = plan["pgo"]
+    if type(pgo) is not dict:
+        raise CandidateControlError("training records are valid only for PGO")
+    expected = {row["command_id"] for row in pgo["training_commands"]}
+    records: dict[str, tuple[dict[str, object], str]] = {}
+    produced: dict[str, dict[str, object]] = {}
+    for path in record_paths:
+        row, digest = _load_workload_record(
+            path, plan_id=plan["plan_id"], plan_sha256=plan_sha256
+        )
+        command_id = row["command_id"]
+        if command_id not in expected or command_id in records:
+            raise CandidateControlError("PGO workload record set is not closed")
+        records[command_id] = (row, digest)
+        for profile in row["produced_profiles"]:
+            if type(profile) is not dict:
+                raise CandidateControlError("PGO produced profile is invalid")
+            _exact_fields(
+                profile,
+                frozenset({"path", "producer_command_id", "sha256", "size_bytes"}),
+                "PGO produced profile",
+            )
+            path_value = profile["path"]
+            if (
+                type(path_value) is not str
+                or path_value in produced
+                or profile["producer_command_id"] != command_id
+                or type(profile["size_bytes"]) is not int
+                or profile["size_bytes"] <= 0
+                or type(profile["sha256"]) is not str
+                or SHA256.fullmatch(profile["sha256"]) is None
+            ):
+                raise CandidateControlError("PGO produced profile identity is invalid")
+            produced[path_value] = profile
+    if set(records) != expected:
+        raise CandidateControlError(
+            "PGO merge requires one record for every training command"
+        )
+    raw_directory = pathlib.Path(pgo["raw_profile_directory"]).resolve()
+    observed = _profraw_inventory(raw_directory)
+    if {row["path"]: (row["sha256"], row["size_bytes"]) for row in observed} != {
+        path: (row["sha256"], row["size_bytes"]) for path, row in produced.items()
+    }:
+        raise CandidateControlError(
+            "PGO raw directory differs from the closed training records"
+        )
+    files = [produced[path] for path in sorted(produced)]
+    return {
+        "files": files,
+        "file_count": len(files),
+        "kind": "closed-profraw-inventory",
+        "record_sha256": [records[key][1] for key in sorted(records)],
+        "sha256": _json_sha256(files),
+        "total_size_bytes": sum(row["size_bytes"] for row in files),
+    }
+
+
+def _phase_inputs(
+    plan: dict[str, object],
+    phase_name: str,
+    *,
+    plan_sha256: str | None = None,
+    training_record_paths: Sequence[pathlib.Path] = (),
+) -> list[dict[str, object]]:
     pgo = plan["pgo"]
     if pgo is None:
         return []
@@ -1346,7 +1641,11 @@ def _phase_inputs(plan: dict[str, object], phase_name: str) -> list[dict[str, ob
             raise CandidateControlError(
                 "PGO merged profile already exists; use a fresh experiment target root"
             )
-        return [_profraw_input_snapshot(raw_directory)]
+        if not training_record_paths or plan_sha256 is None:
+            raise CandidateControlError(
+                "PGO merge requires the closed per-command training record set"
+            )
+        return [_closed_training_inventory(plan, plan_sha256, training_record_paths)]
     if phase_name == "pgo-use":
         if not merged_profile.is_file():
             raise CandidateControlError("PGO use requires the merged profile")
@@ -1368,6 +1667,7 @@ def run_experiment_phase(
     plan_path: pathlib.Path,
     phase_name: str,
     log_path: pathlib.Path,
+    training_record_paths: Sequence[pathlib.Path] = (),
     executor: Callable[
         [Sequence[str], pathlib.Path, dict[str, str], pathlib.Path], int
     ] = _default_executor,
@@ -1388,9 +1688,7 @@ def run_experiment_phase(
     source_identity = captured_environment["source_identity"]
     current_environment = capture_environment(
         repository=pathlib.Path(captured_environment["repository"]),
-        parent_sha=source_identity["parent_sha"],
-        candidate_sha=source_identity["candidate_sha"],
-        run_kind=source_identity["run_kind"],
+        source_sha=source_identity["source_sha"],
         environment_kind=captured_environment["environment_kind"],
         runner_image=captured_environment["runner_image"],
     )
@@ -1413,22 +1711,59 @@ def run_experiment_phase(
         plan["controlled_environment_prefix_removals"],
         phase["environment_overrides"],
     )
-    inputs = _phase_inputs(plan, phase_name)
+    inputs = _phase_inputs(
+        plan,
+        phase_name,
+        plan_sha256=plan_sha256,
+        training_record_paths=training_record_paths,
+    )
+    runtime_argv = list(phase["argv"])
+    if phase_name == "pgo-merge":
+        if runtime_argv.count("{profraw-inventory}") != 1:
+            raise CandidateControlError(
+                "PGO merge command inventory placeholder is invalid"
+            )
+        inventory_paths = [
+            str(
+                pathlib.Path(plan["pgo"]["raw_profile_directory"]).resolve()
+                / row["path"]
+            )
+            for row in inputs[0]["files"]
+        ]
+        placeholder = runtime_argv.index("{profraw-inventory}")
+        runtime_argv[placeholder : placeholder + 1] = inventory_paths
     started_at = _utc_now()
     started = clock()
-    returncode = executor(phase["argv"], repository, environment, log_path)
+    resource_before = _child_resource_snapshot()
+    returncode = executor(runtime_argv, repository, environment, log_path)
+    resource_after = _child_resource_snapshot()
     elapsed = clock() - started
     if type(returncode) is not int or returncode < 0 or elapsed < 0:
         raise CandidateControlError("build phase executor returned an invalid result")
+    if phase_name == "pgo-generate" and _profraw_inventory(
+        pathlib.Path(plan["pgo"]["raw_profile_directory"]).resolve()
+    ):
+        raise CandidateControlError(
+            "PGO instrumented build polluted the external training profile inventory"
+        )
     artifact_rows: list[dict[str, object]] = []
     if returncode == 0:
-        for relative in phase["artifacts"]:
+        output_names = (
+            plan["artifact_names"]
+            if phase["phase_type"] == "build"
+            else ["merged.profdata"]
+        )
+        for artifact_name, relative in zip(
+            output_names, phase["artifacts"], strict=True
+        ):
             artifact = (target_dir / relative).resolve()
             if not artifact.is_relative_to(target_dir) or not artifact.is_file():
                 raise CandidateControlError(f"build artifact is missing: {relative}")
             artifact_rows.append(
                 {
+                    "name": artifact_name,
                     "path": str(artifact),
+                    "relative_path": relative,
                     "sha256": _file_sha256(artifact, field=f"artifact {relative}"),
                     "size_bytes": artifact.stat().st_size,
                 }
@@ -1444,7 +1779,7 @@ def run_experiment_phase(
         "artifacts": artifact_rows,
         "build_identity_id": environment_reference["build_identity_id"],
         "command": {
-            "argv": phase["argv"],
+            "argv": runtime_argv,
             "environment_overrides": phase["environment_overrides"],
             "repository": str(repository),
         },
@@ -1458,10 +1793,234 @@ def run_experiment_phase(
         "phase_type": phase["phase_type"],
         "plan_id": plan["plan_id"],
         "plan_sha256": plan_sha256,
+        "resource_usage": {
+            "after": resource_after,
+            "before": resource_before,
+            "phase_peak_rss_upper_bound_kib": resource_after["peak_rss_kib"],
+        },
         "schema_version": RECORD_SCHEMA_VERSION,
         "started_at_utc": started_at,
         "status": "succeeded" if returncode == 0 else "failed",
     }
+    record["record_id"] = _json_sha256(record)
+    return record, returncode
+
+
+def _validate_generate_artifacts(
+    plan: dict[str, object], phase_record: dict[str, object]
+) -> None:
+    artifacts = phase_record["artifacts"]
+    if type(artifacts) is not list or len(artifacts) != len(plan["artifact_names"]):
+        raise CandidateControlError("PGO generate phase artifact set is incomplete")
+    names: set[str] = set()
+    for row in artifacts:
+        if type(row) is not dict:
+            raise CandidateControlError("PGO generate artifact is invalid")
+        _exact_fields(
+            row,
+            frozenset({"name", "path", "relative_path", "sha256", "size_bytes"}),
+            "PGO generate artifact",
+        )
+        name = row["name"]
+        path = pathlib.Path(row["path"])
+        if (
+            name not in plan["artifact_names"]
+            or name in names
+            or not path.is_file()
+            or type(row["sha256"]) is not str
+            or SHA256.fullmatch(row["sha256"]) is None
+            or _file_sha256(path, field=f"PGO generate artifact {name}")
+            != row["sha256"]
+            or path.stat().st_size != row["size_bytes"]
+        ):
+            raise CandidateControlError("PGO generate artifact identity changed")
+        names.add(name)
+    if names != set(plan["artifact_names"]):
+        raise CandidateControlError("PGO generate artifact names are not closed")
+
+
+def run_pgo_workload_command(
+    *,
+    plan_path: pathlib.Path,
+    command_id: str,
+    generate_phase_record_path: pathlib.Path,
+    log_path: pathlib.Path,
+    executor: Callable[
+        [Sequence[str], pathlib.Path, dict[str, str], pathlib.Path], int
+    ] = _default_executor,
+    clock: Callable[[], int] = time.perf_counter_ns,
+) -> tuple[dict[str, object], int]:
+    """Run one trusted PGO training command and bind its exact profile delta."""
+
+    plan, plan_sha256 = _load_plan(plan_path)
+    pgo = plan["pgo"]
+    if type(pgo) is not dict:
+        raise CandidateControlError("PGO workload execution requires a PGO plan")
+    commands = [
+        row for row in pgo["training_commands"] if row["command_id"] == command_id
+    ]
+    if len(commands) != 1:
+        raise CandidateControlError("PGO training command is not present exactly once")
+    command = commands[0]
+    phase_record, phase_record_sha256 = _load_phase_record(
+        generate_phase_record_path,
+        plan_id=plan["plan_id"],
+        plan_sha256=plan_sha256,
+        phase="pgo-generate",
+    )
+    _validate_generate_artifacts(plan, phase_record)
+    raw_directory = pathlib.Path(pgo["raw_profile_directory"]).resolve()
+    raw_directory.mkdir(parents=True, exist_ok=True)
+    before = _profraw_inventory(raw_directory)
+    before_by_path = {row["path"]: row for row in before}
+    environment = _effective_environment(
+        plan["controlled_environment_removals"],
+        plan["controlled_environment_prefix_removals"],
+        command["environment_overrides"],
+    )
+    profile_template = command["environment_overrides"].get("LLVM_PROFILE_FILE")
+    if type(profile_template) is not str or "%p" not in profile_template:
+        raise CandidateControlError("PGO training command profile template is invalid")
+    template_path = pathlib.Path(profile_template).resolve()
+    if not template_path.is_relative_to(raw_directory):
+        raise CandidateControlError("PGO profile template escapes the raw directory")
+    profile_prefix = template_path.name.split("%", 1)[0]
+    started_at = _utc_now()
+    started = clock()
+    returncode = executor(
+        command["argv"],
+        pathlib.Path(command["working_directory"]),
+        environment,
+        log_path,
+    )
+    elapsed = clock() - started
+    if type(returncode) is not int or returncode < 0 or elapsed < 0:
+        raise CandidateControlError("PGO workload executor returned an invalid result")
+    after = _profraw_inventory(raw_directory)
+    after_by_path = {row["path"]: row for row in after}
+    for path, row in before_by_path.items():
+        if after_by_path.get(path) != row:
+            raise CandidateControlError("PGO workload modified an existing raw profile")
+    produced_rows = [
+        row for path, row in after_by_path.items() if path not in before_by_path
+    ]
+    if returncode == 0:
+        if not produced_rows or any(
+            row["size_bytes"] <= 0
+            or not pathlib.PurePath(row["path"]).name.startswith(profile_prefix)
+            for row in produced_rows
+        ):
+            raise CandidateControlError(
+                "successful PGO workload must create a unique nonempty profile set"
+            )
+    produced = [
+        {**row, "producer_command_id": command_id}
+        for row in sorted(produced_rows, key=lambda row: row["path"])
+    ]
+    log_row: dict[str, object] | None = None
+    if log_path.is_file():
+        log_row = {
+            "path": str(log_path.resolve()),
+            "sha256": _file_sha256(log_path, field="PGO workload log"),
+            "size_bytes": log_path.stat().st_size,
+        }
+    record = {
+        "command_id": command_id,
+        "elapsed_nanoseconds": elapsed,
+        "exit_code": returncode,
+        "finished_at_utc": _utc_now(),
+        "generate_phase_record_sha256": phase_record_sha256,
+        "inventory_after": after,
+        "inventory_before": before,
+        "log": log_row,
+        "plan_id": plan["plan_id"],
+        "plan_sha256": plan_sha256,
+        "produced_profiles": produced,
+        "schema_version": WORKLOAD_RECORD_SCHEMA_VERSION,
+        "started_at_utc": started_at,
+        "status": "succeeded" if returncode == 0 else "failed",
+    }
+    record["record_id"] = _json_sha256(record)
+    return record, returncode
+
+
+def run_pgo_validation_command(
+    *,
+    plan_path: pathlib.Path,
+    command_id: str,
+    phase_record_path: pathlib.Path,
+    log_path: pathlib.Path,
+    executor: Callable[
+        [Sequence[str], pathlib.Path, dict[str, str], pathlib.Path], int
+    ] = _default_executor,
+    clock: Callable[[], int] = time.perf_counter_ns,
+) -> tuple[dict[str, object], int]:
+    """Run one independent PGO validation command without profile generation."""
+
+    plan, plan_sha256 = _load_plan(plan_path)
+    pgo = plan["pgo"]
+    if type(pgo) is not dict:
+        raise CandidateControlError("PGO validation execution requires a PGO plan")
+    commands = [
+        row for row in pgo["validation_commands"] if row["command_id"] == command_id
+    ]
+    if len(commands) != 1:
+        raise CandidateControlError(
+            "PGO validation command is not present exactly once"
+        )
+    command = commands[0]
+    phase = command["build_phase"]
+    phase_record, phase_record_sha256 = _load_phase_record(
+        phase_record_path,
+        plan_id=plan["plan_id"],
+        plan_sha256=plan_sha256,
+        phase=phase,
+    )
+    _validate_generate_artifacts(plan, phase_record)
+    environment = _effective_environment(
+        plan["controlled_environment_removals"],
+        plan["controlled_environment_prefix_removals"],
+        command["environment_overrides"],
+    )
+    if "LLVM_PROFILE_FILE" in environment:
+        raise CandidateControlError("PGO validation inherited profile generation state")
+    started_at = _utc_now()
+    started = clock()
+    returncode = executor(
+        command["argv"],
+        pathlib.Path(command["working_directory"]),
+        environment,
+        log_path,
+    )
+    elapsed = clock() - started
+    if type(returncode) is not int or returncode < 0 or elapsed < 0:
+        raise CandidateControlError(
+            "PGO validation executor returned an invalid result"
+        )
+    log_row: dict[str, object] | None = None
+    if log_path.is_file():
+        log_row = {
+            "path": str(log_path.resolve()),
+            "sha256": _file_sha256(log_path, field="PGO validation log"),
+            "size_bytes": log_path.stat().st_size,
+        }
+    record = {
+        "command_id": command_id,
+        "elapsed_nanoseconds": elapsed,
+        "external_requirement_satisfied": command["coverage"] != "different-cpu",
+        "exit_code": returncode,
+        "finished_at_utc": _utc_now(),
+        "log": log_row,
+        "phase_record_sha256": phase_record_sha256,
+        "plan_id": plan["plan_id"],
+        "plan_sha256": plan_sha256,
+        "schema_version": VALIDATION_RECORD_SCHEMA_VERSION,
+        "started_at_utc": started_at,
+        "status": "succeeded" if returncode == 0 else "failed",
+        "validation_coverage": command["coverage"],
+        "variant": command["variant"],
+    }
+    record["record_id"] = _json_sha256(record)
     return record, returncode
 
 
@@ -1480,11 +2039,10 @@ def add_cli_commands(
         help="capture source, toolchain, machine, and background-process identity",
     )
     environment.add_argument("--repository", required=True, type=pathlib.Path)
-    environment.add_argument("--parent-sha", required=True)
-    environment.add_argument("--candidate-sha", required=True)
-    environment.add_argument(
-        "--run-kind", choices=("comparison", "calibration-aa"), default="comparison"
-    )
+    environment.add_argument("--source-sha")
+    environment.add_argument("--parent-sha")
+    environment.add_argument("--candidate-sha")
+    environment.add_argument("--run-kind", choices=("comparison", "calibration-aa"))
     environment.add_argument(
         "--environment-kind", required=True, choices=ENVIRONMENT_KINDS
     )
@@ -1514,14 +2072,36 @@ def add_cli_commands(
     )
     run.add_argument("--plan", required=True, type=pathlib.Path)
     run.add_argument("--phase", required=True)
+    run.add_argument("--training-record", action="append", type=pathlib.Path)
     run.add_argument("--log", required=True, type=pathlib.Path)
     run.add_argument("--output", required=True, type=pathlib.Path)
+
+    workload = commands.add_parser(
+        "build-experiment-workload-run",
+        help="execute one trusted PGO training command and bind its profraw delta",
+    )
+    workload.add_argument("--plan", required=True, type=pathlib.Path)
+    workload.add_argument("--command-id", required=True)
+    workload.add_argument("--generate-phase-record", required=True, type=pathlib.Path)
+    workload.add_argument("--log", required=True, type=pathlib.Path)
+    workload.add_argument("--output", required=True, type=pathlib.Path)
+
+    validation = commands.add_parser(
+        "build-experiment-validation-run",
+        help="execute one independent PGO validation command without profiling",
+    )
+    validation.add_argument("--plan", required=True, type=pathlib.Path)
+    validation.add_argument("--command-id", required=True)
+    validation.add_argument("--phase-record", required=True, type=pathlib.Path)
+    validation.add_argument("--log", required=True, type=pathlib.Path)
+    validation.add_argument("--output", required=True, type=pathlib.Path)
 
 
 def run_cli_command(parsed: argparse.Namespace) -> int:
     if parsed.command == "build-environment":
         report = capture_environment(
             repository=parsed.repository,
+            source_sha=parsed.source_sha,
             parent_sha=parsed.parent_sha,
             candidate_sha=parsed.candidate_sha,
             run_kind=parsed.run_kind,
@@ -1550,6 +2130,25 @@ def run_cli_command(parsed: argparse.Namespace) -> int:
         record, returncode = run_experiment_phase(
             plan_path=parsed.plan,
             phase_name=parsed.phase,
+            log_path=parsed.log,
+            training_record_paths=parsed.training_record or (),
+        )
+        _write_json(parsed.output, record)
+        return 0 if returncode == 0 else 2
+    if parsed.command == "build-experiment-workload-run":
+        record, returncode = run_pgo_workload_command(
+            plan_path=parsed.plan,
+            command_id=parsed.command_id,
+            generate_phase_record_path=parsed.generate_phase_record,
+            log_path=parsed.log,
+        )
+        _write_json(parsed.output, record)
+        return 0 if returncode == 0 else 2
+    if parsed.command == "build-experiment-validation-run":
+        record, returncode = run_pgo_validation_command(
+            plan_path=parsed.plan,
+            command_id=parsed.command_id,
+            phase_record_path=parsed.phase_record,
             log_path=parsed.log,
         )
         _write_json(parsed.output, record)

@@ -1,0 +1,46 @@
+{
+  "role": "validation",
+  "scenarios": [
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "tcp-bulk", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "tcp-bulk",
+      "coverage": "representative",
+      "name": "pgo-validate-representative-mixed",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": null,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "tcp-request", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "tcp-request",
+      "coverage": "cold-path",
+      "name": "pgo-validate-cold-process-start",
+      "platforms": ["linux-x86_64"],
+      "producer": "process-contract",
+      "weight_basis_points": null,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "udp-small", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "udp-small",
+      "coverage": "error-path",
+      "name": "pgo-validate-replay-and-rejection",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": null,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "rule", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "rule",
+      "coverage": "different-cpu",
+      "name": "pgo-validate-portable-rule-fallback",
+      "platforms": ["linux-x86_64"],
+      "producer": "rule-qualification",
+      "weight_basis_points": null,
+      "working_directory": "."
+    }
+  ],
+  "schema_version": "ferrum2-build-workload-set-v2"
+}

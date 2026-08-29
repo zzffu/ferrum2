@@ -3,6 +3,19 @@ name: performance-candidate
 on:
   workflow_dispatch:
     inputs:
+      campaign:
+        description: "One isolated non-TUN performance qualification campaign"
+        required: true
+        type: choice
+        default: paired-profile
+        options:
+          - paired-profile
+          - rule
+          - build
+          - conditional
+          - udp-workers
+          - udp-headroom
+          - frame-size
       run_kind:
         description: "Source comparison or same-commit A/A calibration"
         required: true
@@ -20,9 +33,10 @@ on:
           - qualification
           - diagnostic
       parent_sha:
-        description: "Exact ancestor SHA, or exact H/final SHA for tcp-scale-10k"
-        required: true
+        description: "Exact ancestor SHA for paired-profile; ignored by other campaigns"
+        required: false
         type: string
+        default: "0000000000000000000000000000000000000000"
       selection:
         description: "Linux paired workload or group; Windows TUN runs only in local Hyper-V"
         required: true
@@ -76,12 +90,18 @@ on:
         type: choice
         default: "6"
         options: ["6"]
+      campaign_options:
+        description: "Closed JSON options for the selected non-paired campaign"
+        required: true
+        type: string
+        default: '{"stage":"calibration-aa","calibration_run_id":0,"reviewed_by":"","reviewed_utc":"","candidate_feature":"domain","experiment_kind":"thin-lto-cgu1","candidate":"UDP-14","axis":"all"}'
 
 permissions:
   contents: read
 
 jobs:
   paired-profile:
+    if: ${{ inputs.campaign == 'paired-profile' }}
     name: paired-profile
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -597,6 +617,7 @@ jobs:
           test "$cleanup_status" -eq 0
 
   structural-diagnostic:
+    if: ${{ inputs.campaign == 'paired-profile' }}
     name: structural-diagnostic
     needs: paired-profile
     runs-on: ubuntu-24.04
@@ -687,3 +708,57 @@ jobs:
             if pgrep -x "$process" >/dev/null; then cleanup_status=1; fi
           done
           test "$cleanup_status" -eq 0
+
+  rule-qualification:
+    if: ${{ inputs.campaign == 'rule' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/performance-rule.yml
+    with:
+      stage: ${{ fromJSON(inputs.campaign_options).stage }}
+      candidate_sha: ${{ github.sha }}
+      calibration_run_id: ${{ fromJSON(inputs.campaign_options).calibration_run_id }}
+      reviewed_by: ${{ fromJSON(inputs.campaign_options).reviewed_by }}
+      reviewed_utc: ${{ fromJSON(inputs.campaign_options).reviewed_utc }}
+      candidate_feature: ${{ fromJSON(inputs.campaign_options).candidate_feature }}
+
+  build-qualification:
+    if: ${{ inputs.campaign == 'build' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/performance-build.yml
+    with:
+      experiment_kind: ${{ fromJSON(inputs.campaign_options).experiment_kind }}
+      source_sha: ${{ github.sha }}
+
+  conditional-qualification:
+    if: ${{ inputs.campaign == 'conditional' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/performance-conditional.yml
+    with:
+      candidate: ${{ fromJSON(inputs.campaign_options).candidate }}
+      source_sha: ${{ github.sha }}
+
+  udp-worker-qualification:
+    if: ${{ inputs.campaign == 'udp-workers' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/performance-udp-workers.yml
+    with:
+      candidate_sha: ${{ github.sha }}
+
+  udp-headroom-qualification:
+    if: ${{ inputs.campaign == 'udp-headroom' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/performance-udp-headroom.yml
+
+  frame-size-qualification:
+    if: ${{ inputs.campaign == 'frame-size' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/performance-frame.yml
+    with:
+      axis: ${{ fromJSON(inputs.campaign_options).axis }}

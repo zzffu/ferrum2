@@ -1,0 +1,436 @@
+name: performance-build
+
+on:
+  workflow_call:
+    inputs:
+      experiment_kind:
+        description: "One isolated same-source build artifact experiment"
+        required: true
+        type: string
+      source_sha:
+        description: "Exact commit whose workflow and source artifacts are qualified"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      experiment_kind:
+        description: "One isolated same-source build artifact experiment"
+        required: true
+        type: choice
+        default: thin-lto-cgu1
+        options:
+          - thin-lto-cgu1
+          - pgo
+          - target-cpu
+      source_sha:
+        description: "Optional exact commit; defaults to the dispatched commit"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  BUILD_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+  BUILD_POLICY: ${{ github.workspace }}/tools/performance_build_policy.json
+  VALIDATION_WORKLOADS: ${{ github.workspace }}/tools/performance_candidate/workloads/pgo-validation-v2.json
+  TRAINING_WORKLOADS: ${{ github.workspace }}/tools/performance_candidate/workloads/pgo-training-v2.json
+  SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+
+jobs:
+  build-artifact-qualification:
+    name: build-artifact-qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout exact same-source experiment
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Initialize one fresh experiment root and require AMD
+        shell: bash
+        env:
+          REQUESTED_EXPERIMENT: ${{ inputs.experiment_kind }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+          python3 -B -m tools.ci.performance_build_workflow prepare \
+            --root "$RUNNER_TEMP/performance-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --experiment-kind "$REQUESTED_EXPERIMENT" \
+            --github-env "$GITHUB_ENV"
+          python3 -B -m tools.ci.performance_build_workflow capture-host \
+            --runner-image ubuntu-24.04 \
+            --output "$RUNNER_TEMP/performance-build-host.json"
+
+      - name: Install pinned Rust and LLVM profile tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal \
+            --component llvm-tools-preview
+          rustup +"$RUSTUP_TOOLCHAIN" target add "$BUILD_TARGET_TRIPLE"
+          rustc +1.97.1 -Vv
+          llvm_profdata="$(find "$(rustc +1.97.1 --print sysroot)" \
+            -type f -name llvm-profdata -perm -u+x -print -quit)"
+          test -n "$llvm_profdata"
+          "$llvm_profdata" --version
+          printf 'LLVM_PROFDATA=%s\n' "$llvm_profdata" >>"$GITHUB_ENV"
+
+      - name: Capture same-source build environment v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate build-environment \
+            --repository "$GITHUB_WORKSPACE" \
+            --source-sha "$SOURCE_SHA" \
+            --environment-kind github-hosted \
+            --runner-image ubuntu-24.04 \
+            --output "$BUILD_ENVIRONMENT"
+          install -m 0644 "$RUNNER_TEMP/performance-build-host.json" \
+            "$BUILD_EVIDENCE/host.json"
+
+      - name: Create exactly one artifact-level build plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          arguments=(
+            --environment "$BUILD_ENVIRONMENT"
+            --validation-workloads "$VALIDATION_WORKLOADS"
+            --kind "$EXPERIMENT_KIND"
+            --target-root "$BUILD_TARGET_ROOT"
+            --target-triple "$BUILD_TARGET_TRIPLE"
+            --artifact-name ferrum2-client
+            --artifact-name ferrum2-server
+            --artifact-name m4-qualification
+            --artifact-name ferrum2-rule-qualification
+            --output "$BUILD_PLAN"
+          )
+          if [ "$EXPERIMENT_KIND" = pgo ]; then
+            arguments+=(
+              --training-workloads "$TRAINING_WORKLOADS"
+              --llvm-profdata "$LLVM_PROFDATA"
+            )
+          elif [ "$EXPERIMENT_KIND" = target-cpu ]; then
+            arguments+=(
+              --target-cpu znver3
+              --deployment-id github-hosted-amd-znver3-provisional
+              --acknowledge-nonportable
+            )
+          fi
+          python3 -B -m tools.performance_candidate build-experiment-plan \
+            "${arguments[@]}"
+
+      - name: Build generic fallback baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate build-experiment-run \
+            --plan "$BUILD_PLAN" \
+            --phase baseline \
+            --log "$PHASE_RECORD_ROOT/baseline.log" \
+            --output "$PHASE_RECORD_ROOT/baseline.json"
+
+      - name: Build ThinLTO or znver3 candidate
+        if: ${{ inputs.experiment_kind != 'pgo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate build-experiment-run \
+            --plan "$BUILD_PLAN" \
+            --phase "$EXPERIMENT_KIND" \
+            --log "$PHASE_RECORD_ROOT/$EXPERIMENT_KIND.log" \
+            --output "$PHASE_RECORD_ROOT/$EXPERIMENT_KIND.json"
+
+      - name: Build PGO instrumented artifacts and run closed training registry
+        if: ${{ inputs.experiment_kind == 'pgo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate build-experiment-run \
+            --plan "$BUILD_PLAN" \
+            --phase pgo-generate \
+            --log "$PHASE_RECORD_ROOT/pgo-generate.log" \
+            --output "$PHASE_RECORD_ROOT/pgo-generate.json"
+          while IFS=$'\t' read -r command_id build_phase; do
+            test "$build_phase" = pgo-generate
+            python3 -B -m tools.performance_candidate build-experiment-workload-run \
+              --plan "$BUILD_PLAN" \
+              --command-id "$command_id" \
+              --generate-phase-record "$PHASE_RECORD_ROOT/pgo-generate.json" \
+              --log "$PGO_RECORD_ROOT/training-$command_id.log" \
+              --output "$PGO_RECORD_ROOT/training-$command_id.json"
+          done < <(
+            python3 -B -m tools.ci.performance_build_workflow plan-items \
+              --plan "$BUILD_PLAN" --kind training
+          )
+
+      - name: Merge closed profiles and build PGO-use artifacts
+        if: ${{ inputs.experiment_kind == 'pgo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          training_arguments=()
+          while IFS=$'\t' read -r command_id build_phase; do
+            test "$build_phase" = pgo-generate
+            training_arguments+=(
+              --training-record "$PGO_RECORD_ROOT/training-$command_id.json"
+            )
+          done < <(
+            python3 -B -m tools.ci.performance_build_workflow plan-items \
+              --plan "$BUILD_PLAN" --kind training
+          )
+          test "${#training_arguments[@]}" -eq 12
+          python3 -B -m tools.performance_candidate build-experiment-run \
+            --plan "$BUILD_PLAN" \
+            --phase pgo-merge \
+            "${training_arguments[@]}" \
+            --log "$PHASE_RECORD_ROOT/pgo-merge.log" \
+            --output "$PHASE_RECORD_ROOT/pgo-merge.json"
+          python3 -B -m tools.performance_candidate build-experiment-run \
+            --plan "$BUILD_PLAN" \
+            --phase pgo-use \
+            --log "$PHASE_RECORD_ROOT/pgo-use.log" \
+            --output "$PHASE_RECORD_ROOT/pgo-use.json"
+
+      - name: Run independent PGO validation commands without profile state
+        if: ${{ inputs.experiment_kind == 'pgo' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${LLVM_PROFILE_FILE:-}"
+          while IFS=$'\t' read -r command_id build_phase; do
+            case "$build_phase" in
+              baseline|pgo-use) ;;
+              *) exit 2 ;;
+            esac
+            python3 -B -m tools.performance_candidate build-experiment-validation-run \
+              --plan "$BUILD_PLAN" \
+              --command-id "$command_id" \
+              --phase-record "$PHASE_RECORD_ROOT/$build_phase.json" \
+              --log "$PGO_RECORD_ROOT/validation-$command_id.log" \
+              --output "$PGO_RECORD_ROOT/validation-$command_id.json"
+          done < <(
+            python3 -B -m tools.ci.performance_build_workflow plan-items \
+              --plan "$BUILD_PLAN" --kind validation
+          )
+
+      - name: Resolve baseline and candidate artifact directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$EXPERIMENT_KIND" in
+            thin-lto-cgu1) candidate_phase=thin-lto-cgu1 ;;
+            target-cpu) candidate_phase=target-cpu ;;
+            pgo) candidate_phase=pgo-use ;;
+            *) exit 2 ;;
+          esac
+          baseline_bin_dir="$(
+            python3 -B -m tools.ci.performance_build_workflow \
+              phase-artifact-directory \
+              --plan "$BUILD_PLAN" \
+              --phase baseline
+          )"
+          candidate_bin_dir="$(
+            python3 -B -m tools.ci.performance_build_workflow \
+              phase-artifact-directory \
+              --plan "$BUILD_PLAN" \
+              --phase "$candidate_phase"
+          )"
+          {
+            printf 'BASELINE_BIN_DIR=%s\n' "$baseline_bin_dir"
+            printf 'CANDIDATE_BIN_DIR=%s\n' "$candidate_bin_dir"
+            printf 'CANDIDATE_PHASE=%s\n' "$candidate_phase"
+          } >>"$GITHUB_ENV"
+
+      - name: Run two A/A rounds and one same-source A/B six-pair schedule
+        shell: bash
+        run: |
+          set -euo pipefail
+          scenarios=(
+            tcp-bulk
+            tcp-request-1k
+            udp-small-high
+            udp-mtu-1200
+            dns-udp-concurrency
+            udp-replay-sequential
+          )
+          run_trial() {
+            local root=$1
+            local member=$2
+            local pair=$3
+            local binary_dir=$4
+            local order
+            if { (( pair % 2 == 1 )) && [ "$member" = parent ]; } \
+              || { (( pair % 2 == 0 )) && [ "$member" = candidate ]; }; then
+              order=1
+            else
+              order=2
+            fi
+            mkdir -p "$root/$member"
+            local profile_bin_dir
+            profile_bin_dir="$(
+              python3 -B -m tools.ci.performance_build_workflow \
+                materialize-profile-artifacts \
+                --source-dir "$binary_dir" \
+                --repository "$GITHUB_WORKSPACE"
+            )"
+            test "$profile_bin_dir" = "$GITHUB_WORKSPACE/target/profiling"
+            local round_name
+            round_name="$(basename -- "$root")"
+            local profile_prefix
+            profile_prefix="profiles/performance-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/$round_name"
+            local ready_relative="$profile_prefix/$scenario-$member-$pair.ready"
+            local output_relative="$profile_prefix/$scenario-$member-$pair.jsonl"
+            test ! -e "$GITHUB_WORKSPACE/$ready_relative"
+            test ! -e "$GITHUB_WORKSPACE/$output_relative"
+            IFS=$'\t' read -r unit runner_image producer controller recipe bundle < <(
+              python3 -B -m tools.ci.performance_build_workflow trial-contract \
+                --scenario "$scenario"
+            )
+            "$profile_bin_dir/m4-qualification" profile-workload \
+              --scenario "$scenario" \
+              --warmup-seconds 1 \
+              --active-seconds 15 \
+              --repository-root "$GITHUB_WORKSPACE" \
+              --binary-dir "$profile_bin_dir" \
+              --ready-file "$ready_relative" \
+              --output "$output_relative" \
+              --parent-sha "$SOURCE_SHA" \
+              --candidate-sha "$SOURCE_SHA" \
+              --member "$member" \
+              --pair "$pair" \
+              --order "$order" \
+              --build-profile current \
+              --unit "$unit" \
+              --runner-image "$runner_image" \
+              --producer-source-sha256 "$producer" \
+              --controller-source-sha256 "$controller" \
+              --semantic-recipe-sha256 "$recipe" \
+              --evidence-bundle-sha256 "$bundle"
+            test ! -e "$GITHUB_WORKSPACE/$ready_relative"
+            test -f "$GITHUB_WORKSPACE/$output_relative"
+            mv -- "$GITHUB_WORKSPACE/$output_relative" \
+              "$root/$member/$scenario-$member-$pair.jsonl"
+          }
+          for round in 1 2; do
+            root="$PROFILE_ROOT/aa-$round"
+            for scenario in "${scenarios[@]}"; do
+              for pair in 1 2 3 4 5 6; do
+                if (( pair % 2 == 1 )); then
+                  run_trial "$root" parent "$pair" "$BASELINE_BIN_DIR"
+                  run_trial "$root" candidate "$pair" "$BASELINE_BIN_DIR"
+                else
+                  run_trial "$root" candidate "$pair" "$BASELINE_BIN_DIR"
+                  run_trial "$root" parent "$pair" "$BASELINE_BIN_DIR"
+                fi
+              done
+            done
+          done
+          root="$PROFILE_ROOT/comparison"
+          for scenario in "${scenarios[@]}"; do
+            for pair in 1 2 3 4 5 6; do
+              if (( pair % 2 == 1 )); then
+                run_trial "$root" parent "$pair" "$BASELINE_BIN_DIR"
+                run_trial "$root" candidate "$pair" "$CANDIDATE_BIN_DIR"
+              else
+                run_trial "$root" candidate "$pair" "$CANDIDATE_BIN_DIR"
+                run_trial "$root" parent "$pair" "$BASELINE_BIN_DIR"
+              fi
+            done
+          done
+
+      - name: Retain branch-heavy rule diagnostics for both artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in baseline candidate; do
+            if [ "$variant" = baseline ]; then
+              binary_dir=$BASELINE_BIN_DIR
+            else
+              binary_dir=$CANDIDATE_BIN_DIR
+            fi
+            "$binary_dir/ferrum2-rule-qualification" \
+              --profile qualification \
+              --samples 101 \
+              --workspace-root "$GITHUB_WORKSPACE" \
+              --output "$BUILD_EVIDENCE/rule-$variant.json" \
+              >"$BUILD_EVIDENCE/rule-$variant.stdout.json"
+            cmp "$BUILD_EVIDENCE/rule-$variant.json" \
+              "$BUILD_EVIDENCE/rule-$variant.stdout.json"
+          done
+
+      - name: Validate build-specific evidence and close provisional decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          phase_arguments=(
+            --phase-record "$PHASE_RECORD_ROOT/baseline.json"
+            --phase-record "$PHASE_RECORD_ROOT/$CANDIDATE_PHASE.json"
+          )
+          validation_arguments=()
+          if [ "$EXPERIMENT_KIND" = pgo ]; then
+            phase_arguments+=(
+              --phase-record "$PHASE_RECORD_ROOT/pgo-generate.json"
+              --phase-record "$PHASE_RECORD_ROOT/pgo-merge.json"
+            )
+            while IFS=$'\t' read -r command_id build_phase; do
+              validation_arguments+=(
+                --pgo-validation-record \
+                "$PGO_RECORD_ROOT/validation-$command_id.json"
+              )
+            done < <(
+              python3 -B -m tools.ci.performance_build_workflow plan-items \
+                --plan "$BUILD_PLAN" --kind validation
+            )
+          fi
+          python3 -B -m tools.performance_candidate build-qualification \
+            --environment "$BUILD_ENVIRONMENT" \
+            --plan "$BUILD_PLAN" \
+            "${phase_arguments[@]}" \
+            --a-a-root "$PROFILE_ROOT/aa-1" \
+            --a-a-root "$PROFILE_ROOT/aa-2" \
+            --comparison-root "$PROFILE_ROOT/comparison" \
+            --policy "$BUILD_POLICY" \
+            --rule-evidence "$BUILD_EVIDENCE/rule-baseline.json" \
+            --rule-evidence "$BUILD_EVIDENCE/rule-candidate.json" \
+            "${validation_arguments[@]}" \
+            --output "$BUILD_QUALIFICATION"
+          python3 -B -m tools.ci.performance_build_workflow artifact-manifest \
+            --evidence-root "$BUILD_EVIDENCE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-sha "$SOURCE_SHA" \
+            --output "$BUILD_EVIDENCE/artifact-manifest.json"
+
+      - name: Upload provisional AMD build evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-build-${{ inputs.experiment_kind }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.BUILD_EVIDENCE }}
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce closed hosted result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$BUILD_QUALIFICATION" <<'PY'
+          import json
+          import pathlib
+          import sys
+          row = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert row["status"] == "PASS"
+          assert row["adoption_decision"] == "NOT_ADOPTED_FOR_GITHUB_HOSTED_AMD_SCOPE"
+          assert row["performance_authoritative"] is False
+          assert row["bare_metal_gate_satisfied"] is False
+          assert row["durable_evidence_gate_satisfied"] is False
+          PY

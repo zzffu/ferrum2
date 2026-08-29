@@ -9,15 +9,28 @@ from tests.performance_candidate.test_build_experiment import (
 )
 from tools.performance_candidate.json_contract import CandidateControlError
 from tools.performance_candidate import cli
-from tools.performance_candidate.linux import baseline, plan as linux_plan, policy as linux_policy
+from tools.performance_candidate.linux import (
+    baseline,
+    plan as linux_plan,
+    policy as linux_policy,
+)
 from tools.performance_candidate.linux.trial import PROFILE_TRIAL_SCHEMA_VERSION
 
 
 class LinuxBaselineTests(BuildExperimentFixture):
-    def policy_path(self) -> pathlib.Path:
-        return pathlib.Path(__file__).resolve().parents[2] / "tools" / "performance_candidate_policy.json"
+    def environment_path(self) -> pathlib.Path:
+        return self.commit_environment_path()
 
-    def plan_path(self, selection: str, *, mode: str = "diagnostic") -> tuple[pathlib.Path, dict[str, object]]:
+    def policy_path(self) -> pathlib.Path:
+        return (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "tools"
+            / "performance_candidate_policy.json"
+        )
+
+    def plan_path(
+        self, selection: str, *, mode: str = "diagnostic"
+    ) -> tuple[pathlib.Path, dict[str, object]]:
         policy = linux_policy.load_decision_policy(self.policy_path())
         plan = linux_plan.create_plan(
             mode=mode,
@@ -126,7 +139,9 @@ class LinuxBaselineTests(BuildExperimentFixture):
                 )
         return root
 
-    def test_structural_group_matrix_binds_every_scale_pair_and_artifact_kind(self) -> None:
+    def test_structural_group_matrix_binds_every_scale_pair_and_artifact_kind(
+        self,
+    ) -> None:
         matrix, _matrix_path, plan, _plan_path, _environment = self.matrix(
             "structural-baseline-matrix", mode="qualification"
         )
@@ -158,10 +173,15 @@ class LinuxBaselineTests(BuildExperimentFixture):
         for row in report["rows"]:
             self.assertEqual(set(row["artifacts"]), set(baseline.ARTIFACT_FILES))
             self.assertTrue(
-                all(len(artifact["sha256"]) == 64 for artifact in row["artifacts"].values())
+                all(
+                    len(artifact["sha256"]) == 64
+                    for artifact in row["artifacts"].values()
+                )
             )
 
-    def test_report_fails_closed_for_missing_or_semantically_wrong_raw_artifact(self) -> None:
+    def test_report_fails_closed_for_missing_or_semantically_wrong_raw_artifact(
+        self,
+    ) -> None:
         matrix, matrix_path, plan, plan_path, environment = self.matrix()
         artifact_root = self.materialize_artifacts(matrix, plan)
         first = matrix["rows"][0]
@@ -245,6 +265,7 @@ class LinuxBaselineTests(BuildExperimentFixture):
         )
         report = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(report["schema_version"], baseline.REPORT_SCHEMA_VERSION)
+
 
 if __name__ == "__main__":
     import unittest

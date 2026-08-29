@@ -1,0 +1,366 @@
+name: performance-conditional
+
+on:
+  workflow_call:
+    inputs:
+      candidate:
+        description: "Conditional optimization whose profiler prerequisites should be measured"
+        required: true
+        type: string
+      source_sha:
+        description: "Exact commit whose workflow and source artifacts are diagnosed"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: "Conditional optimization whose profiler prerequisites should be measured"
+        required: true
+        type: choice
+        default: UDP-14
+        options:
+          - UDP-14
+          - OBS-01
+          - BUILD-04
+          - BUILD-05
+      source_sha:
+        description: "Optional exact commit; defaults to the dispatched commit"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+
+jobs:
+  conditional-evidence:
+    name: conditional-evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout exact conditional source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Require AMD and initialize isolated evidence paths
+        shell: bash
+        env:
+          CONDITIONAL_CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+          root="$RUNNER_TEMP/performance-conditional-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$root"
+          mkdir -p "$root/evidence/raw" "$root/evidence/measurements" \
+            "$root/evidence/prerequisites" "$root/target"
+          python3 -B -m tools.ci.performance_build_workflow capture-host \
+            --runner-image ubuntu-24.04 \
+            --output "$root/evidence/host.json"
+          {
+            printf 'CONDITIONAL_CANDIDATE=%s\n' "$CONDITIONAL_CANDIDATE"
+            printf 'CONDITIONAL_ROOT=%s\n' "$root"
+            printf 'CONDITIONAL_EVIDENCE=%s\n' "$root/evidence"
+            printf 'CONDITIONAL_RAW=%s\n' "$root/evidence/raw"
+            printf 'CONDITIONAL_MEASUREMENTS=%s\n' "$root/evidence/measurements"
+            printf 'CONDITIONAL_PREREQUISITES=%s\n' "$root/evidence/prerequisites"
+            printf 'CONDITIONAL_TARGET=%s\n' "$root/target"
+            printf 'SOURCE_TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          } >>"$GITHUB_ENV"
+
+      - name: Build isolated profiling workload artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          cargo +1.97.1 build --locked --profile profiling \
+            -p ferrum2-client \
+            -p ferrum2-server \
+            -p ferrum2-m4-qualification \
+            -p ferrum2-rule-qualification \
+            --target-dir "$CONDITIONAL_TARGET"
+          test -x "$CONDITIONAL_TARGET/profiling/m4-qualification"
+
+      - name: Collect typed profiler prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary_dir="$CONDITIONAL_TARGET/profiling"
+          profile_bin_dir="$(
+            python3 -B -m tools.ci.performance_build_workflow \
+              materialize-profile-artifacts \
+              --source-dir "$binary_dir" \
+              --repository "$GITHUB_WORKSPACE"
+          )"
+          test "$profile_bin_dir" = "$GITHUB_WORKSPACE/target/profiling"
+          profile_prefix="profiles/performance-conditional-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ready_relative="$profile_prefix/workload.ready"
+          output_relative="$profile_prefix/workload.jsonl"
+          test ! -e "$GITHUB_WORKSPACE/$ready_relative"
+          test ! -e "$GITHUB_WORKSPACE/$output_relative"
+          scenario=udp-small-high
+          IFS=$'\t' read -r unit runner_image producer controller recipe bundle < <(
+            python3 -B -m tools.ci.performance_build_workflow trial-contract \
+              --scenario "$scenario"
+          )
+          profile_command=(
+            "$profile_bin_dir/m4-qualification" profile-workload
+            --scenario "$scenario"
+            --warmup-seconds 1
+            --active-seconds 15
+            --repository-root "$GITHUB_WORKSPACE"
+            --binary-dir "$profile_bin_dir"
+            --ready-file "$ready_relative"
+            --output "$output_relative"
+            --parent-sha "$SOURCE_SHA"
+            --candidate-sha "$SOURCE_SHA"
+            --member parent
+            --pair 1
+            --order 1
+            --build-profile current
+            --unit "$unit"
+            --runner-image "$runner_image"
+            --producer-source-sha256 "$producer"
+            --controller-source-sha256 "$controller"
+            --semantic-recipe-sha256 "$recipe"
+            --evidence-bundle-sha256 "$bundle"
+          )
+          capture_profile_output() {
+            local label=$1
+            local captured="$CONDITIONAL_RAW/workload-$label.jsonl"
+            test ! -e "$GITHUB_WORKSPACE/$ready_relative"
+            if [ -f "$GITHUB_WORKSPACE/$output_relative" ]; then
+              test ! -e "$captured"
+              mv -- "$GITHUB_WORKSPACE/$output_relative" \
+                "$captured"
+            fi
+          }
+          assertion() {
+            local kind=$1
+            local reason=$2
+            local measurement="$CONDITIONAL_MEASUREMENTS/$kind.json"
+            local raw="$CONDITIONAL_RAW/$kind.txt"
+            printf '%s\n' "$reason" >"$raw"
+            python3 -B -m tools.ci.performance_build_collect assertion \
+              --reason "$reason" --satisfied true --output "$measurement"
+            python3 -B -m tools.performance_candidate conditional-prerequisite \
+              --kind "$kind" --source-sha "$SOURCE_SHA" \
+              --source-tree "$SOURCE_TREE" --profiler-status AVAILABLE \
+              --raw-artifact "$raw" --measurement "$measurement" \
+              --output "$CONDITIONAL_PREREQUISITES/$kind.json"
+          }
+          unavailable() {
+            local kind=$1
+            python3 -B -m tools.performance_candidate conditional-prerequisite \
+              --kind "$kind" --source-sha "$SOURCE_SHA" \
+              --source-tree "$SOURCE_TREE" --profiler-status UNAVAILABLE \
+              --output "$CONDITIONAL_PREREQUISITES/$kind.json"
+          }
+          bind_available() {
+            local kind=$1
+            local raw=$2
+            local measurement=$3
+            python3 -B -m tools.performance_candidate conditional-prerequisite \
+              --kind "$kind" --source-sha "$SOURCE_SHA" \
+              --source-tree "$SOURCE_TREE" --profiler-status AVAILABLE \
+              --raw-artifact "$raw" --measurement "$measurement" \
+              --output "$CONDITIONAL_PREREQUISITES/$kind.json"
+          }
+          case "$CONDITIONAL_CANDIDATE" in
+            UDP-14)
+              assertion exact-size-addressed \
+                "UDP exact-size wire and scratch prerequisite is source-reviewed"
+              assertion udp-global-locks-addressed \
+                "Established UDP process-wide gates are source-reviewed as removed"
+              raw="$CONDITIONAL_RAW/udp-strace.txt"
+              measurement="$CONDITIONAL_MEASUREMENTS/udp-syscall.json"
+              set +e
+              strace -f -qq \
+                -e trace=recvfrom,recvmsg,recvmmsg,sendto,sendmsg,sendmmsg \
+                -o "$raw" "${profile_command[@]}"
+              profiler_status=$?
+              set -e
+              capture_profile_output udp-strace
+              if [ "$profiler_status" -eq 0 ]; then
+                set +e
+                datagrams="$(python3 - "$CONDITIONAL_RAW/workload-udp-strace.jsonl" <<'PY'
+          import json
+          import pathlib
+          import sys
+          row = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          print(row["checked_units"])
+          PY
+                )"
+                workload_status=$?
+                set -e
+                if [ "$workload_status" -eq 0 ] \
+                  && python3 -B -m tools.ci.performance_build_collect udp-syscall \
+                  --raw "$raw" --datagrams "$datagrams" \
+                  --topology m4-udp-small-high-full-round-trip-v1 \
+                  --trigger-threshold 1.5 --output "$measurement"; then
+                  bind_available udp-syscall "$raw" "$measurement"
+                else
+                  unavailable udp-syscall
+                fi
+              else
+                unavailable udp-syscall
+              fi
+              raw="$CONDITIONAL_RAW/udp-perf-stat.csv"
+              measurement="$CONDITIONAL_MEASUREMENTS/udp-kernel-cpu.json"
+              set +e
+              perf stat -x, -e cycles -e cycles:k -o "$raw" -- \
+                "${profile_command[@]}"
+              profiler_status=$?
+              set -e
+              capture_profile_output udp-perf
+              if [ "$profiler_status" -eq 0 ] \
+                && python3 -B -m tools.ci.performance_build_collect udp-kernel-cpu \
+                  --raw "$raw" --trigger-threshold-percent 10 \
+                  --output "$measurement"; then
+                bind_available udp-kernel-cpu "$raw" "$measurement"
+              else
+                unavailable udp-kernel-cpu
+              fi
+              ;;
+            OBS-01)
+              assertion structural-metrics-complete \
+                "Structural metrics producer and closed scrape diagnostic are source-reviewed"
+              printf 'perf lock/c2c collection attempted on hosted runner\n' \
+                >"$CONDITIONAL_RAW/counter-contention-attempt.txt"
+              unavailable counter-contention
+              raw="$CONDITIONAL_RAW/perf-c2c.txt"
+              measurement="$CONDITIONAL_MEASUREMENTS/perf-c2c.json"
+              set +e
+              perf c2c record -o "$CONDITIONAL_RAW/perf-c2c.data" -- \
+                "${profile_command[@]}"
+              record_status=$?
+              if [ "$record_status" -eq 0 ]; then
+                perf c2c report --stdio -i "$CONDITIONAL_RAW/perf-c2c.data" \
+                  >"$raw" 2>&1
+                report_status=$?
+              else
+                report_status=$record_status
+              fi
+              set -e
+              capture_profile_output obs-perf-c2c
+              if [ "$report_status" -eq 0 ] \
+                && python3 -B -m tools.ci.performance_build_collect perf-c2c \
+                  --raw "$raw" --trigger-minimum 100 --output "$measurement"; then
+                bind_available perf-c2c "$raw" "$measurement"
+              else
+                unavailable perf-c2c
+              fi
+              ;;
+            BUILD-04)
+              assertion known-allocations-addressed \
+                "Known TCP UDP DNS and transaction allocation work is source-reviewed"
+              raw="$CONDITIONAL_RAW/perf-allocation.txt"
+              measurement="$CONDITIONAL_MEASUREMENTS/allocation-hotspots.json"
+              set +e
+              perf record -o "$CONDITIONAL_RAW/perf-allocation.data" -g -- \
+                "${profile_command[@]}"
+              record_status=$?
+              if [ "$record_status" -eq 0 ]; then
+                perf report --stdio -i "$CONDITIONAL_RAW/perf-allocation.data" \
+                  >"$raw" 2>&1
+                report_status=$?
+              else
+                report_status=$record_status
+              fi
+              set -e
+              capture_profile_output build04-perf
+              if [ "$report_status" -eq 0 ] \
+                && python3 -B -m tools.ci.performance_build_collect allocation-hotspots \
+                  --raw "$raw" --trigger-threshold 5.0 \
+                  --output "$measurement"; then
+                bind_available allocation-hotspots "$raw" "$measurement"
+              else
+                unavailable allocation-hotspots
+              fi
+              printf 'perf lock collection is unavailable or nonportable on hosted scope\n' \
+                >"$CONDITIONAL_RAW/allocator-cpu-lock-attempt.txt"
+              unavailable allocator-cpu-lock
+              ;;
+            BUILD-05)
+              assertion global-locks-addressed \
+                "Known process-wide UDP gates are source-reviewed as addressed"
+              assertion dns-codec-addressed \
+                "DNS and codec owned-buffer serialization is source-reviewed as addressed"
+              assertion waiter-herd-addressed \
+                "Per-handle publication avoids global waiter-herd wakeups"
+              raw="$CONDITIONAL_RAW/perf-stat.csv"
+              measurement="$CONDITIONAL_MEASUREMENTS/context-switch.json"
+              set +e
+              perf stat -x, -e context-switches -o "$raw" -- \
+                "${profile_command[@]}"
+              profiler_status=$?
+              set -e
+              capture_profile_output build05-perf-stat
+              if [ "$profiler_status" -eq 0 ] \
+                && python3 -B -m tools.ci.performance_build_collect context-switch \
+                  --raw "$raw" --duration-seconds 15 \
+                  --trigger-threshold 1000 --output "$measurement"; then
+                bind_available context-switch "$raw" "$measurement"
+              else
+                unavailable context-switch
+              fi
+              ;;
+            *) exit 2 ;;
+          esac
+
+      - name: Write closed provisional conditional decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_arguments=()
+          while IFS= read -r path; do
+            evidence_arguments+=(--evidence "$path")
+          done < <(find "$CONDITIONAL_PREREQUISITES" -maxdepth 1 \
+            -type f -name '*.json' -print | sort)
+          test "${#evidence_arguments[@]}" -gt 0
+          python3 -B -m tools.performance_candidate conditional-decision \
+            --candidate "$CONDITIONAL_CANDIDATE" \
+            --source-sha "$SOURCE_SHA" \
+            --source-tree "$SOURCE_TREE" \
+            "${evidence_arguments[@]}" \
+            --output "$CONDITIONAL_EVIDENCE/decision.json"
+          python3 -B -m tools.ci.performance_build_workflow artifact-manifest \
+            --evidence-root "$CONDITIONAL_EVIDENCE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-sha "$SOURCE_SHA" \
+            --output "$CONDITIONAL_EVIDENCE/artifact-manifest.json"
+
+      - name: Upload conditional raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-conditional-${{ inputs.candidate }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CONDITIONAL_EVIDENCE }}
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce non-adoption terminal scope
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$CONDITIONAL_EVIDENCE/decision.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+          row = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert row["status"] in {"DEFERRED", "INCONCLUSIVE", "TRIGGER_PRESENT", "NO_TRIGGER"}
+          assert row["adoption_decision"] == "NOT_ADOPTED_FOR_GITHUB_HOSTED_AMD_SCOPE"
+          assert row["performance_authoritative"] is False
+          assert row["bare_metal_gate_satisfied"] is False
+          assert row["durable_evidence_gate_satisfied"] is False
+          PY

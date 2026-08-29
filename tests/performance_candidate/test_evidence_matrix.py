@@ -1,8 +1,12 @@
 import pathlib
 import unittest
 
-from tests.performance_candidate.test_build_experiment import BuildExperimentFixture
-from tools.performance_candidate import evidence_matrix
+from tests.performance_candidate.test_build_experiment import (
+    SOURCE_SHA,
+    SOURCE_TREE,
+    BuildExperimentFixture,
+)
+from tools.performance_candidate import conditional_decision, evidence_matrix
 from tools.performance_candidate.json_contract import CandidateControlError
 
 
@@ -19,8 +23,46 @@ class Phase4EvidenceMatrixTests(BuildExperimentFixture):
     def matrix(self, family: str, **overrides) -> dict[str, object]:
         prerequisite_evidence = []
         for kind in sorted(evidence_matrix.PREREQUISITE_EVIDENCE_KEYS[family]):
-            path = self.root / f"{family}-{kind}.evidence"
-            path.write_text(f"fixture evidence: {kind}\n", encoding="utf-8")
+            raw = self.root / f"{family}-{kind}.raw"
+            raw.write_text(f"fixture raw evidence: {kind}\n", encoding="utf-8")
+            if kind in conditional_decision.ASSERTION_KINDS:
+                measurement = {"reason": "fixture prerequisite", "satisfied": True}
+            elif kind == "counter-contention":
+                measurement = {
+                    "contention_percent": 12.0,
+                    "trigger_present": True,
+                    "trigger_threshold_percent": 5.0,
+                }
+            elif kind == "perf-c2c":
+                measurement = {
+                    "cache_line_bounces": 200,
+                    "trigger_minimum": 100,
+                    "trigger_present": True,
+                }
+            elif kind == "allocation-hotspots":
+                measurement = {
+                    "hotspot_percent": 25.0,
+                    "sample_count": 1_000,
+                    "trigger_present": True,
+                    "trigger_threshold_percent": 10.0,
+                }
+            else:
+                self.assertEqual(kind, "allocator-cpu-lock")
+                measurement = {
+                    "allocator_cpu_percent": 8.0,
+                    "lock_wait_nanoseconds": 10_000,
+                    "trigger_present": True,
+                    "trigger_threshold_percent": 5.0,
+                }
+            record = conditional_decision.create_prerequisite_record(
+                kind=kind,
+                source_sha=SOURCE_SHA,
+                source_tree=SOURCE_TREE,
+                profiler_status="AVAILABLE",
+                raw_artifact_path=raw,
+                measurement=measurement,
+            )
+            path = self.write_json(f"{family}-{kind}.json", record)
             prerequisite_evidence.append(f"{kind}={path}")
         arguments = {
             "environment_path": self.environment_path(),

@@ -1,0 +1,66 @@
+{
+  "role": "training",
+  "scenarios": [
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "tcp-request", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "tcp-request",
+      "coverage": "steady-state",
+      "name": "pgo-train-tcp-request",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": 1667,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "tcp-bulk", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "tcp-bulk",
+      "coverage": "steady-state",
+      "name": "pgo-train-tcp-bulk",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": 1667,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "udp-small", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "udp-small",
+      "coverage": "steady-state",
+      "name": "pgo-train-udp-small",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": 1667,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "udp-mtu", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "udp-mtu",
+      "coverage": "steady-state",
+      "name": "pgo-train-udp-mtu",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": 1667,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "dns", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "dns",
+      "coverage": "steady-state",
+      "name": "pgo-train-dns",
+      "platforms": ["linux-x86_64"],
+      "producer": "m4-profile-workload",
+      "weight_basis_points": 1667,
+      "working_directory": "."
+    },
+    {
+      "argv": ["python3", "-B", "-m", "tools.performance_candidate.workloads.pgo_workload", "--category", "rule", "--runner", "{artifact:m4-qualification}", "--client", "{artifact:ferrum2-client}", "--server", "{artifact:ferrum2-server}", "--rule", "{artifact:ferrum2-rule-qualification}", "--repository", "."],
+      "category": "rule",
+      "coverage": "steady-state",
+      "name": "pgo-train-rule",
+      "platforms": ["linux-x86_64"],
+      "producer": "rule-qualification",
+      "weight_basis_points": 1665,
+      "working_directory": "."
+    }
+  ],
+  "schema_version": "ferrum2-build-workload-set-v2"
+}

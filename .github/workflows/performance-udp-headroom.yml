@@ -1,0 +1,334 @@
+name: performance-udp-headroom
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  UDP_HEADROOM_POLICY: ${{ github.workspace }}/tools/performance_udp_headroom/policy.json
+
+jobs:
+  udp-headroom-qualification:
+    name: udp-headroom-qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout exact same-source UDP headroom experiment
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Require exact SHA and AuthenticAMD before any build
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ""
+          test "$RUNNER_OS/$RUNNER_ARCH" = "Linux/X64"
+          vendor_id="$(awk -F: '/^vendor_id/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' /proc/cpuinfo)"
+          cpu_model="$(awk -F: '/^model name/{sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' /proc/cpuinfo)"
+          if [ "$vendor_id" != AuthenticAMD ] || [ -z "$cpu_model" ]; then
+            echo "::error::UDP headroom qualification requires AuthenticAMD; observed ${vendor_id:-unknown} / ${cpu_model:-unknown}."
+            exit 1
+          fi
+          printf 'Selected provisional AuthenticAMD host: %s\n' "$cpu_model"
+
+      - name: Initialize fresh closed evidence paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          headroom_root="$RUNNER_TEMP/performance-udp-headroom-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          profile_root="$GITHUB_WORKSPACE/profiles/udp-headroom"
+          test ! -e "$headroom_root"
+          test ! -e "$profile_root"
+          test ! -e "$GITHUB_WORKSPACE/target/profiling"
+          test ! -e "$GITHUB_WORKSPACE/target/udp-worker/profiling"
+          mkdir -p "$headroom_root/builds" "$headroom_root/logs" "$headroom_root/targets"
+          mkdir -p "$profile_root"
+          {
+            printf 'UDP_HEADROOM_ROOT=%s\n' "$headroom_root"
+            printf 'UDP_HEADROOM_ENVIRONMENT=%s\n' "$headroom_root/environment.json"
+            printf 'UDP_HEADROOM_PLAN=%s\n' "$headroom_root/plan.json"
+            printf 'UDP_HEADROOM_TARGET_ROOT=%s\n' "$headroom_root/targets"
+            printf 'UDP_HEADROOM_PROFILE_ROOT=%s\n' "$profile_root"
+            printf 'UDP_HEADROOM_TIMED_STAGE=%s\n' "$GITHUB_WORKSPACE/target/profiling"
+            printf 'UDP_HEADROOM_DIAGNOSTIC_STAGE=%s\n' "$GITHUB_WORKSPACE/target/udp-worker/profiling"
+            printf 'UDP_HEADROOM_DEFAULT_BUILD=%s\n' "$headroom_root/builds/default.json"
+            printf 'UDP_HEADROOM_CANDIDATE_BUILD=%s\n' "$headroom_root/builds/candidate.json"
+            printf 'UDP_HEADROOM_DIAGNOSTIC_DEFAULT_BUILD=%s\n' "$headroom_root/builds/diagnostic-default.json"
+            printf 'UDP_HEADROOM_DIAGNOSTIC_CANDIDATE_BUILD=%s\n' "$headroom_root/builds/diagnostic-candidate.json"
+            printf 'UDP_HEADROOM_DIAGNOSTIC_DEFAULT=%s\n' "$profile_root/diagnostic/default.json"
+            printf 'UDP_HEADROOM_DIAGNOSTIC_CANDIDATE=%s\n' "$profile_root/diagnostic/candidate.json"
+            printf 'UDP_HEADROOM_QUALIFICATION=%s\n' "$headroom_root/qualification.json"
+          } >>"$GITHUB_ENV"
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc +1.97.1 -Vv
+          cargo +1.97.1 -V
+
+      - name: Capture same-source environment and closed plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_candidate build-environment \
+            --repository "$GITHUB_WORKSPACE" \
+            --source-sha "$GITHUB_SHA" \
+            --environment-kind github-hosted \
+            --runner-image ubuntu-24.04 \
+            --output "$UDP_HEADROOM_ENVIRONMENT"
+          python3 -B -m tools.performance_udp_headroom plan \
+            --environment "$UDP_HEADROOM_ENVIRONMENT" \
+            --policy "$UDP_HEADROOM_POLICY" \
+            --target-root "$UDP_HEADROOM_TARGET_ROOT" \
+            --output "$UDP_HEADROOM_PLAN"
+          test "$(python3 -B -m tools.performance_udp_headroom plan-items --plan "$UDP_HEADROOM_PLAN" | tr '\n' ' ')" = "default candidate diagnostic-default diagnostic-candidate "
+
+      - name: Build hash-bound default timed artifacts without structural metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_udp_headroom build \
+            --plan "$UDP_HEADROOM_PLAN" \
+            --variant default \
+            --log "$UDP_HEADROOM_ROOT/logs/default.log" \
+            --output "$UDP_HEADROOM_DEFAULT_BUILD"
+
+      - name: Build hash-bound feature timed artifacts without structural metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_udp_headroom build \
+            --plan "$UDP_HEADROOM_PLAN" \
+            --variant candidate \
+            --log "$UDP_HEADROOM_ROOT/logs/candidate.log" \
+            --output "$UDP_HEADROOM_CANDIDATE_BUILD"
+
+      - name: Run two A/A rounds and one six-pair ABBA round
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stage_timed() {
+            local variant=$1
+            local build_record=$2
+            python3 -B -m tools.performance_udp_headroom materialize \
+              --plan "$UDP_HEADROOM_PLAN" \
+              --build "$build_record" \
+              --variant "$variant" \
+              --destination "$UDP_HEADROOM_TIMED_STAGE" >/dev/null
+          }
+
+          run_trial() {
+            local root=$1
+            local member=$2
+            local pair=$3
+            local variant=$4
+            local build_record=$5
+            local scenario=$6
+            local order
+            if { (( pair % 2 == 1 )) && [ "$member" = parent ]; } \
+              || { (( pair % 2 == 0 )) && [ "$member" = candidate ]; }; then
+              order=1
+            else
+              order=2
+            fi
+            mkdir -p "$root/$member"
+            local output="$root/$member/$scenario-$pair.jsonl"
+            local ready="$root/$member/$scenario-$pair.ready"
+            local relative_output="${output#"$GITHUB_WORKSPACE"/}"
+            local relative_ready="${ready#"$GITHUB_WORKSPACE"/}"
+            test "$relative_output" != "$output"
+            test "$relative_ready" != "$ready"
+            IFS=$'\t' read -r unit runner_image producer controller recipe bundle < <(
+              python3 -B -m tools.performance_udp_headroom trial-contract \
+                --plan "$UDP_HEADROOM_PLAN" --scenario "$scenario"
+            )
+            stage_timed "$variant" "$build_record"
+            "$UDP_HEADROOM_TIMED_STAGE/m4-qualification" profile-workload \
+              --scenario "$scenario" \
+              --warmup-seconds 1 \
+              --active-seconds 15 \
+              --repository-root "$GITHUB_WORKSPACE" \
+              --binary-dir "$UDP_HEADROOM_TIMED_STAGE" \
+              --ready-file "$relative_ready" \
+              --output "$relative_output" \
+              --parent-sha "$GITHUB_SHA" \
+              --candidate-sha "$GITHUB_SHA" \
+              --member "$member" \
+              --pair "$pair" \
+              --order "$order" \
+              --build-profile current \
+              --unit "$unit" \
+              --runner-image "$runner_image" \
+              --producer-source-sha256 "$producer" \
+              --controller-source-sha256 "$controller" \
+              --semantic-recipe-sha256 "$recipe" \
+              --evidence-bundle-sha256 "$bundle"
+            test -s "$output"
+            test ! -e "$ready"
+          }
+
+          run_schedule() {
+            local root=$1
+            local parent_variant=$2
+            local parent_build=$3
+            local candidate_variant=$4
+            local candidate_build=$5
+            local scenario pair
+            for scenario in udp-small-high udp-mtu-1200 udp-payload-8192 udp-max-wire-65507 udp-response-concurrency-32; do
+              for pair in 1 2 3 4 5 6; do
+                if (( pair % 2 == 1 )); then
+                  run_trial "$root" parent "$pair" "$parent_variant" "$parent_build" "$scenario"
+                  run_trial "$root" candidate "$pair" "$candidate_variant" "$candidate_build" "$scenario"
+                else
+                  run_trial "$root" candidate "$pair" "$candidate_variant" "$candidate_build" "$scenario"
+                  run_trial "$root" parent "$pair" "$parent_variant" "$parent_build" "$scenario"
+                fi
+              done
+            done
+          }
+
+          run_schedule "$UDP_HEADROOM_PROFILE_ROOT/timed/aa-1" candidate "$UDP_HEADROOM_CANDIDATE_BUILD" candidate "$UDP_HEADROOM_CANDIDATE_BUILD"
+          run_schedule "$UDP_HEADROOM_PROFILE_ROOT/timed/aa-2" candidate "$UDP_HEADROOM_CANDIDATE_BUILD" candidate "$UDP_HEADROOM_CANDIDATE_BUILD"
+          run_schedule "$UDP_HEADROOM_PROFILE_ROOT/timed/comparison" default "$UDP_HEADROOM_DEFAULT_BUILD" candidate "$UDP_HEADROOM_CANDIDATE_BUILD"
+
+      - name: Build separate default and feature structural diagnostics after ABBA
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_udp_headroom build \
+            --plan "$UDP_HEADROOM_PLAN" \
+            --variant diagnostic-default \
+            --log "$UDP_HEADROOM_ROOT/logs/diagnostic-default.log" \
+            --output "$UDP_HEADROOM_DIAGNOSTIC_DEFAULT_BUILD"
+          python3 -B -m tools.performance_udp_headroom build \
+            --plan "$UDP_HEADROOM_PLAN" \
+            --variant diagnostic-candidate \
+            --log "$UDP_HEADROOM_ROOT/logs/diagnostic-candidate.log" \
+            --output "$UDP_HEADROOM_DIAGNOSTIC_CANDIDATE_BUILD"
+
+      - name: Run same-host same-workload default and candidate 49-counter diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$UDP_HEADROOM_PROFILE_ROOT/diagnostic"
+          IFS=$'\t' read -r runner_image producer controller recipe bundle < <(
+            python3 -B -m tools.performance_udp_headroom diagnostic-contract \
+              --plan "$UDP_HEADROOM_PLAN"
+          )
+
+          run_diagnostic() {
+            local variant=$1
+            local build_record=$2
+            local output=$3
+            local diagnostic_ready="${output%.json}.ready"
+            local relative_output="${output#"$GITHUB_WORKSPACE"/}"
+            local relative_ready="${diagnostic_ready#"$GITHUB_WORKSPACE"/}"
+            test "$relative_output" != "$output"
+            test "$relative_ready" != "$diagnostic_ready"
+            python3 -B -m tools.performance_udp_headroom materialize \
+              --plan "$UDP_HEADROOM_PLAN" \
+              --build "$build_record" \
+              --variant "$variant" \
+              --destination "$UDP_HEADROOM_DIAGNOSTIC_STAGE" >/dev/null
+            "$UDP_HEADROOM_DIAGNOSTIC_STAGE/m4-qualification" udp-worker-workload \
+              --server-receive-workers 1 \
+              --comparison-receive-workers 1 \
+              --session-topology multi-session \
+              --phase calibration-aa \
+              --member baseline \
+              --round 1 \
+              --pair 1 \
+              --order 1 \
+              --output "$relative_output" \
+              --ready-file "$relative_ready" \
+              --repository-root "$GITHUB_WORKSPACE" \
+              --binary-dir "$UDP_HEADROOM_DIAGNOSTIC_STAGE" \
+              --candidate-sha "$GITHUB_SHA" \
+              --runner-image "$runner_image" \
+              --producer-source-sha256 "$producer" \
+              --controller-source-sha256 "$controller" \
+              --semantic-recipe-sha256 "$recipe" \
+              --evidence-bundle-sha256 "$bundle"
+            test -s "$output"
+            test ! -e "$diagnostic_ready"
+          }
+
+          run_diagnostic diagnostic-default "$UDP_HEADROOM_DIAGNOSTIC_DEFAULT_BUILD" "$UDP_HEADROOM_DIAGNOSTIC_DEFAULT"
+          run_diagnostic diagnostic-candidate "$UDP_HEADROOM_DIAGNOSTIC_CANDIDATE_BUILD" "$UDP_HEADROOM_DIAGNOSTIC_CANDIDATE"
+
+      - name: Validate closed timed and structural evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m tools.performance_udp_headroom qualify \
+            --plan "$UDP_HEADROOM_PLAN" \
+            --default-build "$UDP_HEADROOM_DEFAULT_BUILD" \
+            --candidate-build "$UDP_HEADROOM_CANDIDATE_BUILD" \
+            --diagnostic-default-build "$UDP_HEADROOM_DIAGNOSTIC_DEFAULT_BUILD" \
+            --diagnostic-candidate-build "$UDP_HEADROOM_DIAGNOSTIC_CANDIDATE_BUILD" \
+            --a-a-root "$UDP_HEADROOM_PROFILE_ROOT/timed/aa-1" \
+            --a-a-root "$UDP_HEADROOM_PROFILE_ROOT/timed/aa-2" \
+            --comparison-root "$UDP_HEADROOM_PROFILE_ROOT/timed/comparison" \
+            --diagnostic-default "$UDP_HEADROOM_DIAGNOSTIC_DEFAULT" \
+            --diagnostic-candidate "$UDP_HEADROOM_DIAGNOSTIC_CANDIDATE" \
+            --output "$UDP_HEADROOM_QUALIFICATION"
+
+      - name: Upload provisional AMD UDP headroom evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-udp-headroom-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.UDP_HEADROOM_ENVIRONMENT }}
+            ${{ env.UDP_HEADROOM_PLAN }}
+            ${{ env.UDP_HEADROOM_QUALIFICATION }}
+            ${{ env.UDP_HEADROOM_ROOT }}/builds
+            ${{ env.UDP_HEADROOM_ROOT }}/logs
+            ${{ env.UDP_HEADROOM_PROFILE_ROOT }}
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce provisional default-off closure after upload
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$UDP_HEADROOM_QUALIFICATION" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          row = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          authority = row["authority"]
+          assert row["status"] == "PASS"
+          assert row["timed_binaries_structural_metrics"] is False
+          diagnostic = row["diagnostic"]
+          assert diagnostic["status"] == "PASS"
+          assert diagnostic["counter_count"] == 49
+          assert diagnostic["same_host_same_workload"] is True
+          for endpoint in ("client", "server"):
+              default = diagnostic["default"]["assertions"][endpoint]
+              candidate = diagnostic["candidate"]["assertions"][endpoint]
+              assert default["udp_payload_to_wire_copy_bytes"] > 0
+              assert candidate["udp_payload_to_wire_copy_bytes"] == 0
+              assert candidate["udp_owned_fast_path_hits"] > 0
+          assert authority["scope"] == "github-hosted-amd-provisional"
+          assert authority["performance_authoritative"] is False
+          assert authority["adoption_claim"] is False
+          assert authority["default_enabled"] is False
+          assert authority["gate03_stable_host_satisfied"] is False
+          assert authority["gate07_durable_evidence_satisfied"] is False
+          assert row["adoption_decision"] == "NOT_ADOPTED_FOR_GITHUB_HOSTED_AMD_SCOPE"
+          PY

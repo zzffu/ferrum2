@@ -1,0 +1,93 @@
+{
+  "authority": {
+    "adoption_claim": false,
+    "default_enabled": false,
+    "gate03_stable_host_satisfied": false,
+    "gate07_durable_evidence_satisfied": false,
+    "performance_authoritative": false,
+    "scope": "github-hosted-amd-provisional"
+  },
+  "candidate_feature": "candidate-udp-owned-headroom",
+  "diagnostic": {
+    "candidate_assertions": {
+      "client": {
+        "udp_owned_fast_path_hits": "positive",
+        "udp_payload_to_wire_copy_bytes": 0
+      },
+      "server": {
+        "udp_owned_fast_path_hits": "positive",
+        "udp_payload_to_wire_copy_bytes": 0
+      }
+    },
+    "counter_count": 49,
+    "default_assertions": {
+      "client": {
+        "udp_payload_to_wire_copy_bytes": "positive"
+      },
+      "server": {
+        "udp_payload_to_wire_copy_bytes": "positive"
+      }
+    },
+    "scenario": "udp-small-high",
+    "session_topology": "multi-session"
+  },
+  "policy_id": "shadowsocks-udp-owned-headroom-phase7-v1",
+  "scenarios": [
+    {
+      "active_seconds": 15,
+      "application_payload_bytes": 128,
+      "metric": "datagrams_per_second",
+      "name": "udp-small-high",
+      "socks_datagram_bytes": 138,
+      "upstream_wire_bytes": 186,
+      "warmup_seconds": 1,
+      "workload_scale": null
+    },
+    {
+      "active_seconds": 15,
+      "application_payload_bytes": 1200,
+      "metric": "datagrams_per_second",
+      "name": "udp-mtu-1200",
+      "socks_datagram_bytes": 1210,
+      "upstream_wire_bytes": 1258,
+      "warmup_seconds": 1,
+      "workload_scale": null
+    },
+    {
+      "active_seconds": 15,
+      "application_payload_bytes": 8192,
+      "metric": "datagrams_per_second",
+      "name": "udp-payload-8192",
+      "socks_datagram_bytes": 8202,
+      "upstream_wire_bytes": 8250,
+      "warmup_seconds": 1,
+      "workload_scale": null
+    },
+    {
+      "active_seconds": 15,
+      "application_payload_bytes": 65449,
+      "metric": "datagrams_per_second",
+      "name": "udp-max-wire-65507",
+      "socks_datagram_bytes": 65459,
+      "upstream_wire_bytes": 65507,
+      "warmup_seconds": 1,
+      "workload_scale": null
+    },
+    {
+      "active_seconds": 15,
+      "application_payload_bytes": 128,
+      "metric": "datagrams_per_second",
+      "name": "udp-response-concurrency-32",
+      "socks_datagram_bytes": 138,
+      "upstream_wire_bytes": 186,
+      "warmup_seconds": 1,
+      "workload_scale": 32
+    }
+  ],
+  "schedule": {
+    "a_a_rounds": 2,
+    "pair_count": 6,
+    "pair_schedule": "abba-six-pairs"
+  },
+  "schema_version": "ferrum2-performance-udp-headroom-policy-v1"
+}

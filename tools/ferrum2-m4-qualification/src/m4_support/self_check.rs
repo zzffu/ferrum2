@@ -110,6 +110,22 @@ pub(super) fn run_self_check() -> Result<String, String> {
     {
         return Err("explicit profile checkout paths were not preserved".to_owned());
     }
+    let staged_root = tempfile::tempdir().map_err(clean_io)?;
+    let staged_binary_dir = staged_root.path().join("target/profiling");
+    fs::create_dir_all(&staged_binary_dir).map_err(clean_io)?;
+    let staged_root_path = staged_root.path().canonicalize().map_err(clean_io)?;
+    let staged_binary_dir = staged_binary_dir.canonicalize().map_err(clean_io)?;
+    let mut staged_profile_arguments = profile_arguments.clone();
+    staged_profile_arguments.push(OsString::from("--repository-root"));
+    staged_profile_arguments.push(staged_root_path.clone().into_os_string());
+    staged_profile_arguments.push(OsString::from("--binary-dir"));
+    staged_profile_arguments.push(staged_binary_dir.clone().into_os_string());
+    let staged_profile = parse_profile_args(&staged_profile_arguments)?;
+    if staged_profile.repository_root != staged_root_path
+        || staged_profile.binary_dir != staged_binary_dir
+    {
+        return Err("staged target/profiling paths were not preserved".to_owned());
+    }
     expect_rejected("incomplete profile checkout paths", || {
         parse_profile_args(&explicit_profile_arguments[..explicit_profile_arguments.len() - 2])
     })?;
