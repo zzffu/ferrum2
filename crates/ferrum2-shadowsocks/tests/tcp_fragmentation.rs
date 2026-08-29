@@ -503,7 +503,7 @@ async fn response_fixed_partial_reads_yield_and_self_wake_once_per_transition() 
 }
 
 #[tokio::test]
-async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() {
+async fn authenticated_zero_length_frame_continues_to_ready_plaintext_in_one_poll() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -523,50 +523,20 @@ async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() 
 
     let baseline = observation.lock().expect("observation").read_calls;
 
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 1
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 2
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 3
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
-
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("the nonempty payload is ready after its final receive stage");
+        panic!("ready zero-length and nonempty frames complete in one poll");
     };
     assert_eq!(&destination[..read], b"after-zero");
     assert_eq!(
         observation.lock().expect("observation").read_calls,
         baseline + 4
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn length_and_partial_payload_reads_each_yield_before_plaintext() {
+async fn ready_length_and_partial_payload_complete_in_one_poll() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -587,36 +557,16 @@ async fn length_and_partial_payload_reads_each_yield_before_plaintext() {
     let mut destination = [0_u8; 32];
     let baseline = observation.lock().expect("observation").read_calls;
 
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 1
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 2
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
-
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("the final payload fragment produces plaintext");
+        panic!("ready length and payload fragments produce plaintext in one poll");
     };
     assert_eq!(&destination[..read], b"fragmented");
     assert_eq!(
         observation.lock().expect("observation").read_calls,
         baseline + 3
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

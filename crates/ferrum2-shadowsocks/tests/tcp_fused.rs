@@ -368,7 +368,7 @@ async fn fused_server_first_response_partial_writes_preserve_exact_wire() {
 }
 
 #[tokio::test]
-async fn externally_woken_carried_download_polls_one_next_fill() {
+async fn externally_woken_carried_download_drains_one_ready_next_frame() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -423,13 +423,14 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
     let mut cx = Context::from_waker(&waker);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(observation.lock().expect("observation").read_calls, 3);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(observation.lock().expect("observation").read_calls, 4);
+    assert_eq!(write_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(observation.lock().expect("observation").read_calls, 4);
-    assert_eq!(write_polls.load(Ordering::SeqCst), 1);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(write_polls.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
     assert!(accepted.lock().expect("accepted plaintext").is_empty());
 
     ready.store(true, Ordering::SeqCst);
@@ -439,22 +440,10 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
         .take()
         .expect("sink registered the relay waker")
         .wake();
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(write_polls.load(Ordering::SeqCst), 2);
-    assert_eq!(&*accepted.lock().expect("accepted plaintext"), first);
-    assert_eq!(progressed.load(Ordering::SeqCst), first.len());
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        5,
-        "carried completion attempts exactly one fresh tunnel fill"
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
-
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(write_polls.load(Ordering::SeqCst), 3);
-    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    assert_eq!(write_polls.load(Ordering::SeqCst), 4);
     let expected = first
         .iter()
         .chain(second.iter())
@@ -462,6 +451,12 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
         .collect::<Vec<_>>();
     assert_eq!(*accepted.lock().expect("accepted plaintext"), expected);
     assert_eq!(progressed.load(Ordering::SeqCst), expected.len());
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        6,
+        "carried completion drains exactly one fresh ready frame"
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
