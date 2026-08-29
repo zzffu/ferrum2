@@ -739,3 +739,42 @@ generic relay 与 fused engine 的净差，不能把差值全部归因于 self-w
 worker ownership 值得继续；但吞吐未达到预声明的 `+10%` 根因支持门槛。故该结果定性为“方向性
 信号但证据不足”：提交与分支永久保留并冻结，不跑 hosted CI，不作为任何产品提交的祖先。下一候选
 必须从 `bf4cd4a6` 新开 sibling，保留 fused buffer/copy 优势，只消融跨完整 frame 的人工 yield。
+
+## 15. 产品 sibling：fresh download 的一次有界 continuation
+
+历史复核进一步限定了最小未测 seam。`d874d3dd` 只在 outer poll 入口已经携带 Pending/partial
+plaintext、且本次把它完整写入 sink 后，额外调用一次 `poll_download_once`；普通 fresh frame 完整
+写入后仍立即 `wake_by_ref + Pending`。`fd5a42de`、`7e3f137a`、`0ad5cab5` 改的是 frame 内部的
+length→payload/partial ready drain，均未修改这一 fresh-completion 分支。前者在 4 worker 下 `-6.15%`，
+因此本轮不得把其 frame 内循环、64-I/O/256-KiB/8-frame budget 或任何 length→payload 合并带回来。
+
+新建产品 sibling：
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-bounded-frame-drain`；
+- 生产改动只允许位于 `flow/fused.rs`：fresh download frame 完整写入后，与 carried completion 一样
+  fall through 到既有的第二次 `poll_download_once`；
+- 正常 `DataRx::Length { filled: 0 }` 下，第二次调用最多读取下一 frame 的 encrypted length，随后仍由
+  `flow/io.rs` 的既有 `wake_by_ref + Pending` 公平边界停止；不得在同一 poll 进入其 payload；
+- 每个 outer poll 仍最多调用两次 `poll_download_once`。第二次若真实 I/O Pending，依赖 transport/sink
+  waker；若完成 plaintext 或方向结束，沿既有处理；upload、crypto、buffer ownership、idle、stats、
+  cancel、half-close、initial payload、generic/multi-hop、TUN 均不变。
+
+这会删除 fresh frame completion 与下一 frame length read 之间的一次纯 fused 调度往返，同时保留
+历史证明对多 worker 公平性重要的 length→payload 边界。机制测试必须直接证明：同一个 outer poll
+完成 frame 1 payload 与 sink write、读取 frame 2 length，但不读取 frame 2 payload；后续 poll 才发布
+frame 2。还必须保持 carried Pending/partial 的一次 continuation 上界、认证失败不发布、zero frame、
+EOF、partial sink、双向轮换和结构计数合同。
+
+候选必须先通过 targeted/all-features Shadowsocks、client/server compile、Clippy、fmt、diff-check 与
+独立审查，再提交并推送。之后只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream
+`tcp-bulk` 正式本地样本，不重跑、不挑样本。判定预先固定：
+
+- 不高于 `bf4cd4a6` 的 `234,378,581 B/s`：失败、保留并冻结，不跑 CI；
+- 正向但低于 `+5%`：只记为弱正向、保留并冻结，不跑 CI；
+- 达到 `+5%` 且吞吐/proxy CPU 效率不下降：本地强正向，提交与分支保留，并且只触发一次
+  authoritative hosted direct CI；CI 不重跑。
+
+若失败，先用该唯一候选二进制的 poll/wake/ready-state 计数与 CPU 调度证据区分“下一 length 大多
+真实 Pending、因此 continuation 没有命中”与“命中但方向轮换/idle-progress 开销仍主导”；诊断不用于
+性能排名。解决根因的新产品尝试仍从 `bf4cd4a6` 开 sibling，绝不从失败提交叠加。
