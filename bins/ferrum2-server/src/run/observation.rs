@@ -1,3 +1,5 @@
+#[cfg(feature = "structural-metrics")]
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use ferrum2_config::LoggingLevel;
@@ -15,6 +17,8 @@ use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, UdpPacketError,
 };
 use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralHub, StructuralSnapshot, StructuralUnit};
 use tokio::net::TcpListener;
 
 use super::RunError;
@@ -25,6 +29,8 @@ pub(super) struct ServerMetricsRoot {
     pub(super) listener: Option<TcpListener>,
     pub(super) metrics: Arc<Metrics>,
     pub(super) registry: OwnerRegistry,
+    #[cfg(feature = "structural-metrics")]
+    pub(super) structural: StructuralHub,
 }
 
 impl PreparedProcessRoot<RunError> for ServerMetricsRoot {
@@ -39,11 +45,17 @@ impl PreparedProcessRoot<RunError> for ServerMetricsRoot {
         let listener = self.listener.take().expect("prepared metrics root");
         let metrics = Arc::clone(&self.metrics);
         let registry = self.registry.clone();
+        #[cfg(feature = "structural-metrics")]
+        let structural = self.structural.clone();
         let endpoint = MetricsEndpoint::new(
             listener,
             move || {
-                update_udp_resource_metrics(&metrics, &registry);
-                metrics.encode_text().unwrap_or_default()
+                render_server_metrics(
+                    &metrics,
+                    &registry,
+                    #[cfg(feature = "structural-metrics")]
+                    &structural,
+                )
             },
             self.registry.clone(),
         );
@@ -58,6 +70,61 @@ impl PreparedProcessRoot<RunError> for ServerMetricsRoot {
     fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
         Box::pin(async { Ok(()) })
     }
+}
+
+fn render_server_metrics(
+    metrics: &Metrics,
+    registry: &OwnerRegistry,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralHub,
+) -> String {
+    update_udp_resource_metrics(metrics, registry);
+    let output = metrics.encode_text().unwrap_or_default();
+    #[cfg(feature = "structural-metrics")]
+    let output = {
+        let mut output = output;
+        if output.ends_with("# EOF\n") {
+            output.truncate(output.len() - "# EOF\n".len());
+        }
+        append_structural_metrics(&mut output, &structural.snapshot());
+        output.push_str("# EOF\n");
+        output
+    };
+    output
+}
+
+#[cfg(feature = "structural-metrics")]
+fn append_structural_metrics(output: &mut String, snapshot: &StructuralSnapshot) {
+    for (counter, value) in snapshot.iter() {
+        let unit = match counter.unit() {
+            StructuralUnit::Count => "events",
+            StructuralUnit::Bytes => "bytes",
+            StructuralUnit::Nanoseconds => "nanoseconds",
+        };
+        write!(
+            output,
+            concat!(
+                "# HELP ferrum2_structural_{} Closed structural performance evidence measured in {}.\n",
+                "# TYPE ferrum2_structural_{} counter\n",
+                "ferrum2_structural_{}_total {}\n",
+            ),
+            counter.name(),
+            unit,
+            counter.name(),
+            counter.name(),
+            value,
+        )
+        .expect("writing structural metrics to a String cannot fail");
+    }
+    write!(
+        output,
+        concat!(
+            "# HELP ferrum2_structural_overflow Whether a structural counter saturated.\n",
+            "# TYPE ferrum2_structural_overflow gauge\n",
+            "ferrum2_structural_overflow {}\n",
+        ),
+        u8::from(snapshot.overflowed()),
+    )
+    .expect("writing structural overflow to a String cannot fail");
 }
 
 pub(super) fn run_error_for_supervisor(error: SupervisorError) -> RunError {
@@ -387,8 +454,47 @@ mod tests {
     use ferrum2_runtime::SniffPrefixOutcome;
     use ferrum2_shadowsocks::TransportPhase;
     use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
+    #[cfg(feature = "structural-metrics")]
+    use ferrum2_structural::StructuralCounter;
 
     use super::*;
+
+    #[cfg(not(feature = "structural-metrics"))]
+    #[test]
+    fn default_metrics_render_has_no_structural_families() {
+        let output = render_server_metrics(&Metrics::new(), &OwnerRegistry::new());
+        assert!(!output.contains("ferrum2_structural_"));
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    #[test]
+    fn structural_metrics_render_exact_fixed_unlabelled_values() {
+        let structural = StructuralHub::new();
+        let local = structural.local();
+        local.add(StructuralCounter::FtbrBorrowedDownloadFrames, 7);
+        local.add(StructuralCounter::AdmissionLockWaitNanoseconds, 19);
+
+        let output = render_server_metrics(&Metrics::new(), &OwnerRegistry::new(), &structural);
+        assert!(output.contains(concat!(
+            "# HELP ferrum2_structural_tcp_fused_borrowed_download_frames Closed structural performance evidence measured in events.\n",
+            "# TYPE ferrum2_structural_tcp_fused_borrowed_download_frames counter\n",
+            "ferrum2_structural_tcp_fused_borrowed_download_frames_total 7\n",
+        )));
+        assert!(output.contains("ferrum2_structural_admission_lock_wait_nanoseconds_total 19\n"));
+        assert!(output.contains("ferrum2_structural_overflow 0\n"));
+        assert_eq!(
+            output.matches("# TYPE ferrum2_structural_").count(),
+            StructuralCounter::COUNT + 1
+        );
+        assert_eq!(output.matches("# EOF").count(), 1);
+        for line in output
+            .lines()
+            .filter(|line| line.starts_with("ferrum2_structural_"))
+        {
+            assert!(!line.contains('{'), "structural samples have no labels");
+            assert!(!line.contains("structural-private-peer.example"));
+        }
+    }
 
     #[test]
     fn adapter_contract_observability_mapping_is_exhaustive_and_call_site_specific() {

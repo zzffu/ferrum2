@@ -116,6 +116,8 @@ final = "resolver"
         public_udp_slots: None,
         registry: registry.clone(),
         metrics: Arc::new(Metrics::new()),
+        #[cfg(feature = "structural-metrics")]
+        structural: ferrum2_structural::StructuralHub::new().local(),
         dns: Some(dns),
     });
 
@@ -219,6 +221,8 @@ final = "resolver"
         public_udp_slots: None,
         registry: direct_registry.clone(),
         metrics: Arc::new(Metrics::new()),
+        #[cfg(feature = "structural-metrics")]
+        structural: ferrum2_structural::StructuralHub::new().local(),
         dns: None,
     });
     let target = tokio::spawn(async move {

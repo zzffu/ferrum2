@@ -343,6 +343,9 @@ impl CounterShard {
     }
 
     fn add(&self, counter: StructuralCounter, value: u64) {
+        if value == 0 {
+            return;
+        }
         let cell = &self.counters[counter.index()];
         let mut current = cell.load(Ordering::Relaxed);
         loop {

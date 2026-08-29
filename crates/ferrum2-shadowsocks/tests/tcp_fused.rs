@@ -22,6 +22,8 @@ use ferrum2_shadowsocks::{
     ClientFlow, ClientTcpOutbound, MethodKeyAdapter, ShadowsocksTcpInbound, TcpReplayStore,
     TransportIo,
 };
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralCounter, StructuralHub};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use common::{
@@ -276,7 +278,15 @@ async fn always_ready_upload_alternates_read_and_complete_wire_write() {
         shutdown_polls: Arc::new(AtomicUsize::new(0)),
         pending_shutdowns: 0,
     };
-    let mut relay = Box::pin(relay_client_flow(&mut plain, &mut flow, |_, _| {}));
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
     let mut cx = Context::from_waker(std::task::Waker::noop());
 
     for _ in 0..3 {
@@ -312,6 +322,10 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
     };
     let progressed = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&progressed);
+    #[cfg(feature = "structural-metrics")]
+    let structural_hub = StructuralHub::new();
+    #[cfg(feature = "structural-metrics")]
+    let structural = structural_hub.local();
     let mut relay = Box::pin(relay_client_flow(
         &mut plain,
         &mut flow,
@@ -320,6 +334,8 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
                 observed.fetch_add(bytes, Ordering::SeqCst);
             }
         },
+        #[cfg(feature = "structural-metrics")]
+        &structural,
     ));
     let mut cx = Context::from_waker(std::task::Waker::noop());
 
@@ -342,6 +358,35 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
     assert_eq!(sequence.first(), Some(&"READ"));
     assert!(sequence.windows(2).all(|events| events != ["READ", "READ"]));
     assert!(sequence.iter().filter(|event| **event == "WRITE").count() > 1);
+    drop(sequence);
+    drop(relay);
+    #[cfg(feature = "structural-metrics")]
+    {
+        let snapshot = structural_hub.snapshot();
+        assert_eq!(snapshot.get(StructuralCounter::FtbrOwnedUploadFrames), 2);
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrBorrowedDownloadFrames),
+            0
+        );
+        assert_eq!(snapshot.get(StructuralCounter::FtbrFrames), 2);
+        assert!(snapshot.get(StructuralCounter::FtbrPartialWrites) > 0);
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrEncryptBufferCapacityBytes),
+            ferrum2_shadowsocks::MAX_ENCRYPT_WIRE_LEN as u64
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrDecryptBufferCapacityBytes),
+            ferrum2_shadowsocks::MAX_DECRYPT_WIRE_LEN as u64
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::TcpPlainToEncryptCopyBytes),
+            0
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::TcpDecryptToPlainCopyBytes),
+            0
+        );
+    }
 }
 
 #[tokio::test]
@@ -370,9 +415,17 @@ async fn server_raw_eof_before_first_response_sends_no_wire() {
         pending_shutdowns: 1,
     };
 
-    relay_server_flow(&mut plain, &mut flow, |_, _| {})
-        .await
-        .expect("clean raw EOF");
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    )
+    .await
+    .expect("clean raw EOF");
 
     assert_eq!(observation.lock().expect("observation").write_calls, 0);
     assert_eq!(read_polls.load(Ordering::SeqCst), 1);
@@ -394,7 +447,15 @@ async fn pending_upload_shutdown_never_repolls_raw_eof() {
         shutdown_polls: Arc::new(AtomicUsize::new(0)),
         pending_shutdowns: 0,
     };
-    let mut relay = Box::pin(relay_client_flow(&mut plain, &mut flow, |_, _| {}));
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
     let mut cx = Context::from_waker(std::task::Waker::noop());
 
     for _ in 0..3 {
@@ -493,6 +554,12 @@ async fn fused_round_trip(profile: MethodProfile, profile_index: u64, payload_le
     let response = vec![0xa5; payload_len];
     let expected_upload = upload.clone();
     let expected_response = response.clone();
+    #[cfg(feature = "structural-metrics")]
+    let structural_hub = StructuralHub::new();
+    #[cfg(feature = "structural-metrics")]
+    let client_structural = structural_hub.local();
+    #[cfg(feature = "structural-metrics")]
+    let server_structural = structural_hub.local();
 
     let client_relay = relay_client_flow(
         &mut client_plain,
@@ -503,6 +570,8 @@ async fn fused_round_trip(profile: MethodProfile, profile_index: u64, payload_le
                 .expect("client progress")
                 .push((direction, bytes));
         },
+        #[cfg(feature = "structural-metrics")]
+        &client_structural,
     );
     let server_relay = relay_server_flow(
         &mut server_plain,
@@ -513,6 +582,8 @@ async fn fused_round_trip(profile: MethodProfile, profile_index: u64, payload_le
                 .expect("server progress")
                 .push((direction, bytes));
         },
+        #[cfg(feature = "structural-metrics")]
+        &server_structural,
     );
     let exchange = async move {
         application.write_all(&upload).await.expect("upload");
@@ -562,6 +633,24 @@ async fn fused_round_trip(profile: MethodProfile, profile_index: u64, payload_le
         progress_total(&server_progress, FusedRelayDirection::TunnelToPlain),
         payload_len
     );
+    #[cfg(feature = "structural-metrics")]
+    {
+        let snapshot = structural_hub.snapshot();
+        assert_eq!(snapshot.get(StructuralCounter::FtbrOwnedUploadFrames), 2);
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrBorrowedDownloadFrames),
+            2
+        );
+        assert_eq!(snapshot.get(StructuralCounter::FtbrFrames), 4);
+        assert_eq!(
+            snapshot.get(StructuralCounter::TcpPlainToEncryptCopyBytes),
+            0
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::TcpDecryptToPlainCopyBytes),
+            0
+        );
+    }
 }
 
 fn progress_total(

@@ -757,6 +757,8 @@ pub(in crate::run) fn udp_test_context_for_psk(
         public_udp_slots: Some(public_udp_slots),
         registry,
         metrics: Arc::new(Metrics::new()),
+        #[cfg(feature = "structural-metrics")]
+        structural: ferrum2_structural::StructuralHub::new().local(),
         dns: None,
     };
     (path, Arc::new(context))

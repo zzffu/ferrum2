@@ -20,6 +20,8 @@ use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, UdpPacketError,
 };
 use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralHub, StructuralSnapshot, StructuralUnit};
 use tokio::net::TcpListener;
 
 use super::RunError;
@@ -59,6 +61,8 @@ pub(super) struct ClientMetricsRoot {
     pub(super) listener: Option<TcpListener>,
     pub(super) metrics: Arc<Metrics>,
     pub(super) registry: OwnerRegistry,
+    #[cfg(feature = "structural-metrics")]
+    pub(super) structural: StructuralHub,
 }
 
 impl PreparedProcessRoot<RunError> for ClientMetricsRoot {
@@ -73,9 +77,18 @@ impl PreparedProcessRoot<RunError> for ClientMetricsRoot {
         let listener = self.listener.take().expect("prepared metrics root");
         let metrics = Arc::clone(&self.metrics);
         let registry = self.registry.clone();
+        #[cfg(feature = "structural-metrics")]
+        let structural = self.structural.clone();
         let endpoint = MetricsEndpoint::new(
             listener,
-            move || render_client_metrics(&metrics, &registry),
+            move || {
+                render_client_metrics(
+                    &metrics,
+                    &registry,
+                    #[cfg(feature = "structural-metrics")]
+                    &structural,
+                )
+            },
             self.registry.clone(),
         );
         Box::pin(async move {
@@ -91,7 +104,11 @@ impl PreparedProcessRoot<RunError> for ClientMetricsRoot {
     }
 }
 
-fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String {
+fn render_client_metrics(
+    metrics: &Metrics,
+    registry: &OwnerRegistry,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralHub,
+) -> String {
     let snapshot = registry.snapshot();
     metrics.set_udp_sessions_active(Role::Client, snapshot.udp_sessions);
     metrics.set_udp_buffered_bytes(Role::Client, snapshot.udp_buffered_bytes);
@@ -114,7 +131,6 @@ fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String 
             "# HELP ferrum2_tun_tcp_flows_active TCP flows currently owned by the TUN foundation stack.\n",
             "# TYPE ferrum2_tun_tcp_flows_active gauge\n",
             "ferrum2_tun_tcp_flows_active{{role=\"client\"}} {}\n",
-            "# EOF\n",
         ),
         snapshot.active_process_roots,
         snapshot.process_forced_roots,
@@ -122,7 +138,45 @@ fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String 
         snapshot.active_tun_tcp_flows,
     )
     .expect("writing owner metrics to a String cannot fail");
+    #[cfg(feature = "structural-metrics")]
+    append_structural_metrics(&mut output, &structural.snapshot());
+    output.push_str("# EOF\n");
     output
+}
+
+#[cfg(feature = "structural-metrics")]
+fn append_structural_metrics(output: &mut String, snapshot: &StructuralSnapshot) {
+    for (counter, value) in snapshot.iter() {
+        let unit = match counter.unit() {
+            StructuralUnit::Count => "events",
+            StructuralUnit::Bytes => "bytes",
+            StructuralUnit::Nanoseconds => "nanoseconds",
+        };
+        write!(
+            output,
+            concat!(
+                "# HELP ferrum2_structural_{} Closed structural performance evidence measured in {}.\n",
+                "# TYPE ferrum2_structural_{} counter\n",
+                "ferrum2_structural_{}_total {}\n",
+            ),
+            counter.name(),
+            unit,
+            counter.name(),
+            counter.name(),
+            value,
+        )
+        .expect("writing structural metrics to a String cannot fail");
+    }
+    write!(
+        output,
+        concat!(
+            "# HELP ferrum2_structural_overflow Whether a structural counter saturated.\n",
+            "# TYPE ferrum2_structural_overflow gauge\n",
+            "ferrum2_structural_overflow {}\n",
+        ),
+        u8::from(snapshot.overflowed()),
+    )
+    .expect("writing structural overflow to a String cannot fail");
 }
 
 pub(super) fn run_error_for_supervisor(error: SupervisorError) -> RunError {
@@ -551,9 +605,22 @@ fn observe_dns_policy(metrics: &Metrics, observation: DnsPolicyObservation) {
 #[cfg(test)]
 mod tests {
     use ferrum2_shadowsocks::{TransportPhase, UDP_REPLAY_LAG, UdpReplayWindow};
+    #[cfg(feature = "structural-metrics")]
+    use ferrum2_structural::StructuralCounter;
 
     use super::*;
     use crate::run::test_support::*;
+
+    fn render_test_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String {
+        #[cfg(feature = "structural-metrics")]
+        let structural = StructuralHub::new();
+        render_client_metrics(
+            metrics,
+            registry,
+            #[cfg(feature = "structural-metrics")]
+            &structural,
+        )
+    }
 
     #[test]
     fn udp_packet_error_policy_is_closed_for_every_phase_and_variant() {
@@ -652,16 +719,16 @@ mod tests {
         let temporary = provisional
             .reserve_datagram(UdpDirection::ToTarget, 777)
             .expect("temporary reservation");
-        let live = render_client_metrics(&metrics, &registry);
+        let live = render_test_client_metrics(&metrics, &registry);
         assert!(live.contains("ferrum2_udp_sessions_active{role=\"client\"} 1"));
         assert!(live.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 777"));
         assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
         drop(temporary);
-        let rolled_back = render_client_metrics(&metrics, &registry);
+        let rolled_back = render_test_client_metrics(&metrics, &registry);
         assert!(rolled_back.contains("ferrum2_udp_sessions_active{role=\"client\"} 1"));
         assert!(rolled_back.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 0"));
         drop(provisional);
-        let closed = render_client_metrics(&metrics, &registry);
+        let closed = render_test_client_metrics(&metrics, &registry);
         assert!(closed.contains("ferrum2_udp_sessions_active{role=\"client\"} 0"));
         assert!(closed.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 0"));
     }
@@ -673,7 +740,7 @@ mod tests {
         let flow = registry.track_tun_tcp_flow();
         let handler = registry.track_tun_handler_task();
 
-        let live = render_client_metrics(&metrics, &registry);
+        let live = render_test_client_metrics(&metrics, &registry);
         assert!(live.contains("ferrum2_process_roots_active{role=\"client\"} 0"));
         assert!(live.contains("ferrum2_process_roots_forced_total{role=\"client\"} 0"));
         assert!(live.contains("ferrum2_tun_handler_tasks_active{role=\"client\"} 1"));
@@ -682,9 +749,54 @@ mod tests {
 
         drop(handler);
         drop(flow);
-        let closed = render_client_metrics(&metrics, &registry);
+        let closed = render_test_client_metrics(&metrics, &registry);
         assert!(closed.contains("ferrum2_tun_handler_tasks_active{role=\"client\"} 0"));
         assert!(closed.contains("ferrum2_tun_tcp_flows_active{role=\"client\"} 0"));
+    }
+
+    #[cfg(not(feature = "structural-metrics"))]
+    #[test]
+    fn default_metrics_render_has_no_structural_families() {
+        let output = render_test_client_metrics(&Metrics::new(), &OwnerRegistry::new());
+        assert!(!output.contains("ferrum2_structural_"));
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    #[test]
+    fn structural_metrics_render_exact_fixed_unlabelled_values_and_overflow() {
+        let structural = StructuralHub::new();
+        let local = structural.local();
+        local.add(StructuralCounter::DnsUdpCopyBytes, 41);
+        local.add(StructuralCounter::FtbrFastPathConnections, 2);
+        local.add(StructuralCounter::ReplayClearedBits, u64::MAX);
+        local.add(StructuralCounter::ReplayClearedBits, 1);
+
+        let output = render_client_metrics(&Metrics::new(), &OwnerRegistry::new(), &structural);
+        assert!(output.contains(concat!(
+            "# HELP ferrum2_structural_dns_udp_copy_bytes Closed structural performance evidence measured in bytes.\n",
+            "# TYPE ferrum2_structural_dns_udp_copy_bytes counter\n",
+            "ferrum2_structural_dns_udp_copy_bytes_total 41\n",
+        )));
+        assert!(output.contains("ferrum2_structural_tcp_fused_fast_path_connections_total 2\n"));
+        assert!(output.contains(&format!(
+            "ferrum2_structural_replay_cleared_bits_total {}\n",
+            u64::MAX
+        )));
+        assert!(output.contains("ferrum2_structural_tcp_plain_to_encrypt_copy_bytes_total 0\n"));
+        assert!(output.contains("ferrum2_structural_tcp_decrypt_to_plain_copy_bytes_total 0\n"));
+        assert!(output.contains("ferrum2_structural_overflow 1\n"));
+        assert_eq!(
+            output.matches("# TYPE ferrum2_structural_").count(),
+            StructuralCounter::COUNT + 1
+        );
+        assert_eq!(output.matches("# EOF").count(), 1);
+        for line in output
+            .lines()
+            .filter(|line| line.starts_with("ferrum2_structural_"))
+        {
+            assert!(!line.contains('{'), "structural samples have no labels");
+            assert!(!line.contains("structural-private-peer.example"));
+        }
     }
 
     #[test]

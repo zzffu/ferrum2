@@ -4,7 +4,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::{BufMut, BytesMut};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_core::AbortiveClose;
 use ferrum2_crypto::{Clock, SecureRandom, generate_method_response_salt};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralCounter, StructuralLocal};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::io::drain_staged;
@@ -32,6 +36,7 @@ pub(crate) fn fused_relay<'a, P, F, O>(
     plain: &'a mut P,
     flow: &'a mut F,
     observe: O,
+    #[cfg(feature = "structural-metrics")] structural: &'a StructuralLocal,
 ) -> FusedRelay<'a, P, F, O>
 where
     P: AsyncRead + AsyncWrite + Unpin,
@@ -39,10 +44,16 @@ where
     O: FnMut(FusedRelayDirection, usize) + Unpin,
 {
     let pending_upload_plaintext = flow.has_staged_upload().then_some(0);
+    #[cfg(feature = "structural-metrics")]
+    let structural_stats = FusedStructuralStats::new(flow.structural_buffer_capacities());
     FusedRelay {
         plain,
         flow,
         observe,
+        #[cfg(feature = "structural-metrics")]
+        structural,
+        #[cfg(feature = "structural-metrics")]
+        structural_stats,
         pending_upload_plaintext,
         upload_eof: false,
         download_eof: false,
@@ -56,12 +67,72 @@ pub(crate) struct FusedRelay<'a, P, F, O> {
     plain: &'a mut P,
     flow: &'a mut F,
     observe: O,
+    #[cfg(feature = "structural-metrics")]
+    structural: &'a StructuralLocal,
+    #[cfg(feature = "structural-metrics")]
+    structural_stats: FusedStructuralStats,
     pending_upload_plaintext: Option<usize>,
     upload_eof: bool,
     download_eof: bool,
     upload_done: bool,
     download_done: bool,
     upload_first: bool,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<P, F, O> Drop for FusedRelay<'_, P, F, O> {
+    fn drop(&mut self) {
+        self.structural_stats.publish(self.structural);
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+struct FusedStructuralStats {
+    owned_upload_frames: u64,
+    borrowed_download_frames: u64,
+    partial_writes: u64,
+    encrypt_buffer_capacity: u64,
+    decrypt_buffer_capacity: u64,
+    download_frame_open: bool,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl FusedStructuralStats {
+    fn new((encrypt, decrypt): (usize, usize)) -> Self {
+        Self {
+            owned_upload_frames: 0,
+            borrowed_download_frames: 0,
+            partial_writes: 0,
+            encrypt_buffer_capacity: encrypt as u64,
+            decrypt_buffer_capacity: decrypt as u64,
+            download_frame_open: false,
+        }
+    }
+
+    fn publish(&self, structural: &StructuralLocal) {
+        structural.add(
+            StructuralCounter::FtbrOwnedUploadFrames,
+            self.owned_upload_frames,
+        );
+        structural.add(
+            StructuralCounter::FtbrBorrowedDownloadFrames,
+            self.borrowed_download_frames,
+        );
+        structural.add(StructuralCounter::FtbrPartialWrites, self.partial_writes);
+        structural.add(
+            StructuralCounter::FtbrFrames,
+            self.owned_upload_frames
+                .saturating_add(self.borrowed_download_frames),
+        );
+        structural.add(
+            StructuralCounter::FtbrEncryptBufferCapacityBytes,
+            self.encrypt_buffer_capacity,
+        );
+        structural.add(
+            StructuralCounter::FtbrDecryptBufferCapacityBytes,
+            self.decrypt_buffer_capacity,
+        );
+    }
 }
 
 impl<P, F, O> Future for FusedRelay<'_, P, F, O>
@@ -141,13 +212,26 @@ where
         }
 
         self.flow.seal_upload_read(read).map_err(framed_error)?;
+        #[cfg(feature = "structural-metrics")]
+        {
+            self.structural_stats.owned_upload_frames =
+                self.structural_stats.owned_upload_frames.saturating_add(1);
+        }
         self.pending_upload_plaintext = Some(read);
         self.poll_pending_upload(cx)
     }
 
     fn poll_pending_upload(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.flow.has_staged_upload() {
-            match self.flow.poll_drain_upload(cx).map_err(framed_error) {
+            match self
+                .flow
+                .poll_drain_upload(
+                    cx,
+                    #[cfg(feature = "structural-metrics")]
+                    &mut self.structural_stats.partial_writes,
+                )
+                .map_err(framed_error)
+            {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(())) => {}
@@ -198,6 +282,16 @@ where
             self.download_eof = true;
             return self.poll_download_shutdown(cx);
         }
+        #[cfg(feature = "structural-metrics")]
+        if !self.structural_stats.download_frame_open {
+            self.structural_stats.borrowed_download_frames = self
+                .structural_stats
+                .borrowed_download_frames
+                .saturating_add(1);
+            self.structural_stats.download_frame_open = true;
+        }
+        #[cfg(feature = "structural-metrics")]
+        let source_len = source.len();
         let written = match Pin::new(&mut *self.plain).poll_write(cx, source) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -209,6 +303,15 @@ where
                 return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
             }
         };
+        #[cfg(feature = "structural-metrics")]
+        {
+            if written < source_len {
+                self.structural_stats.partial_writes =
+                    self.structural_stats.partial_writes.saturating_add(1);
+            } else {
+                self.structural_stats.download_frame_open = false;
+            }
+        }
         Pin::new(&mut *self.flow).consume_plain(written);
         (self.observe)(FusedRelayDirection::TunnelToPlain, written);
         cx.waker().wake_by_ref();
@@ -234,7 +337,87 @@ pub(crate) trait FusedProtocolFlow: PlainBufferedDuplex {
     fn upload_scratch(&mut self) -> &mut BytesMut;
     fn seal_upload_read(&mut self, payload_len: usize) -> Result<(), ShadowsocksError>;
     fn discard_upload_read(&mut self);
-    fn poll_drain_upload(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ShadowsocksError>>;
+    fn poll_drain_upload(
+        &mut self,
+        cx: &mut Context<'_>,
+        #[cfg(feature = "structural-metrics")] partial_writes: &mut u64,
+    ) -> Poll<Result<(), ShadowsocksError>>;
+    #[cfg(feature = "structural-metrics")]
+    fn structural_buffer_capacities(&self) -> (usize, usize);
+}
+
+#[cfg(feature = "structural-metrics")]
+struct PartialWriteTransport<'a, S> {
+    inner: &'a mut S,
+    partial_writes: &'a mut u64,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<S> AbortiveClose for PartialWriteTransport<'_, S>
+where
+    S: TransportIo,
+{
+    type Error = S::Error;
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        self.inner.mark_abortive()
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<S> TransportIo for PartialWriteTransport<'_, S>
+where
+    S: TransportIo,
+{
+    type IoError = S::IoError;
+
+    fn poll_read_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.inner).poll_read_buf(cx, destination, limit)
+    }
+
+    fn poll_read_initialized(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.inner).poll_read_initialized(cx, destination)
+    }
+
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.inner).poll_write(cx, source);
+        if let Poll::Ready(Ok(written)) = &result
+            && *written != 0
+            && *written < source.len()
+        {
+            *this.partial_writes = this.partial_writes.saturating_add(1);
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::IoError>> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.inner).poll_shutdown(cx)
+    }
 }
 
 impl<S, K, T> FusedProtocolFlow for ClientFlow<'_, S, K, T>
@@ -285,15 +468,42 @@ where
         self.encrypt.clear();
     }
 
-    fn poll_drain_upload(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ShadowsocksError>> {
-        drain_staged(
-            &mut self.io,
-            &mut self.encrypt,
-            &mut self.staged,
-            &mut self.lifecycle,
-            self.observers.flow,
-            cx,
-        )
+    fn poll_drain_upload(
+        &mut self,
+        cx: &mut Context<'_>,
+        #[cfg(feature = "structural-metrics")] partial_writes: &mut u64,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        #[cfg(not(feature = "structural-metrics"))]
+        {
+            drain_staged(
+                &mut self.io,
+                &mut self.encrypt,
+                &mut self.staged,
+                &mut self.lifecycle,
+                self.observers.flow,
+                cx,
+            )
+        }
+        #[cfg(feature = "structural-metrics")]
+        {
+            let mut io = PartialWriteTransport {
+                inner: &mut self.io,
+                partial_writes,
+            };
+            drain_staged(
+                &mut io,
+                &mut self.encrypt,
+                &mut self.staged,
+                &mut self.lifecycle,
+                self.observers.flow,
+                cx,
+            )
+        }
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    fn structural_buffer_capacities(&self) -> (usize, usize) {
+        (self.encrypt.capacity(), self.decrypt.capacity())
     }
 }
 
@@ -413,15 +623,42 @@ where
         }
     }
 
-    fn poll_drain_upload(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ShadowsocksError>> {
-        drain_staged(
-            &mut self.io,
-            &mut self.encrypt,
-            &mut self.staged,
-            &mut self.lifecycle,
-            self.observers.flow,
-            cx,
-        )
+    fn poll_drain_upload(
+        &mut self,
+        cx: &mut Context<'_>,
+        #[cfg(feature = "structural-metrics")] partial_writes: &mut u64,
+    ) -> Poll<Result<(), ShadowsocksError>> {
+        #[cfg(not(feature = "structural-metrics"))]
+        {
+            drain_staged(
+                &mut self.io,
+                &mut self.encrypt,
+                &mut self.staged,
+                &mut self.lifecycle,
+                self.observers.flow,
+                cx,
+            )
+        }
+        #[cfg(feature = "structural-metrics")]
+        {
+            let mut io = PartialWriteTransport {
+                inner: &mut self.io,
+                partial_writes,
+            };
+            drain_staged(
+                &mut io,
+                &mut self.encrypt,
+                &mut self.staged,
+                &mut self.lifecycle,
+                self.observers.flow,
+                cx,
+            )
+        }
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    fn structural_buffer_capacities(&self) -> (usize, usize) {
+        (self.encrypt.capacity(), self.decrypt.capacity())
     }
 }
 

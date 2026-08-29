@@ -9,6 +9,8 @@ use ::tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use bytes::{BufMut, BytesMut};
 use ferrum2_core::{AbortiveClose, ConnectError, Connector, LocalEndpoint, TargetAddr};
 use ferrum2_crypto::{Clock, SecureRandom};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 
 use crate::tcp::{FusedRelayDirection as CoreFusedRelayDirection, fused_relay};
 use crate::{
@@ -145,6 +147,7 @@ pub async fn relay_client_flow<P, S, K, T, O>(
     plain: &mut P,
     flow: &mut ClientFlow<'_, S, K, T>,
     mut observe: O,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> io::Result<()>
 where
     P: AsyncRead + AsyncWrite + Unpin,
@@ -153,9 +156,15 @@ where
     T: Clock + Sync,
     O: FnMut(FusedRelayDirection, usize) + Unpin,
 {
-    fused_relay(plain, flow, move |direction, bytes| {
-        observe(public_fused_direction(direction), bytes);
-    })
+    fused_relay(
+        plain,
+        flow,
+        move |direction, bytes| {
+            observe(public_fused_direction(direction), bytes);
+        },
+        #[cfg(feature = "structural-metrics")]
+        structural,
+    )
     .await
 }
 
@@ -164,6 +173,7 @@ pub async fn relay_server_flow<P, S, K, T, R, O>(
     plain: &mut P,
     flow: &mut ServerFlow<'_, S, K, T, R>,
     mut observe: O,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> io::Result<()>
 where
     P: AsyncRead + AsyncWrite + Unpin,
@@ -173,9 +183,15 @@ where
     R: SecureRandom,
     O: FnMut(FusedRelayDirection, usize) + Unpin,
 {
-    fused_relay(plain, flow, move |direction, bytes| {
-        observe(public_fused_direction(direction), bytes);
-    })
+    fused_relay(
+        plain,
+        flow,
+        move |direction, bytes| {
+            observe(public_fused_direction(direction), bytes);
+        },
+        #[cfg(feature = "structural-metrics")]
+        structural,
+    )
     .await
 }
 

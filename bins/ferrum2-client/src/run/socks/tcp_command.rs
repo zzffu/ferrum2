@@ -6,12 +6,16 @@ use ferrum2_core::{ConnectErrorKind, LocalEndpoint, SessionReply as _};
 use ferrum2_observability::{
     Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
+#[cfg(feature = "structural-metrics")]
+use ferrum2_runtime::RELAY_BUFFER_BYTES;
 use ferrum2_runtime::{
     CancellationToken, RelayDirection, relay_lifecycle, relay_lifecycle_with_engine,
 };
 use ferrum2_shadowsocks::ShadowsocksError;
 use ferrum2_shadowsocks::tokio::{FusedRelayDirection, TokioFramed, relay_client_flow};
 use ferrum2_socks5::SocksCommand;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{FtbrFallbackReason, StructuralCounter};
 use tokio::net::UdpSocket;
 
 use crate::run::context::{ClientContext, ClientRouting};
@@ -221,25 +225,49 @@ pub(super) async fn client_connection(
         Stage::Socks5,
         Outcome::Accepted,
     ));
+    #[cfg(feature = "structural-metrics")]
+    match &flow {
+        ClientTcpFlow::SingleProxy(_) => {
+            context
+                .structural
+                .add(StructuralCounter::FtbrFastPathConnections, 1);
+            context.structural.add(
+                StructuralCounter::FtbrRelayBufferCapacityRemovedBytes,
+                2 * RELAY_BUFFER_BYTES as u64,
+            );
+        }
+        ClientTcpFlow::Direct(_) => context
+            .structural
+            .add(FtbrFallbackReason::Direct.counter(), 1),
+        ClientTcpFlow::Proxy(_) => context
+            .structural
+            .add(FtbrFallbackReason::MultiHop.counter(), 1),
+    }
     let flow = match flow {
         ClientTcpFlow::SingleProxy(mut flow) => {
             let relay = relay_lifecycle_with_engine(
                 context.runtime.idle_timeout,
                 cancellation.cancelled(),
                 |progress| {
-                    relay_client_flow(&mut stream, &mut flow, move |direction, bytes| {
-                        progress.record(
-                            match direction {
-                                FusedRelayDirection::PlainToTunnel => {
-                                    RelayDirection::InboundToOutbound
-                                }
-                                FusedRelayDirection::TunnelToPlain => {
-                                    RelayDirection::OutboundToInbound
-                                }
-                            },
-                            bytes,
-                        );
-                    })
+                    relay_client_flow(
+                        &mut stream,
+                        &mut flow,
+                        move |direction, bytes| {
+                            progress.record(
+                                match direction {
+                                    FusedRelayDirection::PlainToTunnel => {
+                                        RelayDirection::InboundToOutbound
+                                    }
+                                    FusedRelayDirection::TunnelToPlain => {
+                                        RelayDirection::OutboundToInbound
+                                    }
+                                },
+                                bytes,
+                            );
+                        },
+                        #[cfg(feature = "structural-metrics")]
+                        &context.structural,
+                    )
                 },
             )
             .await;

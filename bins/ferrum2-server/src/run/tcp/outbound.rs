@@ -10,6 +10,8 @@ use ferrum2_observability::Metrics;
 use ferrum2_runtime::RuntimeTcpStream;
 use ferrum2_runtime::{MAX_RESOLVED_CANDIDATES, OwnerRegistry};
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 use tokio::io::AsyncWrite;
 
 use super::prefix::{PrefixFailure, forward_initial_payload};
@@ -73,6 +75,8 @@ pub(in crate::run) struct ServerContext {
     pub(in crate::run) network_sockets: Arc<ServerNetworkSocketService>,
     pub(in crate::run) registry: OwnerRegistry,
     pub(in crate::run) metrics: Arc<Metrics>,
+    #[cfg(feature = "structural-metrics")]
+    pub(in crate::run) structural: StructuralLocal,
 }
 
 pub(super) struct ServerNetworkTcpOutbound {

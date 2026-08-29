@@ -24,6 +24,8 @@ use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
 use ferrum2_shadowsocks::MethodKeyAdapter;
 use ferrum2_socks5::Socks5Inbound;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralHub;
 
 mod egress;
 
@@ -494,6 +496,8 @@ async fn run_with_registry_and_metrics_inner<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new();
     let ClientRunResources {
         mut materialization_root,
         materialized_cache,
@@ -689,6 +693,8 @@ where
             public_udp_slots,
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
+            #[cfg(feature = "structural-metrics")]
+            structural: structural.local(),
             dns: ordinary_dns.as_ref().map(Arc::clone),
         });
         let mut listens = Vec::with_capacity(config.inbounds.len());
@@ -813,6 +819,8 @@ where
         }
         if let Some(metrics_config) = config.metrics {
             let metrics_registry = registry.clone();
+            #[cfg(feature = "structural-metrics")]
+            let metrics_structural = structural.clone();
             roots.push(
                 ClientRootName::Metrics,
                 ProcessRoot::new(move || async move {
@@ -821,6 +829,8 @@ where
                         listener: Some(listener),
                         metrics,
                         registry: metrics_registry,
+                        #[cfg(feature = "structural-metrics")]
+                        structural: metrics_structural,
                     })
                 }),
             );

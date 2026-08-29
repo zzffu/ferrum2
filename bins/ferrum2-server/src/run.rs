@@ -12,6 +12,8 @@ use ferrum2_runtime::{
     ProcessSupervisor, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralHub;
 
 mod dns;
 #[path = "dns_egress.rs"]
@@ -326,6 +328,8 @@ async fn run_with_registry_prepared<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new();
     let ServerRunResources {
         mut materialization_root,
         materialized_cache,
@@ -507,6 +511,8 @@ where
                 network_sockets: Arc::clone(&network_sockets),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
+                #[cfg(feature = "structural-metrics")]
+                structural: structural.local(),
             });
             tcp_contexts.push(context);
         }
@@ -596,12 +602,16 @@ where
         }));
         if let Some(metrics_config) = config.metrics {
             let metrics_registry = registry.clone();
+            #[cfg(feature = "structural-metrics")]
+            let metrics_structural = structural.clone();
             roots.push(ProcessRoot::new(move || async move {
                 let listener = bind_listener(metrics_config.listen, 16)?;
                 Ok(ServerMetricsRoot {
                     listener: Some(listener),
                     metrics,
                     registry: metrics_registry,
+                    #[cfg(feature = "structural-metrics")]
+                    structural: metrics_structural,
                 })
             }));
         }
