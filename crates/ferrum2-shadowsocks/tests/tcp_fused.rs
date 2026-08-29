@@ -7,9 +7,9 @@ use std::future::{Future, ready};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -28,8 +28,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Re
 
 use common::{
     FakeClock, NOW, RecordingIo, ScriptedRandom, SourceSentinel, client_random_bytes,
-    method_provider, method_salt_from_u64, provider, response_wire_and_frames, salt_from_u64,
-    server_target, target, valid_request_wire, valid_request_wire_for,
+    method_provider, method_salt_from_u64, provider, request_data_frames, response_wire_and_frames,
+    salt_from_u64, server_target, target, valid_request_wire, valid_request_wire_for,
 };
 
 struct EndpointIo {
@@ -249,6 +249,62 @@ impl AsyncWrite for AlwaysReadyPlain {
     }
 }
 
+struct ExternallyReadyWritePlain {
+    ready: Arc<AtomicBool>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+    accepted: Arc<Mutex<Vec<u8>>>,
+    write_polls: Arc<AtomicUsize>,
+}
+
+impl AsyncRead for ExternallyReadyWritePlain {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for ExternallyReadyWritePlain {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_polls.fetch_add(1, Ordering::SeqCst);
+        if !self.ready.load(Ordering::SeqCst) {
+            *self.pending_waker.lock().expect("pending waker") = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        self.accepted
+            .lock()
+            .expect("accepted plaintext")
+            .extend_from_slice(source);
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[tokio::test]
 async fn fused_round_trip_covers_all_ciphers_and_boundary_payloads() {
     for (profile_index, profile) in MethodProfile::ALL.into_iter().enumerate() {
@@ -309,6 +365,103 @@ async fn fused_server_first_response_partial_writes_preserve_exact_wire() {
     }
     assert!(observed.write_calls > 1);
     assert_eq!(observed.abortive_calls, 0);
+}
+
+#[tokio::test]
+async fn externally_woken_carried_download_polls_one_next_fill() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("replay capacity");
+    let request_salt = salt_from_u64(74);
+    let request = valid_request_wire(NOW, &request_salt);
+    let first = b"first download";
+    let second = b"second download";
+    let reads = [
+        request[..ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN].to_vec(),
+        request[ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN..].to_vec(),
+    ]
+    .into_iter()
+    .chain(request_data_frames(&request_salt, &[first, second]))
+    .collect::<Vec<_>>();
+    let (io, observation) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io)
+        .await
+        .expect("server request")
+        .stream;
+    assert_eq!(observation.lock().expect("observation").read_calls, 2);
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let pending_waker = Arc::new(Mutex::new(None));
+    let accepted = Arc::new(Mutex::new(Vec::new()));
+    let write_polls = Arc::new(AtomicUsize::new(0));
+    let mut plain = ExternallyReadyWritePlain {
+        ready: Arc::clone(&ready),
+        pending_waker: Arc::clone(&pending_waker),
+        accepted: Arc::clone(&accepted),
+        write_polls: Arc::clone(&write_polls),
+    };
+    let progressed = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&progressed);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        move |direction, bytes| {
+            if direction == FusedRelayDirection::TunnelToPlain {
+                observed.fetch_add(bytes, Ordering::SeqCst);
+            }
+        },
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 4);
+    assert_eq!(write_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert!(accepted.lock().expect("accepted plaintext").is_empty());
+
+    ready.store(true, Ordering::SeqCst);
+    pending_waker
+        .lock()
+        .expect("pending waker")
+        .take()
+        .expect("sink registered the relay waker")
+        .wake();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(write_polls.load(Ordering::SeqCst), 2);
+    assert_eq!(&*accepted.lock().expect("accepted plaintext"), first);
+    assert_eq!(progressed.load(Ordering::SeqCst), first.len());
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        5,
+        "carried completion attempts exactly one fresh tunnel fill"
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(write_polls.load(Ordering::SeqCst), 3);
+    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    let expected = first
+        .iter()
+        .chain(second.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(*accepted.lock().expect("accepted plaintext"), expected);
+    assert_eq!(progressed.load(Ordering::SeqCst), expected.len());
 }
 
 #[tokio::test]
