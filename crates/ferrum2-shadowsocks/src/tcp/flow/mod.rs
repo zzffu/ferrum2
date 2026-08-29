@@ -3,12 +3,21 @@ mod client;
 mod fused;
 mod io;
 mod server;
+#[cfg(not(feature = "__single-worker-direct-open-diagnostic"))]
 mod worker_local;
 
 pub use client::{BoxedClientFlow, ClientFlow};
 #[cfg(feature = "tokio")]
 pub(crate) use fused::{FusedRelayDirection, fused_relay};
 pub use server::ServerFlow;
+
+/// Closed artifact identity for the subsequent-payload receive-open strategy.
+pub const TCP_SUBSEQUENT_PAYLOAD_OPEN_BUILD_IDENTITY: &str =
+    if cfg!(feature = "__single-worker-direct-open-diagnostic") {
+        "single-worker-direct-open-diagnostic"
+    } else {
+        "worker-local-copyback"
+    };
 
 use std::pin::Pin;
 use std::task::{Context, Poll};

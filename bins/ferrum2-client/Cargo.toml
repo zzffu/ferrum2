@@ -15,6 +15,9 @@ default = []
 __frame-size-16k = ["ferrum2-shadowsocks/__frame-size-16k"]
 __frame-size-65535 = ["ferrum2-shadowsocks/__frame-size-65535"]
 __frame-size-adaptive = ["ferrum2-shadowsocks/__frame-size-adaptive"]
+__single-worker-direct-open-diagnostic = [
+    "ferrum2-shadowsocks/__single-worker-direct-open-diagnostic",
+]
 candidate-udp-owned-headroom = [
     "ferrum2-runtime/candidate-udp-owned-headroom",
     "ferrum2-shadowsocks/candidate-udp-owned-headroom",

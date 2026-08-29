@@ -15,9 +15,10 @@ pub use tcp::{
     MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN, MAX_ENCRYPT_WIRE_LEN, MAX_PADDING_LEN,
     MAX_PAYLOAD_LEN, MethodKeyAdapter, NoReply, PlainBufferedDuplex, PlainDuplex, ProtocolReason,
     REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, ReplayCapacityError, ServerFlow,
-    ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN, TCP_SALT_LEN, TcpKeyError, TcpKeyProvider,
-    TcpReplayStore, TransportIo, TransportPhase, encode_request_first_write,
-    encode_response_first_write, open_data_frame,
+    ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN, TCP_SALT_LEN,
+    TCP_SUBSEQUENT_PAYLOAD_OPEN_BUILD_IDENTITY, TcpKeyError, TcpKeyProvider, TcpReplayStore,
+    TransportIo, TransportPhase, encode_request_first_write, encode_response_first_write,
+    open_data_frame,
 };
 #[cfg(feature = "candidate-udp-owned-headroom")]
 pub use udp::EncodedOwnedUdpResponse;

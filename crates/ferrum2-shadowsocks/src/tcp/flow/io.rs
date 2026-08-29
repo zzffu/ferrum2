@@ -3,6 +3,7 @@ use std::task::{Context, Poll};
 
 use bytes::BytesMut;
 
+#[cfg(not(feature = "__single-worker-direct-open-diagnostic"))]
 use super::worker_local::try_with_wire_staging;
 use super::{
     DataRx, Lifecycle, StagedKind, StagedWrite, TransportIo, TxState, prepare_decrypt,
@@ -185,34 +186,49 @@ pub(super) fn poll_data_fill<S: TransportIo>(
                     DataPoll::Pending(next)
                 } else {
                     let payload_len = wire_len - TAG_LEN;
-                    let opened = try_with_wire_staging(wire_len, |worker_wire| {
-                        worker_wire.copy_from_slice(&scratch[..wire_len]);
-                        protocol_cipher_boundary(lifecycle, observer, || {
-                            opener
-                                .open_slice_in_place(worker_wire)
-                                .map_err(frame_from_open_aead)
-                        })?;
-                        scratch[..payload_len].copy_from_slice(&worker_wire[..payload_len]);
-                        scratch.truncate(payload_len);
-                        Ok(())
-                    });
-                    match opened {
-                        Some(Ok(())) => {}
-                        Some(Err(error)) => {
-                            return DataPoll::Ready(DataRx::Poison, Err(error));
-                        }
-                        None => {
-                            if let Err(error) =
-                                protocol_cipher_boundary(lifecycle, observer, || {
-                                    opener.open_in_place(scratch).map_err(frame_from_open_aead)
-                                })
-                            {
+                    #[cfg(feature = "__single-worker-direct-open-diagnostic")]
+                    if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                        opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                    }) {
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    #[cfg(feature = "__single-worker-direct-open-diagnostic")]
+                    if scratch.len() != payload_len {
+                        let error =
+                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    #[cfg(not(feature = "__single-worker-direct-open-diagnostic"))]
+                    {
+                        let opened = try_with_wire_staging(wire_len, |worker_wire| {
+                            worker_wire.copy_from_slice(&scratch[..wire_len]);
+                            protocol_cipher_boundary(lifecycle, observer, || {
+                                opener
+                                    .open_slice_in_place(worker_wire)
+                                    .map_err(frame_from_open_aead)
+                            })?;
+                            scratch[..payload_len].copy_from_slice(&worker_wire[..payload_len]);
+                            scratch.truncate(payload_len);
+                            Ok(())
+                        });
+                        match opened {
+                            Some(Ok(())) => {}
+                            Some(Err(error)) => {
                                 return DataPoll::Ready(DataRx::Poison, Err(error));
                             }
-                            if scratch.len() != payload_len {
-                                let error = lifecycle
-                                    .install_protocol(observer, ProtocolReason::FrameBounds);
-                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            None => {
+                                if let Err(error) =
+                                    protocol_cipher_boundary(lifecycle, observer, || {
+                                        opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                                    })
+                                {
+                                    return DataPoll::Ready(DataRx::Poison, Err(error));
+                                }
+                                if scratch.len() != payload_len {
+                                    let error = lifecycle
+                                        .install_protocol(observer, ProtocolReason::FrameBounds);
+                                    return DataPoll::Ready(DataRx::Poison, Err(error));
+                                }
                             }
                         }
                     }
@@ -430,5 +446,20 @@ pub(super) fn poll_shutdown<S: TransportIo>(
             let error = lifecycle.install_transport(observer, TransportPhase::Shutdown);
             Poll::Ready(Err(error))
         }
+    }
+}
+
+#[cfg(test)]
+mod build_identity_tests {
+    use super::super::TCP_SUBSEQUENT_PAYLOAD_OPEN_BUILD_IDENTITY;
+
+    #[test]
+    fn subsequent_payload_open_identity_matches_selected_feature() {
+        let expected = if cfg!(feature = "__single-worker-direct-open-diagnostic") {
+            "single-worker-direct-open-diagnostic"
+        } else {
+            "worker-local-copyback"
+        };
+        assert_eq!(TCP_SUBSEQUENT_PAYLOAD_OPEN_BUILD_IDENTITY, expected);
     }
 }

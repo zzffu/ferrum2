@@ -9,7 +9,8 @@ pub use error::{
     DetectionReason, FlowTerminal, FrameError, ProtocolReason, ShadowsocksError, TransportPhase,
 };
 pub use flow::{
-    BoxedClientFlow, ClientFlow, PlainBufferedDuplex, PlainDuplex, ServerFlow, TransportIo,
+    BoxedClientFlow, ClientFlow, PlainBufferedDuplex, PlainDuplex, ServerFlow,
+    TCP_SUBSEQUENT_PAYLOAD_OPEN_BUILD_IDENTITY, TransportIo,
 };
 #[cfg(feature = "tokio")]
 pub(crate) use flow::{FusedRelayDirection, fused_relay};
