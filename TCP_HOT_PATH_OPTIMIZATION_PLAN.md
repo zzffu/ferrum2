@@ -5,8 +5,11 @@
 `62.9574%`，未达 90%。后续 two-worker、4+4 connection shard、2+2 balanced shard、
 两代 incoming-CPU shard，以及两代 length→payload single-poll 候选均已提交、推送并判失败；
 随后 fused decrypt-to-sink 候选在唯一正式本地样本中相对即时 `d874d3dd` 对照为 `+1.3604%`，
-方向为正但幅度不足以触发 hosted direct CI；其 direct worker receive 子候选又相对父节点下降
-`1.6963%`，已判失败并冻结。所有候选提交与远端分支均保留。
+方向为正但幅度不足以触发 hosted direct CI；其 direct worker receive 与 worker-local out-of-place
+open 两个子候选又分别相对父节点下降 `1.6963%` 与 `2.7589%`，均已判失败并冻结。独立 hot/cold
+primitive 诊断证明 out-of-place AES-128 本身并不慢，因此不再把失败归因于 crypto primitive，也不为
+单个未配对正式样本引入自研 GCM。阶段 3 的 copy-in 删除轴停止，`bf4cd4a6` 保持最后一个本地弱正向
+节点；所有产品候选与诊断证据提交、远端分支均保留。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -73,7 +76,9 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── 7e3f137a  length→payload single-poll（本地 -7.23%，失败）
             ├── 0ad5cab5  single-poll + transition Pending retry（即时对照 -0.90%，失败）
             └── bf4cd4a6  fused decrypt-to-sink（即时对照 +1.36%，弱正向、未进 CI）
-                └── 8fa19ec1  direct worker receive（相对父节点 -1.70%，失败）
+                ├── 8fa19ec1  direct worker receive（相对父节点 -1.70%，失败）
+                └── bf516bb5  worker-local out-of-place open（相对父节点 -2.76%，失败）
+                    └── 7d06266c → 02b9faa4  hot/cold primitive diagnostic（diagnostic-only）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -583,9 +588,98 @@ full/Pending/partial/reentrant 次数，再从 `bf4cd4a6` 或共同基线开新�
 解到 worker-local plaintext，再沿 bf4 sink seam 发布。这样完全删除 8fa 的长 TLS-around-I/O scope，
 同时继续独立验证删除 copy-in 是否有价值。
 
+### 12.12 worker-local out-of-place open 唯一正式样本与失败判定
+
+候选 `codex/tcp-hot-path-stage3-worker-local-out-of-place-open` @
+`bf516bb58657a5d6827d2153b8c9d86a8c677cb9` 已在测量前提交并推送；tree 为
+`d5bab0f2c7afbdf09ea1a54b5c9061e0a88235a6`。它直接从 `bf4cd4a6` 开始，`8fa19ec1` 不是祖先。
+生产差异严格限于四个 crypto/vendor 文件、`flow/io.rs` 与 `tests/tcp_fused.rs`；没有 direct receive、
+runtime、initial payload、Windows/SOCKS、TUN 或公共 `PlainBufferedDuplex` 改动。
+
+完整 payload 仍先由原 flow scratch 收齐；随后才借 worker TLS，把只读 ciphertext-and-tag 直接解到
+exact-size worker plaintext，再沿 bf4 sink seam 发布。三种 cipher 都使用 RustCrypto separate
+`InOutBuf`，成功路径没有 scratch→TLS copy-in。新增 `TcpOpener::open_slice_into` 返回 `Result<()>`，
+不返回冗余长度：认证或长度失败清完整候选 output、nonce 不提交；nonce exhaustion 在触碰 input/output
+前失败；成功只提交一次 nonce。这里明确删除历史“失败时 output 原样不变”契约，不做 rollback copy；
+只读 input 因接口结构保持不变，但这不是通过成功路径备份换来的兼容承诺。
+
+两轮独立审查均为零 blocker。Crypto 全套 36 项、Shadowsocks all-features 全套、`tcp_fused` 16/16、
+`tcp_fragmentation` 17/17、no-default check、client/server all-features check、两 crate all-targets/
+all-features Clippy `-D warnings`、fmt 与 diff-check 全部通过。测试覆盖三算法成功/tamper/长度/nonce
+exhaustion、auth failure 不 poll sink、fragmented transport 在完整 ciphertext 前不发布、sink
+full/Pending/partial/error、zero frame 与 TLS reentrant fallback。
+
+clean、pushed HEAD 的候选专属 profiling 二进制固定 CPU 0—3，执行一次且仅一次 3 秒预热 + 15 秒
+正式 `tcp-bulk`；前面的 shell pipe 启动尝试因 `git.exe` 消耗脚本 stdin 在任何 build/proxy/workload
+前静默结束，不消耗样本。改用 process substitution 后的唯一 workload 合同为 `status=PASS`、
+`sample_count=1`、`runner_exit_status=0`、8 workers、52,165 transactions、3,418,685,440 checked
+bytes，即 `227,912,362 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `8cc10e6ab28178853a0f3f11b3382fd26da5afbdeeead78769f12b6faa0e144a` |
+| `ferrum2-client` | `02539403914066cdf3e086d0ef937f15b8f7ca134c173c23359f3ca92999eb98` |
+| `ferrum2-server` | `4e0f75ae714ef41338c3abc92ae469bd50e59fe09d6d57383a14999b4893cad0` |
+
+相对父节点 `bf4cd4a6` 的 `234,378,581 B/s` 下降 `6,466,219 B/s`（`-2.7589%`）；代理
+CPU 从 `23,180 ms` 变为 `23,160 ms`（`-0.0863%`），吞吐/代理 CPU 下降 `2.6749%`；migrations
+从 `123,973` 增至 `130,836`（`+5.5359%`），context switches 从 `505,073` 增至 `512,254`
+（`+1.4218%`），mean CPU busy 从 `47.156%` 变为 `47.045%`（`-0.111` 个百分点）。相对共同
+基线 `d874d3dd` 则低 `3,320,491 B/s`（`-1.4360%`），CPU 高 `0.1730%`，效率低 `1.6062%`。
+
+按预声明的“不得低于父候选”条件，`bf516bb` 判失败、冻结、不触发 CI、不重跑，也不作为后续产品
+祖先。该判定是候选选择规则，不把单个未配对 15 秒差值自动升级为已证明的代码因果。
+
+### 12.13 hot/cold primitive 诊断与根因边界
+
+诊断分支 `codex/tcp-hot-path-stage3-crypto-open-micro-diagnostic` 只为同时调用两种 primitive 而从
+`bf516bb` 开始；它是 diagnostic-only，绝不作为产品祖先。`7d06266c` 加入固定 CPU 2、32 KiB、
+9 个 ABBA/BAAB 样本的 hot-source 测试；`02b9faa4` 继续加入 AES-128 cold-source 测试。两个提交均
+已推送，既有 hot 测试没有为 cold 结果重写或重跑。
+
+hot-source 中位数：
+
+| cipher | copy + in-place | out-of-place | out-of-place 变化 |
+| --- | ---: | ---: | ---: |
+| AES-128-GCM | 10,543.5 ns/op | 10,164.8 ns/op | `-3.593%` |
+| AES-256-GCM | 11,476.7 ns/op | 11,253.1 ns/op | `-1.949%` |
+| ChaCha20-Poly1305 | 16,119.6 ns/op | 15,717.7 ns/op | `-2.493%` |
+
+cold-source 只测正式 workload 使用的 AES-128：每个 role 使用独立 64 MiB ciphertext corpus 与
+64 MiB eviction buffer，每个 timed role 前先驱逐 LLC、再预触热固定 output；2,048 个唯一 32 KiB
+块/批，每样本两批、9 个平衡样本，只运行一次。copy + in-place 为 `12,074.8 ns/op`，out-of-place
+为 `10,861.5 ns/op`，后者快 `10.048%`；九个 paired delta 均为负，范围 `-8.996%` 至
+`-11.068%`，认证、完整明文和 checksum 合同全部通过。
+
+因此可以排除以下产品回归解释：out-of-place primitive 算术本身更慢、`InOutBuf` 隐藏整帧 copy、
+成功路径为失败输出契约做 rollback、普通 cold source 的第二遍读取是主要瓶颈。hot/cold micro 都与
+产品样本方向相反。剩余解释只包括 micro 未模拟的跨核 dirty-line ownership/真实 socket 调度耦合、
+少量集成 code layout，以及不可从一个未配对正式样本消除的运行波动。历史多 worker locality 消融和
+本次 migrations/context-switch 方向支持前两项，但没有一项被当前证据单独闭合；特别是 `bf516bb`
+相对共同基线只低 `1.4360%`，与 `bf4cd4a6` 的 `+1.3604%` 都处于历史短样本噪声量级。
+
+### 12.14 阶段 3 停止决定
+
+buffer rotation 方案曾从 `bf4cd4a6` 建立 clean 本地 lineage 分支
+`codex/tcp-hot-path-stage3-worker-buffer-rotation`，但在任何代码、提交或 workload 前被审查否决：
+交换 `BytesMut` owner 不迁移 cache line，却会破坏固定 per-flow decrypt allocation identity，并扩大
+zeroize、capacity、reentrant、Pending/partial 状态面。length→payload read-ahead 后延迟 open 也被
+否决，因为它让完整 ciphertext 额外跨一个 outer poll，反而扩大已知 locality 风险。
+
+单遍 destructive AES-GCM（认证完成前可在 TLS 中暂存候选 plaintext，失败清 output）在密码学上可以
+实现，但 hot/cold 结果已经否定其“两遍读取是瓶颈”的性能前提。为此引入自写 J0/counter/GHASH、
+常量时 tag、硬件批处理和额外 key state 的审计成本不成比例，故 NO-GO：不实现、不建立产品提交、
+不运行正式 workload。
+
+阶段 3 因此停止于 `bf4cd4a6`：保留 copy-in 作为当前已验证的 locality pass，保留 fused sink 删除
+copyback 的弱正向；不再制造 copy-in、direct receive、same-poll 或自研 crypto 候选。本阶段没有满足
+触发第二次 hosted CI 的本地强正向结果，因此不创建 CI run。90% 总目标仍未完成；后续若继续，应由
+用户明确授权进入阶段 4 或新的 profile 证据支持的独立架构轴。
+
 ## 13. 停止条件与后续
 
 - 若 direct ratio `>=90%`：停止热路径改动，保留 scale trade-off，后续另立 connection-sharding任务。
-- 若 `<90%`：本次候选与 CI 证据永久保留；不得从测量失败提交叠加产品优化。下一尝试从
-  `d874d3dd` 或后续已证明改善的成功节点开 sibling branch。
+- 若 `<90%`：本次候选与 CI 证据永久保留；不得从测量失败提交叠加产品优化。阶段 2/3 已停止；
+  只有获得后续阶段授权或新的 profile 证据时，才从 `bf4cd4a6`、`d874d3dd` 或其它已证明节点开
+  独立 sibling branch。
 - 不实施 TUN 优化，不用不安全/不零化 ring 结果填补差距。
