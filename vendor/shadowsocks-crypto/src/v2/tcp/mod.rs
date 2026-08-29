@@ -1,6 +1,8 @@
 //! AEAD 2022 TCP ciphers with explicit caller-owned nonces.
 
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
+use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     kind::{CipherCategory, CipherKind},
@@ -57,6 +59,7 @@ impl CipherVariant {
     }
 }
 
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
 impl ZeroizeOnDrop for CipherVariant {}
 
 /// A checked AEAD2022 TCP primitive owner.
@@ -131,6 +134,7 @@ impl TcpCipher {
     }
 }
 
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
 impl ZeroizeOnDrop for TcpCipher {}
 
 #[cfg(test)]

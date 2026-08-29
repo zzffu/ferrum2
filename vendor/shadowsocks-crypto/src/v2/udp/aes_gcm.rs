@@ -1,6 +1,8 @@
 //! AEAD 2022 UDP AES-GCM body ciphers.
 
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
+use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     v2::{
@@ -65,4 +67,5 @@ impl Cipher {
     }
 }
 
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
 impl ZeroizeOnDrop for Cipher {}
