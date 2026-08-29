@@ -2,9 +2,9 @@
 
 状态：阶段 2、阶段 3 已完成实现与本地分轴测量；single-worker 产品候选
 `d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
-`62.9574%`，未达 90%。后续 two-worker、4+4 connection shard 和 2+2 balanced shard
-以及两代 incoming-CPU shard 候选均已提交、推送并判失败；当前继续从共同成功基线
-`d874d3dd` 开 sibling，不把失败候选作为祖先。
+`62.9574%`，未达 90%。后续 two-worker、4+4 connection shard、2+2 balanced shard、
+两代 incoming-CPU shard，以及 length→payload single-poll 候选均已提交、推送并判失败；
+当前继续从共同成功基线 `d874d3dd` 开 sibling，不把失败候选作为祖先。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -67,7 +67,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── a1b67079 → 04a83c90  4+4 connection shards（双模态，失败）
             ├── 8ca007fd  2+2 balanced connection shards（失败）
             ├── ce8b2f10  server incoming-CPU pinned shards（本地 ratio 44.655%，失败）
-            └── 159928d3  dual incoming-CPU pinned shards（首样本 543.7 MB/s，失败）
+            ├── 159928d3  dual incoming-CPU pinned shards（首样本 543.7 MB/s，失败）
+            └── 7e3f137a  length→payload single-poll（本地 -7.23%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -370,9 +371,9 @@ CPU 不在 pool 时仍共享 RR fallback。这样由 source 的初始 RX CPU 选
 `36.87 CPU-s / 14s`，四核容量占用 `65.85%`，runner 发生 `42,315` 次迁移。双入口单变量没有消除
 低档，因此该提交判失败、冻结且不触发 CI。
 
-### 12.5 当前 sibling：length 完成后只 poll payload 一次
+### 12.5 length 完成后只 poll payload 一次（失败、冻结）
 
-下一候选 `codex/tcp-hot-path-stage3-length-payload-poll` 直接从 `d874d3dd` 开始，不继承任何 shard
+候选 `codex/tcp-hot-path-stage3-length-payload-poll` @ `7e3f137a` 直接从 `d874d3dd` 开始，不继承任何 shard
 失败提交。根因假设是当前 receive 状态机即使已经完整读取并认证 18-byte encrypted length，也无条件
 `wake_by_ref + Pending`；若 payload 已在同一 socket ready 批次中，这会为每个 frame 强制增加一次
 Tokio run-queue 往返。64 KiB lockstep、双向、8 流会放大该等待空档，而 dual 候选仅约 66% 全机 busy
@@ -383,6 +384,30 @@ Tokio run-queue 往返。64 KiB lockstep、双向、8 流会放大该等待空�
 完整零长度 payload self-wake 回 length 状态，不读取下一 frame。禁止循环、禁止跨 frame、禁止复用
 `fd5a42de` 的 64-ready-I/O/8-frame/256-KiB budget。EOF、transport/protocol/auth 分类、nonce 提交、
 失败不发布 plaintext 以及 destructive decrypt 契约保持不变。
+
+实现通过 Shadowsocks all-features、Clippy、client/server all-features check、fmt、diff 以及独立审查，
+并在测量前提交、推送。唯一固定 4 CPU、3 秒预热 + 15 秒正式样本为 `218,916,454 B/s`；相对
+同配置 `d874d3dd` 历史值 `235,973,291 B/s` 下降 `17,056,837 B/s`（`-7.2283%`）。被测 SHA 为
+`7e3f137ae8a72bc1a3f68f82e2e4555ac985a067`，tree 为 `a479ec9492fa153a75201e61424f3df0631ce5e7`；
+client/server 二进制 SHA-256 分别为
+`13ade9fca4fe3a0046e723c87c82afdf283ae64e0d27cc40beb759045a5d08a3` 和
+`2697b8ed90b3dd82ac10be09bd730517899ca74adf6b47f2c423692d1bddcd18`。
+
+14 秒 active 观测中 client/server 只消耗 `20.32 CPU-s`（平均 `1.451` 核），却发生 `91,950`
+次迁移和 `426,279` 次 context switch，约为 `4,525 migrations/proxy-CPU-s`；全机平均 busy 仅
+`40.779%`。这排除 CPU/AEAD 饱和。最可信根因是同 poll 的 payload 尚未 ready 时，候选取消了原
+length 边界的 synthetic wake，任务从 Tokio 本地 runnable 转为等待 reactor wake，长期 receive
+scratch 更容易在四个 worker 间移交。该提交永久冻结、不触发 CI；前两次 probe 启动尝试均在创建
+代理进程前被 Git-worktree/M4 binary-dir 预检拒绝，正式 workload 的样本数仍严格为一。
+
+### 12.6 当前 sibling：ready fast path + Pending 本地重试
+
+`codex/tcp-hot-path-stage3-length-payload-local-retry` 重新直接从 `d874d3dd` 开始，不继承
+`7e3f137a`。它保留唯一可能有收益的部分：length 完成后只尝试一次 payload；若 payload 已 ready，
+同 poll 完成并删除一次调度往返；若该首次 payload poll 返回 Pending，则恢复一次 synthetic
+self-wake，使行为回到本地 runnable。以后从既有 Payload 状态再次得到 Pending 时只依赖 transport
+waker，避免 busy loop。partial Ready、zero frame、EOF/error/auth、nonce、terminal、不发布失败
+plaintext、无循环和不跨 frame 契约均保持不变。
 
 ## 13. 停止条件与后续
 
