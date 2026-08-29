@@ -1,6 +1,6 @@
 # Ferrum2 TCP 热路径优化计划
 
-状态：阶段 1 代码与专项测量已完成；完整宏观阶段 0 及阶段 2—7 未实施
+状态：阶段 1 direct-open candidate 经 CI 测得稳定退化；按用户决定不回退，当前分支保留实现与放宽后的失败契约，阶段 2—7 未实施
 
 基线提交：`1e08868c8c3d523f1275cd6f8d3b63f4d42453e6`
 
@@ -22,7 +22,7 @@
 
 所有优化必须保持：
 
-- SIP022 wire compatibility；认证失败仍 fail closed 且不提交 nonce，但不再保证输入 buffer 不变；
+- SIP022 wire compatibility；认证失败仍 fail closed 且不提交 nonce，但输入 buffer 内容未指定；
 - nonce exhaustion 仍必须在 primitive 执行前失败，且不得修改 buffer 或 counter；
 - 有界背压、双向公平性、TCP half-close 和取消语义；
 - workspace `unsafe` 策略不变；
@@ -49,23 +49,23 @@
 - encrypted-length、payload、ready-plaintext 和 staged-write 状态；
 - partial I/O、认证失败、EOF 和 shutdown 处理。
 
-内部 crypto seam 使用可变 slice 和逻辑长度进行原位 seal/open。它不得为每个 packet 分配，也不得要求调用者通过 `BytesMut::clear/resize` 表达状态。
+当前内部 crypto seam 使用可变 slice 和逻辑长度进行原位 seal/open，不为每个 packet 分配，也不要求调用者通过 `BytesMut::clear/resize` 表达状态。CI 已证明把 transport receive scratch 直接作为 AEAD mutation buffer 会在多-worker workload 上退化；后续候选应优先评估 authenticated out-of-place open 或真正 worker-local destination。
 
 测试只通过 frame/flow interface 断言 wire bytes、明文、错误、allocation、背压和 half-close，不再用 scratch 指针稳定性代替真实 allocation 约束。
 
 #### 认证失败 buffer 契约决策
 
-删除“AEAD 认证失败后输入 ciphertext buffer 原样不变”的旧契约。该契约目前由 `crates/ferrum2-crypto/tests/sip022_vectors.rs` 的 corrupted-buffer 相等断言固定，并迫使 `TcpOpener::open_in_place` 在每次尝试前复制完整 body。生产调用者在认证失败后都会终止握手或把 flow 置为 poison，不会重用失败 buffer，因此保留原 ciphertext 没有调用者价值，却让每个成功 frame 都承担 allocation、两次复制和临时清零成本。
+删除“AEAD 认证失败后输入 ciphertext buffer 原样不变”的旧契约。该契约会迫使 destructive open 在尝试前复制完整 body；当前生产调用者在认证失败后终止握手或把 flow 置为 poison，不会继续读取失败 buffer。阶段 1 虽然在真实多-worker socket workload 上稳定退化，但按用户决定不回退，因此当前分支继续采用放宽后的契约；这不是性能通过的依据。
 
-新的 interface 契约为：
+当前 interface 契约为：
 
 | 结果 | 输入 buffer | nonce |
 | --- | --- | --- |
 | 成功 | 同一 backing storage 中得到已认证明文 | 提交一次 |
-| `AuthenticationFailed` | buffer 内容未指定且调用者不得再读取或复用；实际进入 primitive 的 body 会被清零，过短输入也必须整体丢弃 | 不提交 |
+| `AuthenticationFailed` | buffer 内容未指定且调用者不得再读取或复用；不得释放候选明文 | 不提交 |
 | `NonceExhausted` | 保持不变 | 保持不变 |
 
-认证失败仍必须满足：不释放未经认证的明文、安装 fatal terminal、丢弃整个 frame/flow。测试应断言这些可观察结果和 nonce rollback，不再断言失败 ciphertext 的逐字节保留。
+认证失败仍必须安装 fatal terminal 并丢弃整个 frame/flow。测试继续断言 fail closed、fatal terminal 和 nonce rollback，不断言失败 ciphertext 逐字节保留。
 
 ### 3.2 Generation-bound TCP module
 
@@ -105,7 +105,7 @@ ready-flow queue/bitset 使用 slot generation 防止陈旧唤醒，并使用 pe
 
 退出条件：基线环境、命令、配置、日志级别、样本和 profile 均可复现；没有生产代码变化。
 
-### 阶段 1：原位解密并删除全 scratch 清零
+### 阶段 1：原位解密并删除全 scratch 清零（已实现；CI 已知退化，按决定保留）
 
 主要文件：
 
@@ -133,12 +133,15 @@ ready-flow queue/bitset 使用 slot generation 防止陈旧唤醒，并使用 pe
 
 建议提交：`perf(shadowsocks): decrypt TCP frames in place`
 
-#### 阶段 1 实施与测量记录（2026-08-29）
+#### 阶段 1 实施、CI 退化与根因记录（2026-08-29）
 
 阶段 1 保持为两个可独立 checkout、测量和回退的提交：
 
 - 专项测量基线：`6b462785`（仅计划、allocation/timing harness 和测试依赖）；
-- 阶段 1 candidate：`1dfd580`（原位解密、固定 decrypt backing 和契约测试）。
+- 阶段 1 candidate：`1dfd580`（原位解密、固定 decrypt backing 和契约测试）；
+- 结果记录：`40451f60`；
+- CI 后曾生成本地回退提交：`6212eada`；
+- 按用户“不回退”的明确决定重新应用并作为当前产品状态保留：`75c338ac`。
 
 专项 harness 在 Windows 本机使用 current-thread Tokio 和相同 release test binary 入口，排除 fixture 构造、握手、destination 分配及 warm-up，只测 server steady-state RX 的“加密长度读取/解密 + payload 读取/解密 + 明文交付”。payload 固定为 1 B、1 KiB、32 KiB。
 
@@ -158,9 +161,33 @@ release timing 使用 6 对 AB/BA 交错运行；每次运行每档先 warm-up 6
 | 1 KiB | 3,652.1 | 1,900.7 | 47.72% |
 | 32 KiB | 25,943.4 | 13,656.8 | 47.38% |
 
-六对数据在三档 payload 上均为正向，没有触发“退化后根因定位/回退”停止条件。结果与删除的两项确定性成本一致：旧路径每帧分别为 2 字节长度和 payload 创建临时 `Vec`，随后复制明文，并在 RX 状态切换时反复清零 65,551 字节 scratch；candidate 直接在固定 backing 的有效 slice 中认证解密，只维护逻辑有效区间。
+该 current-thread、always-ready 微基准只证明 isolated flow work 变少，不能代表真实 socket 多-worker 吞吐。GitHub Actions run [33238053157](https://github.com/zzffu/ferrum2/actions/runs/33238053157) 使用 Ubuntu 24.04、4 vCPU、8 条长连接、64 KiB lockstep echo、3 秒 warm-up、30 秒 active 和 6 对 AB/BA；parent=`6b462785`，candidate=`40451f60`。六对 correctness/cleanup 全部 PASS，但 `tcp-bulk` 吞吐全部下降：
 
-这个专项微基准可以独立判断阶段 1 的稳态 RX 改动，但不能替代完整 `tcp-bulk`、`tcp-stream-64k`、`tcp-request-1k`、连接建立、客户端首响应、CPU profile 或 TUN 测量。完整宏观阶段 0 仍需在受控 Linux/Windows qualification 环境中按仓库 performance policy 另行采集。
+| pair | baseline B/s | candidate B/s | improvement |
+| ---: | ---: | ---: | ---: |
+| 1 | 258,650,931 | 217,072,708 | -16.075% |
+| 2 | 263,841,382 | 226,614,749 | -14.109% |
+| 3 | 266,698,752 | 221,050,743 | -17.116% |
+| 4 | 264,450,867 | 224,133,120 | -15.246% |
+| 5 | 263,494,041 | 223,453,730 | -15.196% |
+| 6 | 268,540,313 | 227,165,252 | -15.407% |
+
+paired median 为 `-15.3266%`，范围 `-17.116%..-14.109%`，0 胜 6 负。diagnostic 总状态按契约为 `INCONCLUSIVE`，但方向稳定，不能把它解释成噪声或 qualification 通过。
+
+根因消融在 WSL2/Linux 上用真实 socket、同一 8-flow workload 并把全部子进程限制到 4 CPU：
+
+- 保留 fixed scratch、有效区间和 `Result<usize>`，只恢复每帧临时 `Zeroizing<Vec>` 中解密再 copyback：约 310—350 MB/s；
+- direct-open candidate：约 126—158 MB/s；
+- unit-return 变体与 direct-open 等价，排除 `usize`/嵌套 `Result` ABI 为主因；
+- 每-flow 可复用独立 staging（warm-up 后零分配）：约 225—237 MB/s，只恢复部分吞吐，说明 fresh worker-local storage 比长期随 flow 迁移的 storage 更重要；
+- 将同一真实 socket workload 限制为单 CPU 后，baseline 约 236.8 MB/s，direct-open 约 300.9 MB/s，direct-open 反而提升约 27.1%。
+
+`perf stat` 还显示 direct-open 每字节 cycles/instructions 更少，但只利用约 0.31 个 user CPU；copy-open 可利用约 2.29 个 user CPU，并且 direct-open 的 cache-miss/byte 高约 10.6%。结合 AES-GCM 先 GHASH、再 CTR 读写同一 body，可确认主要机制是：真实 socket 的一个 frame 跨 poll 被不同 Tokio worker 填入长期 transport scratch；随后直接在同一 cache lines 上进行多遍认证/写入，触发跨核 cache-line ownership 和写后写代价，导致多核并行利用率崩塌。单线程 `LinearReadIo` 微基准没有 worker migration，因此给出相反方向。
+
+处理决定：按用户明确要求不回退，`1dfd580` 的 direct-open 产品路径及“认证失败 buffer 内容未指定”契约继续保留；其性能状态必须标记为 `known regression / not accepted winner`，不得把本次 CI 解释为 qualification 通过。固定 scratch/删除全量清零虽然在 copy-open 消融中有正向迹象，但尚未经过相同 CI 六对独立确认，因此也不从失败组合中拆出并宣称 winner。后续优化必须拆成独立 candidate：
+
+1. 保持旧 open 契约，只测试 exact logical range/减少 scratch 清零；
+2. 设计 authenticated out-of-place open 或真正 worker-local 的 plaintext destination，避免让长期 transport buffer 同时承担 socket receive 与多遍 AEAD mutation。
 
 ### 阶段 2：无 memmove 发送编码
 
