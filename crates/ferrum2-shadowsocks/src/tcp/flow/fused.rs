@@ -36,6 +36,14 @@ enum DownloadStep {
     DirectionDone,
 }
 
+#[cfg(feature = "structural-metrics")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StructuralDownloadReceiveStage {
+    NextLengthReadPending,
+    LengthReadyYielded,
+    PartialOrOther,
+}
+
 pub(crate) fn fused_relay<'a, P, F, O>(
     plain: &'a mut P,
     flow: &'a mut F,
@@ -100,6 +108,13 @@ struct FusedStructuralStats {
     encrypt_buffer_capacity: u64,
     decrypt_buffer_capacity: u64,
     download_frame_open: bool,
+    fresh_download_continuation_attempts: u64,
+    fresh_download_continuation_pending_next_length_read: u64,
+    fresh_download_continuation_pending_length_ready_yielded: u64,
+    fresh_download_continuation_pending_partial_or_other: u64,
+    fresh_download_continuation_ready_plaintext: u64,
+    fresh_download_continuation_errors: u64,
+    fresh_download_continuation_eof: u64,
 }
 
 #[cfg(feature = "structural-metrics")]
@@ -112,6 +127,13 @@ impl FusedStructuralStats {
             encrypt_buffer_capacity: encrypt as u64,
             decrypt_buffer_capacity: decrypt as u64,
             download_frame_open: false,
+            fresh_download_continuation_attempts: 0,
+            fresh_download_continuation_pending_next_length_read: 0,
+            fresh_download_continuation_pending_length_ready_yielded: 0,
+            fresh_download_continuation_pending_partial_or_other: 0,
+            fresh_download_continuation_ready_plaintext: 0,
+            fresh_download_continuation_errors: 0,
+            fresh_download_continuation_eof: 0,
         }
     }
 
@@ -138,6 +160,57 @@ impl FusedStructuralStats {
             StructuralCounter::FtbrDecryptBufferCapacityBytes,
             self.decrypt_buffer_capacity,
         );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationAttempts,
+            self.fresh_download_continuation_attempts,
+        );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationPendingNextLengthRead,
+            self.fresh_download_continuation_pending_next_length_read,
+        );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationPendingLengthReadyYielded,
+            self.fresh_download_continuation_pending_length_ready_yielded,
+        );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationPendingPartialOrOther,
+            self.fresh_download_continuation_pending_partial_or_other,
+        );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationReadyPlaintext,
+            self.fresh_download_continuation_ready_plaintext,
+        );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationErrors,
+            self.fresh_download_continuation_errors,
+        );
+        structural.add(
+            StructuralCounter::FtbrFreshDownloadContinuationEof,
+            self.fresh_download_continuation_eof,
+        );
+    }
+
+    fn record_fresh_download_continuation_pending(
+        &mut self,
+        stage: StructuralDownloadReceiveStage,
+    ) {
+        match stage {
+            StructuralDownloadReceiveStage::NextLengthReadPending => {
+                self.fresh_download_continuation_pending_next_length_read = self
+                    .fresh_download_continuation_pending_next_length_read
+                    .saturating_add(1);
+            }
+            StructuralDownloadReceiveStage::LengthReadyYielded => {
+                self.fresh_download_continuation_pending_length_ready_yielded = self
+                    .fresh_download_continuation_pending_length_ready_yielded
+                    .saturating_add(1);
+            }
+            StructuralDownloadReceiveStage::PartialOrOther => {
+                self.fresh_download_continuation_pending_partial_or_other = self
+                    .fresh_download_continuation_pending_partial_or_other
+                    .saturating_add(1);
+            }
+        }
     }
 }
 
@@ -277,6 +350,8 @@ where
         if self.download_eof {
             return self.poll_download_shutdown(cx);
         }
+        #[cfg(feature = "structural-metrics")]
+        let download_plaintext_was_carried = self.download_plaintext_carried;
         match self.poll_download_once(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -287,11 +362,56 @@ where
             }
         }
 
+        #[cfg(feature = "structural-metrics")]
+        let diagnose_fresh_continuation = !download_plaintext_was_carried;
+        #[cfg(feature = "structural-metrics")]
+        if diagnose_fresh_continuation {
+            self.structural_stats.fresh_download_continuation_attempts = self
+                .structural_stats
+                .fresh_download_continuation_attempts
+                .saturating_add(1);
+        }
+
         match self.poll_download_once(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(DownloadStep::DirectionDone)) => Poll::Ready(Ok(())),
+            Poll::Pending => {
+                #[cfg(feature = "structural-metrics")]
+                if diagnose_fresh_continuation {
+                    self.structural_stats
+                        .record_fresh_download_continuation_pending(
+                            self.flow.structural_download_receive_stage(),
+                        );
+                }
+                Poll::Pending
+            }
+            Poll::Ready(Err(error)) => {
+                #[cfg(feature = "structural-metrics")]
+                if diagnose_fresh_continuation {
+                    self.structural_stats.fresh_download_continuation_errors = self
+                        .structural_stats
+                        .fresh_download_continuation_errors
+                        .saturating_add(1);
+                }
+                Poll::Ready(Err(error))
+            }
+            Poll::Ready(Ok(DownloadStep::DirectionDone)) => {
+                #[cfg(feature = "structural-metrics")]
+                if diagnose_fresh_continuation {
+                    self.structural_stats.fresh_download_continuation_eof = self
+                        .structural_stats
+                        .fresh_download_continuation_eof
+                        .saturating_add(1);
+                }
+                Poll::Ready(Ok(()))
+            }
             Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
+                #[cfg(feature = "structural-metrics")]
+                if diagnose_fresh_continuation {
+                    self.structural_stats
+                        .fresh_download_continuation_ready_plaintext = self
+                        .structural_stats
+                        .fresh_download_continuation_ready_plaintext
+                        .saturating_add(1);
+                }
                 // The continuation may contain one fresh tunnel read, so it
                 // remains a scheduling boundary after the plaintext write.
                 cx.waker().wake_by_ref();
@@ -450,6 +570,8 @@ pub(crate) trait FusedProtocolFlow: PlainBufferedDuplex {
     ) -> Poll<Result<(), ShadowsocksError>>;
     #[cfg(feature = "structural-metrics")]
     fn structural_buffer_capacities(&self) -> (usize, usize);
+    #[cfg(feature = "structural-metrics")]
+    fn structural_download_receive_stage(&self) -> StructuralDownloadReceiveStage;
 }
 
 #[cfg(feature = "structural-metrics")]
@@ -669,6 +791,14 @@ where
     fn structural_buffer_capacities(&self) -> (usize, usize) {
         (self.encrypt.capacity(), self.decrypt.capacity())
     }
+
+    #[cfg(feature = "structural-metrics")]
+    fn structural_download_receive_stage(&self) -> StructuralDownloadReceiveStage {
+        let ClientRx::Data(state) = &self.rx else {
+            return StructuralDownloadReceiveStage::PartialOrOther;
+        };
+        structural_download_receive_stage(state)
+    }
 }
 
 impl<S, K, T, R> FusedProtocolFlow for ServerFlow<'_, S, K, T, R>
@@ -872,6 +1002,24 @@ where
     #[cfg(feature = "structural-metrics")]
     fn structural_buffer_capacities(&self) -> (usize, usize) {
         (self.encrypt.capacity(), self.decrypt.capacity())
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    fn structural_download_receive_stage(&self) -> StructuralDownloadReceiveStage {
+        structural_download_receive_stage(&self.rx)
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+fn structural_download_receive_stage(state: &DataRx) -> StructuralDownloadReceiveStage {
+    match state {
+        DataRx::Length { filled: 0 } => StructuralDownloadReceiveStage::NextLengthReadPending,
+        DataRx::Payload { filled: 0, .. } => StructuralDownloadReceiveStage::LengthReadyYielded,
+        DataRx::Length { .. }
+        | DataRx::Payload { .. }
+        | DataRx::Ready { .. }
+        | DataRx::Closed
+        | DataRx::Poison => StructuralDownloadReceiveStage::PartialOrOther,
     }
 }
 

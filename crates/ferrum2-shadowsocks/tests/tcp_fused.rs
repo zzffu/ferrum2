@@ -24,7 +24,7 @@ use ferrum2_shadowsocks::{
     TcpReplayStore, TransportIo,
 };
 #[cfg(feature = "structural-metrics")]
-use ferrum2_structural::{StructuralCounter, StructuralHub};
+use ferrum2_structural::{StructuralCounter, StructuralHub, StructuralSnapshot};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use common::{
@@ -484,6 +484,18 @@ async fn observed_server_flow(
     &'static RecordingObservers,
     Arc<Mutex<IoObservation>>,
 ) {
+    observed_server_flow_with_io(request_salt, frames, |io| io).await
+}
+
+async fn observed_server_flow_with_io(
+    request_salt: ferrum2_crypto::MethodTcpSalt,
+    frames: Vec<Vec<u8>>,
+    configure_io: impl FnOnce(RecordingIo) -> RecordingIo,
+) -> (
+    TestServerFlow,
+    &'static RecordingObservers,
+    Arc<Mutex<IoObservation>>,
+) {
     let keys = Box::leak(Box::new(provider()));
     let clock = Box::leak(Box::new(FakeClock::new(NOW, 0)));
     let random = Box::leak(Box::new(ScriptedRandom::new([])));
@@ -500,6 +512,7 @@ async fn observed_server_flow(
     .chain(frames)
     .collect::<Vec<_>>();
     let (io, observation) = RecordingIo::new(reads);
+    let io = configure_io(io);
     let inbound = ShadowsocksTcpInbound::new(keys, clock, random, replay)
         .with_observers(observers, observers);
     let flow = inbound
@@ -508,6 +521,29 @@ async fn observed_server_flow(
         .expect("server request")
         .stream;
     (flow, observers, observation)
+}
+
+#[cfg(feature = "structural-metrics")]
+fn assert_fresh_download_continuations_closed(
+    snapshot: &StructuralSnapshot,
+    expected_attempts: u64,
+) {
+    let outcomes = [
+        StructuralCounter::FtbrFreshDownloadContinuationPendingNextLengthRead,
+        StructuralCounter::FtbrFreshDownloadContinuationPendingLengthReadyYielded,
+        StructuralCounter::FtbrFreshDownloadContinuationPendingPartialOrOther,
+        StructuralCounter::FtbrFreshDownloadContinuationReadyPlaintext,
+        StructuralCounter::FtbrFreshDownloadContinuationErrors,
+        StructuralCounter::FtbrFreshDownloadContinuationEof,
+    ]
+    .into_iter()
+    .map(|counter| snapshot.get(counter))
+    .sum::<u64>();
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrFreshDownloadContinuationAttempts),
+        expected_attempts
+    );
+    assert_eq!(outcomes, expected_attempts);
 }
 
 fn decrypt_pointer(observers: &RecordingObservers) -> usize {
@@ -586,7 +622,9 @@ async fn fresh_download_completion_polls_only_the_next_encrypted_length() {
     let (mut flow, _, transport) = observed_server_flow(request_salt, frames).await;
     let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All, SinkAction::All]);
     #[cfg(feature = "structural-metrics")]
-    let structural = StructuralHub::new().local();
+    let structural_hub = StructuralHub::new();
+    #[cfg(feature = "structural-metrics")]
+    let structural = structural_hub.local();
     let mut relay = Box::pin(relay_server_flow(
         &mut plain,
         &mut flow,
@@ -626,6 +664,115 @@ async fn fresh_download_completion_polls_only_the_next_encrypted_length() {
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 2);
     assert_eq!(sink.accepted, expected);
+    drop(sink);
+    drop(relay);
+    #[cfg(feature = "structural-metrics")]
+    {
+        let snapshot = structural_hub.snapshot();
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrFreshDownloadContinuationPendingLengthReadyYielded),
+            1
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrFreshDownloadContinuationEof),
+            1
+        );
+        assert_fresh_download_continuations_closed(&snapshot, 2);
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+#[tokio::test]
+async fn fresh_download_continuation_records_real_next_length_pending() {
+    let request_salt = salt_from_u64(1_005);
+    let frames = request_data_frames(&request_salt, &[b"first frame", b"second frame"]);
+    let (mut flow, _, _) =
+        observed_server_flow_with_io(request_salt, frames, |io| io.with_pending_reads_after(4, 1))
+            .await;
+    let (mut plain, _, _) = ScriptedWritePlain::new([SinkAction::All]);
+    let structural_hub = StructuralHub::new();
+    let structural = structural_hub.local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    drop(relay);
+
+    let snapshot = structural_hub.snapshot();
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrFreshDownloadContinuationPendingNextLengthRead),
+        1
+    );
+    assert_fresh_download_continuations_closed(&snapshot, 1);
+}
+
+#[cfg(feature = "structural-metrics")]
+#[tokio::test]
+async fn fresh_download_continuation_records_partial_next_length_as_other() {
+    let request_salt = salt_from_u64(1_006);
+    let mut frames = request_data_frames(&request_salt, &[b"first frame", b"second frame"]);
+    let second_length = frames.remove(2);
+    frames.insert(2, second_length[..1].to_vec());
+    frames.insert(3, second_length[1..].to_vec());
+    let (mut flow, _, _) = observed_server_flow(request_salt, frames).await;
+    let (mut plain, _, _) = ScriptedWritePlain::new([SinkAction::All]);
+    let structural_hub = StructuralHub::new();
+    let structural = structural_hub.local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    drop(relay);
+
+    let snapshot = structural_hub.snapshot();
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrFreshDownloadContinuationPendingPartialOrOther),
+        1
+    );
+    assert_fresh_download_continuations_closed(&snapshot, 1);
+}
+
+#[cfg(feature = "structural-metrics")]
+#[tokio::test]
+async fn fresh_download_continuation_records_second_poll_error() {
+    let request_salt = salt_from_u64(1_007);
+    let frames = request_data_frames(&request_salt, &[b"first frame", b"second frame"]);
+    let (mut flow, _, _) =
+        observed_server_flow_with_io(request_salt, frames, |io| io.with_read_failure_after(4))
+            .await;
+    let (mut plain, _, _) = ScriptedWritePlain::new([SinkAction::All]);
+    let structural_hub = StructuralHub::new();
+    let structural = structural_hub.local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Ready(Err(_))));
+    drop(relay);
+
+    let snapshot = structural_hub.snapshot();
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrFreshDownloadContinuationErrors),
+        1
+    );
+    assert_fresh_download_continuations_closed(&snapshot, 1);
 }
 
 #[tokio::test]

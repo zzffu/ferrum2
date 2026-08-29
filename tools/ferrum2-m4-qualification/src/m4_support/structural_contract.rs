@@ -112,8 +112,8 @@ fn parse_body(body: &str) -> Result<StructuralSnapshot, String> {
             )
         })
         .collect();
-    if expected.len() != StructuralCounter::COUNT || StructuralCounter::COUNT != 49 {
-        return Err("structural counter schema is not the fixed 49-family contract".to_owned());
+    if expected.len() != StructuralCounter::COUNT || StructuralCounter::COUNT != 56 {
+        return Err("structural counter schema is not the fixed 56-family contract".to_owned());
     }
 
     let mut help = BTreeSet::new();
@@ -315,7 +315,7 @@ fn structural_unit(counter: StructuralCounter) -> &'static str {
 pub(super) fn run_self_check() -> Result<(), String> {
     let response = valid_response(1);
     let parsed = parse_response(response.as_bytes())?;
-    if parsed.values.len() != 49 || parsed.overflowed {
+    if parsed.values.len() != 56 || parsed.overflowed {
         return Err("valid structural exposition did not preserve its closure".to_owned());
     }
 

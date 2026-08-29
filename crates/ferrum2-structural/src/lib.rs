@@ -67,6 +67,13 @@ pub enum StructuralCounter {
     FtbrEncryptBufferCapacityBytes,
     FtbrDecryptBufferCapacityBytes,
     FtbrRelayBufferCapacityRemovedBytes,
+    FtbrFreshDownloadContinuationAttempts,
+    FtbrFreshDownloadContinuationPendingNextLengthRead,
+    FtbrFreshDownloadContinuationPendingLengthReadyYielded,
+    FtbrFreshDownloadContinuationPendingPartialOrOther,
+    FtbrFreshDownloadContinuationReadyPlaintext,
+    FtbrFreshDownloadContinuationErrors,
+    FtbrFreshDownloadContinuationEof,
     AdmissionLockWaitNanoseconds,
     AdmissionLockHoldNanoseconds,
     AdmissionLockSamples,
@@ -121,6 +128,13 @@ impl StructuralCounter {
         Self::FtbrEncryptBufferCapacityBytes,
         Self::FtbrDecryptBufferCapacityBytes,
         Self::FtbrRelayBufferCapacityRemovedBytes,
+        Self::FtbrFreshDownloadContinuationAttempts,
+        Self::FtbrFreshDownloadContinuationPendingNextLengthRead,
+        Self::FtbrFreshDownloadContinuationPendingLengthReadyYielded,
+        Self::FtbrFreshDownloadContinuationPendingPartialOrOther,
+        Self::FtbrFreshDownloadContinuationReadyPlaintext,
+        Self::FtbrFreshDownloadContinuationErrors,
+        Self::FtbrFreshDownloadContinuationEof,
         Self::AdmissionLockWaitNanoseconds,
         Self::AdmissionLockHoldNanoseconds,
         Self::AdmissionLockSamples,
@@ -184,6 +198,25 @@ impl StructuralCounter {
             Self::FtbrRelayBufferCapacityRemovedBytes => {
                 "tcp_fused_relay_buffer_capacity_removed_bytes"
             }
+            Self::FtbrFreshDownloadContinuationAttempts => {
+                "tcp_fused_fresh_download_continuation_attempts"
+            }
+            Self::FtbrFreshDownloadContinuationPendingNextLengthRead => {
+                "tcp_fused_fresh_download_continuation_pending_next_length_read"
+            }
+            Self::FtbrFreshDownloadContinuationPendingLengthReadyYielded => {
+                "tcp_fused_fresh_download_continuation_pending_length_ready_yielded"
+            }
+            Self::FtbrFreshDownloadContinuationPendingPartialOrOther => {
+                "tcp_fused_fresh_download_continuation_pending_partial_or_other"
+            }
+            Self::FtbrFreshDownloadContinuationReadyPlaintext => {
+                "tcp_fused_fresh_download_continuation_ready_plaintext"
+            }
+            Self::FtbrFreshDownloadContinuationErrors => {
+                "tcp_fused_fresh_download_continuation_errors"
+            }
+            Self::FtbrFreshDownloadContinuationEof => "tcp_fused_fresh_download_continuation_eof",
             Self::AdmissionLockWaitNanoseconds => "admission_lock_wait_nanoseconds",
             Self::AdmissionLockHoldNanoseconds => "admission_lock_hold_nanoseconds",
             Self::AdmissionLockSamples => "admission_lock_samples",
@@ -560,7 +593,7 @@ mod tests {
 
     #[test]
     fn counter_schema_is_closed_and_complete() {
-        assert_eq!(StructuralCounter::COUNT, 49);
+        assert_eq!(StructuralCounter::COUNT, 56);
         assert_eq!(LockSite::ALL.len(), 5);
         assert_eq!(FtbrFallbackReason::ALL.len(), 7);
         assert_eq!(align_of::<CacheLineAligned<super::CounterShard>>(), 64);
