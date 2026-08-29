@@ -69,6 +69,11 @@ pub use udp::{
     UDP_SESSION_QUEUE_DEPTH, UdpBufferBudget, UdpBufferReservation, UdpCommitError, UdpDirection,
     UdpLimitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub use udp::{
+    RecoverableUdpCommitError, UdpHeadroomLayout, UdpHeadroomLease, UdpHeadroomPacket,
+    UdpHeadroomRecycleToken,
+};
 
 /// Default first-handshake deadline.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);

@@ -141,8 +141,12 @@ async fn udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup()
             structural: ferrum2_structural::StructuralHub::new(),
         };
         let fatal_shared = shared.clone();
-        let active_root =
-            ProcessRoot::new(move || async move { prepare_udp_server(0, listener, shared) });
+        let active_root = ProcessRoot::new(move || async move {
+            let prepared = prepare_udp_server(0, listener, shared)?;
+            #[cfg(feature = "candidate-udp-owned-headroom")]
+            assert!(prepared.runtime.uses_owned_headroom_receive());
+            Ok(prepared)
+        });
         let failed =
             ProcessRoot::new(
                 move || async move { prepare_udp_server(1, fatal_listener, fatal_shared) },

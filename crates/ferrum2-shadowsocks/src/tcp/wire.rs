@@ -13,7 +13,77 @@ pub const REQUEST_FIRST_READ_LEN: usize = 43;
 pub const RESPONSE_FIRST_READ_LEN: usize = 59;
 pub const MAX_PAYLOAD_LEN: usize = u16::MAX as usize;
 pub const MAX_DECRYPT_WIRE_LEN: usize = MAX_PAYLOAD_LEN + TAG_LEN;
-pub const MAX_ENCODE_PAYLOAD_LEN: usize = 32_768;
+const FRAME_16K_PAYLOAD_LEN: usize = 16 * 1024;
+const FRAME_32K_PAYLOAD_LEN: usize = 32 * 1024;
+pub const ADAPTIVE_FRAME_GROW_BYTES: u64 = 512 * 1024;
+
+#[cfg(any(
+    all(
+        feature = "__frame-size-16k",
+        feature = "__frame-size-65535",
+        not(feature = "__frame-size-adaptive")
+    ),
+    all(
+        feature = "__frame-size-16k",
+        feature = "__frame-size-adaptive",
+        not(feature = "__frame-size-65535")
+    ),
+    all(
+        feature = "__frame-size-65535",
+        feature = "__frame-size-adaptive",
+        not(feature = "__frame-size-16k")
+    )
+))]
+compile_error!("frame-size experiment features are mutually exclusive");
+
+// Cargo's all-features gate intentionally selects the ordinary 32 KiB
+// behavior. It is a compile-only feature-closure check, never a qualifying
+// frame build identity. Every qualifying artifact uses either no experiment
+// feature or exactly one experiment feature.
+const FEATURE_CLOSURE_CHECK: bool = cfg!(all(
+    feature = "__frame-size-16k",
+    feature = "__frame-size-65535",
+    feature = "__frame-size-adaptive"
+));
+const FRAME_16K_ENABLED: bool = cfg!(feature = "__frame-size-16k") && !FEATURE_CLOSURE_CHECK;
+const FRAME_65535_ENABLED: bool = cfg!(feature = "__frame-size-65535") && !FEATURE_CLOSURE_CHECK;
+const FRAME_ADAPTIVE_ENABLED: bool =
+    cfg!(feature = "__frame-size-adaptive") && !FEATURE_CLOSURE_CHECK;
+
+/// Payload limit used before any adaptive growth.
+pub const INITIAL_ENCODE_PAYLOAD_LEN: usize = if FRAME_16K_ENABLED {
+    FRAME_16K_PAYLOAD_LEN
+} else if FRAME_65535_ENABLED {
+    MAX_PAYLOAD_LEN
+} else {
+    FRAME_32K_PAYLOAD_LEN
+};
+
+/// Largest payload this exact build may encode after any adaptive growth.
+pub const MAX_ENCODE_PAYLOAD_LEN: usize = if FRAME_65535_ENABLED || FRAME_ADAPTIVE_ENABLED {
+    MAX_PAYLOAD_LEN
+} else {
+    INITIAL_ENCODE_PAYLOAD_LEN
+};
+
+/// Closed artifact identity for the qualifying frame-size build axis.
+pub const FRAME_SIZE_BUILD_IDENTITY: &str = if FRAME_16K_ENABLED {
+    "frame16k"
+} else if FRAME_65535_ENABLED {
+    "frame65535"
+} else if FRAME_ADAPTIVE_ENABLED {
+    "adaptive"
+} else if FEATURE_CLOSURE_CHECK {
+    "all-features-compile-check"
+} else {
+    "default32"
+};
+
+pub const INITIAL_ENCRYPT_WIRE_LEN: usize = MAX_TCP_SALT_LEN
+    + MAX_RESPONSE_FIXED_PLAINTEXT_LEN
+    + TAG_LEN
+    + INITIAL_ENCODE_PAYLOAD_LEN
+    + TAG_LEN;
 pub const MAX_ENCRYPT_WIRE_LEN: usize = MAX_TCP_SALT_LEN
     + MAX_RESPONSE_FIXED_PLAINTEXT_LEN
     + TAG_LEN
@@ -30,6 +100,65 @@ pub(super) const REQUEST_FIXED_PLAINTEXT_LEN: usize = 11;
 const MAX_TCP_SALT_LEN: usize = 32;
 pub(super) const MAX_RESPONSE_FIXED_PLAINTEXT_LEN: usize = 43;
 pub(super) const ENCRYPTED_LENGTH_LEN: usize = 2 + TAG_LEN;
+
+/// Per-direction frame cap state. It never batches reads: callers ask for the
+/// current limit once, issue one read, seal exactly the returned bytes, and
+/// only then account progress for the next frame.
+pub(super) struct EncodeFrameSizer {
+    encoded_plaintext_bytes: u64,
+}
+
+impl EncodeFrameSizer {
+    pub(super) const fn new() -> Self {
+        Self {
+            encoded_plaintext_bytes: 0,
+        }
+    }
+
+    pub(super) const fn payload_limit(&self) -> usize {
+        if FRAME_ADAPTIVE_ENABLED && self.encoded_plaintext_bytes >= ADAPTIVE_FRAME_GROW_BYTES {
+            MAX_ENCODE_PAYLOAD_LEN
+        } else {
+            INITIAL_ENCODE_PAYLOAD_LEN
+        }
+    }
+
+    pub(super) fn prepare_scratch(&self, scratch: &mut BytesMut) -> Result<(), FrameError> {
+        let required = encrypt_wire_len(self.payload_limit())?;
+        if scratch.capacity() < required {
+            if !scratch.is_empty() {
+                return Err(FrameError::Bounds);
+            }
+            *scratch = BytesMut::with_capacity(required);
+        }
+        if scratch.capacity() < required {
+            return Err(FrameError::Bounds);
+        }
+        Ok(())
+    }
+
+    pub(super) fn record(&mut self, payload_len: usize) -> Result<(), FrameError> {
+        if payload_len > self.payload_limit() {
+            return Err(FrameError::Bounds);
+        }
+        self.encoded_plaintext_bytes = self
+            .encoded_plaintext_bytes
+            .saturating_add(payload_len as u64);
+        Ok(())
+    }
+}
+
+fn encrypt_wire_len(payload_len: usize) -> Result<usize, FrameError> {
+    match MAX_TCP_SALT_LEN
+        .checked_add(MAX_RESPONSE_FIXED_PLAINTEXT_LEN)
+        .and_then(|length| length.checked_add(TAG_LEN))
+        .and_then(|length| length.checked_add(payload_len))
+        .and_then(|length| length.checked_add(TAG_LEN))
+    {
+        Some(length) => Ok(length),
+        None => Err(FrameError::Bounds),
+    }
+}
 
 pub(super) struct ParsedRequest {
     pub(super) target: TargetAddr,
@@ -586,4 +715,96 @@ pub(super) fn sample_nonzero_padding(
         .fill(&mut padding[..length])
         .map_err(|_| FrameError::Bounds)?;
     Ok(length)
+}
+
+#[cfg(test)]
+mod frame_size_tests {
+    use super::*;
+
+    #[test]
+    fn qualifying_build_identity_has_exact_frame_bounds() {
+        if FRAME_16K_ENABLED {
+            assert_eq!(FRAME_SIZE_BUILD_IDENTITY, "frame16k");
+            assert_eq!(INITIAL_ENCODE_PAYLOAD_LEN, 16_384);
+            assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 16_384);
+        } else if FRAME_65535_ENABLED {
+            assert_eq!(FRAME_SIZE_BUILD_IDENTITY, "frame65535");
+            assert_eq!(INITIAL_ENCODE_PAYLOAD_LEN, 65_535);
+            assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 65_535);
+        } else if FRAME_ADAPTIVE_ENABLED {
+            assert_eq!(FRAME_SIZE_BUILD_IDENTITY, "adaptive");
+            assert_eq!(INITIAL_ENCODE_PAYLOAD_LEN, 32_768);
+            assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 65_535);
+        } else {
+            let expected = if FEATURE_CLOSURE_CHECK {
+                "all-features-compile-check"
+            } else {
+                "default32"
+            };
+            assert_eq!(FRAME_SIZE_BUILD_IDENTITY, expected);
+            assert_eq!(INITIAL_ENCODE_PAYLOAD_LEN, 32_768);
+            assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 32_768);
+        }
+        assert_eq!(
+            INITIAL_ENCRYPT_WIRE_LEN,
+            encrypt_wire_len(INITIAL_ENCODE_PAYLOAD_LEN).expect("initial wire bound")
+        );
+        assert_eq!(
+            MAX_ENCRYPT_WIRE_LEN,
+            encrypt_wire_len(MAX_ENCODE_PAYLOAD_LEN).expect("maximum wire bound")
+        );
+        assert!(MAX_ENCODE_PAYLOAD_LEN <= u16::MAX as usize);
+    }
+
+    #[cfg(all(
+        feature = "__frame-size-adaptive",
+        not(feature = "__frame-size-16k"),
+        not(feature = "__frame-size-65535")
+    ))]
+    #[test]
+    fn adaptive_capacity_grows_only_after_exact_direction_threshold() {
+        let mut sizer = EncodeFrameSizer::new();
+        let mut scratch = BytesMut::with_capacity(INITIAL_ENCRYPT_WIRE_LEN);
+        let initial_pointer = scratch.as_ptr();
+
+        for _ in 0..15 {
+            sizer
+                .record(INITIAL_ENCODE_PAYLOAD_LEN)
+                .expect("initial frame");
+        }
+        sizer
+            .record(INITIAL_ENCODE_PAYLOAD_LEN - 1)
+            .expect("threshold minus one");
+        assert_eq!(sizer.payload_limit(), INITIAL_ENCODE_PAYLOAD_LEN);
+        sizer.prepare_scratch(&mut scratch).expect("no early grow");
+        assert_eq!(scratch.capacity(), INITIAL_ENCRYPT_WIRE_LEN);
+        assert_eq!(scratch.as_ptr(), initial_pointer);
+
+        sizer.record(1).expect("exact threshold");
+        assert_eq!(sizer.payload_limit(), MAX_ENCODE_PAYLOAD_LEN);
+        sizer.prepare_scratch(&mut scratch).expect("exact grow");
+        assert_eq!(scratch.capacity(), MAX_ENCRYPT_WIRE_LEN);
+        assert_ne!(scratch.as_ptr(), initial_pointer);
+    }
+
+    #[cfg(not(all(
+        feature = "__frame-size-adaptive",
+        not(feature = "__frame-size-16k"),
+        not(feature = "__frame-size-65535")
+    )))]
+    #[test]
+    fn fixed_candidate_capacity_never_changes_with_cumulative_bytes() {
+        let mut sizer = EncodeFrameSizer::new();
+        let mut scratch = BytesMut::with_capacity(INITIAL_ENCRYPT_WIRE_LEN);
+        let initial_pointer = scratch.as_ptr();
+        for _ in 0..64 {
+            sizer
+                .record(INITIAL_ENCODE_PAYLOAD_LEN)
+                .expect("bounded frame");
+        }
+        sizer.prepare_scratch(&mut scratch).expect("fixed capacity");
+        assert_eq!(sizer.payload_limit(), INITIAL_ENCODE_PAYLOAD_LEN);
+        assert_eq!(scratch.capacity(), INITIAL_ENCRYPT_WIRE_LEN);
+        assert_eq!(scratch.as_ptr(), initial_pointer);
+    }
 }

@@ -80,9 +80,19 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
         protocol: Arc::clone(&protocol),
         mappings,
         clock: Arc::clone(&clock),
-        codec: Arc::new(
-            ResponseCodecPool::new(manager.buffer_budget(), 2).expect("response codec"),
-        ),
+        codec: {
+            let codec = Arc::new(
+                ResponseCodecPool::new(manager.buffer_budget(), 2).expect("response codec"),
+            );
+            #[cfg(feature = "candidate-udp-owned-headroom")]
+            {
+                Some(codec)
+            }
+            #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+            {
+                codec
+            }
+        },
         metrics: Arc::new(Metrics::new()),
         #[cfg(feature = "structural-metrics")]
         structural: structural.local(),
@@ -107,7 +117,11 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
     });
 
     wait_for_send_entries(&entered, &entry_changed, 2).await;
-    let fixed_codec_capacity = handler.codec.shard_count() * 2 * MAX_UDP_WIRE_DATAGRAM_BYTES;
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let codec = handler.codec.as_ref().expect("explicit legacy test codec");
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+    let codec = &handler.codec;
+    let fixed_codec_capacity = codec.shard_count() * 2 * MAX_UDP_WIRE_DATAGRAM_BYTES;
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
         fixed_codec_capacity,
@@ -121,10 +135,7 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
         fixed_codec_capacity,
         "leased wires return to the fixed pool without changing its budget"
     );
-    assert_eq!(
-        handler.codec.available_wire_count(),
-        handler.codec.shard_count() * 2
-    );
+    assert_eq!(codec.available_wire_count(), codec.shard_count() * 2);
 
     {
         let sent = sent.lock().expect("concurrent sends");
@@ -165,10 +176,7 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
             .await
             .is_ok()
     );
-    assert_eq!(
-        handler.codec.available_wire_count(),
-        handler.codec.shard_count() * 2
-    );
+    assert_eq!(codec.available_wire_count(), codec.shard_count() * 2);
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
         fixed_codec_capacity,

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, MAX_ENCODE_PAYLOAD_LEN, PlainDuplex, RESPONSE_FIRST_READ_LEN,
+    ClientTcpOutbound, INITIAL_ENCODE_PAYLOAD_LEN, PlainDuplex, RESPONSE_FIRST_READ_LEN,
     ShadowsocksTcpInbound, TcpReplayStore,
 };
 
@@ -360,8 +360,8 @@ async fn ready_write_budget_bounds_one_byte_drain_and_self_wakes_once() {
         .await
         .expect("client");
     assert_eq!(
-        write_plain(&mut flow, &[0x5a; MAX_ENCODE_PAYLOAD_LEN]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN)
+        write_plain(&mut flow, &[0x5a; INITIAL_ENCODE_PAYLOAD_LEN]).await,
+        Ok(INITIAL_ENCODE_PAYLOAD_LEN)
     );
     let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wake_counter));

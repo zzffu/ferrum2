@@ -43,9 +43,26 @@ pub(super) async fn run_udp_association<IO, F, Fut>(
         mut control, reply, ..
     } = association;
     let (inbound, routing) = route;
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let Some(receive_budget) = context
+        .egress
+        .udp
+        .as_ref()
+        .map(|udp| udp.manager.buffer_budget())
+    else {
+        let _ = reply.failed(ConnectErrorKind::Other).await;
+        return;
+    };
     let endpoint = tokio::select! {
         _ = cancellation.cancelled() => return,
-        endpoint = SocksUdpEndpoint::bind(local_ip, peer_ip, requested_port, &mut bind) => endpoint,
+        endpoint = SocksUdpEndpoint::bind(
+            local_ip,
+            peer_ip,
+            requested_port,
+            #[cfg(feature = "candidate-udp-owned-headroom")]
+            receive_budget,
+            &mut bind,
+        ) => endpoint,
     };
     let endpoint = match endpoint {
         Ok(endpoint) => endpoint,
@@ -161,7 +178,7 @@ pub(super) async fn relay_udp_association<IO>(
                         Stage::Shadowsocks,
                         Reason::Bounds,
                     );
-                    endpoint.recycle(packet);
+                    endpoint.recycle_failure(packet);
                     continue;
                 }
                 endpoint.accept(packet.source_port());
@@ -170,7 +187,7 @@ pub(super) async fn relay_udp_association<IO>(
         }
     };
     if prepared.activate(&context.egress).is_err() {
-        endpoint.recycle(first);
+        endpoint.recycle_failure(first);
         record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
         return;
     }
@@ -183,7 +200,11 @@ pub(super) async fn relay_udp_association<IO>(
         &mut first,
     )
     .await;
-    endpoint.recycle(first);
+    if forwarded {
+        endpoint.recycle(first);
+    } else {
+        endpoint.recycle_failure(first);
+    }
     if !forwarded {
         return;
     }
@@ -237,7 +258,7 @@ pub(super) async fn relay_udp_association<IO>(
                         Stage::Shadowsocks,
                         Reason::Bounds,
                     );
-                    endpoint.recycle(packet);
+                    endpoint.recycle_failure(packet);
                     continue;
                 }
                 endpoint.accept(packet.source_port());
@@ -249,7 +270,11 @@ pub(super) async fn relay_udp_association<IO>(
                     routing,
                     &mut packet,
                 ).await;
-                endpoint.recycle(packet);
+                if forwarded {
+                    endpoint.recycle(packet);
+                } else {
+                    endpoint.recycle_failure(packet);
+                }
                 if !forwarded {
                     return;
                 }
@@ -379,11 +404,11 @@ pub(super) async fn classify_udp_association<IO>(
             &context.metrics,
             &mut route_scratch,
         ) else {
-            endpoint.recycle(packet);
+            endpoint.recycle_failure(packet);
             return;
         };
         if matches!(terminal, ClientTerminalRoute::Reject) {
-            endpoint.recycle(packet);
+            endpoint.recycle_failure(packet);
             return;
         }
         let encoded_target_len = packet.encoded_target_len();
@@ -402,7 +427,7 @@ pub(super) async fn classify_udp_association<IO>(
                 Stage::Shadowsocks,
                 Reason::Bounds,
             );
-            endpoint.recycle(packet);
+            endpoint.recycle_failure(packet);
             continue;
         }
         endpoint.accept(packet.source_port());
@@ -422,11 +447,11 @@ pub(super) async fn classify_udp_association<IO>(
                 ) => Some(prepared),
             };
             let Some(prepared) = prepared else {
-                endpoint.recycle(packet);
+                endpoint.recycle_failure(packet);
                 return;
             };
             let Ok(mut prepared) = prepared else {
-                endpoint.recycle(packet);
+                endpoint.recycle_failure(packet);
                 record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
                 return;
             };
@@ -448,7 +473,7 @@ pub(super) async fn classify_udp_association<IO>(
                 .and_then(|proxy| proxy.get())
                 .map(Arc::clone)
             else {
-                endpoint.recycle(packet);
+                endpoint.recycle_failure(packet);
                 return;
             };
             relay_hijacked_udp(
@@ -475,13 +500,47 @@ pub(super) async fn forward_udp_request(
     routing: &ClientRouting,
     packet: &mut SocksUdpOwnedPacket,
 ) -> bool {
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    if prepared.supports_owned_headroom_request() {
+        return forward_owned_headroom_request(
+            prepared,
+            cancellation,
+            session_cancellation,
+            context,
+            routing,
+            packet,
+        )
+        .await;
+    }
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     let target = packet.target().clone();
     let payload_len = packet.payload().len();
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     let wire_len = match prepared.prepare_owned_application_request(
         &context.egress,
         &routing.outbounds,
         target,
         packet.payload_mut(),
+        Instant::now(),
+    ) {
+        Ok(length) => length,
+        Err(UdpPlanResponseError::Packet(error)) => {
+            return record_udp_packet_error(
+                context,
+                Direction::ClientToTarget,
+                UdpPacketPhase::RequestEncode,
+                error,
+            );
+        }
+        Err(UdpPlanResponseError::Runtime(error)) => {
+            return record_udp_runtime_error(context, Direction::ClientToTarget, error);
+        }
+    };
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let wire_len = match prepared.prepare_headroom_fallback_application_request(
+        &context.egress,
+        &routing.outbounds,
+        packet.headroom_mut(),
         Instant::now(),
     ) {
         Ok(length) => length,
@@ -509,6 +568,81 @@ pub(super) async fn forward_udp_request(
     .await
     {
         Ok(sent) if sent == wire_len => {}
+        Ok(_) | Err(UdpSendError::Io) => {
+            record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
+            return false;
+        }
+        Err(UdpSendError::Cancelled) => {
+            record_udp_terminal(context, Stage::Relay, Reason::Cancelled, Outcome::Cancelled);
+            return false;
+        }
+        Err(UdpSendError::Idle) => {
+            record_udp_terminal(context, Stage::Relay, Reason::Idle, Outcome::Timeout);
+            return false;
+        }
+    }
+    context
+        .metrics
+        .udp_datagram(Role::Client, Direction::ClientToTarget, Outcome::Accepted);
+    context
+        .metrics
+        .add_udp_bytes(Role::Client, Direction::ClientToTarget, payload_len as u64);
+    true
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[allow(clippy::too_many_arguments)]
+async fn forward_owned_headroom_request(
+    prepared: &mut ClientUdpAssociation,
+    cancellation: &mut CancellationToken,
+    session_cancellation: &mut tokio::sync::watch::Receiver<bool>,
+    context: &ClientContext,
+    routing: &ClientRouting,
+    packet: &mut SocksUdpOwnedPacket,
+) -> bool {
+    let payload_len = packet.payload().len();
+    let wire_range = match prepared.prepare_owned_headroom_application_request(
+        &context.egress,
+        &routing.outbounds,
+        packet.headroom_mut(),
+        Instant::now(),
+    ) {
+        Ok(wire_range) => wire_range,
+        Err(UdpPlanResponseError::Packet(error)) => {
+            return record_udp_packet_error(
+                context,
+                Direction::ClientToTarget,
+                UdpPacketPhase::RequestEncode,
+                error,
+            );
+        }
+        Err(UdpPlanResponseError::Runtime(error)) => {
+            return record_udp_runtime_error(context, Direction::ClientToTarget, error);
+        }
+    };
+    let wire = match packet
+        .headroom_mut()
+        .as_ref()
+        .expect("successful owned encode restores its packet")
+        .wire(wire_range.clone())
+    {
+        Ok(wire) => wire,
+        Err(error) => {
+            return record_udp_runtime_error(context, Direction::ClientToTarget, error);
+        }
+    };
+    let Ok(send_deadline) = prepared.idle_deadline() else {
+        return false;
+    };
+    match send_with_lifecycle(
+        prepared.send_owned_encoded_request(wire),
+        cancellation,
+        session_cancellation,
+        send_deadline,
+    )
+    .await
+    {
+        Ok(sent) if sent == wire_range.len() => {}
         Ok(_) | Err(UdpSendError::Io) => {
             record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
             return false;

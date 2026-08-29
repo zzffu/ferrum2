@@ -4,10 +4,14 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use ferrum2_crypto::SystemClock;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_crypto::SystemRandom;
 use ferrum2_observability::{Direction, Metrics, Outcome, Reason, Role, Stage};
 use ferrum2_runtime::{
     AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, UdpSessionHandle,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_runtime::{UdpHeadroomLease, UdpHeadroomPacket};
 use ferrum2_shadowsocks::UdpServer;
 #[cfg(feature = "structural-metrics")]
 use ferrum2_structural::StructuralLocal;
@@ -63,7 +67,10 @@ pub(super) struct ServerUdpResponseHandler<L> {
     pub(super) protocol: Arc<UdpServer>,
     pub(super) mappings: Arc<UdpMappings>,
     pub(super) clock: Arc<SystemClock>,
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     pub(super) codec: Arc<ResponseCodecPool>,
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(super) codec: Option<Arc<ResponseCodecPool>>,
     pub(super) metrics: Arc<Metrics>,
     #[cfg(feature = "structural-metrics")]
     pub(super) structural: StructuralLocal,
@@ -75,6 +82,9 @@ where
 {
     type Error = UdpAdapterError;
 
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    const SUPPORTS_UDP_HEADROOM: bool = true;
+
     async fn handle_target_response(
         &self,
         session: UdpSessionHandle,
@@ -85,8 +95,12 @@ where
             .capability(session)
             .await
             .ok_or(UdpAdapterError)?;
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        let codec = self.codec.as_ref().ok_or(UdpAdapterError)?;
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+        let codec = &self.codec;
         #[cfg(feature = "structural-metrics")]
-        let encoded = self.codec.encode_structural(
+        let encoded = codec.encode_structural(
             &self.protocol,
             capability,
             self.clock.as_ref(),
@@ -94,7 +108,7 @@ where
             &self.structural,
         );
         #[cfg(not(feature = "structural-metrics"))]
-        let encoded = self.codec.encode(
+        let encoded = codec.encode(
             &self.protocol,
             capability,
             self.clock.as_ref(),
@@ -126,6 +140,71 @@ where
         self.metrics
             .add_udp_bytes(Role::Server, Direction::TargetToClient, wire_len as u64);
         Ok(())
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    async fn handle_target_response_headroom(
+        &self,
+        session: UdpSessionHandle,
+        mut response: UdpHeadroomPacket,
+    ) -> Result<UdpHeadroomLease, Self::Error> {
+        let capability = self
+            .mappings
+            .capability(session)
+            .await
+            .ok_or(UdpAdapterError)?;
+        #[cfg(feature = "structural-metrics")]
+        let encoded = self.protocol.encode_response_owned_headroom_structural(
+            capability,
+            self.clock.as_ref(),
+            &SystemRandom,
+            response.datagram_mut().map_err(|error| {
+                record_udp_runtime_failure(&self.metrics, error);
+                UdpAdapterError
+            })?,
+            0,
+            &self.structural,
+        );
+        #[cfg(not(feature = "structural-metrics"))]
+        let encoded = self.protocol.encode_response_owned_headroom(
+            capability,
+            self.clock.as_ref(),
+            &SystemRandom,
+            response.datagram_mut().map_err(|error| {
+                record_udp_runtime_failure(&self.metrics, error);
+                UdpAdapterError
+            })?,
+            0,
+        );
+        let encoded = match encoded {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.mappings.invalidate_handle(session);
+                record_udp_protocol_failure(&self.metrics, error);
+                return Err(UdpAdapterError);
+            }
+        };
+        let wire_range = encoded.wire_range();
+        let wire_len = wire_range.len();
+        let wire = response.wire(wire_range).map_err(|error| {
+            record_udp_runtime_failure(&self.metrics, error);
+            UdpAdapterError
+        })?;
+        self.listener
+            .send_to(wire, encoded.peer())
+            .await
+            .map_err(|_| {
+                record_udp_failure(&self.metrics, Stage::Direct, Reason::Send, Outcome::Failed);
+                UdpAdapterError
+            })?;
+        self.metrics
+            .udp_datagram(Role::Server, Direction::TargetToClient, Outcome::Completed);
+        self.metrics
+            .add_udp_bytes(Role::Server, Direction::TargetToClient, wire_len as u64);
+        response.recycle().map_err(|error| {
+            record_udp_runtime_failure(&self.metrics, error);
+            UdpAdapterError
+        })
     }
 }
 

@@ -8,10 +8,25 @@ fn listener_fixed_capacity_is_validated_before_any_root_is_prepared() {
     let baseline = registry.snapshot();
 
     config.udp.receive_workers = ferrum2_config::MAX_UDP_RECEIVE_WORKERS;
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     assert_eq!(
         validate_udp_listener_budget(&config.udp, 1),
         Err(crate::run::RunError::StartupProtocol)
     );
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    {
+        assert_eq!(validate_udp_listener_budget(&config.udp, 1), Ok(()));
+        config.udp.max_buffered_bytes = config
+            .udp
+            .receive_workers
+            .checked_mul(MAX_UDP_WIRE_DATAGRAM_BYTES)
+            .expect("bounded listener capacity")
+            - 1;
+        assert_eq!(
+            validate_udp_listener_budget(&config.udp, 1),
+            Err(crate::run::RunError::StartupProtocol)
+        );
+    }
     assert_eq!(registry.snapshot(), baseline);
 
     config.udp.max_buffered_bytes = MAX_UDP_MAX_BUFFERED_BYTES;

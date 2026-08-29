@@ -8,11 +8,15 @@ use ferrum2_crypto::{Clock as _, SystemClock};
 use ferrum2_net::{DialOptions, RouteNetworkOptions, UdpResolver};
 use ferrum2_observability::Metrics;
 use ferrum2_rule::RuleEvaluationScratch;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_runtime::UdpHeadroomLayout;
 use ferrum2_runtime::{
     DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSocketFactory, MAX_UDP_RESOLVED_CANDIDATES,
     MAX_UDP_WIRE_DATAGRAM_BYTES, OwnerRegistry, UdpBufferReservation, UdpRuntimeError,
     UdpRuntimeLimits, UdpSessionManager,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_shadowsocks::udp_response_owned_headroom;
 use ferrum2_shadowsocks::{UdpPacketError, UdpServer};
 #[cfg(feature = "structural-metrics")]
 use ferrum2_structural::{StructuralHub, StructuralLocal};
@@ -28,7 +32,9 @@ use super::listener::{
 #[cfg(test)]
 use super::physical::ServerSystemUdpSocketFactory;
 use super::physical::{ServerNetworkUdpSocketFactory, ServerUdpNetworkPolicy};
+#[cfg(not(feature = "candidate-udp-owned-headroom"))]
 use super::response_codec::ResponseCodecPool;
+#[cfg(not(feature = "candidate-udp-owned-headroom"))]
 use super::response_codec::maximum_response_codec_reservation_bytes;
 
 pub(in crate::run) fn udp_runtime_limits(config: &UdpConfig) -> Option<UdpRuntimeLimits> {
@@ -50,9 +56,12 @@ pub(in crate::run) fn validate_udp_listener_budget(
     let roots = inbound_count
         .checked_mul(config.receive_workers)
         .ok_or(RunError::StartupProtocol)?;
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     let per_root = maximum_response_codec_reservation_bytes(config.max_sessions)
         .and_then(|codec| codec.checked_add(MAX_UDP_WIRE_DATAGRAM_BYTES))
         .ok_or(RunError::StartupProtocol)?;
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let per_root = MAX_UDP_WIRE_DATAGRAM_BYTES;
     let fixed = roots
         .checked_mul(per_root)
         .ok_or(RunError::StartupProtocol)?;
@@ -197,16 +206,22 @@ where
     #[cfg(feature = "structural-metrics")]
     let structural = structural.local();
     let budget = sessions.buffer_budget();
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     let response_codec = Arc::new(
         ResponseCodecPool::new(budget.clone(), config.max_sessions)
             .map_err(|_| RunError::StartupProtocol)?,
     );
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let response_codec = None;
     let handler = ServerUdpResponseHandler {
         listener: Arc::clone(&listener),
         protocol: Arc::clone(&protocol),
         mappings: Arc::clone(&mappings),
         clock: Arc::clone(&clock),
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
         codec: Arc::clone(&response_codec),
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        codec: response_codec,
         metrics: Arc::clone(&metrics),
         #[cfg(feature = "structural-metrics")]
         structural: structural.clone(),
@@ -215,6 +230,7 @@ where
         .first()
         .cloned()
         .ok_or(RunError::StartupProtocol)?;
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     let runtime = DirectUdpRuntime::with_shared_adapters(
         sessions,
         connect_timeout,
@@ -223,6 +239,26 @@ where
         handler,
         registry.clone(),
     );
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let runtime = {
+        let headroom = udp_response_owned_headroom();
+        let layout = UdpHeadroomLayout::for_receive_bound(
+            MAX_UDP_WIRE_DATAGRAM_BYTES,
+            headroom.front(),
+            headroom.rear(),
+        )
+        .map_err(|_| RunError::StartupProtocol)?;
+        DirectUdpRuntime::with_shared_headroom_adapters(
+            sessions,
+            connect_timeout,
+            default_resolver.for_inbound(inbound),
+            socket_factory,
+            handler,
+            registry.clone(),
+            layout,
+        )
+        .map_err(|_| RunError::StartupProtocol)?
+    };
     let receive_wire = budget
         .reserve(MAX_UDP_WIRE_DATAGRAM_BYTES)
         .map_err(|_| RunError::StartupProtocol)?;

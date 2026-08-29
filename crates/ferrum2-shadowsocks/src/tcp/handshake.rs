@@ -23,7 +23,7 @@ use super::observe::{
 };
 use super::replay::{ReplayInsertError, TcpReplayStore};
 use super::wire::{
-    MAX_DECRYPT_WIRE_LEN, MAX_ENCRYPT_WIRE_LEN, MAX_PADDING_LEN, REQUEST_FIXED_PLAINTEXT_LEN,
+    INITIAL_ENCRYPT_WIRE_LEN, MAX_DECRYPT_WIRE_LEN, MAX_PADDING_LEN, REQUEST_FIXED_PLAINTEXT_LEN,
     REQUEST_TYPE, TAG_LEN, encode_request_state_into, opener_for, parse_request_variable,
     sample_nonzero_padding,
 };
@@ -240,8 +240,11 @@ where
             random,
             observers,
         } = self;
-        let mut encrypt =
-            fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, observers.buffer);
+        let mut encrypt = fixed_scratch(
+            BufferRole::Encrypt,
+            INITIAL_ENCRYPT_WIRE_LEN,
+            observers.buffer,
+        );
         let decrypt = fixed_scratch(BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN, observers.buffer);
 
         let salt = generate_method_request_salt(keys.tcp_profile(), random).map_err(|_| {
@@ -374,7 +377,7 @@ where
         );
         let encrypt = fixed_scratch(
             BufferRole::Encrypt,
-            MAX_ENCRYPT_WIRE_LEN,
+            INITIAL_ENCRYPT_WIRE_LEN,
             self.observers.buffer,
         );
         let profile = self.keys.tcp_profile();

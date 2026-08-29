@@ -11,6 +11,10 @@ path = "src/lib.rs"
 
 [features]
 default = []
+__frame-size-16k = []
+__frame-size-65535 = []
+__frame-size-adaptive = []
+candidate-udp-owned-headroom = []
 structural-metrics = ["dep:ferrum2-structural"]
 tokio = ["dep:tokio", "dep:tokio-util"]
 

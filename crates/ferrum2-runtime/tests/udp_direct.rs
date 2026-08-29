@@ -20,6 +20,8 @@ use ferrum2_runtime::{
     ProcessRoot, ProcessSupervisor, UDP_SESSION_QUEUE_DEPTH, UdpCommitError, UdpDirection,
     UdpLimitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_runtime::{UdpHeadroomLayout, UdpHeadroomLease, UdpHeadroomPacket};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
@@ -547,6 +549,146 @@ async fn direct_response_reuses_one_scratch_across_would_block_and_charges_exact
     );
 
     release.notify_one();
+    assert!(runtime.remove_session(handle));
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
+    wait_for_zero_udp_owners(&registry).await;
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[tokio::test]
+async fn candidate_direct_receive_reuses_one_fixed_backing_without_payload_copy() {
+    const FRONT: usize = 326;
+    const REAR: usize = 16;
+
+    #[derive(Clone)]
+    struct HeadroomHandler {
+        observations: Arc<Mutex<Vec<(usize, usize, usize)>>>,
+    }
+
+    impl DirectUdpPacketHandler for HeadroomHandler {
+        type Error = ();
+
+        const SUPPORTS_UDP_HEADROOM: bool = true;
+
+        async fn handle_target_response(
+            &self,
+            _session: UdpSessionHandle,
+            _response: AccountedDatagram,
+        ) -> Result<(), Self::Error> {
+            panic!("candidate runtime must not materialize a copied response")
+        }
+
+        async fn handle_target_response_headroom(
+            &self,
+            _session: UdpSessionHandle,
+            mut response: UdpHeadroomPacket,
+        ) -> Result<UdpHeadroomLease, Self::Error> {
+            let payload_len = response.datagram().payload().len();
+            let (pointer, capacity, payload_range) = {
+                let (_, backing, payload_range) =
+                    response.backing_parts_mut().expect("fixed packet layout");
+                let pointer = backing.as_ptr() as usize;
+                let capacity = backing.capacity();
+                let wire_start = payload_range.start - 64;
+                let wire_end = payload_range.end + REAR;
+                backing.resize(wire_end, 0);
+                backing[wire_start..payload_range.start].fill(0xa5);
+                backing[payload_range.end..wire_end].fill(0x5a);
+                (pointer, capacity, payload_range)
+            };
+            let wire_start = payload_range.start - 64;
+            let wire_end = payload_range.end + REAR;
+            assert_eq!(
+                response
+                    .wire(wire_start..wire_end)
+                    .expect("bounded candidate wire")
+                    .len(),
+                64 + payload_len + REAR
+            );
+            self.observations
+                .lock()
+                .expect("observations")
+                .push((pointer, capacity, payload_len));
+            response.recycle().map_err(|_| ())
+        }
+    }
+
+    let registry = OwnerRegistry::new();
+    let layout =
+        UdpHeadroomLayout::new(MAX_UDP_WIRE_DATAGRAM_BYTES, FRONT, REAR).expect("candidate layout");
+    let payload_sizes = [1, 1_472, 8_192, layout.max_payload(), 31, 4_096];
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    let responses = Arc::clone(&socket.responses);
+    let response_ready = Arc::clone(&socket.response_ready);
+    let send_completed = Arc::clone(&socket.send_completed);
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = DirectUdpRuntime::with_headroom_adapters(
+        limits(1),
+        Duration::from_secs(10),
+        empty_resolver(),
+        scripted_factory(socket),
+        HeadroomHandler {
+            observations: Arc::clone(&observations),
+        },
+        registry.clone(),
+        layout,
+    )
+    .expect("headroom-capable runtime");
+    let admission = runtime
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .expect("reserve candidate session");
+    let handle = runtime
+        .commit_session(admission, ip_datagram(b"request"), Instant::now())
+        .expect("commit candidate session");
+    send_completed.notified().await;
+
+    response_ready.notify_one();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(observations.lock().expect("observations").is_empty());
+
+    for (index, payload_len) in payload_sizes.into_iter().enumerate() {
+        responses.lock().expect("response queue").push_back((
+            vec![index as u8; payload_len],
+            SocketAddr::from(([127, 0, 0, 1], 9_000)),
+        ));
+        response_ready.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if observations.lock().expect("observations").len() > index {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("candidate response handled");
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.udp_buffered_bytes, MAX_UDP_WIRE_DATAGRAM_BYTES);
+        assert_eq!(snapshot.udp_scratch_buffers, 1);
+    }
+
+    {
+        let observations = observations.lock().expect("observations");
+        assert_eq!(observations.len(), payload_sizes.len());
+        assert!(
+            observations
+                .iter()
+                .all(|entry| entry.0 == observations[0].0)
+        );
+        assert!(
+            observations
+                .iter()
+                .all(|entry| entry.1 == MAX_UDP_WIRE_DATAGRAM_BYTES)
+        );
+        assert_eq!(
+            observations.iter().map(|entry| entry.2).collect::<Vec<_>>(),
+            payload_sizes
+        );
+    }
+
     assert!(runtime.remove_session(handle));
     assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
     wait_for_zero_udp_owners(&registry).await;

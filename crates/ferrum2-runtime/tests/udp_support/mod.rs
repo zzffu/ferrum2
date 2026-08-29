@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use ferrum2_core::{Datagram, TargetAddr};
 use ferrum2_net::UdpResolver;
 use ferrum2_runtime::{
@@ -153,24 +153,27 @@ impl DirectUdpSocket for ScriptedSocket {
         Ok(())
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         loop {
             if let Some((response, source)) =
                 self.responses.lock().expect("response lock").pop_front()
             {
-                payload.extend_from_slice(&response);
+                payload.put_slice(&response);
                 return Ok((response.len(), source));
             }
             self.response_ready.notified().await;
         }
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         let Some((response, source)) = self.responses.lock().expect("response lock").pop_front()
         else {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         };
-        payload.extend_from_slice(&response);
+        payload.put_slice(&response);
         Ok((response.len(), source))
     }
 }

@@ -13,8 +13,7 @@ use crate::tcp::error::{
 };
 use crate::tcp::observe::FlowObserver;
 use crate::tcp::wire::{
-    ENCRYPTED_LENGTH_LEN, MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN, TAG_LEN,
-    seal_data_chunk_into,
+    ENCRYPTED_LENGTH_LEN, EncodeFrameSizer, MAX_DECRYPT_WIRE_LEN, TAG_LEN, seal_data_chunk_into,
 };
 use ferrum2_crypto::{TcpOpener, TcpSealer};
 
@@ -207,6 +206,7 @@ pub(super) fn poll_write_open<S: TransportIo>(
     scratch: &mut BytesMut,
     staged: &mut Option<StagedWrite>,
     tx: &mut TxState,
+    frame_sizer: &mut EncodeFrameSizer,
     lifecycle: &mut Lifecycle,
     observer: &dyn FlowObserver,
     cx: &mut Context<'_>,
@@ -232,11 +232,21 @@ pub(super) fn poll_write_open<S: TransportIo>(
             Poll::Ready(Ok(())) => {}
         }
     }
-    let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
+    if let Err(error) =
+        protocol_cipher_boundary(lifecycle, observer, || frame_sizer.prepare_scratch(scratch))
+    {
+        return Poll::Ready(Err(error));
+    }
+    let admitted = source.len().min(frame_sizer.payload_limit());
     match protocol_cipher_boundary(lifecycle, observer, || {
         seal_data_chunk_into(sealer, &source[..admitted], scratch)
     }) {
         Ok(()) => {
+            if let Err(error) =
+                protocol_cipher_boundary(lifecycle, observer, || frame_sizer.record(admitted))
+            {
+                return Poll::Ready(Err(error));
+            }
             *staged = Some(StagedWrite {
                 kind: StagedKind::Subsequent,
                 position: 0,

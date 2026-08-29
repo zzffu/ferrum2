@@ -9,7 +9,11 @@ use tokio::time::Instant;
 use crate::OwnerRegistry;
 use crate::owner::OwnerGuard;
 
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use super::reservation::UdpBufferReservation;
 use super::reservation::{AccountedDatagram, UdpBufferBudget};
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use super::session::reserve_datagram_with_reservation;
 use super::session::{DatagramQueue, PendingUdpDatagram, PendingUdpSession, reserve_datagram};
 use super::{
     UDP_EXPIRY_REBUILD_MIN_NODES, UDP_EXPIRY_STALE_FACTOR, UDP_SESSION_QUEUE_DEPTH,
@@ -254,6 +258,18 @@ impl UdpSessionManager {
             true,
             false,
         )
+    }
+
+    /// Reserves one live-session queue slot using a capacity token acquired
+    /// before ingress receive began.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn reserve_datagram_with_reservation(
+        &self,
+        handle: UdpSessionHandle,
+        direction: UdpDirection,
+        reservation: UdpBufferReservation,
+    ) -> Result<PendingUdpDatagram, (UdpRuntimeError, UdpBufferReservation)> {
+        reserve_datagram_with_reservation(&self.inner, handle, direction, reservation, true)
     }
 
     /// Removes one exact generation and invalidates every late capability.

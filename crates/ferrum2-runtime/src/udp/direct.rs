@@ -7,7 +7,7 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use ferrum2_core::Datagram;
 use ferrum2_net::UdpResolver;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -26,6 +26,8 @@ use super::{
     UdpBufferReservation, UdpCommitError, UdpDirection, UdpRuntimeError, UdpRuntimeLimits,
     UdpSessionHandle, UdpSessionManager,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use super::{UdpHeadroomLayout, UdpHeadroomLease, UdpHeadroomPacket};
 
 /// Production system UDP resolver.
 #[derive(Clone, Copy, Debug, Default)]
@@ -55,13 +57,15 @@ pub trait DirectUdpSocket: Send + Sync + 'static {
     fn readable(&self) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Receives one complete target datagram and its source address.
-    fn recv_buf_from(
+    fn recv_buf_from<B>(
         &self,
-        payload: &mut BytesMut,
-    ) -> impl Future<Output = io::Result<(usize, SocketAddr)>> + Send;
+        payload: &mut B,
+    ) -> impl Future<Output = io::Result<(usize, SocketAddr)>> + Send
+    where
+        B: BufMut + Send;
 
-    /// Attempts one non-blocking receive into spare `BytesMut` capacity.
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)>;
+    /// Attempts one non-blocking receive into bounded spare buffer capacity.
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)>;
 }
 
 impl DirectUdpSocket for UdpSocket {
@@ -73,11 +77,14 @@ impl DirectUdpSocket for UdpSocket {
         UdpSocket::readable(self).await
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         UdpSocket::recv_buf_from(self, payload).await
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         UdpSocket::try_recv_buf_from(self, payload)
     }
 }
@@ -105,12 +112,15 @@ impl DirectUdpSocket for SystemDirectUdpSocket {
         self.socket.readable().await
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         let (length, source) = self.socket.recv_buf_from(payload).await?;
         Ok((length, normalize_direct_source(source)))
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         let (length, source) = self.socket.try_recv_buf_from(payload)?;
         Ok((length, normalize_direct_source(source)))
     }
@@ -173,6 +183,25 @@ pub trait DirectUdpPacketHandler: Send + Sync + 'static {
         session: UdpSessionHandle,
         response: AccountedDatagram,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Declares support for the candidate fixed-headroom receive interface.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    const SUPPORTS_UDP_HEADROOM: bool = false;
+
+    /// Consumes one response that already occupies its future protocol payload
+    /// range and returns the same allocation after send completion.
+    ///
+    /// The explicit candidate constructor rejects handlers that retain the
+    /// default support declaration, so this default is unreachable in a valid
+    /// runtime. It keeps ordinary handlers and default behavior feature-neutral.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn handle_target_response_headroom(
+        &self,
+        _session: UdpSessionHandle,
+        _response: UdpHeadroomPacket,
+    ) -> impl Future<Output = Result<UdpHeadroomLease, Self::Error>> + Send {
+        async move { unreachable!("headroom runtime requires an explicit handler adapter") }
+    }
 }
 
 /// Capacity and socket reservation made before protocol accepted-state commit.
@@ -200,9 +229,20 @@ struct DirectUdpSessionRoot<S> {
 }
 
 struct DirectReceiveScratch {
-    buffer: BytesMut,
-    _reservation: UdpBufferReservation,
+    backing: DirectReceiveBacking,
     _guard: OwnerGuard,
+}
+
+enum DirectReceiveBacking {
+    Copy {
+        buffer: BytesMut,
+        _reservation: UdpBufferReservation,
+    },
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    Headroom {
+        layout: UdpHeadroomLayout,
+        lease: Option<UdpHeadroomLease>,
+    },
 }
 
 impl DirectReceiveScratch {
@@ -216,10 +256,40 @@ impl DirectReceiveScratch {
             return Err(UdpRuntimeError::Bounds);
         }
         Ok(Self {
-            buffer,
-            _reservation: reservation,
+            backing: DirectReceiveBacking::Copy {
+                buffer,
+                _reservation: reservation,
+            },
             _guard: registry.track_udp_scratch(),
         })
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn reserve_headroom(
+        budget: &UdpBufferBudget,
+        registry: &OwnerRegistry,
+        layout: UdpHeadroomLayout,
+    ) -> Result<Self, UdpRuntimeError> {
+        let lease = UdpHeadroomLease::reserve(budget, layout)?;
+        Ok(Self {
+            backing: DirectReceiveBacking::Headroom {
+                layout,
+                lease: Some(lease),
+            },
+            _guard: registry.track_udp_scratch(),
+        })
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn restore_headroom(&mut self, returned: UdpHeadroomLease) -> Result<(), UdpRuntimeError> {
+        let DirectReceiveBacking::Headroom { layout, lease } = &mut self.backing else {
+            return Err(UdpRuntimeError::Bounds);
+        };
+        if returned.layout() != *layout || lease.is_some() {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        *lease = Some(returned);
+        Ok(())
     }
 }
 
@@ -252,6 +322,8 @@ where
     registry: OwnerRegistry,
     tasks: JoinSet<()>,
     owner_slots: Arc<Semaphore>,
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    receive_headroom: Option<UdpHeadroomLayout>,
     _runtime_owner: UdpRuntimeOwner,
 }
 
@@ -301,6 +373,12 @@ where
     F: DirectUdpSocketFactory,
     H: DirectUdpPacketHandler,
 {
+    /// Reports whether target receives use the candidate fixed-headroom seam.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub const fn uses_owned_headroom_receive(&self) -> bool {
+        self.receive_headroom.is_some()
+    }
+
     /// Creates a runtime with deterministic resolver/socket/handler adapters.
     pub fn with_adapters(
         limits: UdpRuntimeLimits,
@@ -317,6 +395,29 @@ where
             socket_factory,
             handler,
             registry,
+        )
+    }
+
+    /// Creates an explicit candidate runtime whose target receives land in a
+    /// protocol-compatible fixed-headroom allocation.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn with_headroom_adapters(
+        limits: UdpRuntimeLimits,
+        connect_timeout: Duration,
+        resolver: R,
+        socket_factory: F,
+        handler: H,
+        registry: OwnerRegistry,
+        receive_headroom: UdpHeadroomLayout,
+    ) -> Result<Self, UdpRuntimeError> {
+        Self::with_shared_headroom_adapters(
+            UdpSessionManager::new(limits, registry.clone()),
+            connect_timeout,
+            resolver,
+            socket_factory,
+            handler,
+            registry,
+            receive_headroom,
         )
     }
 
@@ -340,8 +441,37 @@ where
             registry,
             tasks: JoinSet::new(),
             owner_slots,
+            #[cfg(feature = "candidate-udp-owned-headroom")]
+            receive_headroom: None,
             _runtime_owner: runtime_owner,
         }
+    }
+
+    /// Creates a shared-capacity candidate runtime with one fixed receive
+    /// layout. The handler must explicitly implement the owned-headroom seam.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn with_shared_headroom_adapters(
+        manager: UdpSessionManager,
+        connect_timeout: Duration,
+        resolver: R,
+        socket_factory: F,
+        handler: H,
+        registry: OwnerRegistry,
+        receive_headroom: UdpHeadroomLayout,
+    ) -> Result<Self, UdpRuntimeError> {
+        if !H::SUPPORTS_UDP_HEADROOM {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        let mut runtime = Self::with_shared_adapters(
+            manager,
+            connect_timeout,
+            resolver,
+            socket_factory,
+            handler,
+            registry,
+        );
+        runtime.receive_headroom = Some(receive_headroom);
+        Ok(runtime)
     }
 
     /// Returns the protocol-neutral capacity manager.
@@ -410,6 +540,16 @@ where
         let owner_slot = Arc::clone(&self.owner_slots)
             .try_acquire_owned()
             .map_err(|_| UdpRuntimeError::SessionLimit)?;
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        let receive_scratch = match self.receive_headroom {
+            Some(layout) => DirectReceiveScratch::reserve_headroom(
+                &self.manager.buffer_budget(),
+                &self.registry,
+                layout,
+            )?,
+            None => DirectReceiveScratch::reserve(&self.manager.buffer_budget(), &self.registry)?,
+        };
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
         let receive_scratch =
             DirectReceiveScratch::reserve(&self.manager.buffer_budget(), &self.registry)?;
         let first_datagram =
@@ -715,46 +855,123 @@ where
                 // generation, shutdown, and queue-capacity checks without a
                 // same-task enqueue/notify/pop round trip.
                 manager.validate_direct_response(handle)?;
-                handler
-                    .handle_target_response(handle, response)
-                    .await
-                    .map_err(|_| UdpRuntimeError::Receive)?;
+                match response {
+                    DirectTargetResponse::Copy(response) => {
+                        handler
+                            .handle_target_response(handle, response)
+                            .await
+                            .map_err(|_| UdpRuntimeError::Receive)?;
+                    }
+                    #[cfg(feature = "candidate-udp-owned-headroom")]
+                    DirectTargetResponse::Headroom(response) => {
+                        let returned = handler
+                            .handle_target_response_headroom(handle, response)
+                            .await
+                            .map_err(|_| UdpRuntimeError::Receive)?;
+                        receive_scratch.restore_headroom(returned)?;
+                    }
+                }
                 manager.commit_activity(handle, Instant::now())?;
             }
         }
     }
 }
 
+enum DirectTargetResponse {
+    Copy(AccountedDatagram),
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    Headroom(UdpHeadroomPacket),
+}
+
 async fn receive_target<S>(
     socket: &S,
     budget: UdpBufferBudget,
     scratch: &mut DirectReceiveScratch,
-) -> Result<AccountedDatagram, UdpRuntimeError>
+) -> Result<DirectTargetResponse, UdpRuntimeError>
+where
+    S: DirectUdpSocket,
+{
+    match &mut scratch.backing {
+        DirectReceiveBacking::Copy { buffer, .. } => {
+            receive_target_copy(socket, budget, buffer).await
+        }
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        DirectReceiveBacking::Headroom { lease, .. } => {
+            receive_target_headroom(socket, lease).await
+        }
+    }
+}
+
+async fn receive_target_copy<S>(
+    socket: &S,
+    budget: UdpBufferBudget,
+    buffer: &mut BytesMut,
+) -> Result<DirectTargetResponse, UdpRuntimeError>
 where
     S: DirectUdpSocket,
 {
     loop {
-        scratch.buffer.clear();
+        buffer.clear();
         socket
             .readable()
             .await
             .map_err(|_| UdpRuntimeError::Receive)?;
-        let (length, source) = match socket.try_recv_buf_from(&mut scratch.buffer) {
+        let (length, source) = match socket.try_recv_buf_from(buffer) {
             Ok(received) => received,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => return Err(UdpRuntimeError::Receive),
         };
-        if length > MAX_UDP_WIRE_DATAGRAM_BYTES || scratch.buffer.len() != length {
+        if length > MAX_UDP_WIRE_DATAGRAM_BYTES || buffer.len() != length {
             return Err(UdpRuntimeError::Bounds);
         }
         let target = ferrum2_core::TargetAddr::ip(source).map_err(|_| UdpRuntimeError::Bounds)?;
         let reservation = budget.reserve_when_available(length).await?;
         let mut payload = BytesMut::with_capacity(length);
-        payload.extend_from_slice(&scratch.buffer[..length]);
-        scratch.buffer.clear();
+        payload.extend_from_slice(&buffer[..length]);
+        buffer.clear();
         let datagram = Datagram::new(target, payload, MAX_UDP_WIRE_DATAGRAM_BYTES)
             .map_err(|_| UdpRuntimeError::Bounds)?;
-        return reservation.attach(datagram);
+        return reservation.attach(datagram).map(DirectTargetResponse::Copy);
+    }
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+async fn receive_target_headroom<S>(
+    socket: &S,
+    lease: &mut Option<UdpHeadroomLease>,
+) -> Result<DirectTargetResponse, UdpRuntimeError>
+where
+    S: DirectUdpSocket,
+{
+    loop {
+        let receive_bound = lease
+            .as_ref()
+            .expect("headroom receive owns one available lease")
+            .layout()
+            .receive_bound();
+        let buffer = lease
+            .as_mut()
+            .expect("headroom receive owns one available lease")
+            .prepare_receive()?;
+        socket
+            .readable()
+            .await
+            .map_err(|_| UdpRuntimeError::Receive)?;
+        let received = {
+            let mut bounded = (&mut *buffer).limit(receive_bound);
+            socket.try_recv_buf_from(&mut bounded)
+        };
+        let (length, source) = match received {
+            Ok(received) => received,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => return Err(UdpRuntimeError::Receive),
+        };
+        let target = ferrum2_core::TargetAddr::ip(source).map_err(|_| UdpRuntimeError::Bounds)?;
+        let packet = lease
+            .take()
+            .expect("completed headroom receive consumes its lease")
+            .finish_receive(target, length)?;
+        return Ok(DirectTargetResponse::Headroom(packet));
     }
 }
 

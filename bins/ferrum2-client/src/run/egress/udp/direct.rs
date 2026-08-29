@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_net::UdpResolver;
 use ferrum2_runtime::{DirectUdpSocket, MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES};
@@ -128,7 +128,10 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
         }
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.recv_buf_from(payload).await,
             #[cfg(all(windows, not(test)))]
@@ -138,7 +141,7 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
         }
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         match self {
             Self::System(socket) => socket.try_recv_buf_from(payload),
             #[cfg(all(windows, not(test)))]

@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 use ferrum2_core::{ConnectErrorKind, TargetAddr};
 use ferrum2_crypto::{MethodProfile, MethodPsk, MethodSinglePskProvider};
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_ENCODE_PAYLOAD_LEN, MethodKeyAdapter,
+    ClientTcpOutbound, DetectionReason, FlowTerminal, INITIAL_ENCODE_PAYLOAD_LEN, MethodKeyAdapter,
     PlainDuplex, ProtocolReason, ShadowsocksError, ShadowsocksTcpInbound, TcpKeyProvider,
     TcpReplayStore, TransportPhase, encode_response_first_write,
 };
@@ -161,8 +161,8 @@ async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_p
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     assert!(matches!(
-        Pin::new(&mut flow).poll_write_plain(&mut cx, &[2; MAX_ENCODE_PAYLOAD_LEN]),
-        Poll::Ready(Ok(MAX_ENCODE_PAYLOAD_LEN))
+        Pin::new(&mut flow).poll_write_plain(&mut cx, &[2; INITIAL_ENCODE_PAYLOAD_LEN]),
+        Poll::Ready(Ok(INITIAL_ENCODE_PAYLOAD_LEN))
     ));
     assert_eq!(
         observation.lock().expect("observation").write_calls,
@@ -171,8 +171,8 @@ async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_p
     );
 
     assert_eq!(
-        write_plain(&mut flow, &[3; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN)
+        write_plain(&mut flow, &[3; INITIAL_ENCODE_PAYLOAD_LEN + 1]).await,
+        Ok(INITIAL_ENCODE_PAYLOAD_LEN)
     );
 }
 
@@ -200,8 +200,8 @@ async fn response_pending_opposite_direction_failures_keep_protocol_or_transport
         .await
         .expect("client");
     assert_eq!(
-        write_plain(&mut client, &[0x5a; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN),
+        write_plain(&mut client, &[0x5a; INITIAL_ENCODE_PAYLOAD_LEN + 1]).await,
+        Ok(INITIAL_ENCODE_PAYLOAD_LEN),
         "response-pending client TX admits its structural maximum without a fatal"
     );
     assert_eq!(client.terminal(), None);

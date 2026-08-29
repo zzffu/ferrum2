@@ -9,6 +9,8 @@ async fn endpoint_and_application() -> (SocksUdpEndpoint, UdpSocket, SocketAddr)
         Ipv4Addr::LOCALHOST,
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        standalone_udp_buffer_budget(),
         UdpSocket::bind,
     )
     .await
@@ -87,13 +89,20 @@ async fn structural_counters_report_lazy_buffers_and_only_response_payload_copie
     else {
         panic!("valid replacement request")
     };
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     drop(std::mem::take(packet.payload_mut()));
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    drop(packet.headroom_mut().take());
     endpoint.recycle(packet);
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+    let expected_allocations = 3;
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    let expected_allocations = 2;
     assert_eq!(
         structural
             .snapshot()
             .get(StructuralCounter::SocksUdpAllocations),
-        3,
+        expected_allocations,
         "a consumed failed request backing is replaced and reported",
     );
 }
@@ -123,7 +132,19 @@ async fn cancelled_and_invalid_receive_keep_the_same_allocation_available() {
     let pointer = endpoint
         .receive_allocation_pointer()
         .expect("lazy receive allocation");
-    assert_eq!(endpoint.buffer_state().0, (0, MAX_SOCKS_UDP_DATAGRAM_BYTES));
+    let receive_state = endpoint.buffer_state().0;
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+    assert_eq!(receive_state.0, 0);
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+    assert_eq!(receive_state.1, MAX_SOCKS_UDP_DATAGRAM_BYTES);
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    assert_eq!(
+        receive_state.1
+            - receive_state.0
+            - ferrum2_shadowsocks::udp_request_owned_headroom().rear(),
+        MAX_SOCKS_UDP_DATAGRAM_BYTES,
+        "front reserve does not reduce the socket receive bound",
+    );
     assert_eq!(endpoint.receive_allocation_pointer(), Some(pointer));
 
     application
@@ -146,7 +167,10 @@ async fn cancelled_and_invalid_receive_keep_the_same_allocation_available() {
     let SocksUdpPacket::Valid(packet) = endpoint.receive().await.expect("valid receive") else {
         panic!("valid owned packet")
     };
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     assert_ne!(packet.allocation_pointer(), pointer);
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    assert_eq!(packet.allocation_pointer(), pointer);
     endpoint.recycle(packet);
     assert_eq!(endpoint.receive_allocation_pointer(), Some(pointer));
 }
@@ -233,7 +257,182 @@ async fn owned_request_unsplit_reuses_identity_and_send_storage_is_independent()
     }
 }
 
+#[cfg(feature = "candidate-udp-owned-headroom")]
 #[tokio::test]
+async fn single_hop_owned_requests_keep_one_lease_through_send_and_clear_rejection() {
+    let registry = OwnerRegistry::new();
+    let proxy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("proxy socket");
+    let proxy_address = match proxy.local_addr().expect("proxy address") {
+        SocketAddr::V4(address) => address,
+        SocketAddr::V6(_) => unreachable!("IPv4 proxy"),
+    };
+    let (path, context) = udp_test_context_for_server(registry.clone(), proxy_address);
+    let budget = context_udp_buffer_budget(&context);
+    let mut endpoint = SocksUdpEndpoint::bind(
+        Ipv4Addr::LOCALHOST,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        budget.clone(),
+        UdpSocket::bind,
+    )
+    .await
+    .expect("SOCKS endpoint");
+    let relay = SocketAddr::V4(endpoint.local_addr().expect("SOCKS relay"));
+    let target = TargetAddr::ipv4("192.0.2.44:53".parse().expect("target")).expect("target");
+    let mut association = context
+        .egress
+        .prepare_udp_for_ingress(
+            crate::run::egress::ClientRequestOrigin::Socks,
+            0,
+            Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+            Some(&target),
+        )
+        .await
+        .expect("single-hop association");
+    association
+        .activate(&context.egress)
+        .expect("single-hop activation");
+    assert!(association.supports_owned_headroom_request());
+    let server = UdpServer::new(&context.keys).expect("proxy protocol");
+    let clock = SystemClock::new();
+    let random = SystemRandom;
+    let mut scratch = UdpPacketScratch::new();
+    let mut socks_wire = vec![0_u8; MAX_SOCKS_UDP_DATAGRAM_BYTES];
+    let mut allocation = None;
+
+    for payload_len in [1, 8_192, 31] {
+        let payload = vec![0x5a; payload_len];
+        let socks_len =
+            encode_udp_datagram(&target, &payload, &mut socks_wire).expect("SOCKS request encode");
+        application_send(&proxy, &socks_wire[..socks_len], relay).await;
+        let SocksUdpPacket::Valid(mut packet) = endpoint.receive().await.expect("owned receive")
+        else {
+            panic!("valid owned packet")
+        };
+        endpoint.accept(packet.source_port());
+        let state = (
+            packet.allocation_pointer(),
+            packet.allocation_capacity(),
+            budget.reserved_bytes(),
+        );
+        assert!(state.1 > ferrum2_shadowsocks::MAX_UDP_WIRE_LEN);
+        match allocation {
+            Some(expected) => assert_eq!(state.0, expected),
+            None => allocation = Some(state.0),
+        }
+        let wire_range = association
+            .prepare_owned_headroom_application_request(
+                &context.egress,
+                &context.egress.outbounds,
+                packet.headroom_mut(),
+                Instant::now(),
+            )
+            .unwrap_or_else(|_| panic!("owned request encode"));
+        assert_eq!(
+            (
+                packet.allocation_pointer(),
+                packet.allocation_capacity(),
+                budget.reserved_bytes(),
+            ),
+            state,
+            "accounting and in-place seal retain the exact receive lease",
+        );
+        let wire = packet
+            .headroom_mut()
+            .as_ref()
+            .expect("encoded packet")
+            .wire(wire_range.clone())
+            .expect("owned wire");
+        assert_eq!(
+            association.send_owned_encoded_request(wire).await.unwrap(),
+            wire_range.len()
+        );
+        let mut received_wire = vec![0_u8; ferrum2_shadowsocks::MAX_UDP_WIRE_LEN];
+        let (received, peer) = proxy
+            .recv_from(&mut received_wire)
+            .await
+            .expect("proxy receives request");
+        let pending = server
+            .prepare_request(&clock, &received_wire[..received], &mut scratch)
+            .expect("proxy opens request");
+        assert_eq!(pending.datagram().payload(), payload);
+        let (_, commit) = pending.into_parts();
+        server
+            .commit_request(commit, peer, clock.monotonic_now(), &random)
+            .expect("proxy commits request");
+        endpoint.recycle(packet);
+        assert_eq!(
+            endpoint.receive_allocation_pointer(),
+            allocation,
+            "the same lease returns after the awaited socket send",
+        );
+        assert_eq!(budget.reserved_bytes(), state.2);
+    }
+
+    let sensitive = b"undelivered plaintext";
+    let socks_len =
+        encode_udp_datagram(&target, sensitive, &mut socks_wire).expect("failure request encode");
+    application_send(&proxy, &socks_wire[..socks_len], relay).await;
+    let SocksUdpPacket::Valid(mut packet) = endpoint.receive().await.expect("failure receive")
+    else {
+        panic!("valid failure packet")
+    };
+    let failure_state = (
+        packet.allocation_pointer(),
+        packet.allocation_capacity(),
+        budget.reserved_bytes(),
+    );
+    context
+        .egress
+        .udp
+        .as_ref()
+        .expect("UDP context")
+        .manager
+        .cancel_all();
+    assert!(matches!(
+        association.prepare_owned_headroom_application_request(
+            &context.egress,
+            &context.egress.outbounds,
+            packet.headroom_mut(),
+            Instant::now(),
+        ),
+        Err(crate::run::egress::UdpPlanResponseError::Runtime(
+            ferrum2_runtime::UdpRuntimeError::Cancelled
+        ))
+    ));
+    assert!(packet.payload().iter().all(|byte| *byte == 0));
+    assert_eq!(
+        (
+            packet.allocation_pointer(),
+            packet.allocation_capacity(),
+            budget.reserved_bytes(),
+        ),
+        failure_state,
+        "rejected accounting physically clears and returns the exact lease",
+    );
+    endpoint.recycle_failure(packet);
+    assert_eq!(endpoint.receive_allocation_pointer(), allocation);
+    assert_eq!(budget.reserved_bytes(), failure_state.2);
+
+    drop(association);
+    drop(endpoint);
+    drop(context);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    std::fs::remove_file(path).expect("remove test config");
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+async fn application_send(socket: &UdpSocket, wire: &[u8], relay: SocketAddr) {
+    socket
+        .send_to(wire, relay)
+        .await
+        .expect("application sends request");
+}
+
+#[tokio::test]
+#[cfg(not(feature = "candidate-udp-owned-headroom"))]
 async fn routed_owned_request_restores_allocation_and_charges_its_exact_capacity() {
     let registry = OwnerRegistry::new();
     let proxy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))

@@ -1,5 +1,7 @@
 use super::*;
 
+use bytes::BufMut;
+
 #[test]
 fn dns_connected_response_binding_is_exact_or_a_port_preserving_remote_resolution() {
     let numeric = TargetAddr::ip("192.0.2.53:53".parse().unwrap()).unwrap();
@@ -72,11 +74,14 @@ impl DirectUdpSocket for DirectTestSocket {
         Ok(())
     }
 
-    async fn recv_buf_from(&self, _payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        _payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         Err(io::Error::other("receive is unused"))
     }
 
-    fn try_recv_buf_from(&self, _payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, _payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         Err(io::Error::other("receive is unused"))
     }
 }
@@ -141,11 +146,14 @@ impl DirectUdpSocket for SelectiveDirectTestSocket {
         Ok(())
     }
 
-    async fn recv_buf_from(&self, _payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        _payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         Err(io::Error::other("receive is unused"))
     }
 
-    fn try_recv_buf_from(&self, _payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, _payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         Err(io::Error::other("receive is unused"))
     }
 }
@@ -158,9 +166,9 @@ struct ScriptedDirectUdpSocket {
 }
 
 impl ScriptedDirectUdpSocket {
-    fn receive(
+    fn receive<B: BufMut>(
         queue: &Mutex<VecDeque<(Vec<u8>, SocketAddr)>>,
-        payload: &mut BytesMut,
+        payload: &mut B,
     ) -> io::Result<(usize, SocketAddr)> {
         let (packet, source) = queue
             .lock()
@@ -168,7 +176,7 @@ impl ScriptedDirectUdpSocket {
             .pop_front()
             .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
         let length = packet.len();
-        payload.extend_from_slice(&packet);
+        payload.put_slice(&packet);
         Ok((length, source))
     }
 }
@@ -182,12 +190,15 @@ impl DirectUdpSocket for ScriptedDirectUdpSocket {
         Ok(())
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         self.awaited_calls.fetch_add(1, Ordering::SeqCst);
         Self::receive(&self.awaited, payload)
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         self.try_calls.fetch_add(1, Ordering::SeqCst);
         Self::receive(&self.ready, payload)
     }

@@ -26,6 +26,8 @@ use super::replay::UdpReplayWindow;
 use super::wire::{
     encode_packet, open_packet, open_packet_in_place, open_packet_owned, udp_crypto,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use super::wire::{encode_packet_owned_headroom, zeroize_owned_headroom};
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
 use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE};
 
@@ -1038,6 +1040,105 @@ impl UdpServer {
         })
     }
 
+    /// Seals one response in the received datagram's fixed owned headroom.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn encode_response_owned_headroom(
+        &self,
+        capability: ServerResponseCapability,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &mut Datagram,
+        padding_len: usize,
+    ) -> Result<EncodedOwnedUdpResponse, UdpPacketError> {
+        let result = self.encode_response_owned_headroom_inner(
+            capability,
+            clock,
+            random,
+            datagram,
+            padding_len,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        );
+        if result.is_err() {
+            zeroize_owned_headroom(datagram);
+        }
+        result
+    }
+
+    /// Seals one owned-headroom response and records a zero-copy fast-path hit.
+    #[cfg(all(
+        feature = "candidate-udp-owned-headroom",
+        feature = "structural-metrics"
+    ))]
+    pub fn encode_response_owned_headroom_structural(
+        &self,
+        capability: ServerResponseCapability,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &mut Datagram,
+        padding_len: usize,
+        structural: &StructuralLocal,
+    ) -> Result<EncodedOwnedUdpResponse, UdpPacketError> {
+        let result = self.encode_response_owned_headroom_inner(
+            capability,
+            clock,
+            random,
+            datagram,
+            padding_len,
+            Some(structural),
+        );
+        if result.is_err() {
+            zeroize_owned_headroom(datagram);
+        }
+        let encoded = result?;
+        structural.add(StructuralCounter::UdpOwnedFastPathHits, 1);
+        Ok(encoded)
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_response_owned_headroom_inner(
+        &self,
+        capability: ServerResponseCapability,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &mut Datagram,
+        padding_len: usize,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Result<EncodedOwnedUdpResponse, UdpPacketError> {
+        let ServerSessionLookup { binding, protocol } = self
+            .session_by_capability(
+                capability,
+                #[cfg(feature = "structural-metrics")]
+                structural,
+            )?
+            .ok_or(UdpPacketError::Generation)?;
+        let mut session = lock_protocol(
+            &protocol,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
+        if !session.live {
+            return Err(UdpPacketError::Generation);
+        }
+        let wire_range = encode_packet_owned_headroom(
+            &self.crypto,
+            &mut session.outbound,
+            clock,
+            random,
+            RESPONSE_TYPE,
+            Some(&binding),
+            datagram,
+            padding_len,
+        )?;
+        Ok(EncodedOwnedUdpResponse {
+            wire_range,
+            peer: session.peer,
+        })
+    }
+
     /// Removes an idle generation only after the mandatory retention period.
     pub fn remove_session(
         &self,
@@ -1241,6 +1342,38 @@ impl EncodedUdpResponse {
     /// Returns the latest successfully validated client peer.
     pub const fn peer(self) -> SocketAddr {
         self.peer
+    }
+}
+
+/// Complete in-place response range and destination without exposing wire IDs.
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[derive(Clone, Eq, PartialEq)]
+pub struct EncodedOwnedUdpResponse {
+    wire_range: std::ops::Range<usize>,
+    peer: SocketAddr,
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+impl EncodedOwnedUdpResponse {
+    /// Returns the exact sealed range inside the owned backing.
+    pub fn wire_range(&self) -> std::ops::Range<usize> {
+        self.wire_range.clone()
+    }
+
+    /// Returns the latest successfully validated client peer.
+    pub const fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+impl fmt::Debug for EncodedOwnedUdpResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncodedOwnedUdpResponse")
+            .field("wire_len", &self.wire_range.len())
+            .field("peer", &"[redacted]")
+            .finish()
     }
 }
 

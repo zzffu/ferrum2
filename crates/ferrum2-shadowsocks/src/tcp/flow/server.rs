@@ -16,7 +16,7 @@ use crate::tcp::error::{
 };
 use crate::tcp::handshake::TcpKeyProvider;
 use crate::tcp::observe::{BufferRole, Observers, inspect_scratch};
-use crate::tcp::wire::{MAX_ENCODE_PAYLOAD_LEN, encode_response_state_into, seal_data_chunk_into};
+use crate::tcp::wire::{EncodeFrameSizer, encode_response_state_into, seal_data_chunk_into};
 
 /// Opaque server flow retaining unsplit transport and both cipher directions.
 pub struct ServerFlow<'a, S, K, T, R> {
@@ -31,6 +31,7 @@ pub struct ServerFlow<'a, S, K, T, R> {
     pub(super) tx: TxState,
     pub(super) encrypt: BytesMut,
     pub(super) decrypt: BytesMut,
+    pub(super) frame_sizer: EncodeFrameSizer,
     pub(super) staged: Option<StagedWrite>,
     pub(super) lifecycle: Lifecycle,
     pub(super) observers: Observers<'a>,
@@ -61,6 +62,7 @@ impl<'a, S, K, T, R> ServerFlow<'a, S, K, T, R> {
             tx: TxState::ResponsePending,
             encrypt,
             decrypt,
+            frame_sizer: EncodeFrameSizer::new(),
             staged: None,
             lifecycle: Lifecycle::default(),
             observers,
@@ -190,7 +192,14 @@ where
             }
         }
 
-        let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
+        if let Err(error) =
+            protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+                self.frame_sizer.prepare_scratch(&mut self.encrypt)
+            })
+        {
+            return Poll::Ready(Err(error));
+        }
+        let admitted = source.len().min(self.frame_sizer.payload_limit());
         if self.tx == TxState::ResponsePending {
             let response_salt = match generate_method_response_salt(self.random, &self.request_salt)
             {
@@ -233,6 +242,13 @@ where
                     return Poll::Ready(Err(error));
                 }
             }
+            if let Err(error) =
+                protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+                    self.frame_sizer.record(admitted)
+                })
+            {
+                return Poll::Ready(Err(error));
+            }
             self.staged = Some(StagedWrite {
                 kind: StagedKind::First,
                 position: 0,
@@ -249,6 +265,13 @@ where
             seal_data_chunk_into(sealer, &source[..admitted], &mut self.encrypt)
         }) {
             Ok(()) => {
+                if let Err(error) =
+                    protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+                        self.frame_sizer.record(admitted)
+                    })
+                {
+                    return Poll::Ready(Err(error));
+                }
                 self.staged = Some(StagedWrite {
                     kind: StagedKind::Subsequent,
                     position: 0,

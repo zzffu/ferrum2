@@ -28,6 +28,34 @@ pub(super) struct DatagramQueue {
     pub(super) len: usize,
 }
 
+/// One rejected immediate commit that returns the datagram and its exact
+/// pre-acquired capacity token to the caller.
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub struct RecoverableUdpCommitError {
+    error: UdpRuntimeError,
+    datagram: Datagram,
+    reservation: UdpBufferReservation,
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+impl RecoverableUdpCommitError {
+    /// Separates the runtime error from ownership that must be cleared or
+    /// restored by the ingress adapter.
+    pub fn into_parts(self) -> (UdpRuntimeError, Datagram, UdpBufferReservation) {
+        (self.error, self.datagram, self.reservation)
+    }
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+impl fmt::Debug for RecoverableUdpCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecoverableUdpCommitError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
 impl DatagramQueue {
     pub(super) fn new() -> Self {
         Self {
@@ -109,6 +137,17 @@ impl PendingUdpSession {
         )
     }
 
+    /// Reserves the first queue slot using a capacity token acquired before
+    /// ingress receive started.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn reserve_datagram_with_reservation(
+        &self,
+        direction: UdpDirection,
+        reservation: UdpBufferReservation,
+    ) -> Result<PendingUdpDatagram, (UdpRuntimeError, UdpBufferReservation)> {
+        reserve_datagram_with_reservation(&self.manager, self.handle, direction, reservation, false)
+    }
+
     /// Activates this generation and enqueues its first post-validation datagram.
     pub fn commit(
         self,
@@ -140,6 +179,26 @@ impl PendingUdpSession {
             Err(UdpCommitError::Runtime(error)) => Err(error),
             Err(UdpCommitError::Protocol(never)) => match never {},
         }
+    }
+
+    /// Activates this generation while returning all pre-acquired buffer
+    /// ownership to the caller if the generation recheck rejects the commit.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn commit_immediate_recoverable(
+        mut self,
+        datagram_reservation: PendingUdpDatagram,
+        datagram: Datagram,
+        now: Instant,
+    ) -> Result<(UdpSessionHandle, AccountedDatagram), RecoverableUdpCommitError> {
+        if datagram_reservation.handle != self.handle
+            || datagram_reservation.manager.as_ptr() != Arc::as_ptr(&self.manager)
+        {
+            return Err(datagram_reservation.reject_immediate(UdpRuntimeError::Cancelled, datagram));
+        }
+        let datagram =
+            datagram_reservation.commit_immediate_recoverable_inner(datagram, now, true)?;
+        self.committed = true;
+        Ok((self.handle, datagram))
     }
 
     /// Atomically activates this generation, commits protocol state, and
@@ -252,6 +311,17 @@ impl PendingUdpDatagram {
             Err(UdpCommitError::Runtime(error)) => Err(error),
             Err(UdpCommitError::Protocol(never)) => match never {},
         }
+    }
+
+    /// Commits accepted activity without a queue round trip, returning the
+    /// datagram and its pre-acquired reservation on every runtime rejection.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn commit_immediate_recoverable(
+        self,
+        datagram: Datagram,
+        now: Instant,
+    ) -> Result<AccountedDatagram, RecoverableUdpCommitError> {
+        self.commit_immediate_recoverable_inner(datagram, now, false)
     }
 
     /// Atomically rechecks generation, commits protocol state and activity,
@@ -372,6 +442,80 @@ impl PendingUdpDatagram {
         self.pending = false;
         Ok(accounted)
     }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn commit_immediate_recoverable_inner(
+        mut self,
+        datagram: Datagram,
+        now: Instant,
+        activate_session: bool,
+    ) -> Result<AccountedDatagram, RecoverableUdpCommitError> {
+        let valid_capacity = self.reservation.as_ref().is_some_and(|reservation| {
+            datagram.allocated_capacity() == reservation.capacity()
+                && datagram.payload().len() <= super::MAX_UDP_WIRE_DATAGRAM_BYTES
+        });
+        if !valid_capacity {
+            return Err(self.reject_immediate(UdpRuntimeError::Bounds, datagram));
+        }
+        let Some(manager) = self.manager.upgrade() else {
+            return Err(self.reject_immediate(UdpRuntimeError::Cancelled, datagram));
+        };
+        let accepted = {
+            let mut shard = lock_session_shard(&manager, self.handle);
+            if manager.shutting_down.load(Ordering::Acquire) {
+                Err(UdpRuntimeError::Cancelled)
+            } else {
+                match matching_entry_mut(&mut shard, self.handle) {
+                    Err(error) => Err(error),
+                    Ok(entry) if entry.committed == activate_session => {
+                        Err(UdpRuntimeError::Cancelled)
+                    }
+                    Ok(entry) => {
+                        let index = self.direction.index();
+                        debug_assert!(entry.pending[index] > 0);
+                        entry.pending[index] -= 1;
+                        update_session_activity(
+                            &mut shard,
+                            self.handle,
+                            now,
+                            manager.limits.idle_timeout(),
+                            activate_session,
+                        );
+                        Ok(())
+                    }
+                }
+            }
+        };
+        if let Err(error) = accepted {
+            return Err(self.reject_immediate(error, datagram));
+        }
+        self.pending = false;
+        let reservation = self
+            .reservation
+            .take()
+            .expect("recoverable UDP commit retains its reservation");
+        Ok(AccountedDatagram {
+            datagram,
+            reservation,
+        })
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn reject_immediate(
+        mut self,
+        error: UdpRuntimeError,
+        datagram: Datagram,
+    ) -> RecoverableUdpCommitError {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("rejected UDP commit returns its reservation");
+        RecoverableUdpCommitError {
+            error,
+            datagram,
+            reservation,
+        }
+    }
 }
 
 impl fmt::Debug for PendingUdpDatagram {
@@ -423,6 +567,53 @@ pub(super) fn reserve_datagram(
         return Err(UdpRuntimeError::QueueFull);
     }
     entry.pending[index] += 1;
+    Ok(PendingUdpDatagram {
+        manager: Arc::downgrade(manager),
+        handle,
+        direction,
+        reservation: Some(reservation),
+        pending: true,
+    })
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub(super) fn reserve_datagram_with_reservation(
+    manager: &Arc<UdpSessionManagerInner>,
+    handle: UdpSessionHandle,
+    direction: UdpDirection,
+    reservation: UdpBufferReservation,
+    require_committed: bool,
+) -> Result<PendingUdpDatagram, (UdpRuntimeError, UdpBufferReservation)> {
+    if !reservation.belongs_to(&manager.budget)
+        || reservation.capacity() > super::headroom::MAX_UDP_HEADROOM_ALLOCATION_BYTES
+    {
+        return Err((UdpRuntimeError::Bounds, reservation));
+    }
+    let accepted = {
+        let mut shard = lock_session_shard(manager, handle);
+        if manager.shutting_down.load(Ordering::Acquire) {
+            Err(UdpRuntimeError::Cancelled)
+        } else {
+            match matching_entry_mut(&mut shard, handle) {
+                Err(error) => Err(error),
+                Ok(entry) if entry.committed != require_committed => {
+                    Err(UdpRuntimeError::Cancelled)
+                }
+                Ok(entry) => {
+                    let index = direction.index();
+                    if entry.pending[index] + entry.queues[index].len() >= UDP_SESSION_QUEUE_DEPTH {
+                        Err(UdpRuntimeError::QueueFull)
+                    } else {
+                        entry.pending[index] += 1;
+                        Ok(())
+                    }
+                }
+            }
+        }
+    };
+    if let Err(error) = accepted {
+        return Err((error, reservation));
+    }
     Ok(PendingUdpDatagram {
         manager: Arc::downgrade(manager),
         handle,

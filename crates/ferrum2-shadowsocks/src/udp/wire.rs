@@ -42,6 +42,63 @@ pub(super) struct OwnedOpenedPacket {
     aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
+/// Fixed maximum layout required to place one application payload directly in
+/// its future Shadowsocks UDP wire.
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UdpOwnedHeadroom {
+    front: usize,
+    rear: usize,
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+impl UdpOwnedHeadroom {
+    /// Returns the fixed bytes available before the payload.
+    pub const fn front(self) -> usize {
+        self.front
+    }
+
+    /// Returns the fixed AEAD tag space after the payload.
+    pub const fn rear(self) -> usize {
+        self.rear
+    }
+
+    /// Returns the largest payload fitting the complete SIP022 wire bound.
+    pub const fn max_payload(self) -> usize {
+        MAX_UDP_WIRE_LEN - self.front - self.rear
+    }
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+const MAX_UDP_CRYPTO_FRONT_HEADROOM: usize = 24 + 16;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+const MAX_ENCODED_TARGET_LEN: usize = 1 + 1 + 255 + 2;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+const UDP_TAG_HEADROOM: usize = 16;
+
+/// Returns the zero-padding request layout valid for every supported method
+/// and target representation.
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub const fn udp_request_owned_headroom() -> UdpOwnedHeadroom {
+    UdpOwnedHeadroom {
+        front: MAX_UDP_CRYPTO_FRONT_HEADROOM + COMMON_HEADER_LEN + MAX_ENCODED_TARGET_LEN,
+        rear: UDP_TAG_HEADROOM,
+    }
+}
+
+/// Returns the zero-padding response layout valid for every supported method
+/// and target representation.
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub const fn udp_response_owned_headroom() -> UdpOwnedHeadroom {
+    UdpOwnedHeadroom {
+        front: MAX_UDP_CRYPTO_FRONT_HEADROOM
+            + COMMON_HEADER_LEN
+            + RESPONSE_BINDING_LEN
+            + MAX_ENCODED_TARGET_LEN,
+        rear: UDP_TAG_HEADROOM,
+    }
+}
+
 impl OwnedOpenedPacket {
     pub(super) const fn session_id(&self) -> &UdpSessionId {
         &self.session_id
@@ -221,7 +278,35 @@ fn encode_semantic_body(
     payload: &[u8],
     padding_len: u16,
 ) -> Result<(), UdpPacketError> {
-    let mut writer = BodyWriter::new(body);
+    let prefix_len = body
+        .len()
+        .checked_sub(payload.len())
+        .ok_or(UdpPacketError::Bounds)?;
+    let (prefix, body_payload) = body.split_at_mut(prefix_len);
+    encode_semantic_prefix(
+        prefix,
+        random,
+        message_type,
+        timestamp,
+        binding,
+        target,
+        padding_len,
+    )?;
+    body_payload.copy_from_slice(payload);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_semantic_prefix(
+    prefix: &mut [u8],
+    random: &(impl SecureRandom + ?Sized),
+    message_type: u8,
+    timestamp: u64,
+    binding: Option<&UdpSessionId>,
+    target: &TargetAddr,
+    padding_len: u16,
+) -> Result<(), UdpPacketError> {
+    let mut writer = BodyWriter::new(prefix);
     writer.write(&[message_type])?;
     writer.write(&timestamp.to_be_bytes())?;
     if let Some(binding) = binding {
@@ -235,8 +320,118 @@ fn encode_semantic_body(
         random.fill(padding).map_err(|_| UdpPacketError::Random)?;
     }
     encode_target(target, &mut writer)?;
-    writer.write(payload)?;
     writer.finish()
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_packet_owned_headroom(
+    crypto: &UdpCrypto,
+    outbound: &mut UdpOutboundSession,
+    clock: &(impl Clock + ?Sized),
+    random: &(impl SecureRandom + ?Sized),
+    message_type: u8,
+    binding: Option<&UdpSessionId>,
+    datagram: &mut Datagram,
+    padding_len: usize,
+) -> Result<Range<usize>, UdpPacketError> {
+    let (target, backing, payload_range) = datagram.backing_parts_mut();
+    let result = encode_packet_owned_headroom_parts(
+        crypto,
+        outbound,
+        clock,
+        random,
+        message_type,
+        binding,
+        target,
+        backing,
+        payload_range,
+        padding_len,
+    );
+    if result.is_err() {
+        backing.zeroize();
+    }
+    result
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub(super) fn zeroize_owned_headroom(datagram: &mut Datagram) {
+    let (_, backing, _) = datagram.backing_parts_mut();
+    backing.zeroize();
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[allow(clippy::too_many_arguments)]
+fn encode_packet_owned_headroom_parts(
+    crypto: &UdpCrypto,
+    outbound: &mut UdpOutboundSession,
+    clock: &(impl Clock + ?Sized),
+    random: &(impl SecureRandom + ?Sized),
+    message_type: u8,
+    binding: Option<&UdpSessionId>,
+    target: &TargetAddr,
+    backing: &mut BytesMut,
+    payload_range: Range<usize>,
+    padding_len: usize,
+) -> Result<Range<usize>, UdpPacketError> {
+    let response = message_type == RESPONSE_TYPE;
+    let address_len = encoded_target_len(target).map_err(map_frame)?;
+    let semantic_prefix_len = semantic_body_len(response, address_len, 0, padding_len)?;
+    let body_len = semantic_prefix_len
+        .checked_add(payload_range.len())
+        .ok_or(UdpPacketError::Bounds)?;
+    let wire_len = body_len
+        .checked_add(crypto.profile().udp_wire_overhead_bytes())
+        .ok_or(UdpPacketError::Bounds)?;
+    if wire_len > MAX_UDP_WIRE_LEN {
+        return Err(UdpPacketError::Bounds);
+    }
+    let crypto_front = crypto
+        .profile()
+        .udp_wire_overhead_bytes()
+        .checked_sub(crypto.profile().tag_bytes())
+        .ok_or(UdpPacketError::Bounds)?;
+    let complete_front = crypto_front
+        .checked_add(semantic_prefix_len)
+        .ok_or(UdpPacketError::Bounds)?;
+    let wire_start = payload_range
+        .start
+        .checked_sub(complete_front)
+        .ok_or(UdpPacketError::Bounds)?;
+    let wire_end = wire_start
+        .checked_add(wire_len)
+        .ok_or(UdpPacketError::Bounds)?;
+    if payload_range.end > backing.len() || wire_end > backing.capacity() {
+        return Err(UdpPacketError::Bounds);
+    }
+    let allocation_address = backing.as_ptr() as usize;
+    backing.resize(wire_end, 0);
+    if backing.as_ptr() as usize != allocation_address {
+        return Err(UdpPacketError::Bounds);
+    }
+
+    let timestamp = clock.unix_seconds().map_err(|_| UdpPacketError::Clock)?;
+    let padding_len = u16::try_from(padding_len).map_err(|_| UdpPacketError::Bounds)?;
+    let output = &mut backing[wire_start..wire_end];
+    let mut reservation = crypto
+        .reserve_seal(outbound, body_len, output)
+        .map_err(map_crypto)?;
+    let body = reservation.body_mut();
+    let (prefix, payload) = body.split_at_mut(semantic_prefix_len);
+    if payload.len() != payload_range.len() {
+        return Err(UdpPacketError::Bounds);
+    }
+    encode_semantic_prefix(
+        prefix,
+        random,
+        message_type,
+        timestamp,
+        binding,
+        target,
+        padding_len,
+    )?;
+    reservation.seal(random).map_err(map_crypto)?;
+    Ok(wire_start..wire_end)
 }
 
 struct BodyWriter<'a> {

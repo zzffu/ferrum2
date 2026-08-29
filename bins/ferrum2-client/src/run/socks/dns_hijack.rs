@@ -31,7 +31,11 @@ pub(super) async fn relay_hijacked_udp<IO>(
             packet.payload(),
         )
         .await;
-        endpoint.recycle(packet);
+        if answered {
+            endpoint.recycle(packet);
+        } else {
+            endpoint.recycle_failure(packet);
+        }
         if !answered {
             return;
         }
@@ -82,7 +86,11 @@ pub(super) async fn relay_hijacked_udp<IO>(
             packet.payload(),
         )
         .await;
-        endpoint.recycle(packet);
+        if answered {
+            endpoint.recycle(packet);
+        } else {
+            endpoint.recycle_failure(packet);
+        }
         if !answered {
             return;
         }

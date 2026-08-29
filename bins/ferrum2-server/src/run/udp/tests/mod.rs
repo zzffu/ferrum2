@@ -38,6 +38,8 @@ mod admission;
 mod commit;
 mod identity;
 mod listener;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+mod owned_headroom;
 mod response_codec;
 mod run_loop;
 use crate::run::test_support::*;

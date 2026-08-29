@@ -16,6 +16,8 @@ use ferrum2_structural::{StructuralCounter, StructuralLocal};
 #[cfg(feature = "structural-metrics")]
 use super::UdpProtocolStructuralEvidence;
 use super::replay::UdpReplayWindow;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use super::wire::encode_packet_owned_headroom;
 use super::wire::{
     encode_packet, open_packet_borrowed, open_packet_in_place_borrowed, open_packet_owned,
     udp_crypto, udp_wire_len,
@@ -171,6 +173,47 @@ impl UdpClientSession {
             padding_len,
             output,
         )
+    }
+
+    /// Seals one request in the datagram's existing owned headroom without
+    /// moving or copying its application payload.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub fn encode_request_owned_headroom(
+        &mut self,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &mut Datagram,
+        padding_len: usize,
+    ) -> Result<std::ops::Range<usize>, UdpPacketError> {
+        encode_packet_owned_headroom(
+            &self.crypto,
+            &mut self.outbound,
+            clock,
+            random,
+            REQUEST_TYPE,
+            None,
+            datagram,
+            padding_len,
+        )
+    }
+
+    /// Seals one owned-headroom request and records a zero-copy fast-path hit.
+    #[cfg(all(
+        feature = "candidate-udp-owned-headroom",
+        feature = "structural-metrics"
+    ))]
+    pub fn encode_request_owned_headroom_structural(
+        &mut self,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &mut Datagram,
+        padding_len: usize,
+        structural: &StructuralLocal,
+    ) -> Result<std::ops::Range<usize>, UdpPacketError> {
+        let wire_range =
+            self.encode_request_owned_headroom(clock, random, datagram, padding_len)?;
+        structural.add(StructuralCounter::UdpOwnedFastPathHits, 1);
+        Ok(wire_range)
     }
 
     /// Authenticates, semantically validates, and reserves an owned response

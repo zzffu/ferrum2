@@ -48,6 +48,8 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
                 Ipv4Addr::LOCALHOST,
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 0,
+                #[cfg(feature = "candidate-udp-owned-headroom")]
+                context_udp_buffer_budget(&context),
                 UdpSocket::bind,
             )
             .await

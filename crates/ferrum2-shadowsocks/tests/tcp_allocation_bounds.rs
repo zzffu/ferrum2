@@ -3,8 +3,8 @@ mod common;
 use bytes::BytesMut;
 use ferrum2_crypto::MethodProfile;
 use ferrum2_shadowsocks::{
-    BufferRole, ClientTcpOutbound, MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN,
-    MAX_ENCRYPT_WIRE_LEN, ShadowsocksTcpInbound, TAG_LEN, TcpKeyProvider, TcpReplayStore,
+    BufferRole, ClientTcpOutbound, INITIAL_ENCODE_PAYLOAD_LEN, INITIAL_ENCRYPT_WIRE_LEN,
+    MAX_DECRYPT_WIRE_LEN, ShadowsocksTcpInbound, TAG_LEN, TcpKeyProvider, TcpReplayStore,
     encode_request_first_write, open_data_frame,
 };
 
@@ -21,7 +21,7 @@ fn assert_fixed_storage_identity(observers: &RecordingObservers) {
     for (role, usable_limit, identity) in buffers.iter().copied() {
         assert!(matches!(
             (role, usable_limit),
-            (BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN)
+            (BufferRole::Encrypt, INITIAL_ENCRYPT_WIRE_LEN)
                 | (BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN)
         ));
         let samples = observers
@@ -87,7 +87,7 @@ async fn maximum_request_uses_one_fixed_scratch_per_role_and_independent_payload
     assert_eq!(buffers[0].1, MAX_DECRYPT_WIRE_LEN);
     assert_ne!(buffers[0].2, session.initial_payload.as_ptr() as usize);
     assert_eq!(buffers[1].0, BufferRole::Encrypt);
-    assert_eq!(buffers[1].1, MAX_ENCRYPT_WIRE_LEN);
+    assert_eq!(buffers[1].1, INITIAL_ENCRYPT_WIRE_LEN);
     assert_ne!(buffers[0].2, buffers[1].2);
     let inspections = observers.inspections.lock().expect("inspections");
     assert!(inspections.iter().all(|(role, identity)| {
@@ -124,12 +124,12 @@ async fn client_flow_allocates_once_then_admits_0_1_max_and_max_plus_one() {
     assert_eq!(write_plain(&mut flow, &[]).await, Ok(0));
     assert_eq!(write_plain(&mut flow, &[1]).await, Ok(1));
     assert_eq!(
-        write_plain(&mut flow, &vec![2; MAX_ENCODE_PAYLOAD_LEN]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN)
+        write_plain(&mut flow, &vec![2; INITIAL_ENCODE_PAYLOAD_LEN]).await,
+        Ok(INITIAL_ENCODE_PAYLOAD_LEN)
     );
     assert_eq!(
-        write_plain(&mut flow, &vec![3; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN)
+        write_plain(&mut flow, &vec![3; INITIAL_ENCODE_PAYLOAD_LEN + 1]).await,
+        Ok(INITIAL_ENCODE_PAYLOAD_LEN)
     );
 
     let buffers = observers.buffers.lock().expect("buffers");
@@ -138,7 +138,7 @@ async fn client_flow_allocates_once_then_admits_0_1_max_and_max_plus_one() {
         buffers.iter().map(|entry| entry.0).collect::<Vec<_>>(),
         vec![BufferRole::Encrypt, BufferRole::Decrypt]
     );
-    assert_eq!(buffers[0].1, MAX_ENCRYPT_WIRE_LEN);
+    assert_eq!(buffers[0].1, INITIAL_ENCRYPT_WIRE_LEN);
     assert_eq!(buffers[1].1, MAX_DECRYPT_WIRE_LEN);
     let inspections = observers.inspections.lock().expect("inspections");
     assert!(inspections.len() >= 8);
@@ -222,7 +222,10 @@ async fn client_rx_and_server_tx_reuse_storage_across_32_subsequent_frames() {
 async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
     const CONTINUOUS_BYTES: usize = 262_144;
 
-    assert_eq!(MAX_ENCODE_PAYLOAD_LEN, 32_768);
+    assert!(matches!(
+        INITIAL_ENCODE_PAYLOAD_LEN,
+        16_384 | 32_768 | 65_535
+    ));
     let clock = FakeClock::new(NOW, 0);
     let plaintext = (0..CONTINUOUS_BYTES)
         .map(|index| (index % 251) as u8)
@@ -258,7 +261,7 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
                 .expect("steady frame");
             assert_eq!(
                 written,
-                MAX_ENCODE_PAYLOAD_LEN.min(plaintext.len() - offset)
+                INITIAL_ENCODE_PAYLOAD_LEN.min(plaintext.len() - offset)
             );
             offset += written;
         }
@@ -271,11 +274,16 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
             .writes
             .clone();
         let (request, frames) = writes.split_first().expect("request first-write");
-        assert_eq!(frames.len(), 8);
+        let frame_plaintext_lengths = plaintext
+            .chunks(INITIAL_ENCODE_PAYLOAD_LEN)
+            .map(<[u8]>::len)
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), frame_plaintext_lengths.len());
         assert!(
             frames
                 .iter()
-                .all(|frame| frame.len() == 2 + TAG_LEN + MAX_ENCODE_PAYLOAD_LEN + TAG_LEN)
+                .zip(&frame_plaintext_lengths)
+                .all(|(frame, payload_len)| frame.len() == 2 + TAG_LEN + payload_len + TAG_LEN)
         );
 
         let first_read_len = profile.initial_request_read_bytes();
@@ -297,12 +305,12 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
             .expect("server")
             .stream;
         let mut opened = Vec::with_capacity(CONTINUOUS_BYTES);
-        let mut destination = vec![0_u8; MAX_ENCODE_PAYLOAD_LEN];
-        while opened.len() < plaintext.len() {
+        let mut destination = vec![0_u8; INITIAL_ENCODE_PAYLOAD_LEN];
+        for expected in &frame_plaintext_lengths {
             let read = read_plain(&mut server, &mut destination)
                 .await
                 .expect("open steady frame");
-            assert_eq!(read, MAX_ENCODE_PAYLOAD_LEN);
+            assert_eq!(read, *expected);
             opened.extend_from_slice(&destination[..read]);
         }
         assert_eq!(opened, plaintext);
@@ -312,8 +320,8 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
             profile.initial_request_read_bytes(),
             request.len() - profile.initial_request_read_bytes(),
         ];
-        for _ in 0..frames.len() {
-            expected_read_lengths.extend([2 + TAG_LEN, MAX_ENCODE_PAYLOAD_LEN + TAG_LEN]);
+        for payload_len in frame_plaintext_lengths {
+            expected_read_lengths.extend([2 + TAG_LEN, payload_len + TAG_LEN]);
         }
         assert_eq!(
             server_observation
@@ -324,6 +332,61 @@ async fn steady_frame_capacity_preserves_wire_and_reduces_records() {
             "continuous frames expose only encrypted length and current payload ranges"
         );
     }
+}
+
+#[cfg(all(
+    feature = "__frame-size-adaptive",
+    not(feature = "__frame-size-16k"),
+    not(feature = "__frame-size-65535")
+))]
+#[tokio::test]
+async fn adaptive_flow_grows_after_512_kib_without_batching_the_triggering_read() {
+    use ferrum2_shadowsocks::{ADAPTIVE_FRAME_GROW_BYTES, MAX_ENCODE_PAYLOAD_LEN};
+
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(601);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io);
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("request first-write");
+
+    let initial_frames =
+        usize::try_from(ADAPTIVE_FRAME_GROW_BYTES / INITIAL_ENCODE_PAYLOAD_LEN as u64)
+            .expect("threshold frame count");
+    assert_eq!(initial_frames, 16);
+    for _ in 0..initial_frames {
+        assert_eq!(
+            write_plain(&mut flow, &vec![0x41; INITIAL_ENCODE_PAYLOAD_LEN]).await,
+            Ok(INITIAL_ENCODE_PAYLOAD_LEN)
+        );
+    }
+    flush_plain(&mut flow).await.expect("initial frame drain");
+    assert_eq!(
+        write_plain(&mut flow, &vec![0x42; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
+        Ok(MAX_ENCODE_PAYLOAD_LEN)
+    );
+    flush_plain(&mut flow).await.expect("grown frame drain");
+
+    let writes = &observation.lock().expect("wire writes").writes;
+    let frames = &writes[1..];
+    assert_eq!(frames.len(), initial_frames + 1);
+    assert!(
+        frames[..initial_frames]
+            .iter()
+            .all(|wire| { wire.len() == 2 + TAG_LEN + INITIAL_ENCODE_PAYLOAD_LEN + TAG_LEN })
+    );
+    assert_eq!(
+        frames.last().expect("grown wire").len(),
+        2 + TAG_LEN + MAX_ENCODE_PAYLOAD_LEN + TAG_LEN
+    );
 }
 
 #[test]

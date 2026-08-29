@@ -372,7 +372,7 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
         assert!(snapshot.get(StructuralCounter::FtbrPartialWrites) > 0);
         assert_eq!(
             snapshot.get(StructuralCounter::FtbrEncryptBufferCapacityBytes),
-            ferrum2_shadowsocks::MAX_ENCRYPT_WIRE_LEN as u64
+            ferrum2_shadowsocks::INITIAL_ENCRYPT_WIRE_LEN as u64
         );
         assert_eq!(
             snapshot.get(StructuralCounter::FtbrDecryptBufferCapacityBytes),

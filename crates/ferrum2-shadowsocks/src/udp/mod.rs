@@ -8,10 +8,14 @@ pub use client::{
     UdpResponseCommit,
 };
 pub use replay::UdpReplayWindow;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub use server::EncodedOwnedUdpResponse;
 pub use server::{
     AcceptedUdpRequest, EncodedUdpResponse, PendingUdpRequest, ServerResponseCapability,
     ServerSessionSnapshot, UdpRequestCommit, UdpServer,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+pub use wire::{UdpOwnedHeadroom, udp_request_owned_headroom, udp_response_owned_headroom};
 pub use wire::{max_udp_payload_len, max_udp_payload_len_for_encoded_target};
 
 use std::fmt;

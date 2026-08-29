@@ -225,6 +225,8 @@ outbound = "manual"
         Ipv4Addr::LOCALHOST,
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        context_udp_buffer_budget(&context),
         UdpSocket::bind,
     )
     .await
@@ -252,6 +254,7 @@ outbound = "manual"
         UdpServer::new(&routing.outbounds[0].shadowsocks().unwrap().keys).expect("outer protocol");
     let random = SystemRandom;
 
+    let mut steady_buffered_bytes = None;
     for label in ["before switch", "after switch"] {
         application
             .send_to(&socks[..length], relay)
@@ -273,6 +276,14 @@ outbound = "manual"
         routed_outer
             .commit_request(commit, peer, clock.monotonic_now(), &random)
             .expect("commit routed outer");
+        let buffered_bytes = registry.snapshot().udp_buffered_bytes;
+        match steady_buffered_bytes {
+            Some(expected) => assert_eq!(
+                buffered_bytes, expected,
+                "multi-hop fallback retains its ingress lease and fixed wire buffers",
+            ),
+            None => steady_buffered_bytes = Some(buffered_bytes),
+        }
         if label == "before switch" {
             selector
                 .switch("manual", "a-c")

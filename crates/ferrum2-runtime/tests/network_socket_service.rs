@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use ferrum2_core::{AbortiveClose, LocalEndpoint};
 use ferrum2_net::{
     DialOptions, InterfaceBinding, InterfaceSelectionSource, NetworkInterfaceCatalog,
@@ -244,12 +244,12 @@ impl DirectUdpSocket for FakeUdpSocket {
         std::future::pending().await
     }
 
-    async fn recv_buf_from(&self, _: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(&self, _: &mut B) -> io::Result<(usize, SocketAddr)> {
         self.state.udp_recv_started.notify_one();
         std::future::pending().await
     }
 
-    fn try_recv_buf_from(&self, _: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, _: &mut B) -> io::Result<(usize, SocketAddr)> {
         Err(io::ErrorKind::WouldBlock.into())
     }
 }

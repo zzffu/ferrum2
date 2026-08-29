@@ -20,9 +20,10 @@ pub use handshake::{
 pub use observe::{BufferObserver, BufferRole, FlowObserver};
 pub use replay::{ReplayCapacityError, TcpReplayStore};
 pub use wire::{
-    MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN, MAX_ENCRYPT_WIRE_LEN, MAX_PADDING_LEN,
-    MAX_PAYLOAD_LEN, REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, TAG_LEN, TCP_SALT_LEN,
-    encode_request_first_write, encode_response_first_write, open_data_frame,
+    ADAPTIVE_FRAME_GROW_BYTES, FRAME_SIZE_BUILD_IDENTITY, INITIAL_ENCODE_PAYLOAD_LEN,
+    INITIAL_ENCRYPT_WIRE_LEN, MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN, MAX_ENCRYPT_WIRE_LEN,
+    MAX_PADDING_LEN, MAX_PAYLOAD_LEN, REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, TAG_LEN,
+    TCP_SALT_LEN, encode_request_first_write, encode_response_first_write, open_data_frame,
 };
 
 #[cfg(test)]

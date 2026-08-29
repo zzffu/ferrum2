@@ -4,8 +4,16 @@ use std::ops::{Deref, DerefMut};
 #[cfg(test)]
 use std::sync::Arc;
 
-use bytes::{Buf as _, BytesMut};
+#[cfg(not(feature = "candidate-udp-owned-headroom"))]
+use bytes::Buf as _;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use bytes::BufMut as _;
+use bytes::BytesMut;
 use ferrum2_core::{TargetAddr, TargetHostRef};
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_runtime::{UdpBufferBudget, UdpHeadroomLayout, UdpHeadroomLease, UdpHeadroomPacket};
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, udp_request_owned_headroom};
 use ferrum2_socks5::{MAX_SOCKS_UDP_DATAGRAM_BYTES, decode_udp_datagram, encode_udp_datagram};
 #[cfg(feature = "structural-metrics")]
 use ferrum2_structural::{StructuralCounter, StructuralLocal};
@@ -20,7 +28,12 @@ use super::source_pinning::SocksUdpSourcePin;
 pub(super) struct SocksUdpEndpoint {
     socket: UdpSocket,
     source: SocksUdpSourcePin,
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     receive_wire: Option<BytesMut>,
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    receive_wire: Option<UdpHeadroomLease>,
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    receive_budget: UdpBufferBudget,
     send_wire: BytesMut,
     #[cfg(feature = "structural-metrics")]
     structural: Option<StructuralLocal>,
@@ -34,7 +47,10 @@ pub(super) struct SocksUdpOwnedPacket {
     target: TargetAddr,
     encoded_target_len: usize,
     source_port: u16,
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     payload: BytesMut,
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    headroom: Option<UdpHeadroomPacket>,
 }
 
 impl SocksUdpOwnedPacket {
@@ -50,29 +66,65 @@ impl SocksUdpOwnedPacket {
         self.source_port
     }
 
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     pub(super) fn payload(&self) -> &[u8] {
         &self.payload
     }
 
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(super) fn payload(&self) -> &[u8] {
+        self.headroom
+            .as_ref()
+            .expect("live SOCKS UDP packet owns headroom")
+            .datagram()
+            .payload()
+    }
+
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     pub(super) fn payload_mut(&mut self) -> &mut BytesMut {
         &mut self.payload
     }
 
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(super) fn headroom_mut(&mut self) -> &mut Option<UdpHeadroomPacket> {
+        &mut self.headroom
+    }
+
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
     fn into_wire(self) -> BytesMut {
         self.payload
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "candidate-udp-owned-headroom")))]
     pub(super) fn allocation_pointer(&self) -> *const u8 {
         self.payload.as_ptr()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "candidate-udp-owned-headroom"))]
+    pub(super) fn allocation_pointer(&self) -> *const u8 {
+        self.headroom
+            .as_ref()
+            .expect("live SOCKS UDP packet owns headroom")
+            .storage_identity() as *const u8
+    }
+
+    #[cfg(all(test, not(feature = "candidate-udp-owned-headroom")))]
     pub(super) fn allocation_capacity(&self) -> usize {
         self.payload.capacity()
     }
+
+    #[cfg(all(test, feature = "candidate-udp-owned-headroom"))]
+    pub(super) fn allocation_capacity(&self) -> usize {
+        self.headroom
+            .as_ref()
+            .expect("live SOCKS UDP packet owns headroom")
+            .allocated_capacity()
+    }
 }
 
+// Indirection here would add the per-datagram allocation this owned receive
+// contract exists to remove.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum SocksUdpPacket {
     Valid(SocksUdpOwnedPacket),
     WrongSource,
@@ -106,6 +158,7 @@ impl SocksUdpEndpoint {
         local_ip: Ipv4Addr,
         peer_ip: IpAddr,
         requested_port: u16,
+        #[cfg(feature = "candidate-udp-owned-headroom")] receive_budget: UdpBufferBudget,
         mut bind: F,
     ) -> io::Result<Self>
     where
@@ -115,7 +168,12 @@ impl SocksUdpEndpoint {
         Ok(Self {
             socket: bind(SocketAddrV4::new(local_ip, 0).into()).await?,
             source: SocksUdpSourcePin::new(peer_ip, requested_port),
+            #[cfg(not(feature = "candidate-udp-owned-headroom"))]
             receive_wire: Some(BytesMut::new()),
+            #[cfg(feature = "candidate-udp-owned-headroom")]
+            receive_wire: None,
+            #[cfg(feature = "candidate-udp-owned-headroom")]
+            receive_budget,
             send_wire: BytesMut::new(),
             #[cfg(feature = "structural-metrics")]
             structural: None,
@@ -147,6 +205,16 @@ impl SocksUdpEndpoint {
         {
             return Err(io::Error::other("injected application receive failure"));
         }
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        {
+            return self.receive_headroom().await;
+        }
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+        self.receive_plain().await
+    }
+
+    #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+    async fn receive_plain(&mut self) -> io::Result<SocksUdpPacket> {
         let wire = self
             .receive_wire
             .as_mut()
@@ -201,18 +269,120 @@ impl SocksUdpEndpoint {
         }))
     }
 
-    pub(super) fn recycle(&mut self, packet: SocksUdpOwnedPacket) {
-        let mut wire = packet.into_wire();
-        wire.clear();
-        #[cfg(feature = "structural-metrics")]
-        let allocates = wire.capacity() == 0;
-        wire.reserve(MAX_SOCKS_UDP_DATAGRAM_BYTES);
-        #[cfg(feature = "structural-metrics")]
-        if allocates && let Some(structural) = &self.structural {
-            structural.add(StructuralCounter::SocksUdpAllocations, 1);
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    async fn receive_headroom(&mut self) -> io::Result<SocksUdpPacket> {
+        if self.receive_wire.is_none() {
+            let layout = socks_udp_headroom_layout()?;
+            let lease = UdpHeadroomLease::reserve(&self.receive_budget, layout)
+                .map_err(|_| io::Error::other("SOCKS UDP receive capacity unavailable"))?;
+            self.receive_wire = Some(lease);
+            #[cfg(feature = "structural-metrics")]
+            if let Some(structural) = &self.structural {
+                structural.add(StructuralCounter::SocksUdpAllocations, 1);
+            }
         }
-        debug_assert!(self.receive_wire.is_none());
-        self.receive_wire = Some(wire);
+        let prefix = socks_udp_receive_prefix();
+        let receive_bound = self
+            .receive_wire
+            .as_ref()
+            .expect("SOCKS UDP endpoint owns a receive lease")
+            .layout()
+            .receive_bound();
+        let wire = self
+            .receive_wire
+            .as_mut()
+            .expect("SOCKS UDP endpoint owns a receive lease")
+            .prepare_receive()
+            .map_err(|_| io::Error::other("SOCKS UDP receive layout invalid"))?;
+        let received = {
+            let mut bounded = (&mut *wire).limit(receive_bound);
+            self.socket.recv_buf_from(&mut bounded).await
+        };
+        let (length, source) = match received {
+            Ok(received) => received,
+            Err(error) => {
+                wire.fill(0);
+                wire.clear();
+                return Err(error);
+            }
+        };
+        let expected_len = prefix.checked_add(length);
+        if expected_len != Some(wire.len()) || length > MAX_SOCKS_UDP_DATAGRAM_BYTES {
+            wire.fill(0);
+            wire.clear();
+            return Ok(SocksUdpPacket::InvalidWire);
+        }
+        if !self.source.admits(source) {
+            wire.fill(0);
+            wire.clear();
+            return Ok(SocksUdpPacket::WrongSource);
+        }
+        let decoded = {
+            let received_wire = &wire[prefix..prefix + length];
+            let Ok(datagram) = decode_udp_datagram(received_wire) else {
+                wire.fill(0);
+                wire.clear();
+                return Ok(SocksUdpPacket::InvalidWire);
+            };
+            let target = datagram.to_target_addr();
+            let encoded_target_len = datagram.encoded_target_len();
+            let payload_offset = length
+                .checked_sub(datagram.payload().len())
+                .expect("decoded SOCKS UDP payload is within its wire");
+            (target, encoded_target_len, payload_offset)
+        };
+        let (target, encoded_target_len, payload_offset) = decoded;
+        let source_port = source.port();
+        let lease = self
+            .receive_wire
+            .take()
+            .expect("validated SOCKS UDP request consumes its receive lease");
+        let headroom =
+            match lease.finish_receive_payload(target.clone(), length, payload_offset..length) {
+                Ok(packet) => packet,
+                Err(_) => return Ok(SocksUdpPacket::InvalidWire),
+            };
+        Ok(SocksUdpPacket::Valid(SocksUdpOwnedPacket {
+            target,
+            encoded_target_len,
+            source_port,
+            headroom: Some(headroom),
+        }))
+    }
+
+    pub(super) fn recycle(&mut self, packet: SocksUdpOwnedPacket) {
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+        {
+            let mut wire = packet.into_wire();
+            wire.clear();
+            #[cfg(feature = "structural-metrics")]
+            let allocates = wire.capacity() == 0;
+            wire.reserve(MAX_SOCKS_UDP_DATAGRAM_BYTES);
+            #[cfg(feature = "structural-metrics")]
+            if allocates && let Some(structural) = &self.structural {
+                structural.add(StructuralCounter::SocksUdpAllocations, 1);
+            }
+            debug_assert!(self.receive_wire.is_none());
+            self.receive_wire = Some(wire);
+        }
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        {
+            debug_assert!(self.receive_wire.is_none());
+            self.receive_wire = packet.headroom.and_then(|packet| packet.recycle().ok());
+        }
+    }
+
+    pub(super) fn recycle_failure(&mut self, packet: SocksUdpOwnedPacket) {
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        {
+            let mut packet = packet;
+            if let Some(headroom) = packet.headroom.as_mut() {
+                let _ = headroom.clear_failure();
+            }
+            self.recycle(packet);
+        }
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
+        self.recycle(packet);
     }
 
     pub(super) fn accept(&mut self, source_port: u16) {
@@ -267,16 +437,28 @@ impl SocksUdpEndpoint {
 
     #[cfg(test)]
     pub(super) fn buffer_state(&self) -> ((usize, usize), (usize, usize)) {
+        #[cfg(not(feature = "candidate-udp-owned-headroom"))]
         let receive = self
             .receive_wire
             .as_ref()
             .map_or((0, 0), |wire| (wire.len(), wire.capacity()));
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        let receive = self.receive_wire.as_ref().map_or((0, 0), |wire| {
+            (wire.logical_len(), wire.layout().capacity())
+        });
         (receive, (self.send_wire.len(), self.send_wire.capacity()))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "candidate-udp-owned-headroom")))]
     pub(super) fn receive_allocation_pointer(&self) -> Option<*const u8> {
         self.receive_wire.as_ref().map(|wire| wire.as_ptr())
+    }
+
+    #[cfg(all(test, feature = "candidate-udp-owned-headroom"))]
+    pub(super) fn receive_allocation_pointer(&self) -> Option<*const u8> {
+        self.receive_wire
+            .as_ref()
+            .map(|wire| wire.storage_identity() as *const u8)
     }
 
     #[cfg(test)]
@@ -307,4 +489,21 @@ fn socks_udp_wire_len(target: &TargetAddr, payload_len: usize) -> io::Result<usi
 
 fn socks_udp_bounds_error() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "SOCKS UDP datagram too large")
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+const fn socks_udp_receive_prefix() -> usize {
+    const MAX_ENCODED_TARGET_LEN: usize = 1 + 1 + 255 + 2;
+    const SOCKS_FIXED_HEADER_LEN: usize = 3;
+    udp_request_owned_headroom().front() - MAX_ENCODED_TARGET_LEN - SOCKS_FIXED_HEADER_LEN
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+fn socks_udp_headroom_layout() -> io::Result<UdpHeadroomLayout> {
+    UdpHeadroomLayout::for_receive_bound(
+        MAX_UDP_WIRE_LEN,
+        socks_udp_receive_prefix(),
+        udp_request_owned_headroom().rear(),
+    )
+    .map_err(|_| io::Error::other("SOCKS UDP headroom layout invalid"))
 }

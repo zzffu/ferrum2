@@ -1,5 +1,123 @@
 use super::*;
 
+#[cfg(all(
+    feature = "candidate-udp-owned-headroom",
+    feature = "structural-metrics"
+))]
+#[tokio::test]
+async fn single_hop_headroom_encode_has_zero_payload_copy_and_keeps_one_budget_owner() {
+    use ferrum2_runtime::{UdpHeadroomLayout, UdpHeadroomLease};
+    use ferrum2_shadowsocks::udp_request_owned_headroom;
+    use ferrum2_structural::{StructuralCounter, StructuralHub};
+
+    let proxy_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("proxy bind");
+    let outbounds = crate::run::egress::prepare_client_outbounds(vec![
+        ferrum2_config::ClientOutboundConfig::Shadowsocks {
+            server: proxy_socket.local_addr().expect("proxy address"),
+            psk: Arc::new(default_test_psk()),
+            dial_options: Default::default(),
+        },
+    ])
+    .expect("proxy outbound");
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
+    let budget = manager.buffer_budget();
+    let structural = StructuralHub::new();
+    let engine = ClientEgressEngine::new(
+        outbounds,
+        TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+        ferrum2_crypto::SystemClock::new(),
+        ferrum2_crypto::SystemRandom,
+        (Duration::from_secs(1), Duration::from_secs(1)),
+        Some(ClientUdpContext {
+            manager,
+            live_ids: Arc::new(Mutex::new(HashSet::new())),
+        }),
+        None,
+    )
+    .with_structural(structural.local());
+    let target = TargetAddr::ip("192.0.2.61:53".parse().expect("target address")).expect("target");
+    let mut association = engine
+        .prepare_udp_for_ingress(
+            ClientRequestOrigin::Socks,
+            0,
+            Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+            Some(&target),
+        )
+        .await
+        .expect("proxy association");
+    association.activate(&engine).expect("proxy activation");
+    assert!(association.supports_owned_headroom_request());
+
+    let headroom = udp_request_owned_headroom();
+    let layout =
+        UdpHeadroomLayout::for_receive_bound(MAX_UDP_WIRE_LEN, headroom.front(), headroom.rear())
+            .expect("request layout");
+    let payload = vec![0x5a; 8_192];
+    let mut lease = UdpHeadroomLease::reserve(&budget, layout).expect("request lease");
+    let pointer = lease.storage_identity();
+    lease
+        .prepare_receive()
+        .expect("prepare application receive")
+        .extend_from_slice(&payload);
+    let mut packet = Some(
+        lease
+            .finish_receive(target, payload.len())
+            .expect("finish application receive"),
+    );
+    let reserved = budget.reserved_bytes();
+    let wire_range = association
+        .prepare_owned_headroom_application_request(
+            &engine,
+            &engine.outbounds,
+            &mut packet,
+            Instant::now(),
+        )
+        .unwrap_or_else(|_| panic!("owned request encode"));
+    let restored = packet.as_ref().expect("restored packet");
+    assert_eq!(restored.storage_identity(), pointer);
+    assert_eq!(restored.allocated_capacity(), layout.capacity());
+    assert_eq!(budget.reserved_bytes(), reserved);
+    let snapshot = structural.snapshot();
+    assert_eq!(
+        snapshot.get(StructuralCounter::UdpPayloadToWireCopyBytes),
+        0
+    );
+    assert_eq!(snapshot.get(StructuralCounter::UdpOwnedFastPathHits), 1);
+    let wire = restored.wire(wire_range.clone()).expect("owned wire");
+    assert_eq!(
+        association.send_owned_encoded_request(wire).await.unwrap(),
+        wire_range.len()
+    );
+    let mut received = vec![0_u8; MAX_UDP_WIRE_LEN];
+    assert_eq!(
+        proxy_socket
+            .recv_from(&mut received)
+            .await
+            .expect("proxy request")
+            .0,
+        wire_range.len()
+    );
+    assert_eq!(
+        restored.storage_identity(),
+        pointer,
+        "Pending socket send retains the same backing"
+    );
+    let returned = packet
+        .take()
+        .expect("owned packet")
+        .recycle()
+        .expect("recycle request");
+    assert_eq!(returned.storage_identity(), pointer);
+    assert_eq!(budget.reserved_bytes(), reserved);
+    drop(returned);
+    drop(association);
+    assert_eq!(budget.reserved_bytes(), 0);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+}
+
 #[cfg(feature = "structural-metrics")]
 #[tokio::test]
 async fn request_structural_work_is_visible_before_the_live_association_drops() {

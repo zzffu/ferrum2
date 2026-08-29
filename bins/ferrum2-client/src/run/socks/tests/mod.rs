@@ -7,6 +7,8 @@ use tokio::io::AsyncWriteExt as _;
 
 use ferrum2_core::route::Network;
 use ferrum2_runtime::BoundedSupervisor;
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_runtime::{UdpBufferBudget, UdpRuntimeLimits, UdpSessionManager};
 use ferrum2_socks5::{SocksStream, decode_udp_datagram};
 
 use super::association::{relay_udp_association, run_udp_association};
@@ -29,6 +31,22 @@ mod routing;
 
 use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
 pub(in crate::run) use lifecycle::RunningUdpRelay;
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+fn standalone_udp_buffer_budget() -> UdpBufferBudget {
+    UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()).buffer_budget()
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+fn context_udp_buffer_budget(context: &ClientContext) -> UdpBufferBudget {
+    context
+        .egress
+        .udp
+        .as_ref()
+        .expect("UDP context")
+        .manager
+        .buffer_budget()
+}
 
 fn udp_test_context(registry: OwnerRegistry) -> (PathBuf, Arc<ClientContext>, SocketAddrV4) {
     let server = reserve_address();
@@ -367,6 +385,8 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
         Ipv4Addr::LOCALHOST,
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        context_udp_buffer_budget(&context),
         UdpSocket::bind,
     )
     .await

@@ -14,6 +14,8 @@ use ferrum2_runtime::{
     UDP_SESSION_QUEUE_DEPTH, UdpBufferBudget, UdpBufferReservation, UdpDirection, UdpRuntimeError,
     UdpSessionHandle, UdpSessionManager,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_runtime::{RecoverableUdpCommitError, UdpHeadroomPacket, UdpHeadroomRecycleToken};
 use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketError};
 #[cfg(feature = "structural-metrics")]
 use ferrum2_structural::{StructuralCounter, StructuralLocal};
@@ -321,6 +323,184 @@ impl ClientUdpAssociation {
             .as_mut()
             .expect("proxy UDP association owns its buffer lifecycle")
             .ensure_ready()
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(in crate::run) fn supports_owned_headroom_request(&self) -> bool {
+        matches!(self.upstream, ClientUdpUpstream::Shadowsocks(_))
+            && self.meter_global_buffers
+            && self
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.hops().len() == 1)
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(in crate::run) fn prepare_owned_headroom_application_request<C, T, R>(
+        &mut self,
+        engine: &ClientEgressEngine<C, T, R>,
+        outbounds: &[ClientOutboundContext],
+        packet: &mut Option<UdpHeadroomPacket>,
+        now: Instant,
+    ) -> Result<std::ops::Range<usize>, UdpPlanResponseError>
+    where
+        T: Clock,
+        R: SecureRandom,
+    {
+        if !self.supports_owned_headroom_request() {
+            return Err(UdpPlanResponseError::Packet(
+                UdpPacketError::StateUnavailable,
+            ));
+        }
+        let owned = packet.as_ref().ok_or(UdpPlanResponseError::Packet(
+            UdpPacketError::StateUnavailable,
+        ))?;
+        let target = owned.datagram().target();
+        let encoded_target_len = match target.host() {
+            TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
+            TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
+            TargetHostRef::Domain(name) => 3_usize
+                .checked_add(name.len())
+                .ok_or(UdpPlanResponseError::Packet(UdpPacketError::Bounds))?,
+        };
+        if owned.datagram().payload().len()
+            > self.payload_limit(outbounds, false, encoded_target_len)
+        {
+            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+        }
+        let (accounted, recycle) = self.account_headroom_application(packet, now)?;
+        let (mut datagram, reservation) = accounted.into_parts();
+        let encode_result = {
+            let plan = self
+                .protocol
+                .as_mut()
+                .expect("client UDP protocol is activated before encode");
+            #[cfg(feature = "structural-metrics")]
+            {
+                plan.legs[0]
+                    .protocol
+                    .encode_request_owned_headroom_structural(
+                        &engine.clock,
+                        &engine.random,
+                        &mut datagram,
+                        0,
+                        &self.structural,
+                    )
+            }
+            #[cfg(not(feature = "structural-metrics"))]
+            {
+                plan.legs[0].protocol.encode_request_owned_headroom(
+                    &engine.clock,
+                    &engine.random,
+                    &mut datagram,
+                    0,
+                )
+            }
+        };
+        let restored = recycle
+            .restore(datagram, reservation)
+            .map_err(UdpPlanResponseError::Runtime)?;
+        *packet = Some(restored);
+        encode_result.map_err(UdpPlanResponseError::Packet)
+    }
+
+    /// Accounts a non-single-hop or direct SOCKS request while preserving its
+    /// fixed ingress allocation. The existing encoder performs the one
+    /// explicit fallback copy into its already-reusable wire buffer.
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(in crate::run) fn prepare_headroom_fallback_application_request<C, T, R>(
+        &mut self,
+        engine: &ClientEgressEngine<C, T, R>,
+        outbounds: &[ClientOutboundContext],
+        packet: &mut Option<UdpHeadroomPacket>,
+        now: Instant,
+    ) -> Result<usize, UdpPlanResponseError>
+    where
+        T: Clock,
+        R: SecureRandom,
+    {
+        let owned = packet.as_ref().ok_or(UdpPlanResponseError::Packet(
+            UdpPacketError::StateUnavailable,
+        ))?;
+        let encoded_target_len = match owned.datagram().target().host() {
+            TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
+            TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
+            TargetHostRef::Domain(name) => 3_usize
+                .checked_add(name.len())
+                .ok_or(UdpPlanResponseError::Packet(UdpPacketError::Bounds))?,
+        };
+        if owned.datagram().payload().len()
+            > self.payload_limit(outbounds, false, encoded_target_len)
+        {
+            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+        }
+        if matches!(&self.upstream, ClientUdpUpstream::Shadowsocks(_)) {
+            self.ensure_proxy_buffers()
+                .map_err(UdpPlanResponseError::Runtime)?;
+        }
+        let (accounted, recycle) = self.account_headroom_application(packet, now)?;
+        let payload_len = accounted.datagram().payload().len();
+        let wire_result = if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
+            self.direct_target = Some(accounted.datagram().target().clone());
+            let direct_wire = self
+                .direct_wire
+                .as_mut()
+                .expect("direct UDP association owns its request wire buffer");
+            direct_wire.clear();
+            direct_wire.extend_from_slice(accounted.datagram().payload());
+            #[cfg(feature = "structural-metrics")]
+            self.structural_pending.record_payload_copy(payload_len);
+            Ok(payload_len)
+        } else {
+            self.encode_request(engine, outbounds, accounted.datagram())
+                .map_err(UdpPlanResponseError::Packet)
+        };
+        let (datagram, reservation) = accounted.into_parts();
+        *packet = Some(
+            recycle
+                .restore(datagram, reservation)
+                .map_err(UdpPlanResponseError::Runtime)?,
+        );
+        #[cfg(feature = "structural-metrics")]
+        self.structural_pending.publish(&self.structural);
+        wire_result
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn account_headroom_application(
+        &mut self,
+        packet: &mut Option<UdpHeadroomPacket>,
+        now: Instant,
+    ) -> Result<(AccountedDatagram, UdpHeadroomRecycleToken), UdpPlanResponseError> {
+        let owned = packet.take().ok_or(UdpPlanResponseError::Packet(
+            UdpPacketError::StateUnavailable,
+        ))?;
+        let (mut datagram, reservation, recycle) = owned.into_accounting_parts();
+        let pending = match self.reserve_application_headroom_datagram(reservation) {
+            Ok(pending) => pending,
+            Err((error, reservation)) => {
+                datagram.backing_parts_mut().1.fill(0);
+                *packet = Some(
+                    recycle
+                        .restore(datagram, reservation)
+                        .map_err(UdpPlanResponseError::Runtime)?,
+                );
+                return Err(UdpPlanResponseError::Runtime(error));
+            }
+        };
+        match self.commit_application_headroom_datagram(pending, datagram, now) {
+            Ok(accounted) => Ok((accounted, recycle)),
+            Err(rejected) => {
+                let (error, mut datagram, reservation) = rejected.into_parts();
+                datagram.backing_parts_mut().1.fill(0);
+                *packet = Some(
+                    recycle
+                        .restore(datagram, reservation)
+                        .map_err(UdpPlanResponseError::Runtime)?,
+                );
+                Err(UdpPlanResponseError::Runtime(error))
+            }
+        }
     }
 
     pub(in crate::run) fn activate<C, T, R>(
@@ -702,6 +882,26 @@ impl ClientUdpAssociation {
         }
     }
 
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn reserve_application_headroom_datagram(
+        &self,
+        reservation: UdpBufferReservation,
+    ) -> Result<PendingUdpDatagram, (UdpRuntimeError, UdpBufferReservation)> {
+        if !self.meter_global_buffers {
+            return Err((UdpRuntimeError::Bounds, reservation));
+        }
+        match self.pending_session.as_ref() {
+            Some(session) => {
+                session.reserve_datagram_with_reservation(UdpDirection::ToTarget, reservation)
+            }
+            None => self.manager.reserve_datagram_with_reservation(
+                self.handle,
+                UdpDirection::ToTarget,
+                reservation,
+            ),
+        }
+    }
+
     fn reserve_response_datagram(
         &self,
         allocated_capacity: usize,
@@ -729,6 +929,21 @@ impl ClientUdpAssociation {
                 .commit_immediate(reservation, datagram, now)
                 .map(|(_, datagram)| datagram),
             None => reservation.commit_immediate(datagram, now),
+        }
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    fn commit_application_headroom_datagram(
+        &mut self,
+        reservation: PendingUdpDatagram,
+        datagram: Datagram,
+        now: Instant,
+    ) -> Result<AccountedDatagram, RecoverableUdpCommitError> {
+        match self.pending_session.take() {
+            Some(session) => session
+                .commit_immediate_recoverable(reservation, datagram, now)
+                .map(|(_, datagram)| datagram),
+            None => reservation.commit_immediate_recoverable(datagram, now),
         }
     }
 
@@ -970,6 +1185,27 @@ impl ClientUdpAssociation {
                 }
                 Ok(length)
             }
+        }
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(in crate::run) async fn send_owned_encoded_request(
+        &mut self,
+        wire: &[u8],
+    ) -> io::Result<usize> {
+        #[cfg(test)]
+        if self
+            .io_fault
+            .as_ref()
+            .is_some_and(|plan| plan.fails(UdpIoOperation::UpstreamSend))
+        {
+            return Err(io::Error::other("injected upstream send failure"));
+        }
+        match &mut self.upstream {
+            ClientUdpUpstream::Shadowsocks(socket) => socket.send(wire).await,
+            ClientUdpUpstream::Direct { .. } => Err(io::Error::other(
+                "owned-headroom request requires one Shadowsocks hop",
+            )),
         }
     }
 

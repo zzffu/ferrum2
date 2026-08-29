@@ -19,8 +19,8 @@ use crate::tcp::error::{
 use crate::tcp::handshake::TcpKeyProvider;
 use crate::tcp::observe::{BufferRole, Observers, inspect_scratch};
 use crate::tcp::wire::{
-    MAX_DECRYPT_WIRE_LEN, MAX_RESPONSE_FIXED_PLAINTEXT_LEN, RESPONSE_TYPE, TAG_LEN, opener_for,
-    response_fixed_plaintext_len,
+    EncodeFrameSizer, MAX_DECRYPT_WIRE_LEN, MAX_RESPONSE_FIXED_PLAINTEXT_LEN, RESPONSE_TYPE,
+    TAG_LEN, opener_for, response_fixed_plaintext_len,
 };
 
 /// Opaque client flow retaining unsplit transport and both cipher directions.
@@ -35,6 +35,7 @@ pub struct ClientFlow<'a, S, K, T> {
     pub(super) tx: TxState,
     pub(super) encrypt: BytesMut,
     pub(super) decrypt: BytesMut,
+    pub(super) frame_sizer: EncodeFrameSizer,
     pub(super) staged: Option<StagedWrite>,
     pub(super) lifecycle: Lifecycle,
     pub(super) observers: Observers<'a>,
@@ -68,6 +69,7 @@ impl<'a, S, K, T> ClientFlow<'a, S, K, T> {
             tx: TxState::Open,
             encrypt,
             decrypt,
+            frame_sizer: EncodeFrameSizer::new(),
             staged: None,
             lifecycle: Lifecycle::default(),
             observers,
@@ -472,6 +474,7 @@ where
             &mut self.encrypt,
             &mut self.staged,
             &mut self.tx,
+            &mut self.frame_sizer,
             &mut self.lifecycle,
             self.observers.flow,
             cx,

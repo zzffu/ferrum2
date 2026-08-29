@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
+use bytes::BufMut;
 use ferrum2_core::{AbortiveClose, LocalEndpoint};
 use ferrum2_net::ResolvedInterface;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -708,7 +708,10 @@ impl<T: DirectUdpSocket> DirectUdpSocket for GenerationBoundUdpSocket<T> {
         }
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         let mut cancellation = self.cancellation.clone();
         let outcome = tokio::select! {
             biased;
@@ -734,7 +737,7 @@ impl<T: DirectUdpSocket> DirectUdpSocket for GenerationBoundUdpSocket<T> {
         }
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         if let Some(cancellation) = self.cancellation.terminal_now() {
             self.close(cancellation);
             return Err(closed_io_error(cancellation));
@@ -845,14 +848,17 @@ impl<T: DirectUdpSocket> DirectUdpSocket for NetworkUdpSocket<T> {
         }
     }
 
-    async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    async fn recv_buf_from<B: BufMut + Send>(
+        &self,
+        payload: &mut B,
+    ) -> io::Result<(usize, SocketAddr)> {
         match &self.inner {
             NetworkUdpSocketInner::Static(socket) => socket.socket.recv_buf_from(payload).await,
             NetworkUdpSocketInner::Dynamic(socket) => socket.recv_buf_from(payload).await,
         }
     }
 
-    fn try_recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+    fn try_recv_buf_from<B: BufMut>(&self, payload: &mut B) -> io::Result<(usize, SocketAddr)> {
         match &self.inner {
             NetworkUdpSocketInner::Static(socket) => socket.socket.try_recv_buf_from(payload),
             NetworkUdpSocketInner::Dynamic(socket) => socket.try_recv_buf_from(payload),

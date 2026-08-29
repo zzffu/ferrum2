@@ -4,6 +4,7 @@ mod identity;
 mod listener;
 mod listener_bind;
 mod physical;
+#[cfg_attr(feature = "candidate-udp-owned-headroom", allow(dead_code))]
 mod response_codec;
 mod route;
 mod run_loop;

@@ -119,6 +119,8 @@ async fn success_reply_write_failure_rolls_back_and_next_setup_rebinds() {
         Ipv4Addr::LOCALHOST,
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        context_udp_buffer_budget(&context),
         UdpSocket::bind,
     )
     .await
@@ -160,6 +162,8 @@ async fn application_binder_receives_the_accepted_concrete_local_ip() {
         Ipv4Addr::new(127, 0, 0, 2),
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
+        #[cfg(feature = "candidate-udp-owned-headroom")]
+        context_udp_buffer_budget(&context),
         &mut bind,
     )
     .await

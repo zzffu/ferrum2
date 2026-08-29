@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+candidate-udp-owned-headroom = []
 structural-metrics = ["dep:ferrum2-structural"]
 
 [dependencies]

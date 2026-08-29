@@ -15,6 +15,10 @@ use ferrum2_shadowsocks::{
     UdpPacketScratch, UdpResponseCommit, UdpServer, max_udp_payload_len,
     max_udp_payload_len_for_encoded_target,
 };
+#[cfg(feature = "candidate-udp-owned-headroom")]
+use ferrum2_shadowsocks::{
+    UdpOwnedHeadroom, udp_request_owned_headroom, udp_response_owned_headroom,
+};
 
 use serde_json::Value;
 
@@ -24,6 +28,18 @@ const UDP_FIXTURE: &str = include_str!("../../../tests/fixtures/sip022/sip022-ud
 
 fn datagram(target: TargetAddr, payload: &[u8]) -> Datagram {
     Datagram::new(target, BytesMut::from(payload), payload.len()).expect("bounded datagram")
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+fn headroom_datagram(target: TargetAddr, payload: &[u8], headroom: UdpOwnedHeadroom) -> Datagram {
+    assert!(payload.len() <= headroom.max_payload());
+    let mut backing = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
+    backing.resize(headroom.front(), 0);
+    backing.extend_from_slice(payload);
+    assert_eq!(backing.capacity(), MAX_UDP_WIRE_LEN);
+    let payload_range = headroom.front()..headroom.front() + payload.len();
+    Datagram::from_payload_range(target, backing, payload_range, headroom.max_payload())
+        .expect("owned-headroom datagram")
 }
 
 fn raw_packet(crypto: &UdpCrypto, session_byte: u8, body: &[u8], random: &FillRandom) -> Vec<u8> {
@@ -202,6 +218,167 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
                 .expect("exact commit");
         }
     }
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[test]
+fn owned_headroom_round_trips_without_moving_payload_for_all_methods_and_targets() {
+    let request_headroom = udp_request_owned_headroom();
+    let response_headroom = udp_response_owned_headroom();
+    assert!(response_headroom.front() > request_headroom.front());
+    assert_eq!(request_headroom.rear(), response_headroom.rear());
+
+    for profile in MethodProfile::ALL {
+        for target in [
+            fixture_target("ipv4"),
+            fixture_target("ipv6"),
+            fixture_target("domain"),
+            TargetAddr::domain("a", 443).expect("one-byte domain"),
+            TargetAddr::domain(&"x".repeat(255), 443).expect("maximum domain"),
+        ] {
+            for payload_len in [1, 1_472, 8_192, response_headroom.max_payload()] {
+                let keys = MethodKeyAdapter::new(udp_provider(profile));
+                let client_random = FillRandom::new(0x10);
+                let server_random = FillRandom::new(0x80);
+                let clock = FakeClock::new(NOW, 0);
+                let mut client = UdpClientSession::new(&keys, &client_random, |_| false)
+                    .expect("client session");
+                let server = UdpServer::new(&keys).expect("server protocol");
+                let request_payload = vec![0x31; payload_len];
+                let mut request =
+                    headroom_datagram(target.clone(), &request_payload, request_headroom);
+                let (_, request_backing, request_payload_range) = request.backing_parts();
+                let request_pointer = request_backing.as_ptr() as usize;
+                let request_capacity = request_backing.capacity();
+                let request_wire_range = client
+                    .encode_request_owned_headroom(&clock, &client_random, &mut request, 0)
+                    .expect("owned request seals");
+                let (_, request_backing, retained_request_payload_range) = request.backing_parts();
+                assert_eq!(request_backing.as_ptr() as usize, request_pointer);
+                assert_eq!(request_backing.capacity(), request_capacity);
+                assert_eq!(retained_request_payload_range, request_payload_range);
+                assert!(request_wire_range.start <= request_payload_range.start);
+                assert!(request_wire_range.end >= request_payload_range.end);
+                let request_wire = BytesMut::from(&request_backing[request_wire_range.clone()]);
+
+                let pending = server
+                    .prepare_request_owned(&clock, request_wire)
+                    .expect("owned request opens");
+                assert_eq!(pending.datagram().target(), &target);
+                assert_eq!(pending.datagram().payload(), request_payload);
+                let (_, request_commit) = pending.into_parts();
+                let peer = "127.0.0.1:49152".parse().expect("peer");
+                let accepted = server
+                    .commit_request(request_commit, peer, MonotonicInstant::ZERO, &server_random)
+                    .expect("request commits");
+
+                let response_payload = vec![0x72; payload_len];
+                let mut response =
+                    headroom_datagram(target.clone(), &response_payload, response_headroom);
+                let (_, response_backing, response_payload_range) = response.backing_parts();
+                let response_pointer = response_backing.as_ptr() as usize;
+                let response_capacity = response_backing.capacity();
+                let encoded = server
+                    .encode_response_owned_headroom(
+                        accepted.capability(),
+                        &clock,
+                        &server_random,
+                        &mut response,
+                        0,
+                    )
+                    .expect("owned response seals");
+                assert_eq!(encoded.peer(), peer);
+                let (_, response_backing, retained_response_payload_range) =
+                    response.backing_parts();
+                assert_eq!(response_backing.as_ptr() as usize, response_pointer);
+                assert_eq!(response_backing.capacity(), response_capacity);
+                assert_eq!(retained_response_payload_range, response_payload_range);
+                let response_wire_range = encoded.wire_range();
+                assert!(response_wire_range.start <= response_payload_range.start);
+                assert!(response_wire_range.end >= response_payload_range.end);
+                if profile == MethodProfile::Blake3ChaCha20Poly13052022
+                    && matches!(
+                        target.host(),
+                        ferrum2_core::TargetHostRef::Domain(name) if name.len() == 255
+                    )
+                    && payload_len == response_headroom.max_payload()
+                {
+                    assert_eq!(response_wire_range.len(), MAX_UDP_WIRE_LEN);
+                }
+                let response_wire = BytesMut::from(&response_backing[response_wire_range.clone()]);
+                let pending = client
+                    .prepare_response_owned(&clock, response_wire)
+                    .expect("owned response opens");
+                assert_eq!(pending.datagram().target(), &target);
+                assert_eq!(pending.datagram().payload(), response_payload);
+                let (_, response_commit) = pending.into_parts();
+                client
+                    .commit_response(response_commit, MonotonicInstant::ZERO)
+                    .expect("response commits");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "candidate-udp-owned-headroom")]
+#[test]
+fn owned_headroom_failures_zeroize_initialized_backing() {
+    let profile = MethodProfile::Blake3ChaCha20Poly13052022;
+    let keys = MethodKeyAdapter::new(udp_provider(profile));
+    let client_random = FillRandom::new(0x10);
+    let server_random = FillRandom::new(0x80);
+    let clock = FakeClock::new(NOW, 0);
+    let mut client =
+        UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
+    let server = UdpServer::new(&keys).expect("server");
+    let target = TargetAddr::domain(&"x".repeat(255), 443).expect("maximum domain");
+    let request_headroom = udp_request_owned_headroom();
+    let response_headroom = udp_response_owned_headroom();
+
+    let mut oversized = headroom_datagram(
+        target.clone(),
+        &vec![0xa5; request_headroom.max_payload()],
+        request_headroom,
+    );
+    assert_eq!(
+        client.encode_request_owned_headroom(&clock, &client_random, &mut oversized, 1),
+        Err(UdpPacketError::Bounds)
+    );
+    assert!(oversized.backing_parts().1.iter().all(|byte| *byte == 0));
+
+    let mut request = headroom_datagram(target.clone(), b"request", request_headroom);
+    let request_range = client
+        .encode_request_owned_headroom(&clock, &client_random, &mut request, 0)
+        .expect("request seals");
+    let request_wire = BytesMut::from(&request.backing_parts().1[request_range]);
+    let pending = server
+        .prepare_request_owned(&clock, request_wire)
+        .expect("request opens");
+    let (_, commit) = pending.into_parts();
+    let capability = server
+        .commit_request(
+            commit,
+            "127.0.0.1:49152".parse().expect("peer"),
+            MonotonicInstant::ZERO,
+            &server_random,
+        )
+        .expect("request commits")
+        .capability();
+    assert!(
+        server
+            .remove_session(
+                capability,
+                MonotonicInstant::from_duration(Duration::from_secs(61)),
+            )
+            .expect("remove session")
+    );
+
+    let mut stale = headroom_datagram(target, b"stale response", response_headroom);
+    assert_eq!(
+        server.encode_response_owned_headroom(capability, &clock, &server_random, &mut stale, 0,),
+        Err(UdpPacketError::Generation)
+    );
+    assert!(stale.backing_parts().1.iter().all(|byte| *byte == 0));
 }
 
 #[test]

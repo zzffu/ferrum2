@@ -74,6 +74,21 @@ impl UdpBufferBudget {
     /// Reserves exact allocated capacity before accepted protocol state advances.
     pub fn reserve(&self, capacity: usize) -> Result<UdpBufferReservation, UdpRuntimeError> {
         validate_capacity(capacity)?;
+        self.reserve_validated(capacity)
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(super) fn reserve_headroom(
+        &self,
+        capacity: usize,
+    ) -> Result<UdpBufferReservation, UdpRuntimeError> {
+        if capacity > super::headroom::MAX_UDP_HEADROOM_ALLOCATION_BYTES {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        self.reserve_validated(capacity)
+    }
+
+    fn reserve_validated(&self, capacity: usize) -> Result<UdpBufferReservation, UdpRuntimeError> {
         if capacity == 0 {
             return Ok(zero_capacity_reservation(&self.inner));
         }
@@ -301,6 +316,14 @@ impl UdpBufferReservation {
     /// Returns the exact allocated capacity owned by this token.
     pub const fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    #[cfg(feature = "candidate-udp-owned-headroom")]
+    pub(super) fn belongs_to(&self, budget: &UdpBufferBudget) -> bool {
+        matches!(
+            &self.charge,
+            UdpBufferCharge::Metered(inner) if Arc::ptr_eq(inner, &budget.inner)
+        )
     }
 
     pub(super) fn attach(self, datagram: Datagram) -> Result<AccountedDatagram, UdpRuntimeError> {

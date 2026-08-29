@@ -20,9 +20,8 @@ use crate::tcp::error::{DetectionReason, ShadowsocksError, detection_from_frame}
 use crate::tcp::handshake::TcpKeyProvider;
 use crate::tcp::observe::{BufferRole, inspect_scratch};
 use crate::tcp::wire::{
-    ENCRYPTED_LENGTH_LEN, MAX_ENCODE_PAYLOAD_LEN, prepare_data_chunk_into,
-    prepare_response_state_in_place, seal_prepared_data_chunk_into,
-    seal_prepared_response_state_into,
+    ENCRYPTED_LENGTH_LEN, prepare_data_chunk_into, prepare_response_state_in_place,
+    seal_prepared_data_chunk_into, seal_prepared_response_state_into,
 };
 
 /// Direction of one completed plaintext admission in the fused engine.
@@ -193,8 +192,9 @@ where
 
         self.flow.prepare_upload_read().map_err(framed_error)?;
         let before = self.flow.upload_scratch().len();
+        let payload_limit = self.flow.upload_payload_limit();
         let read = {
-            let mut limited = (&mut *self.flow.upload_scratch()).limit(MAX_ENCODE_PAYLOAD_LEN);
+            let mut limited = (&mut *self.flow.upload_scratch()).limit(payload_limit);
             tokio_util::io::poll_read_buf(Pin::new(&mut *self.plain), cx, &mut limited)
         };
         let read = match read {
@@ -334,6 +334,7 @@ pub(crate) trait FusedProtocolFlow: PlainBufferedDuplex {
     fn inspect_buffers(&self);
     fn has_staged_upload(&self) -> bool;
     fn prepare_upload_read(&mut self) -> Result<(), ShadowsocksError>;
+    fn upload_payload_limit(&self) -> usize;
     fn upload_scratch(&mut self) -> &mut BytesMut;
     fn seal_upload_read(&mut self, payload_len: usize) -> Result<(), ShadowsocksError>;
     fn discard_upload_read(&mut self);
@@ -438,6 +439,7 @@ where
     fn prepare_upload_read(&mut self) -> Result<(), ShadowsocksError> {
         if self.encrypt.is_empty() {
             protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+                self.frame_sizer.prepare_scratch(&mut self.encrypt)?;
                 prepare_data_chunk_into(&mut self.encrypt)
             })?;
         } else if self.encrypt.len() != ENCRYPTED_LENGTH_LEN {
@@ -448,6 +450,10 @@ where
         Ok(())
     }
 
+    fn upload_payload_limit(&self) -> usize {
+        self.frame_sizer.payload_limit()
+    }
+
     fn upload_scratch(&mut self) -> &mut BytesMut {
         &mut self.encrypt
     }
@@ -455,6 +461,9 @@ where
     fn seal_upload_read(&mut self, payload_len: usize) -> Result<(), ShadowsocksError> {
         protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
             seal_prepared_data_chunk_into(&mut self.request_sealer, payload_len, &mut self.encrypt)
+        })?;
+        protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+            self.frame_sizer.record(payload_len)
         })?;
         self.staged = Some(StagedWrite {
             kind: StagedKind::Subsequent,
@@ -538,6 +547,10 @@ where
                 .install_protocol(self.observers.flow, crate::tcp::ProtocolReason::FrameBounds));
         }
 
+        protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+            self.frame_sizer.prepare_scratch(&mut self.encrypt)
+        })?;
+
         if self.tx == TxState::ResponsePending {
             let response_first_read_len = self.request_salt.profile().initial_response_read_bytes();
             if response_first_read_len > self.encrypt.capacity() {
@@ -553,6 +566,10 @@ where
         protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
             prepare_data_chunk_into(&mut self.encrypt)
         })
+    }
+
+    fn upload_payload_limit(&self) -> usize {
+        self.frame_sizer.payload_limit()
     }
 
     fn upload_scratch(&mut self) -> &mut BytesMut {
@@ -612,6 +629,9 @@ where
             })?;
             StagedKind::Subsequent
         };
+        protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+            self.frame_sizer.record(payload_len)
+        })?;
         self.staged = Some(StagedWrite { kind, position: 0 });
         Ok(())
     }
