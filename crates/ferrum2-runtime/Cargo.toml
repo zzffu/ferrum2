@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-candidate-udp-owned-headroom = []
+candidate-udp-owned-headroom = ["dep:zeroize"]
 structural-metrics = ["dep:ferrum2-structural"]
 
 [dependencies]
@@ -23,6 +23,7 @@ futures-util.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

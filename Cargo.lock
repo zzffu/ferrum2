@@ -686,6 +686,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

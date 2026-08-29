@@ -3,6 +3,7 @@ use std::ops::Range;
 
 use bytes::BytesMut;
 use ferrum2_core::{Datagram, TargetAddr};
+use zeroize::Zeroize as _;
 
 use super::{MAX_UDP_WIRE_DATAGRAM_BYTES, UdpBufferBudget, UdpBufferReservation, UdpRuntimeError};
 
@@ -241,7 +242,7 @@ impl UdpHeadroomLease {
     /// Physically clears a rejected receive while retaining its fixed budget.
     pub fn clear_failure(&mut self) -> Result<(), UdpRuntimeError> {
         self.validate_allocation()?;
-        clear_initialized(
+        clear_allocation(
             self.backing
                 .as_mut()
                 .expect("live UDP headroom lease owns its backing"),
@@ -281,7 +282,7 @@ impl fmt::Debug for UdpHeadroomLease {
 impl Drop for UdpHeadroomLease {
     fn drop(&mut self) {
         if let Some(backing) = &mut self.backing {
-            clear_initialized(backing);
+            clear_allocation(backing);
         }
     }
 }
@@ -414,7 +415,10 @@ impl UdpHeadroomPacket {
             .datagram
             .as_mut()
             .expect("live UDP headroom packet owns its datagram");
-        datagram.backing_parts_mut().1.fill(0);
+        let backing = datagram.backing_parts_mut().1;
+        let logical_len = backing.len();
+        zeroize_allocation(backing);
+        backing.truncate(logical_len);
         Ok(())
     }
 
@@ -429,7 +433,7 @@ impl UdpHeadroomPacket {
         if backing.as_ptr() as usize != self.allocation_address
             || backing.capacity() != self.layout.capacity()
         {
-            clear_initialized(&mut backing);
+            clear_allocation(&mut backing);
             return Err(UdpRuntimeError::Bounds);
         }
         backing.clear();
@@ -489,12 +493,18 @@ impl Drop for UdpHeadroomPacket {
             return;
         };
         let (_, mut backing, _) = datagram.into_backing_parts();
-        clear_initialized(&mut backing);
+        clear_allocation(&mut backing);
     }
 }
 
-fn clear_initialized(backing: &mut BytesMut) {
-    backing.fill(0);
+fn zeroize_allocation(backing: &mut BytesMut) {
+    let capacity = backing.capacity();
+    backing.resize(capacity, 0);
+    backing.as_mut().zeroize();
+}
+
+fn clear_allocation(backing: &mut BytesMut) {
+    zeroize_allocation(backing);
     backing.clear();
 }
 
@@ -543,6 +553,22 @@ mod tests {
             UdpHeadroomLayout::new(64, usize::MAX, 1).unwrap_err(),
             UdpRuntimeError::Bounds
         );
+    }
+
+    #[test]
+    fn failure_zeroization_covers_stale_bytes_beyond_the_logical_length() {
+        let mut backing = BytesMut::with_capacity(128);
+        let capacity = backing.capacity();
+        backing.resize(capacity, 0xa5);
+        backing.truncate(7);
+        let pointer = backing.as_ptr();
+
+        zeroize_allocation(&mut backing);
+
+        assert_eq!(backing.as_ptr(), pointer);
+        assert_eq!(backing.capacity(), capacity);
+        assert_eq!(backing.len(), capacity);
+        assert!(backing.iter().all(|byte| *byte == 0));
     }
 
     #[test]
