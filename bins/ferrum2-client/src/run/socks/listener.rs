@@ -53,12 +53,32 @@ impl AcceptListener for ClientTcpListeners {
         })
         .await
     }
+
+    fn connection_runtime_cpu_hint(&self, stream: &Self::Stream) -> Option<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            incoming_cpu_hint(rustix::net::sockopt::socket_incoming_cpu(&stream.1).ok())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _stream = stream;
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn incoming_cpu_hint(incoming_cpu: Option<u32>) -> Option<usize> {
+    incoming_cpu
+        .filter(|cpu_id| *cpu_id != u32::MAX)
+        .and_then(|cpu_id| usize::try_from(cpu_id).ok())
 }
 
 pub(in crate::run) struct ClientTcpRoot {
     pub(in crate::run) supervisor: Option<BoundedSupervisor<ClientTcpListeners>>,
     pub(in crate::run) context: Arc<ClientContext>,
     pub(in crate::run) routing: Arc<ClientRouting>,
+    pub(in crate::run) reregister_accepted_stream: bool,
 }
 
 impl PreparedProcessRoot<RunError> for ClientTcpRoot {
@@ -73,6 +93,7 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
         let supervisor = self.supervisor.take().expect("prepared TCP root");
         let context = Arc::clone(&self.context);
         let routing = Arc::clone(&self.routing);
+        let reregister_accepted_stream = self.reregister_accepted_stream;
         let handler_context = Arc::clone(&context);
         let mut quiescing = cancellation.clone();
         let mut forced = cancellation.clone();
@@ -82,6 +103,17 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
                     let context = Arc::clone(&handler_context);
                     let routing = Arc::clone(&routing);
                     async move {
+                        let stream = if reregister_accepted_stream {
+                            let Ok(stream) = stream.into_std() else {
+                                return;
+                            };
+                            let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+                                return;
+                            };
+                            stream
+                        } else {
+                            stream
+                        };
                         client_connection(stream, cancellation, context, inbound, routing).await;
                     }
                 },
@@ -115,5 +147,17 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
 
     fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
         Box::pin(async { Ok(()) })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::incoming_cpu_hint;
+
+    #[test]
+    fn incoming_cpu_hint_rejects_kernel_sentinel_and_query_errors() {
+        assert_eq!(incoming_cpu_hint(Some(7)), Some(7));
+        assert_eq!(incoming_cpu_hint(Some(u32::MAX)), None);
+        assert_eq!(incoming_cpu_hint(None), None);
     }
 }
