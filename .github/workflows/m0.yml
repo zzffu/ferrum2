@@ -792,12 +792,21 @@ jobs:
           "$reference/ssserver" --version | grep -Fx 'shadowsocks 1.24.0'
 
           cargo +1.97.1 build --workspace --bins --release --locked
+          binary_hashes="$work/binaries.sha256"
+          sha256sum \
+            target/release/m4-qualification \
+            target/release/ferrum2-client \
+            target/release/ferrum2-server \
+            "$reference/sslocal" \
+            "$reference/ssserver" >"$binary_hashes"
+          cat "$binary_hashes"
           throughput_output="$(target/release/m4-qualification throughput \
             --sha "$GITHUB_SHA" \
             --sslocal "$reference/sslocal" \
             --ssserver "$reference/ssserver" \
             --output "$work/throughput.jsonl")"
           printf '%s\n' "$throughput_output"
+          sha256sum --check "$binary_hashes"
 
           thp_knob=/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none
           thp_original_file="$work/thp-max-ptes-none.original"
@@ -857,6 +866,7 @@ jobs:
             ${{ runner.temp }}/m4/throughput.jsonl
             ${{ runner.temp }}/m4/resource.jsonl
             ${{ runner.temp }}/m4/dns-resource.jsonl
+            ${{ runner.temp }}/m4/binaries.sha256
           if-no-files-found: error
           retention-days: 30
       - name: Reap M4 processes and delete generated evidence
