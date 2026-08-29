@@ -1,10 +1,12 @@
 # Ferrum2 TCP 热路径优化计划
 
-状态：阶段 1 direct-open candidate 经 CI 测得稳定退化；按用户决定不回退，当前分支保留实现与放宽后的失败契约，阶段 2—7 未实施
+状态：阶段 1 direct-open candidate 经 CI 测得稳定退化后保留；针对多 Tokio worker 的 cache ownership/migration 根因，已完成三个彼此独立的 locality candidate，worker-local copyback 在唯一一次 CI 配对测量中 6/6 获胜、中位提升 18.4176%，选为 locality 修复，阶段 2—7 未实施
 
 基线提交：`1e08868c8c3d523f1275cd6f8d3b63f4d42453e6`
 
-工作分支：`codex/tcp-hot-path-stage1`
+locality 公共基线：`d8275b1e6b6d67c09cc2bd54e75da00a9e664de0`（`codex/tcp-hot-path-stage1-locality-base`）
+
+选中分支：`codex/tcp-hot-path-stage1-worker-local-copyback`
 
 范围：Shadowsocks 2022 TCP、公共双向 relay、Windows 物理 TCP、TUN TCP
 
@@ -188,6 +190,46 @@ paired median 为 `-15.3266%`，范围 `-17.116%..-14.109%`，0 胜 6 负。diag
 
 1. 保持旧 open 契约，只测试 exact logical range/减少 scratch 清零；
 2. 设计 authenticated out-of-place open 或真正 worker-local 的 plaintext destination，避免让长期 transport buffer 同时承担 socket receive 与多遍 AEAD mutation。
+
+#### 阶段 1 locality 修复候选（2026-08-29）
+
+后续实验以 `d8275b1e` 为公共基线，每个性能方案都从该提交独立开分支。失败或部分改善的提交、分支和测量证据全部保留；后续方案不把失败候选作为祖先，不改写或删除历史：
+
+```text
+d8275b1e  codex/tcp-hot-path-stage1-locality-base
+├── 160e0f19  codex/tcp-hot-path-stage1-out-of-place          保留的失败候选
+├── c24f512d  codex/tcp-hot-path-stage1-worker-local          保留的部分改善候选
+└── 9d081127  codex/tcp-hot-path-stage1-worker-local-copyback 选中的 locality 修复
+```
+
+三者先使用同一 WSL2/Linux 真实 socket workload 做 2 对 AB/BA 交错测量：8 条 stream、1 秒 warm-up、15 秒 active，并分别把全部进程限制到 1 CPU 和 4 CPU。数值是各模式的中位 B/s improvement：
+
+| candidate | 1 CPU | 4 CPU | 决策 |
+| --- | ---: | ---: | --- |
+| authenticated out-of-place，直接写长期 relay destination（`160e0f19`） | +0.62% | -6.97% | 失败；保留，不作为后续基线 |
+| worker-local decrypt，直接发布 relay destination（`c24f512d`） | -2.17% | +9.57% | 仅部分恢复；保留，不作为后续基线 |
+| worker-local decrypt → receive scratch copyback（`9d081127`） | -5.63% | +53.77% | 本地通过多 worker 根因验证；CI 6/6 获胜，选中 |
+
+选中候选在每个 OS worker 上懒分配一块固定 wire staging。完整 frame 到达后同步执行：transport receive scratch → worker-local staging → staging 内认证/解密 → 明文 copyback 到 receive scratch → 使用 `zeroize` 清除 staging used range → 由既有 `copy_ready` 把明文复制到调用者 destination。encrypted-length 则使用 2 字节栈 destination 做 out-of-place open。TLS borrow 不跨 poll；重入时退回现有 receive-scratch direct-open 路径；线程退出时清除完整 backing。
+
+该顺序的关键不是增加复制本身，而是把多遍 GHASH/CTR 读写限制到 worker-local cache lines，并让 relay destination 成为返回 Tokio socket write 前最后写入、最热的 buffer。前一个 direct-publish 候选在 destination 写入后还会清除同尺寸 TLS staging，容易逐出刚发布的数据；copyback 顺序避免了该问题。代价是单 CPU 多一次线性 copy，本地测得约 5.63% 回退，必须与多 worker 吞吐收益一并评估。
+
+公共接口仍采用已经放宽的认证失败契约：认证失败不得发布候选明文、不得提交 nonce，但输入 buffer 内容未指定。选中候选的普通 TLS 路径会自然保持 receive scratch 中的 ciphertext 不变，然而不把这一实现结果重新升级为契约；否则重入 fallback 或未来 primitive 仍会被迫增加整帧备份。`NonceExhausted` 的 buffer/counter 不变契约保持不变。
+
+GitHub Actions run [33242674497](https://github.com/zzffu/ferrum2/actions/runs/33242674497) 只触发一次，candidate=`9d081127`，paired parent=`d8275b1e`，selection=`tcp-bulk`，Ubuntu 24.04、4 vCPU、3 秒 warm-up、30 秒 active、6 对 AB/BA。correctness、cleanup 和 artifact 上传全部 PASS；artifact id=`9712033825`，zip SHA-256=`80842ac0519f12bd6524ecee556b3563a056659501c8e17ee00ed008ce6deea7`。
+
+| pair | parent B/s | candidate B/s | improvement |
+| ---: | ---: | ---: | ---: |
+| 1 | 207,296,921 | 241,928,328 | +16.7062% |
+| 2 | 205,944,695 | 248,888,251 | +20.8520% |
+| 3 | 208,817,356 | 249,150,395 | +19.3150% |
+| 4 | 213,708,526 | 250,367,180 | +17.1536% |
+| 5 | 211,231,266 | 248,239,445 | +17.5202% |
+| 6 | 206,565,102 | 250,690,491 | +21.3615% |
+
+paired median=`+18.4176%`，范围=`+16.7062%..+21.3615%`，6 胜 0 负，无 outlier warning。先前 direct-open `-15.3266%` 回退需要相对该路径提升 `+18.1008%` 才能数学上补平；本次高出该恢复线 `0.3168` 个百分点，跨 run 隐含净值约 `+0.2682%`。后两个值用于检查是否补回已知差距，不替代同一 run 的 paired 结论。
+
+workflow 原始状态仍为 `INCONCLUSIVE / DIAGNOSTIC_ONLY`，因为 hosted runner policy 没有已校准的 adoption/noise/regression threshold，`adoption_claim=false`。因此准确结论是“六对方向一致并补回已知回退，选为本阶段 locality 修复”，而不是“已通过正式 performance qualification”。按约定不重复触发 CI 来挑选样本。
 
 ### 阶段 2：无 memmove 发送编码
 
@@ -373,7 +415,7 @@ Windows TUN 或 generation-bound stream 变化还必须运行匹配 profile/targ
 - Windows 与 SOCKS 数据 poll 不使用同步 mutex 包裹底层 stream；
 - `tcp-bulk`、`tcp-stream-64k`、`tcp-request-1k`、`tcp-scale-10k` 均通过 paired performance policy；
 - 正确性、interop、half-close、backpressure、取消、Windows native 和 TUN qualification 全部通过；
-- 每阶段都有独立、可审查、可回退的提交和对应测量证据。
+- 每阶段都有独立、可审查、可 checkout 的提交和对应测量证据；失败候选也永久保留。
 
 ## 7. 风险与停止条件
 
@@ -381,7 +423,7 @@ Windows TUN 或 generation-bound stream 变化还必须运行匹配 profile/targ
 - poll 内循环可能影响 Tokio 公平性；达到 cooperative budget 必须让出执行权。
 - ready-flow scheduler 最危险的是 lost wake 和 stale slot；没有 generation/race 测试不得合并。
 - buffer pooling 会延长敏感数据驻留时间；没有清理合同和 RSS/churn 证据不得实施。
-- 某阶段若 correctness gate 失败，立即停止后续性能工作；若 paired performance policy 未通过，则保留 profile 证据并回退该阶段，不用后续大改掩盖结果。
+- 某候选若 correctness gate 失败，立即停止该候选；若 paired performance policy 未通过，则提交并推送代码与 profile 证据、明确标记为失败，但不回退、不删除、不改写。后续优化必须从该候选之前的公共基线另开 sibling 分支，不能把失败提交作为祖先，也不能用后续大改掩盖结果。
 
 ## 8. 参考实现基线
 
