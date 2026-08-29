@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+__single-worker-runtime-diagnostic = []
 __frame-size-16k = ["ferrum2-shadowsocks/__frame-size-16k"]
 __frame-size-65535 = ["ferrum2-shadowsocks/__frame-size-65535"]
 __frame-size-adaptive = ["ferrum2-shadowsocks/__frame-size-adaptive"]

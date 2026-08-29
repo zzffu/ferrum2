@@ -173,13 +173,37 @@ fn runtime_dial_options(config: &ferrum2_config::OutboundDialOptions) -> DialOpt
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunRuntimeBuildIdentity {
+    ProductionDefaultWorkers,
+    DiagnosticSingleWorker,
+}
+
+const RUN_RUNTIME_BUILD_IDENTITY: RunRuntimeBuildIdentity =
+    if cfg!(feature = "__single-worker-runtime-diagnostic") {
+        RunRuntimeBuildIdentity::DiagnosticSingleWorker
+    } else {
+        RunRuntimeBuildIdentity::ProductionDefaultWorkers
+    };
+
+fn build_run_runtime() -> Result<tokio::runtime::Runtime, RunError> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    match RUN_RUNTIME_BUILD_IDENTITY {
+        RunRuntimeBuildIdentity::ProductionDefaultWorkers => {}
+        RunRuntimeBuildIdentity::DiagnosticSingleWorker => {
+            builder.worker_threads(1);
+        }
+    }
+    builder
+        .enable_all()
+        .build()
+        .map_err(|_| RunError::StartupRuntime)
+}
+
 /// Fully materializes schema-v2 fixed endpoints and the initial RuleSet
 /// snapshot before any listener root is allowed to prepare.
 pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
+    let runtime = build_run_runtime()?;
     runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
@@ -713,6 +737,35 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
             ProcessRootExit::Panicked | ProcessRootExit::JoinFailed => Err(RunError::RuntimeChild),
             ProcessRootExit::Completed => Err(RunError::RuntimeRoot),
         },
+    }
+}
+
+#[cfg(test)]
+mod runtime_build_tests {
+    use super::*;
+
+    #[test]
+    fn run_runtime_matches_the_compile_time_build_identity() {
+        let expected_identity = if cfg!(feature = "__single-worker-runtime-diagnostic") {
+            RunRuntimeBuildIdentity::DiagnosticSingleWorker
+        } else {
+            RunRuntimeBuildIdentity::ProductionDefaultWorkers
+        };
+        assert_eq!(RUN_RUNTIME_BUILD_IDENTITY, expected_identity);
+
+        let runtime = build_run_runtime().expect("run runtime");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        match expected_identity {
+            RunRuntimeBuildIdentity::ProductionDefaultWorkers => {
+                assert!(runtime.metrics().num_workers() >= 1);
+            }
+            RunRuntimeBuildIdentity::DiagnosticSingleWorker => {
+                assert_eq!(runtime.metrics().num_workers(), 1);
+            }
+        }
     }
 }
 
