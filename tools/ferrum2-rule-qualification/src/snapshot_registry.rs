@@ -284,41 +284,70 @@ fn spawn_reader(
 ) -> thread::JoinHandle<Result<ReaderBatch>> {
     thread::spawn(move || {
         handshake.active_readers.fetch_add(1, Ordering::AcqRel);
+
+        let mut checksum = 0_u64;
+        let mut minimum_generation = u64::MAX;
+        let mut maximum_generation = 0_u64;
+        let mut reader_error = None;
+        match evaluate_once(&fixture, &mut scratch) {
+            Ok((generation, _)) => {
+                minimum_generation = generation;
+                maximum_generation = generation;
+            }
+            Err(error) => reader_error = Some(error),
+        }
+
         handshake.start.wait();
         let started = Instant::now();
-        let outcome = (|| {
-            let checkpoint_interval = operations.div_ceil(8).max(1);
-            let mut checksum = 0_u64;
-            let mut minimum_generation = u64::MAX;
-            let mut maximum_generation = 0_u64;
-            for index in 0..operations {
-                let (generation, action) = evaluate_once(&fixture, &mut scratch)?;
-                minimum_generation = minimum_generation.min(generation);
-                maximum_generation = maximum_generation.max(generation);
-                checksum = checksum.rotate_left(5) ^ generation ^ u64::from(action);
-                let completed = index + 1;
-                if completed <= 8
-                    || completed.is_multiple_of(checkpoint_interval)
-                    || completed == operations
-                {
-                    witness.record_checkpoint(completed, maximum_generation);
+        let checkpoint_interval = operations.div_ceil(8).max(1);
+        for index in 0..operations {
+            match evaluate_once(&fixture, &mut scratch) {
+                Ok((generation, action)) => {
+                    minimum_generation = minimum_generation.min(generation);
+                    maximum_generation = maximum_generation.max(generation);
+                    checksum = checksum.rotate_left(5) ^ generation ^ u64::from(action);
+                    let completed = index + 1;
+                    if completed <= 8
+                        || completed.is_multiple_of(checkpoint_interval)
+                        || completed == operations
+                    {
+                        witness.record_checkpoint(completed, maximum_generation);
+                    }
+                }
+                Err(error) => {
+                    if reader_error.is_none() {
+                        reader_error = Some(error);
+                    }
+                    break;
                 }
             }
-            Ok(ReaderBatch {
-                elapsed_nanoseconds: elapsed_nanoseconds(started),
-                checksum: black_box(checksum),
-                minimum_generation,
-                maximum_generation,
-            })
-        })();
+        }
+        let elapsed_nanoseconds = elapsed_nanoseconds(started);
+
         handshake.finish.wait();
+        match evaluate_once(&fixture, &mut scratch) {
+            Ok((generation, _)) => {
+                minimum_generation = minimum_generation.min(generation);
+                maximum_generation = maximum_generation.max(generation);
+            }
+            Err(error) if reader_error.is_none() => reader_error = Some(error),
+            Err(_) => {}
+        }
         let writer_remained_active = handshake.writer_active.load(Ordering::Acquire);
         handshake.release.wait();
         handshake.active_readers.fetch_sub(1, Ordering::AcqRel);
         if !writer_remained_active {
             return failure("snapshot reader/writer liveness failed");
         }
-        outcome
+        if let Some(error) = reader_error {
+            return Err(error);
+        }
+        Ok(ReaderBatch {
+            elapsed_nanoseconds,
+            checksum: black_box(checksum),
+            minimum_generation,
+            maximum_generation,
+        })
     })
 }
 

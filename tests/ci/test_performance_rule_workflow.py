@@ -45,9 +45,17 @@ class PerformanceRuleWorkflowControllerTests(unittest.TestCase):
                 "qualification",
                 "--samples",
                 "101",
+                "--iterations-per-sample",
+                "1",
                 "--workspace-root",
                 ".",
             ),
+        )
+        self.assertEqual(evidence.WORKFLOW_BASE_ITERATIONS, 1)
+        seed_index = evidence.WORKFLOW_ARGUMENTS.index("--iterations-per-sample") + 1
+        self.assertEqual(
+            evidence.WORKFLOW_ARGUMENTS[seed_index],
+            str(evidence.WORKFLOW_BASE_ITERATIONS),
         )
 
     @staticmethod
@@ -455,6 +463,50 @@ class PerformanceRuleWorkflowControllerTests(unittest.TestCase):
                             command_probe=self.command_probe,
                         )
 
+    def test_calibration_manifest_rejects_unregistered_iteration_identity(self) -> None:
+        mutations = ("old_configuration", "missing_argument", "wrong_argument")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for index, mutation in enumerate(mutations):
+                with self.subTest(mutation=mutation):
+                    case = root / str(index)
+                    bundle = self.calibration_bundle(case)
+                    bundle["manifest"].unlink()
+                    report = json.loads(bundle["aa"].read_text(encoding="utf-8"))
+                    if mutation == "old_configuration":
+                        report["raw_pairs"][0]["parent"]["configuration"][
+                            "base_iterations_per_sample"
+                        ] = 8_192
+                    elif mutation == "missing_argument":
+                        seed = report["runner_arguments"].index(
+                            "--iterations-per-sample"
+                        )
+                        del report["runner_arguments"][seed : seed + 2]
+                    else:
+                        seed = report["runner_arguments"].index(
+                            "--iterations-per-sample"
+                        )
+                        report["runner_arguments"][seed + 1] = "8192"
+                    write_json(bundle["aa"], report)
+                    with self.assertRaises(
+                        (evidence.WorkflowContractError, ControlError)
+                    ):
+                        evidence.build_calibration_manifest(
+                            evidence.CalibrationManifestInputs(
+                                evidence=bundle["evidence"],
+                                parent=bundle["parent"],
+                                aa_report=bundle["aa"],
+                                host_identity=bundle["host"],
+                                workspace=case,
+                                expected_sha=SOURCE_SHA,
+                                repository=REPOSITORY,
+                                run_id=101,
+                                run_attempt=2,
+                                output=bundle["manifest"],
+                            ),
+                            command_probe=self.command_probe,
+                        )
+
     def test_resolve_calibration_uses_injected_api_and_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -560,6 +612,10 @@ class PerformanceRuleWorkflowControllerTests(unittest.TestCase):
             "comparisons",
             "policy",
             "matrix",
+            "ab_old_configuration",
+            "ab_missing_seed",
+            "ab_wrong_seed",
+            "qualification_old_configuration",
             "extra",
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -603,6 +659,32 @@ class PerformanceRuleWorkflowControllerTests(unittest.TestCase):
                             inputs.qualification_report.read_text(encoding="utf-8")
                         )
                         report["configuration"]["route_sizes"] = [1, 32, 64]
+                        write_json(inputs.qualification_report, report)
+                    elif mutation == "ab_old_configuration":
+                        report = json.loads(
+                            inputs.ab_report.read_text(encoding="utf-8")
+                        )
+                        report["raw_pairs"][0]["candidate"]["configuration"][
+                            "base_iterations_per_sample"
+                        ] = 8_192
+                        write_json(inputs.ab_report, report)
+                    elif mutation in {"ab_missing_seed", "ab_wrong_seed"}:
+                        report = json.loads(
+                            inputs.ab_report.read_text(encoding="utf-8")
+                        )
+                        seed = report["runner_arguments"].index(
+                            "--iterations-per-sample"
+                        )
+                        if mutation == "ab_missing_seed":
+                            del report["runner_arguments"][seed : seed + 2]
+                        else:
+                            report["runner_arguments"][seed + 1] = "8192"
+                        write_json(inputs.ab_report, report)
+                    elif mutation == "qualification_old_configuration":
+                        report = json.loads(
+                            inputs.qualification_report.read_text(encoding="utf-8")
+                        )
+                        report["configuration"]["base_iterations_per_sample"] = 8_192
                         write_json(inputs.qualification_report, report)
                     else:
                         (inputs.evidence / "unexpected.txt").write_text(

@@ -178,7 +178,8 @@ jobs:
             --parent "$PARENT_BINARY" \
             --pairs 6 \
             --output "$AA_REPORT" \
-            -- --profile qualification --samples 101 --workspace-root . \
+            -- --profile qualification --samples 101 \
+            --iterations-per-sample 1 --workspace-root . \
             >"$aa_stdout"
           controller_status=$?
           set -e
@@ -353,7 +354,8 @@ jobs:
             --calibration "$REVIEWED_CALIBRATION" \
             --pairs 6 \
             --output "$AB_REPORT" \
-            -- --profile qualification --samples 101 --workspace-root . \
+            -- --profile qualification --samples 101 \
+            --iterations-per-sample 1 --workspace-root . \
             >"$ab_stdout"
           controller_status=$?
           set -e
@@ -372,6 +374,7 @@ jobs:
           "$CANDIDATE_BINARY" \
             --profile qualification \
             --include-100k \
+            --iterations-per-sample 1 \
             --workspace-root . \
             --output "$QUALIFICATION_REPORT" \
             >"$qualification_stdout"

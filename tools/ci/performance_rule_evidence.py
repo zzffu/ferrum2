@@ -42,6 +42,8 @@ WORKFLOW_ARGUMENTS = (
     "qualification",
     "--samples",
     str(WORKFLOW_SAMPLES),
+    "--iterations-per-sample",
+    str(WORKFLOW_BASE_ITERATIONS),
     "--workspace-root",
     ".",
 )

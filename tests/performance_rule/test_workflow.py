@@ -132,7 +132,13 @@ class PerformanceRuleWorkflowOrchestrationTests(unittest.TestCase):
         self.assertIn("--no-default-features", job)
         self.assertNotIn('--features "$CANDIDATE_FEATURES"', job)
         self.assertEqual(job.count("--pairs 6"), 1)
-        self.assertIn("--profile qualification --samples 101 --workspace-root .", job)
+        self.assertIn(
+            "--profile qualification --samples 101 \\\n"
+            "            --iterations-per-sample 1 --workspace-root .",
+            job,
+        )
+        self.assertEqual(job.count("--iterations-per-sample 1"), 1)
+        self.assertNotIn("--timeout-seconds", job)
         self.assertIn('test "$controller_status" -eq 4', job)
 
     def test_comparison_sequence_preserves_review_and_independent_candidate(
@@ -173,11 +179,21 @@ class PerformanceRuleWorkflowOrchestrationTests(unittest.TestCase):
         self.assertIn('--calibration "$REVIEWED_CALIBRATION"', job)
         self.assertEqual(job.count("--pairs 6"), 1)
         self.assertEqual(
-            job.count("--profile qualification --samples 101 --workspace-root ."),
+            job.count(
+                "--profile qualification --samples 101 \\\n"
+                "            --iterations-per-sample 1 --workspace-root ."
+            ),
             1,
         )
+        self.assertEqual(job.count("--iterations-per-sample 1"), 2)
+        self.assertNotIn("--timeout-seconds", job)
         self.assertIn("--profile qualification", job)
         self.assertIn("--include-100k", job)
+        qualification_step = job.split(
+            "- name: Collect candidate qualification including 100k", 1
+        )[1].split("- name: Validate comparison raw evidence and write hashes", 1)[0]
+        self.assertEqual(qualification_step.count("--iterations-per-sample 1"), 1)
+        self.assertNotIn("--iterations-per-sample 8192", qualification_step)
         self.assertEqual(job.count('--expected-sha "$CANDIDATE_SHA"'), 3)
 
     def test_cross_run_download_and_always_uploads_remain_explicit(self) -> None:
