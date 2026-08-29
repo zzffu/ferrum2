@@ -34,22 +34,41 @@ const COMMON_HEADER_LEN: usize = 1 + TIMESTAMP_LEN + PADDING_LEN;
 const RESPONSE_BINDING_LEN: usize = SESSION_ID_LEN;
 const REPLAY_WORDS: usize = 128;
 
-/// Fixed caller-reusable storage for the legacy borrowed-wire open path.
+/// Caller-reusable storage for the legacy borrowed-wire open path.
+///
+/// New scratch starts without an allocation and grows only to the received
+/// wire's high-water mark. Production callers with exclusive ownership should
+/// prefer the owned/in-place receive APIs, which avoid the wire-to-scratch copy.
 pub struct UdpPacketScratch {
     pub(super) body: BytesMut,
 }
 
 impl UdpPacketScratch {
-    /// Allocates the one fixed hard-bounded borrowed-open scratch.
+    /// Creates an empty scratch without reserving the maximum datagram size.
     pub fn new() -> Self {
         Self {
-            body: BytesMut::with_capacity(MAX_UDP_WIRE_LEN),
+            body: BytesMut::new(),
         }
     }
 
-    /// Returns the fixed usable bound.
+    /// Creates scratch with caller-selected bounded initial capacity.
+    pub fn with_capacity(capacity: usize) -> Result<Self, UdpPacketError> {
+        if capacity > MAX_UDP_WIRE_LEN {
+            return Err(UdpPacketError::Bounds);
+        }
+        Ok(Self {
+            body: BytesMut::with_capacity(capacity),
+        })
+    }
+
+    /// Returns the hard usable bound.
     pub const fn usable_limit(&self) -> usize {
         MAX_UDP_WIRE_LEN
+    }
+
+    /// Returns the currently allocated reusable capacity.
+    pub fn allocated_capacity(&self) -> usize {
+        self.body.capacity()
     }
 
     /// Returns an opaque allocation identity for reuse evidence.

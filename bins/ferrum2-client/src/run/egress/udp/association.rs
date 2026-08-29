@@ -234,6 +234,25 @@ fn expected_nested_target(
     .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))
 }
 
+fn encode_request_layer<T, R>(
+    protocol: &mut UdpClientSession,
+    clock: &T,
+    random: &R,
+    target: &TargetAddr,
+    payload: &[u8],
+    output: &mut BytesMut,
+) -> Result<usize, UdpPacketError>
+where
+    T: Clock + ?Sized,
+    R: SecureRandom + ?Sized,
+{
+    let exact_len = protocol.request_wire_len(target, payload.len(), 0)?;
+    output.resize(exact_len, 0);
+    let wire_len = protocol.encode_request_parts(clock, random, target, payload, 0, output)?;
+    debug_assert_eq!(wire_len, exact_len);
+    Ok(wire_len)
+}
+
 impl Drop for ClientUdpAssociation {
     fn drop(&mut self) {
         self.manager.remove(self.handle);
@@ -319,20 +338,17 @@ impl ClientUdpAssociation {
             .expect("client UDP protocol is activated before encode");
         if hops.len() == 1 {
             let upstream = buffers.upstream_mut();
-            upstream.resize(MAX_UDP_WIRE_LEN, 0);
-            return plan.legs[0].protocol.encode_request_parts(
+            return encode_request_layer(
+                &mut plan.legs[0].protocol,
                 &egress.clock,
                 &egress.random,
                 datagram.target(),
                 datagram.payload(),
-                0,
                 upstream,
             );
         }
 
         let (upstream, inner) = buffers.pair_mut();
-        upstream.resize(MAX_UDP_WIRE_LEN, 0);
-        inner.resize(MAX_UDP_WIRE_LEN, 0);
         let mut wire_len = 0;
         for layer in (0..hops.len()).rev() {
             let intermediate;
@@ -355,12 +371,12 @@ impl ClientUdpAssociation {
                 } else {
                     &inner[..wire_len]
                 };
-                plan.legs[layer].protocol.encode_request_parts(
+                encode_request_layer(
+                    &mut plan.legs[layer].protocol,
                     &egress.clock,
                     &egress.random,
                     target,
                     payload,
-                    0,
                     upstream,
                 )?
             } else {
@@ -369,12 +385,12 @@ impl ClientUdpAssociation {
                 } else {
                     &upstream[..wire_len]
                 };
-                plan.legs[layer].protocol.encode_request_parts(
+                encode_request_layer(
+                    &mut plan.legs[layer].protocol,
                     &egress.clock,
                     &egress.random,
                     target,
                     payload,
-                    0,
                     inner,
                 )?
             };
@@ -960,13 +976,14 @@ impl ClientUdpAssociation {
         self.io_fault = fault;
     }
 
-    pub(in crate::run) async fn relay<C, T, R>(
+    pub(in crate::run) async fn relay_dns_into<C, T, R>(
         &mut self,
         engine: &ClientEgressEngine<C, T, R>,
         plan: Option<&EgressPlanSnapshot>,
         destination: TargetAddr,
-        packet: Vec<u8>,
-    ) -> io::Result<(Vec<u8>, bool)>
+        packet: &[u8],
+        response_output: &mut BytesMut,
+    ) -> io::Result<bool>
     where
         T: Clock,
         R: SecureRandom,
@@ -980,14 +997,20 @@ impl ClientUdpAssociation {
         if self.plan.as_ref() != plan {
             return Err(invalid_dns_target());
         }
+        if !response_output.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS UDP response buffer is not empty",
+            ));
+        }
         let expected_response_target = destination.clone();
         self.activate(engine).map_err(|_| runtime_error(()))?;
         let wire_len = self
-            .prepare_owned_application_request(
+            .prepare_application_request(
                 engine,
                 &engine.outbounds,
                 destination,
-                bytes::Bytes::from(packet).into(),
+                packet,
                 Instant::now(),
             )
             .map_err(|_| io::Error::other("DNS UDP encode failed"))?;
@@ -1015,9 +1038,19 @@ impl ClientUdpAssociation {
                 self.recycle_application_response(response);
                 continue;
             }
-            let payload = response.datagram().payload().to_vec();
-            self.recycle_application_response(response);
-            return Ok((payload, reusable));
+            let direct = matches!(self.upstream, ClientUdpUpstream::Direct { .. });
+            let (datagram, reservation) = response.into_parts();
+            let (_, payload) = datagram.into_parts();
+            let mut payload = match payload.try_into_mut() {
+                Ok(payload) => payload,
+                Err(payload) => payload.into(),
+            };
+            std::mem::swap(response_output, &mut payload);
+            if direct {
+                self.restore_direct_wire(payload);
+            }
+            drop(reservation);
+            return Ok(reusable);
         }
     }
 }
@@ -1187,6 +1220,8 @@ where
 #[cfg(test)]
 mod buffer_tests {
     use super::*;
+    use crate::run::test_support::FixedRandom;
+    use ferrum2_crypto::{MethodPsk, MethodSinglePskProvider, SystemClock};
     use ferrum2_runtime::{
         MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, UdpRuntimeLimits,
     };
@@ -1261,5 +1296,65 @@ mod buffer_tests {
 
         drop(held);
         assert_eq!(budget.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn single_and_multi_hop_encoding_use_exact_logical_lengths_and_reuse_capacity() {
+        let keys = MethodSinglePskProvider::new(MethodPsk::aes128([0x31; 16]));
+        let mut inner_protocol =
+            UdpClientSession::new(&keys, &FixedRandom, |_| false).expect("inner protocol");
+        let mut outer_protocol =
+            UdpClientSession::new(&keys, &FixedRandom, |_| false).expect("outer protocol");
+        let clock = SystemClock::new();
+        let application = TargetAddr::domain("exact.example", 53).expect("application target");
+        let next = TargetAddr::ip("[2001:db8::1]:8388".parse().expect("next endpoint"))
+            .expect("next target");
+        let mut upstream = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
+        let mut inner = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
+        let upstream_identity = upstream.as_ptr();
+        let inner_identity = inner.as_ptr();
+
+        for payload_len in [128, 8_192, 128] {
+            let payload = vec![0x5a; payload_len];
+            let inner_len = encode_request_layer(
+                &mut inner_protocol,
+                &clock,
+                &FixedRandom,
+                &application,
+                &payload,
+                &mut inner,
+            )
+            .expect("inner exact encoding");
+            assert_eq!(inner.len(), inner_len);
+            assert_eq!(
+                inner_len,
+                inner_protocol
+                    .request_wire_len(&application, payload_len, 0)
+                    .expect("inner layout")
+            );
+
+            let outer_len = encode_request_layer(
+                &mut outer_protocol,
+                &clock,
+                &FixedRandom,
+                &next,
+                &inner[..inner_len],
+                &mut upstream,
+            )
+            .expect("outer exact encoding");
+            assert_eq!(upstream.len(), outer_len);
+            assert_eq!(
+                outer_len,
+                outer_protocol
+                    .request_wire_len(&next, inner_len, 0)
+                    .expect("outer layout")
+            );
+            assert!(inner_len < MAX_UDP_WIRE_LEN);
+            assert!(outer_len < MAX_UDP_WIRE_LEN);
+            assert_eq!(inner.capacity(), MAX_UDP_WIRE_LEN);
+            assert_eq!(upstream.capacity(), MAX_UDP_WIRE_LEN);
+            assert_eq!(inner.as_ptr(), inner_identity);
+            assert_eq!(upstream.as_ptr(), upstream_identity);
+        }
     }
 }

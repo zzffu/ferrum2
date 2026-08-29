@@ -442,7 +442,113 @@ fn server_routes_by_authenticated_id_supports_roaming_and_rejects_stale_generati
 }
 
 #[test]
-fn outbound_session_index_reuses_removed_ids_without_stale_generation_cleanup() {
+fn existing_request_commit_requires_exact_live_capability_and_never_creates_generation() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let server_random = FillRandom::new(0x80);
+    let server = UdpServer::new(&keys).expect("server");
+    let first_random = FillRandom::new(0x10);
+    let second_random = FillRandom::new(0x40);
+    let mut first = UdpClientSession::new(&keys, &first_random, |_| false).expect("first client");
+    let mut second =
+        UdpClientSession::new(&keys, &second_random, |_| false).expect("second client");
+    let first_peer: SocketAddr = "127.0.0.1:49152".parse().expect("first peer");
+    let replacement_peer: SocketAddr = "127.0.0.2:49153".parse().expect("replacement peer");
+    let first_capability = accept(
+        &server,
+        &clock,
+        &server_random,
+        &request_wire(&mut first, &clock, &first_random, b"first"),
+        first_peer,
+        0,
+    );
+    let second_capability = accept(
+        &server,
+        &clock,
+        &server_random,
+        &request_wire(&mut second, &clock, &second_random, b"second"),
+        replacement_peer,
+        0,
+    );
+    let before = server
+        .session_snapshot(first_capability)
+        .expect("snapshot")
+        .expect("first generation");
+
+    let mismatch_wire = request_wire(&mut first, &clock, &first_random, b"mismatch");
+    let mut scratch = UdpPacketScratch::new();
+    let (_, mismatch_commit) = server
+        .prepare_request(&clock, &mismatch_wire, &mut scratch)
+        .expect("mismatch request prepares")
+        .into_parts();
+    assert!(matches!(
+        server.commit_existing_request(
+            mismatch_commit,
+            second_capability,
+            replacement_peer,
+            instant(1),
+        ),
+        Err(UdpPacketError::Generation)
+    ));
+    assert_eq!(
+        server
+            .session_snapshot(first_capability)
+            .expect("snapshot")
+            .expect("first generation"),
+        before,
+        "capability mismatch cannot mutate replay, peer, or activity"
+    );
+
+    let exact_wire = request_wire(&mut first, &clock, &first_random, b"exact");
+    let (_, exact_commit) = server
+        .prepare_request(&clock, &exact_wire, &mut scratch)
+        .expect("exact request prepares")
+        .into_parts();
+    assert_eq!(
+        server
+            .commit_existing_request(exact_commit, first_capability, replacement_peer, instant(2),)
+            .expect("exact existing commit")
+            .capability(),
+        first_capability
+    );
+    let committed = server
+        .session_snapshot(first_capability)
+        .expect("snapshot")
+        .expect("first generation");
+    assert_eq!(committed.highest_packet_id(), Some(2));
+    assert_eq!(committed.peer(), replacement_peer);
+    assert_eq!(committed.last_activity(), instant(2));
+
+    let removed_wire = request_wire(&mut first, &clock, &first_random, b"removed");
+    let (_, removed_commit) = server
+        .prepare_request(&clock, &removed_wire, &mut scratch)
+        .expect("removed request prepares")
+        .into_parts();
+    assert!(
+        server
+            .remove_session(first_capability, instant(60_002))
+            .expect("remove first generation")
+    );
+    assert!(matches!(
+        server.commit_existing_request(
+            removed_commit,
+            first_capability,
+            first_peer,
+            instant(60_002),
+        ),
+        Err(UdpPacketError::Generation)
+    ));
+    assert_eq!(server.session_count().expect("count"), 1);
+    assert!(
+        server
+            .session_snapshot(first_capability)
+            .expect("snapshot")
+            .is_none()
+    );
+}
+
+#[test]
+fn global_session_registry_rejects_cross_direction_collisions_and_reuses_removed_ids() {
     let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
     let clock = FakeClock::new(1_700_000_000, 0);
     let server = UdpServer::new(&keys).expect("server");
@@ -455,6 +561,27 @@ fn outbound_session_index_reuses_removed_ids_without_stale_generation_cleanup() 
     let first_random = CountingFillRandom::new(0x80);
     let first = accept(&server, &clock, &first_random, &first_wire, peer, 0);
     assert_eq!(first_random.calls(), 1);
+
+    let mut colliding_client = UdpClientSession::new(&keys, &FillRandom::new(0x80), |_| false)
+        .expect("inbound/outbound collision client");
+    let collision_wire = request_wire(
+        &mut colliding_client,
+        &clock,
+        &FillRandom::new(0x81),
+        b"inbound collision",
+    );
+    let mut collision_scratch = UdpPacketScratch::new();
+    let (_, collision_commit) = server
+        .prepare_request(&clock, &collision_wire, &mut collision_scratch)
+        .expect("collision authenticates")
+        .into_parts();
+    let unused_random = CountingFillRandom::new(0x90);
+    assert!(matches!(
+        server.commit_request(collision_commit, peer, instant(0), &unused_random),
+        Err(UdpPacketError::Generation)
+    ));
+    assert_eq!(unused_random.calls(), 0);
+    assert_eq!(server.session_count().expect("collision count"), 1);
 
     let mut second_client =
         UdpClientSession::new(&keys, &FillRandom::new(0x30), |_| false).expect("second client");

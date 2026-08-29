@@ -438,6 +438,7 @@ pub struct UdpOpenResult {
     authenticated_len: usize,
     plaintext_offset: usize,
     plaintext_len: usize,
+    aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 impl UdpOpenResult {
@@ -465,6 +466,14 @@ impl UdpOpenResult {
     /// later semantic or replay check rejects the packet.
     pub fn authenticated_range(&self) -> Range<usize> {
         self.authenticated_offset..self.authenticated_offset + self.authenticated_len
+    }
+
+    /// Transfers the authenticated cold-miss AES cipher to protocol commit state.
+    ///
+    /// Cache hits and ChaCha packets return `None`. The opaque token remains
+    /// move-only so rejected or abandoned protocol transitions cannot publish it.
+    pub fn into_aes_session_cipher(self) -> Option<UdpAesSessionCipher> {
+        self.aes_session_cipher
     }
 }
 
@@ -629,6 +638,7 @@ fn open_aes_udp(
         authenticated_len: body_len,
         plaintext_offset: 0,
         plaintext_len: body_len,
+        aes_session_cipher: temporary,
     })
 }
 
@@ -693,6 +703,7 @@ fn open_xchacha_udp(
         authenticated_len: body_len,
         plaintext_offset: 0,
         plaintext_len: body_len,
+        aes_session_cipher: None,
     })
 }
 
@@ -754,6 +765,7 @@ fn open_aes_udp_in_place(
         authenticated_len: body_len,
         plaintext_offset: body_range.start,
         plaintext_len: body_len,
+        aes_session_cipher: temporary,
     })
 }
 
@@ -798,6 +810,7 @@ fn open_xchacha_udp_in_place(
         authenticated_len: encrypted_len,
         plaintext_offset: identity_end,
         plaintext_len: encrypted_len - UDP_IDENTITY_BYTES,
+        aes_session_cipher: None,
     })
 }
 
@@ -1037,6 +1050,7 @@ mod tests {
             .open_in_place_with_aes_session_cipher(&mut first_wire, |_| Some(Arc::clone(&accepted)))
             .expect("accepted cache hit");
         assert_eq!(&first_wire[opened.plaintext_range()], b"first");
+        assert!(opened.into_aes_session_cipher().is_none());
         assert_eq!(crypto.aes_body_cipher_derivation_count(), 2);
         let mut copied_plaintext = vec![0xa5; second_wire.len()];
         let copied = crypto
@@ -1052,9 +1066,31 @@ mod tests {
             .seal(&mut outbound, b"miss", &mut miss_wire, &SystemRandom)
             .expect("miss packet");
         miss_wire.truncate(miss.wire_len());
-        crypto
+        let cold_miss = crypto
             .open_in_place_with_aes_session_cipher(&mut miss_wire, |_| None)
             .expect("cold miss derives temporary state");
+        assert_eq!(crypto.aes_body_cipher_derivation_count(), 3);
+        let cold_miss = Arc::new(
+            cold_miss
+                .into_aes_session_cipher()
+                .expect("authenticated miss transfers its derived cipher"),
+        );
+        let mut established_wire = BytesMut::from(&vec![0; 96][..]);
+        let established = crypto
+            .seal(
+                &mut outbound,
+                b"established",
+                &mut established_wire,
+                &SystemRandom,
+            )
+            .expect("established packet");
+        established_wire.truncate(established.wire_len());
+        let established = crypto
+            .open_in_place_with_aes_session_cipher(&mut established_wire, |_| {
+                Some(Arc::clone(&cold_miss))
+            })
+            .expect("handoff cache hit");
+        assert!(established.into_aes_session_cipher().is_none());
         assert_eq!(crypto.aes_body_cipher_derivation_count(), 3);
 
         let mut rejected_wire = BytesMut::from(&vec![0; 96][..]);
@@ -1147,12 +1183,13 @@ mod tests {
             .expect("packet");
         wire.truncate(sealed.wire_len());
         let called = AtomicBool::new(false);
-        crypto
+        let opened = crypto
             .open_in_place_with_aes_session_cipher(&mut wire, |_| {
                 called.store(true, Ordering::SeqCst);
                 None
             })
             .expect("ChaCha packet");
+        assert!(opened.into_aes_session_cipher().is_none());
         assert!(!called.load(Ordering::SeqCst));
         assert_eq!(crypto.aes_body_cipher_derivation_count(), 0);
     }

@@ -1,18 +1,18 @@
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 use ferrum2_crypto::{
-    Clock, MethodKeyProvider, MonotonicInstant, SecureRandom, UdpCrypto, UdpOutboundSession,
-    UdpSessionId,
+    Clock, MethodKeyProvider, MonotonicInstant, SecureRandom, UdpAesSessionCipher, UdpCrypto,
+    UdpOutboundSession, UdpSessionId,
 };
 
 use super::replay::UdpReplayWindow;
 use super::wire::{
     encode_packet, open_packet_borrowed, open_packet_in_place_borrowed, open_packet_owned,
-    udp_crypto,
+    udp_crypto, udp_wire_len,
 };
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
 use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE, ValidatedTarget};
@@ -20,6 +20,7 @@ use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE, ValidatedTarget};
 #[derive(Clone)]
 struct ClientAssociation {
     session_id: UdpSessionId,
+    aes_body_cipher: Option<Arc<UdpAesSessionCipher>>,
     replay: UdpReplayWindow,
     last_valid: MonotonicInstant,
 }
@@ -83,6 +84,25 @@ impl UdpClientSession {
     /// Returns the opaque live ID for collision-safe process-local registration.
     pub const fn session_id(&self) -> &UdpSessionId {
         self.outbound.session_id()
+    }
+
+    /// Returns the exact output span required by one request for this session's method.
+    ///
+    /// This is mutation-free: callers can resize reusable storage to the returned
+    /// logical length before calling [`Self::encode_request_parts`].
+    pub fn request_wire_len(
+        &self,
+        target: &TargetAddr,
+        payload_len: usize,
+        padding_len: usize,
+    ) -> Result<usize, UdpPacketError> {
+        udp_wire_len(
+            self.crypto.profile(),
+            false,
+            target,
+            payload_len,
+            padding_len,
+        )
     }
 
     /// Encodes one request into caller-owned bounded output.
@@ -157,6 +177,7 @@ impl UdpClientSession {
             wire,
             RESPONSE_TYPE,
             Some(self.outbound.session_id()),
+            |session_id| self.cached_response_cipher(session_id),
         )?;
         self.check_response_replay(opened.session_id(), opened.packet_id())?;
         let opened = opened.into_opened_packet()?;
@@ -165,6 +186,7 @@ impl UdpClientSession {
             session_id: opened.session_id,
             packet_id: opened.packet_id,
             datagram: opened.datagram,
+            aes_session_cipher: opened.aes_session_cipher,
         })
     }
 
@@ -182,6 +204,7 @@ impl UdpClientSession {
             scratch,
             RESPONSE_TYPE,
             Some(self.outbound.session_id()),
+            |session_id| self.cached_response_cipher(session_id),
             |session_id, packet_id| self.check_response_replay(session_id, packet_id),
         )?;
         Ok(BorrowedPendingUdpResponse {
@@ -190,6 +213,7 @@ impl UdpClientSession {
             packet_id: opened.packet_id,
             target: opened.target,
             payload: opened.payload,
+            aes_session_cipher: opened.aes_session_cipher,
         })
     }
 
@@ -209,6 +233,7 @@ impl UdpClientSession {
             wire,
             RESPONSE_TYPE,
             Some(self.outbound.session_id()),
+            |session_id| self.cached_response_cipher(session_id),
             |session_id, packet_id| self.check_response_replay(session_id, packet_id),
         )?;
         Ok(BorrowedPendingUdpResponse {
@@ -217,6 +242,7 @@ impl UdpClientSession {
             packet_id: opened.packet_id,
             target: opened.target,
             payload: opened.payload,
+            aes_session_cipher: opened.aes_session_cipher,
         })
     }
 
@@ -245,6 +271,26 @@ impl UdpClientSession {
         Ok(())
     }
 
+    fn cached_response_cipher(
+        &self,
+        session_id: &UdpSessionId,
+    ) -> Option<Arc<UdpAesSessionCipher>> {
+        let associations = self.associations.lock().ok()?;
+        associations
+            .current
+            .as_ref()
+            .filter(|association| association.session_id == *session_id)
+            .or_else(|| {
+                associations
+                    .old
+                    .as_ref()
+                    .filter(|association| association.session_id == *session_id)
+            })?
+            .aes_body_cipher
+            .as_ref()
+            .map(Arc::clone)
+    }
+
     /// Atomically rechecks and commits a reserved response transition.
     ///
     /// T04 must call this only from the T03 byte/queue/session/generation
@@ -261,7 +307,14 @@ impl UdpClientSession {
             .associations
             .lock()
             .map_err(|_| UdpPacketError::StateUnavailable)?;
-        commit_client_association(&mut associations, commit.session_id, commit.packet_id, now)
+        commit_client_association(
+            &self.crypto,
+            &mut associations,
+            commit.session_id,
+            commit.packet_id,
+            commit.aes_session_cipher,
+            now,
+        )
     }
 
     /// Atomically commits one ordered response transition per distinct client session.
@@ -299,8 +352,19 @@ impl UdpClientSession {
             .iter()
             .map(|associations| (**associations).clone())
             .collect::<Vec<_>>();
-        for (associations, commit) in updated.iter_mut().zip(ordered_commits) {
-            commit_client_association(associations, commit.session_id, commit.packet_id, now)?;
+        for ((session, associations), commit) in ordered_sessions
+            .iter()
+            .zip(updated.iter_mut())
+            .zip(ordered_commits)
+        {
+            commit_client_association(
+                &session.crypto,
+                associations,
+                commit.session_id,
+                commit.packet_id,
+                commit.aes_session_cipher,
+                now,
+            )?;
         }
         for (associations, replacement) in guards.iter_mut().zip(updated) {
             **associations = replacement;
@@ -336,9 +400,11 @@ impl fmt::Debug for UdpClientSession {
 }
 
 fn commit_client_association(
+    crypto: &UdpCrypto,
     associations: &mut ClientAssociations,
     session_id: UdpSessionId,
     packet_id: u64,
+    aes_session_cipher: Option<UdpAesSessionCipher>,
     now: MonotonicInstant,
 ) -> Result<(), UdpPacketError> {
     if let Some(current) = associations
@@ -363,6 +429,12 @@ fn commit_client_association(
     let mut replay = UdpReplayWindow::new();
     replay.commit(packet_id)?;
     let new = ClientAssociation {
+        // Normal cold misses move their single authenticated derivation here.
+        // Only a cache-hit prepare that raced with rotation needs one new
+        // derivation for the replacement association.
+        aes_body_cipher: aes_session_cipher
+            .or_else(|| crypto.derive_aes_session_cipher(&session_id))
+            .map(Arc::new),
         session_id,
         replay,
         last_valid: now,
@@ -397,6 +469,7 @@ pub struct PendingUdpResponse {
     session_id: UdpSessionId,
     packet_id: u64,
     datagram: Datagram,
+    aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 impl PendingUdpResponse {
@@ -413,6 +486,7 @@ impl PendingUdpResponse {
                 owner_id: self.owner_id,
                 session_id: self.session_id,
                 packet_id: self.packet_id,
+                aes_session_cipher: self.aes_session_cipher,
             },
         )
     }
@@ -434,6 +508,7 @@ pub struct BorrowedPendingUdpResponse<'a> {
     packet_id: u64,
     target: ValidatedTarget<'a>,
     payload: &'a [u8],
+    aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 impl BorrowedPendingUdpResponse<'_> {
@@ -485,6 +560,7 @@ impl BorrowedPendingUdpResponse<'_> {
             owner_id: self.owner_id,
             session_id: self.session_id,
             packet_id: self.packet_id,
+            aes_session_cipher: self.aes_session_cipher,
         }
     }
 
@@ -502,6 +578,7 @@ impl BorrowedPendingUdpResponse<'_> {
             owner_id: self.owner_id,
             session_id: self.session_id,
             packet_id: self.packet_id,
+            aes_session_cipher: self.aes_session_cipher,
         }
     }
 }
@@ -520,10 +597,197 @@ pub struct UdpResponseCommit {
     owner_id: UdpSessionId,
     session_id: UdpSessionId,
     packet_id: u64,
+    aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 impl fmt::Debug for UdpResponseCommit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("UdpResponseCommit([redacted])")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ferrum2_crypto::{
+        ClockError, MethodPsk, MethodSinglePskProvider, RandomError, SecureRandom,
+    };
+
+    use super::super::MAX_UDP_WIRE_LEN;
+    use super::super::server::UdpServer;
+
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn unix_seconds(&self) -> Result<u64, ClockError> {
+            Ok(1_700_000_000)
+        }
+
+        fn monotonic_now(&self) -> MonotonicInstant {
+            MonotonicInstant::ZERO
+        }
+    }
+
+    struct SequenceRandom(Mutex<u8>);
+
+    impl SequenceRandom {
+        fn new(first: u8) -> Self {
+            Self(Mutex::new(first))
+        }
+    }
+
+    impl SecureRandom for SequenceRandom {
+        fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
+            let mut next = self.0.lock().expect("test random");
+            destination.fill(*next);
+            *next = next.wrapping_add(1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn inbound_response_aes_miss_moves_one_cipher_and_established_hits_derive_none() {
+        fn exercise(keys: MethodSinglePskProvider, expects_aes: bool) {
+            let client_random = SequenceRandom::new(0x31);
+            let server_random = SequenceRandom::new(0x91);
+            let mut client = UdpClientSession::new(&keys, &client_random, |_| false)
+                .expect("response cache client");
+            let server = UdpServer::new(&keys).expect("response cache server");
+            let target = TargetAddr::ip("192.0.2.1:53".parse().expect("response endpoint"))
+                .expect("response target");
+            let request = Datagram::new(target.clone(), BytesMut::from(&b"request"[..]), 7)
+                .expect("request datagram");
+            let mut request_wire = vec![
+                0;
+                client
+                    .request_wire_len(request.target(), request.payload().len(), 0)
+                    .expect("request wire length")
+            ];
+            let request_len = client
+                .encode_request(&FixedClock, &client_random, &request, 0, &mut request_wire)
+                .expect("request encode");
+            request_wire.truncate(request_len);
+            let mut scratch = UdpPacketScratch::new();
+            let (_, request_commit) = server
+                .prepare_request(&FixedClock, &request_wire, &mut scratch)
+                .expect("request prepare")
+                .into_parts();
+            let capability = server
+                .commit_request(
+                    request_commit,
+                    "127.0.0.1:49154".parse().expect("response peer"),
+                    MonotonicInstant::ZERO,
+                    &server_random,
+                )
+                .expect("request commit")
+                .capability();
+
+            let response = Datagram::new(target, BytesMut::from(&b"response"[..]), 8)
+                .expect("response datagram");
+            let mut dropped_wire = vec![0; MAX_UDP_WIRE_LEN];
+            let dropped_len = server
+                .encode_response(
+                    capability,
+                    &FixedClock,
+                    &server_random,
+                    &response,
+                    0,
+                    &mut dropped_wire,
+                )
+                .expect("dropped response")
+                .wire_len();
+            dropped_wire.truncate(dropped_len);
+            let dropped = client
+                .prepare_response_owned(&FixedClock, BytesMut::from(dropped_wire.as_slice()))
+                .expect("dropped cold response");
+            assert_eq!(dropped.aes_session_cipher.is_some(), expects_aes);
+            drop(dropped);
+
+            let mut first_wire = vec![0; MAX_UDP_WIRE_LEN];
+            let first_len = server
+                .encode_response(
+                    capability,
+                    &FixedClock,
+                    &server_random,
+                    &response,
+                    0,
+                    &mut first_wire,
+                )
+                .expect("first response")
+                .wire_len();
+            first_wire.truncate(first_len);
+            let first = client
+                .prepare_response_owned(&FixedClock, BytesMut::from(first_wire.as_slice()))
+                .expect("cold response");
+            assert_eq!(first.aes_session_cipher.is_some(), expects_aes);
+            let (_, response_commit) = first.into_parts();
+            client
+                .commit_response(response_commit, MonotonicInstant::ZERO)
+                .expect("cold response commit");
+
+            let mut established_wire = vec![0; MAX_UDP_WIRE_LEN];
+            let established_len = server
+                .encode_response(
+                    capability,
+                    &FixedClock,
+                    &server_random,
+                    &response,
+                    0,
+                    &mut established_wire,
+                )
+                .expect("established response")
+                .wire_len();
+            established_wire.truncate(established_len);
+            let established = client
+                .prepare_response(&FixedClock, &established_wire, &mut scratch)
+                .expect("established response open");
+            assert!(established.aes_session_cipher.is_none());
+        }
+
+        exercise(
+            MethodSinglePskProvider::new(MethodPsk::aes128([0x51; 16])),
+            true,
+        );
+        exercise(
+            MethodSinglePskProvider::new(MethodPsk::chacha20_poly1305([0x52; 32])),
+            false,
+        );
+
+        let mut associations = ClientAssociations::default();
+        let aes_keys = MethodSinglePskProvider::new(MethodPsk::aes128([0x63; 16]));
+        let aes_random = SequenceRandom::new(0x64);
+        let aes_session =
+            UdpClientSession::new(&aes_keys, &aes_random, |_| false).expect("AES association ID");
+        let aes_crypto = udp_crypto(&aes_keys).expect("AES association crypto");
+        commit_client_association(
+            &aes_crypto,
+            &mut associations,
+            aes_session.session_id().clone(),
+            0,
+            None,
+            MonotonicInstant::ZERO,
+        )
+        .expect("cache-hit rotation derives one replacement AES token");
+        assert!(
+            associations
+                .current
+                .as_ref()
+                .is_some_and(|association| association.aes_body_cipher.is_some())
+        );
+        let chacha_keys = MethodSinglePskProvider::new(MethodPsk::chacha20_poly1305([0x65; 32]));
+        let chacha_random = SequenceRandom::new(0x66);
+        let chacha_session = UdpClientSession::new(&chacha_keys, &chacha_random, |_| false)
+            .expect("ChaCha association ID");
+        let chacha_crypto = udp_crypto(&chacha_keys).expect("ChaCha association crypto");
+        commit_client_association(
+            &chacha_crypto,
+            &mut associations,
+            chacha_session.session_id().clone(),
+            0,
+            None,
+            MonotonicInstant::ZERO,
+        )
+        .expect("ChaCha association needs no AES token");
     }
 }

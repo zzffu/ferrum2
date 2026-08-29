@@ -138,7 +138,6 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
                 )
                 .expect("response encodes");
             assert_eq!(encoded.peer(), peer);
-            let scratch_identity = response_scratch.storage_identity();
             let pending = client
                 .prepare_response_borrowed(
                     &clock,
@@ -147,12 +146,14 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
                 )
                 .expect("response authenticates and binds");
             let payload_pointer = pending.payload().as_ptr() as usize;
-            assert!(
-                (scratch_identity..scratch_identity + MAX_UDP_WIRE_LEN).contains(&payload_pointer),
-                "prepared response must borrow charged scratch"
-            );
             assert_eq!(pending.allocated_capacity(), b"response payload".len());
             let (opened_response, commit) = pending.materialize().into_parts();
+            let scratch_identity = response_scratch.storage_identity();
+            assert!(
+                (scratch_identity..scratch_identity + response_scratch.allocated_capacity())
+                    .contains(&payload_pointer),
+                "prepared response must borrow lazily allocated scratch"
+            );
             client
                 .commit_response(commit, MonotonicInstant::ZERO)
                 .expect("reserved response commits");
@@ -199,6 +200,91 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
             client
                 .commit_response(commit, MonotonicInstant::ZERO)
                 .expect("exact commit");
+        }
+    }
+}
+
+#[test]
+fn exact_request_layout_matches_all_methods_targets_and_payload_sizes() {
+    for profile in MethodProfile::ALL {
+        for target in [
+            fixture_target("ipv4"),
+            fixture_target("ipv6"),
+            fixture_target("domain"),
+        ] {
+            let keys = udp_provider(profile);
+            let random = FillRandom::new(0x20);
+            let clock = FakeClock::new(NOW, 0);
+            let mut client =
+                UdpClientSession::new(&keys, &random, |_| false).expect("client session");
+            let maximum = max_udp_payload_len(profile, false, &target, 0).expect("payload maximum");
+            let mut payload_sizes = vec![0, 128, 1_200, 1_472, 1_500, 8_192, maximum];
+            payload_sizes.sort_unstable();
+            payload_sizes.dedup();
+
+            for payload_len in payload_sizes {
+                let exact = client
+                    .request_wire_len(&target, payload_len, 0)
+                    .expect("session-bound exact layout");
+                let payload = vec![0x5a; payload_len];
+                let mut wire = vec![0xa5; exact];
+                let encoded = client
+                    .encode_request_parts(&clock, &random, &target, &payload, 0, &mut wire)
+                    .expect("exact output encodes");
+                assert_eq!(encoded, exact);
+            }
+
+            assert_eq!(
+                client.request_wire_len(&target, maximum + 1, 0),
+                Err(UdpPacketError::Bounds)
+            );
+        }
+    }
+}
+
+#[test]
+fn borrowed_scratch_lazily_grows_and_reuses_its_high_water_allocation() {
+    let profile = MethodProfile::Blake3Aes128Gcm2022;
+    let keys = udp_provider(profile);
+    let random = FillRandom::new(0x24);
+    let clock = FakeClock::new(NOW, 0);
+    let target = fixture_target("domain");
+    let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client session");
+    let server = UdpServer::new(&keys).expect("server");
+    let mut scratch = UdpPacketScratch::new();
+    assert_eq!(scratch.allocated_capacity(), 0);
+    assert_eq!(
+        UdpPacketScratch::with_capacity(MAX_UDP_WIRE_LEN + 1).unwrap_err(),
+        UdpPacketError::Bounds
+    );
+    let preallocated = UdpPacketScratch::with_capacity(1_500).expect("bounded preallocation");
+    assert!(preallocated.allocated_capacity() >= 1_500);
+
+    let mut high_water = None;
+    for payload_len in [128, 8_192, 128] {
+        let payload = vec![0x3c; payload_len];
+        let exact = client
+            .request_wire_len(&target, payload_len, 0)
+            .expect("exact request layout");
+        let mut wire = vec![0; exact];
+        assert_eq!(
+            client
+                .encode_request_parts(&clock, &random, &target, &payload, 0, &mut wire)
+                .expect("request encoding"),
+            exact
+        );
+        let opened = server
+            .prepare_request(&clock, &wire, &mut scratch)
+            .expect("borrowed open");
+        assert_eq!(opened.datagram().payload(), payload);
+        drop(opened);
+        assert!(scratch.allocated_capacity() >= exact);
+
+        if payload_len == 8_192 {
+            high_water = Some((scratch.storage_identity(), scratch.allocated_capacity()));
+        } else if let Some((identity, capacity)) = high_water {
+            assert_eq!(scratch.storage_identity(), identity);
+            assert_eq!(scratch.allocated_capacity(), capacity);
         }
     }
 }
@@ -463,7 +549,7 @@ fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id()
             max_udp_payload_len(profile, false, &target, 0).expect("checked payload maximum");
         let maximum_datagram = datagram(target.clone(), &vec![0x5a; maximum]);
         let mut scratch = UdpPacketScratch::new();
-        let identity = scratch.storage_identity();
+        assert_eq!(scratch.allocated_capacity(), 0);
         let mut short = vec![0_u8; MAX_UDP_WIRE_LEN - 1];
         assert_eq!(
             client.encode_request(&clock, &random, &maximum_datagram, 0, &mut short,),
@@ -480,7 +566,7 @@ fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id()
             .expect("maximum authenticates through reusable scratch");
         assert_eq!(borrowed.datagram().payload().len(), maximum);
         drop(borrowed);
-        assert_eq!(scratch.storage_identity(), identity);
+        assert!(scratch.allocated_capacity() >= MAX_UDP_WIRE_LEN);
         let mut in_place_wire = BytesMut::from(wire.as_slice());
         let in_place_capacity = in_place_wire.capacity();
         let pending = server
@@ -894,7 +980,6 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
         let next = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8388)).expect("next");
         let application = fixture_target("ipv4");
         let mut scratch = UdpPacketScratch::new();
-        let scratch_identity = scratch.storage_identity();
         let mut wire = vec![0; MAX_UDP_WIRE_LEN];
         let inner_len = clients[1]
             .encode_request(
@@ -976,6 +1061,8 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
             MonotonicInstant::from_duration(Duration::from_millis(1)),
         )
         .expect("first batch");
+        let scratch_identity = scratch.storage_identity();
+        let scratch_capacity = scratch.allocated_capacity();
         let before = clients
             .each_ref()
             .map(|client| client.association_snapshot().expect("snapshot"));
@@ -1043,6 +1130,7 @@ fn chained_response_commit_is_atomic_when_fresh_outer_wraps_replayed_inner() {
         )
         .expect("valid after duplicate");
         assert_eq!(scratch.storage_identity(), scratch_identity);
+        assert_eq!(scratch.allocated_capacity(), scratch_capacity);
     }
 }
 

@@ -1,11 +1,12 @@
 use std::net::IpAddr;
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 use ferrum2_crypto::{
-    Clock, KeySelector, MethodKeyProvider, MethodProfile, SecureRandom, UdpCrypto, UdpCryptoError,
-    UdpOutboundSession, UdpSessionId,
+    Clock, KeySelector, MethodKeyProvider, MethodProfile, SecureRandom, UdpAesSessionCipher,
+    UdpCrypto, UdpCryptoError, UdpOutboundSession, UdpSessionId,
 };
 use zeroize::Zeroize;
 
@@ -20,6 +21,7 @@ pub(super) struct OpenedPacket {
     pub(super) session_id: UdpSessionId,
     pub(super) packet_id: u64,
     pub(super) datagram: Datagram,
+    pub(super) aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 pub(super) struct BorrowedOpenedPacket<'a> {
@@ -27,6 +29,7 @@ pub(super) struct BorrowedOpenedPacket<'a> {
     pub(super) packet_id: u64,
     pub(super) target: ValidatedTarget<'a>,
     pub(super) payload: &'a [u8],
+    pub(super) aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 pub(super) struct OwnedOpenedPacket {
@@ -36,6 +39,7 @@ pub(super) struct OwnedOpenedPacket {
     authenticated_range: Range<usize>,
     target_range: Range<usize>,
     payload_range: Range<usize>,
+    aes_session_cipher: Option<UdpAesSessionCipher>,
 }
 
 impl OwnedOpenedPacket {
@@ -75,6 +79,7 @@ impl OwnedOpenedPacket {
             session_id: self.session_id.clone(),
             packet_id: self.packet_id,
             datagram,
+            aes_session_cipher: self.aes_session_cipher.take(),
         })
     }
 }
@@ -105,17 +110,59 @@ pub fn max_udp_payload_len_for_encoded_target(
     encoded_target_len: usize,
     padding_len: usize,
 ) -> Result<usize, UdpPacketError> {
-    let semantic_overhead = COMMON_HEADER_LEN
-        .checked_add(if response { RESPONSE_BINDING_LEN } else { 0 })
-        .and_then(|length| length.checked_add(padding_len))
-        .and_then(|length| length.checked_add(encoded_target_len))
-        .ok_or(UdpPacketError::Bounds)?;
     if padding_len > usize::from(u16::MAX) {
         return Err(UdpPacketError::Bounds);
     }
+    let semantic_overhead = semantic_body_len(response, encoded_target_len, 0, padding_len)?;
     MAX_UDP_WIRE_LEN
         .checked_sub(profile.udp_wire_overhead_bytes())
         .and_then(|length| length.checked_sub(semantic_overhead))
+        .ok_or(UdpPacketError::Bounds)
+}
+
+/// Computes the exact complete wire length for one validated UDP packet.
+pub(super) fn udp_wire_len(
+    profile: MethodProfile,
+    response: bool,
+    target: &TargetAddr,
+    payload_len: usize,
+    padding_len: usize,
+) -> Result<usize, UdpPacketError> {
+    let address_len = encoded_target_len(target).map_err(map_frame)?;
+    udp_wire_len_for_encoded_target(profile, response, address_len, payload_len, padding_len)
+}
+
+fn udp_wire_len_for_encoded_target(
+    profile: MethodProfile,
+    response: bool,
+    encoded_target_len: usize,
+    payload_len: usize,
+    padding_len: usize,
+) -> Result<usize, UdpPacketError> {
+    let body_len = semantic_body_len(response, encoded_target_len, payload_len, padding_len)?;
+    let wire_len = body_len
+        .checked_add(profile.udp_wire_overhead_bytes())
+        .ok_or(UdpPacketError::Bounds)?;
+    if wire_len > MAX_UDP_WIRE_LEN {
+        return Err(UdpPacketError::Bounds);
+    }
+    Ok(wire_len)
+}
+
+fn semantic_body_len(
+    response: bool,
+    encoded_target_len: usize,
+    payload_len: usize,
+    padding_len: usize,
+) -> Result<usize, UdpPacketError> {
+    if padding_len > usize::from(u16::MAX) {
+        return Err(UdpPacketError::Bounds);
+    }
+    COMMON_HEADER_LEN
+        .checked_add(if response { RESPONSE_BINDING_LEN } else { 0 })
+        .and_then(|length| length.checked_add(padding_len))
+        .and_then(|length| length.checked_add(encoded_target_len))
+        .and_then(|length| length.checked_add(payload_len))
         .ok_or(UdpPacketError::Bounds)
 }
 
@@ -134,21 +181,14 @@ pub(super) fn encode_packet(
 ) -> Result<usize, UdpPacketError> {
     let response = message_type == RESPONSE_TYPE;
     let address_len = encoded_target_len(target).map_err(map_frame)?;
-    let max_payload = max_udp_payload_len_for_encoded_target(
+    let wire_len = udp_wire_len_for_encoded_target(
         crypto.profile(),
         response,
         address_len,
+        payload.len(),
         padding_len,
     )?;
-    if payload.len() > max_payload {
-        return Err(UdpPacketError::Bounds);
-    }
-    let body_len = COMMON_HEADER_LEN
-        .checked_add(if response { RESPONSE_BINDING_LEN } else { 0 })
-        .and_then(|length| length.checked_add(padding_len))
-        .and_then(|length| length.checked_add(address_len))
-        .and_then(|length| length.checked_add(payload.len()))
-        .ok_or(UdpPacketError::Bounds)?;
+    let body_len = wire_len - crypto.profile().udp_wire_overhead_bytes();
     let timestamp = clock.unix_seconds().map_err(|_| UdpPacketError::Clock)?;
     let padding_len = u16::try_from(padding_len).map_err(|_| UdpPacketError::Bounds)?;
     let mut reservation = crypto
@@ -255,15 +295,20 @@ fn encode_target(target: &TargetAddr, writer: &mut BodyWriter<'_>) -> Result<(),
     writer.write(&target.port().get().to_be_bytes())
 }
 
-pub(super) fn open_packet(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_packet<F>(
     crypto: &UdpCrypto,
     clock: &(impl Clock + ?Sized),
     wire: &[u8],
     scratch: &mut UdpPacketScratch,
     expected_type: u8,
     binding: Option<&UdpSessionId>,
+    resolve_aes: F,
     validate_identity: impl FnOnce(&UdpSessionId, u64) -> Result<(), UdpPacketError>,
-) -> Result<OpenedPacket, UdpPacketError> {
+) -> Result<OpenedPacket, UdpPacketError>
+where
+    F: FnOnce(&UdpSessionId) -> Option<Arc<UdpAesSessionCipher>>,
+{
     let opened = open_packet_borrowed(
         crypto,
         clock,
@@ -271,6 +316,7 @@ pub(super) fn open_packet(
         scratch,
         expected_type,
         binding,
+        resolve_aes,
         validate_identity,
     )?;
     let target = opened.target.into_owned().map_err(map_target)?;
@@ -281,22 +327,29 @@ pub(super) fn open_packet(
         session_id: opened.session_id,
         packet_id: opened.packet_id,
         datagram,
+        aes_session_cipher: opened.aes_session_cipher,
     })
 }
 
-pub(super) fn open_packet_borrowed<'a>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_packet_borrowed<'a, F>(
     crypto: &UdpCrypto,
     clock: &(impl Clock + ?Sized),
     wire: &[u8],
     scratch: &'a mut UdpPacketScratch,
     expected_type: u8,
     binding: Option<&UdpSessionId>,
+    resolve_aes: F,
     validate_identity: impl FnOnce(&UdpSessionId, u64) -> Result<(), UdpPacketError>,
-) -> Result<BorrowedOpenedPacket<'a>, UdpPacketError> {
+) -> Result<BorrowedOpenedPacket<'a>, UdpPacketError>
+where
+    F: FnOnce(&UdpSessionId) -> Option<Arc<UdpAesSessionCipher>>,
+{
     if wire.len() > MAX_UDP_WIRE_LEN {
         return Err(UdpPacketError::Bounds);
     }
     scratch.body.clear();
+    scratch.body.reserve(wire.len());
     scratch.body.extend_from_slice(wire);
     open_packet_in_place_borrowed(
         crypto,
@@ -304,18 +357,23 @@ pub(super) fn open_packet_borrowed<'a>(
         &mut scratch.body,
         expected_type,
         binding,
+        resolve_aes,
         validate_identity,
     )
 }
 
-pub(super) fn open_packet_in_place(
+pub(super) fn open_packet_in_place<F>(
     crypto: &UdpCrypto,
     clock: &(impl Clock + ?Sized),
     wire: &mut BytesMut,
     expected_type: u8,
     binding: Option<&UdpSessionId>,
+    resolve_aes: F,
     validate_identity: impl FnOnce(&UdpSessionId, u64) -> Result<(), UdpPacketError>,
-) -> Result<OpenedPacket, UdpPacketError> {
+) -> Result<OpenedPacket, UdpPacketError>
+where
+    F: FnOnce(&UdpSessionId) -> Option<Arc<UdpAesSessionCipher>>,
+{
     let result = (|| {
         let opened = open_packet_in_place_borrowed(
             crypto,
@@ -323,6 +381,7 @@ pub(super) fn open_packet_in_place(
             wire,
             expected_type,
             binding,
+            resolve_aes,
             validate_identity,
         )?;
         let target = opened.target.into_owned().map_err(map_target)?;
@@ -333,6 +392,7 @@ pub(super) fn open_packet_in_place(
             session_id: opened.session_id,
             packet_id: opened.packet_id,
             datagram,
+            aes_session_cipher: opened.aes_session_cipher,
         })
     })();
     match result {
@@ -347,19 +407,23 @@ pub(super) fn open_packet_in_place(
     }
 }
 
-pub(super) fn open_packet_in_place_borrowed<'a>(
+pub(super) fn open_packet_in_place_borrowed<'a, F>(
     crypto: &UdpCrypto,
     clock: &(impl Clock + ?Sized),
     wire: &'a mut BytesMut,
     expected_type: u8,
     binding: Option<&UdpSessionId>,
+    resolve_aes: F,
     validate_identity: impl FnOnce(&UdpSessionId, u64) -> Result<(), UdpPacketError>,
-) -> Result<BorrowedOpenedPacket<'a>, UdpPacketError> {
+) -> Result<BorrowedOpenedPacket<'a>, UdpPacketError>
+where
+    F: FnOnce(&UdpSessionId) -> Option<Arc<UdpAesSessionCipher>>,
+{
     if wire.len() > MAX_UDP_WIRE_LEN {
         wire.zeroize();
         return Err(UdpPacketError::Bounds);
     }
-    let opened = match crypto.open_in_place(wire) {
+    let opened = match crypto.open_in_place_with_aes_session_cipher(wire, resolve_aes) {
         Ok(opened) => opened,
         Err(error) => {
             wire.zeroize();
@@ -395,20 +459,27 @@ pub(super) fn open_packet_in_place_borrowed<'a>(
         packet_id: opened.packet_id(),
         target,
         payload: &wire[payload_start..plaintext_range.end],
+        aes_session_cipher: opened.into_aes_session_cipher(),
     })
 }
 
-pub(super) fn open_packet_owned(
+pub(super) fn open_packet_owned<F>(
     crypto: &UdpCrypto,
     clock: &(impl Clock + ?Sized),
     mut wire: BytesMut,
     expected_type: u8,
     binding: Option<&UdpSessionId>,
-) -> Result<OwnedOpenedPacket, UdpPacketError> {
+    resolve_aes: F,
+) -> Result<OwnedOpenedPacket, UdpPacketError>
+where
+    F: FnOnce(&UdpSessionId) -> Option<Arc<UdpAesSessionCipher>>,
+{
     if wire.len() > MAX_UDP_WIRE_LEN {
         return Err(UdpPacketError::Bounds);
     }
-    let opened = crypto.open_in_place(&mut wire).map_err(map_crypto)?;
+    let opened = crypto
+        .open_in_place_with_aes_session_cipher(&mut wire, resolve_aes)
+        .map_err(map_crypto)?;
     let plaintext_range = opened.plaintext_range();
     let authenticated_range = opened.authenticated_range();
     let parsed = match parse_body(
@@ -433,6 +504,7 @@ pub(super) fn open_packet_owned(
         authenticated_range,
         target_range,
         payload_range,
+        aes_session_cipher: opened.into_aes_session_cipher(),
     })
 }
 
@@ -583,6 +655,7 @@ mod tests {
                 &mut scratch,
                 crate::tcp::wire::REQUEST_TYPE,
                 None,
+                |_| None,
                 |_, _| Err(UdpPacketError::Duplicate),
             ) {
                 Ok(_) => panic!("replay rejection must not release a view"),
