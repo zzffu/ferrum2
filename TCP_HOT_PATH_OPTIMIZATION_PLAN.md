@@ -395,19 +395,24 @@ client/server 二进制 SHA-256 分别为
 
 14 秒 active 观测中 client/server 只消耗 `20.32 CPU-s`（平均 `1.451` 核），却发生 `91,950`
 次迁移和 `426,279` 次 context switch，约为 `4,525 migrations/proxy-CPU-s`；全机平均 busy 仅
-`40.779%`。这排除 CPU/AEAD 饱和。最可信根因是同 poll 的 payload 尚未 ready 时，候选取消了原
-length 边界的 synthetic wake，任务从 Tokio 本地 runnable 转为等待 reactor wake，长期 receive
-scratch 更容易在四个 worker 间移交。该提交永久冻结、不触发 CI；前两次 probe 启动尝试均在创建
-代理进程前被 Git-worktree/M4 binary-dir 预检拒绝，正式 workload 的样本数仍严格为一。
+`40.779%`。这排除 CPU/AEAD 持续饱和，但不能单独证明 connection future 迁移：这里的 migration
+计数来自 `/proc/<pid>/task/<tid>/sched`，度量 OS worker thread 跨 CPU，context switch 也不能区分
+reactor wake 与 self-wake；当前还缺同探针 `d874d3dd` 对照。根因因此保留两个待区分假设：首次
+payload Pending 时从本地 runnable 改成 reactor wake，或 payload 已 ready 时取消公平 yield、立即执行
+最多约 64 KiB read + AEAD + 双 copy，恶化多 worker 负载分配；后者与 `fd5a42de` 固定 4 CPU
+`-6.15%` 的历史形态一致。该提交永久冻结、不触发 CI；前两次 probe 启动尝试均在创建代理进程前被
+Git-worktree/M4 binary-dir 预检拒绝，正式 workload 的样本数仍严格为一。
 
 ### 12.6 当前 sibling：ready fast path + Pending 本地重试
 
 `codex/tcp-hot-path-stage3-length-payload-local-retry` 重新直接从 `d874d3dd` 开始，不继承
-`7e3f137a`。它保留唯一可能有收益的部分：length 完成后只尝试一次 payload；若 payload 已 ready，
+`7e3f137a`。它作为区分 wake 来源的窄消融，保留 length 完成后只尝试一次 payload；若 payload 已 ready，
 同 poll 完成并删除一次调度往返；若该首次 payload poll 返回 Pending，则恢复一次 synthetic
-self-wake，使行为回到本地 runnable。以后从既有 Payload 状态再次得到 Pending 时只依赖 transport
-waker，避免 busy loop。partial Ready、zero frame、EOF/error/auth、nonce、terminal、不发布失败
-plaintext、无循环和不跨 frame 契约均保持不变。
+self-wake，使任务通常进入当前 worker 本地 FIFO 尾，但 Tokio 允许 steal，因此不承诺同线程/同核。
+以后从既有 Payload 状态再次得到 Pending 时只依赖 transport waker，避免 busy loop。partial Ready、
+zero frame、EOF/error/auth、nonce、terminal、不发布失败 plaintext、无循环和不跨 frame 契约均保持。
+先执行一次 `d874d3dd` 同探针对照；若 OS scheduler 指标并未恶化，或该 sibling 仍回归，则停止
+length→payload same-poll 路线，把根因归到 ready-path 公平性/负载分配而不是 Pending wake 来源。
 
 ## 13. 停止条件与后续
 
