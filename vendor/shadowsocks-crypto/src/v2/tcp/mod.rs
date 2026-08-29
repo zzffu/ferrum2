@@ -55,6 +55,14 @@ impl CipherVariant {
             Self::ChaCha20Poly1305(cipher) => cipher.decrypt(nonce, ciphertext, tag),
         }
     }
+
+    fn decrypt_into(&self, nonce: &[u8; 12], ciphertext: &[u8], plaintext: &mut [u8], tag: &[u8; 16]) -> bool {
+        match self {
+            Self::Aes128Gcm(cipher) => cipher.decrypt_into(nonce, ciphertext, plaintext, tag),
+            Self::Aes256Gcm(cipher) => cipher.decrypt_into(nonce, ciphertext, plaintext, tag),
+            Self::ChaCha20Poly1305(cipher) => cipher.decrypt_into(nonce, ciphertext, plaintext, tag),
+        }
+    }
 }
 
 impl ZeroizeOnDrop for CipherVariant {}
@@ -126,6 +134,25 @@ impl TcpCipher {
             Ok(())
         } else {
             ciphertext.zeroize();
+            Err(CryptoError::AuthenticationFailed)
+        }
+    }
+
+    /// Authenticates one body, then decrypts it into an equally sized,
+    /// non-overlapping caller-owned output slice.
+    pub fn decrypt_packet_into(
+        &self,
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        plaintext: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CryptoError> {
+        if ciphertext.len() != plaintext.len() {
+            return Err(CryptoError::OperationFailed);
+        }
+        if self.cipher.decrypt_into(nonce, ciphertext, plaintext, tag) {
+            Ok(())
+        } else {
             Err(CryptoError::AuthenticationFailed)
         }
     }

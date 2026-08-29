@@ -82,6 +82,36 @@ impl TcpOpener {
         Ok(tag_start)
     }
 
+    /// Authenticates a ciphertext-and-tag slice and decrypts into separate
+    /// caller-owned storage without allocating.
+    ///
+    /// `plaintext` must have exactly the ciphertext length (the input length
+    /// minus the tag). Authentication, malformed input, output-size failure,
+    /// and nonce exhaustion leave `plaintext` and the nonce unchanged.
+    pub fn open_slice_into(
+        &mut self,
+        buffer: &[u8],
+        plaintext: &mut [u8],
+    ) -> Result<usize, AeadError> {
+        let (nonce, next) = self.nonce.reserve()?;
+        let tag_start = buffer
+            .len()
+            .checked_sub(AEAD_TAG_BYTES)
+            .ok_or(AeadError::AuthenticationFailed)?;
+        if plaintext.len() != tag_start {
+            return Err(AeadError::OperationFailed);
+        }
+        let (ciphertext, tag) = buffer.split_at(tag_start);
+        let tag: [u8; AEAD_TAG_BYTES] = tag
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
+        self.cipher
+            .decrypt_packet_into(&nonce, ciphertext, plaintext, &tag)
+            .map_err(|_| AeadError::AuthenticationFailed)?;
+        self.nonce = next;
+        Ok(tag_start)
+    }
+
     /// Authenticates and decrypts in place with empty associated data.
     ///
     /// After authentication failure, the contents of `buffer` are unspecified
@@ -99,7 +129,7 @@ impl TcpOpener {
 pub enum AeadError {
     /// Authentication failed and no plaintext was accepted.
     AuthenticationFailed,
-    /// The primitive rejected the in-place operation.
+    /// The primitive rejected the operation or its output size.
     OperationFailed,
     /// No unused nonce remains for this owner.
     NonceExhausted,
@@ -109,7 +139,7 @@ impl fmt::Display for AeadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::AuthenticationFailed => "authentication failed",
-            Self::OperationFailed => "encryption failed",
+            Self::OperationFailed => "operation failed",
             Self::NonceExhausted => "nonce exhausted",
         };
         formatter.write_str(message)
@@ -124,6 +154,17 @@ mod tests {
     use crate::method::{AES_128_KEY_BYTES, MethodProfile, WIDE_KEY_BYTES};
 
     const EXHAUSTED_NONCE: [u8; AEAD_NONCE_BYTES] = [u8::MAX; AEAD_NONCE_BYTES];
+
+    fn test_subkey(profile: MethodProfile, byte: u8) -> TcpSubkey {
+        match profile {
+            MethodProfile::Blake3Aes128Gcm2022 => {
+                TcpSubkey::from_subkey(profile, [byte; AES_128_KEY_BYTES])
+            }
+            MethodProfile::Blake3Aes256Gcm2022 | MethodProfile::Blake3ChaCha20Poly13052022 => {
+                TcpSubkey::from_subkey(profile, [byte; WIDE_KEY_BYTES])
+            }
+        }
+    }
 
     #[test]
     fn tcp_owner_nonce_exhaustion_sealer_fails_closed() {
@@ -223,5 +264,120 @@ mod tests {
             .open_slice_in_place(valid.as_mut())
             .expect("short input did not consume nonce zero");
         assert_eq!(&valid[..plaintext_len], b"nonce zero remains available");
+    }
+
+    #[test]
+    fn tcp_opener_into_decrypts_all_methods_without_mutating_input() {
+        let expected = b"authenticated out-of-place plaintext";
+
+        for profile in MethodProfile::ALL {
+            let mut sealer = TcpSealer::new(test_subkey(profile, 0x81));
+            let mut wire = BytesMut::from(expected.as_slice());
+            sealer.seal_in_place(&mut wire).expect("fixture seals");
+            let original_wire = wire.clone();
+            let mut plaintext = vec![0xa5; expected.len()];
+            let mut opener = TcpOpener::new(test_subkey(profile, 0x81));
+
+            let plaintext_len = opener
+                .open_slice_into(&wire, &mut plaintext)
+                .expect("fixture authenticates");
+
+            assert_eq!(plaintext_len, expected.len());
+            assert_eq!(plaintext, expected);
+            assert_eq!(wire, original_wire);
+            assert_eq!(opener.nonce.current_bytes()[0], 1);
+        }
+    }
+
+    #[test]
+    fn tcp_opener_into_tamper_leaves_output_and_nonce_unchanged() {
+        let expected = b"tampering cannot expose plaintext";
+
+        for profile in MethodProfile::ALL {
+            let mut sealer = TcpSealer::new(test_subkey(profile, 0x82));
+            let mut valid = BytesMut::from(expected.as_slice());
+            sealer.seal_in_place(&mut valid).expect("fixture seals");
+            let mut tampered = valid.clone();
+            tampered[0] ^= 0x80;
+            let mut plaintext = vec![0xa5; expected.len()];
+            let original_plaintext = plaintext.clone();
+            let mut opener = TcpOpener::new(test_subkey(profile, 0x82));
+
+            assert_eq!(
+                opener.open_slice_into(&tampered, &mut plaintext),
+                Err(AeadError::AuthenticationFailed)
+            );
+            assert_eq!(plaintext, original_plaintext);
+            assert_eq!(opener.nonce.current_bytes(), [0; AEAD_NONCE_BYTES]);
+
+            let plaintext_len = opener
+                .open_slice_into(&valid, &mut plaintext)
+                .expect("failed authentication did not consume nonce zero");
+            assert_eq!(plaintext_len, expected.len());
+            assert_eq!(plaintext, expected);
+        }
+    }
+
+    #[test]
+    fn tcp_opener_into_rejects_output_bounds_and_short_tag_without_nonce_commit() {
+        let expected = b"output must have the exact plaintext length";
+
+        for profile in MethodProfile::ALL {
+            let mut sealer = TcpSealer::new(test_subkey(profile, 0x83));
+            let mut valid = BytesMut::from(expected.as_slice());
+            sealer.seal_in_place(&mut valid).expect("fixture seals");
+            let mut opener = TcpOpener::new(test_subkey(profile, 0x83));
+            let mut short_output = vec![0xa5; expected.len() - 1];
+            let original_short = short_output.clone();
+            let mut long_output = vec![0x5a; expected.len() + 1];
+            let original_long = long_output.clone();
+            let mut empty_output = [];
+
+            assert_eq!(
+                opener.open_slice_into(&valid, &mut short_output),
+                Err(AeadError::OperationFailed)
+            );
+            assert_eq!(short_output, original_short);
+            assert_eq!(
+                opener.open_slice_into(&valid, &mut long_output),
+                Err(AeadError::OperationFailed)
+            );
+            assert_eq!(long_output, original_long);
+            assert_eq!(
+                opener.open_slice_into(&[0xa5; AEAD_TAG_BYTES - 1], &mut empty_output),
+                Err(AeadError::AuthenticationFailed)
+            );
+            assert_eq!(opener.nonce.current_bytes(), [0; AEAD_NONCE_BYTES]);
+
+            let mut exact_output = vec![0; expected.len()];
+            opener
+                .open_slice_into(&valid, &mut exact_output)
+                .expect("invalid sizes did not consume nonce zero");
+            assert_eq!(exact_output, expected);
+        }
+    }
+
+    #[test]
+    fn tcp_opener_into_nonce_exhaustion_leaves_input_and_output_unchanged() {
+        let expected = b"nonce exhaustion fails before output";
+
+        for profile in MethodProfile::ALL {
+            let mut sealer = TcpSealer::new(test_subkey(profile, 0x84));
+            let mut wire = BytesMut::from(expected.as_slice());
+            sealer.seal_in_place(&mut wire).expect("fixture seals");
+            let original_wire = wire.clone();
+            let mut plaintext = vec![0xa5; expected.len()];
+            let original_plaintext = plaintext.clone();
+            let mut opener = TcpOpener::new(test_subkey(profile, 0x84));
+            opener.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);
+
+            assert_eq!(
+                opener.open_slice_into(&wire, &mut plaintext),
+                Err(AeadError::NonceExhausted)
+            );
+            assert_eq!(wire, original_wire);
+            assert_eq!(plaintext, original_plaintext);
+            assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
+        }
     }
 }
