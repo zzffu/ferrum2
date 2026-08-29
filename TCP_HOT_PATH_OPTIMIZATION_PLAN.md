@@ -397,11 +397,17 @@ client/server 二进制 SHA-256 分别为
 次迁移和 `426,279` 次 context switch，约为 `4,525 migrations/proxy-CPU-s`；全机平均 busy 仅
 `40.779%`。这排除 CPU/AEAD 持续饱和，但不能单独证明 connection future 迁移：这里的 migration
 计数来自 `/proc/<pid>/task/<tid>/sched`，度量 OS worker thread 跨 CPU，context switch 也不能区分
-reactor wake 与 self-wake；当前还缺同探针 `d874d3dd` 对照。根因因此保留两个待区分假设：首次
-payload Pending 时从本地 runnable 改成 reactor wake，或 payload 已 ready 时取消公平 yield、立即执行
-最多约 64 KiB read + AEAD + 双 copy，恶化多 worker 负载分配；后者与 `fd5a42de` 固定 4 CPU
-`-6.15%` 的历史形态一致。该提交永久冻结、不触发 CI；前两次 probe 启动尝试均在创建代理进程前被
+reactor wake 与 self-wake。该提交永久冻结、不触发 CI；前两次 probe 启动尝试均在创建代理进程前被
 Git-worktree/M4 binary-dir 预检拒绝，正式 workload 的样本数仍严格为一。
+
+随后对 `d874d3dd` 执行且只执行一次相同 3+15 秒探针对照：`231,232,853 B/s`、client/server
+`23.12 CPU-s / 14s`（平均 `1.651` 核）、`133,942` migrations、`515,157` context switches、全机
+`47.268%` busy。按这次相邻诊断对照，`7e3f137a` 吞吐为 `-5.3264%`，代理 CPU 为 `-12.1107%`，
+migrations 为 `-31.3509%`，context switches 为 `-17.2526%`，busy 低 `6.489` 个百分点。候选没有
+增加迁移或切换，反而以更少调度开销获得更高 bytes/proxy-CPU-s，却无法维持足够 runnable work；
+“reactor wake 导致更多迁移/cache ownership”因此被否定。剩余根因是 length 公平 yield 被删除后
+pipeline 填充不足，或 ready/partial payload 的 read + AEAD + 双 copy 被绑定在同一 outer poll 后造成
+多 worker 公平性/convoy；这与 `fd5a42de` 固定 4 CPU `-6.15%` 的历史形态一致。
 
 ### 12.6 当前 sibling：ready fast path + Pending 本地重试
 
@@ -411,8 +417,9 @@ Git-worktree/M4 binary-dir 预检拒绝，正式 workload 的样本数仍严格�
 self-wake，使任务通常进入当前 worker 本地 FIFO 尾，但 Tokio 允许 steal，因此不承诺同线程/同核。
 以后从既有 Payload 状态再次得到 Pending 时只依赖 transport waker，避免 busy loop。partial Ready、
 zero frame、EOF/error/auth、nonce、terminal、不发布失败 plaintext、无循环和不跨 frame 契约均保持。
-先执行一次 `d874d3dd` 同探针对照；若 OS scheduler 指标并未恶化，或该 sibling 仍回归，则停止
-length→payload same-poll 路线，把根因归到 ready-path 公平性/负载分配而不是 Pending wake 来源。
+`d874d3dd` 同探针对照已经证明 OS scheduler migration/context-switch 指标没有恶化。该 sibling 仅
+用于最后区分“首次 payload 真正 Pending 时缺一次 retry”是否解释 CPU occupancy 缺口；若仍回归，
+立即停止 length→payload same-poll 路线，把根因归到 ready/partial-path 公平性与负载分配。
 
 ## 13. 停止条件与后续
 
