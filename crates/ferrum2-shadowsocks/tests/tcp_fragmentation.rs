@@ -10,6 +10,7 @@ use ferrum2_shadowsocks::{
     BufferRole, ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_PAYLOAD_LEN,
     PlainBufferedDuplex, PlainDuplex, ProtocolReason, REQUEST_FIRST_READ_LEN,
     RESPONSE_FIRST_READ_LEN, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
+    TransportPhase,
 };
 
 use common::{
@@ -504,6 +505,8 @@ async fn response_fixed_partial_reads_yield_and_self_wake_once_per_transition() 
 
 #[tokio::test]
 async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() {
+    const SENTINEL: u8 = 0x6d;
+
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -519,7 +522,7 @@ async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() 
     let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wake_counter));
     let mut cx = Context::from_waker(&waker);
-    let mut destination = [0_u8; 32];
+    let mut destination = [SENTINEL; 32];
 
     let baseline = observation.lock().expect("observation").read_calls;
 
@@ -529,44 +532,26 @@ async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() 
     ));
     assert_eq!(
         observation.lock().expect("observation").read_calls,
-        baseline + 1
+        baseline + 2,
+        "the zero-length frame consumes only its length and payload"
     );
     assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 2
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 3
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
 
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("the nonempty payload is ready after its final receive stage");
+        panic!("the next ready length and payload complete together");
     };
     assert_eq!(&destination[..read], b"after-zero");
     assert_eq!(
         observation.lock().expect("observation").read_calls,
         baseline + 4
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn length_and_partial_payload_reads_each_yield_before_plaintext() {
+async fn ready_length_polls_one_partial_payload_without_draining() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -593,19 +578,10 @@ async fn length_and_partial_payload_reads_each_yield_before_plaintext() {
     ));
     assert_eq!(
         observation.lock().expect("observation").read_calls,
-        baseline + 1
+        baseline + 2,
+        "the completed length polls exactly one payload fragment"
     );
     assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 2
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
 
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
@@ -616,11 +592,69 @@ async fn length_and_partial_payload_reads_each_yield_before_plaintext() {
         observation.lock().expect("observation").read_calls,
         baseline + 3
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ready_length_uses_the_pending_payload_waker_without_self_waking() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(923);
+    let request = valid_request_wire(NOW, &salt);
+    let frames = request_data_frames(&salt, &[b"pending"]);
+    let reads = [
+        request[..43].to_vec(),
+        request[43..].to_vec(),
+        frames[0].clone(),
+        frames[1].clone(),
+    ];
+    let (io, observation) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io.with_pending_reads_after(3, 1))
+        .await
+        .expect("request")
+        .stream;
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 16];
+    let baseline = observation.lock().expect("observation").read_calls;
+    assert_eq!(baseline, 2, "request handshake uses the scripted two reads");
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 1,
+        "pending payload does not count as a completed transport read"
+    );
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        1,
+        "only the underlying pending transport wakes the task"
+    );
+
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("the payload completes when its registered waker is polled");
+    };
+    assert_eq!(&destination[..read], b"pending");
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 2
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn mid_subsequent_frame_eof_is_protocol_not_detection_and_freezes_counts() {
+    const SENTINEL: u8 = 0x6d;
+
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -634,11 +668,25 @@ async fn mid_subsequent_frame_eof_is_protocol_not_detection_and_freezes_counts()
     let (io, observation) = RecordingIo::new(reads);
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
     let mut flow = inbound.accept_stream(io).await.expect("request").stream;
-    let mut destination = [0_u8; 32];
+    let mut destination = [SENTINEL; 32];
+    let baseline = observation.lock().expect("observation").read_calls;
+    let mut cx = Context::from_waker(Waker::noop());
 
-    let error = read_plain(&mut flow, &mut destination)
-        .await
-        .expect_err("mid-frame EOF");
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 2,
+        "the ready length polls exactly one partial payload fragment"
+    );
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
+
+    let Poll::Ready(Err(error)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("payload EOF is classified after the partial payload stage");
+    };
 
     assert_eq!(
         error,
@@ -648,6 +696,12 @@ async fn mid_subsequent_frame_eof_is_protocol_not_detection_and_freezes_counts()
         flow.terminal(),
         Some(FlowTerminal::Protocol(ProtocolReason::FrameBounds))
     );
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 3,
+        "the next payload poll observes EOF without reading ahead"
+    );
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
     let counts = {
         let observed = observation.lock().expect("observation");
         assert_eq!(observed.abortive_calls, 0);
@@ -659,6 +713,93 @@ async fn mid_subsequent_frame_eof_is_protocol_not_detection_and_freezes_counts()
     );
     let observed = observation.lock().expect("observation");
     assert_eq!((observed.read_calls, observed.write_calls), counts);
+}
+
+#[tokio::test]
+async fn ready_length_payload_transport_error_is_terminal_without_publication() {
+    const SENTINEL: u8 = 0x6d;
+
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(924);
+    let request = valid_request_wire(NOW, &salt);
+    let frames = request_data_frames(&salt, &[b"transport"]);
+    let reads = [
+        request[..43].to_vec(),
+        request[43..].to_vec(),
+        frames[0].clone(),
+        frames[1].clone(),
+    ];
+    let (io, observation) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io.with_read_failure_after(3))
+        .await
+        .expect("request")
+        .stream;
+    let mut destination = [SENTINEL; 32];
+    let baseline = observation.lock().expect("observation").read_calls;
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Ready(Err(ShadowsocksError::Transport(TransportPhase::Read)))
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 2,
+        "the ready length directly observes the payload read error"
+    );
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
+    assert_eq!(
+        flow.terminal(),
+        Some(FlowTerminal::Transport(TransportPhase::Read))
+    );
+}
+
+#[tokio::test]
+async fn ready_length_payload_auth_failure_is_terminal_without_publication() {
+    const SENTINEL: u8 = 0x6d;
+
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(925);
+    let request = valid_request_wire(NOW, &salt);
+    let mut frames = request_data_frames(&salt, &[b"authentication"]);
+    *frames[1].last_mut().expect("payload tag") ^= 1;
+    let reads = [
+        request[..43].to_vec(),
+        request[43..].to_vec(),
+        frames[0].clone(),
+        frames[1].clone(),
+    ];
+    let (io, observation) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let mut destination = [SENTINEL; 32];
+    let baseline = observation.lock().expect("observation").read_calls;
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Ready(Err(ShadowsocksError::Protocol(
+            ProtocolReason::Authentication
+        )))
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + 2,
+        "the ready length authenticates exactly one payload"
+    );
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
+    assert_eq!(
+        flow.terminal(),
+        Some(FlowTerminal::Protocol(ProtocolReason::Authentication))
+    );
 }
 
 #[tokio::test]

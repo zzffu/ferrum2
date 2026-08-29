@@ -222,7 +222,7 @@ impl Wake for WakeCounter {
 }
 
 #[tokio::test]
-async fn subsequent_rx_stage_yields_once_while_ready_writes_stay_in_one_poll() {
+async fn ready_subsequent_length_and_payload_complete_in_one_poll() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(807);
@@ -259,16 +259,6 @@ async fn subsequent_rx_stage_yields_once_while_ready_writes_stay_in_one_poll() {
     let baseline = observation.lock().expect("observation").read_calls;
     assert!(matches!(
         Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        baseline + 1
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
         Poll::Ready(Ok(1))
     ));
     assert_eq!(destination[0], b'x');
@@ -276,7 +266,7 @@ async fn subsequent_rx_stage_yields_once_while_ready_writes_stay_in_one_poll() {
         observation.lock().expect("observation").read_calls,
         baseline + 2
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 
     assert!(matches!(
         Pin::new(&mut flow).poll_write_plain(&mut cx, b"u"),
@@ -289,11 +279,11 @@ async fn subsequent_rx_stage_yields_once_while_ready_writes_stay_in_one_poll() {
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.write_calls, 1 + 2 + 16 + 1 + 16);
     assert_eq!(observed.flush_calls, 1);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn each_nonfinal_fragmented_read_yields_and_self_wakes_once() {
+async fn fragmented_payload_transition_polls_once_and_never_drains() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -302,7 +292,8 @@ async fn each_nonfinal_fragmented_read_yields_and_self_wakes_once() {
     let request = valid_request_wire(NOW, &request_salt);
     let payload = vec![0x5a; 4];
     let frames = request_data_frames(&request_salt, &[payload.as_slice()]);
-    let wire_len = frames.iter().map(Vec::len).sum::<usize>();
+    let length_wire_len = frames[0].len();
+    let payload_wire_len = frames[1].len();
     let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
     reads.extend(frames.into_iter().flatten().map(|byte| vec![byte]));
     let (io, observation) = RecordingIo::new(reads);
@@ -314,7 +305,7 @@ async fn each_nonfinal_fragmented_read_yields_and_self_wakes_once() {
     let mut destination = [0_u8; 4];
     let baseline = observation.lock().expect("observation").read_calls;
 
-    for successful_read in 1..wire_len {
+    for successful_read in 1..length_wire_len {
         assert!(matches!(
             Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
             Poll::Pending
@@ -330,6 +321,33 @@ async fn each_nonfinal_fragmented_read_yields_and_self_wakes_once() {
         );
     }
 
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        baseline + length_wire_len + 1,
+        "the completed length polls exactly one payload fragment"
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), length_wire_len);
+
+    for payload_filled in 2..payload_wire_len {
+        assert!(matches!(
+            Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+            Poll::Pending
+        ));
+        assert_eq!(
+            observation.lock().expect("observation").read_calls,
+            baseline + length_wire_len + payload_filled
+        );
+        assert_eq!(
+            wake_counter.0.load(Ordering::SeqCst),
+            length_wire_len + payload_filled - 1,
+            "a partial payload self-wakes without draining another fragment"
+        );
+    }
+
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
         panic!("the final payload byte produces plaintext");
@@ -338,9 +356,12 @@ async fn each_nonfinal_fragmented_read_yields_and_self_wakes_once() {
     assert_eq!(&destination[..read], payload);
     assert_eq!(
         observation.lock().expect("observation").read_calls,
-        baseline + wire_len
+        baseline + length_wire_len + payload_wire_len
     );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), wire_len - 1);
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        length_wire_len + payload_wire_len - 2
+    );
 }
 
 #[tokio::test]
