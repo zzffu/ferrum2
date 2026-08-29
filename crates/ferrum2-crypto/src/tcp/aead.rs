@@ -5,9 +5,7 @@ use bytes::BytesMut;
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
 
 use super::{NonceCounter, TcpSubkey};
-#[cfg(test)]
-use crate::method::AEAD_NONCE_BYTES;
-use crate::method::AEAD_TAG_BYTES;
+use crate::method::{AEAD_NONCE_BYTES, AEAD_TAG_BYTES};
 
 /// A method-bound AEAD owner for one outbound TCP direction.
 ///
@@ -27,14 +25,38 @@ impl TcpSealer {
         }
     }
 
+    fn encrypt_detached_with_nonce(
+        &self,
+        nonce: &[u8; AEAD_NONCE_BYTES],
+        plaintext: &mut [u8],
+    ) -> Result<[u8; AEAD_TAG_BYTES], AeadError> {
+        self.cipher
+            .encrypt_packet(nonce, plaintext)
+            .map_err(|_| AeadError::OperationFailed)
+    }
+
+    /// Encrypts a caller-owned plaintext slice in place with empty associated
+    /// data and returns the detached authentication tag.
+    ///
+    /// The nonce is committed only after the primitive returns a tag. Nonce
+    /// exhaustion leaves both the plaintext and counter unchanged. On any
+    /// other primitive failure, the plaintext contents are unspecified while
+    /// the nonce remains uncommitted.
+    pub fn seal_slice_detached(
+        &mut self,
+        plaintext: &mut [u8],
+    ) -> Result<[u8; AEAD_TAG_BYTES], AeadError> {
+        let (nonce, next) = self.nonce.reserve()?;
+        let tag = self.encrypt_detached_with_nonce(&nonce, plaintext)?;
+        self.nonce = next;
+        Ok(tag)
+    }
+
     /// Encrypts and appends the tag in place with empty associated data.
     pub fn seal_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
         buffer.reserve(AEAD_TAG_BYTES);
-        let tag = self
-            .cipher
-            .encrypt_packet(&nonce, buffer.as_mut())
-            .map_err(|_| AeadError::OperationFailed)?;
+        let tag = self.encrypt_detached_with_nonce(&nonce, buffer.as_mut())?;
         buffer.extend_from_slice(&tag);
         self.nonce = next;
         Ok(())
@@ -182,17 +204,73 @@ mod tests {
             let original_plaintext = plaintext.clone();
 
             assert_eq!(
-                sealer.seal_in_place(&mut plaintext),
+                sealer.seal_slice_detached(plaintext.as_mut()),
                 Err(AeadError::NonceExhausted)
             );
             assert_eq!(plaintext, original_plaintext);
             assert_eq!(sealer.nonce.current_bytes(), EXHAUSTED_NONCE);
 
             assert_eq!(
-                sealer.seal_in_place(&mut plaintext),
+                sealer.seal_slice_detached(plaintext.as_mut()),
                 Err(AeadError::NonceExhausted)
             );
             assert_eq!(plaintext, original_plaintext);
+            assert_eq!(sealer.nonce.current_bytes(), EXHAUSTED_NONCE);
+        }
+    }
+
+    #[test]
+    fn tcp_sealer_detached_matches_appended_wire_for_all_methods_and_sizes() {
+        for profile in MethodProfile::ALL {
+            let mut detached = TcpSealer::new(test_subkey(profile, 0x41));
+            let mut appended = TcpSealer::new(test_subkey(profile, 0x41));
+
+            for length in [0, 1, 32_768] {
+                let source: Vec<u8> = (0..length)
+                    .map(|index| u8::try_from(index % 251).expect("bounded pattern"))
+                    .collect();
+                let mut detached_wire = Vec::with_capacity(length + AEAD_TAG_BYTES);
+                detached_wire.extend_from_slice(&source);
+                let storage = detached_wire.as_ptr();
+                let tag = detached
+                    .seal_slice_detached(&mut detached_wire)
+                    .expect("detached seal");
+                assert_eq!(detached_wire.as_ptr(), storage);
+                detached_wire.extend_from_slice(&tag);
+
+                let mut appended_wire = BytesMut::with_capacity(length + AEAD_TAG_BYTES);
+                appended_wire.extend_from_slice(&source);
+                appended
+                    .seal_in_place(&mut appended_wire)
+                    .expect("appended seal");
+
+                assert_eq!(detached_wire, appended_wire.as_ref());
+            }
+
+            assert_eq!(detached.nonce.current_bytes()[0], 3);
+            assert_eq!(appended.nonce.current_bytes()[0], 3);
+        }
+    }
+
+    #[test]
+    fn tcp_sealer_appended_nonce_exhaustion_preserves_storage() {
+        for profile in MethodProfile::ALL {
+            let mut sealer = TcpSealer::new(test_subkey(profile, 0x42));
+            sealer.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);
+            let source = b"exhaustion must precede tag capacity mutation";
+            let mut plaintext = BytesMut::with_capacity(source.len());
+            plaintext.extend_from_slice(source);
+            let original = plaintext.clone();
+            let storage = plaintext.as_ptr();
+            let capacity = plaintext.capacity();
+
+            assert_eq!(
+                sealer.seal_in_place(&mut plaintext),
+                Err(AeadError::NonceExhausted)
+            );
+            assert_eq!(plaintext, original);
+            assert_eq!(plaintext.as_ptr(), storage);
+            assert_eq!(plaintext.capacity(), capacity);
             assert_eq!(sealer.nonce.current_bytes(), EXHAUSTED_NONCE);
         }
     }
