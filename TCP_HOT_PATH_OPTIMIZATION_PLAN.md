@@ -1,8 +1,9 @@
 # Ferrum2 非 TUN TCP 热路径优化计划与证据账本
 
-状态：阶段 2、阶段 3 已完成实现与本地分轴测量；最终安全产品候选为
-`d64b068a7f090a26313f8113590cf39be85f12b8`。真实 hosted direct CI 尚待本分支唯一一次
-dispatch 回填。
+状态：阶段 2、阶段 3 已完成实现与本地分轴测量；single-worker 产品候选
+`d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
+`62.9574%`，未达 90%，失败分支和证据永久保留。后续尝试从其前方的 `d874d3dd` 开 sibling，
+不把失败候选作为祖先。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -192,6 +193,8 @@ materialize-only runtime 不变。代码未修改任何 TUN 文件。
 | single-worker + ring `ef5d6df1` | 4 CPU 约 -95.7% | 非零化诊断，绝不产品化 |
 | frame65535 build axis | 当前组合约 -69.4% | 65,536 workload 形成 65,535+1 tiny tail |
 | single-worker direct-open `dfa12a66` | 4 CPU 约 -95.9% | copyback 仍是必需 |
+| single-worker production `d64b068a` | direct CI 为 reference 的 62.9574% | 改善旧基线但未达目标；保留，不作为后续祖先 |
+| bounded ready-read drain `fd5a42de` | 固定 4 CPU -6.15%；固定 1 CPU +0.95% | 多 worker 负载均衡退化；保留失败分支 |
 
 ring 反汇编确认实际命中 VAES/AVX2，不是 fallback，也没有 payload copy/allocation。它只在整个拓扑
 固定到同一 CPU 时快；普通 4-CPU affinity 允许 OS thread migration 后严重退化。除非未来有独立、
@@ -217,26 +220,75 @@ timeout；二者不属于本次非 TUN TCP 范围。server 68/68 通过，client
 
 ## 11. 唯一一次真实 CI 测量
 
-测量提交必须满足：
+[GitHub Actions run `33260356423`](https://github.com/zzffu/ferrum2/actions/runs/33260356423)
+的 performance job 成功完成，且没有重复 dispatch：
 
-1. 产品祖先为 `d64b068a`；
-2. workflow 在同一 runner 构建并运行 Ferrum/reference；
-3. 运行前记录并在运行后复核以下 SHA-256：
-   - `m4-qualification`；
-   - `ferrum2-client`；
-   - `ferrum2-server`；
-   - `sslocal`；
-   - `ssserver`；
-4. 只接受 GitHub Actions artifact，不接受本地伪 hosted 输出；
-5. 即使整体 workflow 的无关 job 失败，只要 performance job/artifact 完整，就不重复挑样本；
-6. Ferrum 5 次中位数 / reference 5 次中位数 `>= 0.90` 才标记目标完成。
+- 测量 commit：`aca84fdcd4e44b779ddf7ee84bdaeb525e6d2fa7`；产品祖先为 `d64b068a`；
+- Ubuntu 24.04 image `20260823.283.1`，Intel Xeon Platinum 8370C，4 vCPU；
+- 8 streams，65,536-byte lockstep，10 秒 warm-up、30 秒 measure；
+- `F,R,R,F,F,R,R,F,F,R`，Ferrum/reference 各 5 次；
+- artifact ID `9717616894`，服务端 digest
+  `sha256:3b7545914b0eab3212766e8f5ec66f940349ac90cc0ef3a041ade0c3942ca930`；
+- `throughput.jsonl` SHA-256
+  `43a7887bc6b52233e8a546bee7cdad11a0f9ae09a0b96f58cbac62fc8e6c81b4`；
+- `binaries.sha256` SHA-256
+  `59d6f1c6899dd5b7de1fe13de98e76adde1f7676d7e4f15ed4a79a198cd694b6`。
 
-待回填：测量 commit、run ID、artifact ID/SHA-256、10 个 trial、两侧中位数与最终比例。
+被测二进制在 throughput 前记录、之后由 `sha256sum --check` 全部复核成功：
 
-## 12. 停止条件与后续
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `1e3d52b6cd10ff7e21c781f54dddf7b6c63209eef17f0f3585c1458a67de54fe` |
+| `ferrum2-client` | `0525c9f1cd9e2646bf4d0f58ae25e02b308a8ac921fa5f5e27c81184556766d0` |
+| `ferrum2-server` | `72b6cf492a0b45635de91bac3f177782b04e8a7729c871c1331b9b7f1e680567` |
+| `sslocal` | `eec6d0ef06742c2bf7a592c756a9c7fab0a4f822bec8552679751142917ff332` |
+| `ssserver` | `bbb26b41ad6ef40fd9a9ab399009ddff14ec22b1a04b77288671d9fa50dd9b06` |
+
+原始 trial：
+
+| trial | topology | bytes/s |
+| ---: | --- | ---: |
+| 1 | Ferrum | 430,634,871 |
+| 2 | reference | 684,010,154 |
+| 3 | reference | 681,264,196 |
+| 4 | Ferrum | 427,950,080 |
+| 5 | Ferrum | 430,960,366 |
+| 6 | reference | 685,524,036 |
+| 7 | reference | 683,852,868 |
+| 8 | Ferrum | 430,551,859 |
+| 9 | Ferrum | 434,147,601 |
+| 10 | reference | 684,726,681 |
+
+| 汇总 | bytes/s |
+| --- | ---: |
+| Ferrum 中位数 | 430,634,871 |
+| shadowsocks-rust 中位数 | 684,010,154 |
+| 90% 同轮完成线 | 615,609,139 |
+| Ferrum/reference | **62.9573799%** |
+
+结论：正确性、二进制身份和 performance artifact 完整，但绝对目标失败。Ferrum 还需要相对当前
+提升 `42.95%`（`184,974,268 B/s`），差 `27.04` 个百分点。不得把本次结果解释成通过，也不得
+为挑选样本重复 dispatch。
+
+## 12. CI 后根因与新尝试
+
+`d64b068a` 通过每进程单 Tokio worker 阻止 Send connection future 在 runtime workers 间迁移，
+但同轮 reference 使用默认 multi-thread runtime，可利用 4 vCPU；8 条流因此变成 Ferrum 每个代理进程
+最多一核、reference 多核，解释了剩余并行度缺口。
+
+从 `d874d3dd` 开出的独立 `fd5a42de` 删除 subsequent RX 每次成功 read 的强制 yield，并使用现有
+`64 ready I/O / 256 KiB / 8 frames` budget。同一候选固定 1 CPU 为 `+0.95%`，固定 4 CPU 为
+`-6.15%`。这证明 same-poll 推进本身能省调度，但普通 multi-worker 依赖 frame 边界进行重任务
+负载均衡；直接把 length 与 payload decrypt 绑定到当前 worker 会让 8 条流分配不均。
+
+新 sibling `codex/tcp-hot-path-stage3-two-worker-runtime` 再从 `d874d3dd` 开始：先独立测量每进程
+2 个 Tokio worker，寻找“一核 locality”与“默认多核迁移”之间的最小可用迁移域。若仍失败，保留
+提交并从 `d874d3dd` 再开 sibling，实施按连接稳定分片的多个 current-thread runtime；中央 accept
+只分发连接，完整 flow 生命周期固定在 shard 内。
+
+## 13. 停止条件与后续
 
 - 若 direct ratio `>=90%`：停止热路径改动，保留 scale trade-off，后续另立 connection-sharding任务。
-- 若 `<90%`：本次候选与 CI 证据永久保留；不得从测量失败提交叠加产品优化。新的尝试从
-  `d64b068a` 之前最后一个成功产品节点开 sibling branch，根因优先为跨平台 worker-thread affinity
-  或 connection-sharded current-thread runtimes。
+- 若 `<90%`：本次候选与 CI 证据永久保留；不得从测量失败提交叠加产品优化。下一尝试从
+  `d874d3dd` 或后续已证明改善的成功节点开 sibling branch。
 - 不实施 TUN 优化，不用不安全/不零化 ring 结果填补差距。
