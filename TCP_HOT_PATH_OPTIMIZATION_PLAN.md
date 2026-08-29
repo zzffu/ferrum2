@@ -709,3 +709,33 @@ I/O `Pending` 或 cooperative budget 生效。这一差异能够直接放大已�
 正向但低于 `10%` 只记为不足；达到 `+10%` 且吞吐/proxy CPU 效率不下降，才认为 fused 调度语义
 得到足够强的产品级根因支持。命中后仍从 `bf4cd4a6` 另开 sibling，在 protocol-owned buffer 内实现
 同 poll 连续推进，保留 fused 的 buffer/copy 优势；不得从 generic diagnostic 叠加产品修改。
+
+### 14.1 唯一正式样本与冻结决定
+
+诊断提交已在 workload 前提交并推送：
+
+- commit：`c84b5bc27816f28989adf0a70660e988a2c731da`；
+- tree：`e08699e58d4fffc570cdeed030b486bcc27d019c`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-generic-relay-diagnostic`。
+
+两路独立审查确认 TCP 方向统计、idle/cancel 优先级、half-close、backpressure、registry accounting
+均保持，且没有 TUN、wire framing 或 crypto 变化。实验有效性审查同时限定了结论边界：该候选同时
+改变 generic buffer/copy、fused direction/budget、progress atomic 提交频率，因而只能诊断整个
+generic relay 与 fused engine 的净差，不能把差值全部归因于 self-wake。
+
+固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 的唯一正式样本为：
+
+- `250,408,686 B/s`，`3,756,130,304` checked bytes，`57,314` transactions；
+- 相对 `bf4cd4a6` 的 `234,378,581 B/s` 为 `+6.8394%`；
+- proxy CPU `23,860 ms`，相对 `23,180 ms` 为 `+2.9336%`；
+- 吞吐/proxy CPU 效率由 `10,111.242` 增至 `10,494.916 B/s/ms`，为 `+3.7945%`；
+- proxy migrations `83,568`，相对 `123,973` 为 `-32.5918%`；
+- proxy context switches `484,355`，相对 `505,073` 为 `-4.1020%`；
+- CPU busy `48.841%`，相对 `47.156%` 增加 `1.685` 个百分点；
+- runner status `PASS`，`sample_count=1`，没有重跑。
+
+吞吐和 CPU 效率方向为正，且 migrations 明显降低，说明减少 fused scheduling boundary 与改善
+worker ownership 值得继续；但吞吐未达到预声明的 `+10%` 根因支持门槛。故该结果定性为“方向性
+信号但证据不足”：提交与分支永久保留并冻结，不跑 hosted CI，不作为任何产品提交的祖先。下一候选
+必须从 `bf4cd4a6` 新开 sibling，保留 fused buffer/copy 优势，只消融跨完整 frame 的人工 yield。
