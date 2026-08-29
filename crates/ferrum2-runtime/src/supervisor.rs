@@ -10,7 +10,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::{OwnerRegistry, ProcessCancellation};
+use crate::{ConnectionRuntimeDispatcher, OwnerRegistry, ProcessCancellation};
 
 /// Listener boundary used by the bounded supervisor and deterministic tests.
 pub trait AcceptListener: Send + Sync + 'static {
@@ -111,6 +111,7 @@ pub struct BoundedSupervisor<L> {
     max_connections: usize,
     shutdown_grace: Duration,
     registry: OwnerRegistry,
+    connection_runtime: Option<ConnectionRuntimeDispatcher>,
 }
 
 impl<L> BoundedSupervisor<L>
@@ -132,6 +133,30 @@ where
             max_connections,
             shutdown_grace,
             registry,
+            connection_runtime: None,
+        })
+    }
+
+    /// Creates a supervisor whose `JoinSet` places whole connections on fixed runtime shards.
+    ///
+    /// Admission and shutdown ownership are unchanged: one global permit is acquired before
+    /// every accept, and this supervisor's `JoinSet` directly aborts and reaps every remote task.
+    pub fn new_on_connection_runtime(
+        listener: L,
+        max_connections: usize,
+        shutdown_grace: Duration,
+        registry: OwnerRegistry,
+        connection_runtime: ConnectionRuntimeDispatcher,
+    ) -> Result<Self, SupervisorConfigError> {
+        if max_connections == 0 {
+            return Err(SupervisorConfigError::ZeroConnectionLimit);
+        }
+        Ok(Self {
+            listener,
+            max_connections,
+            shutdown_grace,
+            registry,
+            connection_runtime: Some(connection_runtime),
         })
     }
 
@@ -183,6 +208,7 @@ where
             max_connections,
             shutdown_grace: _,
             registry,
+            connection_runtime,
         } = self;
         let semaphore = Arc::new(Semaphore::new(max_connections));
         let (cancellation_source, cancellation_token) = CancellationSource::new();
@@ -255,13 +281,21 @@ where
             let connection_guard = registry.track_connection_task();
             let handler = Arc::clone(&handler);
             let token = cancellation_token.clone();
-            children.spawn(async move {
+            let child = async move {
                 let _child_guard = child_guard;
                 let _connection_guard = connection_guard;
                 let _permit_guard = permit_guard;
                 let _permit = permit;
                 handler(stream, token).await;
-            });
+            };
+            match &connection_runtime {
+                Some(dispatcher) => {
+                    children.spawn_on(child, dispatcher.next_handle());
+                }
+                None => {
+                    children.spawn(child);
+                }
+            }
         };
 
         drop(listener);

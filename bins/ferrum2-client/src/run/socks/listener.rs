@@ -59,6 +59,7 @@ pub(in crate::run) struct ClientTcpRoot {
     pub(in crate::run) supervisor: Option<BoundedSupervisor<ClientTcpListeners>>,
     pub(in crate::run) context: Arc<ClientContext>,
     pub(in crate::run) routing: Arc<ClientRouting>,
+    pub(in crate::run) reregister_accepted_stream: bool,
 }
 
 impl PreparedProcessRoot<RunError> for ClientTcpRoot {
@@ -73,6 +74,7 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
         let supervisor = self.supervisor.take().expect("prepared TCP root");
         let context = Arc::clone(&self.context);
         let routing = Arc::clone(&self.routing);
+        let reregister_accepted_stream = self.reregister_accepted_stream;
         let handler_context = Arc::clone(&context);
         let mut quiescing = cancellation.clone();
         let mut forced = cancellation.clone();
@@ -82,6 +84,17 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
                     let context = Arc::clone(&handler_context);
                     let routing = Arc::clone(&routing);
                     async move {
+                        let stream = if reregister_accepted_stream {
+                            let Ok(stream) = stream.into_std() else {
+                                return;
+                            };
+                            let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+                                return;
+                            };
+                            stream
+                        } else {
+                            stream
+                        };
                         client_connection(stream, cancellation, context, inbound, routing).await;
                     }
                 },

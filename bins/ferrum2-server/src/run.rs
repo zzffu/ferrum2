@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 
@@ -8,8 +9,9 @@ use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_observability::{Metrics, RuleProgram, RuleProgramMode, json_subscriber};
 use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
-    BoundedSupervisor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit,
-    ProcessSupervisor, UdpSessionManager,
+    BoundedSupervisor, ConnectionRuntimeDispatcher, ConnectionRuntimePool, OwnerRegistry,
+    ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor,
+    UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
 #[cfg(feature = "structural-metrics")]
@@ -173,14 +175,39 @@ fn runtime_dial_options(config: &ferrum2_config::OutboundDialOptions) -> DialOpt
     )
 }
 
+fn build_run_runtime(connection_sharded: bool) -> Result<tokio::runtime::Runtime, RunError> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if connection_sharded {
+        // Connection work runs on dedicated shards; one control worker avoids
+        // duplicating the host CPU count with otherwise idle scheduler workers.
+        builder.worker_threads(1);
+    }
+    builder
+        .enable_all()
+        .build()
+        .map_err(|_| RunError::StartupRuntime)
+}
+
 /// Fully materializes schema-v2 fixed endpoints and the initial RuleSet
 /// snapshot before any listener root is allowed to prepare.
 pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(async move {
+    // An enabled UDP service keeps the existing shared runtime topology. The
+    // TCP-only profile pins whole connections to stable current-thread shards.
+    let connection_runtimes = if prepared.udp().enabled {
+        None
+    } else {
+        Some(
+            ConnectionRuntimePool::new(tcp_connection_shard_count(usize::from(
+                prepared.runtime().max_connections.get(),
+            )))
+            .map_err(|_| RunError::StartupRuntime)?,
+        )
+    };
+    let connection_runtime = connection_runtimes
+        .as_ref()
+        .map(ConnectionRuntimePool::dispatcher);
+    let runtime = build_run_runtime(connection_runtimes.is_some())?;
+    let result = runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
         #[cfg(all(windows, not(test)))]
@@ -228,6 +255,7 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
                     network_sockets: Some(network_sockets),
                     #[cfg(all(windows, not(test)))]
                     network_change_monitor: network_change_monitor.take(),
+                    tcp_connection_runtime: connection_runtime,
                 },
             )
             .await
@@ -238,7 +266,27 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
             network::close_server_network_change_monitor(monitor)?;
         }
         result
-    })
+    });
+    drop(runtime);
+    drop(connection_runtimes);
+    result
+}
+
+const MAX_TCP_CONNECTION_SHARDS: usize = 2;
+
+fn tcp_connection_shard_count(max_connections: usize) -> NonZeroUsize {
+    let available = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    tcp_connection_shard_count_for(max_connections, available)
+}
+
+fn tcp_connection_shard_count_for(max_connections: usize, available: NonZeroUsize) -> NonZeroUsize {
+    NonZeroUsize::new(
+        available
+            .get()
+            .min(MAX_TCP_CONNECTION_SHARDS)
+            .min(max_connections),
+    )
+    .expect("validated connection limit is non-zero")
 }
 
 /// Performs the opt-in networked validation pass without preparing listeners
@@ -280,6 +328,7 @@ struct ServerRunResources {
     network_sockets: Option<Arc<ServerNetworkSocketService>>,
     #[cfg(all(windows, not(test)))]
     network_change_monitor: Option<ferrum2_platform_windows::WindowsNetworkChangeMonitor>,
+    tcp_connection_runtime: Option<ConnectionRuntimeDispatcher>,
 }
 
 impl ServerRunResources {
@@ -291,6 +340,7 @@ impl ServerRunResources {
             dns_specs,
             materialized: false,
             network_sockets: None,
+            tcp_connection_runtime: None,
         }
     }
 }
@@ -338,6 +388,7 @@ where
         network_sockets,
         #[cfg(all(windows, not(test)))]
         network_change_monitor,
+        tcp_connection_runtime,
     } = resources;
     #[cfg(all(windows, not(test)))]
     let mut network_change_monitor = network_change_monitor;
@@ -594,20 +645,29 @@ where
             for listen in tcp_listens {
                 listeners.push(bind_listener(listen, listen_backlog)?);
             }
-            let supervisor = BoundedSupervisor::new(
-                ServerTcpListeners {
+            let listeners = ServerTcpListeners {
+                listeners,
+                next: AtomicUsize::new(0),
+            };
+            let reregister_accepted_stream = tcp_connection_runtime.is_some();
+            let supervisor = match tcp_connection_runtime {
+                Some(connection_runtime) => BoundedSupervisor::new_on_connection_runtime(
                     listeners,
-                    next: AtomicUsize::new(0),
-                },
-                max_connections,
-                shutdown_grace,
-                tcp_registry,
-            )
+                    max_connections,
+                    shutdown_grace,
+                    tcp_registry,
+                    connection_runtime,
+                ),
+                None => {
+                    BoundedSupervisor::new(listeners, max_connections, shutdown_grace, tcp_registry)
+                }
+            }
             .map_err(|_| RunError::StartupProtocol)?;
             Ok(ServerDnsDependentRoot::new(
                 ServerTcpRoot {
                     supervisor: Some(supervisor),
                     contexts: Arc::new(tcp_contexts),
+                    reregister_accepted_stream,
                 },
                 tcp_dns_lease,
             ))
@@ -720,3 +780,36 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
 mod test_support;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod runtime_build_tests {
+    use super::*;
+
+    #[test]
+    fn connection_shards_use_one_multi_thread_control_worker() {
+        let runtime = build_run_runtime(true).expect("run runtime");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        assert_eq!(runtime.metrics().num_workers(), 1);
+    }
+
+    #[test]
+    fn unsharded_runtime_keeps_the_existing_multi_thread_builder() {
+        let runtime = build_run_runtime(false).expect("run runtime");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        assert!(runtime.metrics().num_workers() >= 1);
+    }
+
+    #[test]
+    fn connection_shards_are_capped_by_the_shared_cpu_budget() {
+        let eight_cpus = NonZeroUsize::new(8).expect("non-zero CPU count");
+
+        assert_eq!(tcp_connection_shard_count_for(1_024, eight_cpus).get(), 2);
+        assert_eq!(tcp_connection_shard_count_for(1, eight_cpus).get(), 1);
+    }
+}
