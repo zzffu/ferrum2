@@ -4,6 +4,8 @@ pub(crate) mod crypto;
 pub mod tcp;
 pub mod udp;
 
+pub use crypto::aes_gcm::{V2_AES_GCM_BUILD_SECURITY_IDENTITY, V2_AES_GCM_EXPANDED_KEYS_ZEROIZE_ON_DROP};
+
 /// Closed failure for Ferrum's checked v2 primitive boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CryptoError {

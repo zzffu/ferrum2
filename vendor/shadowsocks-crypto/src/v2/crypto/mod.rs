@@ -23,4 +23,5 @@ pub(crate) fn require_zeroize_on_drop<T: ZeroizeOnDrop>(value: T) -> T {
     value
 }
 
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
 pub(crate) fn require_zeroize_on_drop_type<T: ZeroizeOnDrop>() {}

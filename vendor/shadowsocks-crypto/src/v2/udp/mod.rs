@@ -23,6 +23,7 @@ enum CipherVariant {
     ChaCha20Poly1305(ChaCha20Poly1305Cipher),
 }
 
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
 impl ZeroizeOnDrop for CipherVariant {}
 
 /// AEAD2022 UDP body cipher with checked method, key, session and nonce inputs.
@@ -101,6 +102,7 @@ impl UdpCipher {
     }
 }
 
+#[cfg(not(feature = "v2-ring-nonzeroizing-diagnostic"))]
 impl ZeroizeOnDrop for UdpCipher {}
 
 enum HeaderVariant {
