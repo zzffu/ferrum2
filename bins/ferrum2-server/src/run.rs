@@ -173,13 +173,22 @@ fn runtime_dial_options(config: &ferrum2_config::OutboundDialOptions) -> DialOpt
     )
 }
 
+// Keep independent connections parallel while bounding the worker set across
+// which each Send connection future and its hot frame state may migrate.
+const PRODUCTION_RUNTIME_WORKERS: usize = 2;
+
+fn production_runtime() -> Result<tokio::runtime::Runtime, RunError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(PRODUCTION_RUNTIME_WORKERS)
+        .enable_all()
+        .build()
+        .map_err(|_| RunError::StartupRuntime)
+}
+
 /// Fully materializes schema-v2 fixed endpoints and the initial RuleSet
 /// snapshot before any listener root is allowed to prepare.
 pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
+    let runtime = production_runtime()?;
     runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
@@ -713,6 +722,24 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
             ProcessRootExit::Panicked | ProcessRootExit::JoinFailed => Err(RunError::RuntimeChild),
             ProcessRootExit::Completed => Err(RunError::RuntimeRoot),
         },
+    }
+}
+
+#[cfg(test)]
+mod runtime_contract_tests {
+    use tokio::runtime::RuntimeFlavor;
+
+    use super::{PRODUCTION_RUNTIME_WORKERS, production_runtime};
+
+    #[test]
+    fn production_runtime_is_multi_thread_with_exact_worker_count() {
+        let runtime = production_runtime().expect("production runtime");
+
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            RuntimeFlavor::MultiThread
+        );
+        assert_eq!(runtime.metrics().num_workers(), PRODUCTION_RUNTIME_WORKERS);
     }
 }
 

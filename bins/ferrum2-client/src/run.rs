@@ -264,14 +264,23 @@ impl ClientProcessRoots {
     }
 }
 
+// Keep independent connections parallel while bounding the worker set across
+// which each Send connection future and its hot frame state may migrate.
+const PRODUCTION_RUNTIME_WORKERS: usize = 2;
+
+fn production_runtime() -> Result<tokio::runtime::Runtime, RunError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(PRODUCTION_RUNTIME_WORKERS)
+        .enable_all()
+        .build()
+        .map_err(|_| RunError::StartupRuntime)
+}
+
 /// Fully materializes a prepared schema-v2 client before any listener or TUN
 /// root is allowed to prepare. The returned process owns the bootstrap DNS,
 /// RuleSet refresh, and egress bridge lifecycle for its entire run.
 pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
+    let runtime = production_runtime()?;
     runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
@@ -913,6 +922,24 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
             ProcessRootExit::Panicked | ProcessRootExit::JoinFailed => Err(RunError::RuntimeChild),
             ProcessRootExit::Completed => Err(RunError::RuntimeRoot),
         },
+    }
+}
+
+#[cfg(test)]
+mod runtime_contract_tests {
+    use tokio::runtime::RuntimeFlavor;
+
+    use super::{PRODUCTION_RUNTIME_WORKERS, production_runtime};
+
+    #[test]
+    fn production_runtime_is_multi_thread_with_exact_worker_count() {
+        let runtime = production_runtime().expect("production runtime");
+
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            RuntimeFlavor::MultiThread
+        );
+        assert_eq!(runtime.metrics().num_workers(), PRODUCTION_RUNTIME_WORKERS);
     }
 }
 
