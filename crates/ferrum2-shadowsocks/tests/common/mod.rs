@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -339,6 +339,7 @@ pub struct RecordingIo {
     write_limit_after: Option<(usize, usize)>,
     pending_reads: usize,
     pending_read_after: Option<(usize, usize)>,
+    silent_pending_read_after: Option<SilentPendingRead>,
     pending_writes: usize,
     pending_write_after: Option<(usize, usize)>,
     fail_read: bool,
@@ -352,6 +353,12 @@ pub struct RecordingIo {
     sequence: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
 
+struct SilentPendingRead {
+    after: usize,
+    returned: bool,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+}
+
 impl RecordingIo {
     pub fn new(reads: impl IntoIterator<Item = Vec<u8>>) -> (Self, Arc<Mutex<IoObservation>>) {
         let observation = Arc::new(Mutex::new(IoObservation::default()));
@@ -363,6 +370,7 @@ impl RecordingIo {
                 write_limit_after: None,
                 pending_reads: 0,
                 pending_read_after: None,
+                silent_pending_read_after: None,
                 pending_writes: 0,
                 pending_write_after: None,
                 fail_read: false,
@@ -413,6 +421,19 @@ impl RecordingIo {
 
     pub fn with_pending_reads_after(mut self, successful_reads: usize, polls: usize) -> Self {
         self.pending_read_after = Some((successful_reads, polls));
+        self
+    }
+
+    pub fn with_silent_pending_read_after(
+        mut self,
+        successful_reads: usize,
+        pending_waker: Arc<Mutex<Option<Waker>>>,
+    ) -> Self {
+        self.silent_pending_read_after = Some(SilentPendingRead {
+            after: successful_reads,
+            returned: false,
+            pending_waker,
+        });
         self
     }
 
@@ -476,6 +497,14 @@ impl TransportIo for RecordingIo {
             .lock()
             .expect("observation lock")
             .read_calls;
+        if let Some(pending) = self.silent_pending_read_after.as_mut()
+            && completed_reads >= pending.after
+            && !pending.returned
+        {
+            pending.returned = true;
+            *pending.pending_waker.lock().expect("pending waker") = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
         if let Some((after, pending)) = self.pending_read_after.as_mut()
             && completed_reads >= *after
             && *pending > 0

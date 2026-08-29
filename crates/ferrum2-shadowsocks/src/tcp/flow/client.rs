@@ -203,7 +203,7 @@ where
         }
 
         let mut budget = PollBudget::new();
-        loop {
+        {
             let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
             match state {
                 ClientRx::ResponseFixed { mut filled } => {
@@ -216,7 +216,7 @@ where
                     ) {
                         Poll::Pending => {
                             self.rx = ClientRx::ResponseFixed { filled };
-                            return Poll::Pending;
+                            Poll::Pending
                         }
                         Poll::Ready(Err(_)) => {
                             let error = self.lifecycle.install_detection(
@@ -224,7 +224,7 @@ where
                                 self.observers.flow,
                                 DetectionReason::ReadFailed,
                             );
-                            return Poll::Ready(Err(error));
+                            Poll::Ready(Err(error))
                         }
                         Poll::Ready(Ok(0)) => {
                             let error = self.lifecycle.install_detection(
@@ -232,7 +232,7 @@ where
                                 self.observers.flow,
                                 DetectionReason::ShortRead,
                             );
-                            return Poll::Ready(Err(error));
+                            Poll::Ready(Err(error))
                         }
                         Poll::Ready(Ok(read)) => {
                             budget.record_io(read);
@@ -268,9 +268,8 @@ where
                                         wire_len,
                                         filled: 0,
                                     };
-                                    if budget.yield_if_exhausted(cx) {
-                                        return Poll::Pending;
-                                    }
+                                    cx.waker().wake_by_ref();
+                                    Poll::Pending
                                 }
                                 Err(reason) => {
                                     let error = self.lifecycle.install_detection(
@@ -278,7 +277,7 @@ where
                                         self.observers.flow,
                                         reason,
                                     );
-                                    return Poll::Ready(Err(error));
+                                    Poll::Ready(Err(error))
                                 }
                             }
                         }
@@ -295,7 +294,7 @@ where
                     ) {
                         Poll::Pending => {
                             self.rx = ClientRx::ResponsePayload { wire_len, filled };
-                            return Poll::Pending;
+                            Poll::Pending
                         }
                         Poll::Ready(Err(_)) => {
                             let error = self.lifecycle.install_detection(
@@ -303,7 +302,7 @@ where
                                 self.observers.flow,
                                 DetectionReason::ReadFailed,
                             );
-                            return Poll::Ready(Err(error));
+                            Poll::Ready(Err(error))
                         }
                         Poll::Ready(Ok(0)) => {
                             let error = self.lifecycle.install_detection(
@@ -311,7 +310,7 @@ where
                                 self.observers.flow,
                                 DetectionReason::ShortRead,
                             );
-                            return Poll::Ready(Err(error));
+                            Poll::Ready(Err(error))
                         }
                         Poll::Ready(Ok(read)) => {
                             budget.record_io(read);
@@ -336,10 +335,8 @@ where
                             filled = next;
                             if filled < wire_len {
                                 self.rx = ClientRx::ResponsePayload { wire_len, filled };
-                                if budget.yield_if_exhausted(cx) {
-                                    return Poll::Pending;
-                                }
-                                continue;
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
                             }
                             let opened = self
                                 .response_opener
@@ -356,7 +353,7 @@ where
                             }
                             budget.record_frame();
                             self.rx = ClientRx::Data(DataRx::Ready { position: 0 });
-                            return Poll::Ready(Ok(&self.decrypt));
+                            Poll::Ready(Ok(&self.decrypt))
                         }
                     }
                 }
@@ -375,15 +372,15 @@ where
                     match result {
                         DataPoll::Pending(state) => {
                             self.rx = ClientRx::Data(state);
-                            return Poll::Pending;
+                            Poll::Pending
                         }
                         DataPoll::Ready(state, result) => {
                             self.rx = ClientRx::Data(state);
-                            return match result {
+                            match result {
                                 Ok(DataRead::Buffered) => Poll::Ready(Ok(self.current_plaintext())),
                                 Ok(DataRead::Eof) => Poll::Ready(Ok(&[])),
                                 Err(error) => Poll::Ready(Err(error)),
-                            };
+                            }
                         }
                     }
                 }

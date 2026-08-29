@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -28,8 +28,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Re
 
 use common::{
     FakeClock, NOW, RecordingIo, ScriptedRandom, SourceSentinel, client_random_bytes,
-    method_provider, method_salt_from_u64, provider, response_wire_and_frames, salt_from_u64,
-    server_target, target, valid_request_wire, valid_request_wire_for,
+    method_provider, method_salt_from_u64, provider, request_data_frames, response_wire_and_frames,
+    salt_from_u64, server_target, target, valid_request_wire, valid_request_wire_for,
 };
 
 struct EndpointIo {
@@ -249,6 +249,114 @@ impl AsyncWrite for AlwaysReadyPlain {
     }
 }
 
+enum UploadReadStep {
+    Data(Vec<u8>),
+    Pending,
+}
+
+struct ScriptedUploadPlain {
+    reads: VecDeque<UploadReadStep>,
+    positive_reads: Arc<AtomicUsize>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl AsyncRead for ScriptedUploadPlain {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.reads.pop_front() {
+            Some(UploadReadStep::Data(source)) => {
+                assert!(source.len() <= buffer.remaining());
+                buffer.put_slice(&source);
+                self.positive_reads.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }
+            Some(UploadReadStep::Pending) => {
+                *self.pending_waker.lock().expect("pending waker") = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+impl AsyncWrite for ScriptedUploadPlain {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct PartialWritePlain {
+    accepted: Arc<Mutex<Vec<u8>>>,
+    write_calls: usize,
+    first_write_limit: usize,
+}
+
+impl AsyncRead for PartialWritePlain {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for PartialWritePlain {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let limit = if self.write_calls == 0 {
+            self.first_write_limit
+        } else {
+            source.len()
+        };
+        self.write_calls += 1;
+        let written = source.len().min(limit);
+        self.accepted
+            .lock()
+            .expect("accepted plaintext")
+            .extend_from_slice(&source[..written]);
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[tokio::test]
 async fn fused_round_trip_covers_all_ciphers_and_boundary_payloads() {
     for (profile_index, profile) in MethodProfile::ALL.into_iter().enumerate() {
@@ -309,6 +417,206 @@ async fn fused_server_first_response_partial_writes_preserve_exact_wire() {
     }
     assert!(observed.write_calls > 1);
     assert_eq!(observed.abortive_calls, 0);
+}
+
+#[tokio::test]
+async fn completed_carried_upload_polls_one_next_read_without_synthetic_wake() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let replay = TcpReplayStore::new(1024).expect("replay capacity");
+    let request_salt = salt_from_u64(72);
+    let response_salt = salt_from_u64(73);
+    let request = valid_request_wire(NOW, &request_salt);
+    let first = b"first upload";
+    let second = b"second upload";
+    let (expected_first, expected_frames) =
+        response_wire_and_frames(&request_salt, &response_salt, first, &[second]);
+    let expected = expected_first
+        .into_iter()
+        .chain(expected_frames.into_iter().flatten())
+        .collect::<Vec<_>>();
+    let (io, observation) = RecordingIo::request(&request);
+    let random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io.with_pending_writes(1))
+        .await
+        .expect("server request")
+        .stream;
+    let positive_reads = Arc::new(AtomicUsize::new(0));
+    let pending_waker = Arc::new(Mutex::new(None));
+    let mut plain = ScriptedUploadPlain {
+        reads: [
+            UploadReadStep::Data(first.to_vec()),
+            UploadReadStep::Pending,
+            UploadReadStep::Data(second.to_vec()),
+        ]
+        .into(),
+        positive_reads: Arc::clone(&positive_reads),
+        pending_waker: Arc::clone(&pending_waker),
+    };
+    let progressed = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&progressed);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        move |direction, bytes| {
+            if direction == FusedRelayDirection::PlainToTunnel {
+                observed.fetch_add(bytes, Ordering::SeqCst);
+            }
+        },
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(positive_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(
+        positive_reads.load(Ordering::SeqCst),
+        1,
+        "the carried drain completes before exactly one pending raw read"
+    );
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        1,
+        "carried completion does not manufacture a wake for a pending child read"
+    );
+    let child_waker = pending_waker
+        .lock()
+        .expect("pending waker")
+        .take()
+        .expect("raw read registered the relay waker");
+    child_waker.wake();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(positive_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        progressed.load(Ordering::SeqCst),
+        first.len() + second.len()
+    );
+
+    drop(relay);
+    let observed = observation.lock().expect("observation");
+    let accepted = observed
+        .writes
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        accepted, expected,
+        "carried continuation preserves exact wire"
+    );
+}
+
+#[tokio::test]
+async fn completed_carried_download_polls_one_next_read_without_synthetic_wake() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("replay capacity");
+    let request_salt = salt_from_u64(74);
+    let request = valid_request_wire(NOW, &request_salt);
+    let first = b"first download";
+    let second = b"second download";
+    let frames = request_data_frames(&request_salt, &[first, second]);
+    let reads = [
+        request[..ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN].to_vec(),
+        request[ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN..].to_vec(),
+    ]
+    .into_iter()
+    .chain(frames)
+    .collect::<Vec<_>>();
+    let (inner, observation) = RecordingIo::new(reads);
+    let pending_waker = Arc::new(Mutex::new(None));
+    let io = inner.with_silent_pending_read_after(4, Arc::clone(&pending_waker));
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io)
+        .await
+        .expect("server request")
+        .stream;
+    assert_eq!(observation.lock().expect("observation").read_calls, 2);
+    let accepted = Arc::new(Mutex::new(Vec::new()));
+    let mut plain = PartialWritePlain {
+        accepted: Arc::clone(&accepted),
+        write_calls: 0,
+        first_write_limit: 3,
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 4);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(&*accepted.lock().expect("accepted plaintext"), &first[..3]);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        4,
+        "the carried plaintext completes before exactly one pending tunnel read"
+    );
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        2,
+        "carried completion does not manufacture a wake for a pending tunnel read"
+    );
+    assert_eq!(&*accepted.lock().expect("accepted plaintext"), first);
+    let child_waker = pending_waker
+        .lock()
+        .expect("pending waker")
+        .take()
+        .expect("tunnel read registered the relay waker");
+    child_waker.wake();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 5);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 4);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 5);
+    let expected = first
+        .iter()
+        .chain(second.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        *accepted.lock().expect("accepted plaintext"),
+        expected,
+        "partial carried writes neither repeat nor omit plaintext"
+    );
+    assert_eq!(
+        observation.lock().expect("observation").read_calls,
+        6,
+        "each successful lower read was issued once"
+    );
 }
 
 #[tokio::test]
