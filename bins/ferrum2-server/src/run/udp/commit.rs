@@ -7,11 +7,14 @@ use ferrum2_runtime::{
     PendingUdpDatagram, UdpCommitError, UdpRuntimeError, UdpSessionHandle,
 };
 use ferrum2_shadowsocks::{PendingUdpRequest, ServerResponseCapability, UdpPacketError, UdpServer};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 
 use crate::run::routing::ServerTerminalRoute;
 
 use super::identity::UdpMappings;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn commit_rejected_request(
     protocol: &UdpServer,
     mappings: &UdpMappings,
@@ -20,8 +23,13 @@ pub(super) fn commit_rejected_request(
     peer: SocketAddr,
     now: ferrum2_crypto::MonotonicInstant,
     inbound: usize,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> Result<(), UdpPacketError> {
     let (_datagram, commit) = pending.into_parts();
+    #[cfg(feature = "structural-metrics")]
+    let accepted =
+        protocol.commit_request_structural(commit, peer, now, &SystemRandom, structural)?;
+    #[cfg(not(feature = "structural-metrics"))]
     let accepted = protocol.commit_request(commit, peer, now, &SystemRandom)?;
     if expected.is_some_and(|capability| capability != accepted.capability()) {
         return Err(UdpPacketError::Generation);
@@ -42,9 +50,19 @@ pub(super) fn commit_existing_direct_request(
     handle: UdpSessionHandle,
     peer: SocketAddr,
     clock: &SystemClock,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> Result<(), UdpCommitError<UdpPacketError>> {
     let (datagram, commit) = pending.into_parts();
     let committed = reservation.commit_with(datagram, tokio::time::Instant::now(), || {
+        #[cfg(feature = "structural-metrics")]
+        protocol.commit_existing_request_structural(
+            commit,
+            expected,
+            peer,
+            clock.monotonic_now(),
+            structural,
+        )?;
+        #[cfg(not(feature = "structural-metrics"))]
         protocol.commit_existing_request(commit, expected, peer, clock.monotonic_now())?;
         Ok(())
     });
@@ -75,6 +93,7 @@ pub(super) fn commit_new_direct_session<R, F, H>(
     clock: &SystemClock,
     inbound: usize,
     outbound: usize,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> Result<UdpSessionHandle, NewDirectCommitError>
 where
     R: UdpResolver,
@@ -92,6 +111,15 @@ where
         || {
             // Protocol identity is published only after the runtime session,
             // socket, bytes, and queue are ready to own it.
+            #[cfg(feature = "structural-metrics")]
+            let accepted = protocol.commit_request_structural(
+                commit,
+                peer,
+                clock.monotonic_now(),
+                &SystemRandom,
+                structural,
+            )?;
+            #[cfg(not(feature = "structural-metrics"))]
             let accepted =
                 protocol.commit_request(commit, peer, clock.monotonic_now(), &SystemRandom)?;
             committed_capability = Some(accepted.capability());

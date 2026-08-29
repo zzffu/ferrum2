@@ -8,7 +8,6 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use bytes::BytesMut;
 use ferrum2_config::{
     DirectDomainResolver, DnsRuntimeConfig, DnsServerConfig, DnsTransport, ServerDnsRoute,
 };
@@ -35,6 +34,8 @@ use ferrum2_runtime::MAX_RESOLVED_CANDIDATES;
 use ferrum2_runtime::RuntimeTcpStream;
 #[cfg(any(windows, test))]
 use ferrum2_runtime::{DirectUdpSocket, NetworkUdpSocket};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 use tokio::net::UdpSocket;
 use tokio::time::Instant as TokioInstant;
 
@@ -596,6 +597,8 @@ pub(super) struct ServerDnsEgress {
     outbound_count: usize,
     outbound_resolvers: Arc<[Option<ServerDnsResolver>]>,
     physical: Arc<ServerPhysicalSocketContext>,
+    #[cfg(feature = "structural-metrics")]
+    structural: Option<StructuralLocal>,
 }
 
 impl ServerDnsEgress {
@@ -605,7 +608,15 @@ impl ServerDnsEgress {
             outbound_count,
             outbound_resolvers: vec![None; outbound_count].into(),
             physical,
+            #[cfg(feature = "structural-metrics")]
+            structural: None,
         }
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(super) fn with_structural(mut self, structural: StructuralLocal) -> Self {
+        self.structural = Some(structural);
+        self
     }
 
     #[cfg(test)]
@@ -741,6 +752,8 @@ impl DnsEgress for ServerDnsEgress {
                 });
             }
         };
+        #[cfg(feature = "structural-metrics")]
+        let structural = self.structural.clone();
         Box::pin(async move {
             let candidate = match (resolved, resolver, domain) {
                 (Some(destination), None, None) => destination,
@@ -760,7 +773,13 @@ impl DnsEgress for ServerDnsEgress {
                 _ => return Err(closed_physical_socket_error()),
             };
             let socket = physical.connect_udp(candidate, outbound).await?;
-            Ok(server_dns_datagram(socket, candidate, tasks))
+            Ok(server_dns_datagram(
+                socket,
+                candidate,
+                tasks,
+                #[cfg(feature = "structural-metrics")]
+                structural,
+            ))
         })
     }
 }
@@ -769,34 +788,38 @@ fn server_dns_datagram(
     socket: ServerPhysicalUdpSocket,
     target: SocketAddr,
     tasks: DnsTaskRegistrar,
+    #[cfg(feature = "structural-metrics")] structural: Option<StructuralLocal>,
 ) -> BoxedDnsDatagramIo {
-    let (io, mut outgoing_packets, incoming_packets) = ChannelDnsDatagram::bounded(
-        NonZeroUsize::new(MAX_DNS_UDP_DATAGRAM_BYTES).expect("non-zero DNS UDP datagram limit"),
-    )
-    .into_parts();
+    let maximum =
+        NonZeroUsize::new(MAX_DNS_UDP_DATAGRAM_BYTES).expect("non-zero DNS UDP datagram limit");
+    #[cfg(feature = "structural-metrics")]
+    let channel = match structural.as_ref() {
+        Some(structural) => ChannelDnsDatagram::bounded_structural(maximum, structural),
+        None => ChannelDnsDatagram::bounded(maximum),
+    };
+    #[cfg(not(feature = "structural-metrics"))]
+    let channel = ChannelDnsDatagram::bounded(maximum);
+    let (io, mut outgoing_packets, incoming_packets) = channel.into_parts();
     let outgoing_queue = tasks.own(DnsEgressResourceKind::Queue);
     let incoming_queue = tasks.own(DnsEgressResourceKind::Queue);
     let buffer = tasks.own(DnsEgressResourceKind::Buffer);
     tasks.spawn(DnsEgressTaskKind::Session, async move {
         let (_outgoing_queue, _incoming_queue, _buffer) = (outgoing_queue, incoming_queue, buffer);
-        let mut response = BytesMut::with_capacity(MAX_DNS_UDP_DATAGRAM_BYTES);
         while let Some(packet) = outgoing_packets.recv().await {
             let sent = socket.send_to(&packet, target).await;
             if !matches!(sent, Ok(length) if length == packet.len()) {
                 break;
             }
-            response.clear();
-            let Ok((length, source)) = socket.recv_buf_from(&mut response).await else {
+            let Ok(mut response) = incoming_packets.lease().await else {
                 break;
             };
-            if source != target || length > MAX_DNS_UDP_DATAGRAM_BYTES {
+            let Ok((length, source)) = socket.recv_buf_from(response.as_bytes_mut()).await else {
+                break;
+            };
+            if source != target || length > MAX_DNS_UDP_DATAGRAM_BYTES || length != response.len() {
                 break;
             }
-            if incoming_packets
-                .send(response[..length].to_vec())
-                .await
-                .is_err()
-            {
+            if incoming_packets.send(response).await.is_err() {
                 break;
             }
         }

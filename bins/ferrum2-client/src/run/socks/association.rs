@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use ferrum2_core::route::Network;
-use ferrum2_core::{ConnectErrorKind, SessionReply as _, TargetAddr};
+use ferrum2_core::{ConnectErrorKind, SessionReply as _};
 use ferrum2_observability::{Direction, Outcome, Reason, Role, Stage};
 use ferrum2_runtime::CancellationToken;
 use ferrum2_socks5::{SocksStream, SocksUdpAssociate};
@@ -23,7 +23,7 @@ use crate::run::observation::{
 use crate::run::routing::ClientTerminalRoute;
 
 use super::dns_hijack::relay_hijacked_udp;
-use super::endpoint::{SocksUdpEndpoint, SocksUdpPacket};
+use super::endpoint::{SocksUdpEndpoint, SocksUdpOwnedPacket, SocksUdpPacket};
 
 pub(super) async fn run_udp_association<IO, F, Fut>(
     association: SocksUdpAssociate<IO>,
@@ -54,6 +54,8 @@ pub(super) async fn run_udp_association<IO, F, Fut>(
             return;
         }
     };
+    #[cfg(feature = "structural-metrics")]
+    let endpoint = endpoint.with_structural(context.structural.clone());
     let bound = match endpoint.local_addr() {
         Ok(bound) => bound,
         Err(_) => {
@@ -82,7 +84,7 @@ pub(super) async fn relay_udp_association<IO>(
     cancellation: &mut CancellationToken,
     context: &ClientContext,
     routing: &ClientRouting,
-    first: Option<(TargetAddr, Vec<u8>)>,
+    first: Option<SocksUdpOwnedPacket>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -90,7 +92,7 @@ pub(super) async fn relay_udp_association<IO>(
         Ok(cancellation) => cancellation,
         Err(_) => return,
     };
-    let first = match first {
+    let mut first = match first {
         Some(first) => first,
         None => {
             let mut control_byte = [0; 1];
@@ -119,11 +121,8 @@ pub(super) async fn relay_udp_association<IO>(
                     }
                     received = endpoint.receive() => received,
                 };
-                let (decoded, source_port) = match received {
-                    Ok(SocksUdpPacket::Valid {
-                        datagram,
-                        source_port,
-                    }) => (datagram, source_port),
+                let packet = match received {
+                    Ok(SocksUdpPacket::Valid(packet)) => packet,
                     Ok(SocksUdpPacket::WrongSource) => {
                         record_udp_drop(
                             context,
@@ -152,8 +151,8 @@ pub(super) async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let encoded_target_len = decoded.encoded_target_len();
-                if decoded.payload().len()
+                let encoded_target_len = packet.encoded_target_len();
+                if packet.payload().len()
                     > prepared.payload_limit(&routing.outbounds, false, encoded_target_len)
                 {
                     record_udp_drop(
@@ -162,30 +161,30 @@ pub(super) async fn relay_udp_association<IO>(
                         Stage::Shadowsocks,
                         Reason::Bounds,
                     );
+                    endpoint.recycle(packet);
                     continue;
                 }
-                let target = decoded.to_target_addr();
-                let payload = decoded.payload().to_vec();
-                endpoint.accept(source_port);
-                break (target, payload);
+                endpoint.accept(packet.source_port());
+                break packet;
             }
         }
     };
     if prepared.activate(&context.egress).is_err() {
+        endpoint.recycle(first);
         record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
         return;
     }
-    if !forward_udp_request(
+    let forwarded = forward_udp_request(
         prepared,
         cancellation,
         &mut session_cancellation,
         context,
         routing,
-        first.0,
-        first.1,
+        &mut first,
     )
-    .await
-    {
+    .await;
+    endpoint.recycle(first);
+    if !forwarded {
         return;
     }
     let mut control_byte = [0_u8; 1];
@@ -213,10 +212,8 @@ pub(super) async fn relay_udp_association<IO>(
             received = async {
                 endpoint.receive().await
             } => {
-                let (decoded, source_port) = match received {
-                    Ok(SocksUdpPacket::Valid { datagram, source_port }) => {
-                        (datagram, source_port)
-                    }
+                let mut packet = match received {
+                    Ok(SocksUdpPacket::Valid(packet)) => packet,
                     Ok(SocksUdpPacket::WrongSource) => {
                         record_udp_drop(context, Direction::ClientToTarget, Stage::Socks5, Reason::Address);
                         continue;
@@ -230,8 +227,8 @@ pub(super) async fn relay_udp_association<IO>(
                         return;
                     }
                 };
-                let encoded_target_len = decoded.encoded_target_len();
-                if decoded.payload().len()
+                let encoded_target_len = packet.encoded_target_len();
+                if packet.payload().len()
                     > prepared.payload_limit(&routing.outbounds, false, encoded_target_len)
                 {
                     record_udp_drop(
@@ -240,20 +237,20 @@ pub(super) async fn relay_udp_association<IO>(
                         Stage::Shadowsocks,
                         Reason::Bounds,
                     );
+                    endpoint.recycle(packet);
                     continue;
                 }
-                let target = decoded.to_target_addr();
-                let payload = decoded.payload().to_vec();
-                endpoint.accept(source_port);
-                if !forward_udp_request(
+                endpoint.accept(packet.source_port());
+                let forwarded = forward_udp_request(
                     prepared,
                     cancellation,
                     &mut session_cancellation,
                     context,
                     routing,
-                    target,
-                    payload,
-                ).await {
+                    &mut packet,
+                ).await;
+                endpoint.recycle(packet);
+                if !forwarded {
                     return;
                 }
             }
@@ -336,7 +333,7 @@ pub(super) async fn classify_udp_association<IO>(
     let Ok(mut route_scratch) = routing.route_scratch() else {
         return;
     };
-    let (target, payload, terminal) = loop {
+    let (packet, terminal) = loop {
         let idle_deadline = endpoint.idle_deadline(context.runtime.idle_timeout);
         let received = tokio::select! {
             _ = cancellation.cancelled() => return,
@@ -349,11 +346,8 @@ pub(super) async fn classify_udp_association<IO>(
             }
             received = endpoint.receive() => received,
         };
-        let (decoded, source_port) = match received {
-            Ok(SocksUdpPacket::Valid {
-                datagram,
-                source_port,
-            }) => (datagram, source_port),
+        let packet = match received {
+            Ok(SocksUdpPacket::Valid(packet)) => packet,
             Ok(SocksUdpPacket::WrongSource) => {
                 record_udp_drop(
                     context,
@@ -377,23 +371,24 @@ pub(super) async fn classify_udp_association<IO>(
                 return;
             }
         };
-        let target = decoded.to_target_addr();
         let Ok(terminal) = routing.select_terminal_with_scratch(
             inbound,
             Network::Udp,
-            &target,
-            Some(decoded.payload()),
+            packet.target(),
+            Some(packet.payload()),
             &context.metrics,
             &mut route_scratch,
         ) else {
+            endpoint.recycle(packet);
             return;
         };
         if matches!(terminal, ClientTerminalRoute::Reject) {
+            endpoint.recycle(packet);
             return;
         }
-        let encoded_target_len = decoded.encoded_target_len();
+        let encoded_target_len = packet.encoded_target_len();
         if let ClientTerminalRoute::Route(plan) = &terminal
-            && decoded.payload().len()
+            && packet.payload().len()
                 > composed_udp_plan_limit(
                     &routing.outbounds,
                     plan.hops(),
@@ -407,25 +402,31 @@ pub(super) async fn classify_udp_association<IO>(
                 Stage::Shadowsocks,
                 Reason::Bounds,
             );
+            endpoint.recycle(packet);
             continue;
         }
-        let payload = decoded.payload().to_vec();
-        endpoint.accept(source_port);
-        break (target, payload, terminal);
+        endpoint.accept(packet.source_port());
+        break (packet, terminal);
     };
 
     match terminal {
         ClientTerminalRoute::Route(plan) => {
+            let target = packet.target().clone();
             let prepared = tokio::select! {
-                _ = cancellation.cancelled() => return,
+                _ = cancellation.cancelled() => None,
                 prepared = context.egress.prepare_udp_for_ingress(
                     ClientRequestOrigin::Socks,
                     inbound,
                     Some(plan),
                     Some(&target),
-                ) => prepared,
+                ) => Some(prepared),
+            };
+            let Some(prepared) = prepared else {
+                endpoint.recycle(packet);
+                return;
             };
             let Ok(mut prepared) = prepared else {
+                endpoint.recycle(packet);
                 record_udp_terminal(context, Stage::Shadowsocks, Reason::Random, Outcome::Failed);
                 return;
             };
@@ -436,7 +437,7 @@ pub(super) async fn classify_udp_association<IO>(
                 cancellation,
                 context,
                 routing,
-                Some((target, payload)),
+                Some(packet),
             )
             .await;
         }
@@ -447,6 +448,7 @@ pub(super) async fn classify_udp_association<IO>(
                 .and_then(|proxy| proxy.get())
                 .map(Arc::clone)
             else {
+                endpoint.recycle(packet);
                 return;
             };
             relay_hijacked_udp(
@@ -456,7 +458,7 @@ pub(super) async fn classify_udp_association<IO>(
                 context,
                 inbound,
                 &proxy,
-                Some((target, payload)),
+                Some(packet),
             )
             .await;
         }
@@ -471,15 +473,15 @@ pub(super) async fn forward_udp_request(
     session_cancellation: &mut tokio::sync::watch::Receiver<bool>,
     context: &ClientContext,
     routing: &ClientRouting,
-    target: TargetAddr,
-    payload: Vec<u8>,
+    packet: &mut SocksUdpOwnedPacket,
 ) -> bool {
-    let payload_len = payload.len();
+    let target = packet.target().clone();
+    let payload_len = packet.payload().len();
     let wire_len = match prepared.prepare_owned_application_request(
         &context.egress,
         &routing.outbounds,
         target,
-        bytes::Bytes::from(payload).into(),
+        packet.payload_mut(),
         Instant::now(),
     ) {
         Ok(length) => length,

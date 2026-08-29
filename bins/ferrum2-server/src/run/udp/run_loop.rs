@@ -8,6 +8,8 @@ use ferrum2_runtime::{
     ProcessFuture, UdpCommitError, UdpRuntimeError,
 };
 use ferrum2_shadowsocks::UdpPacketError;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{LockSite, StructuralLocal};
 
 use crate::run::observation::{
     record_udp_failure, record_udp_protocol_failure, record_udp_request_accepted,
@@ -27,6 +29,49 @@ use super::commit::{
 use super::listener::{MAX_UDP_LISTENER_READINESS_DRAIN, ServerUdpListener, ServerUdpRuntime};
 use super::physical::ServerUdpNetworkPolicy;
 use super::route::select_udp_route;
+
+#[cfg(feature = "structural-metrics")]
+struct StructuralAdmissionGuard<'a> {
+    guard: Option<tokio::sync::MutexGuard<'a, ()>>,
+    structural: StructuralLocal,
+    wait_nanoseconds: u64,
+    acquired: std::time::Instant,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl Drop for StructuralAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        let hold_nanoseconds = duration_nanoseconds(self.acquired.elapsed());
+        drop(self.guard.take());
+        self.structural
+            .lock(LockSite::Admission, self.wait_nanoseconds, hold_nanoseconds);
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+fn duration_nanoseconds(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "structural-metrics")]
+async fn lock_admission<'a>(
+    admission: &'a tokio::sync::Mutex<()>,
+    structural: &StructuralLocal,
+) -> StructuralAdmissionGuard<'a> {
+    let started = std::time::Instant::now();
+    let guard = admission.lock().await;
+    StructuralAdmissionGuard {
+        guard: Some(guard),
+        structural: structural.clone(),
+        wait_nanoseconds: duration_nanoseconds(started.elapsed()),
+        acquired: std::time::Instant::now(),
+    }
+}
+
+#[cfg(not(feature = "structural-metrics"))]
+async fn lock_admission(admission: &tokio::sync::Mutex<()>) -> tokio::sync::MutexGuard<'_, ()> {
+    admission.lock().await
+}
 
 impl<L, SF> PreparedUdpServer<L, SF>
 where
@@ -74,6 +119,8 @@ where
             mut wire,
             mut maintenance,
             _receive_wire,
+            #[cfg(feature = "structural-metrics")]
+            structural,
         } = self;
         maintenance.tick().await;
         let mut removals = runtime.sessions().subscribe_removals();
@@ -98,7 +145,11 @@ where
                         let maintenance_guard = tokio::select! {
                             biased;
                             _ = &mut shutdown => break Ok(()),
-                            guard = admission.lock() => guard,
+                            guard = lock_admission(
+                                &admission,
+                                #[cfg(feature = "structural-metrics")]
+                                &structural,
+                            ) => guard,
                         };
                         mappings.prune_protocol(&protocol, clock.monotonic_now());
                         drop(maintenance_guard);
@@ -140,14 +191,26 @@ where
                 }
             };
             readiness_drain += 1;
-            let pending = match protocol.prepare_request_in_place(clock.as_ref(), &mut wire) {
+            #[cfg(feature = "structural-metrics")]
+            let prepared = protocol.prepare_request_in_place_structural(
+                clock.as_ref(),
+                &mut wire,
+                &structural,
+            );
+            #[cfg(not(feature = "structural-metrics"))]
+            let prepared = protocol.prepare_request_in_place(clock.as_ref(), &mut wire);
+            let pending = match prepared {
                 Ok(pending) => pending,
                 Err(error) => {
                     record_udp_protocol_failure(&metrics, error);
                     continue;
                 }
             };
-            let established = match protocol.existing_capability(&pending) {
+            #[cfg(feature = "structural-metrics")]
+            let existing = protocol.existing_capability_structural(&pending, &structural);
+            #[cfg(not(feature = "structural-metrics"))]
+            let existing = protocol.existing_capability(&pending);
+            let established = match existing {
                 Ok(existing) => existing,
                 Err(error) => {
                     record_udp_protocol_failure(&metrics, error);
@@ -176,6 +239,8 @@ where
                             handle,
                             peer,
                             &clock,
+                            #[cfg(feature = "structural-metrics")]
+                            &structural,
                         );
                         match committed {
                             Ok(()) => record_udp_request_accepted(&metrics, wire_len),
@@ -206,9 +271,17 @@ where
             let mut admission_guard = Some(tokio::select! {
                 biased;
                 _ = &mut shutdown => break Ok(()),
-                guard = admission.lock() => guard,
+                guard = lock_admission(
+                    &admission,
+                    #[cfg(feature = "structural-metrics")]
+                    &structural,
+                ) => guard,
             });
-            let existing = match protocol.existing_capability(&pending) {
+            #[cfg(feature = "structural-metrics")]
+            let existing = protocol.existing_capability_structural(&pending, &structural);
+            #[cfg(not(feature = "structural-metrics"))]
+            let existing = protocol.existing_capability(&pending);
+            let existing = match existing {
                 Ok(existing) => existing,
                 Err(error) => {
                     record_udp_protocol_failure(&metrics, error);
@@ -264,6 +337,8 @@ where
                     peer,
                     clock.monotonic_now(),
                     inbound,
+                    #[cfg(feature = "structural-metrics")]
+                    &structural,
                 ) {
                     Ok(()) => metrics.udp_datagram(
                         Role::Server,
@@ -311,6 +386,8 @@ where
                             handle,
                             peer,
                             &clock,
+                            #[cfg(feature = "structural-metrics")]
+                            &structural,
                         );
                         match committed {
                             Ok(()) => record_udp_request_accepted(&metrics, wire_len),
@@ -412,9 +489,17 @@ where
                 let admission_guard = tokio::select! {
                     biased;
                     _ = &mut shutdown => break 'packets Ok(()),
-                    guard = admission.lock() => guard,
+                    guard = lock_admission(
+                        &admission,
+                        #[cfg(feature = "structural-metrics")]
+                        &structural,
+                    ) => guard,
                 };
-                let existing = match protocol.existing_capability(&pending) {
+                #[cfg(feature = "structural-metrics")]
+                let existing = protocol.existing_capability_structural(&pending, &structural);
+                #[cfg(not(feature = "structural-metrics"))]
+                let existing = protocol.existing_capability(&pending);
+                let existing = match existing {
                     Ok(existing) => existing,
                     Err(error) => {
                         record_udp_protocol_failure(&metrics, error);
@@ -443,6 +528,8 @@ where
                                 peer,
                                 clock.monotonic_now(),
                                 inbound,
+                                #[cfg(feature = "structural-metrics")]
+                                &structural,
                             ) {
                                 Ok(()) => metrics.udp_datagram(
                                     Role::Server,
@@ -470,6 +557,8 @@ where
                                             binding.handle,
                                             peer,
                                             &clock,
+                                            #[cfg(feature = "structural-metrics")]
+                                            &structural,
                                         );
                                         match committed {
                                             Ok(()) => {
@@ -534,6 +623,8 @@ where
                     &clock,
                     inbound,
                     outbound,
+                    #[cfg(feature = "structural-metrics")]
+                    &structural,
                 );
                 match committed {
                     Ok(_) => {

@@ -10,6 +10,8 @@ use ferrum2_shadowsocks::{
     BorrowedPendingUdpResponse, UdpClientSession, UdpPacketError, UdpResponseCommit,
 };
 use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 use tokio::time::Instant;
 
 use crate::run::egress::context::ClientOutboundContext;
@@ -41,6 +43,7 @@ pub(super) fn commit_single_udp_response(
     handle: UdpSessionHandle,
     meter_global_buffers: bool,
     clock: &(impl Clock + ?Sized),
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> Result<AccountedDatagram, UdpPlanResponseError> {
     let reservation = reserve_final_udp_response(
         &pending,
@@ -53,7 +56,14 @@ pub(super) fn commit_single_udp_response(
     let (datagram, commit) = pending.materialize().into_parts();
     reservation
         .commit_immediate_with(datagram, Instant::now(), || {
-            protocol.commit_response(commit, clock.monotonic_now())
+            #[cfg(feature = "structural-metrics")]
+            {
+                protocol.commit_response_structural(commit, clock.monotonic_now(), structural)
+            }
+            #[cfg(not(feature = "structural-metrics"))]
+            {
+                protocol.commit_response(commit, clock.monotonic_now())
+            }
         })
         .map_err(map_commit_error)
 }
@@ -69,6 +79,7 @@ pub(super) fn commit_composed_udp_response(
     handle: UdpSessionHandle,
     meter_global_buffers: bool,
     clock: &(impl Clock + ?Sized),
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> Result<AccountedDatagram, UdpPlanResponseError> {
     let reservation = reserve_final_udp_response(
         &pending,
@@ -87,7 +98,19 @@ pub(super) fn commit_composed_udp_response(
         .collect::<Vec<_>>();
     reservation
         .commit_immediate_with(datagram, Instant::now(), || {
-            UdpClientSession::commit_responses(&sessions, commits, clock.monotonic_now())
+            #[cfg(feature = "structural-metrics")]
+            {
+                UdpClientSession::commit_responses_structural(
+                    &sessions,
+                    commits,
+                    clock.monotonic_now(),
+                    structural,
+                )
+            }
+            #[cfg(not(feature = "structural-metrics"))]
+            {
+                UdpClientSession::commit_responses(&sessions, commits, clock.monotonic_now())
+            }
         })
         .map_err(map_commit_error)
 }

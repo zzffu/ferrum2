@@ -9,6 +9,8 @@ pub struct UdpReplayWindow {
     bits: [u64; REPLAY_WORDS],
     head: usize,
     last_advance_word_clears: u16,
+    #[cfg(feature = "structural-metrics")]
+    last_advance_bit_clears: u16,
 }
 
 const REPLAY_PHYSICAL_BITS: usize = REPLAY_WORDS * u64::BITS as usize;
@@ -22,6 +24,8 @@ impl UdpReplayWindow {
             bits: [0; REPLAY_WORDS],
             head: 0,
             last_advance_word_clears: 0,
+            #[cfg(feature = "structural-metrics")]
+            last_advance_bit_clears: 0,
         }
     }
 
@@ -36,6 +40,11 @@ impl UdpReplayWindow {
     /// commits, one for the common sequential advance, and at most 128.
     pub const fn last_advance_word_clears(&self) -> u16 {
         self.last_advance_word_clears
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(super) const fn last_advance_bit_clears(&self) -> u16 {
+        self.last_advance_bit_clears
     }
 
     /// Checks an ID without changing accepted state.
@@ -62,6 +71,10 @@ impl UdpReplayWindow {
     pub fn commit(&mut self, packet_id: u64) -> Result<(), UdpPacketError> {
         self.check(packet_id)?;
         self.last_advance_word_clears = 0;
+        #[cfg(feature = "structural-metrics")]
+        {
+            self.last_advance_bit_clears = 0;
+        }
         match self.highest {
             None => {
                 self.highest = Some(packet_id);
@@ -97,9 +110,17 @@ impl UdpReplayWindow {
             self.bits.fill(0);
             self.head = 0;
             self.last_advance_word_clears = REPLAY_WORDS as u16;
+            #[cfg(feature = "structural-metrics")]
+            {
+                self.last_advance_bit_clears = REPLAY_PHYSICAL_BITS as u16;
+            }
             return;
         }
         let advance = usize::try_from(advance).expect("replay advance is at most 8128");
+        #[cfg(feature = "structural-metrics")]
+        {
+            self.last_advance_bit_clears = advance as u16;
+        }
         self.head = self.head.wrapping_sub(advance) & REPLAY_PHYSICAL_MASK;
         let mut cleared = 0_u16;
         let mut logical = 0_usize;

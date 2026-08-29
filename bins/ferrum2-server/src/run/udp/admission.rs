@@ -14,6 +14,8 @@ use ferrum2_runtime::{
     UdpRuntimeLimits, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{UdpPacketError, UdpServer};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralHub, StructuralLocal};
 
 use crate::run::network::ServerNetworkSocketService;
 use crate::run::routing::ServerRouting;
@@ -89,6 +91,8 @@ where
     pub(super) wire: BytesMut,
     pub(super) maintenance: tokio::time::Interval,
     pub(super) _receive_wire: UdpBufferReservation,
+    #[cfg(feature = "structural-metrics")]
+    pub(super) structural: StructuralLocal,
 }
 
 #[derive(Clone)]
@@ -104,6 +108,8 @@ pub(in crate::run) struct ServerUdpShared {
     pub(in crate::run) direct_resolvers: Arc<[dns_egress::ServerDnsResolver]>,
     pub(in crate::run) registry: OwnerRegistry,
     pub(in crate::run) metrics: Arc<Metrics>,
+    #[cfg(feature = "structural-metrics")]
+    pub(in crate::run) structural: StructuralHub,
 }
 
 #[cfg(test)]
@@ -185,7 +191,11 @@ where
         direct_resolvers,
         registry,
         metrics,
+        #[cfg(feature = "structural-metrics")]
+        structural,
     } = shared;
+    #[cfg(feature = "structural-metrics")]
+    let structural = structural.local();
     let budget = sessions.buffer_budget();
     let response_codec = Arc::new(
         ResponseCodecPool::new(budget.clone(), config.max_sessions)
@@ -198,6 +208,8 @@ where
         clock: Arc::clone(&clock),
         codec: Arc::clone(&response_codec),
         metrics: Arc::clone(&metrics),
+        #[cfg(feature = "structural-metrics")]
+        structural: structural.clone(),
     };
     let default_resolver = direct_resolvers
         .first()
@@ -242,6 +254,8 @@ where
         wire,
         maintenance,
         _receive_wire: receive_wire,
+        #[cfg(feature = "structural-metrics")]
+        structural,
     })
 }
 

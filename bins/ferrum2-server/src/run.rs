@@ -463,13 +463,14 @@ where
                     .as_ref()
                     .cloned()
                     .ok_or(RunError::StartupProtocol)?;
+                #[cfg(feature = "structural-metrics")]
+                let root_dns_structural = structural.local();
                 roots.push(ProcessRoot::new(move || async move {
-                    let egress = Arc::new(
-                        dns_egress::ServerDnsEgress::new(root_physical_sockets)
-                            .with_outbound_resolvers(
-                                root_direct_resolvers.iter().cloned().collect(),
-                            ),
-                    );
+                    let egress = dns_egress::ServerDnsEgress::new(root_physical_sockets)
+                        .with_outbound_resolvers(root_direct_resolvers.iter().cloned().collect());
+                    #[cfg(feature = "structural-metrics")]
+                    let egress = egress.with_structural(root_dns_structural);
+                    let egress = Arc::new(egress);
                     let (resolver, mut owner) =
                         TaggedResolver::new(servers, timeout, max_inflight, egress)
                             .map_err(|_| RunError::StartupProtocol)?;
@@ -523,11 +524,17 @@ where
         if let Some(protocol) = udp_protocol {
             let limits = udp_runtime_limits(&udp_config).ok_or(RunError::StartupProtocol)?;
             let sessions = UdpSessionManager::new(limits, registry.clone());
+            #[cfg(feature = "structural-metrics")]
+            let mappings = Arc::new(UdpMappings::new_structural(
+                udp_config.max_sessions,
+                &structural,
+            ));
+            #[cfg(not(feature = "structural-metrics"))]
             let mappings = Arc::new(UdpMappings::new(udp_config.max_sessions));
             let admission = Arc::new(tokio::sync::Mutex::new(()));
             #[cfg(all(windows, not(test)))]
             if network_generation == ferrum2_config::NetworkGenerationMode::Dynamic {
-                udp_network_reset = Some(Arc::new(ServerUdpNetworkReset::new(
+                let reset = ServerUdpNetworkReset::new(
                     network_sockets
                         .coordinator()
                         .status()
@@ -535,7 +542,10 @@ where
                     sessions.clone(),
                     Arc::clone(&mappings),
                     Arc::clone(&admission),
-                )));
+                );
+                #[cfg(feature = "structural-metrics")]
+                let reset = reset.with_structural(structural.local());
+                udp_network_reset = Some(Arc::new(reset));
             }
             let shared = ServerUdpShared {
                 routing: Arc::clone(&routing),
@@ -549,6 +559,8 @@ where
                 direct_resolvers: Arc::clone(&direct_resolvers),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
+                #[cfg(feature = "structural-metrics")]
+                structural: structural.clone(),
             };
             for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
                 for _worker in 0..udp_config.receive_workers {

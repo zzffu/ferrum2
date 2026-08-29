@@ -15,6 +15,8 @@ use ferrum2_runtime::{
     UdpSessionHandle, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketError};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralCounter, StructuralLocal};
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
@@ -56,6 +58,10 @@ pub(in crate::run) struct ClientUdpAssociation {
     handle: UdpSessionHandle,
     meter_global_buffers: bool,
     live_ids: Arc<Mutex<HashSet<UdpSessionId>>>,
+    #[cfg(feature = "structural-metrics")]
+    structural: StructuralLocal,
+    #[cfg(feature = "structural-metrics")]
+    structural_pending: UdpAssociationStructural,
     upstream: ClientUdpUpstream,
     direct_target: Option<TargetAddr>,
     direct_response_policy: DirectUdpResponsePolicy,
@@ -69,6 +75,44 @@ pub(in crate::run) struct ClientUdpAssociation {
     _metered_fixed_capacity: Vec<UdpBufferReservation>,
     #[cfg(test)]
     io_fault: Option<Arc<UdpIoFaultPlan>>,
+}
+
+#[cfg(feature = "structural-metrics")]
+#[derive(Default)]
+struct UdpAssociationStructural {
+    request_wire_resize_bytes: u64,
+    request_wire_zero_bytes: u64,
+    payload_to_wire_copy_bytes: u64,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl UdpAssociationStructural {
+    fn record_resize(&mut self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.request_wire_resize_bytes = self.request_wire_resize_bytes.saturating_add(bytes);
+        self.request_wire_zero_bytes = self.request_wire_zero_bytes.saturating_add(bytes);
+    }
+
+    fn record_payload_copy(&mut self, bytes: usize) {
+        self.payload_to_wire_copy_bytes = self
+            .payload_to_wire_copy_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    fn publish(&mut self, structural: &StructuralLocal) {
+        structural.add(
+            StructuralCounter::UdpRequestWireResizeBytes,
+            std::mem::take(&mut self.request_wire_resize_bytes),
+        );
+        structural.add(
+            StructuralCounter::UdpRequestWireZeroBytes,
+            std::mem::take(&mut self.request_wire_zero_bytes),
+        );
+        structural.add(
+            StructuralCounter::UdpPayloadToWireCopyBytes,
+            std::mem::take(&mut self.payload_to_wire_copy_bytes),
+        );
+    }
 }
 
 enum ClientUdpUpstream {
@@ -241,20 +285,27 @@ fn encode_request_layer<T, R>(
     target: &TargetAddr,
     payload: &[u8],
     output: &mut BytesMut,
+    #[cfg(feature = "structural-metrics")] structural: &mut UdpAssociationStructural,
 ) -> Result<usize, UdpPacketError>
 where
     T: Clock + ?Sized,
     R: SecureRandom + ?Sized,
 {
     let exact_len = protocol.request_wire_len(target, payload.len(), 0)?;
+    #[cfg(feature = "structural-metrics")]
+    structural.record_resize(exact_len.saturating_sub(output.len()));
     output.resize(exact_len, 0);
     let wire_len = protocol.encode_request_parts(clock, random, target, payload, 0, output)?;
+    #[cfg(feature = "structural-metrics")]
+    structural.record_payload_copy(payload.len());
     debug_assert_eq!(wire_len, exact_len);
     Ok(wire_len)
 }
 
 impl Drop for ClientUdpAssociation {
     fn drop(&mut self) {
+        #[cfg(feature = "structural-metrics")]
+        self.structural_pending.publish(&self.structural);
         self.manager.remove(self.handle);
         if let (Some(protocol), Ok(mut live_ids)) = (&self.protocol, self.live_ids.lock()) {
             for leg in &protocol.legs {
@@ -294,6 +345,8 @@ impl ClientUdpAssociation {
             self.plan.as_ref().ok_or(())?.hops(),
             random,
             &self.live_ids,
+            #[cfg(feature = "structural-metrics")]
+            &self.structural,
         )?;
         self.protocol = Some(ClientUdpPlan { legs });
         Ok(())
@@ -327,6 +380,8 @@ impl ClientUdpAssociation {
             plan,
             protocol,
             proxy_buffers,
+            #[cfg(feature = "structural-metrics")]
+            structural_pending,
             ..
         } = self;
         let buffers = proxy_buffers
@@ -345,6 +400,8 @@ impl ClientUdpAssociation {
                 datagram.target(),
                 datagram.payload(),
                 upstream,
+                #[cfg(feature = "structural-metrics")]
+                structural_pending,
             );
         }
 
@@ -378,6 +435,8 @@ impl ClientUdpAssociation {
                     target,
                     payload,
                     upstream,
+                    #[cfg(feature = "structural-metrics")]
+                    structural_pending,
                 )?
             } else {
                 let payload = if layer + 1 == hops.len() {
@@ -392,6 +451,8 @@ impl ClientUdpAssociation {
                     target,
                     payload,
                     inner,
+                    #[cfg(feature = "structural-metrics")]
+                    structural_pending,
                 )?
             };
         }
@@ -414,6 +475,8 @@ impl ClientUdpAssociation {
             handle,
             meter_global_buffers,
             proxy_buffers,
+            #[cfg(feature = "structural-metrics")]
+            structural,
             ..
         } = self;
         let buffers = proxy_buffers
@@ -430,10 +493,23 @@ impl ClientUdpAssociation {
                 upstream.clear();
                 return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
             }
-            let pending = match plan.legs[0]
-                .protocol
-                .prepare_response_in_place(&egress.clock, upstream)
-            {
+            let pending_result = {
+                #[cfg(feature = "structural-metrics")]
+                {
+                    plan.legs[0].protocol.prepare_response_in_place_structural(
+                        &egress.clock,
+                        upstream,
+                        structural,
+                    )
+                }
+                #[cfg(not(feature = "structural-metrics"))]
+                {
+                    plan.legs[0]
+                        .protocol
+                        .prepare_response_in_place(&egress.clock, upstream)
+                }
+            };
+            let pending = match pending_result {
                 Ok(pending) => pending,
                 Err(error) => {
                     upstream.clear();
@@ -449,6 +525,8 @@ impl ClientUdpAssociation {
                 *handle,
                 *meter_global_buffers,
                 &egress.clock,
+                #[cfg(feature = "structural-metrics")]
+                structural,
             );
             if result.is_err() {
                 upstream.fill(0);
@@ -467,10 +545,25 @@ impl ClientUdpAssociation {
         let mut source_is_upstream = true;
         for layer in 0..hops.len() {
             if source_is_upstream {
-                let pending = match plan.legs[layer]
-                    .protocol
-                    .prepare_response_in_place(&egress.clock, upstream)
-                {
+                let pending_result = {
+                    #[cfg(feature = "structural-metrics")]
+                    {
+                        plan.legs[layer]
+                            .protocol
+                            .prepare_response_in_place_structural(
+                                &egress.clock,
+                                upstream,
+                                structural,
+                            )
+                    }
+                    #[cfg(not(feature = "structural-metrics"))]
+                    {
+                        plan.legs[layer]
+                            .protocol
+                            .prepare_response_in_place(&egress.clock, upstream)
+                    }
+                };
+                let pending = match pending_result {
                     Ok(pending) => pending,
                     Err(error) => {
                         upstream.clear();
@@ -488,6 +581,8 @@ impl ClientUdpAssociation {
                         *handle,
                         *meter_global_buffers,
                         &egress.clock,
+                        #[cfg(feature = "structural-metrics")]
+                        structural,
                     );
                     if result.is_err() {
                         upstream.fill(0);
@@ -516,10 +611,21 @@ impl ClientUdpAssociation {
                 upstream.fill(0);
                 upstream.clear();
             } else {
-                let pending = match plan.legs[layer]
-                    .protocol
-                    .prepare_response_in_place(&egress.clock, inner)
-                {
+                let pending_result = {
+                    #[cfg(feature = "structural-metrics")]
+                    {
+                        plan.legs[layer]
+                            .protocol
+                            .prepare_response_in_place_structural(&egress.clock, inner, structural)
+                    }
+                    #[cfg(not(feature = "structural-metrics"))]
+                    {
+                        plan.legs[layer]
+                            .protocol
+                            .prepare_response_in_place(&egress.clock, inner)
+                    }
+                };
+                let pending = match pending_result {
                     Ok(pending) => pending,
                     Err(error) => {
                         inner.clear();
@@ -537,6 +643,8 @@ impl ClientUdpAssociation {
                         *handle,
                         *meter_global_buffers,
                         &egress.clock,
+                        #[cfg(feature = "structural-metrics")]
+                        structural,
                     );
                     if result.is_err() {
                         inner.fill(0);
@@ -653,13 +761,8 @@ impl ClientUdpAssociation {
         T: Clock,
         R: SecureRandom,
     {
-        self.prepare_owned_application_request(
-            engine,
-            outbounds,
-            target,
-            BytesMut::from(payload),
-            now,
-        )
+        let mut payload = BytesMut::from(payload);
+        self.prepare_owned_application_request(engine, outbounds, target, &mut payload, now)
     }
 
     pub(in crate::run) fn prepare_owned_application_request<C, T, R>(
@@ -667,7 +770,7 @@ impl ClientUdpAssociation {
         engine: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
         target: TargetAddr,
-        payload: BytesMut,
+        payload: &mut BytesMut,
         now: Instant,
     ) -> Result<usize, UdpPlanResponseError>
     where
@@ -689,15 +792,17 @@ impl ClientUdpAssociation {
                 .map_err(UdpPlanResponseError::Runtime)?;
         }
         let payload_len = payload.len();
+        let payload_capacity = payload.capacity();
         let reservation = self
-            .reserve_application_datagram(payload.capacity())
+            .reserve_application_datagram(payload_capacity)
             .map_err(UdpPlanResponseError::Runtime)?;
-        let datagram = Datagram::new(target, payload, payload_len)
-            .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::Bounds))?;
+        let owned_payload = std::mem::take(payload);
+        let datagram = Datagram::new(target, owned_payload, payload_len)
+            .expect("validated owned UDP application payload");
         let datagram = self
             .commit_application_datagram(reservation, datagram, now)
             .map_err(UdpPlanResponseError::Runtime)?;
-        let wire_len = if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
+        let wire_result = if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
             self.direct_target = Some(datagram.datagram().target().clone());
             let direct_wire = self
                 .direct_wire
@@ -705,12 +810,23 @@ impl ClientUdpAssociation {
                 .expect("direct UDP association owns its request wire buffer");
             direct_wire.clear();
             direct_wire.extend_from_slice(datagram.datagram().payload());
-            payload_len
+            #[cfg(feature = "structural-metrics")]
+            self.structural_pending.record_payload_copy(payload_len);
+            Ok(payload_len)
         } else {
             self.encode_request(engine, outbounds, datagram.datagram())
-                .map_err(UdpPlanResponseError::Packet)?
+                .map_err(UdpPlanResponseError::Packet)
         };
-        Ok(wire_len)
+        let (datagram, reservation) = datagram.into_parts();
+        let (_, owned_payload) = datagram.into_parts();
+        let restored_payload = owned_payload.try_into_mut();
+        #[cfg(feature = "structural-metrics")]
+        self.structural_pending.publish(&self.structural);
+        *payload = restored_payload
+            .map_err(|_| UdpPlanResponseError::Packet(UdpPacketError::StateUnavailable))?;
+        debug_assert_eq!(payload.capacity(), payload_capacity);
+        drop(reservation);
+        wire_result
     }
 
     pub(in crate::run) fn prepare_application_response<C, T, R>(
@@ -981,7 +1097,7 @@ impl ClientUdpAssociation {
         engine: &ClientEgressEngine<C, T, R>,
         plan: Option<&EgressPlanSnapshot>,
         destination: TargetAddr,
-        packet: &[u8],
+        packet: &mut BytesMut,
         response_output: &mut BytesMut,
     ) -> io::Result<bool>
     where
@@ -1006,7 +1122,7 @@ impl ClientUdpAssociation {
         let expected_response_target = destination.clone();
         self.activate(engine).map_err(|_| runtime_error(()))?;
         let wire_len = self
-            .prepare_application_request(
+            .prepare_owned_application_request(
                 engine,
                 &engine.outbounds,
                 destination,
@@ -1041,10 +1157,9 @@ impl ClientUdpAssociation {
             let direct = matches!(self.upstream, ClientUdpUpstream::Direct { .. });
             let (datagram, reservation) = response.into_parts();
             let (_, payload) = datagram.into_parts();
-            let mut payload = match payload.try_into_mut() {
-                Ok(payload) => payload,
-                Err(payload) => payload.into(),
-            };
+            let mut payload = payload
+                .try_into_mut()
+                .map_err(|_| io::Error::other("DNS UDP response backing is not uniquely owned"))?;
             std::mem::swap(response_output, &mut payload);
             if direct {
                 self.restore_direct_wire(payload);
@@ -1201,6 +1316,10 @@ where
         handle,
         meter_global_buffers,
         live_ids: Arc::clone(&udp.live_ids),
+        #[cfg(feature = "structural-metrics")]
+        structural: egress.structural.clone(),
+        #[cfg(feature = "structural-metrics")]
+        structural_pending: UdpAssociationStructural::default(),
         upstream,
         direct_target: None,
         direct_response_policy,
@@ -1313,9 +1432,25 @@ mod buffer_tests {
         let mut inner = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
         let upstream_identity = upstream.as_ptr();
         let inner_identity = inner.as_ptr();
+        #[cfg(feature = "structural-metrics")]
+        let structural = ferrum2_structural::StructuralHub::new();
+        #[cfg(feature = "structural-metrics")]
+        let mut structural_pending = UdpAssociationStructural::default();
+        #[cfg(feature = "structural-metrics")]
+        let mut expected_resize = 0_u64;
+        #[cfg(feature = "structural-metrics")]
+        let mut expected_copy = 0_u64;
 
         for payload_len in [128, 8_192, 128] {
             let payload = vec![0x5a; payload_len];
+            #[cfg(feature = "structural-metrics")]
+            {
+                let exact = inner_protocol
+                    .request_wire_len(&application, payload_len, 0)
+                    .expect("inner layout");
+                expected_resize += u64::try_from(exact.saturating_sub(inner.len())).unwrap();
+                expected_copy += u64::try_from(payload_len).unwrap();
+            }
             let inner_len = encode_request_layer(
                 &mut inner_protocol,
                 &clock,
@@ -1323,6 +1458,8 @@ mod buffer_tests {
                 &application,
                 &payload,
                 &mut inner,
+                #[cfg(feature = "structural-metrics")]
+                &mut structural_pending,
             )
             .expect("inner exact encoding");
             assert_eq!(inner.len(), inner_len);
@@ -1333,6 +1470,14 @@ mod buffer_tests {
                     .expect("inner layout")
             );
 
+            #[cfg(feature = "structural-metrics")]
+            {
+                let exact = outer_protocol
+                    .request_wire_len(&next, inner_len, 0)
+                    .expect("outer layout");
+                expected_resize += u64::try_from(exact.saturating_sub(upstream.len())).unwrap();
+                expected_copy += u64::try_from(inner_len).unwrap();
+            }
             let outer_len = encode_request_layer(
                 &mut outer_protocol,
                 &clock,
@@ -1340,6 +1485,8 @@ mod buffer_tests {
                 &next,
                 &inner[..inner_len],
                 &mut upstream,
+                #[cfg(feature = "structural-metrics")]
+                &mut structural_pending,
             )
             .expect("outer exact encoding");
             assert_eq!(upstream.len(), outer_len);
@@ -1355,6 +1502,24 @@ mod buffer_tests {
             assert_eq!(upstream.capacity(), MAX_UDP_WIRE_LEN);
             assert_eq!(inner.as_ptr(), inner_identity);
             assert_eq!(upstream.as_ptr(), upstream_identity);
+        }
+
+        #[cfg(feature = "structural-metrics")]
+        {
+            structural_pending.publish(&structural.local());
+            let snapshot = structural.snapshot();
+            assert_eq!(
+                snapshot.get(ferrum2_structural::StructuralCounter::UdpRequestWireResizeBytes),
+                expected_resize,
+            );
+            assert_eq!(
+                snapshot.get(ferrum2_structural::StructuralCounter::UdpRequestWireZeroBytes),
+                expected_resize,
+            );
+            assert_eq!(
+                snapshot.get(ferrum2_structural::StructuralCounter::UdpPayloadToWireCopyBytes),
+                expected_copy,
+            );
         }
     }
 }

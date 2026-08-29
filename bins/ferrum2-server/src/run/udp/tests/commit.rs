@@ -54,6 +54,8 @@ async fn concurrent_same_session_rolls_back_losing_socket_before_protocol_commit
         direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
+        #[cfg(feature = "structural-metrics")]
+        structural: ferrum2_structural::StructuralHub::new(),
     };
     let socket_factory = gated_socket_factory();
     let first = prepare_udp_server_with_socket_factory(

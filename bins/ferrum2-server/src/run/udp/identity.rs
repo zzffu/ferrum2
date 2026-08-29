@@ -3,11 +3,17 @@ use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+#[cfg(feature = "structural-metrics")]
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "structural-metrics")]
+use std::time::Instant;
 
 use ferrum2_runtime::{UdpSessionHandle, UdpSessionManager};
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpServer};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{LockSite, StructuralHub, StructuralLocal};
 
 use crate::run::routing::ServerTerminalRoute;
 
@@ -60,9 +66,74 @@ pub(in crate::run) struct UdpMappings {
     trimming_retired: AtomicBool,
     next_retirement: AtomicU64,
     next_publication: AtomicU64,
+    #[cfg(feature = "structural-metrics")]
+    structural_shards: [StructuralLocal; UDP_MAPPING_SHARD_COUNT],
     #[cfg(test)]
     publish_phase_one_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
     pub(super) limit: usize,
+}
+
+#[cfg(feature = "structural-metrics")]
+struct StructuralMappingGuard<'a, T> {
+    guard: Option<std::sync::MutexGuard<'a, T>>,
+    structural: StructuralLocal,
+    wait_nanoseconds: u64,
+    acquired: Instant,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<T> Deref for StructuralMappingGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .as_deref()
+            .expect("structural mapping guard is live")
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<T> DerefMut for StructuralMappingGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .as_deref_mut()
+            .expect("structural mapping guard is live")
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<T> Drop for StructuralMappingGuard<'_, T> {
+    fn drop(&mut self) {
+        let hold_nanoseconds = duration_nanoseconds(self.acquired.elapsed());
+        drop(self.guard.take());
+        self.structural.lock(
+            LockSite::UdpMappings,
+            self.wait_nanoseconds,
+            hold_nanoseconds,
+        );
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+fn duration_nanoseconds(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "structural-metrics")]
+fn lock_mapping<'a, T>(
+    mutex: &'a Mutex<T>,
+    structural: &StructuralLocal,
+) -> StructuralMappingGuard<'a, T> {
+    let started = Instant::now();
+    let guard = mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    StructuralMappingGuard {
+        guard: Some(guard),
+        structural: structural.clone(),
+        wait_nanoseconds: duration_nanoseconds(started.elapsed()),
+        acquired: Instant::now(),
+    }
 }
 
 struct HandlePublication {
@@ -95,7 +166,24 @@ impl Drop for HandlePublicationWaiter<'_> {
 }
 
 impl UdpMappings {
+    #[cfg(any(not(feature = "structural-metrics"), test))]
     pub(in crate::run) fn new(limit: usize) -> Self {
+        #[cfg(feature = "structural-metrics")]
+        let mappings = Self::new_structural(limit, &StructuralHub::new());
+        #[cfg(not(feature = "structural-metrics"))]
+        let mappings = Self::new_inner(limit);
+        mappings
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(in crate::run) fn new_structural(limit: usize, structural: &StructuralHub) -> Self {
+        Self::new_inner(limit, structural)
+    }
+
+    fn new_inner(
+        limit: usize,
+        #[cfg(feature = "structural-metrics")] structural: &StructuralHub,
+    ) -> Self {
         Self {
             capability_shards: std::array::from_fn(|_| {
                 Mutex::new(CapabilityMappingShard::default())
@@ -107,6 +195,8 @@ impl UdpMappings {
             trimming_retired: AtomicBool::new(false),
             next_retirement: AtomicU64::new(1),
             next_publication: AtomicU64::new(1),
+            #[cfg(feature = "structural-metrics")]
+            structural_shards: std::array::from_fn(|_| structural.local()),
             #[cfg(test)]
             publish_phase_one_barrier: Mutex::new(None),
             limit,
@@ -295,8 +385,13 @@ impl UdpMappings {
     pub(super) fn reset_runtime(&self) -> usize {
         let mut publications = Vec::new();
         let mut removed_handles = 0;
-        for shard in &self.handle_shards {
+        for (index, shard) in self.handle_shards.iter().enumerate() {
+            #[cfg(not(feature = "structural-metrics"))]
+            let _ = index;
             {
+                #[cfg(feature = "structural-metrics")]
+                let mut shard = lock_mapping(shard, &self.structural_shards[index]);
+                #[cfg(not(feature = "structural-metrics"))]
                 let mut shard = shard.lock().expect("UDP mapping shard lock poisoned");
                 let handles = std::mem::take(&mut shard.by_handle);
                 removed_handles += handles.len();
@@ -319,7 +414,12 @@ impl UdpMappings {
         self.release_active_handles(removed_handles);
 
         let mut removed = 0;
-        for shard in &self.capability_shards {
+        for (index, shard) in self.capability_shards.iter().enumerate() {
+            #[cfg(not(feature = "structural-metrics"))]
+            let _ = index;
+            #[cfg(feature = "structural-metrics")]
+            let mut shard = lock_mapping(shard, &self.structural_shards[index]);
+            #[cfg(not(feature = "structural-metrics"))]
             let mut shard = shard.lock().expect("UDP mapping shard lock poisoned");
             let active = std::mem::take(&mut shard.by_capability);
             removed += active.len();
@@ -338,7 +438,16 @@ impl UdpMappings {
     }
 
     pub(super) fn reconcile_runtime(&self, sessions: &UdpSessionManager) {
-        for shard in &self.handle_shards {
+        for (index, shard) in self.handle_shards.iter().enumerate() {
+            #[cfg(not(feature = "structural-metrics"))]
+            let _ = index;
+            #[cfg(feature = "structural-metrics")]
+            let candidates: Vec<_> = lock_mapping(shard, &self.structural_shards[index])
+                .by_handle
+                .keys()
+                .copied()
+                .collect();
+            #[cfg(not(feature = "structural-metrics"))]
             let candidates: Vec<_> = shard
                 .lock()
                 .expect("UDP mapping shard lock poisoned")
@@ -361,7 +470,16 @@ impl UdpMappings {
         protocol: &UdpServer,
         now: ferrum2_crypto::MonotonicInstant,
     ) {
-        for shard in &self.capability_shards {
+        for (index, shard) in self.capability_shards.iter().enumerate() {
+            #[cfg(not(feature = "structural-metrics"))]
+            let _ = index;
+            #[cfg(feature = "structural-metrics")]
+            let candidates: Vec<_> = lock_mapping(shard, &self.structural_shards[index])
+                .orphaned
+                .keys()
+                .copied()
+                .collect();
+            #[cfg(not(feature = "structural-metrics"))]
             let candidates: Vec<_> = shard
                 .lock()
                 .expect("UDP mapping shard lock poisoned")
@@ -369,6 +487,13 @@ impl UdpMappings {
                 .keys()
                 .copied()
                 .collect();
+            #[cfg(feature = "structural-metrics")]
+            let removed = candidates.into_iter().filter(|capability| {
+                protocol
+                    .remove_session_structural(*capability, now, &self.structural_shards[index])
+                    .unwrap_or(false)
+            });
+            #[cfg(not(feature = "structural-metrics"))]
             let removed = candidates
                 .into_iter()
                 .filter(|capability| protocol.remove_session(*capability, now).unwrap_or(false));
@@ -436,7 +561,12 @@ impl UdpMappings {
     ) -> Option<ServerResponseCapability> {
         loop {
             let mut oldest = None;
-            for shard in &self.handle_shards {
+            for (index, shard) in self.handle_shards.iter().enumerate() {
+                #[cfg(not(feature = "structural-metrics"))]
+                let _ = index;
+                #[cfg(feature = "structural-metrics")]
+                let shard = lock_mapping(shard, &self.structural_shards[index]);
+                #[cfg(not(feature = "structural-metrics"))]
                 let shard = shard.lock().expect("UDP mapping shard lock poisoned");
                 let candidate = shard
                     .by_handle
@@ -537,10 +667,15 @@ impl UdpMappings {
             let oldest = self
                 .handle_shards
                 .iter()
-                .filter_map(|shard| {
+                .enumerate()
+                .filter_map(|(index, shard)| {
+                    #[cfg(not(feature = "structural-metrics"))]
+                    let _ = index;
+                    #[cfg(feature = "structural-metrics")]
+                    let shard = lock_mapping(shard, &self.structural_shards[index]);
+                    #[cfg(not(feature = "structural-metrics"))]
+                    let shard = shard.lock().expect("UDP mapping shard lock poisoned");
                     shard
-                        .lock()
-                        .expect("UDP mapping shard lock poisoned")
                         .retired
                         .iter()
                         .map(|(handle, retirement)| (*retirement, *handle))
@@ -607,8 +742,15 @@ impl UdpMappings {
     fn lock_capability_shard(
         &self,
         capability: ServerResponseCapability,
-    ) -> std::sync::MutexGuard<'_, CapabilityMappingShard> {
-        self.capability_shards[shard_index(&capability)]
+    ) -> impl std::ops::DerefMut<Target = CapabilityMappingShard> + '_ {
+        let index = shard_index(&capability);
+        #[cfg(feature = "structural-metrics")]
+        return lock_mapping(
+            &self.capability_shards[index],
+            &self.structural_shards[index],
+        );
+        #[cfg(not(feature = "structural-metrics"))]
+        self.capability_shards[index]
             .lock()
             .expect("UDP mapping shard lock poisoned")
     }
@@ -616,8 +758,12 @@ impl UdpMappings {
     fn lock_handle_shard(
         &self,
         handle: UdpSessionHandle,
-    ) -> std::sync::MutexGuard<'_, HandleMappingShard> {
-        self.handle_shards[shard_index(&handle)]
+    ) -> impl std::ops::DerefMut<Target = HandleMappingShard> + '_ {
+        let index = shard_index(&handle);
+        #[cfg(feature = "structural-metrics")]
+        return lock_mapping(&self.handle_shards[index], &self.structural_shards[index]);
+        #[cfg(not(feature = "structural-metrics"))]
+        self.handle_shards[index]
             .lock()
             .expect("UDP mapping shard lock poisoned")
     }
@@ -738,6 +884,29 @@ pub(in crate::run) struct ServerUdpNetworkReset {
     pub(super) sessions: UdpSessionManager,
     pub(super) mappings: Arc<UdpMappings>,
     pub(super) admission: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(feature = "structural-metrics")]
+    structural: Option<StructuralLocal>,
+}
+
+#[cfg(all(any(windows, test), feature = "structural-metrics"))]
+struct StructuralResetAdmissionGuard<'a> {
+    guard: Option<tokio::sync::MutexGuard<'a, ()>>,
+    structural: Option<StructuralLocal>,
+    wait_nanoseconds: u64,
+    acquired: Option<Instant>,
+}
+
+#[cfg(all(any(windows, test), feature = "structural-metrics"))]
+impl Drop for StructuralResetAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        let hold_nanoseconds = self
+            .acquired
+            .map_or(0, |acquired| duration_nanoseconds(acquired.elapsed()));
+        drop(self.guard.take());
+        if let Some(structural) = &self.structural {
+            structural.lock(LockSite::Admission, self.wait_nanoseconds, hold_nanoseconds);
+        }
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -753,7 +922,15 @@ impl ServerUdpNetworkReset {
             sessions,
             mappings,
             admission,
+            #[cfg(feature = "structural-metrics")]
+            structural: None,
         }
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(in crate::run) fn with_structural(mut self, structural: StructuralLocal) -> Self {
+        self.structural = Some(structural);
+        self
     }
 }
 
@@ -768,7 +945,23 @@ impl ferrum2_runtime::ResetNetwork for ServerUdpNetworkReset {
             // New mappings are published only from the slow path, which holds
             // this same gate. That serializes its two shard phases with reset;
             // established fast-path traffic only reads existing mappings.
-            let _admission = self.admission.lock().await;
+            #[cfg(feature = "structural-metrics")]
+            let admission_started = self.structural.as_ref().map(|_| Instant::now());
+            let admission = self.admission.lock().await;
+            #[cfg(feature = "structural-metrics")]
+            let _admission = {
+                let acquired = admission_started.map(|started| (started.elapsed(), Instant::now()));
+                StructuralResetAdmissionGuard {
+                    guard: Some(admission),
+                    structural: self.structural.clone(),
+                    wait_nanoseconds: acquired
+                        .as_ref()
+                        .map_or(0, |(wait, _)| duration_nanoseconds(*wait)),
+                    acquired: acquired.map(|(_, acquired)| acquired),
+                }
+            };
+            #[cfg(not(feature = "structural-metrics"))]
+            let _admission = admission;
             let current = self
                 .accepted_generation
                 .load(std::sync::atomic::Ordering::Acquire);

@@ -7,6 +7,56 @@ use tokio::time::timeout;
 
 use super::ChannelDnsDatagram;
 
+#[cfg(feature = "structural-metrics")]
+#[tokio::test]
+async fn structural_counters_report_fixed_leases_and_only_actual_slice_copies() {
+    use ferrum2_structural::{StructuralCounter, StructuralHub};
+
+    let structural = StructuralHub::new();
+    let local = structural.local();
+    let (io, mut outgoing, incoming) = ChannelDnsDatagram::bounded_structural(
+        NonZeroUsize::new(32).expect("non-zero limit"),
+        &local,
+    )
+    .into_parts();
+    assert_eq!(
+        structural
+            .snapshot()
+            .get(StructuralCounter::DnsUdpAllocations),
+        2,
+        "one fixed lease is allocated for each channel direction",
+    );
+
+    poll_fn(|context| io.poll_send(context, b"query"))
+        .await
+        .expect("instrumented query");
+    let query = outgoing.recv().await.expect("instrumented outgoing lease");
+    assert_eq!(query.as_slice(), b"query");
+    drop(query);
+
+    let mut response = incoming.lease().await.expect("instrumented response lease");
+    response
+        .extend_from_slice(b"answer")
+        .expect("bounded instrumented response");
+    incoming
+        .send(response)
+        .await
+        .expect("instrumented response");
+    let mut output = [0_u8; 16];
+    let received = poll_fn(|context| io.poll_recv(context, &mut output))
+        .await
+        .expect("instrumented receive");
+    assert_eq!(&output[..received], b"answer");
+
+    let snapshot = structural.snapshot();
+    assert_eq!(snapshot.get(StructuralCounter::DnsUdpAllocations), 2);
+    assert_eq!(
+        snapshot.get(StructuralCounter::DnsUdpCopyBytes),
+        u64::try_from(b"query".len() + b"answer".len()).expect("small copy count"),
+        "only the two required slice-oriented DnsDatagramIo boundaries copy bytes",
+    );
+}
+
 #[tokio::test]
 async fn session_observes_complete_outgoing_datagram_and_publishes_response() {
     let (io, mut outgoing, incoming) =

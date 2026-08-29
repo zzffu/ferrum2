@@ -675,6 +675,8 @@ where
             _udp_id_random,
         )
         .with_route_network(runtime_route_network(&config.route_network));
+        #[cfg(feature = "structural-metrics")]
+        let egress = egress.with_structural(structural.local());
         #[cfg(all(windows, not(test)))]
         let egress = if network_generation == ferrum2_config::NetworkGenerationMode::Dynamic {
             egress.with_shared_network_reset(&network_socket_service)?

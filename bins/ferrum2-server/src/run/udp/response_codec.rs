@@ -10,6 +10,8 @@ use ferrum2_runtime::{
     MAX_UDP_WIRE_DATAGRAM_BYTES, UdpBufferBudget, UdpBufferReservation, UdpRuntimeError,
 };
 use ferrum2_shadowsocks::{ServerResponseCapability, UdpPacketError, UdpServer};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{LockSite, StructuralLocal};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 pub(super) const MAX_RESPONSE_CODEC_SHARDS: usize = 4;
@@ -81,12 +83,45 @@ impl ResponseCodecPool {
         })
     }
 
+    #[cfg(any(not(feature = "structural-metrics"), test))]
     pub(super) async fn encode(
         self: &Arc<Self>,
         protocol: &UdpServer,
         capability: ServerResponseCapability,
         clock: &SystemClock,
         datagram: &ferrum2_core::Datagram,
+    ) -> Result<EncodedResponseWire, ResponseEncodeError> {
+        self.encode_inner(
+            protocol,
+            capability,
+            clock,
+            datagram,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )
+        .await
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(super) async fn encode_structural(
+        self: &Arc<Self>,
+        protocol: &UdpServer,
+        capability: ServerResponseCapability,
+        clock: &SystemClock,
+        datagram: &ferrum2_core::Datagram,
+        structural: &StructuralLocal,
+    ) -> Result<EncodedResponseWire, ResponseEncodeError> {
+        self.encode_inner(protocol, capability, clock, datagram, Some(structural))
+            .await
+    }
+
+    async fn encode_inner(
+        self: &Arc<Self>,
+        protocol: &UdpServer,
+        capability: ServerResponseCapability,
+        clock: &SystemClock,
+        datagram: &ferrum2_core::Datagram,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
     ) -> Result<EncodedResponseWire, ResponseEncodeError> {
         let shard_index = self.shard_index(capability);
         let shard = &self.shards[shard_index];
@@ -111,15 +146,57 @@ impl ResponseCodecPool {
             }
         };
         let mut response_wire = {
+            #[cfg(feature = "structural-metrics")]
+            let lock_started = structural.map(|_| Instant::now());
             let mut codec = shard
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            codec
+            #[cfg(feature = "structural-metrics")]
+            let lock_wait = lock_started.map(|started| started.elapsed());
+            #[cfg(feature = "structural-metrics")]
+            let hold_started = structural.map(|_| Instant::now());
+            let response_wire = codec
                 .available_wires
                 .pop()
-                .expect("response wire permit owns one fixed wire")
+                .expect("response wire permit owns one fixed wire");
+            drop(codec);
+            #[cfg(feature = "structural-metrics")]
+            if let Some(structural) = structural {
+                structural.lock(
+                    LockSite::ResponseCodec,
+                    duration_nanoseconds(lock_wait.unwrap_or_default()),
+                    duration_nanoseconds(
+                        hold_started
+                            .expect("instrumented codec hold has a start")
+                            .elapsed(),
+                    ),
+                );
+            }
+            response_wire
         };
+        #[cfg(feature = "structural-metrics")]
+        let encoded = if let Some(structural) = structural {
+            protocol.encode_response_structural(
+                capability,
+                clock,
+                &SystemRandom,
+                datagram,
+                0,
+                &mut response_wire.wire,
+                structural,
+            )
+        } else {
+            protocol.encode_response(
+                capability,
+                clock,
+                &SystemRandom,
+                datagram,
+                0,
+                &mut response_wire.wire,
+            )
+        };
+        #[cfg(not(feature = "structural-metrics"))]
         let encoded = protocol.encode_response(
             capability,
             clock,
@@ -135,12 +212,19 @@ impl ResponseCodecPool {
                     shard_index,
                     wire: Some(response_wire),
                     permit: Some(permit),
+                    #[cfg(feature = "structural-metrics")]
+                    structural: structural.cloned(),
                 },
                 wire_len: encoded.wire_len(),
                 peer: encoded.peer(),
             }),
             Err(error) => {
-                self.release(shard_index, response_wire);
+                self.release(
+                    shard_index,
+                    response_wire,
+                    #[cfg(feature = "structural-metrics")]
+                    structural,
+                );
                 drop(permit);
                 Err(ResponseEncodeError::Protocol(error))
             }
@@ -153,12 +237,36 @@ impl ResponseCodecPool {
         hasher.finish() as usize & (self.shards.len() - 1)
     }
 
-    fn release(&self, shard_index: usize, response_wire: ResponseWire) {
+    fn release(
+        &self,
+        shard_index: usize,
+        response_wire: ResponseWire,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) {
+        #[cfg(feature = "structural-metrics")]
+        let lock_started = structural.map(|_| Instant::now());
         let mut codec = self.shards[shard_index]
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(feature = "structural-metrics")]
+        let lock_wait = lock_started.map(|started| started.elapsed());
+        #[cfg(feature = "structural-metrics")]
+        let hold_started = structural.map(|_| Instant::now());
         codec.available_wires.push(response_wire);
+        drop(codec);
+        #[cfg(feature = "structural-metrics")]
+        if let Some(structural) = structural {
+            structural.lock(
+                LockSite::ResponseCodec,
+                duration_nanoseconds(lock_wait.unwrap_or_default()),
+                duration_nanoseconds(
+                    hold_started
+                        .expect("instrumented codec release has a hold start")
+                        .elapsed(),
+                ),
+            );
+        }
     }
 
     #[cfg(test)]
@@ -191,6 +299,11 @@ impl ResponseCodecPool {
     }
 }
 
+#[cfg(feature = "structural-metrics")]
+fn duration_nanoseconds(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 pub(super) fn response_codec_shards(maximum_sessions: usize) -> usize {
     let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
     let target = maximum_sessions
@@ -213,6 +326,8 @@ pub(super) struct ResponseWireLease {
     pub(super) shard_index: usize,
     pub(super) wire: Option<ResponseWire>,
     pub(super) permit: Option<OwnedSemaphorePermit>,
+    #[cfg(feature = "structural-metrics")]
+    pub(super) structural: Option<StructuralLocal>,
 }
 
 impl ResponseWireLease {
@@ -228,7 +343,12 @@ impl ResponseWireLease {
 impl Drop for ResponseWireLease {
     fn drop(&mut self) {
         if let Some(wire) = self.wire.take() {
-            self.pool.release(self.shard_index, wire);
+            self.pool.release(
+                self.shard_index,
+                wire,
+                #[cfg(feature = "structural-metrics")]
+                self.structural.as_ref(),
+            );
         }
         drop(self.permit.take());
     }

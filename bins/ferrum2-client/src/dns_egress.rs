@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::egress::{ClientEgressEngine, ClientRequestOrigin, ClientUdpAssociation};
+use bytes::BytesMut;
 use ferrum2_config::{DnsServerConfig, DnsTransport};
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
@@ -20,18 +22,15 @@ use ferrum2_dns::{
     DnsProxy,
 };
 use ferrum2_dns::{
-    BoxedDnsDatagramIo, BoxedDnsTcpIo, ChannelDnsDatagram, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
+    BoxedDnsDatagramIo, BoxedDnsTcpIo, ChannelDnsDatagram, DnsDatagramLease, DnsEgress,
+    DnsEgressResourceKind, DnsEgressTaskKind, DnsIoFuture, DnsTaskRegistrar, DnsUpstreamSpec,
+    DnsUpstreamTransport,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
+use ferrum2_shadowsocks::tokio::TokioFramed;
 #[cfg(test)]
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 
-use super::egress::{ClientEgressEngine, ClientRequestOrigin, ClientUdpAssociation};
-use ferrum2_shadowsocks::tokio::TokioFramed;
-
-type Packet = Vec<u8>;
 type DnsUdpPool = Arc<DnsUdpPoolState<IdleDnsUdp>>;
 
 struct DnsUdpPoolState<T> {
@@ -185,29 +184,62 @@ impl PooledDnsUdp {
         self.reusable = false;
     }
 
-    async fn relay_request(
+    async fn relay_into(
         &mut self,
         engine: &ClientEgressEngine,
         plan: Option<&EgressPlanSnapshot>,
         destination: TargetAddr,
-        packet: Vec<u8>,
-        responses: &mpsc::Sender<Packet>,
+        packet: &mut BytesMut,
+        response: &mut BytesMut,
     ) -> io::Result<bool> {
         self.begin_request();
         let idle = self.idle.as_mut().expect("pooled DNS UDP owner");
         if idle.key.target != destination {
             return Err(invalid_target());
         }
-        let (response, fully_reusable) = idle
+        let fully_reusable = idle
             .association
-            .relay(engine, plan, destination, packet)
+            .relay_dns_into(engine, plan, destination, packet, response)
             .await?;
-        responses
-            .send(response)
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "DNS UDP response closed"))?;
         self.reusable = fully_reusable;
         Ok(fully_reusable)
+    }
+
+    async fn relay_leased(
+        &mut self,
+        engine: &ClientEgressEngine,
+        plan: Option<&EgressPlanSnapshot>,
+        destination: TargetAddr,
+        mut packet: DnsDatagramLease,
+        mut response: DnsDatagramLease,
+    ) -> io::Result<(DnsDatagramLease, bool)> {
+        let fully_reusable = self
+            .relay_into(
+                engine,
+                plan,
+                destination,
+                packet.as_bytes_mut(),
+                response.as_bytes_mut(),
+            )
+            .await?;
+        drop(packet);
+        Ok((response, fully_reusable))
+    }
+
+    #[cfg(test)]
+    async fn relay_request(
+        &mut self,
+        engine: &ClientEgressEngine,
+        plan: Option<&EgressPlanSnapshot>,
+        destination: TargetAddr,
+        packet: &[u8],
+    ) -> io::Result<(bytes::BytesMut, bool)> {
+        let mut packet = BytesMut::from(packet);
+        let mut response = BytesMut::new();
+        let fully_reusable = self
+            .relay_into(engine, plan, destination, &mut packet, &mut response)
+            .await?;
+        Ok((response, fully_reusable))
     }
 }
 
@@ -314,51 +346,31 @@ impl DnsEgress for ClientDnsEgress {
                 reusable,
             };
 
-            let (io, mut outbound, inbound) = ChannelDnsDatagram::bounded(
-                NonZeroUsize::new(MAX_UDP_WIRE_LEN).expect("non-zero DNS UDP wire limit"),
-            )
-            .into_parts();
-            let (session_requests, mut requests) = mpsc::channel::<Packet>(1);
-            let (session_responses, mut responses) = mpsc::channel::<Packet>(1);
+            let maximum = NonZeroUsize::new(MAX_UDP_WIRE_LEN).expect("non-zero DNS UDP wire limit");
+            #[cfg(feature = "structural-metrics")]
+            let channel = ChannelDnsDatagram::bounded_structural(maximum, engine.structural());
+            #[cfg(not(feature = "structural-metrics"))]
+            let channel = ChannelDnsDatagram::bounded(maximum);
+            let (io, mut outbound, inbound) = channel.into_parts();
             let outbound_queue = tasks.own(DnsEgressResourceKind::Queue);
             let inbound_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let request_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let response_queue = tasks.own(DnsEgressResourceKind::Queue);
             let buffer = tasks.own(DnsEgressResourceKind::Buffer);
-            tasks.spawn(DnsEgressTaskKind::Bridge, async move {
-                let (_outbound_queue, _inbound_queue, _request_queue, _response_queue, _buffer) = (
-                    outbound_queue,
-                    inbound_queue,
-                    request_queue,
-                    response_queue,
-                    buffer,
-                );
+            tasks.spawn(DnsEgressTaskKind::Session, async move {
+                let (_outbound_queue, _inbound_queue, _buffer) =
+                    (outbound_queue, inbound_queue, buffer);
                 while let Some(packet) = outbound.recv().await {
-                    if session_requests.send(packet).await.is_err() {
+                    let Ok(response) = inbound.lease().await else {
                         break;
-                    }
-                    let Some(response) = responses.recv().await else {
+                    };
+                    let result = prepared
+                        .relay_leased(&engine, plan.as_ref(), target.clone(), packet, response)
+                        .await;
+                    let Ok((response, fully_reusable)) = result else {
                         break;
                     };
                     if inbound.send(response).await.is_err() {
                         break;
                     }
-                }
-            });
-            tasks.spawn(DnsEgressTaskKind::Session, async move {
-                while let Some(packet) = requests.recv().await {
-                    let reusable = prepared
-                        .relay_request(
-                            &engine,
-                            plan.as_ref(),
-                            target.clone(),
-                            packet,
-                            &session_responses,
-                        )
-                        .await;
-                    let Ok(fully_reusable) = reusable else {
-                        break;
-                    };
                     if !fully_reusable {
                         break;
                     }

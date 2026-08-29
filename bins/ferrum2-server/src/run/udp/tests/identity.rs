@@ -35,6 +35,11 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
         udp_runtime_limits(&config.udp).expect("capacity-one limits"),
         registry.clone(),
     );
+    #[cfg(feature = "structural-metrics")]
+    let structural = ferrum2_structural::StructuralHub::new();
+    #[cfg(feature = "structural-metrics")]
+    let mappings = Arc::new(UdpMappings::new_structural(1, &structural));
+    #[cfg(not(feature = "structural-metrics"))]
     let mappings = Arc::new(UdpMappings::new(1));
     let keys = aes_keys();
     let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
@@ -55,6 +60,8 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
+            #[cfg(feature = "structural-metrics")]
+            structural: structural.clone(),
         },
     )
     .expect("prepare production UDP root");
@@ -246,6 +253,18 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
         "frozen reject later forwarded",
     )
     .await;
+
+    #[cfg(feature = "structural-metrics")]
+    {
+        let snapshot = structural.snapshot();
+        use ferrum2_structural::StructuralCounter;
+        assert!(snapshot.get(StructuralCounter::AdmissionLockSamples) > 0);
+        assert!(snapshot.get(StructuralCounter::UdpMappingsLockSamples) > 0);
+        assert!(snapshot.get(StructuralCounter::UdpServerLockSamples) > 0);
+        assert!(snapshot.get(StructuralCounter::SessionShardLockSamples) > 0);
+        assert!(snapshot.get(StructuralCounter::UdpOwnedFastPathHits) > 0);
+        assert!(snapshot.get(StructuralCounter::UdpAesBodyCipherConstructions) > 0);
+    }
 
     stop.send(()).expect("stop production UDP root");
     assert_eq!(server.await.expect("production UDP task"), Ok(()));
@@ -842,7 +861,11 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
     );
     let mappings = Arc::new(UdpMappings::new(1));
     let admission = Arc::new(tokio::sync::Mutex::new(()));
+    #[cfg(feature = "structural-metrics")]
+    let structural = ferrum2_structural::StructuralHub::new();
     let hook = ServerUdpNetworkReset::new(1, manager.clone(), Arc::clone(&mappings), admission);
+    #[cfg(feature = "structural-metrics")]
+    let hook = hook.with_structural(structural.local());
     let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_092));
     let mut scratch = UdpPacketScratch::new();
     let mut client = UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("reset client");
@@ -942,6 +965,14 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
             inbound: 0,
             terminal: ServerTerminalRoute::Direct(0),
         })
+    );
+    #[cfg(feature = "structural-metrics")]
+    assert_eq!(
+        structural
+            .snapshot()
+            .get(ferrum2_structural::StructuralCounter::AdmissionLockSamples),
+        3,
+        "every reset attempt records the shared admission gate",
     );
 }
 

@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 use crate::run::context::ClientContext;
 use crate::run::observation::record_udp_drop;
 
-use super::endpoint::{SocksUdpEndpoint, SocksUdpPacket};
+use super::endpoint::{SocksUdpEndpoint, SocksUdpOwnedPacket, SocksUdpPacket};
 
 pub(super) async fn relay_hijacked_udp<IO>(
     endpoint: &mut SocksUdpEndpoint,
@@ -17,14 +17,24 @@ pub(super) async fn relay_hijacked_udp<IO>(
     context: &ClientContext,
     inbound: usize,
     proxy: &DnsProxy,
-    first: Option<(TargetAddr, Vec<u8>)>,
+    first: Option<SocksUdpOwnedPacket>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    if let Some((target, payload)) = first
-        && !answer_hijacked_udp(endpoint, cancellation, inbound, proxy, &target, &payload).await
-    {
-        return;
+    if let Some(packet) = first {
+        let answered = answer_hijacked_udp(
+            endpoint,
+            cancellation,
+            inbound,
+            proxy,
+            packet.target(),
+            packet.payload(),
+        )
+        .await;
+        endpoint.recycle(packet);
+        if !answered {
+            return;
+        }
     }
     let mut control_byte = [0; 1];
     loop {
@@ -40,11 +50,8 @@ pub(super) async fn relay_hijacked_udp<IO>(
             }
             received = endpoint.receive() => received,
         };
-        let (decoded, source_port) = match received {
-            Ok(SocksUdpPacket::Valid {
-                datagram,
-                source_port,
-            }) => (datagram, source_port),
+        let packet = match received {
+            Ok(SocksUdpPacket::Valid(packet)) => packet,
             Ok(SocksUdpPacket::WrongSource) => {
                 record_udp_drop(
                     context,
@@ -65,10 +72,18 @@ pub(super) async fn relay_hijacked_udp<IO>(
             }
             Err(_) => return,
         };
-        let target = decoded.to_target_addr();
-        let payload = decoded.payload().to_vec();
-        endpoint.accept(source_port);
-        if !answer_hijacked_udp(endpoint, cancellation, inbound, proxy, &target, &payload).await {
+        endpoint.accept(packet.source_port());
+        let answered = answer_hijacked_udp(
+            endpoint,
+            cancellation,
+            inbound,
+            proxy,
+            packet.target(),
+            packet.payload(),
+        )
+        .await;
+        endpoint.recycle(packet);
+        if !answered {
             return;
         }
     }

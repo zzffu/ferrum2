@@ -10,6 +10,8 @@ use ferrum2_runtime::MAX_RESOLVED_CANDIDATES;
 #[cfg(test)]
 use ferrum2_shadowsocks::{BufferObserver, FlowObserver};
 use ferrum2_shadowsocks::{ShadowsocksError, TransportIo};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralHub, StructuralLocal};
 #[cfg(test)]
 use std::net::SocketAddr;
 
@@ -43,6 +45,8 @@ pub(in crate::run) struct ClientEgressEngine<
     pub(in crate::run) application_resolver: ApplicationResolverAdapter,
     pub(in crate::run::egress) direct_resolvers: Arc<[Option<ApplicationResolverAdapter>]>,
     pub(in crate::run) route_network: RouteNetworkOptions,
+    #[cfg(feature = "structural-metrics")]
+    pub(in crate::run::egress) structural: StructuralLocal,
     network_reset_state: Arc<ClientEgressNetworkResetState>,
     network_reset_hub: ClientNetworkResetHub,
     _network_reset_registration: ClientNetworkResetTargetRegistration,
@@ -149,12 +153,25 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             application_resolver,
             direct_resolvers,
             route_network,
+            #[cfg(feature = "structural-metrics")]
+            structural: StructuralHub::new().local(),
             network_reset_state,
             network_reset_hub,
             _network_reset_registration: network_reset_registration,
             #[cfg(test)]
             udp_id_random,
         }
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(in crate::run) fn with_structural(mut self, structural: StructuralLocal) -> Self {
+        self.structural = structural;
+        self
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    pub(crate) const fn structural(&self) -> &StructuralLocal {
+        &self.structural
     }
 
     pub(in crate::run) fn with_route_network(mut self, route_network: RouteNetworkOptions) -> Self {

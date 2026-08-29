@@ -4,11 +4,17 @@ use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
+#[cfg(feature = "structural-metrics")]
+use ferrum2_crypto::MethodProfile;
 use ferrum2_crypto::{
     Clock, MethodKeyProvider, MonotonicInstant, SecureRandom, UdpAesSessionCipher, UdpCrypto,
     UdpOutboundSession, UdpSessionId,
 };
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralCounter, StructuralLocal};
 
+#[cfg(feature = "structural-metrics")]
+use super::UdpProtocolStructuralEvidence;
 use super::replay::UdpReplayWindow;
 use super::wire::{
     encode_packet, open_packet_borrowed, open_packet_in_place_borrowed, open_packet_owned,
@@ -79,6 +85,24 @@ impl UdpClientSession {
             outbound,
             associations: Mutex::new(ClientAssociations::default()),
         })
+    }
+
+    /// Creates an instrumented client direction for structural qualification.
+    #[cfg(feature = "structural-metrics")]
+    pub fn new_structural<K: MethodKeyProvider>(
+        keys: &K,
+        random: &(impl SecureRandom + ?Sized),
+        is_live: impl FnMut(&UdpSessionId) -> bool,
+        structural: &StructuralLocal,
+    ) -> Result<Self, UdpPacketError> {
+        let session = Self::new(keys, random, is_live)?;
+        if matches!(
+            session.crypto.profile(),
+            MethodProfile::Blake3Aes128Gcm2022 | MethodProfile::Blake3Aes256Gcm2022
+        ) {
+            structural.add(StructuralCounter::UdpAesBodyCipherConstructions, 1);
+        }
+        Ok(session)
     }
 
     /// Returns the opaque live ID for collision-safe process-local registration.
@@ -246,6 +270,22 @@ impl UdpClientSession {
         })
     }
 
+    /// Opens one exclusively owned response and records accepted structural work.
+    #[cfg(feature = "structural-metrics")]
+    pub fn prepare_response_in_place_structural<'a>(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: &'a mut BytesMut,
+        structural: &StructuralLocal,
+    ) -> Result<BorrowedPendingUdpResponse<'a>, UdpPacketError> {
+        let pending = self.prepare_response_in_place(clock, wire)?;
+        structural.add(StructuralCounter::UdpOwnedFastPathHits, 1);
+        if pending.aes_session_cipher.is_some() {
+            structural.add(StructuralCounter::UdpAesBodyCipherConstructions, 1);
+        }
+        Ok(pending)
+    }
+
     fn check_response_replay(
         &self,
         session_id: &UdpSessionId,
@@ -300,6 +340,36 @@ impl UdpClientSession {
         commit: UdpResponseCommit,
         now: MonotonicInstant,
     ) -> Result<(), UdpPacketError> {
+        #[cfg(feature = "structural-metrics")]
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        self.commit_response_inner(
+            commit,
+            now,
+            #[cfg(feature = "structural-metrics")]
+            &mut evidence,
+        )
+    }
+
+    /// Commits one response and publishes its structural work once.
+    #[cfg(feature = "structural-metrics")]
+    pub fn commit_response_structural(
+        &self,
+        commit: UdpResponseCommit,
+        now: MonotonicInstant,
+        structural: &StructuralLocal,
+    ) -> Result<(), UdpPacketError> {
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        let result = self.commit_response_inner(commit, now, &mut evidence);
+        evidence.publish(structural);
+        result
+    }
+
+    fn commit_response_inner(
+        &self,
+        commit: UdpResponseCommit,
+        now: MonotonicInstant,
+        #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
+    ) -> Result<(), UdpPacketError> {
         if commit.owner_id != *self.outbound.session_id() {
             return Err(UdpPacketError::Binding);
         }
@@ -314,6 +384,8 @@ impl UdpClientSession {
             commit.packet_id,
             commit.aes_session_cipher,
             now,
+            #[cfg(feature = "structural-metrics")]
+            evidence,
         )
     }
 
@@ -322,6 +394,37 @@ impl UdpClientSession {
         sessions: &[&Self],
         commits: Vec<UdpResponseCommit>,
         now: MonotonicInstant,
+    ) -> Result<(), UdpPacketError> {
+        #[cfg(feature = "structural-metrics")]
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        Self::commit_responses_inner(
+            sessions,
+            commits,
+            now,
+            #[cfg(feature = "structural-metrics")]
+            &mut evidence,
+        )
+    }
+
+    /// Atomically commits a response batch and publishes structural work once.
+    #[cfg(feature = "structural-metrics")]
+    pub fn commit_responses_structural(
+        sessions: &[&Self],
+        commits: Vec<UdpResponseCommit>,
+        now: MonotonicInstant,
+        structural: &StructuralLocal,
+    ) -> Result<(), UdpPacketError> {
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        let result = Self::commit_responses_inner(sessions, commits, now, &mut evidence);
+        evidence.publish(structural);
+        result
+    }
+
+    fn commit_responses_inner(
+        sessions: &[&Self],
+        commits: Vec<UdpResponseCommit>,
+        now: MonotonicInstant,
+        #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
     ) -> Result<(), UdpPacketError> {
         if sessions.is_empty() || sessions.len() > 8 || sessions.len() != commits.len() {
             return Err(UdpPacketError::Bounds);
@@ -364,6 +467,8 @@ impl UdpClientSession {
                 commit.packet_id,
                 commit.aes_session_cipher,
                 now,
+                #[cfg(feature = "structural-metrics")]
+                evidence,
             )?;
         }
         for (associations, replacement) in guards.iter_mut().zip(updated) {
@@ -406,6 +511,7 @@ fn commit_client_association(
     packet_id: u64,
     aes_session_cipher: Option<UdpAesSessionCipher>,
     now: MonotonicInstant,
+    #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
 ) -> Result<(), UdpPacketError> {
     if let Some(current) = associations
         .current
@@ -413,6 +519,8 @@ fn commit_client_association(
         .filter(|association| association.session_id == session_id)
     {
         current.replay.commit(packet_id)?;
+        #[cfg(feature = "structural-metrics")]
+        evidence.observe_replay(&current.replay);
         current.last_valid = now;
         return Ok(());
     }
@@ -422,12 +530,18 @@ fn commit_client_association(
         .filter(|association| association.session_id == session_id)
     {
         old.replay.commit(packet_id)?;
+        #[cfg(feature = "structural-metrics")]
+        evidence.observe_replay(&old.replay);
         old.last_valid = now;
         return Ok(());
     }
 
     let mut replay = UdpReplayWindow::new();
     replay.commit(packet_id)?;
+    #[cfg(feature = "structural-metrics")]
+    evidence.observe_replay(&replay);
+    #[cfg(feature = "structural-metrics")]
+    let cold_miss_cipher = aes_session_cipher.is_some();
     let new = ClientAssociation {
         // Normal cold misses move their single authenticated derivation here.
         // Only a cache-hit prepare that raced with rotation needs one new
@@ -439,6 +553,11 @@ fn commit_client_association(
         replay,
         last_valid: now,
     };
+    #[cfg(feature = "structural-metrics")]
+    if !cold_miss_cipher && new.aes_body_cipher.is_some() {
+        evidence.aes_body_cipher_constructions =
+            evidence.aes_body_cipher_constructions.saturating_add(1);
+    }
     match associations.current.take() {
         None => {
             associations.current = Some(new);
@@ -646,6 +765,33 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "structural-metrics")]
+    #[test]
+    fn structural_outbound_aes_constructs_once_and_chacha_constructs_none() {
+        let structural = ferrum2_structural::StructuralHub::new();
+        let local = structural.local();
+        UdpClientSession::new_structural(
+            &MethodSinglePskProvider::new(MethodPsk::aes128([0x47; 16])),
+            &SequenceRandom::new(0x48),
+            |_| false,
+            &local,
+        )
+        .expect("structural AES client");
+        UdpClientSession::new_structural(
+            &MethodSinglePskProvider::new(MethodPsk::chacha20_poly1305([0x49; 32])),
+            &SequenceRandom::new(0x4a),
+            |_| false,
+            &local,
+        )
+        .expect("structural ChaCha client");
+        assert_eq!(
+            structural
+                .snapshot()
+                .get(StructuralCounter::UdpAesBodyCipherConstructions),
+            1,
+        );
+    }
+
     #[test]
     fn inbound_response_aes_miss_moves_one_cipher_and_established_hits_derive_none() {
         fn exercise(keys: MethodSinglePskProvider, expects_aes: bool) {
@@ -760,6 +906,8 @@ mod tests {
         let aes_session =
             UdpClientSession::new(&aes_keys, &aes_random, |_| false).expect("AES association ID");
         let aes_crypto = udp_crypto(&aes_keys).expect("AES association crypto");
+        #[cfg(feature = "structural-metrics")]
+        let mut evidence = UdpProtocolStructuralEvidence::default();
         commit_client_association(
             &aes_crypto,
             &mut associations,
@@ -767,6 +915,8 @@ mod tests {
             0,
             None,
             MonotonicInstant::ZERO,
+            #[cfg(feature = "structural-metrics")]
+            &mut evidence,
         )
         .expect("cache-hit rotation derives one replacement AES token");
         assert!(
@@ -787,6 +937,8 @@ mod tests {
             0,
             None,
             MonotonicInstant::ZERO,
+            #[cfg(feature = "structural-metrics")]
+            &mut evidence,
         )
         .expect("ChaCha association needs no AES token");
     }

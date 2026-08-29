@@ -20,6 +20,9 @@ use std::time::Duration;
 use bytes::BytesMut;
 use thiserror::Error;
 
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralCounter, StructuralLocal};
+
 /// Hard maximum for one complete Shadowsocks UDP wire datagram.
 pub const MAX_UDP_WIRE_LEN: usize = 65_507;
 /// Number of packet IDs represented behind the highest accepted ID.
@@ -33,6 +36,41 @@ const PADDING_LEN: usize = 2;
 const COMMON_HEADER_LEN: usize = 1 + TIMESTAMP_LEN + PADDING_LEN;
 const RESPONSE_BINDING_LEN: usize = SESSION_ID_LEN;
 const REPLAY_WORDS: usize = 128;
+
+#[cfg(feature = "structural-metrics")]
+#[derive(Default)]
+struct UdpProtocolStructuralEvidence {
+    aes_body_cipher_constructions: u64,
+    replay_cleared_words: u64,
+    replay_cleared_bits: u64,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl UdpProtocolStructuralEvidence {
+    fn observe_replay(&mut self, replay: &UdpReplayWindow) {
+        self.replay_cleared_words = self
+            .replay_cleared_words
+            .saturating_add(u64::from(replay.last_advance_word_clears()));
+        self.replay_cleared_bits = self
+            .replay_cleared_bits
+            .saturating_add(u64::from(replay.last_advance_bit_clears()));
+    }
+
+    fn publish(self, structural: &StructuralLocal) {
+        structural.add(
+            StructuralCounter::UdpAesBodyCipherConstructions,
+            self.aes_body_cipher_constructions,
+        );
+        structural.add(
+            StructuralCounter::ReplayClearedWords,
+            self.replay_cleared_words,
+        );
+        structural.add(
+            StructuralCounter::ReplayClearedBits,
+            self.replay_cleared_bits,
+        );
+    }
+}
 
 /// Caller-reusable storage for the legacy borrowed-wire open path.
 ///

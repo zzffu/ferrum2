@@ -581,6 +581,7 @@ dependencies = [
  "ferrum2-dns",
  "ferrum2-shadowsocks",
  "ferrum2-socks5",
+ "ferrum2-structural",
  "hickory-proto",
  "rustls",
  "serde",

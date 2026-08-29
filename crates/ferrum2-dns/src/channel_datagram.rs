@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use bytes::BytesMut;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{StructuralCounter, StructuralLocal};
 use tokio::sync::mpsc;
 
 use crate::{BoxedDnsDatagramIo, DnsDatagramIo};
@@ -168,6 +170,8 @@ impl DnsDatagramLeaseSender {
 struct LeasePool {
     max_datagram_bytes: usize,
     state: Mutex<LeasePoolState>,
+    #[cfg(feature = "structural-metrics")]
+    structural: Option<StructuralLocal>,
 }
 
 struct LeasePoolState {
@@ -176,13 +180,22 @@ struct LeasePoolState {
 }
 
 impl LeasePool {
-    fn new(max_datagram_bytes: usize) -> Arc<Self> {
+    fn new(
+        max_datagram_bytes: usize,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Arc<Self> {
+        #[cfg(feature = "structural-metrics")]
+        if let Some(structural) = structural {
+            structural.add(StructuralCounter::DnsUdpAllocations, 1);
+        }
         Arc::new(Self {
             max_datagram_bytes,
             state: Mutex::new(LeasePoolState {
                 buffer: Some(BytesMut::with_capacity(max_datagram_bytes)),
                 waiter: None,
             }),
+            #[cfg(feature = "structural-metrics")]
+            structural: structural.cloned(),
         })
     }
 
@@ -210,6 +223,10 @@ impl LeasePool {
         buffer.clear();
         if buffer.capacity() > self.max_datagram_bytes {
             buffer = BytesMut::with_capacity(self.max_datagram_bytes);
+            #[cfg(feature = "structural-metrics")]
+            if let Some(structural) = &self.structural {
+                structural.add(StructuralCounter::DnsUdpAllocations, 1);
+            }
         }
         let waiter = {
             let Ok(mut state) = self.state.lock() else {
@@ -242,9 +259,37 @@ pub struct ChannelDnsDatagram {
 impl ChannelDnsDatagram {
     /// Creates a one-datagram-deep boundary with a closed maximum wire length.
     pub fn bounded(max_datagram_bytes: NonZeroUsize) -> Self {
+        Self::bounded_inner(
+            max_datagram_bytes,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )
+    }
+
+    /// Creates an instrumented one-datagram-deep boundary.
+    #[cfg(feature = "structural-metrics")]
+    pub fn bounded_structural(
+        max_datagram_bytes: NonZeroUsize,
+        structural: &StructuralLocal,
+    ) -> Self {
+        Self::bounded_inner(max_datagram_bytes, Some(structural))
+    }
+
+    fn bounded_inner(
+        max_datagram_bytes: NonZeroUsize,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Self {
         let max_datagram_bytes = max_datagram_bytes.get();
-        let outgoing_pool = LeasePool::new(max_datagram_bytes);
-        let incoming_pool = LeasePool::new(max_datagram_bytes);
+        let outgoing_pool = LeasePool::new(
+            max_datagram_bytes,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+        );
+        let incoming_pool = LeasePool::new(
+            max_datagram_bytes,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+        );
         let (outgoing_sender, outgoing) = mpsc::channel(CHANNEL_DEPTH);
         let (incoming_sender, incoming_receiver) = mpsc::channel(CHANNEL_DEPTH);
         Self {
@@ -254,6 +299,8 @@ impl ChannelDnsDatagram {
                 send: Mutex::new(SendState::default()),
                 incoming: Mutex::new(incoming_receiver),
                 max_datagram_bytes,
+                #[cfg(feature = "structural-metrics")]
+                structural: structural.cloned(),
             }),
             outgoing,
             incoming: DnsDatagramLeaseSender {
@@ -287,6 +334,8 @@ struct ChannelDatagramIo {
     send: Mutex<SendState>,
     incoming: Mutex<mpsc::Receiver<Packet>>,
     max_datagram_bytes: usize,
+    #[cfg(feature = "structural-metrics")]
+    structural: Option<StructuralLocal>,
 }
 
 impl DnsDatagramIo for ChannelDatagramIo {
@@ -299,6 +348,13 @@ impl DnsDatagramIo for ChannelDatagramIo {
                 if packet.len() <= self.max_datagram_bytes && packet.len() <= buffer.len() =>
             {
                 buffer[..packet.len()].copy_from_slice(&packet);
+                #[cfg(feature = "structural-metrics")]
+                if let Some(structural) = &self.structural {
+                    structural.add(
+                        StructuralCounter::DnsUdpCopyBytes,
+                        u64::try_from(packet.len()).unwrap_or(u64::MAX),
+                    );
+                }
                 Poll::Ready(Ok(packet.len()))
             }
             Poll::Ready(Some(_)) => Poll::Ready(Err(datagram_too_large_error())),
@@ -344,6 +400,13 @@ impl DnsDatagramIo for ChannelDatagramIo {
         lease
             .extend_from_slice(buffer)
             .expect("validated DNS datagram length");
+        #[cfg(feature = "structural-metrics")]
+        if let Some(structural) = &self.structural {
+            structural.add(
+                StructuralCounter::DnsUdpCopyBytes,
+                u64::try_from(buffer.len()).unwrap_or(u64::MAX),
+            );
+        }
         send.permit
             .take()
             .expect("DNS UDP reserved channel permit")

@@ -11,6 +11,8 @@ use ferrum2_shadowsocks::{
     MAX_UDP_WIRE_LEN, UdpClientSession, max_udp_payload_len_for_encoded_target,
 };
 use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 use tokio::time::Instant;
 
 use crate::run::egress::context::ClientOutboundContext;
@@ -22,6 +24,7 @@ pub(super) fn register_udp_plan(
     hops: &[usize],
     random: &(impl SecureRandom + ?Sized),
     live_ids: &Mutex<HashSet<UdpSessionId>>,
+    #[cfg(feature = "structural-metrics")] structural: &StructuralLocal,
 ) -> Result<Vec<ClientUdpLeg>, ()> {
     let mut live_ids = live_ids.lock().map_err(|_| ())?;
     let mut legs: Vec<ClientUdpLeg> = Vec::with_capacity(hops.len());
@@ -38,9 +41,18 @@ pub(super) fn register_udp_plan(
             }
             return Err(());
         };
-        let protocol = match UdpClientSession::new(&outbound.keys, random, |candidate| {
+        #[cfg(feature = "structural-metrics")]
+        let protocol = UdpClientSession::new_structural(
+            &outbound.keys,
+            random,
+            |candidate| live_ids.contains(candidate),
+            structural,
+        );
+        #[cfg(not(feature = "structural-metrics"))]
+        let protocol = UdpClientSession::new(&outbound.keys, random, |candidate| {
             live_ids.contains(candidate)
-        }) {
+        });
+        let protocol = match protocol {
             Ok(protocol) => protocol,
             Err(_) => {
                 for leg in &legs {

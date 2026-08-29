@@ -182,7 +182,6 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
             .activate(&context.egress)
             .expect("mutation activation");
         let pool = Arc::new(DnsUdpPoolState::default());
-        let (session_responses, mut responses) = mpsc::channel(1);
         let mut pooled = PooledDnsUdp {
             idle: Some(IdleDnsUdp {
                 key: DnsUdpPoolKey {
@@ -201,7 +200,10 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
             .expect("healthy mutation owner")
             .association
             .handle();
-        let payload = vec![0x10];
+        let mut payload = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
+        payload.extend_from_slice(&[0x10]);
+        let payload_state = (payload.as_ptr(), payload.len(), payload.capacity());
+        let mut response = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
         let echo = async {
             let mut wire = [0_u8; MAX_UDP_WIRE_LEN];
             let (length, peer) = upstream
@@ -214,12 +216,12 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                 .expect("healthy mutation upstream response");
         };
         let (reusable, (), ()) = tokio::join!(
-            pooled.relay_request(
+            pooled.relay_into(
                 &context.egress,
                 Some(&plan),
                 numeric_target.clone(),
-                payload.clone(),
-                &session_responses,
+                &mut payload,
+                &mut response,
             ),
             relay_dns_udp_hop_once(
                 &server,
@@ -236,8 +238,12 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
             echo,
         );
         let fully_reusable = reusable.expect("healthy mutation relay");
-        let response = responses.try_recv().expect("healthy mutation response");
         assert_eq!(response, payload, "{case}");
+        assert_eq!(
+            (payload.as_ptr(), payload.len(), payload.capacity()),
+            payload_state,
+            "{case} must return the exact DNS request lease backing"
+        );
         assert!(fully_reusable, "{case} healthy mutation tainted");
         drop(pooled);
         assert_eq!(
@@ -286,8 +292,7 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                             &context.egress,
                             Some(&plan),
                             numeric_target.clone(),
-                            vec![0x21],
-                            &session_responses,
+                            &[0x21],
                         )
                         .await
                         .is_err(),
@@ -327,8 +332,7 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                         &context.egress,
                         Some(&plan),
                         numeric_target.clone(),
-                        payload.clone(),
-                        &session_responses,
+                        &payload,
                     ),
                     relay_dns_udp_hop_once(
                         &server,
@@ -344,10 +348,8 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                     ),
                     echo,
                 );
-                let fully_reusable = result.expect("valid response after authentication discard");
-                let response = responses
-                    .try_recv()
-                    .expect("valid response after authentication discard");
+                let (response, fully_reusable) =
+                    result.expect("valid response after authentication discard");
                 assert_eq!(response, payload);
                 assert!(!fully_reusable, "{case} discard left association reusable");
             }
@@ -359,8 +361,7 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                             &context.egress,
                             Some(&plan),
                             numeric_target.clone(),
-                            vec![0x23],
-                            &session_responses,
+                            &[0x23],
                         ),
                     )
                     .await
@@ -452,8 +453,7 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                     &context.egress,
                     Some(&plan),
                     numeric_target.clone(),
-                    payload.clone(),
-                    &session_responses,
+                    &payload,
                 ),
                 relay_dns_udp_hop_once(
                     &server,
@@ -469,8 +469,7 @@ async fn dns_udp_pool_reuses_only_exact_success_and_discards_failed_or_partial_s
                 ),
                 echo,
             );
-            let fully_reusable = reusable.expect("following valid relay");
-            let response = responses.try_recv().expect("following valid response");
+            let (response, fully_reusable) = reusable.expect("following valid relay");
             assert_eq!(response, payload, "{case}");
             assert!(fully_reusable, "{case} healthy association tainted");
             drop(healthy);

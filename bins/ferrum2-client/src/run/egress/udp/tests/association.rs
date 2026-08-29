@@ -1,5 +1,80 @@
 use super::*;
 
+#[cfg(feature = "structural-metrics")]
+#[tokio::test]
+async fn request_structural_work_is_visible_before_the_live_association_drops() {
+    use ferrum2_structural::{StructuralCounter, StructuralHub};
+
+    let proxy_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("proxy bind");
+    let outbounds = crate::run::egress::prepare_client_outbounds(vec![
+        ferrum2_config::ClientOutboundConfig::Shadowsocks {
+            server: proxy_socket.local_addr().expect("proxy address"),
+            psk: Arc::new(default_test_psk()),
+            dial_options: Default::default(),
+        },
+    ])
+    .expect("proxy outbound");
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(
+            8,
+            ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES,
+            ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT,
+        )
+        .expect("test limits"),
+        OwnerRegistry::new(),
+    );
+    let structural = StructuralHub::new();
+    let engine = ClientEgressEngine::new(
+        outbounds,
+        TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+        ferrum2_crypto::SystemClock::new(),
+        ferrum2_crypto::SystemRandom,
+        (Duration::from_secs(1), Duration::from_secs(1)),
+        Some(ClientUdpContext {
+            manager,
+            live_ids: Arc::new(Mutex::new(HashSet::new())),
+        }),
+        None,
+    )
+    .with_structural(structural.local());
+    let target = TargetAddr::ip("192.0.2.25:53".parse().expect("target address")).expect("target");
+    let mut association = engine
+        .prepare_udp_for_ingress(
+            ClientRequestOrigin::Socks,
+            0,
+            Some(ferrum2_core::route::EgressPlanHandle::direct(0).snapshot_owned()),
+            Some(&target),
+        )
+        .await
+        .expect("proxy association");
+    association.activate(&engine).expect("proxy activation");
+    let payload = b"visible while live";
+    association
+        .prepare_application_request(&engine, &engine.outbounds, target, payload, Instant::now())
+        .unwrap_or_else(|_| panic!("instrumented request"));
+
+    let snapshot = structural.snapshot();
+    assert!(
+        snapshot.get(StructuralCounter::UdpRequestWireResizeBytes) > 0,
+        "a metrics scrape must not depend on association teardown",
+    );
+    assert_eq!(
+        snapshot.get(StructuralCounter::UdpRequestWireResizeBytes),
+        snapshot.get(StructuralCounter::UdpRequestWireZeroBytes),
+    );
+    assert_eq!(
+        snapshot.get(StructuralCounter::UdpPayloadToWireCopyBytes),
+        u64::try_from(payload.len()).expect("small payload"),
+    );
+    assert_eq!(
+        snapshot.get(StructuralCounter::UdpAesBodyCipherConstructions),
+        1,
+        "the client outbound AES cache is constructed once at activation",
+    );
+}
+
 #[tokio::test]
 async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_gate() {
     let registry = OwnerRegistry::new();
@@ -13,6 +88,8 @@ async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_ga
     let budget = manager.buffer_budget();
     let held_budget = exhaust_budget(&budget, budget_limit);
     assert_eq!(budget.reserved_bytes(), budget_limit);
+    #[cfg(feature = "structural-metrics")]
+    let structural = ferrum2_structural::StructuralHub::new();
     let engine = ClientEgressEngine::new(
         vec![ClientOutboundContext::direct(
             ferrum2_net::DialOptions::default(),
@@ -28,6 +105,8 @@ async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_ga
         }),
         None,
     );
+    #[cfg(feature = "structural-metrics")]
+    let engine = engine.with_structural(structural.local());
     let target_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("TUN target bind");
@@ -62,6 +141,14 @@ async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_ga
     assert!(
         association.direct_peers.is_empty(),
         "TUN sends must not consume the SOCKS/DNS outstanding queue"
+    );
+    #[cfg(feature = "structural-metrics")]
+    assert_eq!(
+        structural
+            .snapshot()
+            .get(ferrum2_structural::StructuralCounter::UdpPayloadToWireCopyBytes),
+        u64::try_from(UDP_SESSION_QUEUE_DEPTH + 1).expect("bounded direct payload total"),
+        "every one-byte direct payload is copied once into the reusable wire",
     );
 
     let mut wire = [0_u8; 8];

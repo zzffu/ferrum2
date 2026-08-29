@@ -337,9 +337,9 @@ final = "upstream"
     let dns_held = resolver.stats();
     assert_eq!(dns_held.queries, 1);
     assert_eq!(dns_held.udp_sockets, 1);
-    assert_eq!(dns_held.bridge_tasks, 1);
+    assert_eq!(dns_held.bridge_tasks, 0);
     assert_eq!(dns_held.sessions, 1);
-    assert_eq!(dns_held.queues, 4);
+    assert_eq!(dns_held.queues, 2);
     assert_eq!(dns_held.buffers, 1);
     assert_eq!(
         context

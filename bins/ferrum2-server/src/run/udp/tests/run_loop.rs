@@ -38,6 +38,8 @@ async fn listener_readiness_drain_yields_at_32_with_shutdown_priority() {
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
+            #[cfg(feature = "structural-metrics")]
+            structural: ferrum2_structural::StructuralHub::new(),
         },
     )
     .expect("prepared listener drain root");
@@ -135,6 +137,8 @@ async fn udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup()
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
+            #[cfg(feature = "structural-metrics")]
+            structural: ferrum2_structural::StructuralHub::new(),
         };
         let fatal_shared = shared.clone();
         let active_root =

@@ -82,6 +82,8 @@ async fn slow_socket_opens_for_distinct_sessions_run_concurrently() {
         direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
         registry: registry.clone(),
         metrics,
+        #[cfg(feature = "structural-metrics")]
+        structural: ferrum2_structural::StructuralHub::new(),
     };
     let socket_factory = gated_socket_factory();
     let first = prepare_udp_server_with_socket_factory(
@@ -219,6 +221,8 @@ async fn established_direct_progresses_while_process_gate_blocks_a_new_identity(
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::new(Metrics::new()),
+            #[cfg(feature = "structural-metrics")]
+            structural: ferrum2_structural::StructuralHub::new(),
         },
         socket_factory.clone(),
     )
@@ -321,6 +325,8 @@ async fn shutdown_cancels_stalled_socket_open_and_rolls_back_provisional_session
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::new(Metrics::new()),
+            #[cfg(feature = "structural-metrics")]
+            structural: ferrum2_structural::StructuralHub::new(),
         },
         socket_factory.clone(),
     )
@@ -407,6 +413,8 @@ async fn post_open_session_limit_race_rolls_back_provisional_resources() {
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
+            #[cfg(feature = "structural-metrics")]
+            structural: ferrum2_structural::StructuralHub::new(),
         },
         socket_factory.clone(),
     )
@@ -545,6 +553,8 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
             direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
             registry: registry.clone(),
             metrics: Arc::new(Metrics::new()),
+            #[cfg(feature = "structural-metrics")]
+            structural: ferrum2_structural::StructuralHub::new(),
         },
         socket_factory.clone(),
     )

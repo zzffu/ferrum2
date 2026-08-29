@@ -9,6 +9,8 @@ use ferrum2_runtime::{
     AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, UdpSessionHandle,
 };
 use ferrum2_shadowsocks::UdpServer;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::StructuralLocal;
 use tokio::net::UdpSocket;
 
 use crate::run::dns_egress;
@@ -63,6 +65,8 @@ pub(super) struct ServerUdpResponseHandler<L> {
     pub(super) clock: Arc<SystemClock>,
     pub(super) codec: Arc<ResponseCodecPool>,
     pub(super) metrics: Arc<Metrics>,
+    #[cfg(feature = "structural-metrics")]
+    pub(super) structural: StructuralLocal,
 }
 
 impl<L> DirectUdpPacketHandler for ServerUdpResponseHandler<L>
@@ -81,16 +85,22 @@ where
             .capability(session)
             .await
             .ok_or(UdpAdapterError)?;
-        let encoded = match self
-            .codec
-            .encode(
-                &self.protocol,
-                capability,
-                self.clock.as_ref(),
-                response.datagram(),
-            )
-            .await
-        {
+        #[cfg(feature = "structural-metrics")]
+        let encoded = self.codec.encode_structural(
+            &self.protocol,
+            capability,
+            self.clock.as_ref(),
+            response.datagram(),
+            &self.structural,
+        );
+        #[cfg(not(feature = "structural-metrics"))]
+        let encoded = self.codec.encode(
+            &self.protocol,
+            capability,
+            self.clock.as_ref(),
+            response.datagram(),
+        );
+        let encoded = match encoded.await {
             Ok(encoded) => encoded,
             Err(ResponseEncodeError::Protocol(error)) => {
                 self.mappings.invalidate_handle(session);

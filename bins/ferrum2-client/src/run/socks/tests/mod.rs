@@ -22,6 +22,7 @@ use ferrum2_shadowsocks::{UdpPacketError, UdpPacketScratch};
 
 mod boundaries;
 mod chain;
+mod endpoint;
 mod lifecycle;
 mod listener;
 mod routing;

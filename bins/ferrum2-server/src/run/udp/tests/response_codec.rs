@@ -73,6 +73,8 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
         send_gate: Arc::clone(&send_gate),
         sent: Arc::clone(&sent),
     });
+    #[cfg(feature = "structural-metrics")]
+    let structural = ferrum2_structural::StructuralHub::new();
     let handler = Arc::new(ServerUdpResponseHandler {
         listener,
         protocol: Arc::clone(&protocol),
@@ -82,6 +84,8 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
             ResponseCodecPool::new(manager.buffer_budget(), 2).expect("response codec"),
         ),
         metrics: Arc::new(Metrics::new()),
+        #[cfg(feature = "structural-metrics")]
+        structural: structural.local(),
     });
 
     let first_task = tokio::spawn({
@@ -170,6 +174,13 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
         fixed_codec_capacity,
         "steady-state responses reuse the fixed accounted shard wires"
     );
+
+    #[cfg(feature = "structural-metrics")]
+    {
+        let snapshot = structural.snapshot();
+        assert!(snapshot.get(ferrum2_structural::StructuralCounter::ResponseCodecLockSamples) >= 3);
+        assert!(snapshot.get(ferrum2_structural::StructuralCounter::UdpPayloadToWireCopyBytes) > 0);
+    }
 
     manager.cancel_all();
     drop(handler);

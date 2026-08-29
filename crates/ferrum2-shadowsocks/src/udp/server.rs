@@ -2,16 +2,26 @@ use std::collections::{HashMap, HashSet, hash_map::RandomState};
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::net::SocketAddr;
+#[cfg(feature = "structural-metrics")]
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "structural-metrics")]
+use std::time::Instant;
 
 use bytes::BytesMut;
 use ferrum2_core::Datagram;
+#[cfg(feature = "structural-metrics")]
+use ferrum2_crypto::MethodProfile;
 use ferrum2_crypto::{
     Clock, MethodKeyProvider, MonotonicInstant, SecureRandom, UdpAesSessionCipher, UdpCrypto,
     UdpOutboundSession, UdpSessionId,
 };
+#[cfg(feature = "structural-metrics")]
+use ferrum2_structural::{LockSite, StructuralCounter, StructuralLocal};
 
+#[cfg(feature = "structural-metrics")]
+use super::UdpProtocolStructuralEvidence;
 use super::replay::UdpReplayWindow;
 use super::wire::{
     encode_packet, open_packet, open_packet_in_place, open_packet_owned, udp_crypto,
@@ -166,6 +176,78 @@ const UDP_SERVER_SHARD_COUNT: usize = 16;
 const UDP_SERVER_SHARD_MASK: usize = UDP_SERVER_SHARD_COUNT - 1;
 const _: () = assert!(UDP_SERVER_SHARD_COUNT.is_power_of_two());
 
+#[cfg(feature = "structural-metrics")]
+struct StructuralMutexGuard<'a, T> {
+    guard: Option<std::sync::MutexGuard<'a, T>>,
+    structural: Option<StructuralLocal>,
+    site: LockSite,
+    wait_nanoseconds: u64,
+    acquired: Option<Instant>,
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<T> Deref for StructuralMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .as_deref()
+            .expect("structural protocol guard is live")
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<T> DerefMut for StructuralMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .as_deref_mut()
+            .expect("structural protocol guard is live")
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+impl<T> Drop for StructuralMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        let hold_nanoseconds = self
+            .acquired
+            .map_or(0, |acquired| duration_nanoseconds(acquired.elapsed()));
+        drop(self.guard.take());
+        if let Some(structural) = &self.structural {
+            structural.lock(self.site, self.wait_nanoseconds, hold_nanoseconds);
+        }
+    }
+}
+
+#[cfg(feature = "structural-metrics")]
+fn duration_nanoseconds(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "structural-metrics")]
+fn lock_protocol<'a, T>(
+    mutex: &'a Mutex<T>,
+    structural: Option<&StructuralLocal>,
+    site: LockSite,
+) -> Result<StructuralMutexGuard<'a, T>, UdpPacketError> {
+    let started = structural.map(|_| Instant::now());
+    let guard = mutex.lock().map_err(|_| UdpPacketError::StateUnavailable)?;
+    let acquired = started.map(|started| (started.elapsed(), Instant::now()));
+    Ok(StructuralMutexGuard {
+        guard: Some(guard),
+        structural: structural.cloned(),
+        site,
+        wait_nanoseconds: acquired
+            .as_ref()
+            .map_or(0, |(wait, _)| duration_nanoseconds(*wait)),
+        acquired: acquired.map(|(_, acquired)| acquired),
+    })
+}
+
+#[cfg(not(feature = "structural-metrics"))]
+fn lock_protocol<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, UdpPacketError> {
+    mutex.lock().map_err(|_| UdpPacketError::StateUnavailable)
+}
+
 /// Non-secret snapshot of one live server generation.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ServerSessionSnapshot {
@@ -247,8 +329,21 @@ impl UdpServer {
             scratch,
             REQUEST_TYPE,
             None,
-            |session_id| self.cached_request_cipher(session_id),
-            |session_id, packet_id| self.check_request_replay(session_id, packet_id),
+            |session_id| {
+                self.cached_request_cipher(
+                    session_id,
+                    #[cfg(feature = "structural-metrics")]
+                    None,
+                )
+            },
+            |session_id, packet_id| {
+                self.check_request_replay(
+                    session_id,
+                    packet_id,
+                    #[cfg(feature = "structural-metrics")]
+                    None,
+                )
+            },
         )?;
         Ok(PendingUdpRequest {
             session_id: opened.session_id,
@@ -274,9 +369,20 @@ impl UdpServer {
             wire,
             REQUEST_TYPE,
             None,
-            |session_id| self.cached_request_cipher(session_id),
+            |session_id| {
+                self.cached_request_cipher(
+                    session_id,
+                    #[cfg(feature = "structural-metrics")]
+                    None,
+                )
+            },
         )?;
-        self.check_request_replay(opened.session_id(), opened.packet_id())?;
+        self.check_request_replay(
+            opened.session_id(),
+            opened.packet_id(),
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )?;
         let opened = opened.into_opened_packet()?;
         Ok(PendingUdpRequest {
             session_id: opened.session_id,
@@ -297,14 +403,57 @@ impl UdpServer {
         clock: &(impl Clock + ?Sized),
         wire: &mut BytesMut,
     ) -> Result<PendingUdpRequest, UdpPacketError> {
+        self.prepare_request_in_place_inner(
+            clock,
+            wire,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )
+    }
+
+    /// Destructively opens one owned request and records accepted structural work.
+    #[cfg(feature = "structural-metrics")]
+    pub fn prepare_request_in_place_structural(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: &mut BytesMut,
+        structural: &StructuralLocal,
+    ) -> Result<PendingUdpRequest, UdpPacketError> {
+        let pending = self.prepare_request_in_place_inner(clock, wire, Some(structural))?;
+        structural.add(StructuralCounter::UdpOwnedFastPathHits, 1);
+        if pending.aes_session_cipher.is_some() {
+            structural.add(StructuralCounter::UdpAesBodyCipherConstructions, 1);
+        }
+        Ok(pending)
+    }
+
+    fn prepare_request_in_place_inner(
+        &self,
+        clock: &(impl Clock + ?Sized),
+        wire: &mut BytesMut,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Result<PendingUdpRequest, UdpPacketError> {
         let opened = open_packet_in_place(
             &self.crypto,
             clock,
             wire,
             REQUEST_TYPE,
             None,
-            |session_id| self.cached_request_cipher(session_id),
-            |session_id, packet_id| self.check_request_replay(session_id, packet_id),
+            |session_id| {
+                self.cached_request_cipher(
+                    session_id,
+                    #[cfg(feature = "structural-metrics")]
+                    structural,
+                )
+            },
+            |session_id, packet_id| {
+                self.check_request_replay(
+                    session_id,
+                    packet_id,
+                    #[cfg(feature = "structural-metrics")]
+                    structural,
+                )
+            },
         )?;
         Ok(PendingUdpRequest {
             session_id: opened.session_id,
@@ -318,20 +467,29 @@ impl UdpServer {
         &self,
         session_id: &UdpSessionId,
         packet_id: u64,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
     ) -> Result<(), UdpPacketError> {
         let protocol = {
-            let shard = self.inbound_shards[self.inbound_shard_index(session_id)]
-                .lock()
-                .map_err(|_| UdpPacketError::StateUnavailable)?;
+            let shard = lock_protocol(
+                &self.inbound_shards[self.inbound_shard_index(session_id)],
+                #[cfg(feature = "structural-metrics")]
+                structural,
+                #[cfg(feature = "structural-metrics")]
+                LockSite::SessionShard,
+            )?;
             shard
                 .sessions
                 .get(session_id)
                 .map(|entry| Arc::clone(&entry.protocol))
         };
         if let Some(protocol) = protocol {
-            let session = protocol
-                .lock()
-                .map_err(|_| UdpPacketError::StateUnavailable)?;
+            let session = lock_protocol(
+                &protocol,
+                #[cfg(feature = "structural-metrics")]
+                structural,
+                #[cfg(feature = "structural-metrics")]
+                LockSite::SessionShard,
+            )?;
             if session.live {
                 session.replay.check(packet_id)?;
             }
@@ -339,15 +497,24 @@ impl UdpServer {
         Ok(())
     }
 
-    fn cached_request_cipher(&self, session_id: &UdpSessionId) -> Option<Arc<UdpAesSessionCipher>> {
-        self.inbound_shards[self.inbound_shard_index(session_id)]
-            .lock()
-            .ok()?
-            .sessions
-            .get(session_id)?
-            .inbound_aes_body_cipher
-            .as_ref()
-            .map(Arc::clone)
+    fn cached_request_cipher(
+        &self,
+        session_id: &UdpSessionId,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Option<Arc<UdpAesSessionCipher>> {
+        lock_protocol(
+            &self.inbound_shards[self.inbound_shard_index(session_id)],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )
+        .ok()?
+        .sessions
+        .get(session_id)?
+        .inbound_aes_body_cipher
+        .as_ref()
+        .map(Arc::clone)
     }
 
     /// Looks up only the authenticated request identity without mutation.
@@ -355,9 +522,35 @@ impl UdpServer {
         &self,
         pending: &PendingUdpRequest,
     ) -> Result<Option<ServerResponseCapability>, UdpPacketError> {
-        let shard = self.inbound_shards[self.inbound_shard_index(&pending.session_id)]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        self.existing_capability_inner(
+            pending,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )
+    }
+
+    /// Looks up an existing capability while recording its one shard acquisition.
+    #[cfg(feature = "structural-metrics")]
+    pub fn existing_capability_structural(
+        &self,
+        pending: &PendingUdpRequest,
+        structural: &StructuralLocal,
+    ) -> Result<Option<ServerResponseCapability>, UdpPacketError> {
+        self.existing_capability_inner(pending, Some(structural))
+    }
+
+    fn existing_capability_inner(
+        &self,
+        pending: &PendingUdpRequest,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Result<Option<ServerResponseCapability>, UdpPacketError> {
+        let shard = lock_protocol(
+            &self.inbound_shards[self.inbound_shard_index(&pending.session_id)],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         Ok(shard
             .sessions
             .get(&pending.session_id)
@@ -374,6 +567,46 @@ impl UdpServer {
         now: MonotonicInstant,
         random: &(impl SecureRandom + ?Sized),
     ) -> Result<AcceptedUdpRequest, UdpPacketError> {
+        #[cfg(feature = "structural-metrics")]
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        self.commit_request_inner(
+            commit,
+            peer,
+            now,
+            random,
+            #[cfg(feature = "structural-metrics")]
+            None,
+            #[cfg(feature = "structural-metrics")]
+            &mut evidence,
+        )
+    }
+
+    /// Commits a request and publishes replay/cache construction evidence once.
+    #[cfg(feature = "structural-metrics")]
+    pub fn commit_request_structural(
+        &self,
+        commit: UdpRequestCommit,
+        peer: SocketAddr,
+        now: MonotonicInstant,
+        random: &(impl SecureRandom + ?Sized),
+        structural: &StructuralLocal,
+    ) -> Result<AcceptedUdpRequest, UdpPacketError> {
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        let result =
+            self.commit_request_inner(commit, peer, now, random, Some(structural), &mut evidence);
+        evidence.publish(structural);
+        result
+    }
+
+    fn commit_request_inner(
+        &self,
+        commit: UdpRequestCommit,
+        peer: SocketAddr,
+        now: MonotonicInstant,
+        random: &(impl SecureRandom + ?Sized),
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+        #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
+    ) -> Result<AcceptedUdpRequest, UdpPacketError> {
         let UdpRequestCommit {
             session_id,
             packet_id,
@@ -381,8 +614,21 @@ impl UdpServer {
         } = commit;
         let mut aes_session_cipher = Some(aes_session_cipher);
         loop {
-            if let Some(existing) = self.inbound_session(&session_id)? {
-                if Self::commit_live_session(&existing.protocol, packet_id, peer, now)? {
+            if let Some(existing) = self.inbound_session(
+                &session_id,
+                #[cfg(feature = "structural-metrics")]
+                structural,
+            )? {
+                if Self::commit_live_session(
+                    &existing.protocol,
+                    packet_id,
+                    peer,
+                    now,
+                    #[cfg(feature = "structural-metrics")]
+                    structural,
+                    #[cfg(feature = "structural-metrics")]
+                    evidence,
+                )? {
                     return Ok(AcceptedUdpRequest {
                         capability: existing.capability,
                     });
@@ -399,12 +645,25 @@ impl UdpServer {
                 now,
                 random,
                 cold_miss_cipher,
+                #[cfg(feature = "structural-metrics")]
+                structural,
+                #[cfg(feature = "structural-metrics")]
+                evidence,
             )? {
                 SessionCreation::Created(capability) => {
                     return Ok(AcceptedUdpRequest { capability });
                 }
                 SessionCreation::Existing(existing) => {
-                    if Self::commit_live_session(&existing.protocol, packet_id, peer, now)? {
+                    if Self::commit_live_session(
+                        &existing.protocol,
+                        packet_id,
+                        peer,
+                        now,
+                        #[cfg(feature = "structural-metrics")]
+                        structural,
+                        #[cfg(feature = "structural-metrics")]
+                        evidence,
+                    )? {
                         return Ok(AcceptedUdpRequest {
                             capability: existing.capability,
                         });
@@ -418,10 +677,15 @@ impl UdpServer {
     fn inbound_session(
         &self,
         session_id: &UdpSessionId,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
     ) -> Result<Option<ExistingServerSession>, UdpPacketError> {
-        let shard = self.inbound_shards[self.inbound_shard_index(session_id)]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let shard = lock_protocol(
+            &self.inbound_shards[self.inbound_shard_index(session_id)],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         Ok(shard
             .sessions
             .get(session_id)
@@ -436,19 +700,30 @@ impl UdpServer {
         packet_id: u64,
         peer: SocketAddr,
         now: MonotonicInstant,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+        #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
     ) -> Result<bool, UdpPacketError> {
-        let mut session = protocol
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut session = lock_protocol(
+            protocol,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         if !session.live {
             return Ok(false);
         }
         session.replay.commit(packet_id)?;
+        #[cfg(feature = "structural-metrics")]
+        evidence.observe_replay(&session.replay);
         session.peer = peer;
         session.last_activity = now;
         Ok(true)
     }
 
+    // The cold creation transaction keeps all authenticated identity, runtime
+    // generation, randomness, and feature-only evidence inputs explicit.
+    #[allow(clippy::too_many_arguments)]
     fn create_session(
         &self,
         session_id: &UdpSessionId,
@@ -457,15 +732,24 @@ impl UdpServer {
         now: MonotonicInstant,
         random: &(impl SecureRandom + ?Sized),
         inbound_aes_body_cipher: Option<UdpAesSessionCipher>,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+        #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
     ) -> Result<SessionCreation, UdpPacketError> {
-        let mut creation = self
-            .creation
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut creation = lock_protocol(
+            &self.creation,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::UdpServer,
+        )?;
         let inbound_index = self.inbound_shard_index(session_id);
-        let mut inbound = self.inbound_shards[inbound_index]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut inbound = lock_protocol(
+            &self.inbound_shards[inbound_index],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         if let Some(entry) = inbound.sessions.get(session_id) {
             return Ok(SessionCreation::Existing(ExistingServerSession {
                 capability: entry.capability,
@@ -489,9 +773,19 @@ impl UdpServer {
                     || creation.outbound_sessions.contains_key(candidate)
             })
             .map_err(|_| UdpPacketError::Random)?;
+        #[cfg(feature = "structural-metrics")]
+        if matches!(
+            self.crypto.profile(),
+            MethodProfile::Blake3Aes128Gcm2022 | MethodProfile::Blake3Aes256Gcm2022
+        ) {
+            evidence.aes_body_cipher_constructions =
+                evidence.aes_body_cipher_constructions.saturating_add(1);
+        }
         let outbound_session_id = outbound.session_id().clone();
         let mut replay = UdpReplayWindow::new();
         replay.commit(packet_id)?;
+        #[cfg(feature = "structural-metrics")]
+        evidence.observe_replay(&replay);
         let capability = ServerResponseCapability {
             slot: generation,
             generation,
@@ -506,13 +800,24 @@ impl UdpServer {
         // Normal cold misses move their single authenticated derivation here.
         // Only a cache-hit prepare that raced with removal needs one new
         // derivation for the replacement generation.
+        #[cfg(feature = "structural-metrics")]
+        let had_handoff_cipher = inbound_aes_body_cipher.is_some();
         let inbound_aes_body_cipher = inbound_aes_body_cipher
             .or_else(|| self.crypto.derive_aes_session_cipher(session_id))
             .map(Arc::new);
+        #[cfg(feature = "structural-metrics")]
+        if !had_handoff_cipher && inbound_aes_body_cipher.is_some() {
+            evidence.aes_body_cipher_constructions =
+                evidence.aes_body_cipher_constructions.saturating_add(1);
+        }
         let capability_index = Self::capability_shard_index(capability);
-        let mut capabilities = self.capability_shards[capability_index]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut capabilities = lock_protocol(
+            &self.capability_shards[capability_index],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         if capabilities.sessions.contains_key(&capability) {
             return Err(UdpPacketError::StateUnavailable);
         }
@@ -557,10 +862,60 @@ impl UdpServer {
         peer: SocketAddr,
         now: MonotonicInstant,
     ) -> Result<AcceptedUdpRequest, UdpPacketError> {
+        #[cfg(feature = "structural-metrics")]
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        self.commit_existing_request_inner(
+            commit,
+            expected_capability,
+            peer,
+            now,
+            #[cfg(feature = "structural-metrics")]
+            None,
+            #[cfg(feature = "structural-metrics")]
+            &mut evidence,
+        )
+    }
+
+    /// Commits an existing generation and records its shard/replay work.
+    #[cfg(feature = "structural-metrics")]
+    pub fn commit_existing_request_structural(
+        &self,
+        commit: UdpRequestCommit,
+        expected_capability: ServerResponseCapability,
+        peer: SocketAddr,
+        now: MonotonicInstant,
+        structural: &StructuralLocal,
+    ) -> Result<AcceptedUdpRequest, UdpPacketError> {
+        let mut evidence = UdpProtocolStructuralEvidence::default();
+        let result = self.commit_existing_request_inner(
+            commit,
+            expected_capability,
+            peer,
+            now,
+            Some(structural),
+            &mut evidence,
+        );
+        evidence.publish(structural);
+        result
+    }
+
+    fn commit_existing_request_inner(
+        &self,
+        commit: UdpRequestCommit,
+        expected_capability: ServerResponseCapability,
+        peer: SocketAddr,
+        now: MonotonicInstant,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+        #[cfg(feature = "structural-metrics")] evidence: &mut UdpProtocolStructuralEvidence,
+    ) -> Result<AcceptedUdpRequest, UdpPacketError> {
         let protocol = {
-            let shard = self.inbound_shards[self.inbound_shard_index(&commit.session_id)]
-                .lock()
-                .map_err(|_| UdpPacketError::StateUnavailable)?;
+            let shard = lock_protocol(
+                &self.inbound_shards[self.inbound_shard_index(&commit.session_id)],
+                #[cfg(feature = "structural-metrics")]
+                structural,
+                #[cfg(feature = "structural-metrics")]
+                LockSite::SessionShard,
+            )?;
             let entry = shard
                 .sessions
                 .get(&commit.session_id)
@@ -568,7 +923,16 @@ impl UdpServer {
                 .ok_or(UdpPacketError::Generation)?;
             Arc::clone(&entry.protocol)
         };
-        if !Self::commit_live_session(&protocol, commit.packet_id, peer, now)? {
+        if !Self::commit_live_session(
+            &protocol,
+            commit.packet_id,
+            peer,
+            now,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            evidence,
+        )? {
             return Err(UdpPacketError::Generation);
         }
         Ok(AcceptedUdpRequest {
@@ -587,12 +951,72 @@ impl UdpServer {
         padding_len: usize,
         output: &mut [u8],
     ) -> Result<EncodedUdpResponse, UdpPacketError> {
+        self.encode_response_inner(
+            capability,
+            clock,
+            random,
+            datagram,
+            padding_len,
+            output,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )
+    }
+
+    /// Encodes one response while recording the payload-to-wire copy and lock work.
+    #[cfg(feature = "structural-metrics")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_response_structural(
+        &self,
+        capability: ServerResponseCapability,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &Datagram,
+        padding_len: usize,
+        output: &mut [u8],
+        structural: &StructuralLocal,
+    ) -> Result<EncodedUdpResponse, UdpPacketError> {
+        let encoded = self.encode_response_inner(
+            capability,
+            clock,
+            random,
+            datagram,
+            padding_len,
+            output,
+            Some(structural),
+        )?;
+        structural.add(
+            StructuralCounter::UdpPayloadToWireCopyBytes,
+            u64::try_from(datagram.payload().len()).unwrap_or(u64::MAX),
+        );
+        Ok(encoded)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_response_inner(
+        &self,
+        capability: ServerResponseCapability,
+        clock: &(impl Clock + ?Sized),
+        random: &(impl SecureRandom + ?Sized),
+        datagram: &Datagram,
+        padding_len: usize,
+        output: &mut [u8],
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Result<EncodedUdpResponse, UdpPacketError> {
         let ServerSessionLookup { binding, protocol } = self
-            .session_by_capability(capability)?
+            .session_by_capability(
+                capability,
+                #[cfg(feature = "structural-metrics")]
+                structural,
+            )?
             .ok_or(UdpPacketError::Generation)?;
-        let mut session = protocol
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut session = lock_protocol(
+            &protocol,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         if !session.live {
             return Err(UdpPacketError::Generation);
         }
@@ -620,14 +1044,46 @@ impl UdpServer {
         capability: ServerResponseCapability,
         now: MonotonicInstant,
     ) -> Result<bool, UdpPacketError> {
-        let Some(ServerSessionLookup { binding, protocol }) =
-            self.session_by_capability(capability)?
+        self.remove_session_inner(
+            capability,
+            now,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )
+    }
+
+    /// Removes an idle generation while recording all protocol lock work.
+    #[cfg(feature = "structural-metrics")]
+    pub fn remove_session_structural(
+        &self,
+        capability: ServerResponseCapability,
+        now: MonotonicInstant,
+        structural: &StructuralLocal,
+    ) -> Result<bool, UdpPacketError> {
+        self.remove_session_inner(capability, now, Some(structural))
+    }
+
+    fn remove_session_inner(
+        &self,
+        capability: ServerResponseCapability,
+        now: MonotonicInstant,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
+    ) -> Result<bool, UdpPacketError> {
+        let Some(ServerSessionLookup { binding, protocol }) = self.session_by_capability(
+            capability,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+        )?
         else {
             return Ok(false);
         };
-        let mut session = protocol
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut session = lock_protocol(
+            &protocol,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         if !session.live
             || !now
                 .duration_since(session.last_activity)
@@ -636,18 +1092,29 @@ impl UdpServer {
             return Ok(false);
         }
 
-        let mut creation = self
-            .creation
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut creation = lock_protocol(
+            &self.creation,
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::UdpServer,
+        )?;
         let inbound_index = self.inbound_shard_index(&binding);
         let capability_index = Self::capability_shard_index(capability);
-        let mut inbound = self.inbound_shards[inbound_index]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
-        let mut capabilities = self.capability_shards[capability_index]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let mut inbound = lock_protocol(
+            &self.inbound_shards[inbound_index],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
+        let mut capabilities = lock_protocol(
+            &self.capability_shards[capability_index],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         let reverse_matches = capabilities.sessions.get(&capability).is_some_and(|entry| {
             entry.binding == binding && Arc::ptr_eq(&entry.protocol, &protocol)
         });
@@ -697,7 +1164,11 @@ impl UdpServer {
         &self,
         capability: ServerResponseCapability,
     ) -> Result<Option<ServerSessionSnapshot>, UdpPacketError> {
-        let Some(ServerSessionLookup { protocol, .. }) = self.session_by_capability(capability)?
+        let Some(ServerSessionLookup { protocol, .. }) = self.session_by_capability(
+            capability,
+            #[cfg(feature = "structural-metrics")]
+            None,
+        )?
         else {
             return Ok(None);
         };
@@ -719,10 +1190,15 @@ impl UdpServer {
     fn session_by_capability(
         &self,
         capability: ServerResponseCapability,
+        #[cfg(feature = "structural-metrics")] structural: Option<&StructuralLocal>,
     ) -> Result<Option<ServerSessionLookup>, UdpPacketError> {
-        let shard = self.capability_shards[Self::capability_shard_index(capability)]
-            .lock()
-            .map_err(|_| UdpPacketError::StateUnavailable)?;
+        let shard = lock_protocol(
+            &self.capability_shards[Self::capability_shard_index(capability)],
+            #[cfg(feature = "structural-metrics")]
+            structural,
+            #[cfg(feature = "structural-metrics")]
+            LockSite::SessionShard,
+        )?;
         let Some(entry) = shard.sessions.get(&capability) else {
             return Ok(None);
         };
@@ -938,6 +1414,102 @@ mod tests {
 
         exercise(keys(), true);
         exercise(chacha_keys(), false);
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    #[test]
+    fn structural_aes_counts_both_cold_direction_caches_and_no_established_derivation() {
+        fn exercise(keys: MethodSinglePskProvider, expected_aes: u64) {
+            let structural = ferrum2_structural::StructuralHub::new();
+            let local = structural.local();
+            let server = UdpServer::new(&keys).expect("structural server");
+            let client_random = SequenceRandom::new(0x25);
+            let server_random = SequenceRandom::new(0x85);
+            let mut client =
+                UdpClientSession::new(&keys, &client_random, |_| false).expect("structural client");
+            let peer = "127.0.0.1:49155".parse().expect("structural peer");
+
+            let mut first_wire =
+                BytesMut::from(request(&mut client, &client_random, b"cold").as_slice());
+            let first = server
+                .prepare_request_in_place_structural(&FixedClock, &mut first_wire, &local)
+                .expect("structural cold prepare");
+            let (_, first_commit) = first.into_parts();
+            let capability = server
+                .commit_request_structural(
+                    first_commit,
+                    peer,
+                    MonotonicInstant::ZERO,
+                    &server_random,
+                    &local,
+                )
+                .expect("structural cold commit")
+                .capability();
+            assert_eq!(
+                structural
+                    .snapshot()
+                    .get(StructuralCounter::UdpAesBodyCipherConstructions),
+                expected_aes,
+            );
+
+            let mut established_wire =
+                BytesMut::from(request(&mut client, &client_random, b"established").as_slice());
+            let established = server
+                .prepare_request_in_place_structural(&FixedClock, &mut established_wire, &local)
+                .expect("structural established prepare");
+            let (_, established_commit) = established.into_parts();
+            server
+                .commit_existing_request_structural(
+                    established_commit,
+                    capability,
+                    peer,
+                    MonotonicInstant::ZERO,
+                    &local,
+                )
+                .expect("structural established commit");
+
+            let snapshot = structural.snapshot();
+            assert_eq!(
+                snapshot.get(StructuralCounter::UdpAesBodyCipherConstructions),
+                expected_aes,
+            );
+            assert_eq!(snapshot.get(StructuralCounter::ReplayClearedBits), 1);
+            assert_eq!(snapshot.get(StructuralCounter::ReplayClearedWords), 1);
+            assert_eq!(snapshot.get(StructuralCounter::UdpOwnedFastPathHits), 2);
+            assert!(snapshot.get(StructuralCounter::UdpServerLockSamples) > 0);
+            assert!(snapshot.get(StructuralCounter::SessionShardLockSamples) > 0);
+        }
+
+        exercise(keys(), 2);
+        exercise(chacha_keys(), 0);
+    }
+
+    #[cfg(feature = "structural-metrics")]
+    #[test]
+    fn structural_removal_counts_every_protocol_lock() {
+        let structural = ferrum2_structural::StructuralHub::new();
+        let local = structural.local();
+        let server = UdpServer::new(&keys()).expect("structural removal server");
+        let client_random = SequenceRandom::new(0x31);
+        let server_random = SequenceRandom::new(0x91);
+        let mut client =
+            UdpClientSession::new(&keys(), &client_random, |_| false).expect("removal client");
+        let peer = "127.0.0.1:49157".parse().expect("removal peer");
+        let capability = establish(&server, &mut client, &client_random, &server_random, peer);
+
+        assert!(
+            server
+                .remove_session_structural(
+                    capability,
+                    MonotonicInstant::from_duration(Duration::from_secs(60)),
+                    &local,
+                )
+                .expect("structural removal")
+        );
+
+        let snapshot = structural.snapshot();
+        assert_eq!(snapshot.get(StructuralCounter::UdpServerLockSamples), 1);
+        assert_eq!(snapshot.get(StructuralCounter::SessionShardLockSamples), 4);
     }
 
     #[test]
