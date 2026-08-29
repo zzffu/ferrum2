@@ -378,7 +378,7 @@ jobs:
             throw "Windows non-TUN qualification evidence is missing"
           }
           $document = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
-          if ($document.schema -ne "ferrum2.windows-non-tun-gate06.v1" -or
+          if ($document.schema -ne "ferrum2.windows-non-tun-gate06.v2" -or
               $document.identity.sha -ne $env:GITHUB_SHA -or
               $document.identity.repository -ne $env:GITHUB_REPOSITORY -or
               $document.identity.workflow_ref -ne $env:GITHUB_WORKFLOW_REF -or
@@ -388,6 +388,88 @@ jobs:
               $document.identity.rustc -ne $rustcIdentity -or
               $document.identity.release_example_sha256 -ne $gateHash) {
             throw "Windows non-TUN qualification evidence identity is invalid"
+          }
+          function Test-Gate06ProcessSample {
+            param([object] $Sample)
+            return $null -ne $Sample -and
+              ($Sample.handle_count -is [long]) -and $Sample.handle_count -ge 0 -and
+              ($Sample.threads -is [long]) -and $Sample.threads -ge 0 -and
+              ($Sample.physical_udp_endpoints -is [long]) -and $Sample.physical_udp_endpoints -ge 0
+          }
+          $warmup = $document.process_network_warmup
+          if ($warmup.passes -ne 2 -or
+              $warmup.recipe -ne "sync_loopback_udp_bind_local_addr_drop_then_windows_catalog_snapshot_and_resolver_without_runtime_service_or_owner" -or
+              -not (Test-Gate06ProcessSample $warmup.cold) -or
+              -not (Test-Gate06ProcessSample $warmup.first_post) -or
+              -not (Test-Gate06ProcessSample $warmup.second_post) -or
+              $warmup.warmed_pre_runtime -ne "second_post" -or
+              $warmup.exact -ne $true -or
+              $warmup.predicates.post_handle_count_exact -ne $true -or
+              $warmup.predicates.post_threads_exact -ne $true -or
+              $warmup.predicates.post_physical_udp_endpoints_exact -ne $true -or
+              $warmup.predicates.cold_threads_preserved -ne $true -or
+              $warmup.predicates.cold_physical_udp_endpoints_preserved -ne $true -or
+              $warmup.first_post.handle_count -ne $warmup.second_post.handle_count -or
+              $warmup.first_post.threads -ne $warmup.second_post.threads -or
+              $warmup.first_post.physical_udp_endpoints -ne $warmup.second_post.physical_udp_endpoints -or
+              $warmup.cold.threads -ne $warmup.second_post.threads -or
+              $warmup.cold.physical_udp_endpoints -ne $warmup.second_post.physical_udp_endpoints) {
+            throw "Windows non-TUN qualification warmup evidence is invalid"
+          }
+          $expectedStages = @(
+            "static_loopback",
+            "static_after_synthetic_reset",
+            "static_cleanup",
+            "dynamic_loopback",
+            "dynamic_pending_receive_reset",
+            "dynamic_cleanup",
+            "dynamic_scale_1000_open",
+            "dynamic_scale_1000_loopback",
+            "dynamic_scale_1000_reset",
+            "dynamic_scale_1000_cleanup",
+            "dynamic_scale_10000_open",
+            "dynamic_scale_10000_loopback",
+            "dynamic_scale_10000_reset",
+            "dynamic_scale_10000_cleanup"
+          )
+          $cleanupStageIndexes = @(2, 5, 9, 13)
+          $stages = @($document.stages)
+          if ($stages.Count -ne $expectedStages.Count -or
+              @($stages.stage | Sort-Object -Unique).Count -ne $expectedStages.Count) {
+            throw "Windows non-TUN qualification stage set is invalid"
+          }
+          for ($index = 0; $index -lt $expectedStages.Count; $index++) {
+            $stage = $stages[$index]
+            $cleanupExpected = $cleanupStageIndexes -contains $index
+            if ($stage.stage -ne $expectedStages[$index] -or
+                $stage.stage_exact -ne $true -or
+                $stage.stage_predicates.owners_exact -ne $true -or
+                $stage.stage_predicates.tasks_exact -ne $true -or
+                $stage.stage_predicates.physical_udp_endpoints_exact -ne $true -or
+                $stage.stage_predicates.threads_at_or_below_baseline -ne $true -or
+                $stage.PSObject.Properties.Name -notcontains "stage_cleanup_at_baseline" -or
+                ($cleanupExpected -and $stage.stage_cleanup_at_baseline -ne $true) -or
+                (-not $cleanupExpected -and $null -ne $stage.stage_cleanup_at_baseline)) {
+              throw "Windows non-TUN qualification stage evidence is invalid"
+            }
+          }
+          $cleanup = $document.runtime_cleanup
+          if (-not (Test-Gate06ProcessSample $cleanup.pre) -or
+              -not (Test-Gate06ProcessSample $cleanup.post) -or
+              $cleanup.shutdown.method -ne "shutdown_timeout" -or
+              $cleanup.shutdown.timeout_milliseconds -ne 5000 -or
+              $cleanup.attempts -lt 1 -or $cleanup.attempts -gt 20 -or
+              $cleanup.exact -ne $true -or
+              $cleanup.predicates.handle_count_exact -ne $true -or
+              $cleanup.predicates.threads_exact -ne $true -or
+              $cleanup.predicates.physical_udp_endpoints_exact -ne $true -or
+              $cleanup.pre.handle_count -ne $warmup.second_post.handle_count -or
+              $cleanup.pre.threads -ne $warmup.second_post.threads -or
+              $cleanup.pre.physical_udp_endpoints -ne $warmup.second_post.physical_udp_endpoints -or
+              $cleanup.post.handle_count -ne $cleanup.pre.handle_count -or
+              $cleanup.post.threads -ne $cleanup.pre.threads -or
+              $cleanup.post.physical_udp_endpoints -ne $cleanup.pre.physical_udp_endpoints) {
+            throw "Windows non-TUN qualification runtime cleanup evidence is invalid"
           }
           if ($gateStatus -ne 0) { throw "Windows non-TUN qualification failed with status $gateStatus" }
           if ($document.status -ne "PASS" -or $null -ne $document.failed_stage) {

@@ -50,6 +50,8 @@ mod windows_gate {
     const SCALE_10K_STAGE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     const ECHO_STAGE_TIMEOUT: Duration = Duration::from_secs(15);
     const CLEANUP_RETRIES: usize = 20;
+    const RUNTIME_WORKER_THREADS: usize = 4;
+    const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
     type GateOperations = SystemNetworkSocketOperations<WindowsResolvedSocketBinder>;
     type GateService = NetworkSocketService<WindowsNetworkInterfaceCatalog, GateOperations>;
@@ -87,7 +89,7 @@ mod windows_gate {
         }
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct ProcessSample {
         working_set_bytes: u64,
         private_memory_bytes: u64,
@@ -110,6 +112,82 @@ mod windows_gate {
         ports_in_use: usize,
         ports_excluded: usize,
         ports_unavailable: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct StagePredicates {
+        owners_exact: bool,
+        tasks_exact: bool,
+        physical_udp_endpoints_exact: bool,
+        threads_at_or_below_baseline: bool,
+    }
+
+    impl StagePredicates {
+        const fn exact(self) -> bool {
+            self.owners_exact
+                && self.tasks_exact
+                && self.physical_udp_endpoints_exact
+                && self.threads_at_or_below_baseline
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct WarmupPredicates {
+        post_handle_count_exact: bool,
+        post_threads_exact: bool,
+        post_physical_udp_endpoints_exact: bool,
+        cold_threads_preserved: bool,
+        cold_physical_udp_endpoints_preserved: bool,
+    }
+
+    impl WarmupPredicates {
+        const fn exact(self) -> bool {
+            self.post_handle_count_exact
+                && self.post_threads_exact
+                && self.post_physical_udp_endpoints_exact
+                && self.cold_threads_preserved
+                && self.cold_physical_udp_endpoints_preserved
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct RuntimeCleanupPredicates {
+        handle_count_exact: bool,
+        threads_exact: bool,
+        physical_udp_endpoints_exact: bool,
+    }
+
+    impl RuntimeCleanupPredicates {
+        const fn exact(self) -> bool {
+            self.handle_count_exact && self.threads_exact && self.physical_udp_endpoints_exact
+        }
+
+        const fn unavailable() -> Self {
+            Self {
+                handle_count_exact: false,
+                threads_exact: false,
+                physical_udp_endpoints_exact: false,
+            }
+        }
+    }
+
+    struct RuntimeCleanupReport {
+        attempts: usize,
+        post: Option<ProcessSample>,
+        predicates: RuntimeCleanupPredicates,
+    }
+
+    struct QualificationCompletion {
+        evidence: Value,
+        result: Result<(), GateError>,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct OverallOutcome {
+        status: &'static str,
+        reason: &'static str,
+        code: i32,
+        failed_stage: Option<&'static str>,
     }
 
     struct AbortOnDropTask<T> {
@@ -197,7 +275,7 @@ mod windows_gate {
         }
     }
 
-    pub async fn entry() -> i32 {
+    pub fn entry() -> i32 {
         let Some(output) = output_path() else {
             eprintln!("usage: windows_non_tun_gate06 --output <new-json-path>");
             return 2;
@@ -258,29 +336,64 @@ mod windows_gate {
             return finish(&output, &evidence, 2);
         }
 
-        match bounded_stage(
-            QUALIFICATION_TIMEOUT,
-            "qualification_deadline_exceeded",
-            run_qualification(&mut evidence),
-        )
-        .await
-        {
-            Ok(()) => {
-                set_outcome(&mut evidence, "PASS", "none");
-                finish(&output, &evidence, 0)
-            }
+        let cold = match process_sample() {
+            Ok(sample) => sample,
             Err(error) => {
-                if error.0 == "qualification_deadline_exceeded" {
-                    set_failed_stage(&mut evidence, "qualification_total");
-                }
-                let (status, code) = match error.disposition() {
-                    GateDisposition::EnvironmentReject => ("ENVIRONMENT_REJECT", 2),
-                    GateDisposition::Failure => ("FAIL", 1),
-                };
-                set_outcome(&mut evidence, status, error.0);
-                finish(&output, &evidence, code)
+                set_failed_stage(&mut evidence, "process_network_warmup");
+                set_outcome(&mut evidence, "ENVIRONMENT_REJECT", error.0);
+                return finish(&output, &evidence, 2);
             }
+        };
+        let first_post = match warm_network_process().and_then(|()| process_sample()) {
+            Ok(sample) => sample,
+            Err(error) => {
+                set_failed_stage(&mut evidence, "process_network_warmup");
+                set_outcome(&mut evidence, "ENVIRONMENT_REJECT", error.0);
+                return finish(&output, &evidence, 2);
+            }
+        };
+        let pre_runtime = match warm_network_process().and_then(|()| process_sample()) {
+            Ok(sample) => sample,
+            Err(error) => {
+                set_failed_stage(&mut evidence, "process_network_warmup");
+                set_outcome(&mut evidence, "ENVIRONMENT_REJECT", error.0);
+                return finish(&output, &evidence, 2);
+            }
+        };
+        let warmup = warmup_predicates(cold, first_post, pre_runtime);
+        record_process_warmup(&mut evidence, cold, first_post, pre_runtime, warmup);
+        if !warmup.exact() {
+            set_failed_stage(&mut evidence, "process_network_warmup");
+            set_outcome(
+                &mut evidence,
+                "ENVIRONMENT_REJECT",
+                "process_network_warmup_unstable",
+            );
+            return finish(&output, &evidence, 2);
         }
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(RUNTIME_WORKER_THREADS)
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                set_failed_stage(&mut evidence, "runtime_start");
+                set_outcome(&mut evidence, "FAIL", "runtime_build_failed");
+                return finish(&output, &evidence, 1);
+            }
+        };
+        let mut completion = runtime.block_on(run_async_qualification(evidence));
+        runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+        let runtime_cleanup = settle_runtime_cleanup(pre_runtime);
+        record_runtime_cleanup(&mut completion.evidence, pre_runtime, &runtime_cleanup);
+
+        let outcome = overall_outcome(completion.result, runtime_cleanup.predicates);
+        if let Some(stage) = outcome.failed_stage {
+            set_failed_stage(&mut completion.evidence, stage);
+        }
+        set_outcome(&mut completion.evidence, outcome.status, outcome.reason);
+        finish(&output, &completion.evidence, outcome.code)
     }
 
     fn output_path() -> Option<PathBuf> {
@@ -294,7 +407,7 @@ mod windows_gate {
 
     fn base_evidence(cpu_vendor: &str, cpu_name: &str, binary_sha256: &str) -> Value {
         json!({
-            "schema": "ferrum2.windows-non-tun-gate06.v1",
+            "schema": "ferrum2.windows-non-tun-gate06.v2",
             "status": "RUNNING",
             "reason": "none",
             "failed_stage": Value::Null,
@@ -329,12 +442,20 @@ mod windows_gate {
                 "runtime_lock_wait": "not_exposed",
             },
             "cleanup_contract": {
-                "network_runtime_owners": "exact_zero",
-                "physical_udp_sockets": "exact_zero",
-                "tokio_tasks": "exact_stage_baseline",
-                "threads": "at_or_below_stage_baseline",
-                "handle_count": "at_or_below_stage_baseline",
-                "working_set_and_private_memory": "diagnostic_allocator_retention_allowed",
+                "stage": {
+                    "owners": "exact_expected_snapshot",
+                    "physical_udp_endpoints": "exact_expected_delta",
+                    "tokio_tasks": "exact_stage_baseline",
+                    "threads": "at_or_below_stage_baseline",
+                    "handle_count": "diagnostic_absolute_and_stage_baseline",
+                    "working_set_and_private_memory": "diagnostic_allocator_retention_allowed",
+                },
+                "runtime": {
+                    "shutdown": "bounded_before_final_sampling",
+                    "handle_count": "exact_warmed_pre_runtime",
+                    "threads": "exact_warmed_pre_runtime",
+                    "physical_udp_endpoints": "exact_warmed_pre_runtime",
+                },
             },
             "contracts": {
                 "runtime_concurrent_send_receive_reset": "covered_by_network_socket_service_test",
@@ -343,7 +464,132 @@ mod windows_gate {
                 "scale": [],
             },
             "stages": [],
+            "process_network_warmup": Value::Null,
+            "runtime_cleanup": Value::Null,
         })
+    }
+
+    fn process_sample_json(sample: ProcessSample) -> Value {
+        json!({
+            "working_set_bytes": sample.working_set_bytes,
+            "private_memory_bytes": sample.private_memory_bytes,
+            "threads": sample.threads,
+            "handle_count": sample.handles,
+            "physical_udp_endpoints": sample.physical_udp_endpoints,
+        })
+    }
+
+    fn warmup_predicates(
+        cold: ProcessSample,
+        first_post: ProcessSample,
+        second_post: ProcessSample,
+    ) -> WarmupPredicates {
+        WarmupPredicates {
+            post_handle_count_exact: first_post.handles == second_post.handles,
+            post_threads_exact: first_post.threads == second_post.threads,
+            post_physical_udp_endpoints_exact: first_post.physical_udp_endpoints
+                == second_post.physical_udp_endpoints,
+            cold_threads_preserved: first_post.threads == cold.threads
+                && second_post.threads == cold.threads,
+            cold_physical_udp_endpoints_preserved: first_post.physical_udp_endpoints
+                == cold.physical_udp_endpoints
+                && second_post.physical_udp_endpoints == cold.physical_udp_endpoints,
+        }
+    }
+
+    fn record_process_warmup(
+        evidence: &mut Value,
+        cold: ProcessSample,
+        first_post: ProcessSample,
+        second_post: ProcessSample,
+        predicates: WarmupPredicates,
+    ) {
+        let cold_handles = i64::try_from(cold.handles).unwrap_or(i64::MAX);
+        let warmed_handles = i64::try_from(second_post.handles).unwrap_or(i64::MAX);
+        evidence["process_network_warmup"] = json!({
+            "passes": 2,
+            "recipe": "sync_loopback_udp_bind_local_addr_drop_then_windows_catalog_snapshot_and_resolver_without_runtime_service_or_owner",
+            "cold": process_sample_json(cold),
+            "first_post": process_sample_json(first_post),
+            "second_post": process_sample_json(second_post),
+            "warmed_pre_runtime": "second_post",
+            "cold_to_warmed_handle_count_delta": warmed_handles.saturating_sub(cold_handles),
+            "predicates": {
+                "post_handle_count_exact": predicates.post_handle_count_exact,
+                "post_threads_exact": predicates.post_threads_exact,
+                "post_physical_udp_endpoints_exact": predicates.post_physical_udp_endpoints_exact,
+                "cold_threads_preserved": predicates.cold_threads_preserved,
+                "cold_physical_udp_endpoints_preserved": predicates.cold_physical_udp_endpoints_preserved,
+            },
+            "exact": predicates.exact(),
+        });
+    }
+
+    fn runtime_cleanup_predicates(
+        pre: ProcessSample,
+        post: ProcessSample,
+    ) -> RuntimeCleanupPredicates {
+        RuntimeCleanupPredicates {
+            handle_count_exact: post.handles == pre.handles,
+            threads_exact: post.threads == pre.threads,
+            physical_udp_endpoints_exact: post.physical_udp_endpoints == pre.physical_udp_endpoints,
+        }
+    }
+
+    fn record_runtime_cleanup(
+        evidence: &mut Value,
+        pre: ProcessSample,
+        report: &RuntimeCleanupReport,
+    ) {
+        evidence["runtime_cleanup"] = json!({
+            "shutdown": {
+                "method": "shutdown_timeout",
+                "timeout_milliseconds": RUNTIME_SHUTDOWN_TIMEOUT.as_millis(),
+            },
+            "attempts": report.attempts,
+            "pre": process_sample_json(pre),
+            "post": report.post.map(process_sample_json),
+            "predicates": {
+                "handle_count_exact": report.predicates.handle_count_exact,
+                "threads_exact": report.predicates.threads_exact,
+                "physical_udp_endpoints_exact": report.predicates.physical_udp_endpoints_exact,
+            },
+            "exact": report.predicates.exact(),
+        });
+    }
+
+    fn overall_outcome(
+        qualification: Result<(), GateError>,
+        runtime_cleanup: RuntimeCleanupPredicates,
+    ) -> OverallOutcome {
+        match qualification {
+            Err(error) => match error.disposition() {
+                GateDisposition::EnvironmentReject => OverallOutcome {
+                    status: "ENVIRONMENT_REJECT",
+                    reason: error.0,
+                    code: 2,
+                    failed_stage: None,
+                },
+                GateDisposition::Failure => OverallOutcome {
+                    status: "FAIL",
+                    reason: error.0,
+                    code: 1,
+                    failed_stage: None,
+                },
+            },
+            Ok(()) if runtime_cleanup.exact() => OverallOutcome {
+                status: "PASS",
+                reason: "none",
+                code: 0,
+                failed_stage: None,
+            },
+            Ok(()) => OverallOutcome {
+                status: "FAIL",
+                reason: "runtime_cleanup_not_exact",
+                code: 1,
+                failed_stage: Some("runtime_cleanup"),
+            },
+        }
     }
 
     fn environment_value(name: &str) -> String {
@@ -543,11 +789,41 @@ mod windows_gate {
         String::from_utf8(output.stdout).map_err(|_| GateError("powershell_query_failed"))
     }
 
+    fn warm_network_process() -> Result<(), GateError> {
+        let socket = std::net::UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .map_err(|_| GateError("process_network_warmup_failed"))?;
+        let address = socket
+            .local_addr()
+            .map_err(|_| GateError("process_network_warmup_failed"))?;
+        if !matches!(address, SocketAddr::V4(address) if *address.ip() == Ipv4Addr::LOCALHOST && address.port() != 0)
+        {
+            return Err(GateError("process_network_warmup_failed"));
+        }
+        drop(socket);
+
+        let catalog = WindowsNetworkInterfaceCatalog::system();
+        let snapshot = NetworkSnapshot::capture(1, &catalog)
+            .map_err(|_| GateError("process_network_warmup_failed"))?;
+        let resolver = NetworkInterfaceResolver::new(catalog);
+        let resolved = resolver
+            .resolve(
+                &DialOptions::default(),
+                &RouteNetworkOptions::new(false, None::<&str>),
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9).into(),
+                &snapshot,
+            )
+            .map_err(|_| GateError("process_network_warmup_failed"))?;
+        drop(resolved);
+        drop(resolver);
+        drop(snapshot);
+        Ok(())
+    }
+
     fn process_sample() -> Result<ProcessSample, GateError> {
         let process_id = std::process::id();
         let script = format!(
             "$p=Get-Process -Id {process_id} -ErrorAction Stop; \
-             $udp=@(Get-NetUDPEndpoint -OwningProcess {process_id} -ErrorAction Stop).Count; \
+             $udp=@(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object {{ $_.OwningProcess -eq {process_id} }}).Count; \
              Write-Output ('{{0}},{{1}},{{2}},{{3}},{{4}}' -f $p.WorkingSet64,$p.PrivateMemorySize64,@($p.Threads).Count,$p.HandleCount,$udp)"
         );
         let output = powershell_output(&script, 1024)?;
@@ -725,6 +1001,19 @@ mod windows_gate {
             .map_err(|_| GateError(timeout_reason))?
     }
 
+    async fn run_async_qualification(mut evidence: Value) -> QualificationCompletion {
+        let result = bounded_stage(
+            QUALIFICATION_TIMEOUT,
+            "qualification_deadline_exceeded",
+            run_qualification(&mut evidence),
+        )
+        .await;
+        if matches!(result, Err(GateError("qualification_deadline_exceeded"))) {
+            set_failed_stage(&mut evidence, "qualification_total");
+        }
+        QualificationCompletion { evidence, result }
+    }
+
     async fn run_qualification(evidence: &mut Value) -> Result<(), GateError> {
         let echo = match bounded_stage(
             ECHO_STAGE_TIMEOUT,
@@ -805,6 +1094,7 @@ mod windows_gate {
             "static_loopback",
             "Static",
             1,
+            0,
             &owners,
             baseline,
             &latencies,
@@ -826,6 +1116,7 @@ mod windows_gate {
             "static_after_synthetic_reset",
             "Static",
             1,
+            0,
             &owners,
             baseline,
             &after_reset,
@@ -865,6 +1156,7 @@ mod windows_gate {
             evidence,
             "dynamic_loopback",
             "Dynamic",
+            1,
             1,
             &owners,
             baseline,
@@ -927,6 +1219,7 @@ mod windows_gate {
             evidence,
             "dynamic_pending_receive_reset",
             "Dynamic",
+            0,
             0,
             &owners,
             baseline,
@@ -995,6 +1288,7 @@ mod windows_gate {
             &format!("dynamic_scale_{socket_count}_open"),
             "Dynamic",
             socket_count,
+            socket_count,
             &owners,
             baseline,
             &[],
@@ -1009,6 +1303,7 @@ mod windows_gate {
             evidence,
             &format!("dynamic_scale_{socket_count}_loopback"),
             "Dynamic",
+            socket_count,
             socket_count,
             &owners,
             baseline,
@@ -1032,6 +1327,7 @@ mod windows_gate {
             evidence,
             &format!("dynamic_scale_{socket_count}_reset"),
             "Dynamic",
+            0,
             0,
             &owners,
             baseline,
@@ -1075,16 +1371,59 @@ mod windows_gate {
             tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(50)).await;
             let latest = process_sample()?;
-            if owners.snapshot() == baseline.owners
-                && alive_tasks() == baseline.tasks
-                && latest.physical_udp_endpoints == baseline.process.physical_udp_endpoints
-                && latest.threads <= baseline.process.threads
-                && latest.handles <= baseline.process.handles
-            {
+            if stage_predicates(owners.snapshot(), alive_tasks(), latest, baseline, 0, 0).exact() {
                 return Ok(latest);
             }
         }
         Err(GateError("cleanup_did_not_return_to_baseline"))
+    }
+
+    fn settle_runtime_cleanup(pre: ProcessSample) -> RuntimeCleanupReport {
+        let mut latest = None;
+        for attempts in 1..=CLEANUP_RETRIES {
+            if let Ok(sample) = process_sample() {
+                let predicates = runtime_cleanup_predicates(pre, sample);
+                latest = Some(sample);
+                if predicates.exact() {
+                    return RuntimeCleanupReport {
+                        attempts,
+                        post: latest,
+                        predicates,
+                    };
+                }
+            }
+            if attempts != CLEANUP_RETRIES {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        RuntimeCleanupReport {
+            attempts: CLEANUP_RETRIES,
+            post: latest,
+            predicates: latest
+                .map(|post| runtime_cleanup_predicates(pre, post))
+                .unwrap_or_else(RuntimeCleanupPredicates::unavailable),
+        }
+    }
+
+    fn stage_predicates(
+        owners: OwnerSnapshot,
+        tasks: usize,
+        process: ProcessSample,
+        baseline: ResourceBaseline,
+        expected_network_runtime_owners: usize,
+        expected_physical_udp_endpoints: usize,
+    ) -> StagePredicates {
+        let mut expected_owners = baseline.owners;
+        expected_owners.network_runtime_owners = expected_network_runtime_owners;
+        StagePredicates {
+            owners_exact: owners == expected_owners,
+            tasks_exact: tasks == baseline.tasks,
+            physical_udp_endpoints_exact: process
+                .physical_udp_endpoints
+                .checked_sub(baseline.process.physical_udp_endpoints)
+                == Some(expected_physical_udp_endpoints),
+            threads_at_or_below_baseline: process.threads <= baseline.process.threads,
+        }
     }
 
     fn record_cleanup_stage(
@@ -1095,11 +1434,8 @@ mod windows_gate {
         baseline: ResourceBaseline,
         process: ProcessSample,
     ) -> Result<(), GateError> {
-        let cleanup = owners.snapshot() == baseline.owners
-            && alive_tasks() == baseline.tasks
-            && process.physical_udp_endpoints == baseline.process.physical_udp_endpoints
-            && process.threads <= baseline.process.threads
-            && process.handles <= baseline.process.handles;
+        let cleanup =
+            stage_predicates(owners.snapshot(), alive_tasks(), process, baseline, 0, 0).exact();
         if !cleanup {
             return Err(GateError("cleanup_did_not_return_to_baseline"));
         }
@@ -1107,6 +1443,7 @@ mod windows_gate {
             evidence,
             stage,
             mode,
+            0,
             0,
             owners,
             baseline,
@@ -1122,6 +1459,7 @@ mod windows_gate {
         stage: &str,
         mode: &str,
         expected_physical_udp_sockets: usize,
+        expected_network_runtime_owners: usize,
         owners: &OwnerRegistry,
         baseline: ResourceBaseline,
         latencies: &[u64],
@@ -1132,6 +1470,7 @@ mod windows_gate {
             stage,
             mode,
             expected_physical_udp_sockets,
+            expected_network_runtime_owners,
             owners,
             baseline,
             latencies,
@@ -1146,6 +1485,7 @@ mod windows_gate {
         stage: &str,
         mode: &str,
         expected_physical_udp_sockets: usize,
+        expected_network_runtime_owners: usize,
         owners: &OwnerRegistry,
         baseline: ResourceBaseline,
         latencies: &[u64],
@@ -1160,6 +1500,17 @@ mod windows_gate {
             return Err(GateError("physical_udp_endpoint_count_mismatch"));
         }
         let alive = alive_tasks();
+        let predicates = stage_predicates(
+            owners.snapshot(),
+            alive,
+            process,
+            baseline,
+            expected_network_runtime_owners,
+            expected_physical_udp_sockets,
+        );
+        if !predicates.exact() {
+            return Err(GateError("stage_resource_contract_not_exact"));
+        }
         let task_delta = alive.saturating_sub(baseline.tasks);
         let tasks_per_socket_ppm = (physical_udp_sockets != 0).then(|| {
             task_delta
@@ -1173,6 +1524,7 @@ mod windows_gate {
             "mode": mode,
             "physical_udp_sockets": physical_udp_sockets,
             "process_udp_endpoints": process.physical_udp_endpoints,
+            "baseline_process_udp_endpoints": baseline.process.physical_udp_endpoints,
             "network_runtime_owners": owners.snapshot().network_runtime_owners,
             "network_reset_hooks": owners.snapshot().network_reset_hooks,
             "network_reset_drivers": owners.snapshot().network_reset_drivers,
@@ -1182,10 +1534,19 @@ mod windows_gate {
             "working_set_bytes": process.working_set_bytes,
             "private_memory_bytes": process.private_memory_bytes,
             "threads": process.threads,
+            "baseline_threads": baseline.process.threads,
             "handle_count": process.handles,
+            "baseline_handle_count": baseline.process.handles,
             "loopback_p50_ns": p50,
             "loopback_p99_ns": p99,
-            "cleanup_at_baseline": cleanup_at_baseline,
+            "stage_predicates": {
+                "owners_exact": predicates.owners_exact,
+                "tasks_exact": predicates.tasks_exact,
+                "physical_udp_endpoints_exact": predicates.physical_udp_endpoints_exact,
+                "threads_at_or_below_baseline": predicates.threads_at_or_below_baseline,
+            },
+            "stage_exact": predicates.exact(),
+            "stage_cleanup_at_baseline": cleanup_at_baseline,
         });
         evidence["stages"]
             .as_array_mut()
@@ -1216,7 +1577,31 @@ mod windows_gate {
 
     #[cfg(test)]
     mod tests {
-        use super::nearest_rank_index;
+        use ferrum2_runtime::OwnerSnapshot;
+
+        use super::{
+            GateError, OverallOutcome, ProcessSample, ResourceBaseline, RuntimeCleanupPredicates,
+            nearest_rank_index, overall_outcome, runtime_cleanup_predicates, stage_predicates,
+            warmup_predicates,
+        };
+
+        fn sample(handles: usize, threads: usize, physical_udp_endpoints: usize) -> ProcessSample {
+            ProcessSample {
+                working_set_bytes: 10,
+                private_memory_bytes: 20,
+                threads,
+                handles,
+                physical_udp_endpoints,
+            }
+        }
+
+        fn exact_runtime_cleanup() -> RuntimeCleanupPredicates {
+            RuntimeCleanupPredicates {
+                handle_count_exact: true,
+                threads_exact: true,
+                physical_udp_endpoints_exact: true,
+            }
+        }
 
         #[test]
         fn nearest_rank_percentiles_cover_small_and_gate_sample_counts() {
@@ -1237,11 +1622,137 @@ mod windows_gate {
                 (127, 253)
             );
         }
+
+        #[test]
+        fn stage_predicate_rejects_each_hard_resource_mutation_but_not_handle_diagnostics() {
+            let baseline = ResourceBaseline {
+                tasks: 7,
+                owners: OwnerSnapshot::default(),
+                process: sample(100, 4, 2),
+            };
+            assert!(
+                stage_predicates(
+                    baseline.owners,
+                    baseline.tasks,
+                    sample(999, 4, 2),
+                    baseline,
+                    0,
+                    0,
+                )
+                .exact(),
+                "stage handles are diagnostic only"
+            );
+
+            let mut owners = baseline.owners;
+            owners.network_runtime_owners = 1;
+            assert!(
+                stage_predicates(owners, baseline.tasks, sample(100, 4, 3), baseline, 1, 1).exact()
+            );
+
+            let mut wrong_owners = owners;
+            wrong_owners.udp_sockets = 1;
+            assert!(
+                !stage_predicates(
+                    wrong_owners,
+                    baseline.tasks,
+                    sample(100, 4, 3),
+                    baseline,
+                    1,
+                    1,
+                )
+                .exact()
+            );
+            assert!(!stage_predicates(owners, 8, sample(100, 4, 3), baseline, 1, 1).exact());
+            assert!(!stage_predicates(owners, 7, sample(100, 4, 4), baseline, 1, 1).exact());
+            assert!(!stage_predicates(owners, 7, sample(100, 5, 3), baseline, 1, 1).exact());
+        }
+
+        #[test]
+        fn warmup_predicate_rejects_each_stability_mutation() {
+            let cold = sample(90, 4, 0);
+            let warmed = sample(98, 4, 0);
+            assert!(warmup_predicates(cold, warmed, warmed).exact());
+
+            for second in [sample(99, 4, 0), sample(98, 5, 0), sample(98, 4, 1)] {
+                assert!(!warmup_predicates(cold, warmed, second).exact());
+            }
+            assert!(!warmup_predicates(sample(90, 3, 0), warmed, warmed).exact());
+            assert!(!warmup_predicates(sample(90, 4, 1), warmed, warmed).exact());
+        }
+
+        #[test]
+        fn runtime_cleanup_predicate_rejects_each_exactness_mutation() {
+            let baseline = sample(98, 4, 0);
+            assert!(runtime_cleanup_predicates(baseline, baseline).exact());
+            for post in [sample(99, 4, 0), sample(98, 5, 0), sample(98, 4, 1)] {
+                assert!(!runtime_cleanup_predicates(baseline, post).exact());
+            }
+        }
+
+        #[test]
+        fn overall_outcome_requires_async_and_runtime_cleanup_success() {
+            assert_eq!(
+                overall_outcome(Ok(()), exact_runtime_cleanup()),
+                OverallOutcome {
+                    status: "PASS",
+                    reason: "none",
+                    code: 0,
+                    failed_stage: None,
+                }
+            );
+
+            for cleanup in [
+                RuntimeCleanupPredicates {
+                    handle_count_exact: false,
+                    ..exact_runtime_cleanup()
+                },
+                RuntimeCleanupPredicates {
+                    threads_exact: false,
+                    ..exact_runtime_cleanup()
+                },
+                RuntimeCleanupPredicates {
+                    physical_udp_endpoints_exact: false,
+                    ..exact_runtime_cleanup()
+                },
+            ] {
+                assert_eq!(
+                    overall_outcome(Ok(()), cleanup),
+                    OverallOutcome {
+                        status: "FAIL",
+                        reason: "runtime_cleanup_not_exact",
+                        code: 1,
+                        failed_stage: Some("runtime_cleanup"),
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn overall_outcome_preserves_original_failure_when_runtime_cleanup_also_fails() {
+            let cleanup_failed = RuntimeCleanupPredicates::unavailable();
+            assert_eq!(
+                overall_outcome(Err(GateError("synthetic_reset_failed")), cleanup_failed),
+                OverallOutcome {
+                    status: "FAIL",
+                    reason: "synthetic_reset_failed",
+                    code: 1,
+                    failed_stage: None,
+                }
+            );
+            assert_eq!(
+                overall_outcome(Err(GateError("echo_bind_failed")), cleanup_failed),
+                OverallOutcome {
+                    status: "ENVIRONMENT_REJECT",
+                    reason: "echo_bind_failed",
+                    code: 2,
+                    failed_stage: None,
+                }
+            );
+        }
     }
 }
 
 #[cfg(windows)]
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
-    std::process::exit(windows_gate::entry().await);
+fn main() {
+    std::process::exit(windows_gate::entry());
 }

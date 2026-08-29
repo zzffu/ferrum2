@@ -175,6 +175,114 @@ fn hosted_execution_mutations_fail_closed() {
         );
     }
 
+    for (from, to) in [
+        (
+            "ferrum2.windows-non-tun-gate06.v2",
+            "ferrum2.windows-non-tun-gate06.v1",
+        ),
+        (
+            "sync_loopback_udp_bind_local_addr_drop_then_windows_catalog_snapshot_and_resolver_without_runtime_service_or_owner",
+            "unspecified_network_warmup",
+        ),
+        ("$warmup.exact -ne $true", "$warmup.exact -ne $false"),
+        ("$cleanup.exact -ne $true", "$cleanup.exact -ne $false"),
+        (
+            "$cleanup.predicates.handle_count_exact -ne $true",
+            "$cleanup.predicates.handle_count_exact -ne $false",
+        ),
+        (
+            "$cleanup.predicates.threads_exact -ne $true",
+            "$cleanup.predicates.threads_exact -ne $false",
+        ),
+        (
+            "$cleanup.predicates.physical_udp_endpoints_exact -ne $true",
+            "$cleanup.predicates.physical_udp_endpoints_exact -ne $false",
+        ),
+        (
+            "$cleanup.post.handle_count -ne $cleanup.pre.handle_count",
+            "$cleanup.post.handle_count -lt $cleanup.pre.handle_count",
+        ),
+        (
+            "$cleanup.post.threads -ne $cleanup.pre.threads",
+            "$cleanup.post.threads -lt $cleanup.pre.threads",
+        ),
+        (
+            "$cleanup.post.physical_udp_endpoints -ne $cleanup.pre.physical_udp_endpoints",
+            "$cleanup.post.physical_udp_endpoints -lt $cleanup.pre.physical_udp_endpoints",
+        ),
+    ] {
+        let weakened = mutate_first(&main, from, to);
+        assert!(
+            validate_hosted_library_execution(&weakened).is_err(),
+            "Windows non-TUN v2 cleanup validation weakening must fail closed: {from}"
+        );
+    }
+
+    for sample in [
+        "$warmup.cold",
+        "$warmup.first_post",
+        "$warmup.second_post",
+        "$cleanup.pre",
+        "$cleanup.post",
+    ] {
+        let check = format!("-not (Test-Gate06ProcessSample {sample})");
+        let weakened = mutate_first(&main, &check, "$false");
+        assert!(
+            validate_hosted_library_execution(&weakened).is_err(),
+            "Windows non-TUN process sample cannot be omitted: {sample}"
+        );
+    }
+    for field in ["handle_count", "threads", "physical_udp_endpoints"] {
+        let check = format!("($Sample.{field} -is [long]) -and $Sample.{field} -ge 0");
+        let weakened = mutate_first(&main, &check, "$true");
+        assert!(
+            validate_hosted_library_execution(&weakened).is_err(),
+            "Windows non-TUN process sample field cannot be omitted: {field}"
+        );
+    }
+
+    let deleted_stage = mutate_first(&main, "            \"dynamic_cleanup\",\n", "");
+    assert!(
+        validate_hosted_library_execution(&deleted_stage).is_err(),
+        "Windows non-TUN stage closure cannot omit a stage"
+    );
+    for (from, to) in [
+        (
+            "$stage.stage_exact -ne $true",
+            "$stage.stage_exact -ne $false",
+        ),
+        (
+            "$stage.stage_predicates.owners_exact -ne $true",
+            "$stage.stage_predicates.owners_exact -ne $false",
+        ),
+        (
+            "$stage.stage_predicates.tasks_exact -ne $true",
+            "$stage.stage_predicates.tasks_exact -ne $false",
+        ),
+        (
+            "$stage.stage_predicates.physical_udp_endpoints_exact -ne $true",
+            "$stage.stage_predicates.physical_udp_endpoints_exact -ne $false",
+        ),
+        (
+            "$stage.stage_predicates.threads_at_or_below_baseline -ne $true",
+            "$stage.stage_predicates.threads_at_or_below_baseline -ne $false",
+        ),
+        (
+            "$cleanupExpected -and $stage.stage_cleanup_at_baseline -ne $true",
+            "$cleanupExpected -and $stage.stage_cleanup_at_baseline -ne $false",
+        ),
+        (
+            "$stage.PSObject.Properties.Name -notcontains \"stage_cleanup_at_baseline\"",
+            "$false",
+        ),
+    ] {
+        let weakened = mutate_first(&main, from, to);
+        assert!(
+            validate_hosted_library_execution(&weakened).is_err(),
+            "Windows non-TUN stage validation weakening must fail closed: {from}"
+        );
+    }
+
     let upload_before_qualification = move_block_before(
         &main,
         "      - name: Upload Windows non-TUN generation evidence\n",
