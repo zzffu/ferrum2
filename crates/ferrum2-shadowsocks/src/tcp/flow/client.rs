@@ -9,6 +9,7 @@ use ferrum2_crypto::{Clock, MethodTcpSalt, TcpOpener, TcpSealer};
 use super::io::{DataPoll, poll_data_read, poll_flush, poll_shutdown, poll_write_open};
 use super::{
     ClientRx, DataRx, Lifecycle, PlainDuplex, StagedWrite, TransportIo, TxState, copy_ready,
+    reset_decrypt,
 };
 use crate::tcp::error::{
     DetectionReason, FlowTerminal, ShadowsocksError, TransportPhase, detection_from_aead,
@@ -16,7 +17,8 @@ use crate::tcp::error::{
 use crate::tcp::handshake::TcpKeyProvider;
 use crate::tcp::observe::{BufferRole, Observers, inspect_scratch};
 use crate::tcp::wire::{
-    MAX_DECRYPT_WIRE_LEN, RESPONSE_TYPE, TAG_LEN, opener_for, response_fixed_plaintext_len,
+    MAX_DECRYPT_WIRE_LEN, MAX_RESPONSE_FIXED_PLAINTEXT_LEN, RESPONSE_TYPE, TAG_LEN, opener_for,
+    response_fixed_plaintext_len,
 };
 
 /// Opaque client flow retaining unsplit transport and both cipher directions.
@@ -182,6 +184,7 @@ where
         let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
         match state {
             ClientRx::ResponseFixed => {
+                reset_decrypt(&mut self.decrypt);
                 let response_first_read_len =
                     self.request_salt.profile().initial_response_read_bytes();
                 match Pin::new(&mut self.io)
@@ -211,6 +214,7 @@ where
                         let result = self.open_response_fixed();
                         match result {
                             Ok(wire_len) => {
+                                reset_decrypt(&mut self.decrypt);
                                 self.rx = ClientRx::ResponsePayload {
                                     wire_len,
                                     filled: 0,
@@ -269,40 +273,27 @@ where
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
+                    self.decrypt.truncate(wire_len);
                     let opened = self
                         .response_opener
                         .as_mut()
                         .expect("fixed response installed opener")
-                        .open_slice_in_place(&mut self.decrypt[..wire_len]);
-                    let plaintext_len = match opened {
-                        Ok(plaintext_len) => plaintext_len,
-                        Err(error) => {
-                            let error = self.lifecycle.install_detection(
-                                &mut self.io,
-                                self.observers.flow,
-                                detection_from_aead(error),
-                            );
-                            return Poll::Ready(Err(error));
-                        }
-                    };
-                    if plaintext_len + TAG_LEN != wire_len {
+                        .open_in_place(&mut self.decrypt);
+                    if let Err(error) = opened {
                         let error = self.lifecycle.install_detection(
                             &mut self.io,
                             self.observers.flow,
-                            DetectionReason::FrameBounds,
+                            detection_from_aead(error),
                         );
                         return Poll::Ready(Err(error));
                     }
                     let mut position = 0;
-                    let (copied, complete) =
-                        copy_ready(&self.decrypt, &mut position, plaintext_len, destination);
+                    let (copied, complete) = copy_ready(&self.decrypt, &mut position, destination);
                     self.rx = if complete {
+                        reset_decrypt(&mut self.decrypt);
                         ClientRx::Data(DataRx::Length { filled: 0 })
                     } else {
-                        ClientRx::Data(DataRx::Ready {
-                            position,
-                            end: plaintext_len,
-                        })
+                        ClientRx::Data(DataRx::Ready { position })
                     };
                     Poll::Ready(Ok(copied))
                 }
@@ -346,13 +337,16 @@ where
             return Err(DetectionReason::ResponseBinding);
         }
         let mut opener = opener_for(self.keys, &response_salt)?;
-        let fixed_wire_len = fixed_plaintext_len + TAG_LEN;
+        let mut fixed_wire = [0_u8; MAX_RESPONSE_FIXED_PLAINTEXT_LEN + TAG_LEN];
+        fixed_wire[..fixed_plaintext_len + TAG_LEN]
+            .copy_from_slice(&self.decrypt[salt_len..response_first_read_len]);
+        self.decrypt.clear();
         self.decrypt
-            .copy_within(salt_len..response_first_read_len, 0);
-        let plaintext_len = opener
-            .open_slice_in_place(&mut self.decrypt[..fixed_wire_len])
+            .extend_from_slice(&fixed_wire[..fixed_plaintext_len + TAG_LEN]);
+        opener
+            .open_in_place(&mut self.decrypt)
             .map_err(detection_from_aead)?;
-        if plaintext_len != fixed_plaintext_len {
+        if self.decrypt.len() != fixed_plaintext_len {
             return Err(DetectionReason::FrameBounds);
         }
         if self.decrypt[0] != RESPONSE_TYPE {

@@ -5,7 +5,7 @@ use bytes::BytesMut;
 
 use super::{
     DataRx, Lifecycle, StagedKind, StagedWrite, TransportIo, TxState, copy_ready,
-    protocol_cipher_boundary,
+    protocol_cipher_boundary, reset_decrypt,
 };
 use crate::tcp::error::{
     DetectionReason, FlowTerminal, ProtocolReason, ShadowsocksError, TransportPhase,
@@ -36,6 +36,9 @@ pub(super) fn poll_data_read<S: TransportIo>(
 ) -> DataPoll {
     match state {
         DataRx::Length { mut filled } => {
+            if filled == 0 {
+                reset_decrypt(scratch);
+            }
             match Pin::new(io).poll_read(cx, &mut scratch[filled..ENCRYPTED_LENGTH_LEN]) {
                 Poll::Pending => DataPoll::Pending(DataRx::Length { filled }),
                 Poll::Ready(Err(_)) => {
@@ -61,15 +64,13 @@ pub(super) fn poll_data_read<S: TransportIo>(
                         cx.waker().wake_by_ref();
                         return DataPoll::Pending(DataRx::Length { filled });
                     }
-                    let plaintext_len = match protocol_cipher_boundary(lifecycle, observer, || {
-                        opener
-                            .open_slice_in_place(&mut scratch[..ENCRYPTED_LENGTH_LEN])
-                            .map_err(frame_from_open_aead)
+                    scratch.truncate(ENCRYPTED_LENGTH_LEN);
+                    if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                        opener.open_in_place(scratch).map_err(frame_from_open_aead)
                     }) {
-                        Ok(plaintext_len) => plaintext_len,
-                        Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
-                    };
-                    if plaintext_len != 2 {
+                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    }
+                    if scratch.len() != 2 {
                         let error =
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                         return DataPoll::Ready(DataRx::Poison, Err(error));
@@ -85,6 +86,7 @@ pub(super) fn poll_data_read<S: TransportIo>(
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                         return DataPoll::Ready(DataRx::Poison, Err(error));
                     }
+                    reset_decrypt(scratch);
                     cx.waker().wake_by_ref();
                     DataPoll::Pending(DataRx::Payload {
                         wire_len,
@@ -116,42 +118,35 @@ pub(super) fn poll_data_read<S: TransportIo>(
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Payload { wire_len, filled });
                 }
-                let plaintext_len = match protocol_cipher_boundary(lifecycle, observer, || {
-                    opener
-                        .open_slice_in_place(&mut scratch[..wire_len])
-                        .map_err(frame_from_open_aead)
+                scratch.truncate(wire_len);
+                if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                    opener.open_in_place(scratch).map_err(frame_from_open_aead)
                 }) {
-                    Ok(plaintext_len) => plaintext_len,
-                    Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
-                };
-                if plaintext_len + TAG_LEN != wire_len {
-                    let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                     return DataPoll::Ready(DataRx::Poison, Err(error));
                 }
-                if plaintext_len == 0 {
+                if scratch.is_empty() {
+                    reset_decrypt(scratch);
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Length { filled: 0 });
                 }
                 let mut position = 0;
-                let (copied, complete) =
-                    copy_ready(scratch, &mut position, plaintext_len, destination);
+                let (copied, complete) = copy_ready(scratch, &mut position, destination);
                 let next = if complete {
+                    reset_decrypt(scratch);
                     DataRx::Length { filled: 0 }
                 } else {
-                    DataRx::Ready {
-                        position,
-                        end: plaintext_len,
-                    }
+                    DataRx::Ready { position }
                 };
                 DataPoll::Ready(next, Ok(copied))
             }
         },
-        DataRx::Ready { mut position, end } => {
-            let (copied, complete) = copy_ready(scratch, &mut position, end, destination);
+        DataRx::Ready { mut position } => {
+            let (copied, complete) = copy_ready(scratch, &mut position, destination);
             let next = if complete {
+                reset_decrypt(scratch);
                 DataRx::Length { filled: 0 }
             } else {
-                DataRx::Ready { position, end }
+                DataRx::Ready { position }
             };
             DataPoll::Ready(next, Ok(copied))
         }

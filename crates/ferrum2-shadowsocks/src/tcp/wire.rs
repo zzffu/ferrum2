@@ -385,16 +385,9 @@ pub fn open_data_frame(
     encrypted_length: &[u8],
     encrypted_payload: &[u8],
 ) -> Result<Bytes, FrameError> {
-    if encrypted_length.len() != ENCRYPTED_LENGTH_LEN
-        || encrypted_payload.len() > MAX_DECRYPT_WIRE_LEN
-    {
-        return Err(FrameError::Bounds);
-    }
-    let scratch_len = encrypted_payload.len().max(ENCRYPTED_LENGTH_LEN);
-    let mut scratch = BytesMut::zeroed(scratch_len);
-    let plaintext_len =
-        open_data_frame_into(opener, encrypted_length, encrypted_payload, &mut scratch)?;
-    Ok(scratch.freeze().slice(..plaintext_len))
+    let mut scratch = BytesMut::with_capacity(MAX_DECRYPT_WIRE_LEN);
+    open_data_frame_into(opener, encrypted_length, encrypted_payload, &mut scratch)?;
+    Ok(scratch.freeze())
 }
 
 pub(super) fn open_data_frame_into(
@@ -402,32 +395,33 @@ pub(super) fn open_data_frame_into(
     encrypted_length: &[u8],
     encrypted_payload: &[u8],
     scratch: &mut BytesMut,
-) -> Result<usize, FrameError> {
+) -> Result<(), FrameError> {
     if encrypted_length.len() != ENCRYPTED_LENGTH_LEN
         || encrypted_payload.len() > MAX_DECRYPT_WIRE_LEN
-        || scratch.len() < encrypted_payload.len().max(ENCRYPTED_LENGTH_LEN)
     {
         return Err(FrameError::Bounds);
     }
-    scratch[..ENCRYPTED_LENGTH_LEN].copy_from_slice(encrypted_length);
-    let length_plaintext_len = opener
-        .open_slice_in_place(&mut scratch[..ENCRYPTED_LENGTH_LEN])
+    scratch.clear();
+    scratch.extend_from_slice(encrypted_length);
+    opener
+        .open_in_place(scratch)
         .map_err(frame_from_open_aead)?;
-    if length_plaintext_len != 2 {
+    if scratch.len() != 2 {
         return Err(FrameError::Bounds);
     }
     let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
     if encrypted_payload.len() != payload_len.checked_add(TAG_LEN).ok_or(FrameError::Bounds)? {
         return Err(FrameError::Bounds);
     }
-    scratch[..encrypted_payload.len()].copy_from_slice(encrypted_payload);
-    let plaintext_len = opener
-        .open_slice_in_place(&mut scratch[..encrypted_payload.len()])
+    scratch.clear();
+    scratch.extend_from_slice(encrypted_payload);
+    opener
+        .open_in_place(scratch)
         .map_err(frame_from_open_aead)?;
-    if plaintext_len != payload_len {
+    if scratch.len() != payload_len {
         return Err(FrameError::Bounds);
     }
-    Ok(plaintext_len)
+    Ok(())
 }
 
 pub(super) fn response_fixed_plaintext_len(profile: MethodProfile) -> usize {
