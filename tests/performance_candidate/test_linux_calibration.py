@@ -9,6 +9,7 @@ import unittest
 from tools.performance_candidate.json_contract import CandidateControlError
 from tools.performance_candidate.linux.calibration import create_calibration_candidate
 from tools.performance_candidate.linux.plan import PLAN_SCHEMA_VERSION, create_plan
+from tools.performance_candidate.linux import policy as linux_policy
 
 
 class LinuxCalibrationTests(unittest.TestCase):
@@ -32,9 +33,7 @@ class LinuxCalibrationTests(unittest.TestCase):
             self.assertIn(
                 f'"$CANDIDATE_DIR/target/profiling/{binary}"', calibration_block
             )
-            self.assertIn(
-                f'"$PARENT_DIR/target/profiling/{binary}"', calibration_block
-            )
+            self.assertIn(f'"$PARENT_DIR/target/profiling/{binary}"', calibration_block)
         self.assertEqual(calibration_block.count("install -m 0755"), 2)
         self.assertEqual(calibration_block.count("cmp \\"), 2)
 
@@ -72,7 +71,9 @@ class LinuxCalibrationTests(unittest.TestCase):
         amd_name = "- name: Require preferred AMD performance host"
         bind_name = "- name: Bind exact parent and runner identity"
         preflight_name = "- name: Preflight reviewed comparison host applicability"
-        build_name = "- name: Prove parent and candidate correctness and build identities"
+        build_name = (
+            "- name: Prove parent and candidate correctness and build identities"
+        )
         self.assertLess(workflow.index(amd_name), workflow.index(bind_name))
         self.assertLess(workflow.index(preflight_name), workflow.index(build_name))
 
@@ -117,8 +118,7 @@ class LinuxCalibrationTests(unittest.TestCase):
         workflow = self._workflow()
         for argument in ("--ready-file", "--output"):
             self.assertIn(
-                f'{argument} "profiles/paired/round-$round/'
-                '$scenario-$member-$pair.',
+                f'{argument} "profiles/paired/round-$round/' "$scenario-$member-$pair.",
                 workflow,
             )
         self.assertIn(
@@ -159,13 +159,11 @@ class LinuxCalibrationTests(unittest.TestCase):
                 aggregate_block,
             )
         self.assertIn("linux-calibration-candidate", aggregate_block)
-        self.assertIn(
-            '--output "$PERFORMANCE_CALIBRATION_CANDIDATE"', aggregate_block
-        )
+        self.assertIn('--output "$PERFORMANCE_CALIBRATION_CANDIDATE"', aggregate_block)
 
-        artifact_block = workflow.split(
-            "- name: Upload paired raw evidence", 1
-        )[1].split("- name: Reap processes", 1)[0]
+        artifact_block = workflow.split("- name: Upload paired raw evidence", 1)[
+            1
+        ].split("- name: Reap processes", 1)[0]
         for path in (
             "${{ github.workspace }}/profiles/paired/**/*.jsonl",
             "${{ runner.temp }}/ferrum2-parent/profiles/paired/**/*.jsonl",
@@ -213,9 +211,7 @@ class LinuxCalibrationTests(unittest.TestCase):
                         evidence_contract_updates=contract_updates,
                         decision_policy_updates=decision_policy_updates,
                     )
-                    with self.assertRaisesRegex(
-                        CandidateControlError, expected_error
-                    ):
+                    with self.assertRaisesRegex(CandidateControlError, expected_error):
                         create_calibration_candidate([first, changed])
 
     def test_calibration_plan_is_same_source_measurement_and_never_adoption_eligible(
@@ -267,7 +263,9 @@ class LinuxCalibrationTests(unittest.TestCase):
             second = root / "round-2.json"
             self._write_summary(first, [0.0] * 6)
             self._write_summary(second, [0.0] * 6, run_kind="comparison")
-            with self.assertRaisesRegex(CandidateControlError, "calibration-aa summaries"):
+            with self.assertRaisesRegex(
+                CandidateControlError, "calibration-aa summaries"
+            ):
                 create_calibration_candidate([first, second])
 
     def test_calibration_rejects_a_repeated_round(self) -> None:
@@ -310,7 +308,7 @@ class LinuxCalibrationTests(unittest.TestCase):
 
             candidate = create_calibration_candidate([upper, lower])
 
-            self.assertEqual(candidate["schema_version"], 2)
+            self.assertEqual(candidate["schema_version"], 3)
             self.assertEqual(candidate["environment_identity"]["memory_kib"], anchor)
             self.assertEqual(candidate["memory_capacity_quantum_kib"], 65_536)
             self.assertEqual(
@@ -323,9 +321,13 @@ class LinuxCalibrationTests(unittest.TestCase):
                 ],
                 anchor + 32_767,
             )
-            with self.assertRaisesRegex(CandidateControlError, "share commit, environment"):
+            with self.assertRaisesRegex(
+                CandidateControlError, "share commit, environment"
+            ):
                 create_calibration_candidate([lower, below])
-            with self.assertRaisesRegex(CandidateControlError, "share commit, environment"):
+            with self.assertRaisesRegex(
+                CandidateControlError, "share commit, environment"
+            ):
                 create_calibration_candidate([upper, outside])
 
     def test_calibration_preserves_real_runner_memory_observations(self) -> None:
@@ -383,7 +385,9 @@ class LinuxCalibrationTests(unittest.TestCase):
                 [0.0] * 6,
                 removed_environment_field="kernel",
             )
-            with self.assertRaisesRegex(CandidateControlError, "share commit, environment"):
+            with self.assertRaisesRegex(
+                CandidateControlError, "share commit, environment"
+            ):
                 create_calibration_candidate([first, missing])
 
     @staticmethod
@@ -441,9 +445,10 @@ class LinuxCalibrationTests(unittest.TestCase):
         if evidence_contract_updates is not None:
             evidence_contract.update(evidence_contract_updates)
         decision_policy = {
-            "schema_version": 3,
+            "schema_version": 4,
             "policy_id": "test-policy",
             "policy_sha256": "5" * 64,
+            "authority": dict(linux_policy.HOSTED_AMD_PROVISIONAL_AUTHORITY),
             "scenarios": {"udp-small-high": {}},
         }
         if decision_policy_updates is not None:
@@ -460,6 +465,8 @@ class LinuxCalibrationTests(unittest.TestCase):
             "decision_policy": decision_policy,
             "status": "CALIBRATION_REQUIRED",
             "adoption_claim": False,
+            "production_feature_enabled_by_default": False,
+            "authority": dict(linux_policy.HOSTED_AMD_PROVISIONAL_AUTHORITY),
             "workflow_failure_reason": None,
             "environment_identity": environment,
             "pairs": 6,

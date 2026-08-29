@@ -11,16 +11,47 @@ import sys
 from decimal import Decimal
 
 from tools.performance_candidate.identity import COMMIT_SHA
-from tools.performance_candidate.json_contract import CandidateControlError, _policy_percent
-from tools.performance_candidate.linux.catalog import SUMMARY_SCHEMA_VERSION, WARNING_POLICY
-from tools.performance_candidate.linux.policy import UNCALIBRATED_POLICY, _scenario_policy_is_applicable, load_decision_policy
-from tools.performance_candidate.linux.scale import SCALE_SCENARIO, load_scale_safety_policy
+from tools.performance_candidate.json_contract import (
+    CandidateControlError,
+    _policy_percent,
+)
+from tools.performance_candidate.linux.catalog import (
+    SUMMARY_SCHEMA_VERSION,
+    WARNING_POLICY,
+)
+from tools.performance_candidate.linux.policy import (
+    HOSTED_AMD_PROVISIONAL_AUTHORITY,
+    UNCALIBRATED_POLICY,
+    _scenario_policy_is_applicable,
+    load_decision_policy,
+)
+from tools.performance_candidate.linux.scale import (
+    SCALE_SCENARIO,
+    load_scale_safety_policy,
+)
 from tools.performance_candidate.linux.scale_decision import _summarize_scale_evidence
-from tools.performance_candidate.linux.scale_lineage import validate_scale_lineage_repository
+from tools.performance_candidate.linux.scale_lineage import (
+    validate_scale_lineage_repository,
+)
 from tools.performance_candidate.linux.trial import _read_trial, _validate_trial
 from tools.performance_candidate.output import _atomic_text
-from tools.performance_candidate.pairing import _display_decimal, _improvement, _median, _observed_direction, _stability_warnings
-from tools.performance_candidate.status import CALIBRATION_REQUIRED, CANDIDATE_WIN, INCONCLUSIVE, INVALID, REGRESSION, WITHIN_CALIBRATED_BAND, summary_exit_code
+from tools.performance_candidate.pairing import (
+    _display_decimal,
+    _improvement,
+    _median,
+    _observed_direction,
+    _stability_warnings,
+)
+from tools.performance_candidate.status import (
+    CALIBRATION_REQUIRED,
+    CANDIDATE_WIN,
+    INCONCLUSIVE,
+    INVALID,
+    REGRESSION,
+    WITHIN_CALIBRATED_BAND,
+    summary_exit_code,
+)
+
 
 def _scenario_threshold_decision(
     *,
@@ -165,10 +196,14 @@ def summarize_evidence(
     run_kind = plan["run_kind"]
     if run_kind == "calibration-aa":
         if parent_sha != candidate_sha:
-            raise CandidateControlError("calibration-aa summary commits must be identical")
+            raise CandidateControlError(
+                "calibration-aa summary commits must be identical"
+            )
     elif run_kind == "comparison":
         if parent_sha == candidate_sha:
-            raise CandidateControlError("summary parent and candidate must be different")
+            raise CandidateControlError(
+                "summary parent and candidate must be different"
+            )
     else:
         raise CandidateControlError("summary run_kind is unsupported")
     is_scale = plan["selection"] == SCALE_SCENARIO
@@ -178,9 +213,13 @@ def summarize_evidence(
             lineage["parent_sha"] != parent_sha
             or lineage["candidate_sha"] != candidate_sha
         ):
-            raise CandidateControlError("scale summary commits do not match the bound lineage")
+            raise CandidateControlError(
+                "scale summary commits do not match the bound lineage"
+            )
         if repository is None:
-            raise CandidateControlError("scale summary requires repository lineage verification")
+            raise CandidateControlError(
+                "scale summary requires repository lineage verification"
+            )
         validate_scale_lineage_repository(repository, lineage)
     planned = {entry["scenario"]: entry for entry in plan["scenarios"]}
     rows: dict[tuple[str, int, str], dict[str, object]] = {}
@@ -277,7 +316,10 @@ def summarize_evidence(
             missing_scenarios=sorted({key[0] for key in missing}),
         )
 
-    if run_kind == "calibration-aa" and member_identity["parent"] != member_identity["candidate"]:
+    if (
+        run_kind == "calibration-aa"
+        and member_identity["parent"] != member_identity["candidate"]
+    ):
         raise CandidateControlError(
             "calibration-aa parent and candidate build identities must be identical"
         )
@@ -357,9 +399,7 @@ def summarize_evidence(
                 "unit": scenario_plan["evidence_contract"]["unit"],
                 "direction": direction,
                 "topology": scenario_plan["topology"],
-                "application_payload_bytes": scenario_plan[
-                    "application_payload_bytes"
-                ],
+                "application_payload_bytes": scenario_plan["application_payload_bytes"],
                 "workload_scale": scenario_plan["workload_scale"],
                 "socks_datagram_bytes": scenario_plan["socks_datagram_bytes"],
                 "upstream_wire_bytes": scenario_plan["upstream_wire_bytes"],
@@ -396,9 +436,7 @@ def summarize_evidence(
     elif any(result["status"] == REGRESSION for result in scenario_summaries):
         status = REGRESSION
         decision_reason = "at least one calibrated mandatory scenario regressed"
-    elif any(
-        result["status"] == CALIBRATION_REQUIRED for result in scenario_summaries
-    ):
+    elif any(result["status"] == CALIBRATION_REQUIRED for result in scenario_summaries):
         status = CALIBRATION_REQUIRED
         decision_reason = "applicable reviewed calibration is required"
     elif any(result["status"] == INCONCLUSIVE for result in scenario_summaries):
@@ -418,7 +456,8 @@ def summarize_evidence(
         ):
             status = CANDIDATE_WIN
             decision_reason = (
-                "all calibrated primaries and guards satisfy the adoption policy"
+                "all calibrated primaries and guards satisfy the provisional "
+                "observation policy"
             )
         else:
             status = WITHIN_CALIBRATED_BAND
@@ -469,11 +508,13 @@ def summarize_evidence(
         "scale_safety_policy": None,
         "scale_lineage": None,
         "warning_policy": dict(WARNING_POLICY),
+        "authority": copy.deepcopy(plan["authority"]),
         "decision_enabled": enabled_count > 0,
         "candidate_win_enabled": threshold_availability == "complete",
         "decision_reason": decision_reason,
         "threshold_availability": threshold_availability,
-        "adoption_claim": status == CANDIDATE_WIN,
+        "adoption_claim": False,
+        "production_feature_enabled_by_default": False,
         "status": status,
         "workflow_failure_reason": (
             decision_reason
@@ -528,11 +569,15 @@ def invalid_summary(
             plan.get("scale_lineage") if plan is not None else None
         ),
         "warning_policy": dict(WARNING_POLICY),
+        "authority": copy.deepcopy(
+            plan["authority"] if plan is not None else HOSTED_AMD_PROVISIONAL_AUTHORITY
+        ),
         "decision_enabled": False,
         "candidate_win_enabled": False,
         "decision_reason": "invalid evidence",
         "threshold_availability": "none",
         "adoption_claim": False,
+        "production_feature_enabled_by_default": False,
         "status": INVALID,
         "workflow_failure_reason": str(error),
         "mandatory_scenarios": mandatory,
@@ -553,7 +598,12 @@ def summary_markdown(summary: dict[str, object]) -> str:
         f"- Status: **{summary['status']}**",
         f"- Parent: `{summary['parent_sha']}`",
         f"- Candidate: `{summary['candidate_sha']}`",
+        f"- Authority: `{summary['authority']['scope']}`",
+        "- Performance authoritative: "
+        f"**{str(summary['authority']['performance_authoritative']).lower()}**",
         f"- Adoption claim: **{str(summary['adoption_claim']).lower()}**",
+        "- Production feature enabled by default: "
+        f"**{str(summary['production_feature_enabled_by_default']).lower()}**",
         "",
     ]
     if summary["status"] == INVALID:

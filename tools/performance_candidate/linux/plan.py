@@ -6,7 +6,10 @@ import copy
 import json
 import pathlib
 
-from tools.performance_candidate.json_contract import CandidateControlError, read_bounded_closed_json
+from tools.performance_candidate.json_contract import (
+    CandidateControlError,
+    read_bounded_closed_json,
+)
 from tools.performance_candidate.linux.catalog import (
     ACTIVE_SECONDS,
     DNS_CACHE_SIZE_SCENARIOS,
@@ -27,12 +30,23 @@ from tools.performance_candidate.linux.catalog import (
     UDP_SS_PAYLOAD_MATRIX,
     WARMUP_SECONDS,
 )
-from tools.performance_candidate.linux.evidence_contract import scenario_evidence_contract
-from tools.performance_candidate.linux.policy import MEASUREMENT_ENVIRONMENT, UNCALIBRATED_POLICY, _scenario_policy_is_applicable, validate_decision_policy
-from tools.performance_candidate.linux.scale import SCALE_SCENARIO, _scale_scenario_entry, validate_scale_lineage_shape, validate_scale_safety_policy
+from tools.performance_candidate.linux.evidence_contract import (
+    scenario_evidence_contract,
+)
+from tools.performance_candidate.linux.policy import (
+    MEASUREMENT_ENVIRONMENT,
+    UNCALIBRATED_POLICY,
+    validate_decision_policy,
+)
+from tools.performance_candidate.linux.scale import (
+    SCALE_SCENARIO,
+    _scale_scenario_entry,
+    validate_scale_lineage_shape,
+    validate_scale_safety_policy,
+)
 from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_SELECTION
 
-PLAN_SCHEMA_VERSION = 10
+PLAN_SCHEMA_VERSION = 11
 PLAN_MAX_BYTES = 1024 * 1024
 
 
@@ -143,7 +157,9 @@ def _qualification_scenarios(
             _scenario_entry("udp-small-high", "guard"),
         ]
     if family == "udp-direct":
-        guard = next(scenario for scenario in UDP_DIRECT_PAYLOAD_BOUNDS if scenario != selected)
+        guard = next(
+            scenario for scenario in UDP_DIRECT_PAYLOAD_BOUNDS if scenario != selected
+        )
         return "udp-direct", [
             _scenario_entry(selected, "primary"),
             _scenario_entry(guard, "guard"),
@@ -217,7 +233,9 @@ def create_plan(
         if mode != "qualification":
             raise CandidateControlError("tcp-scale-10k is qualification-only")
         if (warmup, active, pair_count) != (10, 30, 6):
-            raise CandidateControlError("tcp-scale-10k requires the exact 10/30/6 recipe")
+            raise CandidateControlError(
+                "tcp-scale-10k requires the exact 10/30/6 recipe"
+            )
         if scale_safety_policy is None or scale_lineage is None:
             raise CandidateControlError(
                 "tcp-scale-10k requires a reviewed scale policy and bound lineage"
@@ -227,7 +245,9 @@ def create_plan(
         scenario_group = SCALE_SCENARIO
         scenarios = [_scale_scenario_entry()]
     elif scale_safety_policy is not None or scale_lineage is not None:
-        raise CandidateControlError("scale policy and lineage are only valid for tcp-scale-10k")
+        raise CandidateControlError(
+            "scale policy and lineage are only valid for tcp-scale-10k"
+        )
     elif mode == "diagnostic":
         scenario_group = "diagnostic"
         scenarios = [_scenario_entry(selection, "diagnostic")]
@@ -253,19 +273,11 @@ def create_plan(
         "active_seconds": active,
         "pairs": pair_count,
         "measurement_environment": dict(MEASUREMENT_ENVIRONMENT),
+        "authority": copy.deepcopy(policy["authority"]),
         "decision_policy": policy,
         "scale_safety_policy": copy.deepcopy(scale_safety_policy),
         "scale_lineage": copy.deepcopy(scale_lineage),
-        "adoption_eligible": run_kind == "comparison"
-        and not is_scale
-        and mode == "qualification"
-        and _plan_has_complete_applicable_policy(
-            scenarios=scenarios,
-            policy=policy,
-            warmup_seconds=warmup,
-            active_seconds=active,
-            pairs=pair_count,
-        ),
+        "adoption_eligible": False,
         "scenarios": scenarios,
     }
 
@@ -275,26 +287,6 @@ def write_plan(path: pathlib.Path, plan: dict[str, object]) -> None:
     path.write_text(
         json.dumps(plan, sort_keys=True, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
-    )
-
-
-def _plan_has_complete_applicable_policy(
-    *,
-    scenarios: list[dict[str, object]],
-    policy: dict[str, object],
-    warmup_seconds: int,
-    active_seconds: int,
-    pairs: int,
-) -> bool:
-    return all(
-        _scenario_policy_is_applicable(
-            entry=policy["scenarios"][scenario["scenario"]],
-            scenario_plan=scenario,
-            warmup_seconds=warmup_seconds,
-            active_seconds=active_seconds,
-            pairs=pairs,
-        )
-        for scenario in scenarios
     )
 
 

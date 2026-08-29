@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-
-SUMMARY_SCHEMA_VERSION = 9
+SUMMARY_SCHEMA_VERSION = 10
 
 WARNING_POLICY = {
     "decision_effect": "none",

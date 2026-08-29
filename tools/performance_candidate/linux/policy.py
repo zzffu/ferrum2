@@ -5,15 +5,42 @@ from __future__ import annotations
 import pathlib
 import re
 
-from tools.performance_candidate.json_contract import CandidateControlError, SHA256, _exact_fields, _policy_percent, read_bounded_closed_json
-from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, PAIR_COUNTS, PAIR_SCHEDULE, SCENARIO_CATALOG, WARMUP_SECONDS
+from tools.performance_candidate.json_contract import (
+    CandidateControlError,
+    SHA256,
+    _exact_fields,
+    _policy_percent,
+    read_bounded_closed_json,
+)
+from tools.performance_candidate.linux.catalog import (
+    ACTIVE_SECONDS,
+    PAIR_COUNTS,
+    PAIR_SCHEDULE,
+    SCENARIO_CATALOG,
+    WARMUP_SECONDS,
+)
 from tools.performance_candidate.linux.environment import (
     MEMORY_CAPACITY_QUANTUM_KIB,
     calibration_environments_match,
 )
 
 DECISION_POLICY_MAX_BYTES = 256 * 1024
-DECISION_POLICY_SCHEMA_VERSION = 3
+DECISION_POLICY_SCHEMA_VERSION = 4
+
+AUTHORITY_FIELDS = frozenset(
+    {
+        "scope",
+        "performance_authoritative",
+        "bare_metal_gate_satisfied",
+        "durable_evidence_gate_satisfied",
+    }
+)
+HOSTED_AMD_PROVISIONAL_AUTHORITY = {
+    "scope": "github-hosted-amd-provisional",
+    "performance_authoritative": False,
+    "bare_metal_gate_satisfied": False,
+    "durable_evidence_gate_satisfied": False,
+}
 
 MEASUREMENT_ENVIRONMENT = {
     "runner_image": "ubuntu-24.04",
@@ -26,11 +53,13 @@ MEASUREMENT_ENVIRONMENT = {
 }
 
 
-POLICY_DOCUMENT_FIELDS = frozenset({"schema_version", "policy_id", "scenarios"})
+POLICY_DOCUMENT_FIELDS = frozenset(
+    {"schema_version", "policy_id", "authority", "scenarios"}
+)
 
 
 POLICY_RUNTIME_FIELDS = frozenset(
-    {"schema_version", "policy_id", "policy_sha256", "scenarios"}
+    {"schema_version", "policy_id", "policy_sha256", "authority", "scenarios"}
 )
 
 
@@ -73,6 +102,7 @@ UNCALIBRATED_POLICY = {
     "schema_version": DECISION_POLICY_SCHEMA_VERSION,
     "policy_id": "in-memory-uncalibrated-policy",
     "policy_sha256": None,
+    "authority": dict(HOSTED_AMD_PROVISIONAL_AUTHORITY),
     "scenarios": {
         scenario: {
             "metric": metric,
@@ -89,6 +119,23 @@ UNCALIBRATED_POLICY = {
         for scenario, (metric, direction, _family) in SCENARIO_CATALOG.items()
     },
 }
+
+
+def validate_hosted_authority(authority: object, *, label: str) -> None:
+    if type(authority) is not dict:
+        raise CandidateControlError(f"{label} authority must be a JSON object")
+    _exact_fields(authority, AUTHORITY_FIELDS, f"{label} authority")
+    if authority != HOSTED_AMD_PROVISIONAL_AUTHORITY or any(
+        type(authority[field]) is not bool
+        for field in (
+            "performance_authoritative",
+            "bare_metal_gate_satisfied",
+            "durable_evidence_gate_satisfied",
+        )
+    ):
+        raise CandidateControlError(
+            f"{label} authority must remain GitHub-hosted AMD provisional"
+        )
 
 
 def _calibration_environment_matches(
@@ -133,6 +180,7 @@ def validate_decision_policy(policy: dict[str, object]) -> None:
         )
     if type(policy["policy_id"]) is not str or not policy["policy_id"].strip():
         raise CandidateControlError("decision policy_id must be a non-empty string")
+    validate_hosted_authority(policy["authority"], label="decision policy")
     digest = policy["policy_sha256"]
     if digest is not None and (
         type(digest) is not str or SHA256.fullmatch(digest) is None
@@ -234,7 +282,10 @@ def validate_decision_policy(policy: dict[str, object]) -> None:
             "semantic_recipe_sha256",
             "evidence_bundle_sha256",
         ):
-            if type(environment[field]) is not str or SHA256.fullmatch(environment[field]) is None:
+            if (
+                type(environment[field]) is not str
+                or SHA256.fullmatch(environment[field]) is None
+            ):
                 raise CandidateControlError(
                     f"policy scenario {scenario} calibration_environment {field} is invalid"
                 )

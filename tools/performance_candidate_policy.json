@@ -1,5 +1,11 @@
 {
-  "policy_id": "github-hosted-ubuntu-24.04-profiling-v3-reviewed-3aa0c25",
+  "policy_id": "github-hosted-amd-provisional-profiling-v4-reviewed-3aa0c25",
+  "authority": {
+    "scope": "github-hosted-amd-provisional",
+    "performance_authoritative": false,
+    "bare_metal_gate_satisfied": false,
+    "durable_evidence_gate_satisfied": false
+  },
   "scenarios": {
     "dns-cache-size-4096": {
       "adoption_threshold_percent": 261.2,
@@ -770,5 +776,5 @@
       "regression_threshold_percent": -1.4
     }
   },
-  "schema_version": 3
+  "schema_version": 4
 }

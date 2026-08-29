@@ -12,13 +12,9 @@ from tools.performance_candidate.linux import trial as linux_trial
 
 
 def structural_metrics(scenario: str) -> dict[str, object]:
-    fields = {
-        field: None for field in linux_trial.STRUCTURAL_FIELDS
-    }
+    fields = {field: None for field in linux_trial.STRUCTURAL_FIELDS}
     closed = {
-        field: (
-            "external_artifact" if field == "allocations" else "not_applicable"
-        )
+        field: ("external_artifact" if field == "allocations" else "not_applicable")
         for field in linux_trial.STRUCTURAL_FIELDS
     }
     for field in ("copy_bytes", "zero_bytes", "wakeups", "lock_wait_nanoseconds"):
@@ -38,6 +34,7 @@ def structural_metrics(scenario: str) -> dict[str, object]:
         if value is not None:
             closed.pop(field)
     return {**fields, "closed": closed}
+
 
 class LinuxSummaryFixture(unittest.TestCase):
     PARENT_SHA = "1" * 40
@@ -106,7 +103,9 @@ class LinuxSummaryFixture(unittest.TestCase):
                 value = 110 if direction == "higher_is_better" else 90
         order = 1 if (pair % 2 == 1) == (member == "parent") else 2
         calibration = plan["run_kind"] == "calibration-aa"
-        sha = self.PARENT_SHA if member == "parent" or calibration else self.CANDIDATE_SHA
+        sha = (
+            self.PARENT_SHA if member == "parent" or calibration else self.CANDIDATE_SHA
+        )
         member_digit = "a" if member == "parent" or calibration else "b"
         contract = next(
             entry["evidence_contract"]
@@ -133,14 +132,8 @@ class LinuxSummaryFixture(unittest.TestCase):
             "sha": sha,
             "tree": ("3" if member == "parent" or calibration else "4") * 40,
             "runner_sha256": member_digit * 64,
-            "client_sha256": (
-                "c" if member == "parent" or calibration else "d"
-            )
-            * 64,
-            "server_sha256": (
-                "e" if member == "parent" or calibration else "f"
-            )
-            * 64,
+            "client_sha256": ("c" if member == "parent" or calibration else "d") * 64,
+            "server_sha256": ("e" if member == "parent" or calibration else "f") * 64,
             "rustc": "rustc 1.97.1 test",
             "kernel": "test-kernel",
             "cpu_model": "test-cpu",
@@ -229,6 +222,7 @@ class LinuxSummaryFixture(unittest.TestCase):
         document = {
             "schema_version": policy["schema_version"],
             "policy_id": policy["policy_id"],
+            "authority": policy["authority"],
             "scenarios": policy["scenarios"],
         }
         path.write_text(

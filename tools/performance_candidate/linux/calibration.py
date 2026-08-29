@@ -23,8 +23,9 @@ from tools.performance_candidate.linux.environment import (
     calibration_environments_match,
     memory_capacity_class,
 )
+from tools.performance_candidate.linux.policy import validate_hosted_authority
 
-CALIBRATION_CANDIDATE_SCHEMA_VERSION = 2
+CALIBRATION_CANDIDATE_SCHEMA_VERSION = 3
 SUMMARY_MAX_BYTES = 4 * 1024 * 1024
 BUILD_IDENTITY_FIELDS = frozenset(
     {"sha", "tree", "runner_sha256", "client_sha256", "server_sha256"}
@@ -116,7 +117,9 @@ def create_calibration_candidate(
     """Aggregate at least two complete six-pair A/A summaries without adopting thresholds."""
 
     if not 2 <= len(summaries) <= 16:
-        raise CandidateControlError("Linux calibration requires 2 through 16 A/A summaries")
+        raise CandidateControlError(
+            "Linux calibration requires 2 through 16 A/A summaries"
+        )
     loaded: list[tuple[pathlib.Path, bytes, dict[str, object]]] = []
     source_digests: set[str] = set()
     for path in summaries:
@@ -157,9 +160,7 @@ def create_calibration_candidate(
             type(expected_build_identities) is not dict
             or set(expected_build_identities) != {"parent", "candidate"}
             or any(
-                not _valid_build_identity(
-                    identity, expected_sha=first["parent_sha"]
-                )
+                not _valid_build_identity(identity, expected_sha=first["parent_sha"])
                 for identity in expected_build_identities.values()
             )
             or expected_build_identities["parent"]
@@ -170,9 +171,9 @@ def create_calibration_candidate(
             )
         expected_decision_policy = first["decision_policy"]
         if type(expected_decision_policy) is not dict or not expected_decision_policy:
-            raise CandidateControlError(
-                "Linux A/A summary decision policy is invalid"
-            )
+            raise CandidateControlError("Linux A/A summary decision policy is invalid")
+        expected_authority = first["authority"]
+        validate_hosted_authority(expected_authority, label="Linux A/A summary")
         if first["parent_sha"] != first["candidate_sha"]:
             raise CandidateControlError("Linux A/A summary commits must be identical")
         if first["pairs"] != 6:
@@ -200,10 +201,13 @@ def create_calibration_candidate(
             if summary["kind"] != "performance_candidate_summary":
                 raise CandidateControlError("Linux A/A summary kind is invalid")
             if summary["run_kind"] != "calibration-aa":
-                raise CandidateControlError("Linux calibration accepts only calibration-aa summaries")
+                raise CandidateControlError(
+                    "Linux calibration accepts only calibration-aa summaries"
+                )
             if (
                 summary["status"] != "CALIBRATION_REQUIRED"
                 or summary["adoption_claim"] is not False
+                or summary["production_feature_enabled_by_default"] is not False
                 or summary["workflow_failure_reason"] is not None
             ):
                 raise CandidateControlError(
@@ -219,9 +223,7 @@ def create_calibration_candidate(
             if (
                 identity != expected_identity
                 or type(environment) is not dict
-                or not calibration_environments_match(
-                    expected_environment, environment
-                )
+                or not calibration_environments_match(expected_environment, environment)
             ):
                 raise CandidateControlError(
                     "Linux A/A summaries must share commit, environment, recipe, and selection"
@@ -250,12 +252,16 @@ def create_calibration_candidate(
                 raise CandidateControlError(
                     "Linux A/A summaries must share the full decision policy"
                 )
+            validate_hosted_authority(summary["authority"], label="Linux A/A summary")
+            if summary["authority"] != expected_authority:
+                raise CandidateControlError(
+                    "Linux A/A summaries must share hosted authority"
+                )
             scenarios = summary["scenarios"]
             if [entry["scenario"] for entry in scenarios] != expected_scenarios:
                 raise CandidateControlError("Linux A/A scenario order or set changed")
             evidence_contracts = [
-                (entry["scenario"], entry["evidence_contract"])
-                for entry in scenarios
+                (entry["scenario"], entry["evidence_contract"]) for entry in scenarios
             ]
             if (
                 any(
@@ -270,7 +276,9 @@ def create_calibration_candidate(
             for scenario in scenarios:
                 pairs = scenario["pairs"]
                 if len(pairs) != 6:
-                    raise CandidateControlError("Linux A/A scenario is missing a six-pair round")
+                    raise CandidateControlError(
+                        "Linux A/A scenario is missing a six-pair round"
+                    )
                 aggregate[scenario["scenario"]].extend(
                     _number(
                         pair["improvement_percent"],
@@ -317,6 +325,7 @@ def create_calibration_candidate(
     return {
         "schema_version": CALIBRATION_CANDIDATE_SCHEMA_VERSION,
         "kind": "linux_performance_calibration_candidate",
+        "authority": dict(expected_authority),
         "source_commit": first["parent_sha"],
         "environment_identity": representative_environment,
         "memory_capacity_quantum_kib": MEMORY_CAPACITY_QUANTUM_KIB,
@@ -327,4 +336,5 @@ def create_calibration_candidate(
         "sources": sources,
         "scenarios": scenario_candidates,
         "thresholds_adopted": False,
+        "production_feature_enabled_by_default": False,
     }

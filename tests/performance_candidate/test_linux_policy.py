@@ -13,14 +13,17 @@ from tools.performance_candidate.linux import policy as linux_policy
 class DecisionPolicyTests(unittest.TestCase):
     def test_repository_policy_records_exact_reviewed_calibration(self) -> None:
         policy = linux_policy.load_decision_policy(POLICY_PATH)
-        self.assertEqual(policy["schema_version"], 3)
+        self.assertEqual(policy["schema_version"], 4)
         self.assertRegex(policy["policy_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             policy["policy_id"],
-            "github-hosted-ubuntu-24.04-profiling-v3-reviewed-3aa0c25",
+            "github-hosted-amd-provisional-profiling-v4-reviewed-3aa0c25",
         )
-        self.assertEqual(linux_plan.PLAN_SCHEMA_VERSION, 10)
-        self.assertEqual(linux_catalog.SUMMARY_SCHEMA_VERSION, 9)
+        self.assertEqual(
+            policy["authority"], linux_policy.HOSTED_AMD_PROVISIONAL_AUTHORITY
+        )
+        self.assertEqual(linux_plan.PLAN_SCHEMA_VERSION, 11)
+        self.assertEqual(linux_catalog.SUMMARY_SCHEMA_VERSION, 10)
         self.assertEqual(set(policy["scenarios"]), set(linux_catalog.SCENARIO_CATALOG))
 
         expected_thresholds = {
@@ -284,7 +287,9 @@ class DecisionPolicyTests(unittest.TestCase):
                     ),
                     (6, 5, 4),
                 )
-                self.assertEqual(entry["calibration_source"], expected_sources[scenario])
+                self.assertEqual(
+                    entry["calibration_source"], expected_sources[scenario]
+                )
                 environment = entry["calibration_environment"]
                 self.assertEqual(
                     set(environment), linux_policy.CALIBRATION_ENVIRONMENT_FIELDS
@@ -323,6 +328,10 @@ class DecisionPolicyTests(unittest.TestCase):
                     decision_policy=policy,
                 )
                 self.assertFalse(plan["adoption_eligible"])
+                self.assertEqual(
+                    plan["authority"],
+                    linux_policy.HOSTED_AMD_PROVISIONAL_AUTHORITY,
+                )
                 for scenario in plan["scenarios"]:
                     contract = scenario["evidence_contract"]
                     for field in (
@@ -351,7 +360,23 @@ class DecisionPolicyTests(unittest.TestCase):
         self,
     ) -> None:
         mutations = {
-            "obsolete schema": lambda policy: policy.update(schema_version=2),
+            "obsolete schema": lambda policy: policy.update(schema_version=3),
+            "missing authority": lambda policy: policy.pop("authority"),
+            "authoritative hosted": lambda policy: policy["authority"].update(
+                performance_authoritative=True
+            ),
+            "integer false authority": lambda policy: policy["authority"].update(
+                performance_authoritative=0
+            ),
+            "bare metal claim": lambda policy: policy["authority"].update(
+                bare_metal_gate_satisfied=True
+            ),
+            "durable claim": lambda policy: policy["authority"].update(
+                durable_evidence_gate_satisfied=True
+            ),
+            "authority extra field": lambda policy: policy["authority"].update(
+                unexpected=False
+            ),
             "missing scenario": lambda policy: policy["scenarios"].pop("tcp-bulk"),
             "wrong metric": lambda policy: policy["scenarios"]["tcp-bulk"].update(
                 metric="p99_nanoseconds"
@@ -368,9 +393,9 @@ class DecisionPolicyTests(unittest.TestCase):
             "boolean recipe": lambda policy: policy["scenarios"]["tcp-bulk"][
                 "calibration_environment"
             ].update(warmup_seconds=True),
-            "unaligned memory capacity": lambda policy: policy["scenarios"][
-                "tcp-bulk"
-            ]["calibration_environment"].update(memory_kib=16_777_215),
+            "unaligned memory capacity": lambda policy: policy["scenarios"]["tcp-bulk"][
+                "calibration_environment"
+            ].update(memory_kib=16_777_215),
         }
         for name, mutation in mutations.items():
             with self.subTest(name=name):
@@ -383,10 +408,10 @@ class DecisionPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ferrum2-policy-json-") as directory:
             root = pathlib.Path(directory)
             for name, text in (
-                ("duplicate", '{"schema_version":3,"schema_version":3}'),
+                ("duplicate", '{"schema_version":4,"schema_version":4}'),
                 (
                     "non-finite",
-                    '{"schema_version":3,"policy_id":"x","scenarios":NaN}',
+                    '{"schema_version":4,"policy_id":"x","authority":{},"scenarios":NaN}',
                 ),
             ):
                 with self.subTest(name=name):

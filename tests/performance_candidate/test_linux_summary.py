@@ -11,13 +11,12 @@ from tools.performance_candidate.linux import decision as linux_decision
 from tools.performance_candidate.linux import plan as linux_plan
 from tools.performance_candidate.linux import policy as linux_policy
 
+
 class LinuxSummaryTests(LinuxSummaryFixture):
     def test_same_commit_aa_summary_is_review_only_and_never_an_adoption_claim(
         self,
     ) -> None:
-        plan = self.plan(
-            "qualification", "tcp-bulk", run_kind="calibration-aa"
-        )
+        plan = self.plan("qualification", "tcp-bulk", run_kind="calibration-aa")
         _root, parent, candidate = self.roots()
         self.populate(plan, parent, candidate)
 
@@ -347,7 +346,11 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         self.populate(plan, parent, candidate)
         summary = self.summarize(plan, parent, candidate)
         self.assertEqual(summary["status"], "CANDIDATE_WIN")
-        self.assertTrue(summary["adoption_claim"])
+        self.assertFalse(summary["adoption_claim"])
+        self.assertEqual(
+            summary["authority"], linux_policy.HOSTED_AMD_PROVISIONAL_AUTHORITY
+        )
+        self.assertFalse(summary["production_feature_enabled_by_default"])
         self.assertEqual(summary["threshold_availability"], "complete")
 
     def test_calibrated_guard_regression_overrides_primary_improvement(self) -> None:
@@ -396,7 +399,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                     decision_policy=policy,
                     pairs=6,
                 )
-                self.assertTrue(plan["adoption_eligible"])
+                self.assertFalse(plan["adoption_eligible"])
                 _root, parent, candidate = self.roots()
                 values = {
                     ("tcp-stream-64k", pair, "candidate"): value
@@ -410,9 +413,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                     if item["scenario"] == "tcp-stream-64k"
                 )
                 self.assertEqual(summary["status"], expected_status)
-                self.assertEqual(
-                    primary["threshold_decision"], expected_decision
-                )
+                self.assertEqual(primary["threshold_decision"], expected_decision)
                 self.assertEqual(
                     primary["wins"], sum(value > 100 for value in candidates)
                 )
@@ -433,9 +434,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         self.populate(plan, parent, candidate, values)
         summary = self.summarize(plan, parent, candidate)
         guard = next(
-            item
-            for item in summary["scenarios"]
-            if item["scenario"] == "tcp-bulk"
+            item for item in summary["scenarios"] if item["scenario"] == "tcp-bulk"
         )
         self.assertEqual(summary["status"], "REGRESSION")
         self.assertEqual(guard["losses"], 4)
@@ -465,9 +464,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                 "environment_identity"
             ],
         )
-        self.assertEqual(
-            insufficient["threshold_decision"], "INSUFFICIENT_LOSSES"
-        )
+        self.assertEqual(insufficient["threshold_decision"], "INSUFFICIENT_LOSSES")
         self.assertEqual(insufficient["status"], "INCONCLUSIVE")
         self.assertFalse(insufficient["guard_passed"])
         self.assertEqual(confirmed["threshold_decision"], "CONFIRMED_REGRESSION")
@@ -657,9 +654,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         policy_path, policy = self.materialize_policy(
             root, copy.deepcopy(linux_policy.UNCALIBRATED_POLICY)
         )
-        plan = self.plan(
-            "qualification", "tcp-stream-64k", decision_policy=policy
-        )
+        plan = self.plan("qualification", "tcp-stream-64k", decision_policy=policy)
         plan_path = root / "plan.json"
         output = root / "performance-summary.json"
         markdown = root / "performance-summary.md"
@@ -680,7 +675,9 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         )()
         self.assertEqual(linux_decision.run_summary_command(arguments), 2)
         summary = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(summary["schema_version"], linux_catalog.SUMMARY_SCHEMA_VERSION)
+        self.assertEqual(
+            summary["schema_version"], linux_catalog.SUMMARY_SCHEMA_VERSION
+        )
         self.assertEqual(summary["status"], "INVALID")
         self.assertEqual(summary["mode"], "qualification")
         self.assertEqual(summary["scenario_group"], "tcp-throughput")
@@ -719,7 +716,9 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         )()
         self.assertEqual(linux_decision.run_summary_command(arguments), 0)
         summary = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(summary["schema_version"], linux_catalog.SUMMARY_SCHEMA_VERSION)
+        self.assertEqual(
+            summary["schema_version"], linux_catalog.SUMMARY_SCHEMA_VERSION
+        )
         self.assertEqual(summary["status"], "INCONCLUSIVE")
         self.assertEqual(
             summary["build_identities"],
@@ -750,9 +749,7 @@ class LinuxSummaryTests(LinuxSummaryFixture):
         policy_path, policy = self.materialize_policy(
             root, copy.deepcopy(linux_policy.UNCALIBRATED_POLICY)
         )
-        plan = self.plan(
-            "qualification", "tcp-stream-64k", decision_policy=policy
-        )
+        plan = self.plan("qualification", "tcp-stream-64k", decision_policy=policy)
         values = {
             ("tcp-bulk", pair, "candidate"): 4 for pair in range(1, plan["pairs"] + 1)
         }
@@ -817,22 +814,24 @@ class LinuxSummaryTests(LinuxSummaryFixture):
                         "markdown": markdown,
                     },
                 )()
-                self.assertEqual(linux_decision.run_summary_command(arguments), expected_exit)
+                self.assertEqual(
+                    linux_decision.run_summary_command(arguments), expected_exit
+                )
                 self.assertEqual(
                     json.loads(output.read_text(encoding="utf-8"))["status"],
                     expected_status,
                 )
 
-    def test_structural_metrics_are_closed_and_preserved_without_affecting_decision(self) -> None:
+    def test_structural_metrics_are_closed_and_preserved_without_affecting_decision(
+        self,
+    ) -> None:
         plan = self.plan("diagnostic", "dns-udp-concurrency")
         _root, parent, candidate = self.roots()
         self.populate(plan, parent, candidate)
 
         summary = self.summarize(plan, parent, candidate)
         pair = summary["scenarios"][0]["pairs"][0]
-        self.assertEqual(
-            pair["parent_structural_metrics"]["request_count"], 1_000
-        )
+        self.assertEqual(pair["parent_structural_metrics"]["request_count"], 1_000)
         self.assertEqual(pair["candidate_structural_metrics"]["drop_count"], 0)
         self.assertEqual(summary["status"], "INCONCLUSIVE")
 

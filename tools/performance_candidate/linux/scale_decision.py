@@ -2,18 +2,39 @@
 
 from __future__ import annotations
 
-from tools.performance_candidate.json_contract import CandidateControlError, _scale_decimal
-from tools.performance_candidate.linux.catalog import SUMMARY_SCHEMA_VERSION, WARNING_POLICY
+import copy
+
+from tools.performance_candidate.json_contract import (
+    CandidateControlError,
+    _scale_decimal,
+)
+from tools.performance_candidate.linux.catalog import (
+    SUMMARY_SCHEMA_VERSION,
+    WARNING_POLICY,
+)
 from tools.performance_candidate.pairing import _display_decimal, _improvement, _median
-from tools.performance_candidate.status import CALIBRATION_REQUIRED, REGRESSION, WITHIN_CALIBRATED_BAND
+from tools.performance_candidate.status import (
+    CALIBRATION_REQUIRED,
+    REGRESSION,
+    WITHIN_CALIBRATED_BAND,
+)
 from tools.performance_candidate.linux.scale import scale_policy_is_applicable
 
 from collections.abc import Sequence
 from decimal import Decimal
 from fractions import Fraction
 
-from tools.performance_candidate.linux.scale import SCALE_RECIPE, SCALE_SCENARIO, validate_scale_safety_policy
-from tools.performance_candidate.linux.scale_trial import _scale_stage_median, _truncating_division, _validate_scale_evidence
+from tools.performance_candidate.linux.scale import (
+    SCALE_RECIPE,
+    SCALE_SCENARIO,
+    validate_scale_safety_policy,
+)
+from tools.performance_candidate.linux.scale_trial import (
+    _scale_stage_median,
+    _truncating_division,
+    _validate_scale_evidence,
+)
+
 
 def _fraction_from_policy(value: object, field: str) -> Fraction:
     decimal = _scale_decimal(value, field)
@@ -182,9 +203,7 @@ def _summarize_scale_evidence(
     throughput_improvements: list[Decimal] = []
     throughput_wins = 0
     maximum_process_gog = _scale_decimal(
-        policy[
-            "maximum_page_touch_growth_of_growth_kib_per_connection_per_process"
-        ],
+        policy["maximum_page_touch_growth_of_growth_kib_per_connection_per_process"],
         "maximum_page_touch_growth_of_growth_kib_per_connection_per_process",
     )
     maximum_combined_gog = _scale_decimal(
@@ -196,7 +215,9 @@ def _summarize_scale_evidence(
         parent = rows[(SCALE_SCENARIO, pair, "parent")]
         candidate = rows[(SCALE_SCENARIO, pair, "candidate")]
         if {parent["order"], candidate["order"]} != {1, 2}:
-            raise CandidateControlError(f"scale pair={pair} must contain orders 1 and 2")
+            raise CandidateControlError(
+                f"scale pair={pair} must contain orders 1 and 2"
+            )
         expected_parent_order = 1 if pair % 2 else 2
         if parent["order"] != expected_parent_order:
             raise CandidateControlError(f"scale pair={pair} does not alternate order")
@@ -244,9 +265,7 @@ def _summarize_scale_evidence(
             ) - _scale_stage_median(parent_derived["samples"]["established"], field)
             candidate_growth = _scale_stage_median(
                 candidate_derived["samples"]["touched"], field
-            ) - _scale_stage_median(
-                candidate_derived["samples"]["established"], field
-            )
+            ) - _scale_stage_median(candidate_derived["samples"]["established"], field)
             growth_of_growth_kib[side] = candidate_growth - parent_growth
         client_gog_kib = growth_of_growth_kib["client"]
         server_gog_kib = growth_of_growth_kib["server"]
@@ -315,9 +334,7 @@ def _summarize_scale_evidence(
     status = (
         REGRESSION
         if not passed
-        else WITHIN_CALIBRATED_BAND
-        if policy_applicable
-        else CALIBRATION_REQUIRED
+        else WITHIN_CALIBRATED_BAND if policy_applicable else CALIBRATION_REQUIRED
     )
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -335,24 +352,30 @@ def _summarize_scale_evidence(
         "scale_safety_policy": policy,
         "scale_lineage": plan["scale_lineage"],
         "warning_policy": dict(WARNING_POLICY),
+        "authority": copy.deepcopy(plan["authority"]),
         "decision_enabled": policy_applicable,
         "candidate_win_enabled": False,
         "decision_reason": (
             "reviewed six-pair scale calibration is required"
             if passed and not policy_applicable
-            else "all dedicated tcp-scale safety gates passed"
-            if passed
-            else "one or more dedicated tcp-scale safety gates failed"
+            else (
+                "all dedicated tcp-scale safety gates passed"
+                if passed
+                else "one or more dedicated tcp-scale safety gates failed"
+            )
         ),
         "threshold_availability": "scale_safety" if policy_applicable else "none",
         "adoption_claim": False,
+        "production_feature_enabled_by_default": False,
         "status": status,
         "workflow_failure_reason": (
             None
             if status == WITHIN_CALIBRATED_BAND
-            else "reviewed six-pair scale calibration is required"
-            if status == CALIBRATION_REQUIRED
-            else "; ".join(failures)
+            else (
+                "reviewed six-pair scale calibration is required"
+                if status == CALIBRATION_REQUIRED
+                else "; ".join(failures)
+            )
         ),
         "mandatory_scenarios": [SCALE_SCENARIO],
         "missing_scenarios": [],
