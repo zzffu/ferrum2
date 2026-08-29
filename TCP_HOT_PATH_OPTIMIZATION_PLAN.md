@@ -3,7 +3,7 @@
 状态：阶段 2、阶段 3 已完成实现与本地分轴测量；single-worker 产品候选
 `d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
 `62.9574%`，未达 90%。后续 two-worker、4+4 connection shard、2+2 balanced shard、
-两代 incoming-CPU shard，以及 length→payload single-poll 候选均已提交、推送并判失败；
+两代 incoming-CPU shard，以及两代 length→payload single-poll 候选均已提交、推送并判失败；
 当前继续从共同成功基线 `d874d3dd` 开 sibling，不把失败候选作为祖先。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
@@ -68,7 +68,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── 8ca007fd  2+2 balanced connection shards（失败）
             ├── ce8b2f10  server incoming-CPU pinned shards（本地 ratio 44.655%，失败）
             ├── 159928d3  dual incoming-CPU pinned shards（首样本 543.7 MB/s，失败）
-            └── 7e3f137a  length→payload single-poll（本地 -7.23%，失败）
+            ├── 7e3f137a  length→payload single-poll（本地 -7.23%，失败）
+            └── 0ad5cab5  single-poll + transition Pending retry（即时对照 -0.90%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -409,17 +410,36 @@ migrations 为 `-31.3509%`，context switches 为 `-17.2526%`，busy 低 `6.489`
 pipeline 填充不足，或 ready/partial payload 的 read + AEAD + 双 copy 被绑定在同一 outer poll 后造成
 多 worker 公平性/convoy；这与 `fd5a42de` 固定 4 CPU `-6.15%` 的历史形态一致。
 
-### 12.6 当前 sibling：ready fast path + Pending 本地重试
+### 12.6 ready fast path + Pending scheduler retry（失败、冻结）
 
-`codex/tcp-hot-path-stage3-length-payload-local-retry` 重新直接从 `d874d3dd` 开始，不继承
+`codex/tcp-hot-path-stage3-length-payload-local-retry` @ `0ad5cab5` 重新直接从 `d874d3dd` 开始，不继承
 `7e3f137a`。它作为区分 wake 来源的窄消融，保留 length 完成后只尝试一次 payload；若 payload 已 ready，
 同 poll 完成并删除一次调度往返；若该首次 payload poll 返回 Pending，则恢复一次 synthetic
 self-wake，使任务通常进入当前 worker 本地 FIFO 尾，但 Tokio 允许 steal，因此不承诺同线程/同核。
 以后从既有 Payload 状态再次得到 Pending 时只依赖 transport waker，避免 busy loop。partial Ready、
 zero frame、EOF/error/auth、nonce、terminal、不发布失败 plaintext、无循环和不跨 frame 契约均保持。
 `d874d3dd` 同探针对照已经证明 OS scheduler migration/context-switch 指标没有恶化。该 sibling 仅
-用于最后区分“首次 payload 真正 Pending 时缺一次 retry”是否解释 CPU occupancy 缺口；若仍回归，
-立即停止 length→payload same-poll 路线，把根因归到 ready/partial-path 公平性与负载分配。
+用于最后区分“首次 payload 真正 Pending 时缺一次 retry”是否解释 CPU occupancy 缺口。
+
+实现和独立审查覆盖 transition 首次/后续两次 Pending、ready、partial、zero、EOF、transport/auth、
+fused carried 上界，并在测量前提交、推送。唯一固定 4 CPU、3 秒预热 + 15 秒正式样本为
+`229,144,439 B/s`；被测 SHA 为 `0ad5cab5e45b2e7c44dd0711f3c10f436b3f1652`，tree 为
+`e6e35e55d87a3906752e1af404a91aafcaec15a6`，client/server 二进制 SHA-256 分别为
+`4145cd71ba47c441b92d3dea07097220a76ba0666ec3375bc33686bd6190f499` 和
+`f71ad328119eacc028edd386f8fb5804ad662304a850fd84b070e4a60abbc058`。
+
+它相对 `7e3f137a` 回升 `10,227,985 B/s`（`+4.6721%`），恢复 single-poll 原始回归缺口的
+`83.0436%`；代理 CPU 同时上升 `3.7894%`。这支持 transition Pending 的 scheduler retry 是主要
+回归来源，而不是 migration/cache ownership 增加。但它仍比即时 `d874d3dd` 对照低 `2,088,414 B/s`
+（`-0.9032%`），代理 CPU 低 `8.7803%`，migrations 低 `28.7684%`，context switches 低
+`14.1130%`。按预声明停止条件判失败、冻结且不触发 CI；length→payload same-poll/wake 细调永久停止。
+
+### 12.7 下一 sibling：保留公平点，减少 receive 数据搬运
+
+下一尝试仍直接从 `d874d3dd` 开始，完整保留每帧 length 后的 scheduling boundary。候选只能减少
+payload decrypt 周围的 worker-local copy-in/copyback/zeroize 或等价 transport 数据搬运，不能再次
+合并 length→payload poll，不能继承 `7e3f137a`/`0ad5cab5`，不能扩大到 initial payload、TUN、
+Windows/SOCKS 锁或 runtime shard。具体 seam 先由代码路径和历史尝试审查确定，再建立分支。
 
 ## 13. 停止条件与后续
 
