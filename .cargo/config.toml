@@ -1,2 +1,6 @@
 [resolver]
 incompatible-rust-versions = "fallback"
+
+[target.'cfg(target_arch = "x86_64")']
+# Compile RustCrypto AES's VAES256 path while retaining runtime CPU detection.
+rustflags = ["--cfg", 'aes_backend="avx256"']

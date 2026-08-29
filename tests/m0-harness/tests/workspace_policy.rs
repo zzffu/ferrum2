@@ -217,6 +217,29 @@ fn workspace_members_share_the_declared_release_policy() {
 }
 
 #[test]
+fn x86_64_builds_select_only_the_runtime_dispatched_vaes256_backend() {
+    let config_source = fs::read_to_string(workspace_root().join(".cargo/config.toml"))
+        .expect("workspace Cargo config");
+    let config: toml::Value =
+        toml::from_str(&config_source).expect("structured workspace Cargo config");
+    let expected: toml::Value = toml::from_str(
+        r#"
+[resolver]
+incompatible-rust-versions = "fallback"
+
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["--cfg", 'aes_backend="avx256"']
+"#,
+    )
+    .expect("expected workspace Cargo config");
+
+    assert_eq!(
+        config, expected,
+        "Cargo config must retain resolver fallback and scope the sole AES backend cfg to x86_64"
+    );
+}
+
+#[test]
 fn workspace_boundaries_are_expressed_by_cargo_metadata() {
     let metadata = metadata();
     let core = package(metadata, "ferrum2-core");
