@@ -3,7 +3,8 @@
 状态：阶段 2、阶段 3 已完成实现与本地分轴测量；single-worker 产品候选
 `d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
 `62.9574%`，未达 90%。后续 two-worker、4+4 connection shard 和 2+2 balanced shard
-候选均已提交、推送并判失败；当前继续从共同成功基线 `d874d3dd` 开 sibling，不把失败候选作为祖先。
+以及 server-side incoming-CPU shard 候选均已提交、推送并判失败；当前继续从共同成功基线
+`d874d3dd` 开 sibling，不把失败候选作为祖先。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -64,7 +65,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── fd5a42de  bounded ready drain（失败）
             ├── 2e938fff  two-worker runtime（失败）
             ├── a1b67079 → 04a83c90  4+4 connection shards（双模态，失败）
-            └── 8ca007fd  2+2 balanced connection shards（失败）
+            ├── 8ca007fd  2+2 balanced connection shards（失败）
+            └── ce8b2f10  server incoming-CPU pinned shards（本地 ratio 44.655%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -324,15 +326,44 @@ fmt 和 clippy 均通过，但吞吐出现整轮双模态：
 因此根因不只是 OS thread 迁移，而是两端独立 RR 形成随机、长寿命的 client-shard ↔ server-shard
 连接图。少量动态迁移可追随 socket wakeup；失控迁移会崩到低档；盲目硬 pin 则可能把坏图永久固定。
 
-### 12.3 当前 sibling：按内核 RX CPU 协调分片
+### 12.3 server incoming-CPU sibling：配对成立但仍失败
 
-下一候选 `codex/tcp-hot-path-stage3-incoming-cpu-shards` 仍从 `d874d3dd` 开始，不继承上述失败提交。
-预定的单一变量是：Linux 每个 current-thread shard 固定到进程 allowed mask 中一个 CPU；client 仍 RR，
+`codex/tcp-hot-path-stage3-incoming-cpu-shards` @ `ce8b2f10` 从 `d874d3dd` 开始，不继承上述失败提交。
+Linux 每个 current-thread shard 固定到进程 allowed mask 中一个 CPU；client 仍 RR，
 server accept 后读取 accepted socket 的 `SO_INCOMING_CPU`，把连接投递到该 CPU 对应的 shard，不再使用
 独立 RR。loopback 上 client shard 发起 connect 的 CPU 可直接协调 server shard；真实网络上则保持
 server 本地 RX locality。Linux 枚举、pin 或 readback 失败必须闭合；Windows、UDP、TUN 保持
-`d874d3dd` 路径。候选必须先提交、推送，再测量；若仍低于门槛，提交和证据继续保留，下一尝试仍从
-`d874d3dd` 新开 sibling。
+`d874d3dd` 路径。实现通过 Linux/Windows 编译、runtime/server tests、client compile-only、三包 clippy、
+fmt 与 diff 检查，并在测量前提交、推送。
+
+首个固定 4 CPU、3 秒预热 + 15 秒正式样本为 `539,265,160 B/s`；client/server 各四个 shard 的
+affinity 均为 singleton，连接线程迁移为 0，Jain 分别为 `0.9902 / 0.9889`。同命令、同二进制的后续
+预声明诊断 baseline 为 `744,038,946 B/s`，证明不是固定算力上限，但也证明首个低样本未被消除。
+把 server shard 从 CPU `N` 外部改绑到 `(N+1)%4` 后，单次样本降至 `69,057,467 B/s`，全机 busy
+从约 `77.15%` 降至 `9.34%`；因此 client ↔ server 同 CPU 配对是必要 locality，而不是导致串行空洞。
+
+为避免把上一台 GHA 的绝对 `615,609,139 B/s` 误用于本机，另执行一次本机、同 invocation、固定
+`F,R,R,F,F,R,R,F,F,R` 的 5+5 release 对照；它使用官方 shadowsocks-rust v1.24.0、共同继承
+`taskset 0-3`，只作为 WSL 诊断，不作为 hosted 证据：
+
+| topology | 五次 B/s（按执行顺序） | median |
+|---|---|---:|
+| Ferrum2 | 414,266,163; 464,772,573; 397,615,650; 357,227,997; 353,293,653 | 397,615,650 |
+| shadowsocks-rust | 873,867,946; 895,348,462; 878,505,710; 890,415,786; 917,379,481 | 890,415,786 |
+
+本地 ratio 为 `0.446550540`，远低于 90%，所以 `ce8b2f10` 正式判失败并冻结，不触发 CI。
+
+### 12.4 当前 sibling：双入口 incoming-CPU 对齐
+
+下一候选 `codex/tcp-hot-path-stage3-dual-incoming-cpu-shards` 继续直接从 `d874d3dd` 开始；
+`ce8b2f10` 不得成为其祖先。它无提交地重建已审查的 pinned shard/server hint 逻辑，再增加一个单变量：
+Linux client SOCKS accept 也读取 `SO_INCOMING_CPU` 并精确选择对应 shard；查询失败、`u32::MAX` 或
+CPU 不在 pool 时仍共享 RR fallback。这样由 source 的初始 RX CPU 选择 client shard，client 在该 CPU
+发起 tunnel connect，server 再按自己的 incoming CPU 选择同核 shard，闭合
+`source → client → server` 初始 CPU 链。Windows、UDP、TUN 继续保持 `d874d3dd` 路径。
+
+若该单变量仍不能消除首样本低档，下一 sibling 才测试窄 partial scheduling：完整 18-byte length read
+后只附带一次 payload poll；不循环 partial read、不跨 frame，也不复用失败的 8-frame/256 KiB ready drain。
 
 ## 13. 停止条件与后续
 
