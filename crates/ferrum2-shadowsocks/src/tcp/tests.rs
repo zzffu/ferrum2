@@ -1,9 +1,10 @@
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use ferrum2_core::AbortiveClose;
+use ferrum2_core::{AbortiveClose, TargetAddr};
 use ferrum2_crypto::{
     MethodProfile, MethodPsk, MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, TcpSealer,
 };
@@ -14,7 +15,10 @@ use super::error::{
 use super::flow::{Lifecycle, protocol_cipher_boundary};
 use super::observe::{NOOP_OBSERVER, fixed_scratch};
 use super::replay::{MIN_REPLAY_CAPACITY, ReplayInsertError};
-use super::wire::{open_data_frame_into, opener_for, seal_data_chunk_into, sealer_for};
+use super::wire::{
+    ENCRYPTED_LENGTH_LEN, encode_request_state_into, encode_response_state_into,
+    open_data_frame_into, opener_for, seal_data_chunk_into, sealer_for,
+};
 use super::*;
 #[derive(Default)]
 struct CountingFlowObserver {
@@ -158,6 +162,7 @@ fn server_open_nonce_flow_internal_contract() {
 fn encrypt_scratch_capacity_flow_internal_contract() {
     let keys = provider();
     let mut sealer = sealer_for(&keys, &salt(1)).expect("sealer");
+    let mut reference = sealer_for(&keys, &salt(1)).expect("reference sealer");
     let mut scratch = fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, &NOOP_OBSERVER);
     let identity = scratch.as_ptr() as usize;
     let capacity = scratch.capacity();
@@ -167,8 +172,112 @@ fn encrypt_scratch_capacity_flow_internal_contract() {
         .chain((0_u8..32).map(|value| vec![value]))
     {
         seal_data_chunk_into(&mut sealer, &payload, &mut scratch).expect("seal frame");
+        let (encrypted_length, encrypted_payload) = encrypted_frame(&mut reference, &payload);
+        let mut expected =
+            BytesMut::with_capacity(encrypted_length.len() + encrypted_payload.len());
+        expected.extend_from_slice(&encrypted_length);
+        expected.extend_from_slice(&encrypted_payload);
+        assert_eq!(scratch, expected, "append-only wire remains byte-exact");
         assert_scratch_unchanged(&scratch, identity, capacity);
     }
+}
+
+#[test]
+fn encrypt_scratch_capacity_failure_precedes_nonce_commit() {
+    let keys = provider();
+    let frame_len = ENCRYPTED_LENGTH_LEN + 1 + TAG_LEN;
+    let mut sealer = sealer_for(&keys, &salt(4)).expect("sealer");
+    let mut undersized = BytesMut::with_capacity(frame_len - 1);
+    undersized.extend_from_slice(b"sentinel");
+    let original = undersized.clone();
+
+    assert_eq!(
+        seal_data_chunk_into(&mut sealer, b"x", &mut undersized),
+        Err(FrameError::Bounds)
+    );
+    assert_eq!(undersized, original);
+
+    let mut scratch = BytesMut::with_capacity(frame_len);
+    seal_data_chunk_into(&mut sealer, b"x", &mut scratch)
+        .expect("capacity failure did not consume nonce");
+    let mut reference = sealer_for(&keys, &salt(4)).expect("reference sealer");
+    let (length, payload) = encrypted_frame(&mut reference, b"x");
+    assert_eq!(&scratch[..ENCRYPTED_LENGTH_LEN], length);
+    assert_eq!(&scratch[ENCRYPTED_LENGTH_LEN..], payload);
+}
+
+#[test]
+fn first_write_append_only_layout_preserves_storage_identity() {
+    let keys = provider();
+    let request_salt = salt(5);
+    let response_salt = salt(6);
+    let target =
+        TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)).expect("valid target");
+    let mut scratch = fixed_scratch(BufferRole::Encrypt, MAX_ENCRYPT_WIRE_LEN, &NOOP_OBSERVER);
+    let identity = scratch.as_ptr() as usize;
+    let capacity = scratch.capacity();
+
+    let expected_request =
+        encode_request_first_write(&keys, &request_salt, 7, &target, &[0xa1], b"request")
+            .expect("request fixture");
+    encode_request_state_into(
+        &keys,
+        &request_salt,
+        7,
+        &target,
+        &[0xa1],
+        b"request",
+        &mut scratch,
+    )
+    .expect("request state");
+    assert_eq!(scratch, expected_request);
+    assert_scratch_unchanged(&scratch, identity, capacity);
+
+    let expected_response =
+        encode_response_first_write(&keys, &response_salt, 8, &request_salt, b"response")
+            .expect("response fixture");
+    encode_response_state_into(
+        &keys,
+        &response_salt,
+        8,
+        &request_salt,
+        b"response",
+        &mut scratch,
+    )
+    .expect("response state");
+    assert_eq!(scratch, expected_response);
+    assert_scratch_unchanged(&scratch, identity, capacity);
+}
+
+#[test]
+fn first_write_capacity_failure_preserves_existing_scratch() {
+    let keys = provider();
+    let request_salt = salt(7);
+    let response_salt = salt(8);
+    let target =
+        TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080)).expect("valid target");
+    let mut scratch = BytesMut::with_capacity(1);
+    scratch.extend_from_slice(&[0xa5]);
+    let original = scratch.clone();
+
+    assert!(matches!(
+        encode_request_state_into(&keys, &request_salt, 9, &target, &[0xa1], &[], &mut scratch,),
+        Err(FrameError::Bounds)
+    ));
+    assert_eq!(scratch, original);
+
+    assert!(matches!(
+        encode_response_state_into(
+            &keys,
+            &response_salt,
+            10,
+            &request_salt,
+            b"response",
+            &mut scratch,
+        ),
+        Err(FrameError::Bounds)
+    ));
+    assert_eq!(scratch, original);
 }
 
 #[test]
