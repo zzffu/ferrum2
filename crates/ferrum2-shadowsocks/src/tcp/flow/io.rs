@@ -61,9 +61,13 @@ pub(super) fn poll_data_read<S: TransportIo>(
                         cx.waker().wake_by_ref();
                         return DataPoll::Pending(DataRx::Length { filled });
                     }
+                    let mut plaintext_length = [0_u8; 2];
                     let plaintext_len = match protocol_cipher_boundary(lifecycle, observer, || {
                         opener
-                            .open_slice_in_place(&mut scratch[..ENCRYPTED_LENGTH_LEN])
+                            .open_slice_into(
+                                &scratch[..ENCRYPTED_LENGTH_LEN],
+                                &mut plaintext_length,
+                            )
                             .map_err(frame_from_open_aead)
                     }) {
                         Ok(plaintext_len) => plaintext_len,
@@ -74,7 +78,7 @@ pub(super) fn poll_data_read<S: TransportIo>(
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                         return DataPoll::Ready(DataRx::Poison, Err(error));
                     }
-                    let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
+                    let payload_len = usize::from(u16::from_be_bytes(plaintext_length));
                     let Some(wire_len) = payload_len.checked_add(TAG_LEN) else {
                         let error =
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
@@ -116,13 +120,26 @@ pub(super) fn poll_data_read<S: TransportIo>(
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Payload { wire_len, filled });
                 }
-                let plaintext_len = match protocol_cipher_boundary(lifecycle, observer, || {
-                    opener
-                        .open_slice_in_place(&mut scratch[..wire_len])
-                        .map_err(frame_from_open_aead)
-                }) {
-                    Ok(plaintext_len) => plaintext_len,
-                    Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
+                let payload_len = wire_len - TAG_LEN;
+                let direct = destination.len() >= payload_len;
+                let plaintext_len = if direct {
+                    match protocol_cipher_boundary(lifecycle, observer, || {
+                        opener
+                            .open_slice_into(&scratch[..wire_len], &mut destination[..payload_len])
+                            .map_err(frame_from_open_aead)
+                    }) {
+                        Ok(plaintext_len) => plaintext_len,
+                        Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
+                    }
+                } else {
+                    match protocol_cipher_boundary(lifecycle, observer, || {
+                        opener
+                            .open_slice_in_place(&mut scratch[..wire_len])
+                            .map_err(frame_from_open_aead)
+                    }) {
+                        Ok(plaintext_len) => plaintext_len,
+                        Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
+                    }
                 };
                 if plaintext_len + TAG_LEN != wire_len {
                     let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
@@ -131,6 +148,9 @@ pub(super) fn poll_data_read<S: TransportIo>(
                 if plaintext_len == 0 {
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Length { filled: 0 });
+                }
+                if direct {
+                    return DataPoll::Ready(DataRx::Length { filled: 0 }, Ok(plaintext_len));
                 }
                 let mut position = 0;
                 let (copied, complete) =

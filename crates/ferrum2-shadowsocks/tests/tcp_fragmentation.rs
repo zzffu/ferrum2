@@ -218,6 +218,39 @@ async fn ready_plaintext_range_never_exposes_stale_or_unauthenticated_bytes() {
     assert!(destination.iter().all(|byte| *byte == SENTINEL));
 }
 
+#[tokio::test]
+async fn full_sized_destination_receives_large_frame_and_tamper_publishes_nothing() {
+    const SENTINEL: u8 = 0x6d;
+
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(913);
+    let request = valid_request_wire(NOW, &salt);
+    let large = vec![0xa5; 32 * 1024];
+    let tampered = vec![0x5a; 32 * 1024];
+    let mut frames = request_data_frames(&salt, &[&large, &tampered]);
+    *frames[3].last_mut().expect("tampered payload tag") ^= 1;
+    let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
+    reads.extend(frames);
+    let (io, _) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let mut destination = vec![SENTINEL; large.len() + 7];
+
+    let read = read_plain(&mut flow, &mut destination)
+        .await
+        .expect("large frame");
+    assert_eq!(read, large.len());
+    assert_eq!(&destination[..read], large);
+    assert!(destination[read..].iter().all(|byte| *byte == SENTINEL));
+
+    destination.fill(SENTINEL);
+    assert!(read_plain(&mut flow, &mut destination).await.is_err());
+    assert!(destination.iter().all(|byte| *byte == SENTINEL));
+}
+
 struct WakeCounter(AtomicUsize);
 
 impl Wake for WakeCounter {
