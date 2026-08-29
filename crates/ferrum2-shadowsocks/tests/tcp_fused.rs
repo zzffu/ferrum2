@@ -28,7 +28,8 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Re
 
 use common::{
     FakeClock, NOW, RecordingIo, ScriptedRandom, SourceSentinel, client_random_bytes,
-    method_provider, method_salt_from_u64, server_target, target, valid_request_wire_for,
+    method_provider, method_salt_from_u64, provider, response_wire_and_frames, salt_from_u64,
+    server_target, target, valid_request_wire, valid_request_wire_for,
 };
 
 struct EndpointIo {
@@ -255,6 +256,59 @@ async fn fused_round_trip_covers_all_ciphers_and_boundary_payloads() {
             fused_round_trip(profile, profile_index as u64, payload_len).await;
         }
     }
+}
+
+#[tokio::test]
+async fn fused_server_first_response_partial_writes_preserve_exact_wire() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let replay = TcpReplayStore::new(1024).expect("replay capacity");
+    let request_salt = salt_from_u64(70);
+    let response_salt = salt_from_u64(71);
+    let request = valid_request_wire(NOW, &request_salt);
+    let (expected, _) = response_wire_and_frames(&request_salt, &response_salt, b"pong", &[]);
+    let (io, observation) = RecordingIo::request(&request);
+    let io = io.with_write_limit(7).with_pending_writes_after(1, 1);
+    let random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io)
+        .await
+        .expect("server request")
+        .stream;
+    let mut plain = AlwaysReadyPlain {
+        reads: [b"pong".to_vec()].into(),
+        sequence: Arc::new(Mutex::new(Vec::new())),
+        read_count: Arc::new(AtomicUsize::new(0)),
+        read_polls: Arc::new(AtomicUsize::new(0)),
+        shutdown_polls: Arc::new(AtomicUsize::new(0)),
+        pending_shutdowns: 0,
+    };
+
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    )
+    .await
+    .expect("fused server relay");
+
+    let observed = observation.lock().expect("observation");
+    let accepted = observed
+        .writes
+        .iter()
+        .flat_map(|write| write[..write.len().min(7)].iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(accepted, expected);
+    for pair in observed.writes.windows(2) {
+        assert_eq!(pair[1], pair[0][7.min(pair[0].len())..]);
+    }
+    assert!(observed.write_calls > 1);
+    assert_eq!(observed.abortive_calls, 0);
 }
 
 #[tokio::test]

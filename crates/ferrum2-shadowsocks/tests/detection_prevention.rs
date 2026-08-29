@@ -12,8 +12,15 @@ use common::{
     shutdown_plain, target, valid_request_wire, write_plain,
 };
 
+fn accepted_wire(writes: &[Vec<u8>], limit: usize) -> Vec<u8> {
+    writes
+        .iter()
+        .flat_map(|write| write[..write.len().min(limit)].iter().copied())
+        .collect()
+}
+
 #[tokio::test]
-async fn each_initial_request_failure_uses_one_fixed_read_and_terminal_before_abortive() {
+async fn each_initial_request_failure_installs_terminal_before_abortive() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -52,6 +59,11 @@ async fn each_initial_request_failure_uses_one_fixed_read_and_terminal_before_ab
             DetectionReason::ShortRead,
         ),
         (Vec::new(), Some(0), DetectionReason::ReadFailed),
+        (
+            vec![valid[..7].to_vec()],
+            Some(1),
+            DetectionReason::ReadFailed,
+        ),
         (
             vec![bad_tag[..REQUEST_FIRST_READ_LEN].to_vec()],
             None,
@@ -254,7 +266,47 @@ async fn client_entropy_and_clock_failures_mark_once_before_any_write() {
 }
 
 #[tokio::test]
-async fn request_first_write_is_one_operation_and_short_write_is_terminal() {
+async fn request_first_write_accepts_one_and_seven_byte_progress_across_pending() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+
+    for limit in [1, 7] {
+        let salt = salt_from_u64(5_100 + limit as u64);
+        let expected = valid_request_wire(NOW, &salt);
+        let random = ScriptedRandom::new(client_random_bytes(&salt));
+        let observers = RecordingObservers::default();
+        let (io, observation) = RecordingIo::new([]);
+        let connector = RecordingConnector::succeeds(
+            io.with_write_limit(limit)
+                .with_pending_writes_after(1, 1)
+                .with_abortive_failure()
+                .with_sequence(observers.sequence.clone()),
+        );
+        let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
+            .with_observers(&observers, &observers);
+
+        outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .expect("partial request write");
+
+        let observed = observation.lock().expect("observation");
+        assert_eq!(accepted_wire(&observed.writes, limit), expected);
+        for pair in observed.writes.windows(2) {
+            assert_eq!(pair[1], pair[0][limit.min(pair[0].len())..]);
+        }
+        assert!(observed.write_calls > 1);
+        assert_eq!(observed.abortive_calls, 0);
+        assert_eq!(observed.read_calls, 0);
+        assert!(observers.sequence.lock().expect("sequence").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn request_first_write_zero_remains_short_write_detection() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let salt = salt_with_last(20);
@@ -262,25 +314,22 @@ async fn request_first_write_is_one_operation_and_short_write_is_terminal() {
     let observers = RecordingObservers::default();
     let (io, observation) = RecordingIo::new([]);
     let connector = RecordingConnector::succeeds(
-        io.with_write_limit(1)
+        io.with_write_limit(0)
             .with_abortive_failure()
             .with_sequence(observers.sequence.clone()),
     );
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
         .with_observers(&observers, &observers);
 
-    let error = outbound
-        .connect_server()
-        .await
-        .expect("server connection")
-        .write_request(&target())
-        .await
-        .err()
-        .expect("short write");
-
     assert_eq!(
-        error,
-        ShadowsocksError::Detection(DetectionReason::ShortWrite)
+        outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .err(),
+        Some(ShadowsocksError::Detection(DetectionReason::ShortWrite))
     );
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.write_calls, 1);
@@ -290,6 +339,39 @@ async fn request_first_write_is_one_operation_and_short_write_is_terminal() {
         *observers.sequence.lock().expect("sequence"),
         vec!["terminal", "abortive"]
     );
+}
+
+#[tokio::test]
+async fn request_first_write_partial_then_error_is_write_failed_without_repeating_wire() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let salt = salt_from_u64(5_109);
+    let random = ScriptedRandom::new(client_random_bytes(&salt));
+    let observers = RecordingObservers::default();
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(
+        io.with_write_limit(7)
+            .with_write_failure_after(1)
+            .with_abortive_failure()
+            .with_sequence(observers.sequence.clone()),
+    );
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
+        .with_observers(&observers, &observers);
+
+    assert_eq!(
+        outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .err(),
+        Some(ShadowsocksError::Detection(DetectionReason::WriteFailed))
+    );
+    let observed = observation.lock().expect("observation");
+    assert_eq!(observed.write_calls, 2);
+    assert_eq!(observed.writes[1], observed.writes[0][7..]);
+    assert_eq!(observed.abortive_calls, 1);
 }
 
 #[tokio::test]
@@ -421,7 +503,7 @@ async fn server_request_key_replay_and_capacity_failures_install_before_abortive
 }
 
 #[tokio::test]
-async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_before_abortive() {
+async fn every_scripted_in_flow_response_detection_installs_terminal_before_abortive() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_with_last(30);
@@ -447,6 +529,12 @@ async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_b
             "fixed transport",
             Vec::new(),
             Some(0),
+            DetectionReason::ReadFailed,
+        ),
+        (
+            "fixed partial transport",
+            vec![valid[..7].to_vec()],
+            Some(1),
             DetectionReason::ReadFailed,
         ),
         (
@@ -837,7 +925,51 @@ async fn server_response_clock_random_key_and_write_failures_persist_after_mark_
 }
 
 #[tokio::test]
-async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
+async fn response_first_write_accepts_one_and_seven_byte_progress_across_pending() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+
+    for limit in [1, 7] {
+        let replay = TcpReplayStore::new(1024).expect("approved capacity");
+        let request_salt = salt_from_u64(5_200 + limit as u64);
+        let request = valid_request_wire(NOW, &request_salt);
+        let response_salt = salt_from_u64(5_300 + limit as u64);
+        let (expected, _) = response_wire_and_frames(&request_salt, &response_salt, b"pong", &[]);
+        let observers = RecordingObservers::default();
+        let (io, observation) = RecordingIo::request(&request);
+        let io = io
+            .with_write_limit(limit)
+            .with_pending_writes_after(1, 1)
+            .with_abortive_failure()
+            .with_sequence(observers.sequence.clone());
+        let random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
+        let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+            .with_observers(&observers, &observers);
+        let mut flow = inbound
+            .accept_stream(io)
+            .await
+            .expect("authenticated request")
+            .stream;
+
+        assert_eq!(write_plain(&mut flow, b"pong").await, Ok(4));
+        flush_plain(&mut flow)
+            .await
+            .expect("partial response write");
+
+        assert_eq!(flow.terminal(), None);
+        let observed = observation.lock().expect("observation");
+        assert_eq!(accepted_wire(&observed.writes, limit), expected);
+        for pair in observed.writes.windows(2) {
+            assert_eq!(pair[1], pair[0][limit.min(pair[0].len())..]);
+        }
+        assert!(observed.write_calls > 1);
+        assert_eq!(observed.abortive_calls, 0);
+        assert!(observers.sequence.lock().expect("sequence").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn response_first_write_zero_remains_short_write_detection() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let replay = TcpReplayStore::new(1024).expect("approved capacity");
@@ -846,7 +978,7 @@ async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
     let observers = RecordingObservers::default();
     let (io, observation) = RecordingIo::request(&request);
     let io = io
-        .with_write_limit(1)
+        .with_write_limit(0)
         .with_abortive_failure()
         .with_sequence(observers.sequence.clone());
     let response_salt = salt_with_last(22);
@@ -862,7 +994,7 @@ async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
     assert_eq!(write_plain(&mut flow, b"pong").await, Ok(4));
     let error = flush_plain(&mut flow)
         .await
-        .expect_err("short response write");
+        .expect_err("zero response write");
 
     assert_eq!(
         error,
@@ -899,6 +1031,45 @@ async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
         *observers.sequence.lock().expect("sequence"),
         vec!["terminal", "abortive"]
     );
+}
+
+#[tokio::test]
+async fn response_first_write_partial_then_error_is_write_failed_without_repeating_wire() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let replay = TcpReplayStore::new(1024).expect("approved capacity");
+    let request_salt = salt_from_u64(5_210);
+    let request = valid_request_wire(NOW, &request_salt);
+    let observers = RecordingObservers::default();
+    let (io, observation) = RecordingIo::request(&request);
+    let io = io
+        .with_write_limit(7)
+        .with_write_failure_after(1)
+        .with_abortive_failure()
+        .with_sequence(observers.sequence.clone());
+    let response_salt = salt_from_u64(5_310);
+    let random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+        .with_observers(&observers, &observers);
+    let mut flow = inbound
+        .accept_stream(io)
+        .await
+        .expect("authenticated request")
+        .stream;
+
+    assert_eq!(write_plain(&mut flow, b"pong").await, Ok(4));
+    assert_eq!(
+        flush_plain(&mut flow).await,
+        Err(ShadowsocksError::Detection(DetectionReason::WriteFailed))
+    );
+    assert_eq!(
+        flow.terminal(),
+        Some(FlowTerminal::Detection(DetectionReason::WriteFailed))
+    );
+    let observed = observation.lock().expect("observation");
+    assert_eq!(observed.write_calls, 2);
+    assert_eq!(observed.writes[1], observed.writes[0][7..]);
+    assert_eq!(observed.abortive_calls, 1);
 }
 
 #[tokio::test]

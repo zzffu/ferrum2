@@ -65,7 +65,7 @@ impl<'a, S, K, T> ClientFlow<'a, S, K, T> {
             request_salt,
             request_sealer,
             response_opener: None,
-            rx: ClientRx::ResponseFixed,
+            rx: ClientRx::ResponseFixed { filled: 0 },
             tx: TxState::Open,
             encrypt,
             decrypt,
@@ -206,16 +206,16 @@ where
         loop {
             let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
             match state {
-                ClientRx::ResponseFixed => {
+                ClientRx::ResponseFixed { mut filled } => {
                     let response_first_read_len =
                         self.request_salt.profile().initial_response_read_bytes();
                     match Pin::new(&mut self.io).poll_read_buf(
                         cx,
                         &mut self.decrypt,
-                        response_first_read_len,
+                        response_first_read_len - filled,
                     ) {
                         Poll::Pending => {
-                            self.rx = ClientRx::ResponseFixed;
+                            self.rx = ClientRx::ResponseFixed { filled };
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(_)) => {
@@ -226,10 +226,7 @@ where
                             );
                             return Poll::Ready(Err(error));
                         }
-                        Poll::Ready(Ok(read))
-                            if read != response_first_read_len
-                                || self.decrypt.len() != response_first_read_len =>
-                        {
+                        Poll::Ready(Ok(0)) => {
                             let error = self.lifecycle.install_detection(
                                 &mut self.io,
                                 self.observers.flow,
@@ -239,6 +236,31 @@ where
                         }
                         Poll::Ready(Ok(read)) => {
                             budget.record_io(read);
+                            let Some(next) = filled
+                                .checked_add(read)
+                                .filter(|next| *next <= response_first_read_len)
+                            else {
+                                let error = self.lifecycle.install_detection(
+                                    &mut self.io,
+                                    self.observers.flow,
+                                    DetectionReason::ShortRead,
+                                );
+                                return Poll::Ready(Err(error));
+                            };
+                            if self.decrypt.len() != next {
+                                let error = self.lifecycle.install_detection(
+                                    &mut self.io,
+                                    self.observers.flow,
+                                    DetectionReason::ShortRead,
+                                );
+                                return Poll::Ready(Err(error));
+                            }
+                            filled = next;
+                            if filled < response_first_read_len {
+                                self.rx = ClientRx::ResponseFixed { filled };
+                                cx.waker().wake_by_ref();
+                                return Poll::Pending;
+                            }
                             match self.open_response_fixed() {
                                 Ok(wire_len) => {
                                     prepare_decrypt(&mut self.decrypt, wire_len);
@@ -293,8 +315,17 @@ where
                         }
                         Poll::Ready(Ok(read)) => {
                             budget.record_io(read);
-                            filled += read;
-                            if filled > wire_len || self.decrypt.len() != filled {
+                            let Some(next) =
+                                filled.checked_add(read).filter(|next| *next <= wire_len)
+                            else {
+                                let error = self.lifecycle.install_detection(
+                                    &mut self.io,
+                                    self.observers.flow,
+                                    DetectionReason::FrameBounds,
+                                );
+                                return Poll::Ready(Err(error));
+                            };
+                            if self.decrypt.len() != next {
                                 let error = self.lifecycle.install_detection(
                                     &mut self.io,
                                     self.observers.flow,
@@ -302,6 +333,7 @@ where
                                 );
                                 return Poll::Ready(Err(error));
                             }
+                            filled = next;
                             if filled < wire_len {
                                 self.rx = ClientRx::ResponsePayload { wire_len, filled };
                                 if budget.yield_if_exhausted(cx) {

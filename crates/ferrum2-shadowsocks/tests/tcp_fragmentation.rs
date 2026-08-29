@@ -1,5 +1,6 @@
 mod common;
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,11 +19,44 @@ use common::{
 };
 
 #[tokio::test]
-async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte_and_mixed() {
+async fn request_fixed_region_accepts_one_and_seven_byte_reads_across_pending() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
     let salt = salt_from_u64(900);
+    let request = valid_request_wire(NOW, &salt);
+
+    for width in [1, 7] {
+        let replay = TcpReplayStore::new(1024).expect("capacity");
+        let mut reads = request[..REQUEST_FIRST_READ_LEN]
+            .chunks(width)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        reads.push(request[REQUEST_FIRST_READ_LEN..].to_vec());
+        let (io, observation) = RecordingIo::new(reads);
+        let io = io.with_pending_reads_after(1, 1);
+        let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+
+        let session = inbound.accept_stream(io).await.expect("fragmented request");
+
+        assert_eq!(session.target, target(), "width {width}");
+        assert!(session.initial_payload.is_empty(), "width {width}");
+        let observed = observation.lock().expect("observation");
+        assert_eq!(observed.read_lengths[0], REQUEST_FIRST_READ_LEN);
+        assert_eq!(
+            observed.read_calls,
+            REQUEST_FIRST_READ_LEN.div_ceil(width) + 1,
+            "width {width}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn request_variable_region_accepts_one_byte_and_mixed_fragmentation() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let salt = salt_from_u64(901);
     let request = valid_request_wire(NOW, &salt);
     let one_byte = request[REQUEST_FIRST_READ_LEN..]
         .iter()
@@ -61,11 +95,53 @@ async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte
 }
 
 #[tokio::test]
-async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte_and_mixed() {
+async fn response_fixed_region_accepts_one_and_seven_byte_reads_across_pending() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
-    let request_salt = salt_from_u64(901);
-    let response_salt = salt_from_u64(902);
+    let request_salt = salt_from_u64(902);
+    let response_salt = salt_from_u64(903);
+    let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"fragmented", &[]);
+
+    for width in [1, 7] {
+        let mut reads = response[..RESPONSE_FIRST_READ_LEN]
+            .chunks(width)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        reads.push(response[RESPONSE_FIRST_READ_LEN..].to_vec());
+        let (io, observation) = RecordingIo::new(reads);
+        let connector = RecordingConnector::succeeds(io.with_pending_reads_after(1, 1));
+        let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+        let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+        let mut flow = outbound
+            .connect_server()
+            .await
+            .expect("server connection")
+            .write_request(&target())
+            .await
+            .expect("client");
+        let mut destination = [0_u8; 32];
+
+        let read = read_plain(&mut flow, &mut destination)
+            .await
+            .expect("fragmented response");
+
+        assert_eq!(&destination[..read], b"fragmented", "width {width}");
+        let observed = observation.lock().expect("observation");
+        assert_eq!(observed.read_lengths[0], RESPONSE_FIRST_READ_LEN);
+        assert_eq!(
+            observed.read_calls,
+            RESPONSE_FIRST_READ_LEN.div_ceil(width) + 1,
+            "width {width}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn response_payload_accepts_one_byte_and_mixed_fragmentation() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(904);
+    let response_salt = salt_from_u64(905);
     let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"fragmented", &[]);
     let payload = &response[RESPONSE_FIRST_READ_LEN..];
     let one_byte = payload.iter().map(|byte| vec![*byte]).collect::<Vec<_>>();
@@ -228,6 +304,78 @@ impl Wake for WakeCounter {
     fn wake_by_ref(self: &Arc<Self>) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+#[tokio::test]
+async fn request_fixed_partial_reads_yield_and_self_wake_once_per_transition() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(920);
+    let request = valid_request_wire(NOW, &salt);
+    let (io, observation) = RecordingIo::new([
+        request[..7].to_vec(),
+        request[7..14].to_vec(),
+        request[14..REQUEST_FIRST_READ_LEN].to_vec(),
+        request[REQUEST_FIRST_READ_LEN..].to_vec(),
+    ]);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut accept = Box::pin(inbound.accept_stream(io));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(accept.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(accept.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(observation.lock().expect("observation").read_calls, 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn response_fixed_partial_reads_yield_and_self_wake_once_per_transition() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(921);
+    let response_salt = salt_from_u64(922);
+    let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"payload", &[]);
+    let (io, observation) = RecordingIo::new([
+        response[..7].to_vec(),
+        response[7..14].to_vec(),
+        response[14..RESPONSE_FIRST_READ_LEN].to_vec(),
+        response[RESPONSE_FIRST_READ_LEN..].to_vec(),
+    ]);
+    let connector = RecordingConnector::succeeds(io);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 16];
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(observation.lock().expect("observation").read_calls, 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(observation.lock().expect("observation").read_calls, 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
