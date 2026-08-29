@@ -546,6 +546,43 @@ CPU 与 busy 同时下降而不是上升，说明失败不像算力过载；当�
 降低 runnable progress。现有 probe 没有分支计数，这一因果尚未闭合；下一步先在独立诊断分支记录
 full/Pending/partial/reentrant 次数，再从 `bf4cd4a6` 或共同基线开新的产品 sibling，绝不修改失败分支。
 
+### 12.11 exact-binary uprobe 根因诊断
+
+没有修改或重建 `8fa19ec1`。诊断直接绑定正式样本的 client/server SHA-256 与 DWARF/反汇编地址，
+在两端分别对 direct helper entry、reentrant、Pending、partial、full，以及 sink delivery/materialize
+设置 uprobe。PIE 的 RX LOAD 映射均为 `file offset = virtual address - 0x1000`；每个 outcome probe
+都落在反汇编确认的独占 branch landing，结束后 probe group 已清理。
+
+首次诊断启动在任何代理创建前被 M4 参数合同拒绝：`active=5` 小于允许下限，14 个计数均为 0；
+因此 workload 未启动、诊断样本未消耗。修正为合同允许的 3 秒预热 + 10 秒 active 后只执行一次，
+输出明确标记 `performance_authoritative=false`、`performance_adoption_allowed=false`；其吞吐不得用于
+任何候选排名。workload 合同 PASS，41,184 transactions、2,699,034,624 bytes、8 workers、drain/rebind
+均 PASS。
+
+计数结果：
+
+| 角色 | attempts | reentrant | Pending | partial | full | sink delivery | sink materialize |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| client | 107,439 | 0 | 0 | 0 | 107,439 | 107,439 | 0 |
+| server | 107,447 | 0 | 0 | 0 | 107,447 | 107,447 | 0 |
+
+两端 `attempts = reentrant + Pending + partial + full` 精确闭合；首次成功 direct read 的 full share
+均为 `100%`，每帧额外 Pending 压力为 `0`，sink non-full/materialize 比例也为 `0`。高频 uprobe
+会改变绝对调度，因而不能用本轮吞吐；但在合计 214,886 个 direct frames 中没有一次 fallback，
+足以证伪“正式回归主要来自 Pending/partial/sink materialize”的假设。
+
+根因因此收窄到 full-only direct path 本身，而不是命中率：Tokio 的 `poll_read_buf` 与
+`poll_read_initialized` 最终进入同一 `TcpStream::poll_read_priv → PollEvented → recv`，差异不在系统
+调用次数。`8fa19ec1` 把 TLS `RefCell` lease、动态 clear guard 和更大的分支状态机提前跨在 socket poll
+周围，并删除了原 scratch→TLS 顺序 copy 的缓存预热；这组 full-path layout/locality 变化没有产生收益，
+反而降低 runnable throughput。当前证据不能再细分“长 live range/指令布局”与“copy prefetch”各自占比，
+但已足够判定“直接把 socket receive 搬进 TLS”不是可用解法。
+
+下一产品 sibling 不继承 `8fa19ec1`：从 `bf4cd4a6` 开始，保留原 scratch receive、所有 fragmentation
+与调度行为，只在完整 frame 后借 TLS；用 portable out-of-place AEAD 将只读 scratch ciphertext 直接
+解到 worker-local plaintext，再沿 bf4 sink seam 发布。这样完全删除 8fa 的长 TLS-around-I/O scope，
+同时继续独立验证删除 copy-in 是否有价值。
+
 ## 13. 停止条件与后续
 
 - 若 direct ratio `>=90%`：停止热路径改动，保留 scale trade-off，后续另立 connection-sharding任务。
