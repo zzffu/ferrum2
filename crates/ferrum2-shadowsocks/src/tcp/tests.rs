@@ -180,15 +180,18 @@ fn decrypt_scratch_capacity_flow_internal_contract() {
     let mut scratch = fixed_scratch(BufferRole::Decrypt, MAX_DECRYPT_WIRE_LEN, &NOOP_OBSERVER);
     let identity = scratch.as_ptr() as usize;
     let capacity = scratch.capacity();
+    assert_eq!(scratch.len(), MAX_DECRYPT_WIRE_LEN);
 
     for payload in [Vec::new(), vec![0xa5; MAX_PAYLOAD_LEN]]
         .into_iter()
         .chain((0_u8..32).map(|value| vec![value]))
     {
         let (length, encrypted_payload) = encrypted_frame(&mut sealer, &payload);
-        open_data_frame_into(&mut opener, &length, &encrypted_payload, &mut scratch)
-            .expect("open frame");
-        assert_eq!(scratch.as_ref(), payload);
+        let plaintext_len =
+            open_data_frame_into(&mut opener, &length, &encrypted_payload, &mut scratch)
+                .expect("open frame");
+        assert_eq!(&scratch[..plaintext_len], payload);
+        assert_eq!(scratch.len(), MAX_DECRYPT_WIRE_LEN);
         assert_scratch_unchanged(&scratch, identity, capacity);
     }
 }
