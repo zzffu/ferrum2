@@ -1,8 +1,10 @@
 # Ferrum2 TCP 热路径优化计划
 
-状态：待实施
+状态：阶段 1 代码与专项测量已完成；完整宏观阶段 0 及阶段 2—7 未实施
 
 基线提交：`1e08868c8c3d523f1275cd6f8d3b63f4d42453e6`
+
+工作分支：`codex/tcp-hot-path-stage1`
 
 范围：Shadowsocks 2022 TCP、公共双向 relay、Windows 物理 TCP、TUN TCP
 
@@ -130,6 +132,35 @@ ready-flow queue/bitset 使用 slot generation 防止陈旧唤醒，并使用 pe
 - wire fixtures 与客户端/服务端互通结果不变。
 
 建议提交：`perf(shadowsocks): decrypt TCP frames in place`
+
+#### 阶段 1 实施与测量记录（2026-08-29）
+
+阶段 1 保持为两个可独立 checkout、测量和回退的提交：
+
+- 专项测量基线：`6b462785`（仅计划、allocation/timing harness 和测试依赖）；
+- 阶段 1 candidate：`1dfd580`（原位解密、固定 decrypt backing 和契约测试）。
+
+专项 harness 在 Windows 本机使用 current-thread Tokio 和相同 release test binary 入口，排除 fixture 构造、握手、destination 分配及 warm-up，只测 server steady-state RX 的“加密长度读取/解密 + payload 读取/解密 + 明文交付”。payload 固定为 1 B、1 KiB、32 KiB。
+
+allocation 测量每档先 warm-up 16 帧，再统计 128 帧：
+
+| payload | `6b462785` baseline | `1dfd580` candidate |
+| --- | --- | --- |
+| 1 B | 2 allocations/frame，3 bytes/frame | 0 allocation，0 reallocation |
+| 1 KiB | 2 allocations/frame，1,026 bytes/frame | 0 allocation，0 reallocation |
+| 32 KiB | 2 allocations/frame，32,770 bytes/frame | 0 allocation，0 reallocation |
+
+release timing 使用 6 对 AB/BA 交错运行；每次运行每档先 warm-up 64 帧，再执行 5 个样本，每样本 2,048 帧。下表是六次运行中位数以及逐对 improvement 的中位数；耗时越低越好：
+
+| payload | baseline ns/frame | candidate ns/frame | paired improvement |
+| --- | ---: | ---: | ---: |
+| 1 B | 2,981.3 | 1,558.4 | 47.73% |
+| 1 KiB | 3,652.1 | 1,900.7 | 47.72% |
+| 32 KiB | 25,943.4 | 13,656.8 | 47.38% |
+
+六对数据在三档 payload 上均为正向，没有触发“退化后根因定位/回退”停止条件。结果与删除的两项确定性成本一致：旧路径每帧分别为 2 字节长度和 payload 创建临时 `Vec`，随后复制明文，并在 RX 状态切换时反复清零 65,551 字节 scratch；candidate 直接在固定 backing 的有效 slice 中认证解密，只维护逻辑有效区间。
+
+这个专项微基准可以独立判断阶段 1 的稳态 RX 改动，但不能替代完整 `tcp-bulk`、`tcp-stream-64k`、`tcp-request-1k`、连接建立、客户端首响应、CPU profile 或 TUN 测量。完整宏观阶段 0 仍需在受控 Linux/Windows qualification 环境中按仓库 performance policy 另行采集。
 
 ### 阶段 2：无 memmove 发送编码
 
