@@ -5,7 +5,8 @@
 `62.9574%`，未达 90%。后续 two-worker、4+4 connection shard、2+2 balanced shard、
 两代 incoming-CPU shard，以及两代 length→payload single-poll 候选均已提交、推送并判失败；
 随后 fused decrypt-to-sink 候选在唯一正式本地样本中相对即时 `d874d3dd` 对照为 `+1.3604%`，
-方向为正但幅度不足以触发 hosted direct CI。所有候选提交与远端分支均保留。
+方向为正但幅度不足以触发 hosted direct CI；其 direct worker receive 子候选又相对父节点下降
+`1.6963%`，已判失败并冻结。所有候选提交与远端分支均保留。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -72,6 +73,7 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── 7e3f137a  length→payload single-poll（本地 -7.23%，失败）
             ├── 0ad5cab5  single-poll + transition Pending retry（即时对照 -0.90%，失败）
             └── bf4cd4a6  fused decrypt-to-sink（即时对照 +1.36%，弱正向、未进 CI）
+                └── 8fa19ec1  direct worker receive（相对父节点 -1.70%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -512,6 +514,37 @@ TLS helper 必须支持动态 clear prefix：transport Pending 正常出口清 0
 full/auth/sink 与 transport error 清完整 exposed range，unwind 保守清完整 range；旧 helper 继续全量
 清理。任何返回前都释放 TLS borrow。合法超大 peer frame、普通 `poll_data_fill`、client initial
 response、multi-hop fallback、TUN/runtime/Windows/SOCKS 均保持现状。
+
+### 12.10 direct worker receive 唯一正式样本与失败判定
+
+候选 `codex/tcp-hot-path-stage3-direct-worker-receive` @
+`8fa19ec1d0f174804f42e7e9daa482e4c2cc940f` 已在测量前提交并推送；tree 为
+`c41c4a633761a626235d100ebf53c909f4af845e`。它的 parent 为 `bf4cd4a6`，旧失败提交
+`7e3f137a` 与 `0ad5cab5` 均不是祖先。独立终审为零 blocker；Shadowsocks all-features 全套、
+`tcp_fused` 21/21、no-default、client/server all-features、Clippy `-D warnings`、fmt 与 diff-check
+全部通过。
+
+clean、pushed HEAD 的候选专属 profiling 二进制执行一次且仅一次 CPU 0—3、3 秒预热 + 15 秒正式
+`tcp-bulk` workload；合同为 `status=PASS`、`sample_count=1`、`runner_exit_status=0`、8 workers、
+52,735 transactions、3,456,040,960 checked bytes，即 `230,402,730 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `64047c25a0139d8e815254910b2557cfb99b04a4229d37f72bc7ab2b8b450346` |
+| `ferrum2-client` | `df75f7239588f5523abbac722b2d1f6e892e729920d4d502d1419c2c7cf0ef83` |
+| `ferrum2-server` | `f8e4ea20717b05c301004c9459471619dc281edf119a0da01c1ab638adef7f0d` |
+
+相对父候选 `bf4cd4a6` 的 `234,378,581 B/s` 下降 `3,975,851 B/s`（`-1.6963%`）；代理
+14 秒 CPU 从 `23,180 ms` 降至 `22,890 ms`（`-1.2511%`），migrations 从 `123,973` 增至
+`127,914`（`+3.1789%`），context switches 从 `505,073` 增至 `506,455`（`+0.2736%`），
+mean CPU busy 从 `47.156%` 降至 `46.612%`（`-0.544` 个百分点）。相对共同基线
+`d874d3dd` 也低 `830,123 B/s`（`-0.3590%`）。
+
+按预声明的“不得低于父候选”条件立即判失败并冻结，不触发 CI、不重跑、不在 `8fa19ec1` 上叠加。
+CPU 与 busy 同时下降而不是上升，说明失败不像算力过载；当前最可信假设是完整 direct read 命中率不足，
+而每次 payload Pending 的提前 TLS/`RefCell` 借用、partial 的 TLS→scratch materialize 与前缀清零
+降低 runnable progress。现有 probe 没有分支计数，这一因果尚未闭合；下一步先在独立诊断分支记录
+full/Pending/partial/reentrant 次数，再从 `bf4cd4a6` 或共同基线开新的产品 sibling，绝不修改失败分支。
 
 ## 13. 停止条件与后续
 
