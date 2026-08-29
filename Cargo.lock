@@ -704,6 +704,7 @@ dependencies = [
  "ferrum2-crypto",
  "hex",
  "serde_json",
+ "stats_alloc",
  "thiserror",
  "tokio",
 ]
