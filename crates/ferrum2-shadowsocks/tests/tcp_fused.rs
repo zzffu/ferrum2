@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::future::{Future, ready};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,19 +20,19 @@ use ferrum2_shadowsocks::tokio::{
     FusedRelayDirection, TokioTransport, relay_client_flow, relay_server_flow,
 };
 use ferrum2_shadowsocks::{
-    BufferRole, ClientFlow, ClientTcpOutbound, FlowTerminal, MethodKeyAdapter, PlainBufferedDuplex,
-    PlainDuplex, ProtocolReason, ServerFlow, ShadowsocksError, ShadowsocksTcpInbound,
-    TcpReplayStore, TransportIo,
+    BufferRole, ClientFlow, ClientTcpOutbound, FlowTerminal, MAX_PAYLOAD_LEN, MethodKeyAdapter,
+    PlainBufferedDuplex, PlainDuplex, ProtocolReason, ServerFlow, ShadowsocksError,
+    ShadowsocksTcpInbound, TAG_LEN, TcpReplayStore, TransportIo, TransportPhase,
 };
 #[cfg(feature = "structural-metrics")]
 use ferrum2_structural::{StructuralCounter, StructuralHub};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use common::{
-    FakeClock, IoObservation, NOW, RecordingConnector, RecordingIo, RecordingObservers,
-    ScriptedRandom, SourceSentinel, client_random_bytes, method_provider, method_salt_from_u64,
-    provider, request_data_frames, response_wire_and_frames, salt_from_u64, server_target, target,
-    valid_request_wire, valid_request_wire_for,
+    FakeClock, IoObservation, NOW, RecordingIo, RecordingObservers, ScriptedRandom, SourceSentinel,
+    client_random_bytes, method_provider, method_salt_from_u64, provider, request_data_frames,
+    response_wire_and_frames, salt_from_u64, server_target, target, valid_request_wire,
+    valid_request_wire_for,
 };
 
 struct EndpointIo {
@@ -111,6 +112,8 @@ struct SequencedIo {
 
 impl TransportIo for SequencedIo {
     type IoError = SourceSentinel;
+
+    const DIRECT_WORKER_RECEIVE: bool = true;
 
     fn poll_read_buf(
         mut self: Pin<&mut Self>,
@@ -197,6 +200,232 @@ impl Connector for SequencedConnector {
             .expect("connector lock")
             .take()
             .expect("connector used once")))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InitializedReadAction {
+    Pending,
+    Limit(usize),
+    Error,
+    Zero,
+    Oversize,
+}
+
+#[derive(Default)]
+struct InitializedReadObservation {
+    calls: usize,
+    pointers: Vec<usize>,
+    lengths: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct DirectTransportObservation {
+    buffered: Arc<Mutex<IoObservation>>,
+    initialized: Arc<Mutex<InitializedReadObservation>>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Deref for DirectTransportObservation {
+    type Target = Mutex<IoObservation>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buffered
+    }
+}
+
+struct DirectRecordingIo {
+    inner: RecordingIo,
+    actions: VecDeque<InitializedReadAction>,
+    initialized: Arc<Mutex<InitializedReadObservation>>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl DirectRecordingIo {
+    fn new(
+        inner: RecordingIo,
+        buffered: Arc<Mutex<IoObservation>>,
+        actions: impl IntoIterator<Item = InitializedReadAction>,
+    ) -> (Self, DirectTransportObservation) {
+        let initialized = Arc::new(Mutex::new(InitializedReadObservation::default()));
+        let pending_waker = Arc::new(Mutex::new(None));
+        (
+            Self {
+                inner,
+                actions: actions.into_iter().collect(),
+                initialized: Arc::clone(&initialized),
+                pending_waker: Arc::clone(&pending_waker),
+            },
+            DirectTransportObservation {
+                buffered,
+                initialized,
+                pending_waker,
+            },
+        )
+    }
+}
+
+impl TransportIo for DirectRecordingIo {
+    type IoError = SourceSentinel;
+
+    const DIRECT_WORKER_RECEIVE: bool = true;
+
+    fn poll_read_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut self.inner).poll_read_buf(cx, destination, limit)
+    }
+
+    fn poll_read_initialized(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        {
+            let mut observation = self.initialized.lock().expect("initialized reads");
+            observation.calls += 1;
+            observation.pointers.push(destination.as_ptr() as usize);
+            observation.lengths.push(destination.len());
+        }
+        match self.actions.pop_front() {
+            Some(InitializedReadAction::Pending) => {
+                *self
+                    .pending_waker
+                    .lock()
+                    .expect("initialized pending waker") = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            Some(InitializedReadAction::Limit(limit)) => {
+                let limit = limit.min(destination.len());
+                Pin::new(&mut self.inner).poll_read_initialized(cx, &mut destination[..limit])
+            }
+            Some(InitializedReadAction::Error) => {
+                destination.fill(0xa5);
+                Poll::Ready(Err(SourceSentinel))
+            }
+            Some(InitializedReadAction::Zero) => Poll::Ready(Ok(0)),
+            Some(InitializedReadAction::Oversize) => {
+                destination.fill(0x5a);
+                Poll::Ready(Ok(destination.len() + 1))
+            }
+            None => Pin::new(&mut self.inner).poll_read_initialized(cx, destination),
+        }
+    }
+
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut self.inner).poll_write(cx, source)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl AbortiveClose for DirectRecordingIo {
+    type Error = ();
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        self.inner.mark_abortive()
+    }
+}
+
+impl LocalEndpoint for DirectRecordingIo {
+    fn local_socket_addr(&self) -> SocketAddr {
+        self.inner.local_socket_addr()
+    }
+}
+
+struct DefaultFallbackIo(DirectRecordingIo);
+
+impl TransportIo for DefaultFallbackIo {
+    type IoError = SourceSentinel;
+
+    fn poll_read_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut self.0).poll_read_buf(cx, destination, limit)
+    }
+
+    fn poll_read_initialized(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut self.0).poll_read_initialized(cx, destination)
+    }
+
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut self.0).poll_write(cx, source)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl AbortiveClose for DefaultFallbackIo {
+    type Error = ();
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        self.0.mark_abortive()
+    }
+}
+
+impl LocalEndpoint for DefaultFallbackIo {
+    fn local_socket_addr(&self) -> SocketAddr {
+        self.0.local_socket_addr()
+    }
+}
+
+struct DirectConnector(Mutex<Option<DirectRecordingIo>>);
+
+impl Connector for DirectConnector {
+    type Stream = DirectRecordingIo;
+
+    fn connect(
+        &self,
+        _target: &TargetAddr,
+    ) -> impl Future<Output = Result<Self::Stream, ConnectError>> + Send {
+        ready(Ok(self
+            .0
+            .lock()
+            .expect("direct connector lock")
+            .take()
+            .expect("direct connector used once")))
     }
 }
 
@@ -415,16 +644,14 @@ impl AsyncWrite for ScriptedWritePlain {
 struct ReentrantObservation {
     outer_pointer: usize,
     outer_source: Vec<u8>,
-    nested_pointer: usize,
-    nested_source: Vec<u8>,
 }
 
-struct ReentrantWritePlain<F> {
-    nested: F,
+struct ReentrantRelayPlain {
+    nested: Pin<Box<dyn Future<Output = io::Result<()>>>>,
     observation: Arc<Mutex<ReentrantObservation>>,
 }
 
-impl<F> AsyncRead for ReentrantWritePlain<F> {
+impl AsyncRead for ReentrantRelayPlain {
     fn poll_read(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -434,28 +661,16 @@ impl<F> AsyncRead for ReentrantWritePlain<F> {
     }
 }
 
-impl<F> AsyncWrite for ReentrantWritePlain<F>
-where
-    F: PlainBufferedDuplex + Unpin,
-{
+impl AsyncWrite for ReentrantRelayPlain {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         source: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let (nested_pointer, nested_source, nested_len) = match Pin::new(&mut self.nested)
-            .poll_fill_plain_buf(cx)
-        {
-            Poll::Pending => panic!("nested payload was staged at its payload read"),
-            Poll::Ready(Err(error)) => panic!("nested payload failed: {error}"),
-            Poll::Ready(Ok(nested)) => (nested.as_ptr() as usize, nested.to_vec(), nested.len()),
-        };
-        Pin::new(&mut self.nested).consume_plain(nested_len);
+        assert!(matches!(self.nested.as_mut().poll(cx), Poll::Pending));
         let mut observation = self.observation.lock().expect("reentrant observation");
         observation.outer_pointer = source.as_ptr() as usize;
         observation.outer_source = source.to_vec();
-        observation.nested_pointer = nested_pointer;
-        observation.nested_source = nested_source;
         Poll::Ready(Ok(source.len()))
     }
 
@@ -470,7 +685,7 @@ where
 
 type TestServerFlow = ServerFlow<
     'static,
-    RecordingIo,
+    DirectRecordingIo,
     MethodKeyAdapter<MethodSinglePskProvider>,
     FakeClock,
     ScriptedRandom,
@@ -482,7 +697,19 @@ async fn observed_server_flow(
 ) -> (
     TestServerFlow,
     &'static RecordingObservers,
-    Arc<Mutex<IoObservation>>,
+    DirectTransportObservation,
+) {
+    observed_server_flow_with_initialized(request_salt, frames, []).await
+}
+
+async fn observed_server_flow_with_initialized(
+    request_salt: ferrum2_crypto::MethodTcpSalt,
+    frames: Vec<Vec<u8>>,
+    actions: impl IntoIterator<Item = InitializedReadAction>,
+) -> (
+    TestServerFlow,
+    &'static RecordingObservers,
+    DirectTransportObservation,
 ) {
     let keys = Box::leak(Box::new(provider()));
     let clock = Box::leak(Box::new(FakeClock::new(NOW, 0)));
@@ -499,7 +726,8 @@ async fn observed_server_flow(
     .into_iter()
     .chain(frames)
     .collect::<Vec<_>>();
-    let (io, observation) = RecordingIo::new(reads);
+    let (io, buffered) = RecordingIo::new(reads);
+    let (io, observation) = DirectRecordingIo::new(io, buffered, actions);
     let inbound = ShadowsocksTcpInbound::new(keys, clock, random, replay)
         .with_observers(observers, observers);
     let flow = inbound
@@ -558,8 +786,16 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
     assert_eq!(sink_observation.sources, [payload.to_vec()]);
     assert_eq!(sink_observation.accepted, payload);
     assert_ne!(sink_observation.pointers[0], decrypt_pointer);
+    let initialized = transport
+        .initialized
+        .lock()
+        .expect("initialized read observation");
+    assert_eq!(initialized.calls, 1);
+    assert_eq!(initialized.lengths, [payload.len() + TAG_LEN]);
+    assert_eq!(initialized.pointers, sink_observation.pointers);
     assert_eq!(progressed.load(Ordering::SeqCst), payload.len());
     assert_eq!(transport.lock().expect("transport").read_calls, 4);
+    drop(initialized);
     drop(sink_observation);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
@@ -575,6 +811,101 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
         );
         assert_eq!(snapshot.get(StructuralCounter::FtbrPartialWrites), 0);
     }
+}
+
+#[tokio::test]
+async fn direct_worker_receive_pending_waits_for_external_wake_without_self_wake() {
+    let request_salt = salt_from_u64(1_050);
+    let payload = b"externally ready worker receive";
+    let frames = request_data_frames(&request_salt, &[payload]);
+    let (mut flow, observers, transport) = observed_server_flow_with_initialized(
+        request_salt,
+        frames,
+        [InitializedReadAction::Pending],
+    )
+    .await;
+    let decrypt_pointer = decrypt_pointer(observers);
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.lock().expect("sink observation").polls, 0);
+
+    transport
+        .pending_waker
+        .lock()
+        .expect("initialized pending waker")
+        .take()
+        .expect("transport registered the relay waker")
+        .wake();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+
+    let initialized = transport.initialized.lock().expect("initialized reads");
+    let sink = sink.lock().expect("sink observation");
+    assert_eq!(initialized.calls, 2);
+    assert_eq!(initialized.pointers[0], initialized.pointers[1]);
+    assert_eq!(sink.polls, 1);
+    assert_eq!(sink.accepted, payload);
+    assert_eq!(sink.pointers[0], initialized.pointers[1]);
+    assert_ne!(sink.pointers[0], decrypt_pointer);
+}
+
+#[tokio::test]
+async fn direct_worker_receive_partial_materializes_ciphertext_then_resumes_once() {
+    let request_salt = salt_from_u64(1_051);
+    let payload = b"fragmented worker receive remains exact";
+    let frames = request_data_frames(&request_salt, &[payload]);
+    let (mut flow, observers, transport) = observed_server_flow_with_initialized(
+        request_salt,
+        frames,
+        [InitializedReadAction::Limit(5)],
+    )
+    .await;
+    let decrypt_pointer = decrypt_pointer(observers);
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(sink.lock().expect("sink observation").polls, 0);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+
+    let initialized = transport.initialized.lock().expect("initialized reads");
+    let sink = sink.lock().expect("sink observation");
+    assert_eq!(initialized.calls, 1);
+    assert_eq!(sink.polls, 1);
+    assert_eq!(sink.sources, [payload.to_vec()]);
+    assert_eq!(sink.accepted, payload);
+    assert_eq!(sink.pointers[0], initialized.pointers[0]);
+    assert_ne!(sink.pointers[0], decrypt_pointer);
+    assert_eq!(transport.lock().expect("transport").read_calls, 5);
 }
 
 #[tokio::test]
@@ -757,7 +1088,7 @@ async fn fused_tamper_never_polls_sink_and_freezes_the_protocol_terminal() {
     let payload = b"authenticated before forwarding";
     let mut frames = request_data_frames(&request_salt, &[payload]);
     *frames[1].last_mut().expect("payload tag") ^= 0x80;
-    let (mut flow, observers, _) = observed_server_flow(request_salt, frames).await;
+    let (mut flow, observers, transport) = observed_server_flow(request_salt, frames).await;
     let (mut plain, sink, _) = ScriptedWritePlain::new([]);
     #[cfg(feature = "structural-metrics")]
     let structural = StructuralHub::new().local();
@@ -778,6 +1109,14 @@ async fn fused_tamper_never_polls_sink_and_freezes_the_protocol_terminal() {
     drop(relay);
     assert_eq!(sink.lock().expect("sink observation").polls, 0);
     assert_eq!(
+        transport
+            .initialized
+            .lock()
+            .expect("initialized reads")
+            .calls,
+        1
+    );
+    assert_eq!(
         flow.terminal(),
         Some(FlowTerminal::Protocol(ProtocolReason::Authentication))
     );
@@ -791,6 +1130,63 @@ async fn fused_tamper_never_polls_sink_and_freezes_the_protocol_terminal() {
         observers.terminals.lock().expect("terminals").as_slice(),
         [FlowTerminal::Protocol(ProtocolReason::Authentication)]
     );
+}
+
+#[tokio::test]
+async fn direct_worker_receive_eof_error_and_adapter_violation_fail_closed() {
+    let cases = [
+        (
+            InitializedReadAction::Zero,
+            io::ErrorKind::InvalidData,
+            FlowTerminal::Protocol(ProtocolReason::FrameBounds),
+        ),
+        (
+            InitializedReadAction::Error,
+            io::ErrorKind::Other,
+            FlowTerminal::Transport(TransportPhase::Read),
+        ),
+        (
+            InitializedReadAction::Oversize,
+            io::ErrorKind::InvalidData,
+            FlowTerminal::Protocol(ProtocolReason::FrameBounds),
+        ),
+    ];
+
+    for (index, (action, expected_kind, expected_terminal)) in cases.into_iter().enumerate() {
+        let request_salt = salt_from_u64(1_060 + index as u64);
+        let payload = b"direct receive failure";
+        let frames = request_data_frames(&request_salt, &[payload]);
+        let (mut flow, _, transport) =
+            observed_server_flow_with_initialized(request_salt, frames, [action]).await;
+        let (mut plain, sink, _) = ScriptedWritePlain::new([]);
+        #[cfg(feature = "structural-metrics")]
+        let structural = StructuralHub::new().local();
+        let mut relay = Box::pin(relay_server_flow(
+            &mut plain,
+            &mut flow,
+            |_, _| panic!("failed receive cannot publish progress"),
+            #[cfg(feature = "structural-metrics")]
+            &structural,
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+        let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
+            panic!("direct receive failure must terminate the relay");
+        };
+        assert_eq!(error.kind(), expected_kind);
+        drop(relay);
+        assert_eq!(flow.terminal(), Some(expected_terminal));
+        assert_eq!(sink.lock().expect("sink observation").polls, 0);
+        assert_eq!(
+            transport
+                .initialized
+                .lock()
+                .expect("initialized reads")
+                .calls,
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -824,6 +1220,14 @@ async fn fused_zero_frame_preserves_the_length_boundary_without_polling_sink() {
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.accepted, payload);
+    assert_eq!(
+        transport
+            .initialized
+            .lock()
+            .expect("initialized reads")
+            .calls,
+        2
+    );
 }
 
 #[tokio::test]
@@ -834,11 +1238,12 @@ async fn fused_client_initial_response_keeps_the_buffered_flow_view() {
     let response_salt = salt_from_u64(1_031);
     let payload = b"initial response";
     let (response, _) = response_wire_and_frames(&request_salt, &response_salt, payload, &[]);
-    let (io, transport) = RecordingIo::new([
+    let (io, buffered) = RecordingIo::new([
         response[..ferrum2_shadowsocks::RESPONSE_FIRST_READ_LEN].to_vec(),
         response[ferrum2_shadowsocks::RESPONSE_FIRST_READ_LEN..].to_vec(),
     ]);
-    let connector = RecordingConnector::succeeds(io);
+    let (io, transport) = DirectRecordingIo::new(io, buffered, []);
+    let connector = DirectConnector(Mutex::new(Some(io)));
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let observers = RecordingObservers::default();
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random)
@@ -870,6 +1275,14 @@ async fn fused_client_initial_response_keeps_the_buffered_flow_view() {
     assert_eq!(sink.sources, [payload.to_vec()]);
     assert_eq!(sink.accepted, payload);
     assert_eq!(sink.pointers, [decrypt_pointer]);
+    assert_eq!(
+        transport
+            .initialized
+            .lock()
+            .expect("initialized reads")
+            .calls,
+        0
+    );
 }
 
 #[tokio::test]
@@ -877,14 +1290,24 @@ async fn fused_reentrant_staging_borrow_uses_the_buffered_fallback() {
     let nested_salt = salt_from_u64(1_040);
     let nested_payload = b"nested fallback payload";
     let nested_frames = request_data_frames(&nested_salt, &[nested_payload]);
-    let (mut nested, nested_observers, nested_transport) =
+    let (nested, nested_observers, nested_transport) =
         observed_server_flow(nested_salt, nested_frames).await;
     let nested_decrypt_pointer = decrypt_pointer(nested_observers);
+    let nested = Box::leak(Box::new(nested));
+    let (nested_plain, nested_sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    let nested_plain = Box::leak(Box::new(nested_plain));
+    #[cfg(feature = "structural-metrics")]
+    let nested_structural = Box::leak(Box::new(StructuralHub::new().local()));
+    let mut nested_relay: Pin<Box<dyn Future<Output = io::Result<()>>>> =
+        Box::pin(relay_server_flow(
+            nested_plain,
+            nested,
+            |_, _| {},
+            #[cfg(feature = "structural-metrics")]
+            nested_structural,
+        ));
     let mut cx = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        Pin::new(&mut nested).poll_fill_plain_buf(&mut cx),
-        Poll::Pending
-    ));
+    assert!(matches!(nested_relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(
         nested_transport
             .lock()
@@ -896,11 +1319,12 @@ async fn fused_reentrant_staging_borrow_uses_the_buffered_fallback() {
     let outer_salt = salt_from_u64(1_041);
     let outer_payload = b"outer direct payload";
     let outer_frames = request_data_frames(&outer_salt, &[outer_payload]);
-    let (mut outer, outer_observers, _) = observed_server_flow(outer_salt, outer_frames).await;
+    let (mut outer, outer_observers, outer_transport) =
+        observed_server_flow(outer_salt, outer_frames).await;
     let outer_decrypt_pointer = decrypt_pointer(outer_observers);
     let observation = Arc::new(Mutex::new(ReentrantObservation::default()));
-    let mut plain = ReentrantWritePlain {
-        nested,
+    let mut plain = ReentrantRelayPlain {
+        nested: nested_relay,
         observation: Arc::clone(&observation),
     };
     #[cfg(feature = "structural-metrics")]
@@ -918,14 +1342,159 @@ async fn fused_reentrant_staging_borrow_uses_the_buffered_fallback() {
     let observation = observation.lock().expect("reentrant observation");
     assert_eq!(observation.outer_source, outer_payload);
     assert_ne!(observation.outer_pointer, outer_decrypt_pointer);
-    assert_eq!(observation.nested_source, nested_payload);
-    assert_eq!(observation.nested_pointer, nested_decrypt_pointer);
+    let nested_sink = nested_sink.lock().expect("nested sink observation");
+    assert_eq!(nested_sink.sources, [nested_payload.to_vec()]);
+    assert_eq!(nested_sink.accepted, nested_payload);
+    assert_eq!(nested_sink.pointers, [nested_decrypt_pointer]);
+    assert_eq!(
+        outer_transport
+            .initialized
+            .lock()
+            .expect("outer initialized reads")
+            .calls,
+        1
+    );
+    assert_eq!(
+        nested_transport
+            .initialized
+            .lock()
+            .expect("nested initialized reads")
+            .calls,
+        0,
+        "reentrant direct receive falls through before polling initialized transport"
+    );
     assert_eq!(
         nested_transport
             .lock()
             .expect("nested transport")
             .read_calls,
         4
+    );
+}
+
+#[tokio::test]
+async fn ordinary_buffered_receive_never_uses_initialized_transport() {
+    let request_salt = salt_from_u64(1_070);
+    let payload = b"ordinary buffered receive";
+    let frames = request_data_frames(&request_salt, &[payload]);
+    let (mut flow, observers, transport) = observed_server_flow(request_salt, frames).await;
+    let decrypt_pointer = decrypt_pointer(observers);
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_fill_plain_buf(&mut cx),
+        Poll::Pending
+    ));
+    let Poll::Ready(Ok(source)) = Pin::new(&mut flow).poll_fill_plain_buf(&mut cx) else {
+        panic!("buffered payload must be ready after its payload read");
+    };
+    assert_eq!(source, payload);
+    assert_eq!(source.as_ptr() as usize, decrypt_pointer);
+    assert_eq!(
+        transport
+            .initialized
+            .lock()
+            .expect("initialized reads")
+            .calls,
+        0
+    );
+}
+
+#[tokio::test]
+async fn default_and_boxed_transports_keep_initialized_receive_disabled() {
+    const {
+        assert!(!<DefaultFallbackIo as TransportIo>::DIRECT_WORKER_RECEIVE);
+        assert!(
+            !<ferrum2_shadowsocks::BoxedClientFlow<'static> as TransportIo>::DIRECT_WORKER_RECEIVE
+        );
+    }
+
+    let request_salt = salt_from_u64(1_072);
+    let payload = b"default capability scratch fallback";
+    let frames = request_data_frames(&request_salt, &[payload]);
+    let request = valid_request_wire(NOW, &request_salt);
+    let reads = [
+        request[..ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN].to_vec(),
+        request[ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN..].to_vec(),
+    ]
+    .into_iter()
+    .chain(frames)
+    .collect::<Vec<_>>();
+    let (io, buffered) = RecordingIo::new(reads);
+    let (io, transport) = DirectRecordingIo::new(io, buffered, []);
+    let keys = Box::leak(Box::new(provider()));
+    let clock = Box::leak(Box::new(FakeClock::new(NOW, 0)));
+    let random = Box::leak(Box::new(ScriptedRandom::new([])));
+    let replay = Box::leak(Box::new(
+        TcpReplayStore::new(1024).expect("replay capacity"),
+    ));
+    let mut flow = ShadowsocksTcpInbound::new(keys, clock, random, replay)
+        .accept_stream(DefaultFallbackIo(io))
+        .await
+        .expect("server request")
+        .stream;
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    let sink = sink.lock().expect("sink observation");
+    assert_eq!(sink.polls, 1);
+    assert_eq!(sink.accepted, payload);
+    assert_eq!(
+        transport
+            .initialized
+            .lock()
+            .expect("initialized reads")
+            .calls,
+        0,
+        "default-false and boxed transports must retain the scratch receive path"
+    );
+}
+
+#[tokio::test]
+async fn maximum_peer_frame_keeps_the_scratch_receive_fallback() {
+    let request_salt = salt_from_u64(1_071);
+    let payload = vec![0x6d; MAX_PAYLOAD_LEN];
+    let frames = request_data_frames(&request_salt, &[payload.as_slice()]);
+    let (mut flow, observers, transport) = observed_server_flow(request_salt, frames).await;
+    let decrypt_pointer = decrypt_pointer(observers);
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    let sink = sink.lock().expect("sink observation");
+    assert_eq!(sink.polls, 1);
+    assert_eq!(sink.sources.as_slice(), std::slice::from_ref(&payload));
+    assert_eq!(sink.accepted, payload);
+    assert_ne!(sink.pointers[0], decrypt_pointer);
+    assert_eq!(
+        transport
+            .initialized
+            .lock()
+            .expect("initialized reads")
+            .calls,
+        0,
+        "65,535-byte peer payload remains on the scratch receive path"
     );
 }
 

@@ -28,6 +28,11 @@ pub trait TransportIo: AbortiveClose + Send + Unpin {
     /// Underlying error type. It is immediately erased into a closed phase.
     type IoError;
 
+    /// Whether this adapter is a physical transport that can receive directly
+    /// into worker-local staging. Layered transports retain the default so
+    /// their buffered flow semantics remain unchanged.
+    const DIRECT_WORKER_RECEIVE: bool = false;
+
     /// Appends at most `limit` transport bytes to `destination`.
     ///
     /// `Pending` and `Err` leave the visible length unchanged. Implementations
@@ -40,10 +45,12 @@ pub trait TransportIo: AbortiveClose + Send + Unpin {
         limit: usize,
     ) -> Poll<Result<usize, Self::IoError>>;
 
-    /// Reads into an already initialized caller-owned plaintext slice.
+    /// Reads into an already initialized caller-owned byte slice.
     ///
-    /// Protocol receive state uses [`Self::poll_read_buf`]; this operation is
-    /// retained for direct transports that do not own a reusable receive view.
+    /// `Pending` leaves `destination` unchanged. `Ready(Ok(read))` reports at
+    /// most `destination.len()` bytes and may modify only `destination[..read]`;
+    /// the suffix remains unchanged. `Ready(Err(_))` may have modified any byte
+    /// in the exposed slice. No result retains the borrowed destination.
     fn poll_read_initialized(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

@@ -7,6 +7,8 @@ use std::task::{Context, Poll};
 use bytes::BytesMut;
 
 use super::worker_local::try_with_wire_staging;
+#[cfg(feature = "tokio")]
+use super::worker_local::try_with_wire_staging_clear_prefix;
 use super::{
     DataRx, Lifecycle, StagedKind, StagedWrite, TransportIo, TxState, prepare_decrypt,
     protocol_cipher_boundary,
@@ -22,6 +24,11 @@ use crate::tcp::wire::{
 use ferrum2_crypto::{TcpOpener, TcpSealer};
 #[cfg(feature = "tokio")]
 use tokio::io::AsyncWrite;
+
+#[cfg(feature = "tokio")]
+const DIRECT_WORKER_RECEIVE_PAYLOAD_LIMIT: usize = 32 * 1024;
+#[cfg(feature = "tokio")]
+const DIRECT_WORKER_RECEIVE_WIRE_LIMIT: usize = DIRECT_WORKER_RECEIVE_PAYLOAD_LIMIT + TAG_LEN;
 
 // Bound both useful bulk work and pathological tiny-ready fragmentation per outer poll.
 const POLL_FRAME_BUDGET: usize = 8;
@@ -171,8 +178,8 @@ where
         if remaining == 0 {
             scratch.clear();
         } else {
-            scratch[..remaining].copy_from_slice(&plaintext[consumed..]);
-            scratch.truncate(remaining);
+            scratch.clear();
+            scratch.extend_from_slice(&plaintext[consumed..]);
         }
         InnerDataRead::Forwarded {
             result,
@@ -231,6 +238,33 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut delivery = FusedDelivery(sink);
+    let state = match state {
+        DataRx::Payload {
+            wire_len,
+            filled: 0,
+        } if S::DIRECT_WORKER_RECEIVE
+            && wire_len <= DIRECT_WORKER_RECEIVE_WIRE_LIMIT
+            && scratch.is_empty() =>
+        {
+            match poll_data_forward_worker_receive(
+                io,
+                opener,
+                scratch,
+                wire_len,
+                lifecycle,
+                observer,
+                cx,
+                &mut delivery,
+            ) {
+                Some(result) => return result,
+                None => DataRx::Payload {
+                    wire_len,
+                    filled: 0,
+                },
+            }
+        }
+        state => state,
+    };
     match poll_data_fill_inner(
         io,
         opener,
@@ -251,6 +285,99 @@ where
             }),
         ),
     }
+}
+
+#[cfg(feature = "tokio")]
+#[allow(clippy::too_many_arguments)]
+fn poll_data_forward_worker_receive<S, W>(
+    io: &mut S,
+    opener: &mut TcpOpener,
+    scratch: &mut BytesMut,
+    wire_len: usize,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+    delivery: &mut FusedDelivery<'_, W>,
+) -> Option<FusedDataPoll>
+where
+    S: TransportIo,
+    W: AsyncWrite + Unpin,
+{
+    try_with_wire_staging_clear_prefix(wire_len, |worker_wire| {
+        match Pin::new(&mut *io).poll_read_initialized(cx, worker_wire) {
+            Poll::Pending => (
+                0,
+                FusedDataPoll::Pending(DataRx::Payload {
+                    wire_len,
+                    filled: 0,
+                }),
+            ),
+            Poll::Ready(Err(_)) => {
+                let error = lifecycle.install_transport(observer, TransportPhase::Read);
+                (wire_len, FusedDataPoll::Ready(DataRx::Poison, Err(error)))
+            }
+            Poll::Ready(Ok(0)) => {
+                let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                (0, FusedDataPoll::Ready(DataRx::Poison, Err(error)))
+            }
+            Poll::Ready(Ok(read)) if read > wire_len => {
+                let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                (wire_len, FusedDataPoll::Ready(DataRx::Poison, Err(error)))
+            }
+            Poll::Ready(Ok(read)) if read < wire_len => {
+                scratch.extend_from_slice(&worker_wire[..read]);
+                if scratch.len() != read {
+                    let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
+                    return (wire_len, FusedDataPoll::Ready(DataRx::Poison, Err(error)));
+                }
+                cx.waker().wake_by_ref();
+                (
+                    read,
+                    FusedDataPoll::Pending(DataRx::Payload {
+                        wire_len,
+                        filled: read,
+                    }),
+                )
+            }
+            Poll::Ready(Ok(_)) => {
+                if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
+                    opener
+                        .open_slice_in_place(worker_wire)
+                        .map_err(frame_from_open_aead)
+                }) {
+                    return (wire_len, FusedDataPoll::Ready(DataRx::Poison, Err(error)));
+                }
+                let payload_len = wire_len - TAG_LEN;
+                if payload_len == 0 {
+                    scratch.clear();
+                    cx.waker().wake_by_ref();
+                    return (
+                        wire_len,
+                        FusedDataPoll::Pending(DataRx::Length { filled: 0 }),
+                    );
+                }
+                match delivery.deliver(cx, &worker_wire[..payload_len], scratch) {
+                    InnerDataRead::Forwarded {
+                        result,
+                        frame_complete,
+                    } => {
+                        let state = if frame_complete {
+                            DataRx::Length { filled: 0 }
+                        } else {
+                            DataRx::Ready { position: 0 }
+                        };
+                        (
+                            wire_len,
+                            FusedDataPoll::Ready(state, Ok(FusedDataRead::Forwarded(result))),
+                        )
+                    }
+                    InnerDataRead::Buffered | InnerDataRead::Eof => {
+                        unreachable!("fused delivery always reports a forwarding outcome")
+                    }
+                }
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

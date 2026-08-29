@@ -80,6 +80,8 @@ where
 {
     type IoError = io::Error;
 
+    const DIRECT_WORKER_RECEIVE: bool = true;
+
     fn poll_read_buf(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

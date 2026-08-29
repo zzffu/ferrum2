@@ -479,6 +479,8 @@ where
 {
     type IoError = S::IoError;
 
+    const DIRECT_WORKER_RECEIVE: bool = S::DIRECT_WORKER_RECEIVE;
+
     fn poll_read_buf(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
