@@ -18,6 +18,7 @@ ferrum2-core.workspace = true
 ferrum2-crypto.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]

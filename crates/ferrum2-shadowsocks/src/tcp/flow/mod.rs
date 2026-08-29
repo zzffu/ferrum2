@@ -1,6 +1,7 @@
 mod client;
 mod io;
 mod server;
+mod worker_local;
 
 pub use client::{BoxedClientFlow, ClientFlow};
 pub use server::ServerFlow;
