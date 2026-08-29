@@ -251,11 +251,15 @@ class BuildQualificationTests(BuildExperimentFixture):
 
         # Restore a complete fixture, then make its host identity non-AMD.
         _, _, _, aa1, aa2, comparison = self.prepared("-non-amd")
-        path = next((comparison / "parent").glob("*.jsonl"))
-        row = json.loads(path.read_text(encoding="utf-8"))
-        row["cpu_model"] = "Intel fixture"
-        row["environment_identity"]["cpu_model"] = "Intel fixture"
-        path.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+        for root in (aa1, aa2, comparison):
+            for member in ("parent", "candidate"):
+                for path in (root / member).glob("*.jsonl"):
+                    row = json.loads(path.read_text(encoding="utf-8"))
+                    row["cpu_model"] = "Intel fixture"
+                    row["environment_identity"]["cpu_model"] = "Intel fixture"
+                    path.write_text(
+                        json.dumps(row, sort_keys=True) + "\n", encoding="utf-8"
+                    )
         with self.assertRaisesRegex(CandidateControlError, "AMD"):
             build_qualification.create_qualification_record(
                 environment_path=environment,
