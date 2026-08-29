@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -534,14 +535,23 @@ class BuildPlanTests(BuildExperimentFixture):
             ]
         )
 
-    def test_named_profiles_do_not_modify_default_release(self) -> None:
-        cargo = (pathlib.Path(__file__).resolve().parents[2] / "Cargo.toml").read_text(
-            encoding="utf-8"
+    def test_release_and_named_profiles_keep_scoped_axes(self) -> None:
+        cargo = tomllib.loads(
+            (pathlib.Path(__file__).resolve().parents[2] / "Cargo.toml").read_text(
+                encoding="utf-8"
+            )
         )
 
-        self.assertIn("[profile.performance-thin-lto]", cargo)
-        self.assertIn("[profile.performance-panic-abort-strip]", cargo)
-        self.assertNotIn("[profile.release]", cargo)
+        profiles = cargo["profile"]
+        self.assertEqual(
+            profiles["release"],
+            {"lto": "fat", "codegen-units": 1, "panic": "abort"},
+        )
+        self.assertEqual(profiles["profiling"]["inherits"], "release")
+        self.assertEqual(profiles["performance-thin-lto"]["inherits"], "profiling")
+        self.assertEqual(
+            profiles["performance-panic-abort-strip"]["inherits"], "profiling"
+        )
 
 
 class BuildRunTests(BuildExperimentFixture):
