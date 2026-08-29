@@ -503,6 +503,58 @@ async fn response_fixed_partial_reads_yield_and_self_wake_once_per_transition() 
 }
 
 #[tokio::test]
+async fn completed_response_fixed_and_partial_payload_reads_are_one_shot() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(923);
+    let response_salt = salt_from_u64(924);
+    let payload = b"one-shot response";
+    let (response, _) = response_wire_and_frames(&request_salt, &response_salt, payload, &[]);
+    let response_payload = &response[RESPONSE_FIRST_READ_LEN..];
+    let (io, observation) = RecordingIo::new([
+        response[..RESPONSE_FIRST_READ_LEN].to_vec(),
+        response_payload[..3].to_vec(),
+        response_payload[3..].to_vec(),
+    ]);
+    let connector = RecordingConnector::succeeds(io);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 32];
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(observation.lock().expect("observation").read_calls, 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(observation.lock().expect("observation").read_calls, 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("the final first-response payload fragment produces plaintext");
+    };
+    assert_eq!(&destination[..read], payload);
+    assert_eq!(observation.lock().expect("observation").read_calls, 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn authenticated_zero_length_frame_yields_before_reading_the_next_frame() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);

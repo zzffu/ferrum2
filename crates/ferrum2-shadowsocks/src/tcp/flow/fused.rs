@@ -31,6 +31,11 @@ pub(crate) enum FusedRelayDirection {
     TunnelToPlain,
 }
 
+enum DownloadStep {
+    PlaintextWritten,
+    DirectionDone,
+}
+
 pub(crate) fn fused_relay<'a, P, F, O>(
     plain: &'a mut P,
     flow: &'a mut F,
@@ -54,6 +59,7 @@ where
         #[cfg(feature = "structural-metrics")]
         structural_stats,
         pending_upload_plaintext,
+        download_plaintext_carried: false,
         upload_eof: false,
         download_eof: false,
         upload_done: false,
@@ -71,6 +77,7 @@ pub(crate) struct FusedRelay<'a, P, F, O> {
     #[cfg(feature = "structural-metrics")]
     structural_stats: FusedStructuralStats,
     pending_upload_plaintext: Option<usize>,
+    download_plaintext_carried: bool,
     upload_eof: bool,
     download_eof: bool,
     upload_done: bool,
@@ -184,7 +191,11 @@ where
         self.flow.inspect_buffers();
 
         if self.pending_upload_plaintext.is_some() {
-            return self.poll_pending_upload(cx);
+            match self.poll_pending_upload(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
         }
         if self.upload_eof {
             return self.poll_upload_shutdown(cx);
@@ -218,7 +229,14 @@ where
                 self.structural_stats.owned_upload_frames.saturating_add(1);
         }
         self.pending_upload_plaintext = Some(read);
-        self.poll_pending_upload(cx)
+        match self.poll_pending_upload(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
     }
 
     fn poll_pending_upload(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -244,8 +262,7 @@ where
         if plaintext_len != 0 {
             (self.observe)(FusedRelayDirection::PlainToTunnel, plaintext_len);
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        Poll::Ready(Ok(()))
     }
 
     fn poll_upload_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -270,6 +287,32 @@ where
         if self.download_eof {
             return self.poll_download_shutdown(cx);
         }
+        let carried = self.download_plaintext_carried;
+        match self.poll_download_once(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(DownloadStep::DirectionDone)) => return Poll::Ready(Ok(())),
+            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) if carried => {}
+            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+        }
+
+        match self.poll_download_once(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(DownloadStep::DirectionDone)) => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
+                // This step may contain one fresh tunnel read, so it remains a
+                // scheduling boundary even when the plaintext write completed.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    fn poll_download_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<DownloadStep>> {
         let fill = Pin::new(&mut *self.flow)
             .poll_fill_plain_buf(cx)
             .map_err(framed_error);
@@ -280,7 +323,11 @@ where
         };
         if source.is_empty() {
             self.download_eof = true;
-            return self.poll_download_shutdown(cx);
+            return match self.poll_download_shutdown(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(DownloadStep::DirectionDone)),
+            };
         }
         #[cfg(feature = "structural-metrics")]
         if !self.structural_stats.download_frame_open {
@@ -290,15 +337,17 @@ where
                 .saturating_add(1);
             self.structural_stats.download_frame_open = true;
         }
-        #[cfg(feature = "structural-metrics")]
         let source_len = source.len();
         let written = match Pin::new(&mut *self.plain).poll_write(cx, source) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => {
+                self.download_plaintext_carried = true;
+                return Poll::Pending;
+            }
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(0)) => {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
-            Poll::Ready(Ok(written)) if written <= source.len() => written,
+            Poll::Ready(Ok(written)) if written <= source_len => written,
             Poll::Ready(Ok(_)) => {
                 return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
             }
@@ -314,8 +363,13 @@ where
         }
         Pin::new(&mut *self.flow).consume_plain(written);
         (self.observe)(FusedRelayDirection::TunnelToPlain, written);
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        self.download_plaintext_carried = written < source_len;
+        if self.download_plaintext_carried {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(DownloadStep::PlaintextWritten))
+        }
     }
 
     fn poll_download_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

@@ -157,8 +157,9 @@ async fn pending_response_capability_derives_each_direction_cipher_exactly_once(
         .expect("client");
     assert_eq!(keys.call_count(), 1, "request sealer is the current owner");
 
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
     let mut destination = [0_u8; 16];
     for _ in 0..3 {
         assert!(matches!(
@@ -171,11 +172,21 @@ async fn pending_response_capability_derives_each_direction_cipher_exactly_once(
             "pending capability must not derive early"
         );
     }
+    let wakes_before_fixed = wake_counter.0.load(Ordering::SeqCst);
+    assert!(matches!(
+        Pin::new(&mut client).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(keys.call_count(), 2, "response opener derives exactly once");
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        wakes_before_fixed + 1,
+        "a complete fixed-region read self-wakes before the payload poll"
+    );
     let Poll::Ready(Ok(first)) = Pin::new(&mut client).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("ready fixed and payload regions complete in the same poll");
+        panic!("the next poll completes the response payload");
     };
-    assert_eq!(keys.call_count(), 2, "response opener derives exactly once");
     assert_eq!(&destination[..first], b"first");
     let subsequent = read_plain(&mut client, &mut destination)
         .await
