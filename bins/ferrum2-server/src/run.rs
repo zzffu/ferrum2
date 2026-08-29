@@ -173,28 +173,13 @@ fn runtime_dial_options(config: &ferrum2_config::OutboundDialOptions) -> DialOpt
     )
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RunRuntimeBuildIdentity {
-    ProductionDefaultWorkers,
-    DiagnosticSingleWorker,
-}
-
-const RUN_RUNTIME_BUILD_IDENTITY: RunRuntimeBuildIdentity =
-    if cfg!(feature = "__single-worker-runtime-diagnostic") {
-        RunRuntimeBuildIdentity::DiagnosticSingleWorker
-    } else {
-        RunRuntimeBuildIdentity::ProductionDefaultWorkers
-    };
+// A single Tokio worker prevents Send connection futures from migrating among
+// runtime workers and preserves the locality of their hot connection state.
+const RUN_RUNTIME_WORKER_THREADS: usize = 1;
 
 fn build_run_runtime() -> Result<tokio::runtime::Runtime, RunError> {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    match RUN_RUNTIME_BUILD_IDENTITY {
-        RunRuntimeBuildIdentity::ProductionDefaultWorkers => {}
-        RunRuntimeBuildIdentity::DiagnosticSingleWorker => {
-            builder.worker_threads(1);
-        }
-    }
-    builder
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(RUN_RUNTIME_WORKER_THREADS)
         .enable_all()
         .build()
         .map_err(|_| RunError::StartupRuntime)
@@ -745,27 +730,14 @@ mod runtime_build_tests {
     use super::*;
 
     #[test]
-    fn run_runtime_matches_the_compile_time_build_identity() {
-        let expected_identity = if cfg!(feature = "__single-worker-runtime-diagnostic") {
-            RunRuntimeBuildIdentity::DiagnosticSingleWorker
-        } else {
-            RunRuntimeBuildIdentity::ProductionDefaultWorkers
-        };
-        assert_eq!(RUN_RUNTIME_BUILD_IDENTITY, expected_identity);
-
+    fn production_run_runtime_has_one_multi_thread_worker() {
+        assert_eq!(RUN_RUNTIME_WORKER_THREADS, 1);
         let runtime = build_run_runtime().expect("run runtime");
         assert_eq!(
             runtime.handle().runtime_flavor(),
             tokio::runtime::RuntimeFlavor::MultiThread
         );
-        match expected_identity {
-            RunRuntimeBuildIdentity::ProductionDefaultWorkers => {
-                assert!(runtime.metrics().num_workers() >= 1);
-            }
-            RunRuntimeBuildIdentity::DiagnosticSingleWorker => {
-                assert_eq!(runtime.metrics().num_workers(), 1);
-            }
-        }
+        assert_eq!(runtime.metrics().num_workers(), 1);
     }
 }
 
