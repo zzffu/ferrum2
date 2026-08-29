@@ -9,6 +9,24 @@ fn mutate_first(source: &str, from: &str, to: &str) -> String {
     source.replacen(from, to, 1)
 }
 
+fn move_block_before(source: &str, block_start: &str, block_end: &str, destination: &str) -> String {
+    let start = source.find(block_start).expect("moving block start");
+    let end = start
+        + source[start..]
+            .find(block_end)
+            .expect("moving block end");
+    let block = &source[start..end];
+    let mut remaining = String::with_capacity(source.len());
+    remaining.push_str(&source[..start]);
+    remaining.push_str(&source[end..]);
+    let destination = remaining.find(destination).expect("move destination");
+    let mut moved = String::with_capacity(source.len());
+    moved.push_str(&remaining[..destination]);
+    moved.push_str(block);
+    moved.push_str(&remaining[destination..]);
+    moved
+}
+
 fn dependencies(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
@@ -17,11 +35,19 @@ fn dependencies(values: &[&str]) -> BTreeSet<String> {
 fn hosted_execution_mutations_fail_closed() {
     let main = fs::read_to_string(workspace_root().join(".github/workflows/m0.yml"))
         .expect("main workflow source");
-    validate_read_only_permissions(&main).expect("current read-only permissions");
+    validate_workflow_permissions(".github/workflows/m0.yml", &main)
+        .expect("current read-only permissions");
     validate_hosted_library_execution(&main).expect("current hosted library execution");
 
     let writable = mutate_first(&main, "contents: read", "contents: write");
-    assert!(validate_read_only_permissions(&writable).is_err());
+    assert!(validate_workflow_permissions(".github/workflows/m0.yml", &writable).is_err());
+
+    let extra_actions = mutate_first(
+        &main,
+        "permissions:\n  contents: read\n",
+        "permissions:\n  actions: read\n  contents: read\n",
+    );
+    assert!(validate_workflow_permissions(".github/workflows/m0.yml", &extra_actions).is_err());
 
     let linux_compile_only = mutate_first(
         &main,
@@ -72,6 +98,95 @@ fn hosted_execution_mutations_fail_closed() {
         "            target: aarch64-pc-windows-msvc",
     );
     assert!(validate_hosted_library_execution(&wrong_windows_target).is_err());
+
+    for corrupted_non_tun_gate in [
+        mutate_first(
+            &main,
+            "cargo +1.97.1 check -p ferrum2-runtime -p ferrum2-net -p ferrum2-platform-windows -p ferrum2-client -p ferrum2-server --all-targets --all-features --locked --target ${{ matrix.target }}",
+            "cargo +1.97.1 check -p ferrum2-runtime -p ferrum2-platform-windows -p ferrum2-client -p ferrum2-server --all-targets --all-features --locked --target ${{ matrix.target }}",
+        ),
+        mutate_first(
+            &main,
+            "cargo +1.97.1 check -p ferrum2-runtime -p ferrum2-net -p ferrum2-platform-windows -p ferrum2-client -p ferrum2-server --all-targets --all-features --locked --target ${{ matrix.target }}",
+            "cargo +1.97.1 check -p ferrum2-runtime -p ferrum2-net -p ferrum2-platform-windows -p ferrum2-client -p ferrum2-server --all-features --locked --target ${{ matrix.target }}",
+        ),
+        mutate_first(
+            &main,
+            "cargo +1.97.1 test -p ferrum2-runtime --test network_socket_service --all-features --locked --target ${{ matrix.target }}",
+            "cargo +1.97.1 test -p ferrum2-runtime --test network_socket_service --all-features --no-run --locked --target ${{ matrix.target }}",
+        ),
+        mutate_first(
+            &main,
+            "cargo +1.97.1 test -p ferrum2-server --example windows_non_tun_gate06 --locked --target ${{ matrix.target }}",
+            "cargo +1.97.1 test -p ferrum2-server --example windows_non_tun_gate06 --no-run --locked --target ${{ matrix.target }}",
+        ),
+        mutate_first(
+            &main,
+            "      - name: Compile and test Windows non-TUN generation surface\n        if: matrix.profile == 'windows-msvc'",
+            "      - name: Compile and test Windows non-TUN generation surface\n        if: false",
+        ),
+        mutate_first(
+            &main,
+            "$amdPreferred = $env:FERRUM2_GATE06_CPU_VENDOR -eq \"AuthenticAMD\"",
+            "$amdPreferred = $env:FERRUM2_GATE06_CPU_VENDOR -eq \"AuthenticAMD\"\n          if (-not $amdPreferred) { throw \"AMD required\" }",
+        ),
+        mutate_first(
+            &main,
+            "& $gate --output $evidence",
+            "if ($amdPreferred) { & $gate --output $evidence }",
+        ),
+        mutate_first(
+            &main,
+            "        timeout-minutes: 15\n        shell: pwsh",
+            "        shell: pwsh",
+        ),
+        mutate_first(
+            &main,
+            "        timeout-minutes: 15",
+            "        timeout-minutes: 30",
+        ),
+        mutate_first(
+            &main,
+            "    timeout-minutes: 120",
+            "    timeout-minutes: 60",
+        ),
+        mutate_first(
+            &main,
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "actions/upload-artifact@v4",
+        ),
+        mutate_first(
+            &main,
+            "if: ${{ matrix.profile == 'windows-msvc' && always() }}",
+            "if: matrix.profile == 'windows-msvc'",
+        ),
+        mutate_first(
+            &main,
+            "          retention-days: 90",
+            "          retention-days: 30",
+        ),
+        mutate_first(
+            &main,
+            "          if-no-files-found: error",
+            "          if-no-files-found: ignore",
+        ),
+    ] {
+        assert!(
+            validate_hosted_library_execution(&corrupted_non_tun_gate).is_err(),
+            "Windows non-TUN gate mutations must fail closed"
+        );
+    }
+
+    let upload_before_qualification = move_block_before(
+        &main,
+        "      - name: Upload Windows non-TUN generation evidence\n",
+        "      - name: Run hosted-safe Windows TUN unit tests\n",
+        "      - name: Run Windows non-TUN generation qualification\n",
+    );
+    assert!(
+        validate_hosted_library_execution(&upload_before_qualification).is_err(),
+        "Windows non-TUN evidence upload cannot precede qualification"
+    );
 
     let excluded_windows = mutate_first(
         &main,
@@ -198,6 +313,37 @@ fn hosted_execution_mutations_fail_closed() {
         ),
     ] {
         assert!(validate_hosted_library_execution(&corrupted_pe_contract).is_err());
+    }
+}
+
+#[test]
+fn performance_rule_actions_read_permission_exception_is_exact() {
+    let source =
+        fs::read_to_string(workspace_root().join(".github/workflows/performance-rule.yml"))
+            .expect("performance Rule workflow source");
+    validate_workflow_permissions(".github/workflows/performance-rule.yml", &source)
+        .expect("performance Rule cross-run artifact permissions");
+
+    assert!(validate_workflow_permissions(".github/workflows/lookalike.yml", &source).is_err());
+    let missing_actions = mutate_first(&source, "  actions: read\n", "");
+    assert!(
+        validate_workflow_permissions(".github/workflows/performance-rule.yml", &missing_actions)
+            .is_err()
+    );
+    let writable_contents = mutate_first(&source, "  contents: read\n", "  contents: write\n");
+    assert!(
+        validate_workflow_permissions(
+            ".github/workflows/performance-rule.yml",
+            &writable_contents,
+        )
+        .is_err()
+    );
+    for replacement in ["  actions: write\n", "  checks: read\n"] {
+        let mutated = mutate_first(&source, "  actions: read\n", replacement);
+        assert!(
+            validate_workflow_permissions(".github/workflows/performance-rule.yml", &mutated)
+                .is_err()
+        );
     }
 }
 

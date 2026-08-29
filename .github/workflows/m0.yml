@@ -203,7 +203,7 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout exact current SHA
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -327,6 +327,80 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "native detection binary build failed" }
           cargo +1.97.1 test -p ferrum2-m0-harness --test detection_probe --locked
           if ($LASTEXITCODE -ne 0) { throw "native detection evidence failed" }
+      - name: Compile and test Windows non-TUN generation surface
+        if: matrix.profile == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo +1.97.1 check -p ferrum2-runtime -p ferrum2-net -p ferrum2-platform-windows -p ferrum2-client -p ferrum2-server --all-targets --all-features --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "Windows non-TUN all-target compile failed" }
+          cargo +1.97.1 test -p ferrum2-runtime --test network_socket_service --all-features --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "Windows network socket service tests failed" }
+          cargo +1.97.1 test -p ferrum2-server --example windows_non_tun_gate06 --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "Windows non-TUN qualification contract tests failed" }
+      - name: Run Windows non-TUN generation qualification
+        if: matrix.profile == 'windows-msvc'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $head = (& git rev-parse HEAD).Trim()
+          $dirty = @(& git status --porcelain=v1 --untracked-files=normal)
+          if ($head -ne $env:GITHUB_SHA -or $dirty.Count -ne 0) {
+            throw "Windows non-TUN qualification source identity is not exact and clean"
+          }
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "ferrum2-gate06"
+          New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
+          $cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
+          if ($null -eq $cpu) { throw "Windows CPU identity is unavailable" }
+          $env:FERRUM2_GATE06_CPU_VENDOR = [string] $cpu.Manufacturer
+          $env:FERRUM2_GATE06_CPU_NAME = [string] $cpu.Name
+          $amdPreferred = $env:FERRUM2_GATE06_CPU_VENDOR -eq "AuthenticAMD"
+          Write-Output "gate06_cpu vendor=$env:FERRUM2_GATE06_CPU_VENDOR preferred=$($amdPreferred.ToString().ToLowerInvariant()) performance_authoritative=false"
+          cargo +1.97.1 build -p ferrum2-server --example windows_non_tun_gate06 --release --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw "Windows non-TUN qualification build failed" }
+          $gate = "target\${{ matrix.target }}\release\examples\windows_non_tun_gate06.exe"
+          $gateHash = (Get-FileHash -LiteralPath $gate -Algorithm SHA256).Hash.ToLowerInvariant()
+          $rustcIdentity = (& rustc +1.97.1 --version).Trim()
+          if ($rustcIdentity -notmatch '^rustc 1\.97\.1 \(') {
+            throw "Windows non-TUN qualification rustc identity is invalid"
+          }
+          $env:FERRUM2_GATE06_PROFILE = "${{ matrix.profile }}"
+          $env:FERRUM2_GATE06_TARGET = "${{ matrix.target }}"
+          $env:FERRUM2_GATE06_RUSTC_IDENTITY = $rustcIdentity
+          $env:FERRUM2_GATE06_EXPECTED_BINARY_SHA256 = $gateHash
+          $evidence = Join-Path $evidenceRoot "windows-non-tun-gate06.json"
+          & $gate --output $evidence
+          $gateStatus = $LASTEXITCODE
+          if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) {
+            throw "Windows non-TUN qualification evidence is missing"
+          }
+          $document = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json
+          if ($document.schema -ne "ferrum2.windows-non-tun-gate06.v1" -or
+              $document.identity.sha -ne $env:GITHUB_SHA -or
+              $document.identity.repository -ne $env:GITHUB_REPOSITORY -or
+              $document.identity.workflow_ref -ne $env:GITHUB_WORKFLOW_REF -or
+              $document.identity.workflow_sha -ne $env:GITHUB_WORKFLOW_SHA -or
+              $document.identity.profile -ne "${{ matrix.profile }}" -or
+              $document.identity.target -ne "${{ matrix.target }}" -or
+              $document.identity.rustc -ne $rustcIdentity -or
+              $document.identity.release_example_sha256 -ne $gateHash) {
+            throw "Windows non-TUN qualification evidence identity is invalid"
+          }
+          if ($gateStatus -ne 0) { throw "Windows non-TUN qualification failed with status $gateStatus" }
+          if ($document.status -ne "PASS" -or $null -ne $document.failed_stage) {
+            throw "Windows non-TUN qualification PASS evidence is invalid"
+          }
+      - name: Upload Windows non-TUN generation evidence
+        if: ${{ matrix.profile == 'windows-msvc' && always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-non-tun-gate06-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\ferrum2-gate06\windows-non-tun-gate06.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Run hosted-safe Windows TUN unit tests
         if: matrix.profile == 'windows-msvc'
         shell: pwsh

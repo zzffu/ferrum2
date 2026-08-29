@@ -41,7 +41,10 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+hex.workspace = true
 hickory-proto.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

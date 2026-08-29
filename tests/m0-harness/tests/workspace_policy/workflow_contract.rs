@@ -622,13 +622,20 @@ fn job_runs_library_test(
     })
 }
 
-pub(super) fn validate_read_only_permissions(source: &str) -> Result<(), String> {
+pub(super) fn validate_workflow_permissions(
+    workflow_path: &str,
+    source: &str,
+) -> Result<(), String> {
     let permissions = workflow_mapping(source, "permissions")?;
-    if permissions == BTreeMap::from([("contents".to_owned(), "read".to_owned())]) {
+    let mut expected = BTreeMap::from([("contents".to_owned(), "read".to_owned())]);
+    if workflow_path == ".github/workflows/performance-rule.yml" {
+        expected.insert("actions".to_owned(), "read".to_owned());
+    }
+    if permissions == expected {
         Ok(())
     } else {
         Err(format!(
-            "workflow permissions are not exactly read-only: {permissions:?}"
+            "workflow {workflow_path} permissions are not the exact read-only set: {permissions:?}"
         ))
     }
 }
@@ -648,6 +655,217 @@ pub(super) fn validate_lifecycle_triggers(source: &str) -> Result<(), String> {
                 "lifecycle {trigger} trigger must not be narrowed by filters"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_windows_non_tun_gate(platform: &WorkflowJob) -> Result<(), String> {
+    if platform
+        .properties
+        .get("timeout-minutes")
+        .map(String::as_str)
+        != Some("120")
+    {
+        return Err("platform job does not reserve the reviewed Windows evidence deadline".to_owned());
+    }
+    let compile_steps: Vec<_> = platform
+        .steps
+        .iter()
+        .filter(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Compile and test Windows non-TUN generation surface")
+        })
+        .collect();
+    let expected_compile_properties = BTreeMap::from([
+        (
+            "if".to_owned(),
+            "matrix.profile == 'windows-msvc'".to_owned(),
+        ),
+        (
+            "name".to_owned(),
+            "Compile and test Windows non-TUN generation surface".to_owned(),
+        ),
+        ("shell".to_owned(), "pwsh".to_owned()),
+    ]);
+    let expected_compile_lines = [
+        "$ErrorActionPreference = \"Stop\"",
+        "$PSNativeCommandUseErrorActionPreference = $false",
+        "cargo +1.97.1 check -p ferrum2-runtime -p ferrum2-net -p ferrum2-platform-windows -p ferrum2-client -p ferrum2-server --all-targets --all-features --locked --target ${{ matrix.target }}",
+        "if ($LASTEXITCODE -ne 0) { throw \"Windows non-TUN all-target compile failed\" }",
+        "cargo +1.97.1 test -p ferrum2-runtime --test network_socket_service --all-features --locked --target ${{ matrix.target }}",
+        "if ($LASTEXITCODE -ne 0) { throw \"Windows network socket service tests failed\" }",
+        "cargo +1.97.1 test -p ferrum2-server --example windows_non_tun_gate06 --locked --target ${{ matrix.target }}",
+        "if ($LASTEXITCODE -ne 0) { throw \"Windows non-TUN qualification contract tests failed\" }",
+    ];
+    if compile_steps.len() != 1
+        || compile_steps[0].properties != expected_compile_properties
+        || !compile_steps[0].environment.is_empty()
+        || !compile_steps[0].inputs.is_empty()
+        || compile_steps[0].run_lines != expected_compile_lines
+    {
+        return Err(
+            "Windows non-TUN compile and runtime test step is not the exact fail-closed sequence"
+                .to_owned(),
+        );
+    }
+
+    let qualification_steps: Vec<_> = platform
+        .steps
+        .iter()
+        .filter(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Run Windows non-TUN generation qualification")
+        })
+        .collect();
+    let expected_qualification_properties = BTreeMap::from([
+        (
+            "if".to_owned(),
+            "matrix.profile == 'windows-msvc'".to_owned(),
+        ),
+        (
+            "name".to_owned(),
+            "Run Windows non-TUN generation qualification".to_owned(),
+        ),
+        ("shell".to_owned(), "pwsh".to_owned()),
+        ("timeout-minutes".to_owned(), "15".to_owned()),
+    ]);
+    let expected_qualification_lines = [
+        "$ErrorActionPreference = \"Stop\"",
+        "$PSNativeCommandUseErrorActionPreference = $false",
+        "$head = (& git rev-parse HEAD).Trim()",
+        "$dirty = @(& git status --porcelain=v1 --untracked-files=normal)",
+        "if ($head -ne $env:GITHUB_SHA -or $dirty.Count -ne 0) {",
+        "  throw \"Windows non-TUN qualification source identity is not exact and clean\"",
+        "}",
+        "$evidenceRoot = Join-Path $env:RUNNER_TEMP \"ferrum2-gate06\"",
+        "New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null",
+        "$cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1",
+        "if ($null -eq $cpu) { throw \"Windows CPU identity is unavailable\" }",
+        "$env:FERRUM2_GATE06_CPU_VENDOR = [string] $cpu.Manufacturer",
+        "$env:FERRUM2_GATE06_CPU_NAME = [string] $cpu.Name",
+        "$amdPreferred = $env:FERRUM2_GATE06_CPU_VENDOR -eq \"AuthenticAMD\"",
+        "Write-Output \"gate06_cpu vendor=$env:FERRUM2_GATE06_CPU_VENDOR preferred=$($amdPreferred.ToString().ToLowerInvariant()) performance_authoritative=false\"",
+        "cargo +1.97.1 build -p ferrum2-server --example windows_non_tun_gate06 --release --locked --target ${{ matrix.target }}",
+        "if ($LASTEXITCODE -ne 0) { throw \"Windows non-TUN qualification build failed\" }",
+        "$gate = \"target\\${{ matrix.target }}\\release\\examples\\windows_non_tun_gate06.exe\"",
+        "$gateHash = (Get-FileHash -LiteralPath $gate -Algorithm SHA256).Hash.ToLowerInvariant()",
+        "$rustcIdentity = (& rustc +1.97.1 --version).Trim()",
+        "if ($rustcIdentity -notmatch '^rustc 1\\.97\\.1 \\(') {",
+        "  throw \"Windows non-TUN qualification rustc identity is invalid\"",
+        "}",
+        "$env:FERRUM2_GATE06_PROFILE = \"${{ matrix.profile }}\"",
+        "$env:FERRUM2_GATE06_TARGET = \"${{ matrix.target }}\"",
+        "$env:FERRUM2_GATE06_RUSTC_IDENTITY = $rustcIdentity",
+        "$env:FERRUM2_GATE06_EXPECTED_BINARY_SHA256 = $gateHash",
+        "$evidence = Join-Path $evidenceRoot \"windows-non-tun-gate06.json\"",
+        "& $gate --output $evidence",
+        "$gateStatus = $LASTEXITCODE",
+        "if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) {",
+        "  throw \"Windows non-TUN qualification evidence is missing\"",
+        "}",
+        "$document = Get-Content -LiteralPath $evidence -Raw | ConvertFrom-Json",
+        "if ($document.schema -ne \"ferrum2.windows-non-tun-gate06.v1\" -or",
+        "    $document.identity.sha -ne $env:GITHUB_SHA -or",
+        "    $document.identity.repository -ne $env:GITHUB_REPOSITORY -or",
+        "    $document.identity.workflow_ref -ne $env:GITHUB_WORKFLOW_REF -or",
+        "    $document.identity.workflow_sha -ne $env:GITHUB_WORKFLOW_SHA -or",
+        "    $document.identity.profile -ne \"${{ matrix.profile }}\" -or",
+        "    $document.identity.target -ne \"${{ matrix.target }}\" -or",
+        "    $document.identity.rustc -ne $rustcIdentity -or",
+        "    $document.identity.release_example_sha256 -ne $gateHash) {",
+        "  throw \"Windows non-TUN qualification evidence identity is invalid\"",
+        "}",
+        "if ($gateStatus -ne 0) { throw \"Windows non-TUN qualification failed with status $gateStatus\" }",
+        "if ($document.status -ne \"PASS\" -or $null -ne $document.failed_stage) {",
+        "  throw \"Windows non-TUN qualification PASS evidence is invalid\"",
+        "}",
+    ];
+    if qualification_steps.len() != 1
+        || qualification_steps[0].properties != expected_qualification_properties
+        || !qualification_steps[0].environment.is_empty()
+        || !qualification_steps[0].inputs.is_empty()
+        || qualification_steps[0].run_lines != expected_qualification_lines
+    {
+        return Err(
+            "Windows non-TUN qualification is not the exact hosted diagnostic sequence".to_owned(),
+        );
+    }
+
+    let upload_steps: Vec<_> = platform
+        .steps
+        .iter()
+        .filter(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Upload Windows non-TUN generation evidence")
+        })
+        .collect();
+    let expected_upload_properties = BTreeMap::from([
+        (
+            "if".to_owned(),
+            "${{ matrix.profile == 'windows-msvc' && always() }}".to_owned(),
+        ),
+        (
+            "name".to_owned(),
+            "Upload Windows non-TUN generation evidence".to_owned(),
+        ),
+        (
+            "uses".to_owned(),
+            "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02".to_owned(),
+        ),
+        ("with".to_owned(), String::new()),
+    ]);
+    let expected_upload_inputs = BTreeMap::from([
+        ("if-no-files-found".to_owned(), "error".to_owned()),
+        (
+            "name".to_owned(),
+            "windows-non-tun-gate06-${{ github.run_id }}-${{ github.run_attempt }}".to_owned(),
+        ),
+        (
+            "path".to_owned(),
+            "${{ runner.temp }}\\ferrum2-gate06\\windows-non-tun-gate06.json".to_owned(),
+        ),
+        ("retention-days".to_owned(), "90".to_owned()),
+    ]);
+    if upload_steps.len() != 1
+        || upload_steps[0].properties != expected_upload_properties
+        || !upload_steps[0].environment.is_empty()
+        || upload_steps[0].inputs != expected_upload_inputs
+        || !upload_steps[0].run_lines.is_empty()
+    {
+        return Err(
+            "Windows non-TUN evidence upload is not exact, pinned, always-run, and 90-day"
+                .to_owned(),
+        );
+    }
+    let compile_index = platform
+        .steps
+        .iter()
+        .position(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Compile and test Windows non-TUN generation surface")
+        })
+        .ok_or_else(|| "Windows non-TUN compile step is missing".to_owned())?;
+    let qualification_index = platform
+        .steps
+        .iter()
+        .position(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Run Windows non-TUN generation qualification")
+        })
+        .ok_or_else(|| "Windows non-TUN qualification step is missing".to_owned())?;
+    let upload_index = platform
+        .steps
+        .iter()
+        .position(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Upload Windows non-TUN generation evidence")
+        })
+        .ok_or_else(|| "Windows non-TUN upload step is missing".to_owned())?;
+    if qualification_index != compile_index + 1 || upload_index != qualification_index + 1 {
+        return Err(
+            "Windows non-TUN compile, qualification, and upload steps are not adjacent and ordered"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -743,6 +961,7 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             "Windows platform matrix row is not the exact reviewed profile/target".to_owned(),
         );
     }
+    validate_windows_non_tun_gate(platform)?;
     for package in ["ferrum2-tun", "ferrum2-platform-windows"] {
         let expected_name = if package == "ferrum2-tun" {
             "Run hosted-safe Windows TUN unit tests"
