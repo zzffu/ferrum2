@@ -4,7 +4,8 @@
 `d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
 `62.9574%`，未达 90%。后续 two-worker、4+4 connection shard、2+2 balanced shard、
 两代 incoming-CPU shard，以及两代 length→payload single-poll 候选均已提交、推送并判失败；
-当前继续从共同成功基线 `d874d3dd` 开 sibling，不把失败候选作为祖先。
+随后 fused decrypt-to-sink 候选在唯一正式本地样本中相对即时 `d874d3dd` 对照为 `+1.3604%`，
+方向为正但幅度不足以触发 hosted direct CI。所有候选提交与远端分支均保留。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -69,7 +70,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── ce8b2f10  server incoming-CPU pinned shards（本地 ratio 44.655%，失败）
             ├── 159928d3  dual incoming-CPU pinned shards（首样本 543.7 MB/s，失败）
             ├── 7e3f137a  length→payload single-poll（本地 -7.23%，失败）
-            └── 0ad5cab5  single-poll + transition Pending retry（即时对照 -0.90%，失败）
+            ├── 0ad5cab5  single-poll + transition Pending retry（即时对照 -0.90%，失败）
+            └── bf4cd4a6  fused decrypt-to-sink（即时对照 +1.36%，弱正向、未进 CI）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -453,6 +455,43 @@ write-zero/error 为保持既有状态而 materialize 全量。sink 只在认证
 sink、不提交 nonce并安装原 terminal；TLS borrow 不跨 poll。client initial response、TLS reentrant fallback、
 多跳 buffered path 继续走 `d874d3dd` 实现。历史 `c24f512d` 只把 TLS plaintext 写到旧 generic relay
 destination，之后仍需 socket write；当前 fused 下直接 poll 真实 sink 尚未尝试，因此是独立机制。
+
+### 12.8 fused decrypt-to-sink 唯一正式样本
+
+候选 `codex/tcp-hot-path-stage3-fused-decrypt-forward` @
+`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a` 已提交并推送；tree 为
+`4fcf9a25c47e251eb42aa24f8a6eb62fa1d702c0`。它直接继承 `d874d3dd`，`7e3f137a` 与
+`0ad5cab5` 均不是祖先。最终生产差异仅为 `flow/io.rs` 与 `flow/fused.rs`，另有
+`tests/tcp_fused.rs` 机制覆盖；没有 TUN、runtime、initial payload 或公共
+`PlainBufferedDuplex` interface 改动。
+
+独立复核为零 blocker。Shadowsocks all-features 全套、`tcp_fused` 15/15、no-default check、
+client/server all-features check、all-targets/all-features Clippy `-D warnings`、fmt 与 diff-check
+全部通过。测试明确覆盖 full/Pending/partial、write-zero/error/oversize、认证失败不 poll sink、
+zero frame、client initial response，以及 TLS reentrant buffered fallback。
+
+被忽略的一次性 probe 在 clean、pushed HEAD 上强制重建候选自己的 `target/profiling` 二进制，
+固定 CPU 0—3，执行一次且仅一次 3 秒预热 + 15 秒正式 `tcp-bulk` workload；没有重跑或样本选择。
+合同输出 `status=PASS`、`sample_count=1`、`runner_exit_status=0`、8 workers、53,645 transactions、
+3,515,678,720 checked bytes，即 `234,378,581 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `b4179196ab6d832265e43756a7c6cb22698be28a7ae0f818111390aed9220377` |
+| `ferrum2-client` | `696b21f3070047970b4127a5c73f8c47587a5d232b157ffaf25dfa09ea06ce22` |
+| `ferrum2-server` | `8719df9278ce089a582fb087f72f876368bfc862179b93016c780f8a826f0711` |
+
+同探针即时 `d874d3dd` 对照为 `231,232,853 B/s`，所以候选增加 `3,145,728 B/s`
+（`+1.3604%`）。代理 14 秒 CPU 从 `23,120 ms` 增至 `23,180 ms`（`+0.2595%`），
+每代理 CPU 的吞吐效率约提高 `1.0981%`；migrations 从 `133,942` 降至 `123,973`
+（`-7.4428%`），context switches 从 `515,157` 降至 `505,073`（`-1.9575%`），平均 CPU busy
+从 `47.268%` 变为 `47.156%`（`-0.112` 个百分点）。
+
+结果方向为正，因此不按“性能更差”处理，也不回退该提交；但 `+1.36%` 与历史本地短样本波动量级
+相近，并且不足以改变 direct 90% 判断，故该分支作为弱正向证据保留、暂不触发第二次 hosted CI。
+它说明完整 TLS→flow-scratch copyback 具有可测成本，但不是当前主瓶颈：代理 CPU/CPU busy 几乎不变，
+迁移下降也没有转化为同量级吞吐。下一候选应单独处理仍存在的 flow-scratch→worker-local copy-in，
+同时继续保留 length 后公平边界、TLS borrow 不跨 poll 和失败明文不发布契约。
 
 ## 13. 停止条件与后续
 
