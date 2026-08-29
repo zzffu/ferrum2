@@ -578,6 +578,51 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
 }
 
 #[tokio::test]
+async fn fused_fragmented_transport_waits_for_complete_ciphertext_before_forwarding() {
+    let request_salt = salt_from_u64(1_005);
+    let payload = b"fragmented out-of-place plaintext";
+    let mut frames = request_data_frames(&request_salt, &[payload]);
+    let length_frame = frames.remove(0);
+    let payload_frame = frames.remove(0);
+    let second_split = payload_frame.len() - 4;
+    let fragmented_frames = vec![
+        length_frame,
+        payload_frame[..3].to_vec(),
+        payload_frame[3..second_split].to_vec(),
+        payload_frame[second_split..].to_vec(),
+    ];
+    let (mut flow, observers, transport) =
+        observed_server_flow(request_salt, fragmented_frames).await;
+    let decrypt_pointer = decrypt_pointer(observers);
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    for expected_reads in 3..=5 {
+        assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(
+            transport.lock().expect("transport").read_calls,
+            expected_reads
+        );
+        assert_eq!(sink.lock().expect("sink observation").polls, 0);
+    }
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(transport.lock().expect("transport").read_calls, 6);
+    let sink = sink.lock().expect("sink observation");
+    assert_eq!(sink.polls, 1);
+    assert_eq!(sink.accepted, payload);
+    assert_ne!(sink.pointers[0], decrypt_pointer);
+}
+
+#[tokio::test]
 async fn fused_pending_materializes_once_and_resumes_from_flow_scratch() {
     let request_salt = salt_from_u64(1_002);
     let payload = b"pending direct payload";

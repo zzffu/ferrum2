@@ -374,18 +374,20 @@ where
                     InnerDataPoll::Pending(next)
                 } else {
                     let payload_len = wire_len - TAG_LEN;
-                    let opened = try_with_wire_staging(wire_len, |worker_wire| {
-                        worker_wire.copy_from_slice(&scratch[..wire_len]);
+                    let opened = try_with_wire_staging(payload_len, |worker_plaintext| {
                         protocol_cipher_boundary(lifecycle, observer, || {
                             opener
-                                .open_slice_in_place(worker_wire)
+                                .open_slice_into(
+                                    &scratch[..wire_len],
+                                    &mut worker_plaintext[..payload_len],
+                                )
                                 .map_err(frame_from_open_aead)
                         })?;
                         if payload_len == 0 {
                             scratch.clear();
                             return Ok(InnerDataRead::Buffered);
                         }
-                        Ok(delivery.deliver(cx, &worker_wire[..payload_len], scratch))
+                        Ok(delivery.deliver(cx, &worker_plaintext[..payload_len], scratch))
                     });
                     match opened {
                         Some(Ok(InnerDataRead::Forwarded {

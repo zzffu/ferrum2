@@ -1,4 +1,7 @@
-use chacha20poly1305_v2::{AeadInOut, ChaCha20Poly1305 as CryptoChaCha20Poly1305, KeyInit, Nonce, Tag};
+use chacha20poly1305_v2::{
+    aead::inout::InOutBuf, AeadInOut, ChaCha20Poly1305 as CryptoChaCha20Poly1305,
+    KeyInit, Nonce, Tag,
+};
 use zeroize::ZeroizeOnDrop;
 
 use super::require_zeroize_on_drop;
@@ -34,6 +37,21 @@ impl ChaCha20Poly1305 {
     pub fn decrypt(&self, nonce: &[u8; 12], ciphertext: &mut [u8], tag: &[u8; 16]) -> bool {
         self.0
             .decrypt_inout_detached(&Nonce::from(*nonce), &[], ciphertext.into(), &Tag::from(*tag))
+            .is_ok()
+    }
+
+    pub fn decrypt_into(
+        &self,
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        plaintext: &mut [u8],
+        tag: &[u8; 16],
+    ) -> bool {
+        let Ok(buffer) = InOutBuf::new(ciphertext, plaintext) else {
+            return false;
+        };
+        self.0
+            .decrypt_inout_detached(&Nonce::from(*nonce), &[], buffer, &Tag::from(*tag))
             .is_ok()
     }
 }
