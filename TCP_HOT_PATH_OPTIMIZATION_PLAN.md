@@ -2,8 +2,8 @@
 
 状态：阶段 2、阶段 3 已完成实现与本地分轴测量；single-worker 产品候选
 `d64b068a7f090a26313f8113590cf39be85f12b8` 在唯一一次真实 hosted direct CI 中达到
-`62.9574%`，未达 90%，失败分支和证据永久保留。后续尝试从其前方的 `d874d3dd` 开 sibling，
-不把失败候选作为祖先。
+`62.9574%`，未达 90%。后续 two-worker、4+4 connection shard 和 2+2 balanced shard
+候选均已提交、推送并判失败；当前继续从共同成功基线 `d874d3dd` 开 sibling，不把失败候选作为祖先。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -53,15 +53,18 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
 ## 3. 分支纪律
 
 所有候选均保留提交和远端分支。失败候选不删除、不 force-push、不回退；下一尝试从失败前的成功
-公共基线另开 sibling branch。关键成功链为：
+公共基线另开 sibling branch。关键成功链及其后永久保留的 sibling 为：
 
 ```text
 7edf4fcc  当前非 TUN 产品公共基线
 └── 20c3883b  partial handshake I/O
     └── 790a0aa9  worker-local TCP copyback port
-        └── d874d3dd  download carried continuation
-            └── 90dc643d  single-worker runtime diagnostic
-                └── d64b068a  single-worker production runtime
+        └── d874d3dd  download carried continuation（后续 sibling 的共同基线）
+            ├── 90dc643d → d64b068a  single-worker（direct CI 失败）
+            ├── fd5a42de  bounded ready drain（失败）
+            ├── 2e938fff  two-worker runtime（失败）
+            ├── a1b67079 → 04a83c90  4+4 connection shards（双模态，失败）
+            └── 8ca007fd  2+2 balanced connection shards（失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -281,10 +284,55 @@ timeout；二者不属于本次非 TUN TCP 范围。server 68/68 通过，client
 `-6.15%`。这证明 same-poll 推进本身能省调度，但普通 multi-worker 依赖 frame 边界进行重任务
 负载均衡；直接把 length 与 payload decrypt 绑定到当前 worker 会让 8 条流分配不均。
 
-新 sibling `codex/tcp-hot-path-stage3-two-worker-runtime` 再从 `d874d3dd` 开始：先独立测量每进程
-2 个 Tokio worker，寻找“一核 locality”与“默认多核迁移”之间的最小可用迁移域。若仍失败，保留
-提交并从 `d874d3dd` 再开 sibling，实施按连接稳定分片的多个 current-thread runtime；中央 accept
-只分发连接，完整 flow 生命周期固定在 shard 内。
+### 12.1 two-worker 与稳定连接 shard
+
+`codex/tcp-hot-path-stage3-two-worker-runtime` @ `2e938fff` 从 `d874d3dd` 独立开始。固定 4 CPU
+本地吞吐相对 `d874d3dd` 约 `+7.5%`，但远低于 single-worker 和 direct 90% 所需容量，因此判失败并
+永久保留。
+
+随后 sibling `codex/tcp-hot-path-stage3-connection-shards` @ `a1b67079`、`04a83c90` 使用中央 accept、
+每连接固定 current-thread runtime、全局 permit-before-accept 和原 supervisor `JoinSet::spawn_on`
+精确 owner/reap。Linux 4 CPU 下 client/server 各 4 shard。正确性、panic、forced abort/reap、M0、
+fmt 和 clippy 均通过，但吞吐出现整轮双模态：
+
+- 15 秒高档约 `0.965—1.037 GB/s`，30 秒高档 `1.044—1.061 GB/s`；
+- 15 秒低档曾为 `442.6 MB/s`，30 秒低档 `486.3 MB/s`；
+- 额外 ready 后探针抓到更严重低档：`143.4 MB/s`。
+
+高档探针为 `1.028 GB/s`、8 shard 合计 `44.41 CPU-s / 14s`、`719` 次迁移；严重低档为
+`143.4 MB/s`、`9.71 CPU-s / 14s`、`15,420` 次迁移。低档相对高档：总 shard CPU 时间减少
+`78.1%`，migrations/CPU-s 从 `16.2` 增至 `1,588`，每 CPU-s 产出也下降约 `36%`。这排除了
+固定约 15 GB、nonce、frame counter 或 buffer 容量阈值，证明低档是 active 调度迁移/convoy。
+因为同一提交能达到超过 direct 90% 线的上包络，却不能可靠复现，该分支判失败且不触发 CI。
+
+### 12.2 2+2 shard 证伪
+
+`codex/tcp-hot-path-stage3-balanced-connection-shards` @ `8ca007fd` 再从 `d874d3dd` 独立开始，
+只把两端 shard 数限制为 `min(available_parallelism, 2, max_connections)`。候选在测量前已提交并推送；
+首个固定 4 CPU、15 秒正式本地样本仅 `395.3 MB/s`，合计 `22.63 shard CPU-s / 14s`，发生
+`17,771` 次迁移，即 `785 migrations/CPU-s`，低于 `615,609,139 B/s` direct 完成线，立即判失败。
+
+外部硬 affinity 继续证伪“零迁移即可解决”：
+
+| 拓扑 | 吞吐 | active migrations | 结论 |
+| --- | ---: | ---: | --- |
+| client 2 shard 在 CPU 0/1，server 2 shard 在 CPU 2/3 | 145.5 MB/s | 0 | 全部连接边跨 CPU，convoy |
+| client/server 各 4 shard，同 index 固定同 CPU | 151.3 MB/s | 0 | 独立 accept RR 并未形成真实同核连接对 |
+| client/server 各 2 shard，双方都限制到 CPU 0/1 | 432.4 MB/s | 0 | 两核满载，但容量约等于 single-worker 档 |
+| `d874d3dd` 普通 Tokio workers 逐线程硬 pin | 208.0 MB/s | 0 | 固定 worker 会破坏有益的动态 wake placement |
+
+因此根因不只是 OS thread 迁移，而是两端独立 RR 形成随机、长寿命的 client-shard ↔ server-shard
+连接图。少量动态迁移可追随 socket wakeup；失控迁移会崩到低档；盲目硬 pin 则可能把坏图永久固定。
+
+### 12.3 当前 sibling：按内核 RX CPU 协调分片
+
+下一候选 `codex/tcp-hot-path-stage3-incoming-cpu-shards` 仍从 `d874d3dd` 开始，不继承上述失败提交。
+预定的单一变量是：Linux 每个 current-thread shard 固定到进程 allowed mask 中一个 CPU；client 仍 RR，
+server accept 后读取 accepted socket 的 `SO_INCOMING_CPU`，把连接投递到该 CPU 对应的 shard，不再使用
+独立 RR。loopback 上 client shard 发起 connect 的 CPU 可直接协调 server shard；真实网络上则保持
+server 本地 RX locality。Linux 枚举、pin 或 readback 失败必须闭合；Windows、UDP、TUN 保持
+`d874d3dd` 路径。候选必须先提交、推送，再测量；若仍低于门槛，提交和证据继续保留，下一尝试仍从
+`d874d3dd` 新开 sibling。
 
 ## 13. 停止条件与后续
 
