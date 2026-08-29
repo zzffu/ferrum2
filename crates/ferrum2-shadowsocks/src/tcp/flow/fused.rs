@@ -184,7 +184,11 @@ where
         self.flow.inspect_buffers();
 
         if self.pending_upload_plaintext.is_some() {
-            return self.poll_pending_upload(cx);
+            match self.poll_pending_upload(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
         }
         if self.upload_eof {
             return self.poll_upload_shutdown(cx);
@@ -218,7 +222,14 @@ where
                 self.structural_stats.owned_upload_frames.saturating_add(1);
         }
         self.pending_upload_plaintext = Some(read);
-        self.poll_pending_upload(cx)
+        match self.poll_pending_upload(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
     }
 
     fn poll_pending_upload(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -244,8 +255,7 @@ where
         if plaintext_len != 0 {
             (self.observe)(FusedRelayDirection::PlainToTunnel, plaintext_len);
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        Poll::Ready(Ok(()))
     }
 
     fn poll_upload_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
