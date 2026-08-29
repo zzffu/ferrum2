@@ -1,22 +1,33 @@
 mod common;
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason,
-    REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, ShadowsocksError, ShadowsocksTcpInbound,
-    TcpReplayStore,
+    BufferRole, ClientTcpOutbound, DetectionReason, FlowTerminal, MAX_PAYLOAD_LEN,
+    PlainBufferedDuplex, PlainDuplex, ProtocolReason, REQUEST_FIRST_READ_LEN,
+    RESPONSE_FIRST_READ_LEN, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
 };
 
 use common::{
-    FakeClock, NOW, RecordingConnector, RecordingIo, ScriptedRandom, client_random_bytes, provider,
-    read_plain, request_data_frames, response_wire_and_frames, salt_from_u64, server_target,
-    target, valid_request_wire,
+    FakeClock, NOW, RecordingConnector, RecordingIo, RecordingObservers, ScriptedRandom,
+    client_random_bytes, provider, read_plain, request_data_frames, response_wire_and_frames,
+    salt_from_u64, server_target, target, valid_request_wire,
 };
+
+async fn fill_plain_snapshot(
+    flow: &mut (impl PlainBufferedDuplex + ?Sized),
+) -> Result<(usize, Vec<u8>), ShadowsocksError> {
+    poll_fn(|cx| match Pin::new(&mut *flow).poll_fill_plain_buf(cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Ok(view)) => Poll::Ready(Ok((view.as_ptr() as usize, view.to_vec()))),
+        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+    })
+    .await
+}
 
 #[tokio::test]
 async fn request_fixed_region_accepts_one_and_seven_byte_reads_across_pending() {
@@ -292,6 +303,119 @@ async fn client_subsequent_length_and_payload_accept_one_byte_and_mixed_fragment
         observation.lock().expect("observation").read_lengths,
         expected_read_lengths
     );
+}
+
+#[tokio::test]
+async fn worker_local_copyback_handles_large_remainder_and_tamper_without_publication() {
+    const SENTINEL: u8 = 0x6d;
+
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(913);
+    let request = valid_request_wire(NOW, &salt);
+    let ordinary = vec![0xa5; 32 * 1024];
+    let maximum = (0..MAX_PAYLOAD_LEN)
+        .map(|index| (index % 251) as u8 + 1)
+        .collect::<Vec<_>>();
+    let tampered = vec![0x5a; 4 * 1024];
+    let mut frames = request_data_frames(&salt, &[&ordinary, &maximum, &tampered]);
+    *frames[5].last_mut().expect("tampered payload tag") ^= 1;
+    let mut reads = vec![
+        request[..REQUEST_FIRST_READ_LEN].to_vec(),
+        request[REQUEST_FIRST_READ_LEN..].to_vec(),
+    ];
+    reads.extend(frames);
+    let (io, _) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+
+    let mut full_destination = vec![SENTINEL; ordinary.len() + 7];
+    let read = read_plain(&mut flow, &mut full_destination)
+        .await
+        .expect("32 KiB frame");
+    assert_eq!(read, ordinary.len());
+    assert_eq!(&full_destination[..read], ordinary);
+    assert!(
+        full_destination[read..]
+            .iter()
+            .all(|byte| *byte == SENTINEL)
+    );
+
+    let mut small_destination = [SENTINEL; 997];
+    let mut received = Vec::with_capacity(maximum.len());
+    while received.len() < maximum.len() {
+        small_destination.fill(SENTINEL);
+        let read = read_plain(&mut flow, &mut small_destination)
+            .await
+            .expect("maximum frame remainder");
+        assert!(read > 0);
+        received.extend_from_slice(&small_destination[..read]);
+        assert!(
+            small_destination[read..]
+                .iter()
+                .all(|byte| *byte == SENTINEL)
+        );
+    }
+    assert_eq!(received, maximum);
+
+    small_destination.fill(SENTINEL);
+    assert!(read_plain(&mut flow, &mut small_destination).await.is_err());
+    assert!(small_destination.iter().all(|byte| *byte == SENTINEL));
+}
+
+#[tokio::test]
+async fn fused_borrowed_view_points_to_copyback_scratch_without_losing_bytes() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let observers = RecordingObservers::default();
+    let salt = salt_from_u64(914);
+    let request = valid_request_wire(NOW, &salt);
+    let first = (0..4096)
+        .map(|index| (index % 251) as u8 + 1)
+        .collect::<Vec<_>>();
+    let second = vec![0x7b; 777];
+    let frames = request_data_frames(&salt, &[&first, &second]);
+    let mut reads = vec![
+        request[..REQUEST_FIRST_READ_LEN].to_vec(),
+        request[REQUEST_FIRST_READ_LEN..].to_vec(),
+    ];
+    reads.extend(frames);
+    let (io, _) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
+        .with_observers(&observers, &observers);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let decrypt_storage = observers
+        .buffers
+        .lock()
+        .expect("buffers")
+        .iter()
+        .find_map(|(role, _, storage)| (*role == BufferRole::Decrypt).then_some(*storage))
+        .expect("decrypt scratch allocation");
+
+    let (first_pointer, first_view) = fill_plain_snapshot(&mut flow)
+        .await
+        .expect("first borrowed view");
+    assert_eq!(first_pointer, decrypt_storage);
+    assert_eq!(first_view, first);
+
+    let consumed = 997;
+    Pin::new(&mut flow).consume_plain(consumed);
+    let (remainder_pointer, remainder) = fill_plain_snapshot(&mut flow)
+        .await
+        .expect("borrowed remainder");
+    assert_eq!(remainder_pointer, decrypt_storage + consumed);
+    assert_eq!(remainder, first[consumed..]);
+    Pin::new(&mut flow).consume_plain(remainder.len());
+
+    let (second_pointer, second_view) = fill_plain_snapshot(&mut flow)
+        .await
+        .expect("next borrowed view");
+    assert_eq!(second_pointer, decrypt_storage);
+    assert_eq!(second_view, second);
 }
 
 struct WakeCounter(AtomicUsize);

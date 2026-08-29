@@ -3,6 +3,7 @@ use std::task::{Context, Poll};
 
 use bytes::BytesMut;
 
+use super::worker_local::try_with_wire_staging;
 use super::{
     DataRx, Lifecycle, StagedKind, StagedWrite, TransportIo, TxState, prepare_decrypt,
     protocol_cipher_boundary,
@@ -183,12 +184,39 @@ pub(super) fn poll_data_fill<S: TransportIo>(
                     cx.waker().wake_by_ref();
                     DataPoll::Pending(next)
                 } else {
-                    if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
-                        opener.open_in_place(scratch).map_err(frame_from_open_aead)
-                    }) {
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
+                    let payload_len = wire_len - TAG_LEN;
+                    let opened = try_with_wire_staging(wire_len, |worker_wire| {
+                        worker_wire.copy_from_slice(&scratch[..wire_len]);
+                        protocol_cipher_boundary(lifecycle, observer, || {
+                            opener
+                                .open_slice_in_place(worker_wire)
+                                .map_err(frame_from_open_aead)
+                        })?;
+                        scratch[..payload_len].copy_from_slice(&worker_wire[..payload_len]);
+                        scratch.truncate(payload_len);
+                        Ok(())
+                    });
+                    match opened {
+                        Some(Ok(())) => {}
+                        Some(Err(error)) => {
+                            return DataPoll::Ready(DataRx::Poison, Err(error));
+                        }
+                        None => {
+                            if let Err(error) =
+                                protocol_cipher_boundary(lifecycle, observer, || {
+                                    opener.open_in_place(scratch).map_err(frame_from_open_aead)
+                                })
+                            {
+                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            }
+                            if scratch.len() != payload_len {
+                                let error = lifecycle
+                                    .install_protocol(observer, ProtocolReason::FrameBounds);
+                                return DataPoll::Ready(DataRx::Poison, Err(error));
+                            }
+                        }
                     }
-                    if scratch.is_empty() {
+                    if payload_len == 0 {
                         let next = DataRx::Length { filled: 0 };
                         cx.waker().wake_by_ref();
                         DataPoll::Pending(next)

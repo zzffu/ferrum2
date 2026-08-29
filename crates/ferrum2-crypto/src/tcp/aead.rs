@@ -78,12 +78,13 @@ impl TcpOpener {
         }
     }
 
-    /// Authenticates and decrypts in place with empty associated data.
+    /// Authenticates and decrypts a ciphertext-and-tag slice in place.
     ///
     /// Authentication failure zeroizes the ciphertext body in `buffer` and
     /// leaves the nonce uncommitted. The trailing tag is not part of the
-    /// destructive primitive input and remains in place.
-    pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
+    /// destructive primitive input and remains in place. Nonce exhaustion is
+    /// checked before touching or validating `buffer`.
+    pub fn open_slice_in_place(&mut self, buffer: &mut [u8]) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
         let tag_start = buffer
             .len()
@@ -95,8 +96,19 @@ impl TcpOpener {
         self.cipher
             .decrypt_packet(&nonce, &mut buffer[..tag_start], &tag)
             .map_err(|_| AeadError::AuthenticationFailed)?;
-        buffer.truncate(tag_start);
         self.nonce = next;
+        Ok(())
+    }
+
+    /// Authenticates and decrypts in place with empty associated data.
+    ///
+    /// Authentication failure zeroizes the ciphertext body in `buffer` and
+    /// leaves the nonce uncommitted. The trailing tag is not part of the
+    /// destructive primitive input and remains in place.
+    pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
+        let wire_len = buffer.len();
+        self.open_slice_in_place(buffer.as_mut())?;
+        buffer.truncate(wire_len - AEAD_TAG_BYTES);
         Ok(())
     }
 }
@@ -207,6 +219,50 @@ mod tests {
                 .expect("failed authentication did not commit the nonce");
             assert_eq!(valid.as_ref(), plaintext);
             assert_eq!(opener.nonce.current_bytes(), next_nonce);
+        }
+    }
+
+    #[test]
+    fn tcp_opener_slice_decrypts_without_replacing_storage() {
+        let plaintext = b"caller-owned fixed backing";
+
+        for (sealer_subkey, opener_subkey) in matching_subkey_pairs() {
+            let mut wire = BytesMut::from(plaintext.as_slice());
+            TcpSealer::new(sealer_subkey)
+                .seal_in_place(&mut wire)
+                .expect("matching subkey seals");
+            let storage = wire.as_ptr();
+            let wire_len = wire.len();
+            TcpOpener::new(opener_subkey)
+                .open_slice_in_place(&mut wire[..wire_len])
+                .expect("matching subkey authenticates");
+
+            assert_eq!(wire.as_ptr(), storage);
+            assert_eq!(&wire[..wire_len - AEAD_TAG_BYTES], plaintext);
+        }
+    }
+
+    #[test]
+    fn tcp_opener_slice_nonce_exhaustion_precedes_input_validation() {
+        for subkey in [
+            TcpSubkey::from_bytes([0x44; AES_128_KEY_BYTES]),
+            TcpSubkey::from_subkey(MethodProfile::Blake3Aes256Gcm2022, [0x55; WIDE_KEY_BYTES]),
+            TcpSubkey::from_subkey(
+                MethodProfile::Blake3ChaCha20Poly13052022,
+                [0x66; WIDE_KEY_BYTES],
+            ),
+        ] {
+            let mut opener = TcpOpener::new(subkey);
+            opener.nonce = NonceCounter::from_le_bytes(EXHAUSTED_NONCE);
+            let mut short = [0xa5; AEAD_TAG_BYTES - 1];
+            let original = short;
+
+            assert_eq!(
+                opener.open_slice_in_place(&mut short),
+                Err(AeadError::NonceExhausted)
+            );
+            assert_eq!(short, original);
+            assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
         }
     }
 
