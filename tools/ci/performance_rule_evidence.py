@@ -31,8 +31,8 @@ from tools.performance_rule.schema import (
 )
 
 HOST_SCHEMA = "ferrum2.performance-rule-host.v1"
-CALIBRATION_BUNDLE_SCHEMA = "ferrum2.performance-rule-calibration-bundle.v1"
-COMPARISON_BUNDLE_SCHEMA = "ferrum2.performance-rule-comparison-bundle.v1"
+CALIBRATION_BUNDLE_SCHEMA = "ferrum2.performance-rule-calibration-bundle.v2"
+COMPARISON_BUNDLE_SCHEMA = "ferrum2.performance-rule-comparison-bundle.v2"
 WORKFLOW_PATH = ".github/workflows/performance-rule.yml"
 APPROVED_RUN_WORKFLOW_PATHS = frozenset(
     (WORKFLOW_PATH, ".github/workflows/performance-candidate.yml")
@@ -61,8 +61,29 @@ HOST_FIELDS = frozenset(
 CALIBRATION_MANIFEST_FIELDS = frozenset(
     "schema artifact_name repository workflow_path calibration_run_id "
     "calibration_run_attempt source_sha source_tree controller_schema pairs "
-    "runner_arguments controller_exit parent_binary aa_report host_identity".split()
+    "runner_arguments controller_exit parent_binary aa_report host_identity authority "
+    "adoption_claim production_feature_enabled_by_default".split()
 )
+COMPARISON_MANIFEST_FIELDS = frozenset(
+    "schema artifact_name repository workflow_path comparison_run_id "
+    "comparison_run_attempt calibration_run_id source_sha source_tree "
+    "candidate_feature enabled_features adoption_claim "
+    "production_feature_enabled_by_default authority artifacts".split()
+)
+AUTHORITY_FIELDS = frozenset(
+    {
+        "scope",
+        "performance_authoritative",
+        "bare_metal_gate_satisfied",
+        "durable_evidence_gate_satisfied",
+    }
+)
+HOSTED_AMD_PROVISIONAL_AUTHORITY = {
+    "scope": "github-hosted-amd-provisional",
+    "performance_authoritative": False,
+    "bare_metal_gate_satisfied": False,
+    "durable_evidence_gate_satisfied": False,
+}
 ARTIFACT_RECORD_FIELDS = frozenset({"path", "bytes", "sha256"})
 CALIBRATION_FILES = frozenset(
     "calibration-manifest.json controller-exit-code.txt host-identity.json "
@@ -259,6 +280,61 @@ def _exact_fields(
     if not isinstance(value, dict) or set(value) != expected:
         fail(f"{label} fields are not closed")
     return value
+
+
+def _validate_outer_manifest_authority(
+    value: object, expected_fields: frozenset[str], schema: str, label: str
+) -> dict[str, object]:
+    manifest = _exact_fields(value, expected_fields, label)
+    authority = _exact_fields(manifest.get("authority"), AUTHORITY_FIELDS, "authority")
+    if (
+        manifest.get("schema") != schema
+        or authority.get("scope") != "github-hosted-amd-provisional"
+        or authority.get("performance_authoritative") is not False
+        or authority.get("bare_metal_gate_satisfied") is not False
+        or authority.get("durable_evidence_gate_satisfied") is not False
+        or manifest.get("adoption_claim") is not False
+        or manifest.get("production_feature_enabled_by_default") is not False
+    ):
+        fail(f"{label} broadened GitHub-hosted AMD authority")
+    return manifest
+
+
+def validate_calibration_manifest_authority(value: object) -> dict[str, object]:
+    return _validate_outer_manifest_authority(
+        value,
+        CALIBRATION_MANIFEST_FIELDS,
+        CALIBRATION_BUNDLE_SCHEMA,
+        "calibration manifest",
+    )
+
+
+def validate_comparison_manifest_authority(value: object) -> dict[str, object]:
+    return _validate_outer_manifest_authority(
+        value,
+        COMPARISON_MANIFEST_FIELDS,
+        COMPARISON_BUNDLE_SCHEMA,
+        "comparison manifest",
+    )
+
+
+def _read_persisted_manifest(
+    path: pathlib.Path,
+    *,
+    expected: Mapping[str, object],
+    expected_fields: frozenset[str],
+    schema: str,
+    label: str,
+) -> dict[str, object]:
+    observed = _validate_outer_manifest_authority(
+        read_strict_json(path, MAX_MANIFEST_BYTES, label),
+        expected_fields,
+        schema,
+        label,
+    )
+    if observed != expected:
+        fail(f"{label} differs from recomputed raw evidence")
+    return observed
 
 
 def positive_integer(value: object, label: str) -> int:
@@ -519,13 +595,22 @@ def build_calibration_manifest(
         "host_identity": artifact_record(
             inputs.host_identity, "host-identity.json", MAX_HOST_BYTES, "host identity"
         ),
+        "authority": dict(HOSTED_AMD_PROVISIONAL_AUTHORITY),
+        "adoption_claim": False,
+        "production_feature_enabled_by_default": False,
     }
     if inputs.output.parent != inputs.evidence or inputs.output.name != (
         "calibration-manifest.json"
     ):
         fail("calibration manifest output path is invalid")
     write_json_atomic(inputs.output, manifest)
-    return manifest
+    return _read_persisted_manifest(
+        inputs.output,
+        expected=manifest,
+        expected_fields=CALIBRATION_MANIFEST_FIELDS,
+        schema=CALIBRATION_BUNDLE_SCHEMA,
+        label="calibration manifest",
+    )
 
 
 def _parse_artifact_record(
@@ -561,14 +646,12 @@ def verify_calibration_artifact(
     validate_git_sha(inputs.expected_sha, "expected SHA")
     if _observed_files(inputs.artifact) != CALIBRATION_FILES:
         fail("calibration artifact file closure changed")
-    manifest = _exact_fields(
+    manifest = validate_calibration_manifest_authority(
         read_strict_json(
             inputs.artifact / "calibration-manifest.json",
             MAX_MANIFEST_BYTES,
             "calibration manifest",
         ),
-        CALIBRATION_MANIFEST_FIELDS,
-        "calibration manifest",
     )
     identity = source_identity(inputs.workspace, command_probe)
     if (
@@ -806,6 +889,8 @@ def validate_comparison(
         "candidate_feature": inputs.feature,
         "enabled_features": list(expected_features),
         "adoption_claim": False,
+        "production_feature_enabled_by_default": False,
+        "authority": dict(HOSTED_AMD_PROVISIONAL_AUTHORITY),
         "artifacts": artifacts,
     }
     if inputs.output.parent != inputs.evidence or inputs.output.name != (
@@ -813,4 +898,10 @@ def validate_comparison(
     ):
         fail("comparison manifest output path is invalid")
     write_json_atomic(inputs.output, manifest)
-    return manifest
+    return _read_persisted_manifest(
+        inputs.output,
+        expected=manifest,
+        expected_fields=COMPARISON_MANIFEST_FIELDS,
+        schema=COMPARISON_BUNDLE_SCHEMA,
+        label="comparison manifest",
+    )
