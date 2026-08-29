@@ -366,6 +366,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
         Ok(ClientTcpRoot {
             supervisor: Some(supervisor),
             context: tcp_context,
+            reregister_accepted_stream: false,
             routing: Arc::new(ClientRouting {
                 program,
                 outbounds: listens

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -16,9 +17,10 @@ use ferrum2_net::NetworkSnapshot;
 use ferrum2_observability::{Metrics, Role, json_subscriber};
 use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
-    BoundedSupervisor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
-    MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
-    ProcessRootExit, ProcessSupervisor, UdpRuntimeLimits, UdpSessionManager,
+    BoundedSupervisor, ConnectionRuntimeDispatcher, ConnectionRuntimePool,
+    MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry,
+    ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit, ProcessSupervisor, UdpRuntimeLimits,
+    UdpSessionManager,
 };
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
 #[cfg(test)]
@@ -264,15 +266,44 @@ impl ClientProcessRoots {
     }
 }
 
+fn build_run_runtime(connection_sharded: bool) -> Result<tokio::runtime::Runtime, RunError> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if connection_sharded {
+        // Connection work runs on dedicated shards; one control worker avoids
+        // duplicating the host CPU count with otherwise idle scheduler workers.
+        builder.worker_threads(1);
+    }
+    builder
+        .enable_all()
+        .build()
+        .map_err(|_| RunError::StartupRuntime)
+}
+
 /// Fully materializes a prepared schema-v2 client before any listener or TUN
 /// root is allowed to prepare. The returned process owns the bootstrap DNS,
 /// RuleSet refresh, and egress bridge lifecycle for its entire run.
 pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(async move {
+    // Keep non-Linux, managed TUN, and public UDP on their existing runtime path.
+    // The Linux direct TCP profile instead round-robins each accepted SOCKS
+    // connection across CPU-pinned current-thread shards.
+    let connection_runtimes = if !cfg!(target_os = "linux")
+        || prepared.has_tun()
+        || prepared.udp().is_some_and(|udp| udp.enabled)
+    {
+        None
+    } else {
+        Some(
+            ConnectionRuntimePool::new(tcp_connection_shard_count(usize::from(
+                prepared.runtime().max_connections.get(),
+            )))
+            .map_err(|_| RunError::StartupRuntime)?,
+        )
+    };
+    let connection_runtime = connection_runtimes
+        .as_ref()
+        .map(ConnectionRuntimePool::dispatcher);
+    let runtime = build_run_runtime(connection_runtimes.is_some())?;
+    let result = runtime.block_on(async move {
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
         #[cfg(all(windows, not(test)))]
@@ -373,10 +404,20 @@ pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
                 network_socket_service: Some(network_socket_service),
                 #[cfg(all(windows, not(test)))]
                 network_change_monitor,
+                tcp_connection_runtime: connection_runtime,
             },
         )
         .await
-    })
+    });
+    drop(runtime);
+    drop(connection_runtimes);
+    result
+}
+
+fn tcp_connection_shard_count(max_connections: usize) -> NonZeroUsize {
+    let available = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    NonZeroUsize::new(available.get().min(max_connections))
+        .expect("validated connection limit is non-zero")
 }
 
 /// Performs the opt-in networked validation pass, then explicitly joins every
@@ -422,6 +463,7 @@ struct ClientRunResources {
     network_socket_service: Option<Arc<egress::ClientNetworkSocketService>>,
     #[cfg(all(windows, not(test)))]
     network_change_monitor: Option<ferrum2_platform_windows::WindowsNetworkChangeMonitor>,
+    tcp_connection_runtime: Option<ConnectionRuntimeDispatcher>,
 }
 
 impl ClientRunResources {
@@ -439,6 +481,7 @@ impl ClientRunResources {
             network_socket_service: None,
             #[cfg(all(windows, not(test)))]
             network_change_monitor: None,
+            tcp_connection_runtime: None,
         }
     }
 }
@@ -510,6 +553,7 @@ where
         network_socket_service,
         #[cfg(all(windows, not(test)))]
         mut network_change_monitor,
+        tcp_connection_runtime,
     } = resources;
     let network_reset_coordinator = match network_reset_coordinator {
         Some(coordinator) => coordinator,
@@ -752,22 +796,34 @@ where
                     for listen in listens {
                         listeners.push(bind_listener(listen, listen_backlog)?);
                     }
-                    let supervisor = BoundedSupervisor::new(
-                        ClientTcpListeners {
+                    let listeners = ClientTcpListeners {
+                        listeners,
+                        next: AtomicUsize::new(0),
+                        #[cfg(test)]
+                        accept_errors: None,
+                    };
+                    let reregister_accepted_stream = tcp_connection_runtime.is_some();
+                    let supervisor = match tcp_connection_runtime {
+                        Some(connection_runtime) => BoundedSupervisor::new_on_connection_runtime(
                             listeners,
-                            next: AtomicUsize::new(0),
-                            #[cfg(test)]
-                            accept_errors: None,
-                        },
-                        max_connections,
-                        shutdown_grace,
-                        tcp_registry,
-                    )
+                            max_connections,
+                            shutdown_grace,
+                            tcp_registry,
+                            connection_runtime,
+                        ),
+                        None => BoundedSupervisor::new(
+                            listeners,
+                            max_connections,
+                            shutdown_grace,
+                            tcp_registry,
+                        ),
+                    }
                     .map_err(|_| RunError::StartupProtocol)?;
                     Ok(ClientTcpRoot {
                         supervisor: Some(supervisor),
                         context: tcp_context,
                         routing: tcp_routing,
+                        reregister_accepted_stream,
                     })
                 }),
             );
@@ -920,3 +976,28 @@ fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
 mod test_support;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod runtime_build_tests {
+    use super::*;
+
+    #[test]
+    fn connection_shards_use_one_multi_thread_control_worker() {
+        let runtime = build_run_runtime(true).expect("run runtime");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        assert_eq!(runtime.metrics().num_workers(), 1);
+    }
+
+    #[test]
+    fn unsharded_runtime_keeps_the_existing_multi_thread_builder() {
+        let runtime = build_run_runtime(false).expect("run runtime");
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        assert!(runtime.metrics().num_workers() >= 1);
+    }
+}

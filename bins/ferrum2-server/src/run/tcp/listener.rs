@@ -43,11 +43,26 @@ impl AcceptListener for ServerTcpListeners {
         })
         .await
     }
+
+    fn connection_runtime_cpu_hint(&self, stream: &Self::Stream) -> Option<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            rustix::net::sockopt::socket_incoming_cpu(&stream.1)
+                .ok()
+                .and_then(|cpu_id| usize::try_from(cpu_id).ok())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _stream = stream;
+            None
+        }
+    }
 }
 
 pub(in crate::run) struct ServerTcpRoot {
     pub(in crate::run) supervisor: Option<BoundedSupervisor<ServerTcpListeners>>,
     pub(in crate::run) contexts: Arc<Vec<Arc<ServerContext>>>,
+    pub(in crate::run) reregister_accepted_stream: bool,
 }
 
 impl PreparedProcessRoot<RunError> for ServerTcpRoot {
@@ -61,15 +76,28 @@ impl PreparedProcessRoot<RunError> for ServerTcpRoot {
     ) -> ProcessFuture<Result<(), RunError>> {
         let supervisor = self.supervisor.take().expect("prepared TCP root");
         let contexts = Arc::clone(&self.contexts);
+        let reregister_accepted_stream = self.reregister_accepted_stream;
         Box::pin(async move {
             supervisor
                 .run_with_cancellation(
                     move |(inbound, stream), cancellation| {
                         let contexts = Arc::clone(&contexts);
                         async move {
-                            if let Some(context) = contexts.get(inbound) {
-                                server_connection(stream, cancellation, Arc::clone(context)).await;
-                            }
+                            let Some(context) = contexts.get(inbound).cloned() else {
+                                return;
+                            };
+                            let stream = if reregister_accepted_stream {
+                                let Ok(stream) = stream.into_std() else {
+                                    return;
+                                };
+                                let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+                                    return;
+                                };
+                                stream
+                            } else {
+                                stream
+                            };
+                            server_connection(stream, cancellation, context).await;
                         }
                     },
                     cancellation,
