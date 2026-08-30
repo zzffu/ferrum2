@@ -18,60 +18,48 @@ use common::{
 };
 
 #[tokio::test]
-async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte_and_mixed() {
+async fn request_fixed_region_accepts_one_and_seven_byte_reads_across_pending() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
     let salt = salt_from_u64(900);
     let request = valid_request_wire(NOW, &salt);
-    let one_byte = request[REQUEST_FIRST_READ_LEN..]
-        .iter()
-        .map(|byte| vec![*byte])
-        .collect::<Vec<_>>();
-    let variable = &request[REQUEST_FIRST_READ_LEN..];
-    let mixed = vec![
-        variable[..1].to_vec(),
-        variable[1..4].to_vec(),
-        variable[4..].to_vec(),
-    ];
 
-    for fragments in [one_byte, mixed] {
+    for width in [1, 7] {
         let replay = TcpReplayStore::new(1024).expect("capacity");
-        let mut reads = vec![request[..REQUEST_FIRST_READ_LEN].to_vec()];
-        let fragment_count = fragments.len();
-        reads.extend(fragments);
+        let reads = request
+            .chunks(width)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
         let (io, observation) = RecordingIo::new(reads);
+        let io = io.with_pending_reads_after(1, 1);
         let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
 
-        inbound.accept_stream(io).await.expect("fragmented request");
+        let session = inbound.accept_stream(io).await.expect("fragmented request");
 
+        assert_eq!(session.target, target(), "width {width}");
+        assert!(session.initial_payload.is_empty(), "width {width}");
         let observed = observation.lock().expect("observation");
         assert_eq!(observed.read_lengths[0], REQUEST_FIRST_READ_LEN);
-        assert_eq!(observed.read_calls, 1 + fragment_count);
+        assert!(observed.read_calls > 1, "width {width}");
     }
 }
 
 #[tokio::test]
-async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte_and_mixed() {
+async fn response_fixed_region_accepts_one_and_seven_byte_reads_across_pending() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(901);
     let response_salt = salt_from_u64(902);
     let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"fragmented", &[]);
-    let payload = &response[RESPONSE_FIRST_READ_LEN..];
-    let one_byte = payload.iter().map(|byte| vec![*byte]).collect::<Vec<_>>();
-    let mixed = vec![
-        payload[..1].to_vec(),
-        payload[1..5].to_vec(),
-        payload[5..].to_vec(),
-    ];
 
-    for fragments in [one_byte, mixed] {
-        let mut reads = vec![response[..RESPONSE_FIRST_READ_LEN].to_vec()];
-        let fragment_count = fragments.len();
-        reads.extend(fragments);
+    for width in [1, 7] {
+        let reads = response
+            .chunks(width)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
         let (io, observation) = RecordingIo::new(reads);
-        let connector = RecordingConnector::succeeds(io);
+        let connector = RecordingConnector::succeeds(io.with_pending_reads_after(1, 1));
         let random = ScriptedRandom::new(client_random_bytes(&request_salt));
         let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
         let mut flow = outbound
@@ -87,10 +75,10 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
             .await
             .expect("fragmented response");
 
-        assert_eq!(&destination[..read], b"fragmented");
+        assert_eq!(&destination[..read], b"fragmented", "width {width}");
         let observed = observation.lock().expect("observation");
         assert_eq!(observed.read_lengths[0], RESPONSE_FIRST_READ_LEN);
-        assert_eq!(observed.read_calls, 1 + fragment_count);
+        assert!(observed.read_calls > 1, "width {width}");
     }
 }
 

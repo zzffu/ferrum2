@@ -55,7 +55,7 @@ impl<'a, S, K, T> ClientFlow<'a, S, K, T> {
             request_salt,
             request_sealer,
             response_opener: None,
-            rx: ClientRx::ResponseFixed,
+            rx: ClientRx::ResponseFixed { filled: 0 },
             tx: TxState::Open,
             encrypt,
             decrypt,
@@ -181,14 +181,14 @@ where
 
         let state = std::mem::replace(&mut self.rx, ClientRx::Poison);
         match state {
-            ClientRx::ResponseFixed => {
+            ClientRx::ResponseFixed { mut filled } => {
                 let response_first_read_len =
                     self.request_salt.profile().initial_response_read_bytes();
                 match Pin::new(&mut self.io)
-                    .poll_read(cx, &mut self.decrypt[..response_first_read_len])
+                    .poll_read(cx, &mut self.decrypt[filled..response_first_read_len])
                 {
                     Poll::Pending => {
-                        self.rx = ClientRx::ResponseFixed;
+                        self.rx = ClientRx::ResponseFixed { filled };
                         Poll::Pending
                     }
                     Poll::Ready(Err(_)) => {
@@ -199,7 +199,7 @@ where
                         );
                         Poll::Ready(Err(error))
                     }
-                    Poll::Ready(Ok(read)) if read != response_first_read_len => {
+                    Poll::Ready(Ok(0)) => {
                         let error = self.lifecycle.install_detection(
                             &mut self.io,
                             self.observers.flow,
@@ -207,7 +207,24 @@ where
                         );
                         Poll::Ready(Err(error))
                     }
-                    Poll::Ready(Ok(_)) => {
+                    Poll::Ready(Ok(read)) => {
+                        let Some(next) = filled
+                            .checked_add(read)
+                            .filter(|next| *next <= response_first_read_len)
+                        else {
+                            let error = self.lifecycle.install_detection(
+                                &mut self.io,
+                                self.observers.flow,
+                                DetectionReason::ShortRead,
+                            );
+                            return Poll::Ready(Err(error));
+                        };
+                        filled = next;
+                        if filled < response_first_read_len {
+                            self.rx = ClientRx::ResponseFixed { filled };
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
                         let result = self.open_response_fixed();
                         match result {
                             Ok(wire_len) => {

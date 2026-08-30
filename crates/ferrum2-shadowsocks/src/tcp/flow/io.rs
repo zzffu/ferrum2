@@ -52,12 +52,15 @@ pub(super) fn poll_data_read<S: TransportIo>(
                     DataPoll::Ready(DataRx::Poison, Err(error))
                 }
                 Poll::Ready(Ok(read)) => {
-                    filled += read;
-                    if filled > ENCRYPTED_LENGTH_LEN {
+                    let Some(next) = filled
+                        .checked_add(read)
+                        .filter(|next| *next <= ENCRYPTED_LENGTH_LEN)
+                    else {
                         let error =
                             lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                         return DataPoll::Ready(DataRx::Poison, Err(error));
-                    }
+                    };
+                    filled = next;
                     if filled < ENCRYPTED_LENGTH_LEN {
                         cx.waker().wake_by_ref();
                         return DataPoll::Pending(DataRx::Length { filled });
@@ -112,11 +115,11 @@ pub(super) fn poll_data_read<S: TransportIo>(
                 DataPoll::Ready(DataRx::Poison, Err(error))
             }
             Poll::Ready(Ok(read)) => {
-                filled += read;
-                if filled > wire_len {
+                let Some(next) = filled.checked_add(read).filter(|next| *next <= wire_len) else {
                     let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
                     return DataPoll::Ready(DataRx::Poison, Err(error));
-                }
+                };
+                filled = next;
                 if filled < wire_len {
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Payload { wire_len, filled });
@@ -254,25 +257,28 @@ pub(super) fn drain_staged<S: TransportIo>(
             let error = lifecycle.install_transport(observer, TransportPhase::Write);
             Poll::Ready(Err(error))
         }
-        Poll::Ready(Ok(written)) if current.kind == StagedKind::First => {
-            if written != source.len() {
-                let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
-                return Poll::Ready(Err(error));
-            }
-            scratch.clear();
-            *staged = None;
-            Poll::Ready(Ok(()))
+        Poll::Ready(Ok(0)) if current.kind == StagedKind::First => {
+            let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+            Poll::Ready(Err(error))
         }
         Poll::Ready(Ok(0)) => {
             let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
             Poll::Ready(Err(error))
         }
         Poll::Ready(Ok(written)) => {
-            current.position += written;
-            if current.position > scratch.len() {
-                let error = lifecycle.install_transport(observer, TransportPhase::Write);
+            let Some(next) = current
+                .position
+                .checked_add(written)
+                .filter(|next| *next <= scratch.len())
+            else {
+                let error = if current.kind == StagedKind::First {
+                    lifecycle.install_detection(io, observer, DetectionReason::ShortWrite)
+                } else {
+                    lifecycle.install_transport(observer, TransportPhase::Write)
+                };
                 return Poll::Ready(Err(error));
-            }
+            };
+            current.position = next;
             if current.position == scratch.len() {
                 scratch.clear();
                 *staged = None;

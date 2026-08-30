@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::future::{Future, poll_fn, ready};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::task::Poll;
 
 use ferrum2_core::{
     ConnectErrorKind, Connector, Inbound, LocalEndpoint, Outbound, Session, SessionReply,
@@ -267,16 +268,33 @@ where
             terminate_detection(&mut io, observers.flow, detection_from_frame(error))
         })?;
         let expected = encrypt.len();
-        let write = poll_fn(|cx| Pin::new(&mut io).poll_write(cx, &encrypt)).await;
-        let written = write.map_err(|_| {
-            terminate_detection(&mut io, observers.flow, DetectionReason::WriteFailed)
-        })?;
-        if written != expected {
-            return Err(terminate_detection(
-                &mut io,
-                observers.flow,
-                DetectionReason::ShortWrite,
-            ));
+        let mut position = 0;
+        let first_write =
+            poll_fn(
+                |cx| match Pin::new(&mut io).poll_write(cx, &encrypt[position..]) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Err(_)) => Poll::Ready(Err(DetectionReason::WriteFailed)),
+                    Poll::Ready(Ok(0)) => Poll::Ready(Err(DetectionReason::ShortWrite)),
+                    Poll::Ready(Ok(written)) => {
+                        let Some(next) = position
+                            .checked_add(written)
+                            .filter(|next| *next <= expected)
+                        else {
+                            return Poll::Ready(Err(DetectionReason::ShortWrite));
+                        };
+                        position = next;
+                        if position == expected {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }
+                },
+            )
+            .await;
+        if let Err(reason) = first_write {
+            return Err(terminate_detection(&mut io, observers.flow, reason));
         }
         encrypt.clear();
         inspect_scratch(BufferRole::Encrypt, &encrypt, observers.buffer);
@@ -380,18 +398,34 @@ where
         let profile = self.keys.tcp_profile();
         let salt_len = profile.salt_bytes();
         let request_first_read_len = profile.initial_request_read_bytes();
-        let first_read =
-            poll_fn(|cx| Pin::new(&mut io).poll_read(cx, &mut decrypt[..request_first_read_len]))
-                .await
-                .map_err(|_| {
-                    terminate_detection(&mut io, self.observers.flow, DetectionReason::ReadFailed)
-                })?;
-        if first_read != request_first_read_len {
-            return Err(terminate_detection(
-                &mut io,
-                self.observers.flow,
-                DetectionReason::ShortRead,
-            ));
+        let mut fixed_filled = 0;
+        let fixed_read = poll_fn(|cx| {
+            match Pin::new(&mut io)
+                .poll_read(cx, &mut decrypt[fixed_filled..request_first_read_len])
+            {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(_)) => Poll::Ready(Err(DetectionReason::ReadFailed)),
+                Poll::Ready(Ok(0)) => Poll::Ready(Err(DetectionReason::ShortRead)),
+                Poll::Ready(Ok(read)) => {
+                    let Some(next) = fixed_filled
+                        .checked_add(read)
+                        .filter(|next| *next <= request_first_read_len)
+                    else {
+                        return Poll::Ready(Err(DetectionReason::ShortRead));
+                    };
+                    fixed_filled = next;
+                    if fixed_filled == request_first_read_len {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                }
+            }
+        })
+        .await;
+        if let Err(reason) = fixed_read {
+            return Err(terminate_detection(&mut io, self.observers.flow, reason));
         }
 
         let request_salt =

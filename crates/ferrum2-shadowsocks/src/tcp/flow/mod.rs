@@ -168,7 +168,7 @@ impl Lifecycle {
 }
 
 pub(super) enum ClientRx {
-    ResponseFixed,
+    ResponseFixed { filled: usize },
     ResponsePayload { wire_len: usize, filled: usize },
     Data(DataRx),
     Poison,

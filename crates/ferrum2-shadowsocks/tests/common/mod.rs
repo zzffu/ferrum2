@@ -338,7 +338,9 @@ pub struct RecordingIo {
     write_limit: Option<usize>,
     write_limit_after: Option<(usize, usize)>,
     pending_reads: usize,
+    pending_read_after: Option<(usize, usize)>,
     pending_writes: usize,
+    pending_write_after: Option<(usize, usize)>,
     fail_read: bool,
     fail_read_after: Option<usize>,
     fail_write: bool,
@@ -360,7 +362,9 @@ impl RecordingIo {
                 write_limit: None,
                 write_limit_after: None,
                 pending_reads: 0,
+                pending_read_after: None,
                 pending_writes: 0,
+                pending_write_after: None,
                 fail_read: false,
                 fail_read_after: None,
                 fail_write: false,
@@ -407,8 +411,18 @@ impl RecordingIo {
         self
     }
 
+    pub fn with_pending_reads_after(mut self, successful_reads: usize, polls: usize) -> Self {
+        self.pending_read_after = Some((successful_reads, polls));
+        self
+    }
+
     pub fn with_pending_writes(mut self, polls: usize) -> Self {
         self.pending_writes = polls;
+        self
+    }
+
+    pub fn with_pending_writes_after(mut self, successful_writes: usize, polls: usize) -> Self {
+        self.pending_write_after = Some((successful_writes, polls));
         self
     }
 
@@ -456,6 +470,19 @@ impl TransportIo for RecordingIo {
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
+        let completed_reads = self
+            .observation
+            .lock()
+            .expect("observation lock")
+            .read_calls;
+        if let Some((after, pending)) = self.pending_read_after.as_mut()
+            && completed_reads >= *after
+            && *pending > 0
+        {
+            *pending -= 1;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
         let mut observation = self.observation.lock().expect("observation lock");
         observation.read_calls += 1;
         observation.read_lengths.push(destination.len());
@@ -483,6 +510,19 @@ impl TransportIo for RecordingIo {
     ) -> Poll<Result<usize, Self::IoError>> {
         if self.pending_writes > 0 {
             self.pending_writes -= 1;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let completed_writes = self
+            .observation
+            .lock()
+            .expect("observation lock")
+            .write_calls;
+        if let Some((after, pending)) = self.pending_write_after.as_mut()
+            && completed_writes >= *after
+            && *pending > 0
+        {
+            *pending -= 1;
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
