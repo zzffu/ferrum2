@@ -13,6 +13,7 @@ primitive 诊断证明 out-of-place AES-128 本身并不慢，因此不再把失
 候选分别下降 `11.4717%` 和 `12.7505%`；one-shot retry 的恢复率为负，已确认整个 cross-frame
 prefetch seam 有害并停止。fused progress stats 生命周期批量发布又下降 `2.0953%`，排除 per-write
 方向 stats 原子是 generic 信号的主要来源。所有产品候选与诊断证据提交、远端分支均保留，90% 目标
+随后 poll-local activity 候选再下降 `4.1066%`，说明 activity RMW/Notify 也不是主要瓶颈；90% 目标
 仍未完成。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
@@ -87,7 +88,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
                 ├── d27f96ce  fresh next-length continuation（相对父节点 -11.47%，失败）
                 │   └── 27d98db4  Ready/Pending structural diagnostic（diagnostic-only）
                 ├── c8537fce  fresh next-length + one-shot Pending retry（相对父节点 -12.75%，失败）
-                └── 54147afb  batched fused progress stats（相对父节点 -2.10%，失败）
+                ├── 54147afb  batched fused progress stats（相对父节点 -2.10%，失败）
+                └── c0250248  poll-local activity reset（相对父节点 -4.11%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -1068,3 +1070,37 @@ active、8-stream `tcp-bulk` 正式样本：
 
 无论结果如何都保留提交与远端分支，不重跑；若失败，下一产品尝试仍从 `bf4cd4a6` 开 sibling，不在
 本提交上叠加。
+
+### 18.3 唯一正式样本与失败冻结
+
+候选在 workload 前通过 runtime 全套、client/server all-features compile、相关 Clippy
+`-D warnings`、fmt、diff-check、三密码套件真实进程 bytes + half-close，以及修复一次 off-engine
+`RelayProgress::record` 契约 blocker 后的两路独立复审；随后提交并推送：
+
+- commit：`c02502486ad7fd65a634355c8b291ea01bd131fd`；
+- tree：`c5aae411201aeb7cc1a898e82b249e3f14d98a79`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-poll-local-activity`。
+
+唯一正式样本固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk`，合同为
+`status=PASS`、`sample_count=1`、`runner_exit_status=0`、51,442 transactions、
+`3,371,302,912` checked bytes，即 `224,753,527 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `87e961b21913d2b783dd6d46cde1777d19ef04ed7c65058cffc808c65c77f0c3` |
+| `ferrum2-client` | `19dfc3020e3eed5bcb353bc1d245c4f1bebb2b4f7c95a42d1591117828c79a8d` |
+| `ferrum2-server` | `30c0bfa12d3437fc77a418574b53a0b343af30397c6bc39da9f6d76eec2f6dc3` |
+
+相对 `bf4cd4a6` 的 `234,378,581 B/s` 下降 `9,625,054 B/s`（`-4.1066%`）；proxy CPU
+从 `23,180 ms` 降至 `22,590 ms`（`-2.5453%`），吞吐/proxy CPU 效率从 `10,111.242` 降至
+`9,949.249 B/s/ms`（`-1.6021%`）；migrations 从 `123,973` 降至 `123,751`
+（`-0.1791%`），context switches 从 `505,073` 降至 `495,557`（`-1.8841%`），mean CPU busy
+从 `47.156%` 降至 `46.211%`（`-0.945` 个百分点），但 migrations/byte 仍恶化 `4.0958%`。
+
+候选未达到父节点，按预声明立即失败：提交与远端分支永久保留并冻结，不重跑、不触发 hosted CI、
+不作为后续产品祖先。删除 activity RMW/Notify 虽小幅降低 CPU、context switches 与绝对 migrations，
+吞吐却下降更多；因此这组原子/通知不是 generic relay 净 `+6.8394%` 的来源，baseline 的 notification
+也可能帮助维持 runnable pipeline。结合 17.1 与 18.1，per-write stats、activity 和 partial sink seam
+均停止。下一产品设计必须直接处理 generic 与 fused 的 engine/buffer 结构差异，并继续从
+`bf4cd4a6` 开 sibling；不得把上述失败消融重新组合。
