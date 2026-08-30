@@ -274,8 +274,8 @@ where
                         .as_mut()
                         .expect("fixed response installed opener")
                         .open_slice_in_place(&mut self.decrypt[..wire_len]);
-                    let plaintext_len = match opened {
-                        Ok(plaintext_len) => plaintext_len,
+                    match opened {
+                        Ok(()) => {}
                         Err(error) => {
                             let error = self.lifecycle.install_detection(
                                 &mut self.io,
@@ -284,15 +284,8 @@ where
                             );
                             return Poll::Ready(Err(error));
                         }
-                    };
-                    if plaintext_len + TAG_LEN != wire_len {
-                        let error = self.lifecycle.install_detection(
-                            &mut self.io,
-                            self.observers.flow,
-                            DetectionReason::FrameBounds,
-                        );
-                        return Poll::Ready(Err(error));
                     }
+                    let plaintext_len = wire_len - TAG_LEN;
                     let mut position = 0;
                     let (copied, complete) =
                         copy_ready(&self.decrypt, &mut position, plaintext_len, destination);
@@ -349,12 +342,9 @@ where
         let fixed_wire_len = fixed_plaintext_len + TAG_LEN;
         self.decrypt
             .copy_within(salt_len..response_first_read_len, 0);
-        let plaintext_len = opener
+        opener
             .open_slice_in_place(&mut self.decrypt[..fixed_wire_len])
             .map_err(detection_from_aead)?;
-        if plaintext_len != fixed_plaintext_len {
-            return Err(DetectionReason::FrameBounds);
-        }
         if self.decrypt[0] != RESPONSE_TYPE {
             return Err(DetectionReason::InvalidType);
         }

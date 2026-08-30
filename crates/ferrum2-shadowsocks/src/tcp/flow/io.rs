@@ -61,18 +61,13 @@ pub(super) fn poll_data_read<S: TransportIo>(
                         cx.waker().wake_by_ref();
                         return DataPoll::Pending(DataRx::Length { filled });
                     }
-                    let plaintext_len = match protocol_cipher_boundary(lifecycle, observer, || {
+                    match protocol_cipher_boundary(lifecycle, observer, || {
                         opener
                             .open_slice_in_place(&mut scratch[..ENCRYPTED_LENGTH_LEN])
                             .map_err(frame_from_open_aead)
                     }) {
-                        Ok(plaintext_len) => plaintext_len,
+                        Ok(()) => {}
                         Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
-                    };
-                    if plaintext_len != 2 {
-                        let error =
-                            lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                        return DataPoll::Ready(DataRx::Poison, Err(error));
                     }
                     let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
                     let Some(wire_len) = payload_len.checked_add(TAG_LEN) else {
@@ -116,18 +111,15 @@ pub(super) fn poll_data_read<S: TransportIo>(
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Payload { wire_len, filled });
                 }
-                let plaintext_len = match protocol_cipher_boundary(lifecycle, observer, || {
+                match protocol_cipher_boundary(lifecycle, observer, || {
                     opener
                         .open_slice_in_place(&mut scratch[..wire_len])
                         .map_err(frame_from_open_aead)
                 }) {
-                    Ok(plaintext_len) => plaintext_len,
+                    Ok(()) => {}
                     Err(error) => return DataPoll::Ready(DataRx::Poison, Err(error)),
-                };
-                if plaintext_len + TAG_LEN != wire_len {
-                    let error = lifecycle.install_protocol(observer, ProtocolReason::FrameBounds);
-                    return DataPoll::Ready(DataRx::Poison, Err(error));
                 }
+                let plaintext_len = wire_len - TAG_LEN;
                 if plaintext_len == 0 {
                     cx.waker().wake_by_ref();
                     return DataPoll::Pending(DataRx::Length { filled: 0 });

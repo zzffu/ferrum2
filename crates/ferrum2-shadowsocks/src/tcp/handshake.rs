@@ -402,18 +402,11 @@ where
             .map_err(|reason| terminate_detection(&mut io, self.observers.flow, reason))?;
         let fixed_wire_len = REQUEST_FIXED_PLAINTEXT_LEN + TAG_LEN;
         decrypt.copy_within(salt_len..request_first_read_len, 0);
-        let fixed_plaintext_len = opener
+        opener
             .open_slice_in_place(&mut decrypt[..fixed_wire_len])
             .map_err(|error| {
                 terminate_detection(&mut io, self.observers.flow, detection_from_aead(error))
             })?;
-        if fixed_plaintext_len != REQUEST_FIXED_PLAINTEXT_LEN {
-            return Err(terminate_detection(
-                &mut io,
-                self.observers.flow,
-                DetectionReason::FrameBounds,
-            ));
-        }
         if decrypt[0] != REQUEST_TYPE {
             return Err(terminate_detection(
                 &mut io,
@@ -472,19 +465,12 @@ where
                     terminate_detection(&mut io, self.observers.flow, DetectionReason::FrameBounds)
                 })?;
         }
-        let plaintext_len = opener
+        opener
             .open_slice_in_place(&mut decrypt[..wire_len])
             .map_err(|error| {
                 terminate_detection(&mut io, self.observers.flow, detection_from_aead(error))
             })?;
-        if plaintext_len != variable_len {
-            return Err(terminate_detection(
-                &mut io,
-                self.observers.flow,
-                DetectionReason::FrameBounds,
-            ));
-        }
-        let parsed = parse_request_variable(&decrypt[..plaintext_len])
+        let parsed = parse_request_variable(&decrypt[..variable_len])
             .map_err(|reason| terminate_detection(&mut io, self.observers.flow, reason))?;
         match self
             .replay

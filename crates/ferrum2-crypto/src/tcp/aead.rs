@@ -61,11 +61,11 @@ impl TcpOpener {
 
     /// Authenticates and decrypts a ciphertext-and-tag slice in place.
     ///
-    /// Returns the plaintext length on success. After authentication failure,
-    /// the contents of `buffer` are unspecified and callers must discard them.
-    /// The nonce is committed only after successful authentication. Nonce
-    /// exhaustion is checked before touching `buffer`.
-    pub fn open_slice_in_place(&mut self, buffer: &mut [u8]) -> Result<usize, AeadError> {
+    /// After authentication failure, the contents of `buffer` are unspecified
+    /// and callers must discard them. The nonce is committed only after
+    /// successful authentication. Nonce exhaustion is checked before touching
+    /// `buffer`.
+    pub fn open_slice_in_place(&mut self, buffer: &mut [u8]) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
         let tag_start = buffer
             .len()
@@ -79,7 +79,7 @@ impl TcpOpener {
             .decrypt_packet(&nonce, ciphertext, &tag)
             .map_err(|_| AeadError::AuthenticationFailed)?;
         self.nonce = next;
-        Ok(tag_start)
+        Ok(())
     }
 
     /// Authenticates and decrypts in place with empty associated data.
@@ -88,7 +88,11 @@ impl TcpOpener {
     /// and callers must discard them. Nonce exhaustion leaves both the buffer
     /// and counter unchanged.
     pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
-        let plaintext_len = self.open_slice_in_place(buffer.as_mut())?;
+        let plaintext_len = buffer
+            .len()
+            .checked_sub(AEAD_TAG_BYTES)
+            .ok_or(AeadError::AuthenticationFailed)?;
+        self.open_slice_in_place(buffer.as_mut())?;
         buffer.truncate(plaintext_len);
         Ok(())
     }
@@ -197,9 +201,10 @@ mod tests {
         let storage = wire.as_ptr();
         let wire_len = wire.len();
         let mut opener = TcpOpener::new(subkey);
-        let plaintext_len = opener
+        opener
             .open_slice_in_place(&mut wire[..wire_len])
             .expect("fixture authenticates");
+        let plaintext_len = wire_len - AEAD_TAG_BYTES;
 
         assert_eq!(wire.as_ptr(), storage);
         assert_eq!(&wire[..plaintext_len], b"caller-owned fixed backing");
@@ -219,9 +224,10 @@ mod tests {
             opener.open_slice_in_place(&mut short),
             Err(AeadError::AuthenticationFailed)
         );
-        let plaintext_len = opener
+        opener
             .open_slice_in_place(valid.as_mut())
             .expect("short input did not consume nonce zero");
+        let plaintext_len = valid.len() - AEAD_TAG_BYTES;
         assert_eq!(&valid[..plaintext_len], b"nonce zero remains available");
     }
 }

@@ -214,11 +214,11 @@ fn copy_ready(
     (copied, *position == end)
 }
 
-pub(super) fn protocol_cipher_boundary<T>(
+pub(super) fn protocol_cipher_boundary(
     lifecycle: &mut Lifecycle,
     observer: &dyn FlowObserver,
-    operation: impl FnOnce() -> Result<T, FrameError>,
-) -> Result<T, ShadowsocksError> {
+    operation: impl FnOnce() -> Result<(), FrameError>,
+) -> Result<(), ShadowsocksError> {
     if let Some(error) = lifecycle.fatal_error() {
         return Err(error);
     }

@@ -410,24 +410,18 @@ pub(super) fn open_data_frame_into(
         return Err(FrameError::Bounds);
     }
     scratch[..ENCRYPTED_LENGTH_LEN].copy_from_slice(encrypted_length);
-    let length_plaintext_len = opener
+    opener
         .open_slice_in_place(&mut scratch[..ENCRYPTED_LENGTH_LEN])
         .map_err(frame_from_open_aead)?;
-    if length_plaintext_len != 2 {
-        return Err(FrameError::Bounds);
-    }
     let payload_len = usize::from(u16::from_be_bytes([scratch[0], scratch[1]]));
     if encrypted_payload.len() != payload_len.checked_add(TAG_LEN).ok_or(FrameError::Bounds)? {
         return Err(FrameError::Bounds);
     }
     scratch[..encrypted_payload.len()].copy_from_slice(encrypted_payload);
-    let plaintext_len = opener
+    opener
         .open_slice_in_place(&mut scratch[..encrypted_payload.len()])
         .map_err(frame_from_open_aead)?;
-    if plaintext_len != payload_len {
-        return Err(FrameError::Bounds);
-    }
-    Ok(plaintext_len)
+    Ok(payload_len)
 }
 
 pub(super) fn response_fixed_plaintext_len(profile: MethodProfile) -> usize {
