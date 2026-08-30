@@ -1104,3 +1104,40 @@ active、8-stream `tcp-bulk` 正式样本：
 也可能帮助维持 runnable pipeline。结合 17.1 与 18.1，per-write stats、activity 和 partial sink seam
 均停止。下一产品设计必须直接处理 generic 与 fused 的 engine/buffer 结构差异，并继续从
 `bf4cd4a6` 开 sibling；不得把上述失败消融重新组合。
+
+## 19. 产品 sibling：client/server 固定 request-first poll order
+
+Tokio 1.53.1 `copy_bidirectional_impl` 每个 poll 固定先 `a→b`、再 `b→a`。generic diagnostic 的
+callsite 顺序使 client 固定先 SOCKS/plain→tunnel，server 固定先 tunnel→target，即两端都先推进请求
+因果链。`bf4cd4a6` 的 `FusedRelay` 则每个 outer poll 翻转 `upload_first`：client 在请求/响应优先之间
+交替，server 还从响应优先开始交替。历史 `git log --all -S upload_first` 只找到 `64cd1410` 引入，
+没有从 `bf4` 独立测过 fixed role-aware request-first。
+
+该 seam 不减少 helper 调用数或显式 wake：首方向 Pending 时仍继续 poll 第二方向；它只改变同一 outer
+poll 内的 readiness、cooperative budget 与同时错误优先级。架构审查认为预期收益较弱，但这是进入完整
+protocol-owned copy engine 前最后一个无需新增 buffer/state machine、可以精确排除的 generic 差异，
+故以严格门槛运行一次产品 A/B：
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-request-first-order`；
+- private fused constructor 接收固定 first direction；client 传 `PlainToTunnel`，server 传
+  `TunnelToPlain`；删除 per-poll toggle，但每 poll 仍各调用 upload/download 一次；
+- 不改方向 helper、任何 `wake_by_ref`、frame/length/payload、I/O、buffer、crypto、progress/lifecycle、
+  worker、generic fallback、TUN 或测量配置。
+
+机制测试必须连续多 poll 证明：client 始终 plain/request first，server 始终 tunnel/request first；首方向
+Pending 后第二方向仍被 poll；双向 Ready 各推进一次；simultaneous error 的固定优先级明确；既有
+partial、backpressure、bytes 与 half-close 保持。
+
+候选通过 Shadowsocks targeted/full、client/server compile、相关 Clippy、fmt、diff-check、两路独立
+审查和三密码套件真实进程 bytes + half-close 后，必须先提交推送，再只运行一次固定 CPU `0-3`、
+3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 正式样本：
+
+- 不高于 `bf4cd4a6` 的 `234,378,581 B/s`：失败、保留冻结、不进 CI；
+- 正向但低于 `+5%`：弱正向、保留冻结、不进 CI；
+- 达到 `+5%` 且吞吐/proxy CPU 效率不低于 `10,111.242 B/s/ms`：本地强正向，只触发一次 hosted
+  direct CI；CI 不重跑。
+
+若失败，固定顺序彻底停止；下一步先从 `bf4` 建 diagnostic-only counters，按 frame 区分 upload
+ciphertext drain Pending 与 download sink Pending。只有 upload Pending 命中明显时，才设计
+pending-only one-frame-ahead plaintext buffer；不得直接重建历史已删除的通用 `AsyncBufRead` relay。
