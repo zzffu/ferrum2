@@ -1492,3 +1492,126 @@ diff-check、M0 三密码真实进程 bytes + half-close 和两路独立审查�
 
 hosted 的唯一完成条件仍是 Ferrum2/shadowsocks-rust v1.24.0 `>= 90%`。若仍低于 90%，保留提交与
 artifact，直接对这一完整架构执行 profile/scheduler 分析；不退回继续创建 frame-level 微候选。
+
+### 22.7 唯一正式样本：runnable pipeline 失败并冻结
+
+候选先修复了审查发现的 EOF→shutdown 错误优先级问题，并以 upload-first 与翻转后的
+download-first 两个对称测试证明 EOF 与 half-close shutdown 在同一 direction quantum 内完成；随后
+通过 Shadowsocks all-features 全套 147 项、no-default 全套、两种 fused feature 组合各 22 项、
+client/server 构建、Clippy `-D warnings`、fmt、diff-check、三密码真实进程 bytes + half-close，以及
+两路最终独立审查。候选在 workload 前提交并推送：
+
+- commit：`bcc12262f3fbda57a2a505f7bb016db62cd920a9`；
+- tree：`2c17307e549d7eb8415aed53f80e8b1ea7454d18`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-protocol-cooperative-relay`。
+
+唯一正式样本固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk`，合同为
+`status=PASS`、`sample_count=1`、`runner_exit_status=0`、6,701 transactions、439,156,736 checked
+bytes，即 `29,277,115 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `e7f7808482a66b73288f80510614fcb23a44dfa4621500edee65f3c339dedff2` |
+| `ferrum2-client` | `f640677fd3e8cb5b8ee7c5a8bfcdb1dd94713f49d029f4589015138c6bd40da4` |
+| `ferrum2-server` | `46b856ec435560d2b21b5820f28de1f88ebc4c17906816130eb7327b25ddf3e8` |
+
+转录证据文件为 2,128 bytes，SHA-256 为
+`f884da9d00b067145d0038f0640c0fd27336b70e72ce0599dcfeb0289577e894`。相对 `bf4cd4a6`：
+
+| 指标 | `bf4cd4a6` | bidirectional cooperative relay | 变化 |
+| --- | ---: | ---: | ---: |
+| throughput | 234,378,581 B/s | 29,277,115 B/s | -87.5086% |
+| proxy CPU | 23,180 ms | 2,850 ms | -87.7049% |
+| B/s/ms | 10,111.242 | 10,272.672 | +1.5965% |
+| migrations | 123,973 | 15,479 | -87.5142% |
+| context switches | 505,073 | 48,614 | -90.3749% |
+| mean CPU busy | 47.156% | 3.113% | -44.043 pp |
+
+M4 的 `workers=8` 是 8 条在 warm-up 前已建立且全程复用的持久连接；每条连接严格执行一次
+64 KiB `write_all` 后等待完整 64 KiB echo，收到前不发送下一事务。按 transaction 归一化后，
+`bf4` 为约 `2.237 ms/tx`、`0.4321 proxy CPU-ms/tx`、`2.3110 migrations/tx`；本候选为
+`17.908 ms/tx`、`0.4253 CPU-ms/tx`、`2.3100 migrations/tx`。因此每事务计算与迁移几乎未变，
+额外约 `15.67 ms/tx` 都是非运行等待；吞吐、CPU 与 migrations 同时缩到约八分之一，等效于
+8-stream runnable pipeline 近似只剩一条 baseline lane。现有聚合 evidence 不能区分八条流均匀变慢
+与流间 convoy，但足以排除 crypto、copy、cache ownership 或每字节 CPU 成本回归。
+
+根因是 cooperative charge 的层级错误。Tokio 1.53.1 明确要求 voluntary yield point 尽量放在 leaf，
+避免 outer iteration 重复计费；它自己的 `CopyBuffer::poll_copy` 是每个 direction poll 取得一次 permit，
+随后连续运行到真实 I/O Pending。`bcc12262` 却在 composite bidirectional engine 的每个
+length/payload/auth/sink/upload quantum round 再调用一次 `poll_proceed`，同时底层 Tokio socket
+readiness 也消费同一 task budget。budget 耗尽后的 waker 进入当前 worker 的 deferred queue，而非立即
+进入可 steal 的普通 runnable queue；wake 没有永久丢失，`park_yield` 也不是固定时长 sleep，但 8 条
+lockstep 连接的短因果 burst 被反复排到 scheduler drain barrier 后，形成 pipeline hole/convoy。原
+`128 rounds` fake-I/O 测试只证明 deferred wake 最终发生，还主动 `yield_now` 帮助 flush，未覆盖真实
+socket 的重复计费、production biased outer select 与多连接竞争，因此把性能活性问题漏掉了。
+
+候选远低于父节点，立即判定失败：提交与远端分支永久保留并冻结，不重跑、不进 hosted CI、不作为
+后续祖先。后续不再以 central protocol round 为调度 owner，也不通过 global event interval、硬 affinity、
+per-core shard、`unconstrained`、普通 self-wake 补丁或新的数字 burst budget 掩盖该问题。
+
+## 23. 产品 sibling：direction-owned bounded CopyBuffer relay
+
+下一候选采用目前唯一有正式正向证据、并与 shadowsocks-rust/sing-box 稳态拓扑一致的完整架构：
+调度 owner 从 protocol quantum 改为两个持久 direction transfer。shadowsocks-rust/Tokio copy 在每方向
+一个 buffer 内 run-to-I/O-Pending；sing-box 用两条独立 direction goroutine。Ferrum2 先直接产品化现有
+`TokioFramed + relay_lifecycle + copy_bidirectional_with_sizes` 深模块，不在同一候选继续改写其 storage。
+
+### 23.1 单一假设、范围与显式代价
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 新分支：`codex/tcp-hot-path-directional-copy-relay`；
+- 必须直接从 `bf4cd4a6` 新建；`bcc12262` 与 diagnostic-only `c84b5bc` 均不得成为祖先；
+- client single-proxy 与 server direct 的产品入口改用现成 `TokioFramed + relay_lifecycle`；client 参数
+  顺序使 request/upload direction 先 poll，server 参数顺序使 inbound request direction 先 poll；每方向
+  由一个 32 KiB `CopyBuffer` 持续推进到真实 I/O Pending；
+- 两个 buffer 是本次架构本身，不是临时 benchmark 变量：每连接新增 `2 × 32 KiB` bounded plaintext
+  capacity，10,000 条连接约增加 625 MiB，并恢复 generic source→framed 与 framed→destination 的 plain
+  copy。该候选明确接受这项 memory/copy 代价，以换取 direction ownership、跨连接 runnable pipeline、
+  Tokio 原生 coop 粒度与更低 migration；不得在本候选内再次“零拷贝化”或缩放 buffer；
+- CopyBuffer 不 zeroize，但只保存已认证普通应用明文，不含 key/salt；仓库现有 generic/multi-hop 路径
+  已采用同一合同，当前没有单代理 plaintext buffer 必须清零的安全契约；若今后增加该契约，再在已证明
+  的 direction seam 上单独设计清零 storage；
+- backpressure 由每方向 32 KiB 严格界定；half-close、write-zero/error、idle、cancel、activity/stats 与
+  buffer registry accounting 由现有 `relay_lifecycle` 和 Tokio bidirectional copy 合同拥有；
+- single-proxy 的 wire、cipher、nonce、auth-before-publish、initial payload、target、replay 与错误分类
+  仍由原 `ClientTcpFlow`/`ServerFlow` 和 `TokioFramed` 拥有，不改 crypto 或 frame size；
+- 生产 diff 只允许 client SOCKS TCP composition、server TCP connection composition、必要 import/结构
+  分类及其直接测试；不得修改 `flow/fused.rs`、`flow/io.rs`、TUN、Windows adapter、runtime worker、
+  listener、affinity/shard、runner、配置或 CI；
+- 明确禁止 central round、`Advanced` seam、per-state/per-frame `poll_proceed`、cross-frame fused
+  continuation、pending-only buffer、fresh next-length、stats batching 与其它历史失败机制。
+
+本候选的单一产品假设是：两份持久 bounded plaintext CopyBuffer 的额外 memory/copy 成本，小于它们
+恢复 direction-owned scheduling 与 8-stream runnable pipeline 带来的收益。历史 diagnostic
+`c84b5bc` 只作为选择架构的证据，继续冻结；它曾得到 `250,408,686 B/s`（相对 bf4 `+6.8394%`）、
+`10,494.916 B/s/ms`（`+3.7945%`）和 migrations `-32.5918%`，但本次产品候选仍必须独立完成门禁、
+提交、推送和唯一正式样本，不得直接拿 diagnostic 结果触发 CI。
+
+### 23.2 机制与产品门禁
+
+候选必须证明：
+
+- client single-proxy 与 server direct 确实各拥有且仅拥有两个 direction buffer；连接结束后 registry
+  回到 baseline，multi-hop/direct 既有分类不被误改；
+- 8 条持久 stop-and-wait relay 在多 worker runtime 下都持续前进；测试记录每 flow progress，不以墙钟
+  吞吐排名为断言，并禁止一条 flow 长期独占或只依赖手工 per-frame wake；
+- partial I/O、真实 Pending backpressure、write-zero/error、EOF/双向 half-close、idle、cancel、stats、
+  simultaneous error 与 activity notification 保持现有 `relay_lifecycle` 合同；
+- Shadowsocks 三密码与边界 payload 的 bytes、nonce、auth、tamper、initial payload 及 half-close 保持；
+- 不再保留把 Tokio 私有 `128` budget 常量当产品合同的测试。
+
+依次运行 targeted client/server composition、ferrum2-runtime relay、Shadowsocks full/no-default、
+client/server all-features、相关 Clippy `-D warnings`、fmt、diff-check，以及 M0 三密码真实进程 bytes +
+half-close；至少两路独立审查分别检查产品行为/安全合同和实验范围/架构归因。全部通过后先提交并推送，
+再运行一次且仅一次 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 正式本地样本。
+
+### 23.3 决策与 CI
+
+- 吞吐 `<= 234,378,581 B/s`：失败，永久保留并冻结，不进 CI；
+- 吞吐正向但 `< 246,097,511 B/s`：弱正向，永久保留并冻结，不进 CI；
+- 吞吐 `>= 246,097,511 B/s` 且效率 `>= 10,111.242 B/s/ms`：本地强正向，只触发一次 hosted direct
+  CI；不重跑 CI；
+- hosted direct 唯一完成条件仍为 Ferrum2/shadowsocks-rust v1.24.0 `>= 90%`。可直接使用浏览器查看
+  workflow、日志与 artifact；若低于 90%，提交、分支与 CI 证据全部保留，从新的已证明节点开下一
+  sibling，不回退、不覆盖、不从失败候选继续叠加。
