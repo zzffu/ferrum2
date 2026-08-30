@@ -282,15 +282,16 @@ where
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(DownloadStep::DirectionDone)) => return Poll::Ready(Ok(())),
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) if carried => {}
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
+            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {}
         }
 
         match self.poll_download_once(cx) {
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if !carried {
+                    cx.waker().wake_by_ref();
+                }
+                Poll::Pending
+            }
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(DownloadStep::DirectionDone)) => Poll::Ready(Ok(())),
             Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {

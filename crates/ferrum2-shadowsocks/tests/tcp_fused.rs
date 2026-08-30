@@ -20,7 +20,7 @@ use ferrum2_shadowsocks::tokio::{
 };
 use ferrum2_shadowsocks::{
     BufferRole, ClientFlow, ClientTcpOutbound, FlowTerminal, MethodKeyAdapter, PlainBufferedDuplex,
-    PlainDuplex, ProtocolReason, ServerFlow, ShadowsocksError, ShadowsocksTcpInbound,
+    PlainDuplex, ProtocolReason, ServerFlow, ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN,
     TcpReplayStore, TransportIo,
 };
 #[cfg(feature = "structural-metrics")]
@@ -197,6 +197,142 @@ impl Connector for SequencedConnector {
             .expect("connector lock")
             .take()
             .expect("connector used once")))
+    }
+}
+
+struct ExternalReadGate {
+    ready: Arc<AtomicBool>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+    pending_polls: Arc<AtomicUsize>,
+}
+
+impl ExternalReadGate {
+    fn make_ready(&self) {
+        self.ready.store(true, Ordering::SeqCst);
+        self.pending_waker
+            .lock()
+            .expect("pending read waker")
+            .take()
+            .expect("transport registered the relay waker")
+            .wake();
+    }
+}
+
+struct ExternallyReadyReadIo {
+    inner: RecordingIo,
+    successful_reads: usize,
+    gate_after: usize,
+    ready: Arc<AtomicBool>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+    pending_polls: Arc<AtomicUsize>,
+}
+
+impl ExternallyReadyReadIo {
+    fn new(
+        reads: impl IntoIterator<Item = Vec<u8>>,
+        gate_after: usize,
+    ) -> (Self, Arc<Mutex<IoObservation>>, ExternalReadGate) {
+        let (inner, observation) = RecordingIo::new(reads);
+        let ready = Arc::new(AtomicBool::new(false));
+        let pending_waker = Arc::new(Mutex::new(None));
+        let pending_polls = Arc::new(AtomicUsize::new(0));
+        let gate = ExternalReadGate {
+            ready: Arc::clone(&ready),
+            pending_waker: Arc::clone(&pending_waker),
+            pending_polls: Arc::clone(&pending_polls),
+        };
+        (
+            Self {
+                inner,
+                successful_reads: 0,
+                gate_after,
+                ready,
+                pending_waker,
+                pending_polls,
+            },
+            observation,
+            gate,
+        )
+    }
+
+    fn read_is_gated(&mut self, cx: &mut Context<'_>) -> bool {
+        if self.successful_reads < self.gate_after || self.ready.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.pending_polls.fetch_add(1, Ordering::SeqCst);
+        *self.pending_waker.lock().expect("pending read waker") = Some(cx.waker().clone());
+        true
+    }
+}
+
+impl TransportIo for ExternallyReadyReadIo {
+    type IoError = SourceSentinel;
+
+    fn poll_read_buf(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        if self.read_is_gated(cx) {
+            return Poll::Pending;
+        }
+        let result = Pin::new(&mut self.inner).poll_read_buf(cx, destination, limit);
+        if matches!(result, Poll::Ready(Ok(_))) {
+            self.successful_reads += 1;
+        }
+        result
+    }
+
+    fn poll_read_initialized(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        if self.read_is_gated(cx) {
+            return Poll::Pending;
+        }
+        let result = Pin::new(&mut self.inner).poll_read_initialized(cx, destination);
+        if matches!(result, Poll::Ready(Ok(_))) {
+            self.successful_reads += 1;
+        }
+        result
+    }
+
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        Pin::new(&mut self.inner).poll_write(cx, source)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl AbortiveClose for ExternallyReadyReadIo {
+    type Error = ();
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        self.inner.mark_abortive()
+    }
+}
+
+impl LocalEndpoint for ExternallyReadyReadIo {
+    fn local_socket_addr(&self) -> SocketAddr {
+        self.inner.local_socket_addr()
     }
 }
 
@@ -476,6 +612,14 @@ type TestServerFlow = ServerFlow<
     ScriptedRandom,
 >;
 
+type GatedTestServerFlow = ServerFlow<
+    'static,
+    ExternallyReadyReadIo,
+    MethodKeyAdapter<MethodSinglePskProvider>,
+    FakeClock,
+    ScriptedRandom,
+>;
+
 async fn observed_server_flow(
     request_salt: ferrum2_crypto::MethodTcpSalt,
     frames: Vec<Vec<u8>>,
@@ -508,6 +652,38 @@ async fn observed_server_flow(
         .expect("server request")
         .stream;
     (flow, observers, observation)
+}
+
+async fn gated_server_flow(
+    request_salt: ferrum2_crypto::MethodTcpSalt,
+    frames: Vec<Vec<u8>>,
+) -> (
+    GatedTestServerFlow,
+    Arc<Mutex<IoObservation>>,
+    ExternalReadGate,
+) {
+    let keys = Box::leak(Box::new(provider()));
+    let clock = Box::leak(Box::new(FakeClock::new(NOW, 0)));
+    let random = Box::leak(Box::new(ScriptedRandom::new([])));
+    let replay = Box::leak(Box::new(
+        TcpReplayStore::new(1024).expect("replay capacity"),
+    ));
+    let request = valid_request_wire(NOW, &request_salt);
+    let reads = [
+        request[..ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN].to_vec(),
+        request[ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN..].to_vec(),
+    ]
+    .into_iter()
+    .chain(frames)
+    .collect::<Vec<_>>();
+    let (io, observation, gate) = ExternallyReadyReadIo::new(reads, 4);
+    let inbound = ShadowsocksTcpInbound::new(keys, clock, random, replay);
+    let flow = inbound
+        .accept_stream(io)
+        .await
+        .expect("server request")
+        .stream;
+    (flow, observation, gate)
 }
 
 fn decrypt_pointer(observers: &RecordingObservers) -> usize {
@@ -559,7 +735,7 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
     assert_eq!(sink_observation.accepted, payload);
     assert_ne!(sink_observation.pointers[0], decrypt_pointer);
     assert_eq!(progressed.load(Ordering::SeqCst), payload.len());
-    assert_eq!(transport.lock().expect("transport").read_calls, 4);
+    assert_eq!(transport.lock().expect("transport").read_calls, 5);
     drop(sink_observation);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
@@ -575,6 +751,189 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
         );
         assert_eq!(snapshot.get(StructuralCounter::FtbrPartialWrites), 0);
     }
+}
+
+#[tokio::test]
+async fn fresh_next_length_pending_retries_once_then_waits_for_readiness() {
+    let request_salt = salt_from_u64(1_004);
+    let first = b"first fresh frame";
+    let second = b"second fresh frame";
+    let mut frames = request_data_frames(&request_salt, &[first, second]);
+    let second_payload = frames.pop().expect("second payload wire");
+    let second_length = frames.pop().expect("second length wire");
+    frames.push(second_length[..1].to_vec());
+    frames.push(second_length[1..].to_vec());
+    frames.push(second_payload);
+    let (mut flow, transport, gate) = gated_server_flow(request_salt, frames).await;
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All, SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(transport.lock().expect("transport").read_calls, 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(transport.lock().expect("transport").read_calls, 4);
+    assert_eq!(gate.pending_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(sink.lock().expect("sink observation").accepted, first);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(gate.pending_polls.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.lock().expect("transport").read_calls, 4);
+
+    gate.make_ready();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    {
+        let transport = transport.lock().expect("transport");
+        assert_eq!(transport.read_calls, 5);
+        assert_eq!(transport.read_lengths.last(), Some(&(2 + TAG_LEN)));
+    }
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 4);
+    assert_eq!(sink.lock().expect("sink observation").accepted, first);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    {
+        let transport = transport.lock().expect("transport");
+        assert_eq!(transport.read_calls, 6);
+        assert_eq!(transport.read_lengths.last(), Some(&(2 + TAG_LEN - 1)));
+    }
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 5);
+    assert_eq!(sink.lock().expect("sink observation").accepted, first);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    let expected = first
+        .iter()
+        .chain(second.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(sink.lock().expect("sink observation").accepted, expected);
+    assert_eq!(transport.lock().expect("transport").read_calls, 8);
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        5,
+        "EOF after the fresh continuation must not append a wake"
+    );
+}
+
+#[tokio::test]
+async fn carried_completion_does_not_add_a_next_length_retry() {
+    let request_salt = salt_from_u64(1_005);
+    let first = b"carried frame";
+    let second = b"unread next frame";
+    let frames = request_data_frames(&request_salt, &[first, second]);
+    let (mut flow, transport, gate) = gated_server_flow(request_salt, frames).await;
+    let ready = Arc::new(AtomicBool::new(false));
+    let pending_waker = Arc::new(Mutex::new(None));
+    let accepted = Arc::new(Mutex::new(Vec::new()));
+    let write_polls = Arc::new(AtomicUsize::new(0));
+    let mut plain = ExternallyReadyWritePlain {
+        ready: Arc::clone(&ready),
+        pending_waker: Arc::clone(&pending_waker),
+        accepted: Arc::clone(&accepted),
+        write_polls: Arc::clone(&write_polls),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(transport.lock().expect("transport").read_calls, 4);
+    assert_eq!(write_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    ready.store(true, Ordering::SeqCst);
+    pending_waker
+        .lock()
+        .expect("pending sink waker")
+        .take()
+        .expect("sink registered the relay waker")
+        .wake();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(write_polls.load(Ordering::SeqCst), 2);
+    assert_eq!(&*accepted.lock().expect("accepted plaintext"), first);
+    assert_eq!(gate.pending_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.lock().expect("transport").read_calls, 4);
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        2,
+        "carried completion retains the baseline transport-waker behavior"
+    );
+}
+
+#[tokio::test]
+async fn fresh_next_length_error_does_not_append_a_wake() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("replay capacity");
+    let request_salt = salt_from_u64(1_006);
+    let request = valid_request_wire(NOW, &request_salt);
+    let payload = b"fresh frame before error";
+    let reads = [
+        request[..ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN].to_vec(),
+        request[ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN..].to_vec(),
+    ]
+    .into_iter()
+    .chain(request_data_frames(&request_salt, &[payload]))
+    .collect::<Vec<_>>();
+    let (io, transport) = RecordingIo::new(reads);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io.with_read_failure_after(4))
+        .await
+        .expect("server request")
+        .stream;
+    let (mut plain, sink, _) = ScriptedWritePlain::new([SinkAction::All]);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
+        panic!("next-length transport error must terminate the relay");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(transport.lock().expect("transport").read_calls, 5);
+    assert_eq!(sink.lock().expect("sink observation").accepted, payload);
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        1,
+        "error after the fresh continuation must not append a wake"
+    );
 }
 
 #[tokio::test]
@@ -820,7 +1179,7 @@ async fn fused_zero_frame_preserves_the_length_boundary_without_polling_sink() {
         assert_eq!(sink.lock().expect("sink observation").polls, 0);
     }
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 6);
+    assert_eq!(transport.lock().expect("transport").read_calls, 7);
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.accepted, payload);
@@ -864,7 +1223,7 @@ async fn fused_client_initial_response_keeps_the_buffered_flow_view() {
     let mut cx = Context::from_waker(Waker::noop());
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 2);
+    assert_eq!(transport.lock().expect("transport").read_calls, 3);
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.sources, [payload.to_vec()]);
@@ -1078,7 +1437,7 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(write_polls.load(Ordering::SeqCst), 3);
-    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    assert_eq!(observation.lock().expect("observation").read_calls, 7);
     let expected = first
         .iter()
         .chain(second.iter())
