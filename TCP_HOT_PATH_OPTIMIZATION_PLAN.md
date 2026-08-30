@@ -932,3 +932,37 @@ completion `wake_by_ref + Pending`，不在同一 outer poll 触碰下一 frame 
 冻结，不重跑、不触发 hosted CI、不作为产品祖先。下一产品尝试直接从 `bf4cd4a6` 新开，只在现有
 frame/方向公平边界内部削减 generic 诊断所指向的 progress/activity 原子、direction engine 或 partial
 I/O 成本；不得再以 read-ahead、bounded drain 或 retry 形式重开 cross-frame seam。
+
+## 17. 产品 sibling：fused progress stats 的生命周期批量发布
+
+generic relay 诊断仍在每次 destination write 后即时执行 `ActivitySignal::mark`，因此它没有减少 idle
+activity 的 dirty/Notify 触发点；但方向 byte stats 留在 `ActivityIo` 的普通 `u64`，只在方向 Drop 时
+调用一次 `AtomicU64::fetch_add`。`bf4cd4a6` 的 fused 路径则在每次完整或 partial destination write 后
+直接调用 `RelayProgress::record`，同时执行 stats 原子和 activity 原子。下一 sibling 只隔离这一差异：
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-batched-relay-progress`；
+- runtime 提供 engine-owned RAII recorder：每次非零 write 用普通方向 `u64` 累加并立即 mark activity；
+  recorder Drop 时每方向至多一次调用既有 `add_stats_only`；
+- client single-proxy 与 server direct fused callsite 改用该 recorder，方向映射保持不变；
+- engine 正常、I/O error、idle 或 cancellation 被 drop 时，recorder 必须先发布，再由 lifecycle 读取最终
+  `RelayStats`；zero bytes 不计 progress；
+- 不改 `fused.rs`、`flow/io.rs`、wire、crypto、frame/poll/wake、buffer ownership、generic fallback、
+  TUN、runtime worker 或测量配置。
+
+这会把 fused stats 更新从每次成功 frame/partial write 一个 `AtomicU64` 降为每连接生命周期每方向至多
+一次，同时完整保留每次真实写入后的 idle deadline reset。机制测试必须覆盖 Drop 前 stats 未发布、
+Drop 后双向 totals 精确、zero 不标记 activity，以及 I/O/cancel/idle 三种 engine drop 路径的 partial
+stats；既有 cancellation 优先级、敏感错误不泄漏、bytes、partial I/O 与 half-close 合同保持。
+
+候选先通过 runtime/shadowsocks targeted 与全套、client/server all-features compile、Clippy、fmt、
+diff-check、独立 correctness/experiment 审查和三密码套件真实进程 bytes + half-close，再提交并推送。
+之后只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 正式本地样本：
+
+- 不高于 `bf4cd4a6` 的 `234,378,581 B/s`：失败、保留冻结、不进 CI；
+- 正向但低于 `+5%`：弱正向、保留冻结、不进 CI；
+- 达到 `+5%` 且吞吐/proxy CPU 效率不低于 `10,111.242 B/s/ms`：本地强正向，只触发一次 hosted
+  direct CI；CI 不重跑。
+
+无论结果如何都先保留提交和远端分支，不重跑。失败时不得在该提交上叠加 activity、sink drain 或
+upload batch；下一产品轴仍从 `bf4cd4a6` 新开 sibling。
