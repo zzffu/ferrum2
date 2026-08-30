@@ -821,3 +821,63 @@ Ready/Pending/EOF/error outcome；诊断吞吐不得用于排名。若 Pending �
 `bf4cd4a6` 开始：保留一次 next-length 尝试，但在该第二次调用返回 Pending 时补一次有界
 `wake_by_ref`，让 ready 命中合并、真实 Pending 保留基线 retry。若证据不支持该分支，则回到
 generic diagnostic 揭示的 lifecycle/progress/direction engine 成本，不叠加 `d27f96c`。
+
+### 15.2 structural outcome 诊断
+
+固定 `d27f96c` profiling ELF 的 uprobe 地址已由反汇编确认，但本机 tracefs 写权限被拒且没有免密
+sudo，因此没有绕过权限安装 probe。改从失败候选建立永久 diagnostic-only descendant：
+
+- 分支：`codex/tcp-hot-path-stage3-bounded-frame-pending-diagnostic`；
+- commit：`27d98db41685191c9397be7df76014c9b2f3c435`；
+- tree：`fec07f901110e2a6b66c8966a8e90e7fcf39c154`；
+- parent：`d27f96ce4cacd87c9ba7c2508540249274392261`。
+
+只在 `structural-metrics` build 中，第一次 fresh plaintext completion 后记录第二次
+`poll_download_once` 的 receive state；计数先留在 per-flow 普通 `u64`，flow Drop 时才一次汇总。
+默认产品 build 没有这些字段、分支或原子更新。该冻结诊断局部扩展 structural family 为 56；它不进入
+现有 schema-v7 CI，也不调用仍固定 49 family 的 Python validator。
+
+唯一一次非权威 structural workload 为 8 workers、1 秒 warm-up + 15 秒 active，正确校验
+`5,143,265,280` bytes，`performance_authoritative=false`、`performance_adoption_allowed=false`。
+计数完整闭合：
+
+| 角色 | fresh attempts | next length ready 后 yield | next length 真实 Pending | ready 比例 | Pending 比例 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| client | 175,034 | 121,843 | 53,191 | 69.6110% | 30.3890% |
+| server | 171,818 | 145,500 | 26,318 | 84.6826% | 15.3174% |
+| 合计 | 346,852 | 267,343 | 79,509 | 77.0770% | 22.9230% |
+
+partial/other Pending、第二次 ready plaintext、error、EOF 均为 0；attempts 精确等于 ready + real
+Pending。结果否定“speculative next-length 几乎总是无效 poll”：77.08% 确实合并了下一 length；但
+22.92% 的真实 Pending 会删除基线 frame-completion retry。仅 outcome 比例还不能区分“这四分之一
+任务过早睡眠”与“77% ready batching/current-worker binding 本身破坏公平性”，下一产品 sibling 用
+恢复比例闭合。
+
+## 16. 产品 sibling：fresh next-length 的 one-shot Pending retry
+
+从 `bf4cd4a6` 新开 `codex/tcp-hot-path-stage3-fresh-length-retry`，不得让 `d27f96c` 成为祖先。
+相对基线只在原 guaranteed frame-completion wake 前尝试一次 next-length poll：
+
+- 保留 `carried` 快照；carried completion 维持 `d874d3dd` 原行为；
+- fresh completion 调用一次既有第二次 `poll_download_once`；
+- 该第二次调用若返回 Pending，仅 fresh 路径补一次 `wake_by_ref`；
+- 下一 outer poll 的普通 Length/Payload Pending 不再补 wake，因此静默连接不会 busy-loop；
+- Ready length 仍保持 `flow/io.rs` 的 length→payload 公平边界；EOF/error/DirectionDone 不补 wake；
+- 不改 `io.rs`、upload、crypto、buffer ownership、lifecycle、TUN 或编译参数。
+
+测试必须证明：真实 next-length Pending 只产生一次 retry；立即消费 retry 后若仍 Pending 不再 wake；
+外部 readiness 到来后只读 length、不读 payload；ready/partial length 无丢失或重发；carried completion
+不获得新增 retry；EOF/error 无尾随 wake；既有 auth、zero、partial sink、双向公平与 half-close 保持。
+
+候选先提交推送，再只跑一次既定 CPU `0-3`、3+15 秒、8-stream 正式样本。除相对 `bf4cd4a6` 的
+产品门槛外，记录 recovery ratio：
+
+`(candidate - 207,491,345) / (234,378,581 - 207,491,345)`。
+
+- recovery `>=80%` 但仍不高于 `bf4cd4a6`：确认缺 retry 是 `d27f96c` 主因，但 prefetch 无产品收益，
+  保留并冻结；
+- recovery `<=30%`：ready batching/current-worker binding 是主因，停止整个 cross-frame prefetch seam；
+- 高于 `bf4cd4a6` 但 `<+5%`：弱正向，保留并冻结，不进 CI；
+- 相对 `bf4cd4a6 >=+5%` 且吞吐/proxy CPU 效率不下降：本地强正向，只触发一次 hosted direct CI。
+
+无论结果如何都保留提交，不重跑；失败后的产品尝试仍从 `bf4cd4a6` 或其它已证明节点另开 sibling。
