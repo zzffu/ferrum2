@@ -3,6 +3,7 @@ use std::fmt;
 
 use bytes::BytesMut;
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
+use zeroize::Zeroizing;
 
 use super::{NonceCounter, TcpSubkey};
 #[cfg(test)]
@@ -71,13 +72,14 @@ impl TcpOpener {
             .len()
             .checked_sub(AEAD_TAG_BYTES)
             .ok_or(AeadError::AuthenticationFailed)?;
-        let (ciphertext, tag) = buffer.split_at_mut(tag_start);
-        let tag: [u8; AEAD_TAG_BYTES] = tag
+        let tag: [u8; AEAD_TAG_BYTES] = buffer[tag_start..]
             .try_into()
             .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
+        let mut plaintext = Zeroizing::new(buffer[..tag_start].to_vec());
         self.cipher
-            .decrypt_packet(&nonce, ciphertext, &tag)
+            .decrypt_packet(&nonce, plaintext.as_mut(), &tag)
             .map_err(|_| AeadError::AuthenticationFailed)?;
+        buffer[..tag_start].copy_from_slice(plaintext.as_ref());
         self.nonce = next;
         Ok(tag_start)
     }
