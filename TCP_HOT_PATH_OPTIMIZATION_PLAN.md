@@ -11,7 +11,9 @@ primitive 诊断证明 out-of-place AES-128 本身并不慢，因此不再把失
 单个未配对正式样本引入自研 GCM。阶段 3 的 copy-in 删除轴停止，`bf4cd4a6` 保持最后一个本地弱正向
 节点。随后 generic relay 诊断取得 `+6.8394%` 方向性信号，但 fresh cross-frame next-length 两个产品
 候选分别下降 `11.4717%` 和 `12.7505%`；one-shot retry 的恢复率为负，已确认整个 cross-frame
-prefetch seam 有害并停止。所有产品候选与诊断证据提交、远端分支均保留，90% 目标仍未完成。
+prefetch seam 有害并停止。fused progress stats 生命周期批量发布又下降 `2.0953%`，排除 per-write
+方向 stats 原子是 generic 信号的主要来源。所有产品候选与诊断证据提交、远端分支均保留，90% 目标
+仍未完成。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -84,7 +86,8 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
                 ├── c84b5bc  generic relay diagnostic（相对父节点 +6.84%，diagnostic-only）
                 ├── d27f96ce  fresh next-length continuation（相对父节点 -11.47%，失败）
                 │   └── 27d98db4  Ready/Pending structural diagnostic（diagnostic-only）
-                └── c8537fce  fresh next-length + one-shot Pending retry（相对父节点 -12.75%，失败）
+                ├── c8537fce  fresh next-length + one-shot Pending retry（相对父节点 -12.75%，失败）
+                └── 54147afb  batched fused progress stats（相对父节点 -2.10%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -966,3 +969,37 @@ diff-check、独立 correctness/experiment 审查和三密码套件真实进程 
 
 无论结果如何都先保留提交和远端分支，不重跑。失败时不得在该提交上叠加 activity、sink drain 或
 upload batch；下一产品轴仍从 `bf4cd4a6` 新开 sibling。
+
+### 17.1 唯一正式样本与失败冻结
+
+候选在 workload 前通过 runtime 全套、Shadowsocks all-features、client/server all-features compile、
+受影响三包 Clippy `-D warnings`、fmt、diff-check、两路独立审查，以及真实进程三密码套件 bytes +
+half-close；随后提交并推送：
+
+- commit：`54147afb6969c0105a121eda29ef1a8df62a3476`；
+- tree：`00fe732f88bf3d9e03e786a7df43f7621b5d905e`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-batched-relay-progress`。
+
+唯一正式样本固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk`，合同为
+`status=PASS`、`sample_count=1`、`runner_exit_status=0`、52,521 transactions、
+`3,442,016,256` checked bytes，即 `229,467,750 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `205672b4b35042191e177cf05d55c80f5d6a985bb6255bef21e35969fde32b26` |
+| `ferrum2-client` | `a34ebedc3ef53f23843d25975f0f5040c76792533caedbfb3cf82e347321b797` |
+| `ferrum2-server` | `08e482ac67ddac5acc354541f1ccf7cbabc7a456b8cb2ef387ec2fd812b8bdf3` |
+
+相对 `bf4cd4a6` 的 `234,378,581 B/s` 下降 `4,910,831 B/s`（`-2.0953%`）；proxy CPU
+从 `23,180 ms` 增至 `23,230 ms`（`+0.2157%`），吞吐/proxy CPU 效率从 `10,111.242` 降至
+`9,878.078 B/s/ms`（`-2.3060%`）；migrations 从 `123,973` 增至 `132,862`
+（`+7.1701%`），context switches 从 `505,073` 增至 `513,327`（`+1.6342%`），mean CPU busy
+从 `47.156%` 增至 `47.461%`（`+0.305` 个百分点），migrations/byte 恶化 `9.4637%`。
+
+候选未达到父节点，按预声明立即失败：提交与远端分支永久保留并冻结，不重跑、不触发 hosted CI、
+不作为后续产品祖先。结果排除每次 destination admission 的方向 `AtomicU64::fetch_add` 是 generic relay
+净 `+6.8394%` 的主要来源；减少该原子既没有降低 CPU，也没有改善 migrations。下一步先用
+diagnostic-only structural counters 量化 `FtbrPartialWrites / FtbrBorrowedDownloadFrames`：只有 download
+partial sink write 命中面明显时，才从 `bf4cd4a6` 开 same-frame ready sink drain sibling；否则直接转向
+不改 frame I/O 的 activity/scheduler lifecycle seam。不得在 `54147afb` 上叠加任何优化。
