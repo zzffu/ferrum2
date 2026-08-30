@@ -1222,7 +1222,9 @@ pending-only upload buffer 的决策在运行前固定如下：
 
 - `U_merged >= 10%` 且 client/server 各自 `U >= 5%`：GO；
 - `5% <= U_merged < 10%`、两端各自至少命中一帧且 `S_merged >= 1.5`：条件 GO；
-- 其余全部 NO-GO，包括 `U_merged < 5%`、任一端完全无命中，或明显单端偏斜。
+- 其余全部 NO-GO，包括 `U_merged < 5%`、任一端完全无命中，或明显单端偏斜；
+- 若既有 `tcp_fused_partial_writes` 非零，同样强制 NO-GO：此时 upload drain 的 caller-level
+  `Pending` 可能混入 fairness budget exhaustion，不能诚实归因为 tunnel writer backpressure。
 
 `D` 只用于解释 generic buffer 的信号来源，无论多高都不得重开 download next-length/read-ahead seam。
 若 upload 为 GO，产品实现必须从 `bf4cd4a6` 另开 sibling，仅在当前 ciphertext drain 已真实 Pending 时
