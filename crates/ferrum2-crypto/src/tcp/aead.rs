@@ -3,6 +3,7 @@ use std::fmt;
 
 use bytes::BytesMut;
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{NonceCounter, TcpSubkey};
 #[cfg(test)]
@@ -47,6 +48,7 @@ impl TcpSealer {
 pub struct TcpOpener {
     cipher: ShadowsocksTcpCipher,
     nonce: NonceCounter,
+    staging: Zeroizing<Vec<u8>>,
 }
 
 impl TcpOpener {
@@ -56,6 +58,7 @@ impl TcpOpener {
         Self {
             cipher,
             nonce: NonceCounter::new(),
+            staging: Zeroizing::new(Vec::new()),
         }
     }
 
@@ -71,13 +74,21 @@ impl TcpOpener {
             .len()
             .checked_sub(AEAD_TAG_BYTES)
             .ok_or(AeadError::AuthenticationFailed)?;
-        let (ciphertext, tag) = buffer.split_at_mut(tag_start);
-        let tag: [u8; AEAD_TAG_BYTES] = tag
+        let tag: [u8; AEAD_TAG_BYTES] = buffer[tag_start..]
             .try_into()
             .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
-        self.cipher
-            .decrypt_packet(&nonce, ciphertext, &tag)
-            .map_err(|_| AeadError::AuthenticationFailed)?;
+        self.staging.resize(tag_start, 0);
+        self.staging.copy_from_slice(&buffer[..tag_start]);
+        if self
+            .cipher
+            .decrypt_packet(&nonce, self.staging.as_mut(), &tag)
+            .is_err()
+        {
+            self.staging[..tag_start].zeroize();
+            return Err(AeadError::AuthenticationFailed);
+        }
+        buffer[..tag_start].copy_from_slice(self.staging.as_ref());
+        self.staging[..tag_start].zeroize();
         self.nonce = next;
         Ok(tag_start)
     }
