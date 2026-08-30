@@ -190,42 +190,53 @@ where
         }
         self.flow.inspect_buffers();
 
-        if self.pending_upload_plaintext.is_some() {
-            return self.poll_pending_upload(cx);
-        }
-        if self.upload_eof {
-            return self.poll_upload_shutdown(cx);
-        }
+        loop {
+            if self.pending_upload_plaintext.is_some() {
+                match self.poll_pending_upload(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) => {}
+                }
+            }
+            if self.upload_eof {
+                return self.poll_upload_shutdown(cx);
+            }
 
-        self.flow.prepare_upload_read().map_err(framed_error)?;
-        let before = self.flow.upload_scratch().len();
-        let payload_limit = self.flow.upload_payload_limit();
-        let read = {
-            let mut limited = (&mut *self.flow.upload_scratch()).limit(payload_limit);
-            tokio_util::io::poll_read_buf(Pin::new(&mut *self.plain), cx, &mut limited)
-        };
-        let read = match read {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Ready(Ok(read)) => read,
-        };
-        if self.flow.upload_scratch().len() != before.saturating_add(read) {
-            return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
-        }
-        if read == 0 {
-            self.flow.discard_upload_read();
-            self.upload_eof = true;
-            return self.poll_upload_shutdown(cx);
-        }
+            let cooperative = match tokio::task::coop::poll_proceed(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(cooperative) => cooperative,
+            };
+            self.flow.prepare_upload_read().map_err(framed_error)?;
+            let before = self.flow.upload_scratch().len();
+            let payload_limit = self.flow.upload_payload_limit();
+            let read = {
+                let mut limited = (&mut *self.flow.upload_scratch()).limit(payload_limit);
+                tokio_util::io::poll_read_buf(Pin::new(&mut *self.plain), cx, &mut limited)
+            };
+            let read = match read {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(read)) => read,
+            };
+            if self.flow.upload_scratch().len() != before.saturating_add(read) {
+                return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+            }
+            if read == 0 {
+                self.flow.discard_upload_read();
+                self.upload_eof = true;
+                cooperative.made_progress();
+                continue;
+            }
 
-        self.flow.seal_upload_read(read).map_err(framed_error)?;
-        #[cfg(feature = "structural-metrics")]
-        {
-            self.structural_stats.owned_upload_frames =
-                self.structural_stats.owned_upload_frames.saturating_add(1);
+            self.flow.seal_upload_read(read).map_err(framed_error)?;
+            #[cfg(feature = "structural-metrics")]
+            {
+                self.structural_stats.owned_upload_frames =
+                    self.structural_stats.owned_upload_frames.saturating_add(1);
+            }
+            self.pending_upload_plaintext = Some(read);
+            cooperative.made_progress();
         }
-        self.pending_upload_plaintext = Some(read);
-        self.poll_pending_upload(cx)
     }
 
     fn poll_pending_upload(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -251,8 +262,7 @@ where
         if plaintext_len != 0 {
             (self.observe)(FusedRelayDirection::PlainToTunnel, plaintext_len);
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        Poll::Ready(Ok(()))
     }
 
     fn poll_upload_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

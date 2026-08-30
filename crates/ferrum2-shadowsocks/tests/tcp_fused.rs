@@ -31,7 +31,7 @@ use common::{
     FakeClock, IoObservation, NOW, RecordingConnector, RecordingIo, RecordingObservers,
     ScriptedRandom, SourceSentinel, client_random_bytes, method_provider, method_salt_from_u64,
     provider, request_data_frames, response_wire_and_frames, salt_from_u64, server_target, target,
-    valid_request_wire, valid_request_wire_for,
+    valid_request_wire, valid_request_wire_for, write_plain,
 };
 
 struct EndpointIo {
@@ -113,20 +113,20 @@ impl TransportIo for SequencedIo {
     type IoError = SourceSentinel;
 
     fn poll_read_buf(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        destination: &mut BytesMut,
-        limit: usize,
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _destination: &mut BytesMut,
+        _limit: usize,
     ) -> Poll<Result<usize, Self::IoError>> {
-        Pin::new(&mut self.inner).poll_read_buf(cx, destination, limit)
+        Poll::Pending
     }
 
     fn poll_read_initialized(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        destination: &mut [u8],
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _destination: &mut [u8],
     ) -> Poll<Result<usize, Self::IoError>> {
-        Pin::new(&mut self.inner).poll_read_initialized(cx, destination)
+        Poll::Pending
     }
 
     fn poll_write(
@@ -207,6 +207,50 @@ struct AlwaysReadyPlain {
     read_polls: Arc<AtomicUsize>,
     shutdown_polls: Arc<AtomicUsize>,
     pending_shutdowns: usize,
+}
+
+struct PendingAfterReadyPlain {
+    reads: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    sequence: Arc<Mutex<Vec<&'static str>>>,
+    read_count: Arc<AtomicUsize>,
+    pending_waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl AsyncRead for PendingAfterReadyPlain {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let Some(source) = self.reads.lock().expect("source reads").pop_front() else {
+            *self.pending_waker.lock().expect("pending source waker") = Some(cx.waker().clone());
+            return Poll::Pending;
+        };
+        assert!(source.len() <= buffer.remaining());
+        buffer.put_slice(&source);
+        self.read_count.fetch_add(1, Ordering::SeqCst);
+        self.sequence.lock().expect("sequence").push("READ");
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for PendingAfterReadyPlain {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.sequence.lock().expect("sequence").push("PLAIN_WRITE");
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 impl AsyncRead for AlwaysReadyPlain {
@@ -1089,9 +1133,79 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
 }
 
 #[tokio::test]
-async fn always_ready_upload_alternates_read_and_complete_wire_write() {
+async fn one_outer_poll_completes_multiple_ready_upload_frames_without_synthetic_wakes() {
     let sequence = Arc::new(Mutex::new(Vec::new()));
     let read_count = Arc::new(AtomicUsize::new(0));
+    let (mut flow, transport) = sequenced_client_flow_with_observation(
+        Arc::clone(&sequence),
+        false,
+        None,
+        0,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let initial_write_calls = transport.lock().expect("transport").write_calls;
+    sequence.lock().expect("sequence").clear();
+    let payloads = [vec![0x11; 4096], vec![0x22; 4096], vec![0x33; 4096]];
+    let mut plain = AlwaysReadyPlain {
+        reads: payloads.clone().into(),
+        sequence: Arc::clone(&sequence),
+        read_count: Arc::clone(&read_count),
+        read_polls: Arc::new(AtomicUsize::new(0)),
+        shutdown_polls: Arc::new(AtomicUsize::new(0)),
+        pending_shutdowns: 0,
+    };
+    let progressed = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&progressed);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        move |direction, bytes| {
+            if direction == FusedRelayDirection::PlainToTunnel {
+                observed.lock().expect("upload progress").push(bytes);
+            }
+        },
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(read_count.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *sequence.lock().expect("sequence"),
+        ["READ", "WRITE", "READ", "WRITE", "READ", "WRITE"]
+    );
+    assert_eq!(*progressed.lock().expect("upload progress"), [4096; 3]);
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        0,
+        "complete upload frames do not synthesize relay wakes"
+    );
+
+    let observed_wire = transport.lock().expect("transport").writes[initial_write_calls..]
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    let request_salt = method_salt_from_u64(MethodProfile::Blake3Aes128Gcm2022, 50);
+    let expected_wire = request_data_frames(
+        &request_salt,
+        &payloads.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    assert_eq!(observed_wire, expected_wire);
+}
+
+#[tokio::test]
+async fn upload_source_pending_resumes_after_external_wake_without_duplicate_progress() {
+    let sequence = Arc::new(Mutex::new(Vec::new()));
     let mut flow = sequenced_client_flow(
         Arc::clone(&sequence),
         false,
@@ -1101,33 +1215,205 @@ async fn always_ready_upload_alternates_read_and_complete_wire_write() {
     )
     .await;
     sequence.lock().expect("sequence").clear();
-    let mut plain = AlwaysReadyPlain {
-        reads: [vec![0x11; 4096], vec![0x22; 4096], vec![0x33; 4096]].into(),
+    let reads = Arc::new(Mutex::new([vec![0x31; 1024], vec![0x32; 2048]].into()));
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let pending_waker = Arc::new(Mutex::new(None));
+    let mut plain = PendingAfterReadyPlain {
+        reads: Arc::clone(&reads),
         sequence: Arc::clone(&sequence),
         read_count: Arc::clone(&read_count),
-        read_polls: Arc::new(AtomicUsize::new(0)),
-        shutdown_polls: Arc::new(AtomicUsize::new(0)),
-        pending_shutdowns: 0,
+        pending_waker: Arc::clone(&pending_waker),
     };
+    let progressed = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&progressed);
     #[cfg(feature = "structural-metrics")]
     let structural = StructuralHub::new().local();
     let mut relay = Box::pin(relay_client_flow(
         &mut plain,
         &mut flow,
-        |_, _| {},
+        move |direction, bytes| {
+            if direction == FusedRelayDirection::PlainToTunnel {
+                observed.lock().expect("upload progress").push(bytes);
+            }
+        },
         #[cfg(feature = "structural-metrics")]
         &structural,
     ));
-    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
 
-    for _ in 0..3 {
-        assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    }
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(read_count.load(Ordering::SeqCst), 2);
+    assert_eq!(*progressed.lock().expect("upload progress"), [1024, 2048]);
+    assert!(
+        pending_waker
+            .lock()
+            .expect("pending source waker")
+            .is_some()
+    );
+
+    reads
+        .lock()
+        .expect("source reads")
+        .push_back(vec![0x33; 3072]);
+    let wakes_before_source_signal = wake_counter.0.load(Ordering::SeqCst);
+    pending_waker
+        .lock()
+        .expect("pending source waker")
+        .take()
+        .expect("source registered the relay waker")
+        .wake();
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        wakes_before_source_signal + 1,
+        "the Pending plaintext source owns the wake that resumes upload"
+    );
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(read_count.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *progressed.lock().expect("upload progress"),
+        [1024, 2048, 3072]
+    );
     assert_eq!(
         *sequence.lock().expect("sequence"),
         ["READ", "WRITE", "READ", "WRITE", "READ", "WRITE"]
     );
+}
+
+#[tokio::test]
+async fn pre_staged_wire_drain_does_not_publish_fused_plaintext_progress() {
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let (mut flow, transport) = sequenced_client_flow_with_observation(
+        Arc::clone(&sequence),
+        false,
+        None,
+        0,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let payload = b"pre-staged plaintext";
+    assert_eq!(
+        write_plain(&mut flow, payload)
+            .await
+            .expect("stage plaintext before fused relay"),
+        payload.len()
+    );
+    let initial_write_calls = transport.lock().expect("transport").write_calls;
+    sequence.lock().expect("sequence").clear();
+
+    let reads = Arc::new(Mutex::new(VecDeque::new()));
+    let pending_waker = Arc::new(Mutex::new(None));
+    let mut plain = PendingAfterReadyPlain {
+        reads,
+        sequence: Arc::clone(&sequence),
+        read_count: Arc::new(AtomicUsize::new(0)),
+        pending_waker,
+    };
+    let progressed = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&progressed);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        move |direction, bytes| {
+            if direction == FusedRelayDirection::PlainToTunnel {
+                observed.fetch_add(bytes, Ordering::SeqCst);
+            }
+        },
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(progressed.load(Ordering::SeqCst), 0);
+    assert_eq!(*sequence.lock().expect("sequence"), ["WRITE"]);
+    let observed_wire = transport.lock().expect("transport").writes[initial_write_calls..]
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    let request_salt = method_salt_from_u64(MethodProfile::Blake3Aes128Gcm2022, 50);
+    let expected_wire = request_data_frames(&request_salt, &[payload.as_slice()])
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(observed_wire, expected_wire);
+}
+
+#[tokio::test]
+async fn cooperative_budget_yields_before_reading_an_unbounded_ready_source() {
+    const FRAME_COUNT: usize = 256;
+
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let mut flow = sequenced_client_flow(
+        Arc::clone(&sequence),
+        false,
+        None,
+        0,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    sequence.lock().expect("sequence").clear();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let read_polls = Arc::new(AtomicUsize::new(0));
+    let mut plain = AlwaysReadyPlain {
+        reads: (0..FRAME_COUNT).map(|value| vec![value as u8]).collect(),
+        sequence: Arc::clone(&sequence),
+        read_count: Arc::clone(&read_count),
+        read_polls: Arc::clone(&read_polls),
+        shutdown_polls: Arc::new(AtomicUsize::new(0)),
+        pending_shutdowns: 0,
+    };
+    let progressed = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&progressed);
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        move |direction, bytes| {
+            if direction == FusedRelayDirection::PlainToTunnel {
+                observed.fetch_add(bytes, Ordering::SeqCst);
+            }
+        },
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    tokio::task::yield_now().await;
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    let first_quantum_frames = read_count.load(Ordering::SeqCst);
+    assert!(first_quantum_frames > 1);
+    assert!(first_quantum_frames < FRAME_COUNT);
+    assert!(!tokio::task::coop::has_budget_remaining());
+
+    tokio::task::yield_now().await;
+    assert!(
+        wake_counter.0.load(Ordering::SeqCst) >= 1,
+        "coop defers the relay waker before returning Pending"
+    );
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(read_count.load(Ordering::SeqCst), FRAME_COUNT);
+
+    tokio::task::yield_now().await;
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(read_count.load(Ordering::SeqCst), FRAME_COUNT);
+    assert_eq!(read_polls.load(Ordering::SeqCst), FRAME_COUNT + 1);
+    assert_eq!(progressed.load(Ordering::SeqCst), FRAME_COUNT);
+    assert_eq!(
+        sequence.lock().expect("sequence").len(),
+        FRAME_COUNT * 2,
+        "each frame has exactly one source read and one complete wire write"
+    );
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(read_polls.load(Ordering::SeqCst), FRAME_COUNT + 1);
 }
 
 #[tokio::test]
@@ -1303,15 +1589,34 @@ async fn sequenced_client_flow(
     pending_shutdowns: usize,
     shutdown_polls: Arc<AtomicUsize>,
 ) -> ClientFlow<'static, SequencedIo, MethodKeyAdapter<MethodSinglePskProvider>, FakeClock> {
-    let keys = Box::leak(Box::new(method_provider(
-        MethodProfile::Blake3Aes128Gcm2022,
-    )));
+    sequenced_client_flow_with_observation(
+        sequence,
+        pending_after_handshake,
+        write_limit,
+        pending_shutdowns,
+        shutdown_polls,
+    )
+    .await
+    .0
+}
+
+async fn sequenced_client_flow_with_observation(
+    sequence: Arc<Mutex<Vec<&'static str>>>,
+    pending_after_handshake: bool,
+    write_limit: Option<usize>,
+    pending_shutdowns: usize,
+    shutdown_polls: Arc<AtomicUsize>,
+) -> (
+    ClientFlow<'static, SequencedIo, MethodKeyAdapter<MethodSinglePskProvider>, FakeClock>,
+    Arc<Mutex<IoObservation>>,
+) {
+    let keys = Box::leak(Box::new(provider()));
     let clock = Box::leak(Box::new(FakeClock::new(NOW, 0)));
     let request_salt = method_salt_from_u64(MethodProfile::Blake3Aes128Gcm2022, 50);
     let random = Box::leak(Box::new(ScriptedRandom::new(client_random_bytes(
         &request_salt,
     ))));
-    let (inner, _) = RecordingIo::new([]);
+    let (inner, observation) = RecordingIo::new([]);
     let inner = inner.with_pending_reads(usize::MAX);
     let inner = match write_limit {
         Some(limit) => inner.with_write_limit_after(1, limit),
@@ -1329,13 +1634,14 @@ async fn sequenced_client_flow(
         },
     )))));
     let outbound = ClientTcpOutbound::new(server_target(), keys, connector, clock, random);
-    outbound
+    let flow = outbound
         .connect_server()
         .await
         .expect("client connect")
         .write_request(&target())
         .await
-        .expect("client request")
+        .expect("client request");
+    (flow, observation)
 }
 
 async fn fused_round_trip(profile: MethodProfile, profile_index: u64, payload_len: usize) {
