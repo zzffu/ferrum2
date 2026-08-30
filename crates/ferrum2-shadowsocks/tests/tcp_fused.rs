@@ -200,6 +200,254 @@ impl Connector for SequencedConnector {
     }
 }
 
+struct RoundIo {
+    reads: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    sequence: Arc<Mutex<Vec<&'static str>>>,
+    read_polls: Arc<AtomicUsize>,
+    write_polls: Arc<AtomicUsize>,
+    pending_read_waker: Arc<Mutex<Option<Waker>>>,
+    read_error_when_empty: Arc<AtomicBool>,
+    shutdown_failure_polls: Option<Arc<AtomicUsize>>,
+    eof_when_empty: Arc<AtomicBool>,
+}
+
+impl TransportIo for RoundIo {
+    type IoError = SourceSentinel;
+
+    fn poll_read_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut BytesMut,
+        limit: usize,
+    ) -> Poll<Result<usize, Self::IoError>> {
+        self.read_polls.fetch_add(1, Ordering::SeqCst);
+        let Some(source) = self.reads.lock().expect("tunnel reads").pop_front() else {
+            if self.read_error_when_empty.load(Ordering::SeqCst) {
+                return Poll::Ready(Err(SourceSentinel));
+            }
+            if self.eof_when_empty.load(Ordering::SeqCst) {
+                return Poll::Ready(Ok(0));
+            }
+            *self.pending_read_waker.lock().expect("tunnel read waker") = Some(cx.waker().clone());
+            return Poll::Pending;
+        };
+        let copied = source.len().min(limit);
+        destination.extend_from_slice(&source[..copied]);
+        if copied < source.len() {
+            self.reads
+                .lock()
+                .expect("tunnel reads")
+                .push_front(source[copied..].to_vec());
+        }
+        self.sequence
+            .lock()
+            .expect("round sequence")
+            .push("DOWNLOAD_READ");
+        Poll::Ready(Ok(copied))
+    }
+
+    fn poll_read_initialized(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        let mut temporary = BytesMut::with_capacity(destination.len());
+        match self
+            .as_mut()
+            .poll_read_buf(cx, &mut temporary, destination.len())
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(read)) => {
+                destination[..read].copy_from_slice(&temporary);
+                Poll::Ready(Ok(read))
+            }
+        }
+    }
+
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<Result<usize, Self::IoError>> {
+        self.write_polls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("round sequence")
+            .push("UPLOAD_WRITE");
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::IoError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::IoError>> {
+        if let Some(polls) = &self.shutdown_failure_polls {
+            polls.fetch_add(1, Ordering::SeqCst);
+            return Poll::Ready(Err(SourceSentinel));
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AbortiveClose for RoundIo {
+    type Error = ();
+
+    fn mark_abortive(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl LocalEndpoint for RoundIo {
+    fn local_socket_addr(&self) -> SocketAddr {
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 49_153).into()
+    }
+}
+
+struct RoundPlain {
+    reads: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    sequence: Arc<Mutex<Vec<&'static str>>>,
+    read_polls: Arc<AtomicUsize>,
+    write_polls: Arc<AtomicUsize>,
+    pending_read_waker: Arc<Mutex<Option<Waker>>>,
+    accepted: Arc<Mutex<Vec<u8>>>,
+}
+
+impl AsyncRead for RoundPlain {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.read_polls.fetch_add(1, Ordering::SeqCst);
+        let Some(source) = self.reads.lock().expect("plain reads").pop_front() else {
+            *self.pending_read_waker.lock().expect("plain read waker") = Some(cx.waker().clone());
+            return Poll::Pending;
+        };
+        assert!(source.len() <= buffer.remaining());
+        buffer.put_slice(&source);
+        self.sequence
+            .lock()
+            .expect("round sequence")
+            .push("UPLOAD_READ");
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for RoundPlain {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_polls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("round sequence")
+            .push("DOWNLOAD_WRITE");
+        self.accepted
+            .lock()
+            .expect("accepted download")
+            .extend_from_slice(source);
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct ErrorReadyPlain {
+    read_error_ready: Arc<AtomicBool>,
+    read_polls: Arc<AtomicUsize>,
+    pending_read_waker: Arc<Mutex<Option<Waker>>>,
+    shutdown_failure_polls: Option<Arc<AtomicUsize>>,
+}
+
+impl AsyncRead for ErrorReadyPlain {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.read_polls.fetch_add(1, Ordering::SeqCst);
+        if self.read_error_ready.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()));
+        }
+        *self.pending_read_waker.lock().expect("plain read waker") = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for ErrorReadyPlain {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(polls) = &self.shutdown_failure_polls {
+            polls.fetch_add(1, Ordering::SeqCst);
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct EofReadyPlain {
+    eof_ready: Arc<AtomicBool>,
+    read_polls: Arc<AtomicUsize>,
+    pending_read_waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl AsyncRead for EofReadyPlain {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.read_polls.fetch_add(1, Ordering::SeqCst);
+        if self.eof_ready.load(Ordering::SeqCst) {
+            return Poll::Ready(Ok(()));
+        }
+        *self.pending_read_waker.lock().expect("plain read waker") = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for EofReadyPlain {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(source.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 struct AlwaysReadyPlain {
     reads: VecDeque<Vec<u8>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
@@ -476,6 +724,66 @@ type TestServerFlow = ServerFlow<
     ScriptedRandom,
 >;
 
+type RoundServerFlow = ServerFlow<
+    'static,
+    RoundIo,
+    MethodKeyAdapter<MethodSinglePskProvider>,
+    FakeClock,
+    ScriptedRandom,
+>;
+
+struct RoundIoControls {
+    sequence: Arc<Mutex<Vec<&'static str>>>,
+    read_polls: Arc<AtomicUsize>,
+    write_polls: Arc<AtomicUsize>,
+    pending_read_waker: Arc<Mutex<Option<Waker>>>,
+    read_error_when_empty: Arc<AtomicBool>,
+    shutdown_failure_polls: Option<Arc<AtomicUsize>>,
+    eof_when_empty: Arc<AtomicBool>,
+}
+
+async fn round_server_flow(
+    request_salt: ferrum2_crypto::MethodTcpSalt,
+    frames: Vec<Vec<u8>>,
+    controls: RoundIoControls,
+) -> (RoundServerFlow, Arc<Mutex<VecDeque<Vec<u8>>>>) {
+    let keys = Box::leak(Box::new(provider()));
+    let clock = Box::leak(Box::new(FakeClock::new(NOW, 0)));
+    let response_salt = salt_from_u64(9_001);
+    let random = Box::leak(Box::new(ScriptedRandom::new(
+        response_salt.as_bytes().iter().copied(),
+    )));
+    let replay = Box::leak(Box::new(
+        TcpReplayStore::new(1024).expect("replay capacity"),
+    ));
+    let request = valid_request_wire(NOW, &request_salt);
+    let reads = Arc::new(Mutex::new(
+        [
+            request[..ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN].to_vec(),
+            request[ferrum2_shadowsocks::REQUEST_FIRST_READ_LEN..].to_vec(),
+        ]
+        .into_iter()
+        .chain(frames)
+        .collect(),
+    ));
+    let io = RoundIo {
+        reads: Arc::clone(&reads),
+        sequence: controls.sequence,
+        read_polls: controls.read_polls,
+        write_polls: controls.write_polls,
+        pending_read_waker: controls.pending_read_waker,
+        read_error_when_empty: controls.read_error_when_empty,
+        shutdown_failure_polls: controls.shutdown_failure_polls,
+        eof_when_empty: controls.eof_when_empty,
+    };
+    let flow = ShadowsocksTcpInbound::new(keys, clock, random, replay)
+        .accept_stream(io)
+        .await
+        .expect("server request")
+        .stream;
+    (flow, reads)
+}
+
 async fn observed_server_flow(
     request_salt: ferrum2_crypto::MethodTcpSalt,
     frames: Vec<Vec<u8>>,
@@ -521,6 +829,518 @@ fn decrypt_pointer(observers: &RecordingObservers) -> usize {
 }
 
 #[tokio::test]
+async fn cooperative_rounds_bound_both_ready_directions_and_flip_outer_priority() {
+    let request_salt = salt_from_u64(2_001);
+    let first_download = b"first ready download";
+    let second_download = b"second ready download";
+    let frames = request_data_frames(&request_salt, &[first_download, second_download]);
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+    let tunnel_write_polls = Arc::new(AtomicUsize::new(0));
+    let pending_tunnel_read_waker = Arc::new(Mutex::new(None));
+    let (mut flow, tunnel_reads) = round_server_flow(
+        request_salt,
+        frames[..2].to_vec(),
+        RoundIoControls {
+            sequence: Arc::clone(&sequence),
+            read_polls: Arc::clone(&tunnel_read_polls),
+            write_polls: Arc::clone(&tunnel_write_polls),
+            pending_read_waker: Arc::clone(&pending_tunnel_read_waker),
+            read_error_when_empty: Arc::new(AtomicBool::new(false)),
+            shutdown_failure_polls: None,
+            eof_when_empty: Arc::new(AtomicBool::new(false)),
+        },
+    )
+    .await;
+    sequence.lock().expect("round sequence").clear();
+    tunnel_read_polls.store(0, Ordering::SeqCst);
+    tunnel_write_polls.store(0, Ordering::SeqCst);
+
+    let plain_reads = Arc::new(Mutex::new([vec![0x11], vec![0x22]].into_iter().collect()));
+    let plain_read_polls = Arc::new(AtomicUsize::new(0));
+    let plain_write_polls = Arc::new(AtomicUsize::new(0));
+    let pending_plain_read_waker = Arc::new(Mutex::new(None));
+    let accepted = Arc::new(Mutex::new(Vec::new()));
+    let mut plain = RoundPlain {
+        reads: Arc::clone(&plain_reads),
+        sequence: Arc::clone(&sequence),
+        read_polls: Arc::clone(&plain_read_polls),
+        write_polls: Arc::clone(&plain_write_polls),
+        pending_read_waker: Arc::clone(&pending_plain_read_waker),
+        accepted: Arc::clone(&accepted),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(
+        *sequence.lock().expect("round sequence"),
+        [
+            "UPLOAD_READ",
+            "UPLOAD_WRITE",
+            "DOWNLOAD_READ",
+            "UPLOAD_READ",
+            "UPLOAD_WRITE",
+            "DOWNLOAD_READ",
+            "DOWNLOAD_WRITE",
+        ]
+    );
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 3);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 3);
+
+    plain_reads
+        .lock()
+        .expect("plain reads")
+        .push_back(vec![0x33]);
+    tunnel_reads
+        .lock()
+        .expect("tunnel reads")
+        .extend(frames[2..].iter().cloned());
+    pending_plain_read_waker
+        .lock()
+        .expect("plain read waker")
+        .take()
+        .expect("upload registered waker")
+        .wake();
+    pending_tunnel_read_waker
+        .lock()
+        .expect("tunnel read waker")
+        .take()
+        .expect("download registered waker")
+        .wake();
+    let before = sequence.lock().expect("round sequence").len();
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(
+        &sequence.lock().expect("round sequence")[before..],
+        [
+            "DOWNLOAD_READ",
+            "UPLOAD_READ",
+            "UPLOAD_WRITE",
+            "DOWNLOAD_READ",
+            "DOWNLOAD_WRITE",
+        ]
+    );
+    assert_eq!(
+        *accepted.lock().expect("accepted download"),
+        [first_download.as_slice(), second_download.as_slice()].concat()
+    );
+}
+
+#[tokio::test]
+async fn blocked_upload_is_not_repolled_while_ready_download_continues() {
+    let request_salt = salt_from_u64(2_002);
+    let downloads = [b"download one".as_slice(), b"download two".as_slice()];
+    let frames = request_data_frames(&request_salt, &downloads);
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+    let tunnel_write_polls = Arc::new(AtomicUsize::new(0));
+    let pending_tunnel_read_waker = Arc::new(Mutex::new(None));
+    let (mut flow, _) = round_server_flow(
+        request_salt,
+        frames,
+        RoundIoControls {
+            sequence: Arc::clone(&sequence),
+            read_polls: Arc::clone(&tunnel_read_polls),
+            write_polls: tunnel_write_polls,
+            pending_read_waker: pending_tunnel_read_waker,
+            read_error_when_empty: Arc::new(AtomicBool::new(false)),
+            shutdown_failure_polls: None,
+            eof_when_empty: Arc::new(AtomicBool::new(false)),
+        },
+    )
+    .await;
+    sequence.lock().expect("round sequence").clear();
+    tunnel_read_polls.store(0, Ordering::SeqCst);
+
+    let plain_read_polls = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::new(Mutex::new(Vec::new()));
+    let mut plain = RoundPlain {
+        reads: Arc::new(Mutex::new(VecDeque::new())),
+        sequence: Arc::clone(&sequence),
+        read_polls: Arc::clone(&plain_read_polls),
+        write_polls: Arc::new(AtomicUsize::new(0)),
+        pending_read_waker: Arc::new(Mutex::new(None)),
+        accepted: Arc::clone(&accepted),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        *accepted.lock().expect("accepted download"),
+        downloads.concat()
+    );
+}
+
+#[tokio::test]
+async fn dual_real_pending_returns_without_synthetic_wake_or_repoll() {
+    let request_salt = salt_from_u64(2_003);
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+    let tunnel_write_polls = Arc::new(AtomicUsize::new(0));
+    let pending_tunnel_read_waker = Arc::new(Mutex::new(None));
+    let (mut flow, _) = round_server_flow(
+        request_salt,
+        Vec::new(),
+        RoundIoControls {
+            sequence: Arc::clone(&sequence),
+            read_polls: Arc::clone(&tunnel_read_polls),
+            write_polls: tunnel_write_polls,
+            pending_read_waker: Arc::clone(&pending_tunnel_read_waker),
+            read_error_when_empty: Arc::new(AtomicBool::new(false)),
+            shutdown_failure_polls: None,
+            eof_when_empty: Arc::new(AtomicBool::new(false)),
+        },
+    )
+    .await;
+    sequence.lock().expect("round sequence").clear();
+    tunnel_read_polls.store(0, Ordering::SeqCst);
+
+    let plain_read_polls = Arc::new(AtomicUsize::new(0));
+    let pending_plain_read_waker = Arc::new(Mutex::new(None));
+    let mut plain = RoundPlain {
+        reads: Arc::new(Mutex::new(VecDeque::new())),
+        sequence,
+        read_polls: Arc::clone(&plain_read_polls),
+        write_polls: Arc::new(AtomicUsize::new(0)),
+        pending_read_waker: Arc::clone(&pending_plain_read_waker),
+        accepted: Arc::new(Mutex::new(Vec::new())),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+    assert!(
+        pending_plain_read_waker
+            .lock()
+            .expect("plain waker")
+            .is_some()
+    );
+    assert!(
+        pending_tunnel_read_waker
+            .lock()
+            .expect("tunnel waker")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn simultaneous_errors_follow_the_outer_poll_direction_priority() {
+    for (prepoll_to_flip_priority, expected_kind) in [
+        (false, io::ErrorKind::ConnectionAborted),
+        (true, io::ErrorKind::Other),
+    ] {
+        let request_salt = salt_from_u64(if prepoll_to_flip_priority {
+            2_005
+        } else {
+            2_006
+        });
+        let sequence = Arc::new(Mutex::new(Vec::new()));
+        let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+        let tunnel_write_polls = Arc::new(AtomicUsize::new(0));
+        let pending_tunnel_read_waker = Arc::new(Mutex::new(None));
+        let tunnel_error_ready = Arc::new(AtomicBool::new(false));
+        let (mut flow, _) = round_server_flow(
+            request_salt,
+            Vec::new(),
+            RoundIoControls {
+                sequence,
+                read_polls: Arc::clone(&tunnel_read_polls),
+                write_polls: tunnel_write_polls,
+                pending_read_waker: Arc::clone(&pending_tunnel_read_waker),
+                read_error_when_empty: Arc::clone(&tunnel_error_ready),
+                shutdown_failure_polls: None,
+                eof_when_empty: Arc::new(AtomicBool::new(false)),
+            },
+        )
+        .await;
+        tunnel_read_polls.store(0, Ordering::SeqCst);
+
+        let plain_error_ready = Arc::new(AtomicBool::new(false));
+        let plain_read_polls = Arc::new(AtomicUsize::new(0));
+        let pending_plain_read_waker = Arc::new(Mutex::new(None));
+        let mut plain = ErrorReadyPlain {
+            read_error_ready: Arc::clone(&plain_error_ready),
+            read_polls: Arc::clone(&plain_read_polls),
+            pending_read_waker: Arc::clone(&pending_plain_read_waker),
+            shutdown_failure_polls: None,
+        };
+        #[cfg(feature = "structural-metrics")]
+        let structural = StructuralHub::new().local();
+        let mut relay = Box::pin(relay_server_flow(
+            &mut plain,
+            &mut flow,
+            |_, _| {},
+            #[cfg(feature = "structural-metrics")]
+            &structural,
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        if prepoll_to_flip_priority {
+            assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+            assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 1);
+        }
+
+        plain_error_ready.store(true, Ordering::SeqCst);
+        tunnel_error_ready.store(true, Ordering::SeqCst);
+        if prepoll_to_flip_priority {
+            pending_plain_read_waker
+                .lock()
+                .expect("plain read waker")
+                .take()
+                .expect("upload registered waker")
+                .wake();
+            pending_tunnel_read_waker
+                .lock()
+                .expect("tunnel read waker")
+                .take()
+                .expect("download registered waker")
+                .wake();
+        }
+
+        let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
+            panic!("the first direction error must terminate the relay");
+        };
+        assert_eq!(error.kind(), expected_kind);
+        if prepoll_to_flip_priority {
+            assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+            assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 2);
+        } else {
+            assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+            assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn upload_eof_shutdown_error_precedes_a_ready_download_error() {
+    let request_salt = salt_from_u64(2_007);
+    let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+    let tunnel_error_ready = Arc::new(AtomicBool::new(false));
+    let tunnel_shutdown_polls = Arc::new(AtomicUsize::new(0));
+    let (mut flow, _) = round_server_flow(
+        request_salt,
+        Vec::new(),
+        RoundIoControls {
+            sequence: Arc::new(Mutex::new(Vec::new())),
+            read_polls: Arc::clone(&tunnel_read_polls),
+            write_polls: Arc::new(AtomicUsize::new(0)),
+            pending_read_waker: Arc::new(Mutex::new(None)),
+            read_error_when_empty: Arc::clone(&tunnel_error_ready),
+            shutdown_failure_polls: Some(Arc::clone(&tunnel_shutdown_polls)),
+            eof_when_empty: Arc::new(AtomicBool::new(false)),
+        },
+    )
+    .await;
+    tunnel_read_polls.store(0, Ordering::SeqCst);
+    tunnel_error_ready.store(true, Ordering::SeqCst);
+
+    let plain_read_polls = Arc::new(AtomicUsize::new(0));
+    let mut plain = EofReadyPlain {
+        eof_ready: Arc::new(AtomicBool::new(true)),
+        read_polls: Arc::clone(&plain_read_polls),
+        pending_read_waker: Arc::new(Mutex::new(None)),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
+        panic!("upload EOF shutdown failure must terminate the relay");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(tunnel_shutdown_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn download_eof_shutdown_error_precedes_upload_after_priority_flip() {
+    let request_salt = salt_from_u64(2_008);
+    let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+    let pending_tunnel_read_waker = Arc::new(Mutex::new(None));
+    let tunnel_eof_ready = Arc::new(AtomicBool::new(false));
+    let (mut flow, _) = round_server_flow(
+        request_salt,
+        Vec::new(),
+        RoundIoControls {
+            sequence: Arc::new(Mutex::new(Vec::new())),
+            read_polls: Arc::clone(&tunnel_read_polls),
+            write_polls: Arc::new(AtomicUsize::new(0)),
+            pending_read_waker: Arc::clone(&pending_tunnel_read_waker),
+            read_error_when_empty: Arc::new(AtomicBool::new(false)),
+            shutdown_failure_polls: None,
+            eof_when_empty: Arc::clone(&tunnel_eof_ready),
+        },
+    )
+    .await;
+    tunnel_read_polls.store(0, Ordering::SeqCst);
+
+    let plain_error_ready = Arc::new(AtomicBool::new(false));
+    let plain_read_polls = Arc::new(AtomicUsize::new(0));
+    let pending_plain_read_waker = Arc::new(Mutex::new(None));
+    let plain_shutdown_polls = Arc::new(AtomicUsize::new(0));
+    let mut plain = ErrorReadyPlain {
+        read_error_ready: Arc::clone(&plain_error_ready),
+        read_polls: Arc::clone(&plain_read_polls),
+        pending_read_waker: Arc::clone(&pending_plain_read_waker),
+        shutdown_failure_polls: Some(Arc::clone(&plain_shutdown_polls)),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 1);
+
+    plain_error_ready.store(true, Ordering::SeqCst);
+    tunnel_eof_ready.store(true, Ordering::SeqCst);
+    pending_plain_read_waker
+        .lock()
+        .expect("plain read waker")
+        .take()
+        .expect("upload registered waker")
+        .wake();
+    pending_tunnel_read_waker
+        .lock()
+        .expect("tunnel read waker")
+        .take()
+        .expect("download registered waker")
+        .wake();
+
+    let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
+        panic!("download EOF shutdown failure must terminate the relay");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(plain_shutdown_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cooperative_exhaustion_bounds_zero_frame_bidirectional_fairness() {
+    const ROUND_COUNT: usize = 160;
+
+    let request_salt = salt_from_u64(2_004);
+    let zero_payloads = vec![&b""[..]; ROUND_COUNT];
+    let frames = request_data_frames(&request_salt, &zero_payloads);
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let tunnel_read_polls = Arc::new(AtomicUsize::new(0));
+    let tunnel_write_polls = Arc::new(AtomicUsize::new(0));
+    let (mut flow, _) = round_server_flow(
+        request_salt,
+        frames,
+        RoundIoControls {
+            sequence: Arc::clone(&sequence),
+            read_polls: Arc::clone(&tunnel_read_polls),
+            write_polls: Arc::clone(&tunnel_write_polls),
+            pending_read_waker: Arc::new(Mutex::new(None)),
+            read_error_when_empty: Arc::new(AtomicBool::new(false)),
+            shutdown_failure_polls: None,
+            eof_when_empty: Arc::new(AtomicBool::new(false)),
+        },
+    )
+    .await;
+    sequence.lock().expect("round sequence").clear();
+    tunnel_read_polls.store(0, Ordering::SeqCst);
+    tunnel_write_polls.store(0, Ordering::SeqCst);
+
+    let plain_read_polls = Arc::new(AtomicUsize::new(0));
+    let plain_reads = (0..ROUND_COUNT).map(|value| vec![value as u8]).collect();
+    let mut plain = RoundPlain {
+        reads: Arc::new(Mutex::new(plain_reads)),
+        sequence: Arc::clone(&sequence),
+        read_polls: Arc::clone(&plain_read_polls),
+        write_polls: Arc::new(AtomicUsize::new(0)),
+        pending_read_waker: Arc::new(Mutex::new(None)),
+        accepted: Arc::new(Mutex::new(Vec::new())),
+    };
+    #[cfg(feature = "structural-metrics")]
+    let structural = StructuralHub::new().local();
+    let mut relay = Box::pin(relay_server_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        #[cfg(feature = "structural-metrics")]
+        &structural,
+    ));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    tokio::task::yield_now().await;
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(!tokio::task::coop::has_budget_remaining());
+    assert_eq!(plain_read_polls.load(Ordering::SeqCst), 128);
+    assert_eq!(tunnel_write_polls.load(Ordering::SeqCst), 128);
+    assert_eq!(tunnel_read_polls.load(Ordering::SeqCst), 128);
+    assert_eq!(
+        &sequence.lock().expect("round sequence")[..6],
+        [
+            "UPLOAD_READ",
+            "UPLOAD_WRITE",
+            "DOWNLOAD_READ",
+            "UPLOAD_READ",
+            "UPLOAD_WRITE",
+            "DOWNLOAD_READ",
+        ]
+    );
+
+    tokio::task::yield_now().await;
+    assert!(
+        wake_counter.0.load(Ordering::SeqCst) >= 1,
+        "coop exhaustion defers the relay waker"
+    );
+}
+
+#[tokio::test]
 async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
     let request_salt = salt_from_u64(1_001);
     let payload = b"worker-local direct payload";
@@ -550,8 +1370,6 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
     let mut cx = Context::from_waker(&waker);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 3);
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
 
     let sink_observation = sink.lock().expect("sink observation");
     assert_eq!(sink_observation.polls, 1);
@@ -559,12 +1377,8 @@ async fn fused_full_write_forwards_worker_local_plaintext_without_buffering() {
     assert_eq!(sink_observation.accepted, payload);
     assert_ne!(sink_observation.pointers[0], decrypt_pointer);
     assert_eq!(progressed.load(Ordering::SeqCst), payload.len());
-    assert_eq!(transport.lock().expect("transport").read_calls, 4);
-    drop(sink_observation);
-
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(transport.lock().expect("transport").read_calls, 5);
-    assert_eq!(sink.lock().expect("sink observation").polls, 1);
+    drop(sink_observation);
     drop(relay);
     #[cfg(feature = "structural-metrics")]
     {
@@ -608,9 +1422,7 @@ async fn fused_pending_materializes_once_and_resumes_from_flow_scratch() {
     let mut cx = Context::from_waker(&waker);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
     assert_eq!(progressed.load(Ordering::SeqCst), 0);
 
     pending_waker
@@ -619,7 +1431,7 @@ async fn fused_pending_materializes_once_and_resumes_from_flow_scratch() {
         .take()
         .expect("direct sink registered the relay waker")
         .wake();
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
 
     let sink = sink.lock().expect("sink observation");
@@ -672,9 +1484,6 @@ async fn fused_partial_write_materializes_only_the_unwritten_suffix() {
     let mut cx = Context::from_waker(Waker::noop());
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(progressed.load(Ordering::SeqCst), prefix);
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
 
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 2);
@@ -726,7 +1535,6 @@ async fn fused_sink_failures_restore_the_complete_authenticated_view() {
         ));
         let mut cx = Context::from_waker(Waker::noop());
 
-        assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
         let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
             panic!("sink failure must end the fused relay");
         };
@@ -770,7 +1578,6 @@ async fn fused_tamper_never_polls_sink_and_freezes_the_protocol_terminal() {
     ));
     let mut cx = Context::from_waker(Waker::noop());
 
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     let Poll::Ready(Err(error)) = relay.as_mut().poll(&mut cx) else {
         panic!("tampered payload must terminate the relay");
     };
@@ -811,16 +1618,8 @@ async fn fused_zero_frame_preserves_the_length_boundary_without_polling_sink() {
     ));
     let mut cx = Context::from_waker(Waker::noop());
 
-    for expected_reads in 3..=5 {
-        assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-        assert_eq!(
-            transport.lock().expect("transport").read_calls,
-            expected_reads
-        );
-        assert_eq!(sink.lock().expect("sink observation").polls, 0);
-    }
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 6);
+    assert_eq!(transport.lock().expect("transport").read_calls, 7);
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.accepted, payload);
@@ -864,7 +1663,7 @@ async fn fused_client_initial_response_keeps_the_buffered_flow_view() {
     let mut cx = Context::from_waker(Waker::noop());
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(transport.lock().expect("transport").read_calls, 2);
+    assert_eq!(transport.lock().expect("transport").read_calls, 3);
     let sink = sink.lock().expect("sink observation");
     assert_eq!(sink.polls, 1);
     assert_eq!(sink.sources, [payload.to_vec()]);
@@ -1047,13 +1846,9 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
     let mut cx = Context::from_waker(&waker);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(observation.lock().expect("observation").read_calls, 3);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(observation.lock().expect("observation").read_calls, 4);
     assert_eq!(write_polls.load(Ordering::SeqCst), 1);
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
     assert!(accepted.lock().expect("accepted plaintext").is_empty());
 
     ready.store(true, Ordering::SeqCst);
@@ -1063,22 +1858,11 @@ async fn externally_woken_carried_download_polls_one_next_fill() {
         .take()
         .expect("sink registered the relay waker")
         .wake();
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
-
-    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
-    assert_eq!(write_polls.load(Ordering::SeqCst), 2);
-    assert_eq!(&*accepted.lock().expect("accepted plaintext"), first);
-    assert_eq!(progressed.load(Ordering::SeqCst), first.len());
-    assert_eq!(
-        observation.lock().expect("observation").read_calls,
-        5,
-        "carried completion attempts exactly one fresh tunnel fill"
-    );
-    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
 
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
     assert_eq!(write_polls.load(Ordering::SeqCst), 3);
-    assert_eq!(observation.lock().expect("observation").read_calls, 6);
+    assert_eq!(observation.lock().expect("observation").read_calls, 7);
     let expected = first
         .iter()
         .chain(second.iter())
@@ -1179,6 +1963,7 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
         "partial wire is not plaintext progress"
     );
     for _ in 0..14 {
+        tokio::task::yield_now().await;
         assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
         if read_count.load(Ordering::SeqCst) == 2 {
             break;

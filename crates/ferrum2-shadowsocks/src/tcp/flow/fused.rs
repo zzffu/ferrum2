@@ -11,7 +11,7 @@ use ferrum2_crypto::{Clock, SecureRandom, generate_method_response_salt};
 use ferrum2_structural::{StructuralCounter, StructuralLocal};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::io::{FusedDataPoll, FusedDataRead, FusedSinkPoll, drain_staged, poll_data_forward};
+use super::io::{FusedDataPoll, FusedDataRead, FusedSinkPoll, poll_data_forward, poll_staged_once};
 use super::{
     ClientFlow, ClientRx, DataRx, PlainBufferedDuplex, ServerFlow, StagedKind, StagedWrite,
     TransportIo, TxState, protocol_cipher_boundary,
@@ -31,9 +31,34 @@ pub(crate) enum FusedRelayDirection {
     TunnelToPlain,
 }
 
-enum DownloadStep {
-    PlaintextWritten,
-    DirectionDone,
+#[derive(Clone, Copy)]
+struct DirectionStep {
+    progressed: bool,
+    blocked: bool,
+    done: bool,
+}
+
+impl DirectionStep {
+    const ADVANCED: Self = Self {
+        progressed: true,
+        blocked: false,
+        done: false,
+    };
+    const BLOCKED: Self = Self {
+        progressed: false,
+        blocked: true,
+        done: false,
+    };
+    const PROGRESSED_AND_BLOCKED: Self = Self {
+        progressed: true,
+        blocked: true,
+        done: false,
+    };
+    const DONE: Self = Self {
+        progressed: true,
+        blocked: false,
+        done: true,
+    };
 }
 
 pub(crate) fn fused_relay<'a, P, F, O>(
@@ -154,26 +179,59 @@ where
         let upload_first = this.upload_first;
         this.upload_first = !this.upload_first;
 
-        if upload_first {
-            if let Poll::Ready(result) = this.poll_upload(cx) {
-                result?;
+        let mut upload_blocked = false;
+        let mut download_blocked = false;
+        loop {
+            if this.upload_done && this.download_done {
+                return Poll::Ready(Ok(()));
             }
-            if let Poll::Ready(result) = this.poll_download(cx) {
-                result?;
+            if (this.upload_done || upload_blocked) && (this.download_done || download_blocked) {
+                return Poll::Pending;
             }
-        } else {
-            if let Poll::Ready(result) = this.poll_download(cx) {
-                result?;
-            }
-            if let Poll::Ready(result) = this.poll_upload(cx) {
-                result?;
-            }
-        }
 
-        if this.upload_done && this.download_done {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
+            let cooperative = match tokio::task::coop::poll_proceed(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(cooperative) => cooperative,
+            };
+            let mut round_progressed = false;
+
+            if upload_first {
+                if !this.upload_done && !upload_blocked {
+                    let step = this.poll_upload_quantum(cx)?;
+                    round_progressed |= step.progressed;
+                    upload_blocked = step.blocked;
+                    debug_assert_eq!(step.done, this.upload_done);
+                }
+                if !this.download_done && !download_blocked {
+                    let step = this.poll_download_quantum(cx)?;
+                    round_progressed |= step.progressed;
+                    download_blocked = step.blocked;
+                    debug_assert_eq!(step.done, this.download_done);
+                }
+            } else {
+                if !this.download_done && !download_blocked {
+                    let step = this.poll_download_quantum(cx)?;
+                    round_progressed |= step.progressed;
+                    download_blocked = step.blocked;
+                    debug_assert_eq!(step.done, this.download_done);
+                }
+                if !this.upload_done && !upload_blocked {
+                    let step = this.poll_upload_quantum(cx)?;
+                    round_progressed |= step.progressed;
+                    upload_blocked = step.blocked;
+                    debug_assert_eq!(step.done, this.upload_done);
+                }
+            }
+
+            if round_progressed {
+                cooperative.made_progress();
+            } else {
+                debug_assert!(
+                    (this.upload_done || upload_blocked)
+                        && (this.download_done || download_blocked),
+                    "a cooperative round without progress must end on real I/O Pending"
+                );
+            }
         }
     }
 }
@@ -184,17 +242,15 @@ where
     F: FusedProtocolFlow,
     O: FnMut(FusedRelayDirection, usize),
 {
-    fn poll_upload(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.upload_done {
-            return Poll::Ready(Ok(()));
-        }
+    fn poll_upload_quantum(&mut self, cx: &mut Context<'_>) -> io::Result<DirectionStep> {
+        debug_assert!(!self.upload_done);
         self.flow.inspect_buffers();
 
         if self.pending_upload_plaintext.is_some() {
-            return self.poll_pending_upload(cx);
+            return self.poll_pending_upload_quantum(cx, false);
         }
         if self.upload_eof {
-            return self.poll_upload_shutdown(cx);
+            return self.poll_upload_shutdown_quantum(cx, false);
         }
 
         self.flow.prepare_upload_read().map_err(framed_error)?;
@@ -205,17 +261,17 @@ where
             tokio_util::io::poll_read_buf(Pin::new(&mut *self.plain), cx, &mut limited)
         };
         let read = match read {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Ok(DirectionStep::BLOCKED),
+            Poll::Ready(Err(error)) => return Err(error),
             Poll::Ready(Ok(read)) => read,
         };
         if self.flow.upload_scratch().len() != before.saturating_add(read) {
-            return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+            return Err(io::ErrorKind::InvalidData.into());
         }
         if read == 0 {
             self.flow.discard_upload_read();
             self.upload_eof = true;
-            return self.poll_upload_shutdown(cx);
+            return self.poll_upload_shutdown_quantum(cx, true);
         }
 
         self.flow.seal_upload_read(read).map_err(framed_error)?;
@@ -225,10 +281,14 @@ where
                 self.structural_stats.owned_upload_frames.saturating_add(1);
         }
         self.pending_upload_plaintext = Some(read);
-        self.poll_pending_upload(cx)
+        self.poll_pending_upload_quantum(cx, true)
     }
 
-    fn poll_pending_upload(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_pending_upload_quantum(
+        &mut self,
+        cx: &mut Context<'_>,
+        already_progressed: bool,
+    ) -> io::Result<DirectionStep> {
         if self.flow.has_staged_upload() {
             match self
                 .flow
@@ -239,9 +299,15 @@ where
                 )
                 .map_err(framed_error)
             {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending if already_progressed => {
+                    return Ok(DirectionStep::PROGRESSED_AND_BLOCKED);
+                }
+                Poll::Pending => return Ok(DirectionStep::BLOCKED),
+                Poll::Ready(Err(error)) => return Err(error),
                 Poll::Ready(Ok(())) => {}
+            }
+            if self.flow.has_staged_upload() {
+                return Ok(DirectionStep::ADVANCED);
             }
         }
         let plaintext_len = self
@@ -251,72 +317,49 @@ where
         if plaintext_len != 0 {
             (self.observe)(FusedRelayDirection::PlainToTunnel, plaintext_len);
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        Ok(DirectionStep::ADVANCED)
     }
 
-    fn poll_upload_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_upload_shutdown_quantum(
+        &mut self,
+        cx: &mut Context<'_>,
+        already_progressed: bool,
+    ) -> io::Result<DirectionStep> {
         match Pin::new(&mut *self.flow)
             .poll_shutdown_plain(cx)
             .map_err(framed_error)
         {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending if already_progressed => Ok(DirectionStep::PROGRESSED_AND_BLOCKED),
+            Poll::Pending => Ok(DirectionStep::BLOCKED),
+            Poll::Ready(Err(error)) => Err(error),
             Poll::Ready(Ok(())) => {
                 self.upload_done = true;
-                Poll::Ready(Ok(()))
+                Ok(DirectionStep::DONE)
             }
         }
     }
 
-    fn poll_download(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.download_done {
-            return Poll::Ready(Ok(()));
-        }
+    fn poll_download_quantum(&mut self, cx: &mut Context<'_>) -> io::Result<DirectionStep> {
+        debug_assert!(!self.download_done);
         self.flow.inspect_buffers();
         if self.download_eof {
-            return self.poll_download_shutdown(cx);
+            return self.poll_download_shutdown_quantum(cx, false);
         }
-        let carried = self.download_plaintext_carried;
-        match self.poll_download_once(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Ready(Ok(DownloadStep::DirectionDone)) => return Poll::Ready(Ok(())),
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) if carried => {}
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-        }
-
-        match self.poll_download_once(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(DownloadStep::DirectionDone)) => Poll::Ready(Ok(())),
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten)) => {
-                // The continuation may contain one fresh tunnel read, so it
-                // remains a scheduling boundary after the plaintext write.
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }
+        self.poll_download_once(cx)
     }
 
-    fn poll_download_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<DownloadStep>> {
+    fn poll_download_once(&mut self, cx: &mut Context<'_>) -> io::Result<DirectionStep> {
         let download = self
             .flow
             .poll_fused_download(cx, self.plain)
             .map_err(framed_error);
         match download {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Ok(DirectionStep::BLOCKED),
+            Poll::Ready(Err(error)) => return Err(error),
+            Poll::Ready(Ok(FusedDataRead::Advanced)) => return Ok(DirectionStep::ADVANCED),
             Poll::Ready(Ok(FusedDataRead::Eof)) => {
                 self.download_eof = true;
-                return match self.poll_download_shutdown(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(())) => Poll::Ready(Ok(DownloadStep::DirectionDone)),
-                };
+                return self.poll_download_shutdown_quantum(cx, true);
             }
             Poll::Ready(Ok(FusedDataRead::Buffered)) => {}
             Poll::Ready(Ok(FusedDataRead::Forwarded(result))) => {
@@ -332,11 +375,11 @@ where
                 return match result {
                     FusedSinkPoll::Pending => {
                         self.download_plaintext_carried = true;
-                        Poll::Pending
+                        Ok(DirectionStep::PROGRESSED_AND_BLOCKED)
                     }
                     FusedSinkPoll::Error(error) => {
                         self.download_plaintext_carried = true;
-                        Poll::Ready(Err(error))
+                        Err(error)
                     }
                     FusedSinkPoll::Written {
                         bytes,
@@ -352,12 +395,7 @@ where
                             self.structural_stats.partial_writes =
                                 self.structural_stats.partial_writes.saturating_add(1);
                         }
-                        if frame_complete {
-                            Poll::Ready(Ok(DownloadStep::PlaintextWritten))
-                        } else {
-                            cx.waker().wake_by_ref();
-                            Poll::Pending
-                        }
+                        Ok(DirectionStep::ADVANCED)
                     }
                 };
             }
@@ -366,9 +404,10 @@ where
         let fill = Pin::new(&mut *self.flow)
             .poll_fill_plain_buf(cx)
             .map_err(framed_error);
+        let carried = self.download_plaintext_carried;
         let source = match fill {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Ok(DirectionStep::BLOCKED),
+            Poll::Ready(Err(error)) => return Err(error),
             Poll::Ready(Ok(source)) => source,
         };
         debug_assert!(
@@ -387,15 +426,19 @@ where
         let written = match Pin::new(&mut *self.plain).poll_write(cx, source) {
             Poll::Pending => {
                 self.download_plaintext_carried = true;
-                return Poll::Pending;
+                return Ok(if carried {
+                    DirectionStep::BLOCKED
+                } else {
+                    DirectionStep::PROGRESSED_AND_BLOCKED
+                });
             }
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => return Err(error),
             Poll::Ready(Ok(0)) => {
-                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                return Err(io::ErrorKind::WriteZero.into());
             }
             Poll::Ready(Ok(written)) if written <= source_len => written,
             Poll::Ready(Ok(_)) => {
-                return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+                return Err(io::ErrorKind::InvalidData.into());
             }
         };
         #[cfg(feature = "structural-metrics")]
@@ -410,21 +453,21 @@ where
         Pin::new(&mut *self.flow).consume_plain(written);
         (self.observe)(FusedRelayDirection::TunnelToPlain, written);
         self.download_plaintext_carried = written < source_len;
-        if self.download_plaintext_carried {
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        } else {
-            Poll::Ready(Ok(DownloadStep::PlaintextWritten))
-        }
+        Ok(DirectionStep::ADVANCED)
     }
 
-    fn poll_download_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_download_shutdown_quantum(
+        &mut self,
+        cx: &mut Context<'_>,
+        already_progressed: bool,
+    ) -> io::Result<DirectionStep> {
         match Pin::new(&mut *self.plain).poll_shutdown(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending if already_progressed => Ok(DirectionStep::PROGRESSED_AND_BLOCKED),
+            Poll::Pending => Ok(DirectionStep::BLOCKED),
+            Poll::Ready(Err(error)) => Err(error),
             Poll::Ready(Ok(())) => {
                 self.download_done = true;
-                Poll::Ready(Ok(()))
+                Ok(DirectionStep::DONE)
             }
         }
     }
@@ -577,6 +620,10 @@ where
                 self.rx = ClientRx::Data(state);
                 Poll::Pending
             }
+            FusedDataPoll::Advanced(state) => {
+                self.rx = ClientRx::Data(state);
+                Poll::Ready(Ok(FusedDataRead::Advanced))
+            }
             FusedDataPoll::Ready(state, result) => {
                 self.rx = ClientRx::Data(state);
                 Poll::Ready(result)
@@ -641,7 +688,7 @@ where
     ) -> Poll<Result<(), ShadowsocksError>> {
         #[cfg(not(feature = "structural-metrics"))]
         {
-            drain_staged(
+            poll_staged_once(
                 &mut self.io,
                 &mut self.encrypt,
                 &mut self.staged,
@@ -649,6 +696,7 @@ where
                 self.observers.flow,
                 cx,
             )
+            .map(|result| result.map(|_| ()))
         }
         #[cfg(feature = "structural-metrics")]
         {
@@ -656,7 +704,7 @@ where
                 inner: &mut self.io,
                 partial_writes,
             };
-            drain_staged(
+            poll_staged_once(
                 &mut io,
                 &mut self.encrypt,
                 &mut self.staged,
@@ -664,6 +712,7 @@ where
                 self.observers.flow,
                 cx,
             )
+            .map(|result| result.map(|_| ()))
         }
     }
 
@@ -710,6 +759,10 @@ where
             FusedDataPoll::Pending(state) => {
                 self.rx = state;
                 Poll::Pending
+            }
+            FusedDataPoll::Advanced(state) => {
+                self.rx = state;
+                Poll::Ready(Ok(FusedDataRead::Advanced))
             }
             FusedDataPoll::Ready(state, result) => {
                 self.rx = state;
@@ -845,7 +898,7 @@ where
     ) -> Poll<Result<(), ShadowsocksError>> {
         #[cfg(not(feature = "structural-metrics"))]
         {
-            drain_staged(
+            poll_staged_once(
                 &mut self.io,
                 &mut self.encrypt,
                 &mut self.staged,
@@ -853,6 +906,7 @@ where
                 self.observers.flow,
                 cx,
             )
+            .map(|result| result.map(|_| ()))
         }
         #[cfg(feature = "structural-metrics")]
         {
@@ -860,7 +914,7 @@ where
                 inner: &mut self.io,
                 partial_writes,
             };
-            drain_staged(
+            poll_staged_once(
                 &mut io,
                 &mut self.encrypt,
                 &mut self.staged,
@@ -868,6 +922,7 @@ where
                 self.observers.flow,
                 cx,
             )
+            .map(|result| result.map(|_| ()))
         }
     }
 

@@ -77,11 +77,13 @@ pub(super) enum DataRead {
 #[cfg(feature = "tokio")]
 pub(super) enum FusedDataPoll {
     Pending(DataRx),
+    Advanced(DataRx),
     Ready(DataRx, Result<FusedDataRead, ShadowsocksError>),
 }
 
 #[cfg(feature = "tokio")]
 pub(crate) enum FusedDataRead {
+    Advanced,
     Buffered,
     Eof,
     Forwarded(FusedSinkPoll),
@@ -96,6 +98,7 @@ pub(crate) enum FusedSinkPoll {
 
 enum InnerDataPoll<F> {
     Pending(DataRx),
+    Advanced(DataRx),
     Ready(DataRx, Result<InnerDataRead<F>, ShadowsocksError>),
 }
 
@@ -203,6 +206,10 @@ pub(super) fn poll_data_fill<S: TransportIo>(
         &mut delivery,
     ) {
         InnerDataPoll::Pending(state) => DataPoll::Pending(state),
+        InnerDataPoll::Advanced(state) => {
+            cx.waker().wake_by_ref();
+            DataPoll::Pending(state)
+        }
         InnerDataPoll::Ready(state, result) => DataPoll::Ready(
             state,
             result.map(|read| match read {
@@ -242,6 +249,7 @@ where
         &mut delivery,
     ) {
         InnerDataPoll::Pending(state) => FusedDataPoll::Pending(state),
+        InnerDataPoll::Advanced(state) => FusedDataPoll::Advanced(state),
         InnerDataPoll::Ready(state, result) => FusedDataPoll::Ready(
             state,
             result.map(|read| match read {
@@ -268,10 +276,6 @@ where
     S: TransportIo,
     D: PayloadDelivery,
 {
-    // Yield after every successful transport read that has not produced
-    // plaintext. On edge-triggered transports a partial read may clear
-    // readiness; the one-read scheduling boundary and explicit self-wake
-    // guarantee that the next receive step is polled promptly.
     match state {
         DataRx::Length { mut filled } => {
             if filled == 0 {
@@ -309,9 +313,7 @@ where
                     }
                     filled = next;
                     if filled < ENCRYPTED_LENGTH_LEN {
-                        let next = DataRx::Length { filled };
-                        cx.waker().wake_by_ref();
-                        InnerDataPoll::Pending(next)
+                        InnerDataPoll::Advanced(DataRx::Length { filled })
                     } else {
                         if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
                             opener.open_in_place(scratch).map_err(frame_from_open_aead)
@@ -339,8 +341,7 @@ where
                             wire_len,
                             filled: 0,
                         };
-                        cx.waker().wake_by_ref();
-                        InnerDataPoll::Pending(next)
+                        InnerDataPoll::Advanced(next)
                     }
                 }
             }
@@ -369,9 +370,7 @@ where
                 }
                 filled = next;
                 if filled < wire_len {
-                    let next = DataRx::Payload { wire_len, filled };
-                    cx.waker().wake_by_ref();
-                    InnerDataPoll::Pending(next)
+                    InnerDataPoll::Advanced(DataRx::Payload { wire_len, filled })
                 } else {
                     let payload_len = wire_len - TAG_LEN;
                     let opened = try_with_wire_staging(wire_len, |worker_wire| {
@@ -428,9 +427,7 @@ where
                         }
                     }
                     if payload_len == 0 {
-                        let next = DataRx::Length { filled: 0 };
-                        cx.waker().wake_by_ref();
-                        InnerDataPoll::Pending(next)
+                        InnerDataPoll::Advanced(DataRx::Length { filled: 0 })
                     } else {
                         InnerDataPoll::Ready(
                             DataRx::Ready { position: 0 },
@@ -522,54 +519,78 @@ pub(super) fn drain_staged<S: TransportIo>(
 ) -> Poll<Result<(), ShadowsocksError>> {
     let mut budget = PollBudget::new();
     loop {
-        let current = staged.as_mut().expect("caller checked staged wire");
-        let source = &scratch[current.position..];
-        match Pin::new(&mut *io).poll_write(cx, source) {
+        let progress = match poll_staged_once(io, scratch, staged, lifecycle, observer, cx) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
-                let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
-                return Poll::Ready(Err(error));
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(progress)) => progress,
+        };
+        budget.record_io(progress.written);
+        if progress.drained {
+            budget.record_frame();
+            if budget.yield_if_exhausted(cx) {
+                return Poll::Pending;
             }
-            Poll::Ready(Err(_)) => {
-                let error = lifecycle.install_transport(observer, TransportPhase::Write);
-                return Poll::Ready(Err(error));
-            }
-            Poll::Ready(Ok(0)) if current.kind == StagedKind::First => {
-                let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
-                return Poll::Ready(Err(error));
-            }
-            Poll::Ready(Ok(0)) => {
-                let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
-                return Poll::Ready(Err(error));
-            }
-            Poll::Ready(Ok(written)) => {
-                budget.record_io(written);
-                let Some(next) = current
-                    .position
-                    .checked_add(written)
-                    .filter(|next| *next <= scratch.len())
-                else {
-                    let error = if current.kind == StagedKind::First {
-                        lifecycle.install_detection(io, observer, DetectionReason::ShortWrite)
-                    } else {
-                        lifecycle.install_transport(observer, TransportPhase::Write)
-                    };
-                    return Poll::Ready(Err(error));
+            return Poll::Ready(Ok(()));
+        }
+        if budget.yield_if_exhausted(cx) {
+            return Poll::Pending;
+        }
+    }
+}
+
+pub(super) struct StagedWriteProgress {
+    written: usize,
+    pub(super) drained: bool,
+}
+
+pub(super) fn poll_staged_once<S: TransportIo>(
+    io: &mut S,
+    scratch: &mut BytesMut,
+    staged: &mut Option<StagedWrite>,
+    lifecycle: &mut Lifecycle,
+    observer: &dyn FlowObserver,
+    cx: &mut Context<'_>,
+) -> Poll<Result<StagedWriteProgress, ShadowsocksError>> {
+    let current = staged.as_mut().expect("caller checked staged wire");
+    let source = &scratch[current.position..];
+    match Pin::new(&mut *io).poll_write(cx, source) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
+            let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Err(_)) => {
+            let error = lifecycle.install_transport(observer, TransportPhase::Write);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Ok(0)) if current.kind == StagedKind::First => {
+            let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Ok(0)) => {
+            let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
+            Poll::Ready(Err(error))
+        }
+        Poll::Ready(Ok(written)) => {
+            let Some(next) = current
+                .position
+                .checked_add(written)
+                .filter(|next| *next <= scratch.len())
+            else {
+                let error = if current.kind == StagedKind::First {
+                    lifecycle.install_detection(io, observer, DetectionReason::ShortWrite)
+                } else {
+                    lifecycle.install_transport(observer, TransportPhase::Write)
                 };
-                current.position = next;
-                if current.position == scratch.len() {
-                    scratch.clear();
-                    *staged = None;
-                    budget.record_frame();
-                    if budget.yield_if_exhausted(cx) {
-                        return Poll::Pending;
-                    }
-                    return Poll::Ready(Ok(()));
-                }
-                if budget.yield_if_exhausted(cx) {
-                    return Poll::Pending;
-                }
+                return Poll::Ready(Err(error));
+            };
+            current.position = next;
+            let drained = current.position == scratch.len();
+            if drained {
+                scratch.clear();
+                *staged = None;
             }
+            Poll::Ready(Ok(StagedWriteProgress { written, drained }))
         }
     }
 }
