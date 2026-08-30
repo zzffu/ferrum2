@@ -1221,15 +1221,17 @@ self-check、client/server feature compile、Clippy、fmt、diff-check 与两路
 - `D = download_pending_frames / borrowed_download_frames`；
 - `S = upload_pending_polls / max(upload_pending_frames, 1)`。
 
-pending-only upload buffer 的决策在运行前固定如下：
+pending-only upload buffer 的决策在运行前固定为以下有序规则，命中第一条后立即停止：
 
-- `U_merged >= 10%` 且 client/server 各自 `U >= 5%`：GO；
-- `5% <= U_merged < 10%`、两端各自至少命中一帧且 `S_merged >= 1.5`：条件 GO；
-- 其余全部 NO-GO，包括 `U_merged < 5%`、任一端完全无命中，或明显单端偏斜；
-- 若既有 `tcp_fused_partial_writes` 非零，同样强制 NO-GO：此时 upload drain 的 caller-level
-  `Pending` 可能混入 fairness budget exhaustion，不能诚实归因为 tunnel writer backpressure。
+- 若既有 `tcp_fused_partial_writes` 非零：强制 NO-GO；此时 upload drain 的 caller-level `Pending`
+  可能混入 fairness budget exhaustion，不能诚实归因为 tunnel writer backpressure；
+- 否则，`U_merged >= 10%` 且 client/server 各自 `U >= 5%`：GO；
+- 否则，`5% <= U_merged < 10%`、两端各自至少命中一帧且 `S_merged >= 1.5`：条件 GO；条件
+  GO 与 GO 的后续动作完全相同，必须自动进入产品 sibling，不允许再次人工筛选；
+- 其余全部 NO-GO，包括 `U_merged < 5%`、任一端完全无命中、`U_merged >= 10%` 但任一端
+  `U < 5%`，或中间区间未达到 `S_merged >= 1.5`。
 
 `D` 只用于解释 generic buffer 的信号来源，无论多高都不得重开 download next-length/read-ahead seam。
-若 upload 为 GO，产品实现必须从 `bf4cd4a6` 另开 sibling，仅在当前 ciphertext drain 已真实 Pending 时
-预取最多一个 plaintext frame；不得从诊断提交继承。若 upload 为 NO-GO，pending-only buffer 轴关闭，
-转向保持现有零拷贝 buffer ownership 的完整 protocol-owned cooperative pump 设计。
+若 upload 为 GO 或条件 GO，产品实现必须从 `bf4cd4a6` 另开 sibling，仅在当前 ciphertext drain 已真实
+Pending 时预取最多一个 plaintext frame；不得从诊断提交继承。若 upload 为 NO-GO，pending-only
+buffer 轴关闭，转向保持现有零拷贝 buffer ownership 的完整 protocol-owned cooperative pump 设计。
