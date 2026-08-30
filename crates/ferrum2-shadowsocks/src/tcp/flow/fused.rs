@@ -31,6 +31,40 @@ pub(crate) enum FusedRelayDirection {
     TunnelToPlain,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum FusedRelayFirst {
+    PlainToTunnel,
+    TunnelToPlain,
+}
+
+impl FusedRelayFirst {
+    #[inline(always)]
+    fn poll(
+        self,
+        mut poll: impl FnMut(FusedRelayDirection) -> Poll<io::Result<()>>,
+    ) -> io::Result<()> {
+        match self {
+            Self::PlainToTunnel => {
+                if let Poll::Ready(result) = poll(FusedRelayDirection::PlainToTunnel) {
+                    result?;
+                }
+                if let Poll::Ready(result) = poll(FusedRelayDirection::TunnelToPlain) {
+                    result?;
+                }
+            }
+            Self::TunnelToPlain => {
+                if let Poll::Ready(result) = poll(FusedRelayDirection::TunnelToPlain) {
+                    result?;
+                }
+                if let Poll::Ready(result) = poll(FusedRelayDirection::PlainToTunnel) {
+                    result?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 enum DownloadStep {
     PlaintextWritten,
     DirectionDone,
@@ -39,6 +73,7 @@ enum DownloadStep {
 pub(crate) fn fused_relay<'a, P, F, O>(
     plain: &'a mut P,
     flow: &'a mut F,
+    first: FusedRelayFirst,
     observe: O,
     #[cfg(feature = "structural-metrics")] structural: &'a StructuralLocal,
 ) -> FusedRelay<'a, P, F, O>
@@ -64,7 +99,7 @@ where
         download_eof: false,
         upload_done: false,
         download_done: false,
-        upload_first: true,
+        first,
     }
 }
 
@@ -82,7 +117,7 @@ pub(crate) struct FusedRelay<'a, P, F, O> {
     download_eof: bool,
     upload_done: bool,
     download_done: bool,
-    upload_first: bool,
+    first: FusedRelayFirst,
 }
 
 #[cfg(feature = "structural-metrics")]
@@ -151,24 +186,10 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let upload_first = this.upload_first;
-        this.upload_first = !this.upload_first;
-
-        if upload_first {
-            if let Poll::Ready(result) = this.poll_upload(cx) {
-                result?;
-            }
-            if let Poll::Ready(result) = this.poll_download(cx) {
-                result?;
-            }
-        } else {
-            if let Poll::Ready(result) = this.poll_download(cx) {
-                result?;
-            }
-            if let Poll::Ready(result) = this.poll_upload(cx) {
-                result?;
-            }
-        }
+        this.first.poll(|direction| match direction {
+            FusedRelayDirection::PlainToTunnel => this.poll_upload(cx),
+            FusedRelayDirection::TunnelToPlain => this.poll_download(cx),
+        })?;
 
         if this.upload_done && this.download_done {
             Poll::Ready(Ok(()))
@@ -885,4 +906,82 @@ fn framed_error(error: ShadowsocksError) -> io::Error {
         ShadowsocksError::Transport(_) | ShadowsocksError::Connect(_) => io::ErrorKind::Other,
     };
     kind.into()
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::{FusedRelayDirection, FusedRelayFirst};
+    use std::io;
+    use std::task::Poll;
+
+    #[test]
+    fn fixed_first_direction_is_stable_across_pending_polls() {
+        for (first, expected) in [
+            (
+                FusedRelayFirst::PlainToTunnel,
+                [
+                    FusedRelayDirection::PlainToTunnel,
+                    FusedRelayDirection::TunnelToPlain,
+                ],
+            ),
+            (
+                FusedRelayFirst::TunnelToPlain,
+                [
+                    FusedRelayDirection::TunnelToPlain,
+                    FusedRelayDirection::PlainToTunnel,
+                ],
+            ),
+        ] {
+            let mut observed = Vec::new();
+            for _ in 0..3 {
+                first
+                    .poll(|direction| {
+                        observed.push(direction);
+                        Poll::Pending
+                    })
+                    .expect("pending directions do not fail");
+            }
+            assert_eq!(observed, expected.repeat(3));
+        }
+    }
+
+    #[test]
+    fn both_ready_directions_are_polled_once() {
+        let mut observed = Vec::new();
+        FusedRelayFirst::PlainToTunnel
+            .poll(|direction| {
+                observed.push(direction);
+                Poll::Ready(Ok(()))
+            })
+            .expect("ready directions do not fail");
+        assert_eq!(
+            observed,
+            [
+                FusedRelayDirection::PlainToTunnel,
+                FusedRelayDirection::TunnelToPlain,
+            ]
+        );
+    }
+
+    #[test]
+    fn first_direction_error_has_fixed_priority() {
+        for (first, expected_kind) in [
+            (FusedRelayFirst::PlainToTunnel, io::ErrorKind::Other),
+            (
+                FusedRelayFirst::TunnelToPlain,
+                io::ErrorKind::PermissionDenied,
+            ),
+        ] {
+            let error = first
+                .poll(|direction| {
+                    let kind = match direction {
+                        FusedRelayDirection::PlainToTunnel => io::ErrorKind::Other,
+                        FusedRelayDirection::TunnelToPlain => io::ErrorKind::PermissionDenied,
+                    };
+                    Poll::Ready(Err(kind.into()))
+                })
+                .expect_err("first direction fails");
+            assert_eq!(error.kind(), expected_kind);
+        }
+    }
 }

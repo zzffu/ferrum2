@@ -7,7 +7,7 @@ mod worker_local;
 
 pub use client::{BoxedClientFlow, ClientFlow};
 #[cfg(feature = "tokio")]
-pub(crate) use fused::{FusedRelayDirection, fused_relay};
+pub(crate) use fused::{FusedRelayDirection, FusedRelayFirst, fused_relay};
 pub use server::ServerFlow;
 
 use std::pin::Pin;

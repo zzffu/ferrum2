@@ -12,7 +12,7 @@ use ferrum2_crypto::{Clock, SecureRandom};
 #[cfg(feature = "structural-metrics")]
 use ferrum2_structural::StructuralLocal;
 
-use crate::tcp::{FusedRelayDirection as CoreFusedRelayDirection, fused_relay};
+use crate::tcp::{FusedRelayDirection as CoreFusedRelayDirection, FusedRelayFirst, fused_relay};
 use crate::{
     ClientFlow, FlowTerminal, PlainBufferedDuplex, PlainDuplex, ServerFlow, ShadowsocksError,
     TcpKeyProvider, TransportIo,
@@ -142,6 +142,9 @@ pub enum FusedRelayDirection {
     TunnelToPlain,
 }
 
+const CLIENT_RELAY_FIRST: FusedRelayFirst = FusedRelayFirst::PlainToTunnel;
+const SERVER_RELAY_FIRST: FusedRelayFirst = FusedRelayFirst::TunnelToPlain;
+
 /// Runs the zero-copy payload relay for one concrete client flow.
 pub async fn relay_client_flow<P, S, K, T, O>(
     plain: &mut P,
@@ -159,6 +162,7 @@ where
     fused_relay(
         plain,
         flow,
+        CLIENT_RELAY_FIRST,
         move |direction, bytes| {
             observe(public_fused_direction(direction), bytes);
         },
@@ -186,6 +190,7 @@ where
     fused_relay(
         plain,
         flow,
+        SERVER_RELAY_FIRST,
         move |direction, bytes| {
             observe(public_fused_direction(direction), bytes);
         },
@@ -301,4 +306,15 @@ fn framed_error(error: ShadowsocksError) -> io::Error {
         ShadowsocksError::Transport(_) | ShadowsocksError::Connect(_) => io::ErrorKind::Other,
     };
     kind.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLIENT_RELAY_FIRST, FusedRelayFirst, SERVER_RELAY_FIRST};
+
+    #[test]
+    fn relay_wrappers_fix_the_request_direction_first() {
+        assert!(matches!(CLIENT_RELAY_FIRST, FusedRelayFirst::PlainToTunnel));
+        assert!(matches!(SERVER_RELAY_FIRST, FusedRelayFirst::TunnelToPlain));
+    }
 }
