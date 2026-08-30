@@ -1361,3 +1361,134 @@ Ready 跨帧推进，以免把已知负向 download seam 与 upload 机制混合
 mean CPU busy、commit/tree/binary hashes 与唯一 evidence hash。若 upload-only 失败，先用这些指标判断
 是否关闭全部 cross-frame pump；只有新的 profile 证据仍支持 whole-engine hypothesis 时，才另行预声明
 完整双向 protocol-owned pump，且仍直接从 `bf4cd4a6` 开始。
+
+### 21.4 唯一正式样本：失败并冻结
+
+候选完成 Shadowsocks all-features 全套 143 项、两种 fused feature 组合各 18 项、client/server
+all-features check、Clippy `-D warnings`、fmt、diff-check、三密码真实进程 bytes + half-close，以及
+correctness/experiment 两路独立审查后提交并推送：
+
+- commit：`c3545424b20d355b1158196123d449b21c543108`；
+- tree：`6fed388b1c69eff10e7fca9bfb904bc7e3b87f5b`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-cooperative-upload-pump`。
+
+唯一正式样本固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk`，合同为
+`status=PASS`、`sample_count=1`、`runner_exit_status=0`、45,818 transactions、
+`3,002,728,448` checked bytes，即 `200,181,896 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `f0e69a1d4655defbb544dce5122796e000ac6f65647b63453d86a1c6104d79b5` |
+| `ferrum2-client` | `4049d5c466e050896452a3d5f9883847a9c84924f8a8e0eb1f91ab0f938e29a8` |
+| `ferrum2-server` | `45e06eb82453501c995df1bf0d85b7a1daa13d754cc9c444459bd4048f09113c` |
+
+转录证据文件为 `1,351` bytes，SHA-256 为
+`b3cebaf7cd8bf23beb666d3bdcfed425ecc0540b3aad41620220fb7a0b29dc06`。相对 `bf4cd4a6`：
+
+| 指标 | `bf4cd4a6` | upload-only pump | 变化 |
+| --- | ---: | ---: | ---: |
+| throughput | 234,378,581 B/s | 200,181,896 B/s | -14.5904% |
+| proxy CPU | 23,180 ms | 20,710 ms | -10.6557% |
+| B/s/ms | 10,111.242 | 9,665.953 | -4.4039% |
+| migrations | 123,973 | 56,279 | -54.6038% |
+| context switches | 505,073 | 418,716 | -17.0979% |
+| mean CPU busy | 47.156% | 41.174% | -5.982 pp |
+| migrations/byte | 1.0x | 0.5315x | -46.8489% |
+
+候选明显低于父节点，按预声明立即失败：提交与远端分支永久保留并冻结，不重跑、不进 hosted CI、
+不作为后续产品祖先。结果证明删除每-upload-frame wake 确实显著减少调度与迁移，但吞吐与 CPU 效率
+同时下降，且全机 busy 降得更多；这些 frame boundary 不是纯开销，它们还在维持双向/跨连接 runnable
+pipeline。根因是 cooperative policy 放错了层级：方向内部的 run-to-Pending loop 在 outer relay 给对向
+公平机会之前连续推进，破坏了 `FusedRelay` 原有的双向 round 粒度。后续不得把 upload-only loop 与
+其他小开关组合；正确 seam 必须是整个 bidirectional protocol engine 的统一 cooperative scheduler。
+
+## 22. 一次性架构候选：protocol-owned bidirectional cooperative relay
+
+90% 目标不再通过连续 frame-level 微候选追逐。下一 sibling 直接实现一个完整、可一次验证的非 TUN TCP
+relay 架构：借鉴 shadowsocks-rust 的 protocol-aware continuous copy 与 Tokio cooperative budget，
+同时借鉴 sing/sing-box 的独立方向 run-to-block 原则；但按 Ferrum2 已有零拷贝/worker-local 约束，将
+公平策略统一收口到一个 bidirectional outer scheduler，而不是复制参考实现的额外 buffer。
+
+### 22.1 范围与分支
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-protocol-cooperative-relay`；
+- 生产改动集中于 `crates/ferrum2-shadowsocks/src/tcp/flow/fused.rs` 与 `flow/io.rs`；必要时只更新
+  同 crate 的 fused/duplex/fragmentation/Tokio adapter 测试；
+- 产品入口仍是 `relay_client_flow` / `relay_server_flow -> fused_relay`，不改变公共 API、wire 或配置；
+- 只覆盖 client SOCKS single-proxy 与 server direct 的现有 fused 产品路径；generic/multi-hop fallback
+  行为保持；
+- 明确不改任何 TUN 文件、TUN scheduler、Windows adapter、route/DNS/WFP/Hyper-V；也不改 listener、
+  worker 数、runtime affinity/shard、crypto primitive、frame size、runner 或 CI 配置。
+
+这是一个完整产品候选，不再为 length、payload、upload、download 分别创建性能 sibling；实现中需要的
+状态/调度调整在同一提交一起完成，并由同一套机制门禁和唯一正式样本验收。
+
+### 22.2 深模块 seam
+
+`flow/io.rs` 只拥有协议 receive transition，不拥有 executor 调度。把内部结果闭合为：
+
+- `Advanced`：完成一个 length/payload/auth/sink 或 shutdown 状态 quantum；
+- `Pending`：真实 I/O Pending，相关 waker 已注册；
+- `Done`：单方向 half-close 完成；
+- `Error`：保持既有封闭错误与 terminal 分类。
+
+length partial/full、payload partial、zero frame 等纯协议进展不再由共享 helper 直接决定 self-wake。
+generic adapter 必须把 `Advanced` 映射回 `bf4` 原来的 wake + Pending，确保 generic 路径 bit-for-bit
+保持；只有 fused engine 能观察 `Advanced` 并在当前 outer poll 内继续。
+
+### 22.3 双向 cooperative scheduler
+
+`FusedRelay::poll` 保留 `bf4` 每个 outer poll 的首方向翻转，并执行统一 rounds：
+
+1. 每个 round 只调用一次 `tokio::task::coop::poll_proceed(cx)`；
+2. permit Ready 后，按本轮顺序让 upload 最多推进一个 frame quantum、download 最多推进一个
+   receive/sink/shutdown quantum；
+3. 某方向返回真实 Pending 后，本 outer poll 不再重复 poll 该方向；另一方向可继续；
+4. 本轮任一方向 `Advanced/Done` 才 `made_progress()`；无进展时 token Drop 恢复预算；
+5. coop 耗尽、所有未完成方向均真实 Pending、双方完成或任一错误时退出；
+6. 不在 upload/download helper 内再次调用 coop，也不增加 8-frame/256-KiB/64-I/O 等第二套预算。
+
+整个 relay 返回 `Pending` 时必须已有真实 I/O/shutdown waker或 coop waker；纯状态进展不得单独以
+`Pending` 逃出。这样既删除 artificial state-machine wakes，又避免 21.4 的方向内部独占：两方向都
+Ready 时每 round 都获得 bounded 机会，一方向阻塞时另一方向才持续运行到自身真实阻塞。
+
+### 22.4 保持的 data plane
+
+- upload 保持直接读入 final-layout encrypt tail、原位 seal、staged ciphertext drain；未 drain 完绝不
+  read-ahead，不新增 plaintext buffer、allocation、整帧 copy 或 memmove；
+- download 保持 per-flow ciphertext 收齐、worker-local Zeroizing staging 认证/解密、认证后直接写 real
+  sink；sink Pending/partial 才 materialize 未写 suffix；TLS borrow 不跨 quantum/return/Pending；
+- client request staged wire 的 `Some(0)`、server initial request payload、server first response 与 client
+  initial response 的现有合同保持，本候选不混入 initial-payload 合并；
+- raw EOF 只关闭 tunnel write half，tunnel EOF 只关闭 plain write half；一方向完成后另一方向继续；
+- observer/progress 仍只在 destination 接受非零 bytes 后记录；不带回失败的 stats batching 或
+  poll-local activity；cancellation > engine > idle 的 runtime 优先级保持；
+- auth 失败前不发布 plaintext，terminal 安装后不可变，write-zero、partial/error 与 simultaneous error
+  继续采用既有分类/首方向规则。
+
+### 22.5 明确禁止重新组合的失败机制
+
+不得带回 fresh-next-length one-shot、Pending retry、upload-only run-to-Pending、fixed request-first、
+自定义 frame/byte/I/O budget、generic 32-KiB copy buffers、direct-worker receive、buffer rotation、
+out-of-place open、per-core shard、incoming-CPU、硬 affinity、stats batching、poll-local activity或任何
+TUN 机制。
+
+### 22.6 一次门禁、一次测量
+
+机制测试必须覆盖双向 always-ready round 顺序、一方向 Pending 时另一方向继续、同 outer poll 不重 poll
+blocked 方向、双真实 Pending 无 synthetic wake、coop exhaustion、zero-frame bounded fairness、upload
+backpressure、download suffix materialization、worker-local direct/reentrant、tamper/auth、initial wire、
+EOF/half-close/shutdown、simultaneous error、cancellation/idle/stats，以及三密码边界 round trip。
+
+候选通过 Shadowsocks full/all-features/no-default、client/server all-features、相关 Clippy、fmt、
+diff-check、M0 三密码真实进程 bytes + half-close 和两路独立审查后，先提交推送，再只运行一次与
+`bf4cd4a6` 相同的本地正式样本：
+
+- `<= 234,378,581 B/s`：失败并永久保留；
+- 正向但 `< 246,097,511 B/s`：不足并永久保留；
+- `>= 246,097,511 B/s` 且效率 `>= 10,111.242 B/s/ms`：只触发一次 hosted direct CI。
+
+hosted 的唯一完成条件仍是 Ferrum2/shadowsocks-rust v1.24.0 `>= 90%`。若仍低于 90%，保留提交与
+artifact，直接对这一完整架构执行 profile/scheduler 分析；不退回继续创建 frame-level 微候选。
