@@ -1586,7 +1586,9 @@ per-core shard、`unconstrained`、普通 self-wake 补丁或新的数字 burst 
 恢复 direction-owned scheduling 与 8-stream runnable pipeline 带来的收益。历史 diagnostic
 `c84b5bc` 只作为选择架构的证据，继续冻结；它曾得到 `250,408,686 B/s`（相对 bf4 `+6.8394%`）、
 `10,494.916 B/s/ms`（`+3.7945%`）和 migrations `-32.5918%`，但本次产品候选仍必须独立完成门禁、
-提交、推送和唯一正式样本，不得直接拿 diagnostic 结果触发 CI。
+提交与推送。由于本次选择的是把 `c84b5bc` 的完整产品拓扑原样升格，而不是从其中挑一个微机制，
+当新分支的生产 diff 与 `c84b5bc` 对 bf4 的生产 diff 逐文件等价时，既有唯一正式样本直接作为本方案
+的本地资格证据；不为了标签从 diagnostic 改成 product 而重复同一份本地性能 workload。
 
 ### 23.2 机制与产品门禁
 
@@ -1604,14 +1606,15 @@ per-core shard、`unconstrained`、普通 self-wake 补丁或新的数字 burst 
 依次运行 targeted client/server composition、ferrum2-runtime relay、Shadowsocks full/no-default、
 client/server all-features、相关 Clippy `-D warnings`、fmt、diff-check，以及 M0 三密码真实进程 bytes +
 half-close；至少两路独立审查分别检查产品行为/安全合同和实验范围/架构归因。全部通过后先提交并推送，
-再运行一次且仅一次 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk` 正式本地样本。
+并以机器校验确认 client/server 三个生产文件相对 bf4 的 patch 与 `c84b5bc` 等价；测试增强可以不同，
+但不得改变 release 产品代码。若生产 patch 有任何实质差异，旧证据失效并停止，不自动补跑本地样本。
 
 ### 23.3 决策与 CI
 
-- 吞吐 `<= 234,378,581 B/s`：失败，永久保留并冻结，不进 CI；
-- 吞吐正向但 `< 246,097,511 B/s`：弱正向，永久保留并冻结，不进 CI；
-- 吞吐 `>= 246,097,511 B/s` 且效率 `>= 10,111.242 B/s/ms`：本地强正向，只触发一次 hosted direct
-  CI；不重跑 CI；
+- 已有等价产品 patch 的唯一结果 `250,408,686 B/s >= 246,097,511 B/s`，且
+  `10,494.916 B/s/ms >= 10,111.242 B/s/ms`，直接满足本地强正向门槛；不重复本地样本；
+- 新产品分支正确性门禁、审查、提交、推送与 patch-equivalence 全部通过后，只触发一次 hosted direct
+  CI，对比 shadowsocks-rust v1.24.0；不重跑 CI；
 - hosted direct 唯一完成条件仍为 Ferrum2/shadowsocks-rust v1.24.0 `>= 90%`。可直接使用浏览器查看
   workflow、日志与 artifact；若低于 90%，提交、分支与 CI 证据全部保留，从新的已证明节点开下一
   sibling，不回退、不覆盖、不从失败候选继续叠加。
