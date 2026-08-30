@@ -1235,3 +1235,50 @@ pending-only upload buffer 的决策在运行前固定为以下有序规则，�
 若 upload 为 GO 或条件 GO，产品实现必须从 `bf4cd4a6` 另开 sibling，仅在当前 ciphertext drain 已真实
 Pending 时预取最多一个 plaintext frame；不得从诊断提交继承。若 upload 为 NO-GO，pending-only
 buffer 轴关闭，转向保持现有零拷贝 buffer ownership 的完整 protocol-owned cooperative pump 设计。
+
+### 20.1 唯一 schema-v8 诊断结果：pending-only buffer NO-GO
+
+诊断实现完成默认 v7 与 feature-on v8 的 schema、状态机、controller、M4 self-check、client/server
+compile、全包 Clippy、fmt、diff-check、12 项定向 controller、213 项 performance-controller 全套、17 项
+fused relay 测试，以及两路独立审查；原计划中的模糊条件 GO blocker 在运行前修复并复审通过。随后
+提交并推送：
+
+- commit：`ed89e155ca98c730a3e39737c73609932970697b`；
+- tree：`ce5ce4c5dae5dd61b26efa7d593b4904c9bface0`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-pending-surface-diagnostic`。
+
+client、server 与 runner 在一次 Cargo invocation 中显式启用三个 root
+`tcp-pending-surface-diagnostic` feature，并共同构建于独立
+`target/structural-diagnostic/profiling`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `4f38cea1d5469e1b0512279c8a8b0e1962c0091ca89d2d4bbe62a6b10dc57fdf` |
+| `ferrum2-client` | `cb2860ea323b1d025088f3cae28bdfb124b02154f53161181e49fd935c869e2b` |
+| `ferrum2-server` | `5e149347623e633cbb1eb3be51073656ae541a364478907d10b343c815012ce8` |
+
+唯一 diagnostic workload 为 1 秒 warm-up + 15 秒 active、8-worker `tcp-bulk`；producer 与独立
+`validate-tcp-pending-surface-diagnostic` 均 PASS，schema=`8`、scenario=`tcp-bulk`，正确校验
+`4,869,521,408` bytes，cleanup/correctness/status 均 PASS，且
+`performance_authoritative=false`、`performance_adoption_allowed=false`。evidence 文件长度为
+`23,263` bytes，SHA-256 为
+`6baa53c9bbe643319dcb27c18f57aff4e08ad42eee344936f3bc067080efad25`。
+
+| 角色 | owned upload frames | borrowed download frames | partial writes | upload Pending frames / polls | download Pending frames / polls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| client | 158,729 | 158,729 | 0 | 0 / 0 | 0 / 0 |
+| server | 158,729 | 158,729 | 0 | 0 / 0 | 0 / 0 |
+| merged | 317,458 | 317,458 | 0 | 0 / 0 | 0 / 0 |
+
+因此 `U_client = U_server = U_merged = 0%`、`D_client = D_server = D_merged = 0%`，
+`S_merged = 0`；partial-write veto 未触发，但强 GO 与条件 GO 都不成立，按有序规则落入最终 NO-GO。
+该 workload 的真实 sink 在 317,458 个 upload frame 与 317,458 个 download frame 上从未返回 Pending，
+所以“当前 ciphertext drain Pending 时预取一帧 plaintext”的产品分支没有任何命中面；generic relay 的
+净 `+6.8394%` 也不能由 writer-Pending 下的 one-frame buffer/read-write decoupling 解释。
+
+`ed89e155` 与远端分支永久保留并冻结，不重跑、不进 CI、不作为产品祖先；旧 schema-v7 与 UDP 流程
+仍保持 49 counters。pending-only buffer 轴正式关闭，后续必须从 `bf4cd4a6` 新开 sibling，设计完整
+protocol-owned cooperative pump：保留 final-layout upload、worker-local decrypt-to-real-sink 与现有认证/
+half-close/error 合同，只删除 artificial frame scheduling boundaries，并以双向公平和 Tokio cooperative
+budget 控制跨 frame 连续推进；不得从诊断提交继承或重建 generic copy buffer。
