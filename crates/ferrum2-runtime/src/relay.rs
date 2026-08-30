@@ -35,9 +35,11 @@ pub enum RelayDirection {
 
 /// Cloneable progress recorder supplied to a specialized relay engine.
 ///
-/// Engines call [`Self::record`] only after a destination accepts non-zero
-/// bytes. The recorder owns direction-separated statistics and coalesces idle
-/// notifications until the supervisor observes the accumulated progress.
+/// Engines report progress only after a destination accepts non-zero bytes.
+/// [`Self::record`] publishes statistics immediately, while
+/// [`Self::into_batched_recorder`] defers only the statistics publication until
+/// the engine-owned recorder drops. Both paths refresh activity immediately
+/// and coalesce idle notifications until the supervisor observes the progress.
 #[derive(Clone)]
 pub struct RelayProgress {
     inner: Arc<RelayProgressInner>,
@@ -47,6 +49,12 @@ struct RelayProgressInner {
     activity: ActivitySignal,
     inbound_to_outbound: AtomicU64,
     outbound_to_inbound: AtomicU64,
+}
+
+struct BatchedRelayProgress {
+    progress: RelayProgress,
+    inbound_to_outbound: u64,
+    outbound_to_inbound: u64,
 }
 
 impl RelayProgress {
@@ -69,6 +77,20 @@ impl RelayProgress {
         self.mark_activity();
     }
 
+    /// Returns an engine-owned recorder that publishes totals when dropped.
+    ///
+    /// Every non-zero call still refreshes the idle deadline immediately, but
+    /// the two shared statistics counters are updated at most once per
+    /// direction for the recorder's lifetime.
+    pub fn into_batched_recorder(self) -> impl FnMut(RelayDirection, usize) + Unpin {
+        let mut recorder = BatchedRelayProgress {
+            progress: self,
+            inbound_to_outbound: 0,
+            outbound_to_inbound: 0,
+        };
+        move |direction, bytes| recorder.record(direction, bytes)
+    }
+
     fn add_stats_only(&self, direction: RelayDirection, bytes: u64) {
         if bytes == 0 {
             return;
@@ -88,6 +110,33 @@ impl RelayProgress {
         RelayStats {
             inbound_to_outbound: self.inner.inbound_to_outbound.load(Ordering::Acquire),
             outbound_to_inbound: self.inner.outbound_to_inbound.load(Ordering::Acquire),
+        }
+    }
+}
+
+impl BatchedRelayProgress {
+    fn record(&mut self, direction: RelayDirection, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let total = match direction {
+            RelayDirection::InboundToOutbound => &mut self.inbound_to_outbound,
+            RelayDirection::OutboundToInbound => &mut self.outbound_to_inbound,
+        };
+        *total = total.wrapping_add(bytes as u64);
+        self.progress.mark_activity();
+    }
+}
+
+impl Drop for BatchedRelayProgress {
+    fn drop(&mut self) {
+        if self.inbound_to_outbound != 0 {
+            self.progress
+                .add_stats_only(RelayDirection::InboundToOutbound, self.inbound_to_outbound);
+        }
+        if self.outbound_to_inbound != 0 {
+            self.progress
+                .add_stats_only(RelayDirection::OutboundToInbound, self.outbound_to_inbound);
         }
     }
 }
@@ -306,7 +355,8 @@ where
 /// The engine owns its protocol-specific storage and reports completed writes
 /// through the supplied [`RelayProgress`]. Cancellation wins over engine
 /// completion, which wins over an idle deadline when outcomes become ready in
-/// the same poll.
+/// the same poll. Every terminal path drops the engine future before the
+/// direction-separated statistics snapshot is taken.
 pub async fn relay_lifecycle_with_engine<C, M, E>(
     idle_timeout: Duration,
     cancellation: C,
@@ -404,7 +454,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ActivitySignal;
+    use super::{ActivitySignal, RelayDirection, RelayProgress, RelayStats};
 
     #[test]
     fn activity_notifications_coalesce_until_the_idle_waiter_clears_dirty() {
@@ -417,5 +467,56 @@ mod tests {
         assert!(activity.mark());
         assert!(activity.take_dirty());
         assert!(!activity.take_dirty());
+    }
+
+    #[test]
+    fn batched_progress_publishes_direction_totals_only_when_dropped() {
+        let progress = RelayProgress::new();
+        let observer = progress.clone();
+        let mut record = progress.into_batched_recorder();
+
+        record(RelayDirection::InboundToOutbound, 3);
+        record(RelayDirection::InboundToOutbound, 5);
+        record(RelayDirection::OutboundToInbound, 7);
+
+        assert_eq!(
+            observer.stats(),
+            RelayStats {
+                inbound_to_outbound: 0,
+                outbound_to_inbound: 0,
+            }
+        );
+        assert!(observer.inner.activity.take_dirty());
+
+        drop(record);
+
+        assert_eq!(
+            observer.stats(),
+            RelayStats {
+                inbound_to_outbound: 8,
+                outbound_to_inbound: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn batched_progress_ignores_zero_bytes() {
+        let progress = RelayProgress::new();
+        let observer = progress.clone();
+        let mut record = progress.into_batched_recorder();
+
+        record(RelayDirection::InboundToOutbound, 0);
+        record(RelayDirection::OutboundToInbound, 0);
+        assert!(!observer.inner.activity.take_dirty());
+
+        drop(record);
+
+        assert_eq!(
+            observer.stats(),
+            RelayStats {
+                inbound_to_outbound: 0,
+                outbound_to_inbound: 0,
+            }
+        );
     }
 }

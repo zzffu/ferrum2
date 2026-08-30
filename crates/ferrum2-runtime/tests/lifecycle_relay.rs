@@ -339,6 +339,119 @@ async fn custom_engine_reports_directional_progress_and_redacts_io_failure() {
     assert!(!format!("{failure:?}").contains("sensitive"));
 }
 
+#[tokio::test]
+async fn batched_engine_publishes_directional_progress_on_normal_completion() {
+    let result =
+        relay_lifecycle_with_engine(Duration::from_secs(60), pending(), |progress| async move {
+            let mut record = progress.into_batched_recorder();
+            record(RelayDirection::InboundToOutbound, 3);
+            record(RelayDirection::InboundToOutbound, 5);
+            record(RelayDirection::OutboundToInbound, 7);
+            Ok(())
+        })
+        .await;
+
+    assert_eq!(
+        result,
+        Ok(RelayStats {
+            inbound_to_outbound: 8,
+            outbound_to_inbound: 7,
+        })
+    );
+}
+
+#[tokio::test]
+async fn batched_engine_publishes_partial_progress_on_io_failure() {
+    let failure =
+        relay_lifecycle_with_engine(Duration::from_secs(60), pending(), |progress| async move {
+            let mut record = progress.into_batched_recorder();
+            record(RelayDirection::InboundToOutbound, 11);
+            record(RelayDirection::OutboundToInbound, 13);
+            Err(io::Error::other("sensitive batched engine failure"))
+        })
+        .await
+        .expect_err("batched engine fails");
+
+    assert_eq!(
+        failure,
+        RelayFailure {
+            kind: RelayRunError::Io,
+            stats: RelayStats {
+                inbound_to_outbound: 11,
+                outbound_to_inbound: 13,
+            },
+        }
+    );
+    assert!(!format!("{failure:?}").contains("sensitive"));
+}
+
+#[tokio::test]
+async fn cancellation_drops_batched_engine_before_snapshotting_partial_progress() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(60),
+        async move {
+            let _ = cancel_rx.await;
+        },
+        move |progress| async move {
+            let mut record = progress.into_batched_recorder();
+            record(RelayDirection::InboundToOutbound, 17);
+            record(RelayDirection::OutboundToInbound, 19);
+            entered_tx.send(()).expect("batched engine entered");
+            pending::<()>().await;
+            drop(record);
+            Ok(())
+        },
+    ));
+    entered_rx.await.expect("batched engine entered");
+
+    cancel_tx.send(()).expect("cancel batched engine");
+
+    assert_eq!(
+        relay.await.expect("batched relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::Cancelled,
+            stats: RelayStats {
+                inbound_to_outbound: 17,
+                outbound_to_inbound: 19,
+            },
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_timeout_drops_batched_engine_before_snapshotting_partial_progress() {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(5),
+        pending(),
+        move |progress| async move {
+            let mut record = progress.into_batched_recorder();
+            record(RelayDirection::InboundToOutbound, 23);
+            record(RelayDirection::OutboundToInbound, 29);
+            entered_tx.send(()).expect("batched engine entered");
+            pending::<()>().await;
+            drop(record);
+            Ok(())
+        },
+    ));
+    entered_rx.await.expect("batched engine entered");
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+
+    assert_eq!(
+        relay.await.expect("batched relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            stats: RelayStats {
+                inbound_to_outbound: 23,
+                outbound_to_inbound: 29,
+            },
+        })
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancellation_wins_a_simultaneously_ready_idle_deadline() {
     let result =

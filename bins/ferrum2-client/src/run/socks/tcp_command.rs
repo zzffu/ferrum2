@@ -249,11 +249,12 @@ pub(super) async fn client_connection(
                 context.runtime.idle_timeout,
                 cancellation.cancelled(),
                 |progress| {
+                    let mut record = progress.into_batched_recorder();
                     relay_client_flow(
                         &mut stream,
                         &mut flow,
                         move |direction, bytes| {
-                            progress.record(
+                            record(
                                 match direction {
                                     FusedRelayDirection::PlainToTunnel => {
                                         RelayDirection::InboundToOutbound

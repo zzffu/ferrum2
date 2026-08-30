@@ -222,11 +222,12 @@ pub(super) async fn server_connection(
         context.runtime.idle_timeout,
         cancellation.cancelled(),
         |progress| {
+            let mut record = progress.into_batched_recorder();
             relay_server_flow(
                 &mut target_stream,
                 &mut stream,
                 move |direction, bytes| {
-                    progress.record(
+                    record(
                         match direction {
                             FusedRelayDirection::PlainToTunnel => RelayDirection::OutboundToInbound,
                             FusedRelayDirection::TunnelToPlain => RelayDirection::InboundToOutbound,
