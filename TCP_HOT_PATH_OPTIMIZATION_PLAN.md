@@ -9,7 +9,9 @@
 open 两个子候选又分别相对父节点下降 `1.6963%` 与 `2.7589%`，均已判失败并冻结。独立 hot/cold
 primitive 诊断证明 out-of-place AES-128 本身并不慢，因此不再把失败归因于 crypto primitive，也不为
 单个未配对正式样本引入自研 GCM。阶段 3 的 copy-in 删除轴停止，`bf4cd4a6` 保持最后一个本地弱正向
-节点；所有产品候选与诊断证据提交、远端分支均保留。
+节点。随后 generic relay 诊断取得 `+6.8394%` 方向性信号，但 fresh cross-frame next-length 两个产品
+候选分别下降 `11.4717%` 和 `12.7505%`；one-shot retry 的恢复率为负，已确认整个 cross-frame
+prefetch seam 有害并停止。所有产品候选与诊断证据提交、远端分支均保留，90% 目标仍未完成。
 
 当前目标：在相同 hosted runner、相同 8-stream TCP lockstep workload 下，Ferrum2 吞吐量
 达到 `shadowsocks-rust v1.24.0` 中位吞吐量的 **90% 以上**。
@@ -77,8 +79,12 @@ worker-local copyback 的普通路径可能让原 receive scratch 仍保留 ciph
             ├── 0ad5cab5  single-poll + transition Pending retry（即时对照 -0.90%，失败）
             └── bf4cd4a6  fused decrypt-to-sink（即时对照 +1.36%，弱正向、未进 CI）
                 ├── 8fa19ec1  direct worker receive（相对父节点 -1.70%，失败）
-                └── bf516bb5  worker-local out-of-place open（相对父节点 -2.76%，失败）
-                    └── 7d06266c → 02b9faa4  hot/cold primitive diagnostic（diagnostic-only）
+                ├── bf516bb5  worker-local out-of-place open（相对父节点 -2.76%，失败）
+                │   └── 7d06266c → 02b9faa4  hot/cold primitive diagnostic（diagnostic-only）
+                ├── c84b5bc  generic relay diagnostic（相对父节点 +6.84%，diagnostic-only）
+                ├── d27f96ce  fresh next-length continuation（相对父节点 -11.47%，失败）
+                │   └── 27d98db4  Ready/Pending structural diagnostic（diagnostic-only）
+                └── c8537fce  fresh next-length + one-shot Pending retry（相对父节点 -12.75%，失败）
 ```
 
 当前 CI 测量分支只在 `d64b068a` 上增加计划与证据绑定，不改变产品行为。
@@ -881,3 +887,48 @@ Pending。结果否定“speculative next-length 几乎总是无效 poll”：77
 - 相对 `bf4cd4a6 >=+5%` 且吞吐/proxy CPU 效率不下降：本地强正向，只触发一次 hosted direct CI。
 
 无论结果如何都保留提交，不重跑；失败后的产品尝试仍从 `bf4cd4a6` 或其它已证明节点另开 sibling。
+
+### 16.1 唯一正式样本、失败冻结与根因闭合
+
+候选在 workload 前完成全部门禁、两路独立审查、提交与推送：
+
+- commit：`c8537fce2b477d4bbbba2e17ff84f67c15ccabe5`；
+- tree：`e41324691be55ae6d06a7d45797f22c44a5b8a51`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-fresh-length-retry`。
+
+生产 diff 只在 `flow/fused.rs` 保留 fresh completion 后的一次 next-length poll，并在其真实 Pending 时
+补回一次基线 self-wake；另一文件仅为机制测试。Shadowsocks all-features、no-default、Clippy
+`-D warnings`、fmt、diff-check、client/server all-features compile、两端二进制 build，以及真实进程
+三密码套件 bytes + half-close 矩阵均通过。正确性审查确认下一 outer poll 若仍 Pending 不再 self-wake，
+不存在 busy-loop；实验审查确认 `d27f96c` 不在祖先链且测量配置未变。
+
+clean、pushed HEAD 的候选专属 profiling 二进制只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒
+active、8-stream `tcp-bulk` 正式样本；合同为 `status=PASS`、`sample_count=1`、
+`runner_exit_status=0`、46,805 transactions、`3,067,412,480` checked bytes，即
+`204,494,165 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `ffae388919a92c981f138015ee82b14a7a852755a539616719e8677de92440ff` |
+| `ferrum2-client` | `22ea3dbb54a1ef4b158c29d975dcb625075c33506832a7b4f7011b4f10cc4178` |
+| `ferrum2-server` | `b298c07c3455e12930e90b371747d7ec27c1b81173194ecf0e7b3a8c334a31e7` |
+
+相对 `bf4cd4a6` 的 `234,378,581 B/s` 下降 `29,884,416 B/s`（`-12.7505%`）；proxy CPU
+从 `23,180 ms` 降至 `22,020 ms`（`-5.0043%`），吞吐/proxy CPU 效率从 `10,111.242` 降至
+`9,286.747 B/s/ms`（`-8.1542%`）；migrations 从 `123,973` 增至 `131,241`
+（`+5.8626%`），context switches 从 `505,073` 降至 `478,959`（`-5.1703%`），mean CPU busy
+从 `47.156%` 降至 `43.882%`（`-3.274` 个百分点），migrations/byte 恶化 `21.3331%`。
+
+相对无 retry 的 `d27f96c`，吞吐仍下降 `1.4445%`，CPU 下降 `1.0782%`，效率下降 `0.3703%`，
+migrations 增加 `0.2628%`；恢复率为 `-11.1472%`。因此补回 synthetic retry 没有恢复任何缺口，
+按预声明的 `recovery <=30%` 分支闭合：`d27f96c` 的主因不是 22.92% real Pending 删除了 retry，
+而是 fresh completion 后跨 frame 的 eager next-length batching/current-worker binding 这条 seam 本身。
+两个独立产品样本都同时表现为吞吐、CPU/busy 下降而 migrations/byte 上升，与额外 CPU 饱和不符，
+也不能再把问题归因于 lost wake。
+
+解决方式是停止整个 cross-frame prefetch seam：后续 sibling 完整保留 `bf4cd4a6` 的 fresh frame
+completion `wake_by_ref + Pending`，不在同一 outer poll 触碰下一 frame length。`c8537fce` 永久保留并
+冻结，不重跑、不触发 hosted CI、不作为产品祖先。下一产品尝试直接从 `bf4cd4a6` 新开，只在现有
+frame/方向公平边界内部削减 generic 诊断所指向的 progress/activity 原子、direction engine 或 partial
+I/O 成本；不得再以 read-ahead、bounded drain 或 retry 形式重开 cross-frame seam。
