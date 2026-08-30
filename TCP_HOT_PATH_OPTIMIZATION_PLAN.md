@@ -1141,3 +1141,41 @@ partial、backpressure、bytes 与 half-close 保持。
 若失败，固定顺序彻底停止；下一步先从 `bf4` 建 diagnostic-only counters，按 frame 区分 upload
 ciphertext drain Pending 与 download sink Pending。只有 upload Pending 命中明显时，才设计
 pending-only one-frame-ahead plaintext buffer；不得直接重建历史已删除的通用 `AsyncBufRead` relay。
+
+### 19.1 唯一正式样本与弱正向冻结
+
+候选在 workload 前通过 Shadowsocks targeted/full、client/server all-features compile、相关 Clippy
+`-D warnings`、fmt、diff-check、两路独立审查，以及真实进程三密码套件 bytes + half-close；随后提交并
+推送：
+
+- commit：`c511314385143890cea0e80b422dff364817287a`；
+- tree：`8e472d39a70da63a90289ba08b81f03acfbde19a`；
+- parent：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-request-first-order`。
+
+唯一正式样本固定 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk`，合同为
+`status=PASS`、`sample_count=1`、`runner_exit_status=0`、54,578 transactions、
+`3,576,823,808` checked bytes，即 `238,454,920 B/s`。二进制 SHA-256 为：
+
+| 二进制 | SHA-256 |
+| --- | --- |
+| `m4-qualification` | `b7102053c54b3d7805922d6994692c9c0bacd7990a0f5c5066f9c8c8a2120e68` |
+| `ferrum2-client` | `814782ebb45330f6916627cf015801fb250d0d1e30bea1254fffbbec535489b6` |
+| `ferrum2-server` | `7de33d7d0f3fa46c16381154277536453be67b7c567054c393acee4ed1667484` |
+
+相对 `bf4cd4a6` 的 `234,378,581 B/s` 增加 `4,076,339 B/s`（`+1.7392%`）；proxy CPU
+从 `23,180 ms` 增至 `23,450 ms`（`+1.1648%`），吞吐/proxy CPU 效率从 `10,111.242` 增至
+`10,168.653 B/s/ms`（`+0.5678%`）；migrations 从 `123,973` 增至 `126,641`
+（`+2.1521%`），context switches 从 `505,073` 增至 `515,159`（`+1.9969%`），mean CPU busy
+从 `47.156%` 增至 `48.002%`（`+0.846` 个百分点），migrations/byte 恶化 `0.4058%`。
+
+吞吐虽为正向，但远低于预声明的 `+5%` 门槛 `246,097,511 B/s`，因此判定为弱正向：提交与远端
+分支永久保留并冻结，不重跑、不触发 hosted CI、不作为后续产品祖先。结果只支持固定 request-first
+顺序可能贡献小幅 readiness/codegen 收益，不能单独区分固定方向、删除 toggle 或代码布局的贡献；
+它同时排除了该顺序是 generic relay 净 `+6.8394%` 的主要来源。绝对 CPU、migrations 与 context
+switches 均上升，跨核迁移强度没有改善，所以后续不再调整方向优先级。
+
+下一步严格按 19 节预声明，从 `bf4cd4a6` 新开 diagnostic-only sibling，只增加按 frame 去重的
+upload staged-ciphertext drain Pending 与 download authenticated-plaintext sink Pending 计数，并继续标记
+`performance_authoritative=false`、`performance_adoption_allowed=false`。诊断只决定 pending-only upload
+buffer 是否有真实命中面，不参与性能排名，也不消费产品候选的唯一正式样本。
