@@ -340,10 +340,12 @@ async fn custom_engine_reports_directional_progress_and_redacts_io_failure() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancellation_wins_a_simultaneously_ready_idle_deadline() {
-    let result =
-        relay_lifecycle_with_engine(Duration::ZERO, ready(()), |_| pending::<io::Result<()>>())
-            .await;
+async fn cancellation_wins_simultaneously_ready_engine_and_idle_deadline() {
+    let result = relay_lifecycle_with_engine(Duration::ZERO, ready(()), |progress| async move {
+        progress.record(RelayDirection::InboundToOutbound, 3);
+        Ok(())
+    })
+    .await;
 
     assert_eq!(
         result,
@@ -358,30 +360,42 @@ async fn cancellation_wins_a_simultaneously_ready_idle_deadline() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn custom_progress_coalesces_and_resets_one_idle_deadline() {
-    let (progress_tx, progress_rx) = tokio::sync::oneshot::channel();
+async fn engine_completion_wins_a_simultaneously_ready_idle_deadline() {
+    let result = relay_lifecycle_with_engine(Duration::ZERO, pending(), |progress| async move {
+        progress.record(RelayDirection::InboundToOutbound, 3);
+        Ok(())
+    })
+    .await;
+
+    assert_eq!(
+        result,
+        Ok(RelayStats {
+            inbound_to_outbound: 3,
+            outbound_to_inbound: 0,
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_at_t4_extends_a_five_second_deadline_to_t9() {
     let relay = tokio::spawn(relay_lifecycle_with_engine(
         Duration::from_secs(5),
         pending(),
-        move |progress| {
-            assert!(
-                progress_tx.send(progress).is_ok(),
-                "publish custom progress recorder"
-            );
-            pending::<io::Result<()>>()
+        |progress| async move {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            progress.record(RelayDirection::InboundToOutbound, 1);
+            pending::<()>().await;
+            Ok(())
         },
     ));
-    let progress = progress_rx.await.expect("custom progress recorder");
+    tokio::task::yield_now().await;
 
     tokio::time::advance(Duration::from_secs(4)).await;
-    for _ in 0..1_000 {
-        progress.record(RelayDirection::InboundToOutbound, 1);
-    }
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(4)).await;
     assert!(
         !relay.is_finished(),
-        "coalesced progress reset the deadline"
+        "progress at t=4 moved the deadline past t=8"
     );
     tokio::time::advance(Duration::from_secs(1)).await;
 
@@ -390,7 +404,116 @@ async fn custom_progress_coalesces_and_resets_one_idle_deadline() {
         Err(RelayFailure {
             kind: RelayRunError::IdleTimeout,
             stats: RelayStats {
-                inbound_to_outbound: 1_000,
+                inbound_to_outbound: 1,
+                outbound_to_inbound: 0,
+            },
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_progress_arms_one_fresh_deadline_from_each_engine_poll() {
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(5),
+        pending(),
+        |progress| async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            progress.record(RelayDirection::InboundToOutbound, 1);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            progress.record(RelayDirection::InboundToOutbound, 1);
+            pending::<()>().await;
+            Ok(())
+        },
+    ));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(
+        !relay.is_finished(),
+        "the t=4 progress armed a fresh deadline through t=9"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    assert_eq!(
+        relay.await.expect("custom relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            stats: RelayStats {
+                inbound_to_outbound: 2,
+                outbound_to_inbound: 0,
+            },
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_ready_with_the_timer_resets_before_polling_the_timer() {
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(5),
+        pending(),
+        |progress| async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            progress.record(RelayDirection::InboundToOutbound, 1);
+            pending::<()>().await;
+            Ok(())
+        },
+    ));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !relay.is_finished(),
+        "same-poll progress reset the ready timer"
+    );
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(
+        !relay.is_finished(),
+        "the fresh deadline has one second left"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    assert_eq!(
+        relay.await.expect("custom relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            stats: RelayStats {
+                inbound_to_outbound: 1,
+                outbound_to_inbound: 0,
+            },
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn zero_progress_does_not_mark_activity_or_extend_the_deadline() {
+    let relay = tokio::spawn(relay_lifecycle_with_engine(
+        Duration::from_secs(5),
+        pending(),
+        |progress| async move {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            progress.record(RelayDirection::InboundToOutbound, 0);
+            pending::<()>().await;
+            Ok(())
+        },
+    ));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert!(!relay.is_finished(), "the original deadline is still armed");
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    assert_eq!(
+        relay.await.expect("custom relay task"),
+        Err(RelayFailure {
+            kind: RelayRunError::IdleTimeout,
+            stats: RelayStats {
+                inbound_to_outbound: 0,
                 outbound_to_inbound: 0,
             },
         })
@@ -408,18 +531,16 @@ async fn custom_engine_owns_zero_generic_buffers() {
         async move {
             let _ = cancel_rx.await;
         },
-        move |progress| {
-            assert!(
-                entered_tx.send(progress).is_ok(),
-                "publish custom engine progress"
-            );
-            pending::<io::Result<()>>()
+        move |progress| async move {
+            progress.record(RelayDirection::OutboundToInbound, 7);
+            assert!(entered_tx.send(()).is_ok(), "publish custom engine entry");
+            pending::<()>().await;
+            Ok(())
         },
     ));
-    let progress = entered_rx.await.expect("custom engine entered");
+    entered_rx.await.expect("custom engine entered");
 
     assert_eq!(registry.snapshot().owned_buffers, 0);
-    progress.record(RelayDirection::OutboundToInbound, 7);
     cancel_tx.send(()).expect("cancel custom engine");
     assert_eq!(
         relay.await.expect("custom relay task"),

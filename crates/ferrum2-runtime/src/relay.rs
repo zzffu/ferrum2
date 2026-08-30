@@ -1,5 +1,5 @@
 use std::fmt;
-use std::future::{Future, pending};
+use std::future::{Future, pending, poll_fn};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -7,10 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
-
 use crate::OwnerRegistry;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Fixed application buffer capacity for each relay direction.
 pub const RELAY_BUFFER_BYTES: usize = 32_768;
@@ -36,8 +34,11 @@ pub enum RelayDirection {
 /// Cloneable progress recorder supplied to a specialized relay engine.
 ///
 /// Engines call [`Self::record`] only after a destination accepts non-zero
-/// bytes. The recorder owns direction-separated statistics and coalesces idle
-/// notifications until the supervisor observes the accumulated progress.
+/// bytes. The recorder owns direction-separated statistics and marks poll-local
+/// activity for the lifecycle supervisor to observe after polling the engine.
+/// It must remain owned by the supplied engine and must not be handed to a
+/// detached task or called outside that engine's current poll. Recording does
+/// not independently wake the lifecycle supervisor.
 #[derive(Clone)]
 pub struct RelayProgress {
     inner: Arc<RelayProgressInner>,
@@ -61,6 +62,11 @@ impl RelayProgress {
     }
 
     /// Records bytes successfully accepted by the selected destination.
+    ///
+    /// The supplied engine must call this during its current poll, before that
+    /// poll returns `Pending` or `Ready`. This method does not wake the lifecycle
+    /// supervisor; calling it from outside the engine or from a detached task
+    /// violates the poll-local progress contract.
     pub fn record(&self, direction: RelayDirection, bytes: usize) {
         if bytes == 0 {
             return;
@@ -191,24 +197,17 @@ struct ActivityIo<'a, T> {
 
 struct ActivitySignal {
     dirty: AtomicBool,
-    notify: Notify,
 }
 
 impl ActivitySignal {
     fn new() -> Self {
         Self {
             dirty: AtomicBool::new(false),
-            notify: Notify::new(),
         }
     }
 
-    fn mark(&self) -> bool {
-        if self.dirty.swap(true, Ordering::Release) {
-            false
-        } else {
-            self.notify.notify_one();
-            true
-        }
+    fn mark(&self) {
+        self.dirty.store(true, Ordering::Release);
     }
 
     fn take_dirty(&self) -> bool {
@@ -306,7 +305,8 @@ where
 /// The engine owns its protocol-specific storage and reports completed writes
 /// through the supplied [`RelayProgress`]. Cancellation wins over engine
 /// completion, which wins over an idle deadline when outcomes become ready in
-/// the same poll.
+/// the same poll. Progress is poll-local: the engine reports it before returning
+/// `Pending`, then the idle future observes it later in the same lifecycle poll.
 pub async fn relay_lifecycle_with_engine<C, M, E>(
     idle_timeout: Duration,
     cancellation: C,
@@ -322,36 +322,15 @@ where
     let idle = async move {
         let timer = tokio::time::sleep(idle_timeout);
         tokio::pin!(timer);
-        loop {
-            let notified = idle_progress.inner.activity.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
+        poll_fn(|context| {
             if idle_progress.inner.activity.take_dirty() {
                 timer
                     .as_mut()
                     .reset(tokio::time::Instant::now() + idle_timeout);
-                continue;
             }
-            tokio::select! {
-                biased;
-                () = &mut timer => {
-                    if idle_progress.inner.activity.take_dirty() {
-                        timer
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + idle_timeout);
-                    } else {
-                        return;
-                    }
-                }
-                () = &mut notified => {
-                    if idle_progress.inner.activity.take_dirty() {
-                        timer
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + idle_timeout);
-                    }
-                }
-            }
-        }
+            timer.as_mut().poll(context)
+        })
+        .await
     };
     let outcome = {
         let engine = make_engine(progress.clone());
@@ -407,14 +386,15 @@ mod tests {
     use super::ActivitySignal;
 
     #[test]
-    fn activity_notifications_coalesce_until_the_idle_waiter_clears_dirty() {
+    fn activity_marks_coalesce_until_the_idle_waiter_clears_dirty() {
         let activity = ActivitySignal::new();
-        assert!(activity.mark());
+        activity.mark();
         for _ in 0..1_000 {
-            assert!(!activity.mark());
+            activity.mark();
         }
         assert!(activity.take_dirty());
-        assert!(activity.mark());
+        assert!(!activity.take_dirty());
+        activity.mark();
         assert!(activity.take_dirty());
         assert!(!activity.take_dirty());
     }
