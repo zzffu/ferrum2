@@ -1282,3 +1282,82 @@ client、server 与 runner 在一次 Cargo invocation 中显式启用三个 root
 protocol-owned cooperative pump：保留 final-layout upload、worker-local decrypt-to-real-sink 与现有认证/
 half-close/error 合同，只删除 artificial frame scheduling boundaries，并以双向公平和 Tokio cooperative
 budget 控制跨 frame 连续推进；不得从诊断提交继承或重建 generic copy buffer。
+
+## 21. 产品 sibling：upload-only Tokio cooperative pump
+
+20.1 的零 Pending 只关闭“ciphertext writer 已 Pending 后才预取一帧 plaintext”的 buffer 方案；它没有
+关闭 Ready 状态下的同-poll upload continuation。恰恰相反，正式 workload 中 client/server 合计
+`317,458` 个 upload data frame 全部没有 drain Pending，说明当前每帧完整 drain 后的
+`wake_by_ref + Pending` 在所有这些 frame 上都形成了人工调度边界。generic relay 会在同一次
+`CopyBuffer::poll_copy` 中继续调用 framed writer，shadowsocks-rust 也连续 copy 到真实 I/O Pending，
+而 sing/sing-box 的稳态 relay 是两个 run-to-block goroutine；两者都没有每帧 self-wake 或第二套固定
+frame/byte/I/O budget。
+
+完整双向 pump 暂不作为首个候选：download fresh next-length continuation 已在 `d27f96ce` 与
+`c8537fce` 分别得到 `-11.4717%`、`-12.7505%` 的明确负证据。下一次只测尚未独立覆盖的 upload
+Ready 跨帧推进，以免把已知负向 download seam 与 upload 机制混合。固定 request-first 的弱正向也不
+继承；参考实现只支持 handshake/initial-payload 优先，不支持稳态 role-aware fixed priority。
+
+### 21.1 冻结设计与分支
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-cooperative-upload-pump`；
+- 生产 diff 只允许位于 `crates/ferrum2-shadowsocks/src/tcp/flow/fused.rs`，测试只允许更新该 crate 的
+  fused TCP 测试；不得继承任一失败/诊断/弱正向候选；
+- 保留 `prepare_upload_read -> 直接读入 final-layout encrypt tail -> seal_upload_read ->
+  poll_drain_upload`，不新增 plaintext buffer、heap allocation 或整帧 copy；
+- staged ciphertext 尚未完整 drain 时绝不读取下一 plaintext，现有 tunnel backpressure 保持；
+- data frame 完整 drain 后仍先按原合同发布 observer bytes，再删除该 frame completion 的
+  `wake_by_ref + Pending`，直接进入下一轮 plaintext read；constructor 的
+  `pending_upload_plaintext=Some(0)` 仍只代表 initial request/first response wire，绝不计为 plaintext；
+- 每次准备开始一个新的 plaintext frame 前调用稳定公开 API
+  `tokio::task::coop::poll_proceed(cx)`。拿到 token 后，只有 raw read、EOF/state transition 或实际字节
+  进展发生才调用 `made_progress()`；budget 耗尽立即返回 `Pending` 并依赖 Tokio 注册的 waker；真实
+  raw read/tunnel write/shutdown Pending 继续依赖对应 I/O waker；
+- 不引入 `8 frames`、`256 KiB`、`64 I/O` 或任何自定义公平常量；Tokio 原生 cooperative budget 是
+  唯一新增让出机制；
+- download helper、download self-wake、`upload_first` 翻转、两方向每 outer poll 的既有顺序、crypto、
+  buffer ownership、worker-local decrypt-to-real-sink、runtime lifecycle/activity/stats、generic fallback、
+  client/server composition、TUN 与测量配置全部保持 `bf4cd4a6`；
+- TLS worker-local borrow 不得跨函数返回、`Poll::Pending` 或下一个 pump quantum；认证失败不得发布
+  plaintext；terminal、error、observer、EOF、half-close 与 shutdown 合同不变。
+
+这次实验只回答一个问题：在保持零拷贝 final-layout upload 的情况下，删除 Ready upload frame 边界的
+人工 wake，并连续推进到真实 I/O Pending 或 Tokio coop 耗尽，能否复现 generic relay 的主要收益。
+
+### 21.2 运行前机制门禁
+
+测试必须直接证明：
+
+- 一个 outer poll 可以连续完成多个 always-ready upload data frame，wire、nonce 与 observer bytes 精确，
+  frame completion 不再产生 synthetic wake；
+- raw source 在若干 frame 后 Pending 时立即停止，并在 source 外部 wake 后无重复 observer、无漏帧地恢复；
+- staged writer Pending 或 partial 时绝不读取下一 plaintext，解除 backpressure 后从原 staged offset 恢复；
+- initial request/first response 的 `Some(0)` wire drain 不发布 plaintext observer；
+- EOF 只读一次，既有 staged wire 先 drain，随后只 shutdown tunnel write half；另一方向继续到自身完成；
+- Tokio cooperative budget 耗尽时，在读取下一 frame 前安全返回 Pending，并由 coop waker 恢复；重复
+  zero-length/always-ready 状态不得 busy loop；
+- all-cipher round trip、write-zero/error、terminal、认证失败、partial、half-close 与 download 既有测试
+  全部保持。
+
+候选必须依次通过 Shadowsocks targeted/full、client/server all-features compile、相关 Clippy
+`-D warnings`、fmt、diff-check、三密码套件真实进程 bytes + half-close，以及两路独立审查。审查必须
+分别覆盖正确性/lost-wake/coop 不变量和实验单轴性。全部通过后先提交并推送，再且仅再运行一次正式
+本地样本；任何门禁失败可以修复并复测门禁，但正式 workload 一旦启动不得重跑。
+
+### 21.3 唯一正式样本与后续决策
+
+正式样本固定为 CPU `0-3`、3 秒 warm-up + 15 秒 active、8-stream `tcp-bulk`，与
+`bf4cd4a6` 的唯一基线比较：
+
+- 吞吐 `<= 234,378,581 B/s`：失败，提交与远端分支永久保留并冻结，不进 CI；
+- 吞吐正向但 `< 246,097,511 B/s`：弱正向，永久保留并冻结，不进 CI；
+- 吞吐 `>= 246,097,511 B/s` 且 proxy CPU 效率 `>= 10,111.242 B/s/ms`：本地强正向，只触发
+  一次 hosted direct CI，CI 不重跑；可通过浏览器查看 workflow、日志、artifact 与最终证据；
+- hosted direct CI 仍以 Ferrum2/shadowsocks-rust `>= 90%` 为完成条件；低于 90% 时保留该提交与 CI
+  证据，先做根因分析，再从当时已证明的基线另开 sibling，不在失败候选上叠加，也不回退历史提交。
+
+无论结果如何都记录 throughput、proxy CPU、B/s/ms、migrations、migrations/byte、context switches、
+mean CPU busy、commit/tree/binary hashes 与唯一 evidence hash。若 upload-only 失败，先用这些指标判断
+是否关闭全部 cross-frame pump；只有新的 profile 证据仍支持 whole-engine hypothesis 时，才另行预声明
+完整双向 protocol-owned pump，且仍直接从 `bf4cd4a6` 开始。
