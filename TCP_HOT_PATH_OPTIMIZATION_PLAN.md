@@ -1179,3 +1179,52 @@ switches 均上升，跨核迁移强度没有改善，所以后续不再调整�
 upload staged-ciphertext drain Pending 与 download authenticated-plaintext sink Pending 计数，并继续标记
 `performance_authoritative=false`、`performance_adoption_allowed=false`。诊断只决定 pending-only upload
 buffer 是否有真实命中面，不参与性能排名，也不消费产品候选的唯一正式样本。
+
+## 20. diagnostic-only sibling：按 frame 量化真实 sink Pending
+
+旧 schema-v7 structural diagnostic 使用 `tcp-stream-64k`：每 worker 连续写四个 64 KiB payload 后才读
+回 echo；正式产品样本的 `tcp-bulk` 则每次写一个 64 KiB 后立即读回。前者会人为放大 socket
+backpressure，不能用来决定正式 workload 是否值得增加 pending-only buffer。因此新诊断固定为：
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-pending-surface-diagnostic`；
+- 新增 diagnostic-only feature `tcp-pending-surface-diagnostic`；普通产品、现有 UDP 性能流程及原
+  `structural-metrics` 构建仍保持 schema-v7、49 counters 与 `tcp-stream-64k`，不改变 calibration；
+- 只有该 feature 的 client/server/runner 构建启用 schema-v8、53 counters，并让 structural diagnostic
+  使用与正式候选相同的 8-worker `tcp-bulk`：每次 64 KiB write 后立即 read exact；
+- 新增四个 feature-only counter：
+  `tcp_fused_upload_drain_pending_frames`、`tcp_fused_upload_drain_pending_polls`、
+  `tcp_fused_download_sink_pending_frames`、`tcp_fused_download_sink_pending_polls`；
+- 所有热路径计数先累加到既有 per-relay 普通 `u64/bool`，relay Drop 时才一次发布到 structural shard，
+  不把逐 poll 原子引入产品测量。
+
+上传只统计 relay 已成功 seal 的 data frame：构造时 `pending_upload_plaintext=Some(0)` 所代表的握手/首响应
+staged wire 必须排除。每个 data frame 在 `poll_drain_upload` 每次返回 `Pending` 时增加 polls，首次
+Pending 才增加 frames；wire 完整 drain 后关闭并清除 per-frame seen。下载同时覆盖 decrypt-to-real-sink
+直接交付的 `FusedSinkPoll::Pending`，以及剩余 authenticated plaintext 对 real sink 的后续
+`poll_write::Pending`；两条路径共享 per-frame seen，direct Pending 转为 buffered remainder 后仍只算
+一个 frame。schema/runner/controller 必须拒绝以下不变量：`frames > polls`、upload pending frames 大于
+owned upload frames、download pending frames 大于 borrowed download frames。
+
+诊断候选完成机制测试、schema-v7 未启用时的回归测试、schema-v8 fail-closed consumer 测试、M4
+self-check、client/server feature compile、Clippy、fmt、diff-check 与两路独立审查后，先提交并推送，
+再只运行一次 diagnostic workload：CPU 不作为产品排名输入，1 秒 warm-up + 15 秒 active、8 workers，
+`performance_authoritative=false`、`performance_adoption_allowed=false`。不得把它当正式产品样本，也不
+触发 CI。
+
+对 client、server 与 merged 分别计算：
+
+- `U = upload_pending_frames / owned_upload_frames`；
+- `D = download_pending_frames / borrowed_download_frames`；
+- `S = upload_pending_polls / max(upload_pending_frames, 1)`。
+
+pending-only upload buffer 的决策在运行前固定如下：
+
+- `U_merged >= 10%` 且 client/server 各自 `U >= 5%`：GO；
+- `5% <= U_merged < 10%`、两端各自至少命中一帧且 `S_merged >= 1.5`：条件 GO；
+- 其余全部 NO-GO，包括 `U_merged < 5%`、任一端完全无命中，或明显单端偏斜。
+
+`D` 只用于解释 generic buffer 的信号来源，无论多高都不得重开 download next-length/read-ahead seam。
+若 upload 为 GO，产品实现必须从 `bf4cd4a6` 另开 sibling，仅在当前 ciphertext drain 已真实 Pending 时
+预取最多一个 plaintext frame；不得从诊断提交继承。若 upload 为 NO-GO，pending-only buffer 轴关闭，
+转向保持现有零拷贝 buffer ownership 的完整 protocol-owned cooperative pump 设计。
