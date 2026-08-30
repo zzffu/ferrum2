@@ -1192,6 +1192,9 @@ backpressure，不能用来决定正式 workload 是否值得增加 pending-only
   `structural-metrics` 构建仍保持 schema-v7、49 counters 与 `tcp-stream-64k`，不改变 calibration；
 - 只有该 feature 的 client/server/runner 构建启用 schema-v8、53 counters，并让 structural diagnostic
   使用与正式候选相同的 8-worker `tcp-bulk`：每次 64 KiB write 后立即 read exact；
+- 现有 `validate-structural-diagnostic` 继续只接受 v7/49/`tcp-stream-64k`；新建
+  `validate-tcp-pending-surface-diagnostic` 并只接受 v8/53/`tcp-bulk`。禁止根据 evidence 自选版本，
+  以确保漏开 feature 而产生的 v7 evidence 必然被新诊断拒绝；
 - 新增四个 feature-only counter：
   `tcp_fused_upload_drain_pending_frames`、`tcp_fused_upload_drain_pending_polls`、
   `tcp_fused_download_sink_pending_frames`、`tcp_fused_download_sink_pending_polls`；
