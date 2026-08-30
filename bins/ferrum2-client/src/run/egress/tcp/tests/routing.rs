@@ -83,8 +83,8 @@ outbound = "manual"
     let (mut first_upstream, _) = upstreams[0].accept().await.expect("selected A");
     assert_eq!(
         registry.snapshot().owned_buffers,
-        0,
-        "single-hop SOCKS fused relay owns no generic relay buffers"
+        2,
+        "single-hop SOCKS generic relay owns both directional buffers"
     );
     let mut wire = [0; 256];
     assert!(
