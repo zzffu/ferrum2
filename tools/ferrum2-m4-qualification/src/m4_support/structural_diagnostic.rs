@@ -1,3 +1,5 @@
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
@@ -24,7 +26,10 @@ use super::structural_contract::{
     STRUCTURAL_KIND, STRUCTURAL_SCENARIO, STRUCTURAL_SCHEMA_VERSION, StructuralMeasurement,
     StructuralSnapshot, capture, counter_schema_json, measure,
 };
-use super::throughput::load_tcp_stream;
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+use super::throughput::load_stream as load_structural_stream;
+#[cfg(not(feature = "tcp-pending-surface-diagnostic"))]
+use super::throughput::load_tcp_stream as load_structural_stream;
 
 const STRUCTURAL_EVIDENCE_MAX_BYTES: usize = 256 * 1024;
 const STRUCTURAL_WARMUP_SECONDS: std::ops::RangeInclusive<u64> = 1..=10;
@@ -374,7 +379,7 @@ fn run_workload(arguments: &StructuralArgs) -> Result<StructuralRun, String> {
             let failure_stop = Arc::clone(&stop);
             workers.push(spawn_worker(move || {
                 let result =
-                    load_tcp_stream(proxy, target, worker_gate, worker_stop, warmup, active);
+                    load_structural_stream(proxy, target, worker_gate, worker_stop, warmup, active);
                 if result.is_err() {
                     failure_stop.store(true, Ordering::SeqCst);
                     failure_gate.cancel();
@@ -565,6 +570,46 @@ fn validate_tcp_fused_evidence(measurement: &StructuralMeasurement) -> Result<()
             ));
         }
     }
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    for (endpoint, delta) in [
+        ("client", &measurement.client_delta),
+        ("server", &measurement.server_delta),
+        ("merged", &measurement.merged_delta),
+    ] {
+        validate_pending_surface_delta(endpoint, delta)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+fn validate_pending_surface_delta(
+    endpoint: &str,
+    delta: &BTreeMap<String, u64>,
+) -> Result<(), String> {
+    let upload_frames = delta["tcp_fused_upload_drain_pending_frames"];
+    let upload_polls = delta["tcp_fused_upload_drain_pending_polls"];
+    let download_frames = delta["tcp_fused_download_sink_pending_frames"];
+    let download_polls = delta["tcp_fused_download_sink_pending_polls"];
+    if upload_frames > upload_polls {
+        return Err(format!(
+            "structural {endpoint} upload pending frames exceed pending polls"
+        ));
+    }
+    if download_frames > download_polls {
+        return Err(format!(
+            "structural {endpoint} download pending frames exceed pending polls"
+        ));
+    }
+    if upload_frames > delta["tcp_fused_owned_upload_frames"] {
+        return Err(format!(
+            "structural {endpoint} upload pending frames exceed owned upload frames"
+        ));
+    }
+    if download_frames > delta["tcp_fused_borrowed_download_frames"] {
+        return Err(format!(
+            "structural {endpoint} download pending frames exceed borrowed download frames"
+        ));
+    }
     Ok(())
 }
 
@@ -679,6 +724,57 @@ pub(super) fn run_self_check() -> Result<(), String> {
         mutated[index + 1] = output_dir.path().join("evidence.jsonl").into_os_string();
         StructuralArgs::parse(&mutated)
     })?;
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    run_pending_surface_self_check()?;
+    Ok(())
+}
+
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+fn run_pending_surface_self_check() -> Result<(), String> {
+    let valid = BTreeMap::from([
+        ("tcp_fused_owned_upload_frames".to_owned(), 400_u64),
+        ("tcp_fused_borrowed_download_frames".to_owned(), 400_u64),
+        ("tcp_fused_upload_drain_pending_frames".to_owned(), 20_u64),
+        ("tcp_fused_upload_drain_pending_polls".to_owned(), 25_u64),
+        ("tcp_fused_download_sink_pending_frames".to_owned(), 30_u64),
+        ("tcp_fused_download_sink_pending_polls".to_owned(), 35_u64),
+    ]);
+    validate_pending_surface_delta("self-check", &valid)?;
+    for (name, counter, value, poll_counter) in [
+        (
+            "upload pending frames above polls",
+            "tcp_fused_upload_drain_pending_frames",
+            26_u64,
+            None,
+        ),
+        (
+            "download pending frames above polls",
+            "tcp_fused_download_sink_pending_frames",
+            36_u64,
+            None,
+        ),
+        (
+            "upload pending frames above owned frames",
+            "tcp_fused_upload_drain_pending_frames",
+            401_u64,
+            Some("tcp_fused_upload_drain_pending_polls"),
+        ),
+        (
+            "download pending frames above borrowed frames",
+            "tcp_fused_download_sink_pending_frames",
+            401_u64,
+            Some("tcp_fused_download_sink_pending_polls"),
+        ),
+    ] {
+        let mut mutated = valid.clone();
+        mutated.insert(counter.to_owned(), value);
+        if let Some(poll_counter) = poll_counter {
+            mutated.insert(poll_counter.to_owned(), value);
+        }
+        expect_rejected(name, || {
+            validate_pending_surface_delta("self-check", &mutated)
+        })?;
+    }
     Ok(())
 }
 

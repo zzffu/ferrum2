@@ -8,10 +8,21 @@ use serde_json::{Value, json};
 
 use super::process_support::{IO_TIMEOUT, clean_io, remaining};
 
+#[cfg(not(feature = "tcp-pending-surface-diagnostic"))]
 pub(super) const STRUCTURAL_SCHEMA_VERSION: u8 = 7;
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+pub(super) const STRUCTURAL_SCHEMA_VERSION: u8 = 8;
 pub(super) const STRUCTURAL_KIND: &str = "m18_structural_trial";
+#[cfg(not(feature = "tcp-pending-surface-diagnostic"))]
 pub(super) const STRUCTURAL_SCENARIO: &str = "tcp-stream-64k";
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+pub(super) const STRUCTURAL_SCENARIO: &str = "tcp-bulk";
 pub(super) const STRUCTURAL_AGGREGATION: &str = "checked_sum_of_client_and_server_checked_deltas";
+
+#[cfg(not(feature = "tcp-pending-surface-diagnostic"))]
+const STRUCTURAL_COUNTER_COUNT: usize = 49;
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+const STRUCTURAL_COUNTER_COUNT: usize = 53;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StructuralSnapshot {
@@ -112,8 +123,12 @@ fn parse_body(body: &str) -> Result<StructuralSnapshot, String> {
             )
         })
         .collect();
-    if expected.len() != StructuralCounter::COUNT || StructuralCounter::COUNT != 49 {
-        return Err("structural counter schema is not the fixed 49-family contract".to_owned());
+    if expected.len() != StructuralCounter::COUNT
+        || StructuralCounter::COUNT != STRUCTURAL_COUNTER_COUNT
+    {
+        return Err(format!(
+            "structural counter schema is not the fixed {STRUCTURAL_COUNTER_COUNT}-family contract"
+        ));
     }
 
     let mut help = BTreeSet::new();
@@ -315,7 +330,7 @@ fn structural_unit(counter: StructuralCounter) -> &'static str {
 pub(super) fn run_self_check() -> Result<(), String> {
     let response = valid_response(1);
     let parsed = parse_response(response.as_bytes())?;
-    if parsed.values.len() != 49 || parsed.overflowed {
+    if parsed.values.len() != STRUCTURAL_COUNTER_COUNT || parsed.overflowed {
         return Err("valid structural exposition did not preserve its closure".to_owned());
     }
 

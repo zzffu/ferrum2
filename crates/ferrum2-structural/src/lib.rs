@@ -82,6 +82,14 @@ pub enum StructuralCounter {
     ResponseCodecLockWaitNanoseconds,
     ResponseCodecLockHoldNanoseconds,
     ResponseCodecLockSamples,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    FtbrUploadDrainPendingFrames,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    FtbrUploadDrainPendingPolls,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    FtbrDownloadSinkPendingFrames,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    FtbrDownloadSinkPendingPolls,
 }
 
 impl StructuralCounter {
@@ -136,6 +144,14 @@ impl StructuralCounter {
         Self::ResponseCodecLockWaitNanoseconds,
         Self::ResponseCodecLockHoldNanoseconds,
         Self::ResponseCodecLockSamples,
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        Self::FtbrUploadDrainPendingFrames,
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        Self::FtbrUploadDrainPendingPolls,
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        Self::FtbrDownloadSinkPendingFrames,
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        Self::FtbrDownloadSinkPendingPolls,
     ];
 
     /// Number of counters in the closed schema.
@@ -199,6 +215,14 @@ impl StructuralCounter {
             Self::ResponseCodecLockWaitNanoseconds => "response_codec_lock_wait_nanoseconds",
             Self::ResponseCodecLockHoldNanoseconds => "response_codec_lock_hold_nanoseconds",
             Self::ResponseCodecLockSamples => "response_codec_lock_samples",
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            Self::FtbrUploadDrainPendingFrames => "tcp_fused_upload_drain_pending_frames",
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            Self::FtbrUploadDrainPendingPolls => "tcp_fused_upload_drain_pending_polls",
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            Self::FtbrDownloadSinkPendingFrames => "tcp_fused_download_sink_pending_frames",
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            Self::FtbrDownloadSinkPendingPolls => "tcp_fused_download_sink_pending_polls",
         }
     }
 
@@ -560,7 +584,10 @@ mod tests {
 
     #[test]
     fn counter_schema_is_closed_and_complete() {
+        #[cfg(not(feature = "tcp-pending-surface-diagnostic"))]
         assert_eq!(StructuralCounter::COUNT, 49);
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        assert_eq!(StructuralCounter::COUNT, 53);
         assert_eq!(LockSite::ALL.len(), 5);
         assert_eq!(FtbrFallbackReason::ALL.len(), 7);
         assert_eq!(align_of::<CacheLineAligned<super::CounterShard>>(), 64);
@@ -575,6 +602,16 @@ mod tests {
         }
         for reason in FtbrFallbackReason::ALL {
             assert!(StructuralCounter::ALL.contains(&reason.counter()));
+        }
+
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        for counter in [
+            StructuralCounter::FtbrUploadDrainPendingFrames,
+            StructuralCounter::FtbrUploadDrainPendingPolls,
+            StructuralCounter::FtbrDownloadSinkPendingFrames,
+            StructuralCounter::FtbrDownloadSinkPendingPolls,
+        ] {
+            assert_eq!(counter.unit(), super::StructuralUnit::Count);
         }
     }
 }

@@ -100,6 +100,18 @@ struct FusedStructuralStats {
     encrypt_buffer_capacity: u64,
     decrypt_buffer_capacity: u64,
     download_frame_open: bool,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    upload_drain_pending_frames: u64,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    upload_drain_pending_polls: u64,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    upload_drain_pending_seen: bool,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    download_sink_pending_frames: u64,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    download_sink_pending_polls: u64,
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    download_sink_pending_seen: bool,
 }
 
 #[cfg(feature = "structural-metrics")]
@@ -112,6 +124,18 @@ impl FusedStructuralStats {
             encrypt_buffer_capacity: encrypt as u64,
             decrypt_buffer_capacity: decrypt as u64,
             download_frame_open: false,
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            upload_drain_pending_frames: 0,
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            upload_drain_pending_polls: 0,
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            upload_drain_pending_seen: false,
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            download_sink_pending_frames: 0,
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            download_sink_pending_polls: 0,
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            download_sink_pending_seen: false,
         }
     }
 
@@ -138,6 +162,54 @@ impl FusedStructuralStats {
             StructuralCounter::FtbrDecryptBufferCapacityBytes,
             self.decrypt_buffer_capacity,
         );
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        {
+            structural.add(
+                StructuralCounter::FtbrUploadDrainPendingFrames,
+                self.upload_drain_pending_frames,
+            );
+            structural.add(
+                StructuralCounter::FtbrUploadDrainPendingPolls,
+                self.upload_drain_pending_polls,
+            );
+            structural.add(
+                StructuralCounter::FtbrDownloadSinkPendingFrames,
+                self.download_sink_pending_frames,
+            );
+            structural.add(
+                StructuralCounter::FtbrDownloadSinkPendingPolls,
+                self.download_sink_pending_polls,
+            );
+        }
+    }
+
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    fn upload_frame_sealed(&mut self) {
+        self.upload_drain_pending_seen = false;
+    }
+
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    fn record_upload_drain_pending(&mut self) {
+        self.upload_drain_pending_polls = self.upload_drain_pending_polls.saturating_add(1);
+        if !self.upload_drain_pending_seen {
+            self.upload_drain_pending_frames = self.upload_drain_pending_frames.saturating_add(1);
+            self.upload_drain_pending_seen = true;
+        }
+    }
+
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    fn download_frame_opened(&mut self) {
+        self.download_sink_pending_seen = false;
+    }
+
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    fn record_download_sink_pending(&mut self) {
+        debug_assert!(self.download_frame_open);
+        self.download_sink_pending_polls = self.download_sink_pending_polls.saturating_add(1);
+        if !self.download_sink_pending_seen {
+            self.download_sink_pending_frames = self.download_sink_pending_frames.saturating_add(1);
+            self.download_sink_pending_seen = true;
+        }
     }
 }
 
@@ -224,6 +296,8 @@ where
             self.structural_stats.owned_upload_frames =
                 self.structural_stats.owned_upload_frames.saturating_add(1);
         }
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        self.structural_stats.upload_frame_sealed();
         self.pending_upload_plaintext = Some(read);
         self.poll_pending_upload(cx)
     }
@@ -239,7 +313,13 @@ where
                 )
                 .map_err(framed_error)
             {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+                    if self.pending_upload_plaintext != Some(0) {
+                        self.structural_stats.record_upload_drain_pending();
+                    }
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(())) => {}
             }
@@ -328,9 +408,13 @@ where
                         .borrowed_download_frames
                         .saturating_add(1);
                     self.structural_stats.download_frame_open = true;
+                    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+                    self.structural_stats.download_frame_opened();
                 }
                 return match result {
                     FusedSinkPoll::Pending => {
+                        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+                        self.structural_stats.record_download_sink_pending();
                         self.download_plaintext_carried = true;
                         Poll::Pending
                     }
@@ -382,10 +466,14 @@ where
                 .borrowed_download_frames
                 .saturating_add(1);
             self.structural_stats.download_frame_open = true;
+            #[cfg(feature = "tcp-pending-surface-diagnostic")]
+            self.structural_stats.download_frame_opened();
         }
         let source_len = source.len();
         let written = match Pin::new(&mut *self.plain).poll_write(cx, source) {
             Poll::Pending => {
+                #[cfg(feature = "tcp-pending-surface-diagnostic")]
+                self.structural_stats.record_download_sink_pending();
                 self.download_plaintext_carried = true;
                 return Poll::Pending;
             }

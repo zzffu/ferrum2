@@ -16,6 +16,10 @@ __frame-size-65535 = []
 __frame-size-adaptive = []
 candidate-udp-owned-headroom = []
 structural-metrics = ["dep:ferrum2-structural"]
+tcp-pending-surface-diagnostic = [
+    "structural-metrics",
+    "ferrum2-structural/tcp-pending-surface-diagnostic",
+]
 tokio = ["dep:tokio", "dep:tokio-util"]
 
 [dependencies]

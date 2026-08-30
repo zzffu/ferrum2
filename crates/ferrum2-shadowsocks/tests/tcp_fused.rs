@@ -103,8 +103,7 @@ struct SequencedIo {
     inner: RecordingIo,
     sequence: Arc<Mutex<Vec<&'static str>>>,
     successful_writes: usize,
-    pending_after_handshake: bool,
-    returned_pending: bool,
+    pending_writes_after_handshake: usize,
     pending_shutdowns: usize,
     shutdown_polls: Arc<AtomicUsize>,
 }
@@ -134,8 +133,8 @@ impl TransportIo for SequencedIo {
         cx: &mut Context<'_>,
         source: &[u8],
     ) -> Poll<Result<usize, Self::IoError>> {
-        if self.pending_after_handshake && self.successful_writes != 0 && !self.returned_pending {
-            self.returned_pending = true;
+        if self.successful_writes != 0 && self.pending_writes_after_handshake != 0 {
+            self.pending_writes_after_handshake -= 1;
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
@@ -585,7 +584,7 @@ async fn fused_pending_materializes_once_and_resumes_from_flow_scratch() {
     let (mut flow, observers, _) = observed_server_flow(request_salt, frames).await;
     let decrypt_pointer = decrypt_pointer(observers);
     let (mut plain, sink, pending_waker) =
-        ScriptedWritePlain::new([SinkAction::Pending, SinkAction::All]);
+        ScriptedWritePlain::new([SinkAction::Pending, SinkAction::Pending, SinkAction::All]);
     let progressed = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&progressed);
     #[cfg(feature = "structural-metrics")]
@@ -621,13 +620,28 @@ async fn fused_pending_materializes_once_and_resumes_from_flow_scratch() {
         .wake();
     assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
     assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(progressed.load(Ordering::SeqCst), 0);
+
+    pending_waker
+        .lock()
+        .expect("pending sink waker")
+        .take()
+        .expect("buffered sink registered the relay waker")
+        .wake();
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 3);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
 
     let sink = sink.lock().expect("sink observation");
-    assert_eq!(sink.polls, 2);
-    assert_eq!(sink.sources, [payload.to_vec(), payload.to_vec()]);
+    assert_eq!(sink.polls, 3);
+    assert_eq!(
+        sink.sources,
+        [payload.to_vec(), payload.to_vec(), payload.to_vec()]
+    );
     assert_eq!(sink.accepted, payload);
     assert_ne!(sink.pointers[0], decrypt_pointer);
     assert_eq!(sink.pointers[1], decrypt_pointer);
+    assert_eq!(sink.pointers[2], decrypt_pointer);
     assert_eq!(progressed.load(Ordering::SeqCst), payload.len());
     drop(sink);
     drop(relay);
@@ -639,6 +653,17 @@ async fn fused_pending_materializes_once_and_resumes_from_flow_scratch() {
             1
         );
         assert_eq!(snapshot.get(StructuralCounter::FtbrPartialWrites), 0);
+        #[cfg(feature = "tcp-pending-surface-diagnostic")]
+        {
+            assert_eq!(
+                snapshot.get(StructuralCounter::FtbrDownloadSinkPendingFrames),
+                1
+            );
+            assert_eq!(
+                snapshot.get(StructuralCounter::FtbrDownloadSinkPendingPolls),
+                2
+            );
+        }
     }
 }
 
@@ -1094,7 +1119,7 @@ async fn always_ready_upload_alternates_read_and_complete_wire_write() {
     let read_count = Arc::new(AtomicUsize::new(0));
     let mut flow = sequenced_client_flow(
         Arc::clone(&sequence),
-        false,
+        0,
         None,
         0,
         Arc::new(AtomicUsize::new(0)),
@@ -1110,7 +1135,9 @@ async fn always_ready_upload_alternates_read_and_complete_wire_write() {
         pending_shutdowns: 0,
     };
     #[cfg(feature = "structural-metrics")]
-    let structural = StructuralHub::new().local();
+    let structural_hub = StructuralHub::new();
+    #[cfg(feature = "structural-metrics")]
+    let structural = structural_hub.local();
     let mut relay = Box::pin(relay_client_flow(
         &mut plain,
         &mut flow,
@@ -1128,6 +1155,27 @@ async fn always_ready_upload_alternates_read_and_complete_wire_write() {
         *sequence.lock().expect("sequence"),
         ["READ", "WRITE", "READ", "WRITE", "READ", "WRITE"]
     );
+    drop(relay);
+    #[cfg(feature = "tcp-pending-surface-diagnostic")]
+    {
+        let snapshot = structural_hub.snapshot();
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrUploadDrainPendingFrames),
+            0
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrUploadDrainPendingPolls),
+            0
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrDownloadSinkPendingFrames),
+            0
+        );
+        assert_eq!(
+            snapshot.get(StructuralCounter::FtbrDownloadSinkPendingPolls),
+            0
+        );
+    }
 }
 
 #[tokio::test]
@@ -1136,7 +1184,7 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
     let read_count = Arc::new(AtomicUsize::new(0));
     let mut flow = sequenced_client_flow(
         Arc::clone(&sequence),
-        true,
+        1,
         Some(257),
         0,
         Arc::new(AtomicUsize::new(0)),
@@ -1220,6 +1268,118 @@ async fn pending_and_partial_wire_drain_never_reads_ahead() {
     }
 }
 
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+#[tokio::test]
+async fn repeated_upload_drain_pending_counts_one_frame_and_each_poll() {
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let mut flow = sequenced_client_flow(
+        Arc::clone(&sequence),
+        2,
+        None,
+        0,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    sequence.lock().expect("sequence").clear();
+
+    let mut plain = AlwaysReadyPlain {
+        reads: [b"one pending upload frame".to_vec()].into(),
+        sequence: Arc::clone(&sequence),
+        read_count: Arc::new(AtomicUsize::new(0)),
+        read_polls: Arc::new(AtomicUsize::new(0)),
+        shutdown_polls: Arc::new(AtomicUsize::new(0)),
+        pending_shutdowns: 0,
+    };
+    let structural_hub = StructuralHub::new();
+    let structural = structural_hub.local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        &structural,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(*sequence.lock().expect("sequence"), ["READ"]);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(*sequence.lock().expect("sequence"), ["READ"]);
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(*sequence.lock().expect("sequence"), ["READ", "WRITE"]);
+
+    drop(relay);
+    let snapshot = structural_hub.snapshot();
+    assert_eq!(snapshot.get(StructuralCounter::FtbrOwnedUploadFrames), 1);
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrUploadDrainPendingFrames),
+        1
+    );
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrUploadDrainPendingPolls),
+        2
+    );
+}
+
+#[cfg(feature = "tcp-pending-surface-diagnostic")]
+#[tokio::test]
+async fn pending_initial_staged_upload_is_excluded_from_the_surface() {
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let mut flow = sequenced_client_flow(
+        Arc::clone(&sequence),
+        2,
+        None,
+        0,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    sequence.lock().expect("sequence").clear();
+
+    let staged_plaintext = b"staged before fused relay";
+    let mut cx = Context::from_waker(Waker::noop());
+    let Poll::Ready(Ok(admitted)) = Pin::new(&mut flow).poll_write_plain(&mut cx, staged_plaintext)
+    else {
+        panic!("plaintext is admitted into the staged frame");
+    };
+    assert_eq!(admitted, staged_plaintext.len());
+    assert!(sequence.lock().expect("sequence").is_empty());
+
+    let mut plain = AlwaysReadyPlain {
+        reads: VecDeque::new(),
+        sequence: Arc::clone(&sequence),
+        read_count: Arc::new(AtomicUsize::new(0)),
+        read_polls: Arc::new(AtomicUsize::new(0)),
+        shutdown_polls: Arc::new(AtomicUsize::new(0)),
+        pending_shutdowns: 0,
+    };
+    let structural_hub = StructuralHub::new();
+    let structural = structural_hub.local();
+    let mut relay = Box::pin(relay_client_flow(
+        &mut plain,
+        &mut flow,
+        |_, _| {},
+        &structural,
+    ));
+
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(sequence.lock().expect("sequence").is_empty());
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(sequence.lock().expect("sequence").is_empty());
+    assert!(matches!(relay.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(*sequence.lock().expect("sequence"), ["WRITE"]);
+
+    drop(relay);
+    let snapshot = structural_hub.snapshot();
+    assert_eq!(snapshot.get(StructuralCounter::FtbrOwnedUploadFrames), 0);
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrUploadDrainPendingFrames),
+        0
+    );
+    assert_eq!(
+        snapshot.get(StructuralCounter::FtbrUploadDrainPendingPolls),
+        0
+    );
+}
+
 #[tokio::test]
 async fn server_raw_eof_before_first_response_sends_no_wire() {
     let keys = method_provider(MethodProfile::Blake3Aes128Gcm2022);
@@ -1268,7 +1428,7 @@ async fn pending_upload_shutdown_never_repolls_raw_eof() {
     let sequence = Arc::new(Mutex::new(Vec::new()));
     let tunnel_shutdown_polls = Arc::new(AtomicUsize::new(0));
     let mut flow =
-        sequenced_client_flow(sequence, false, None, 1, Arc::clone(&tunnel_shutdown_polls)).await;
+        sequenced_client_flow(sequence, 0, None, 1, Arc::clone(&tunnel_shutdown_polls)).await;
     let read_polls = Arc::new(AtomicUsize::new(0));
     let mut plain = AlwaysReadyPlain {
         reads: VecDeque::new(),
@@ -1298,7 +1458,7 @@ async fn pending_upload_shutdown_never_repolls_raw_eof() {
 
 async fn sequenced_client_flow(
     sequence: Arc<Mutex<Vec<&'static str>>>,
-    pending_after_handshake: bool,
+    pending_writes_after_handshake: usize,
     write_limit: Option<usize>,
     pending_shutdowns: usize,
     shutdown_polls: Arc<AtomicUsize>,
@@ -1322,8 +1482,7 @@ async fn sequenced_client_flow(
             inner,
             sequence,
             successful_writes: 0,
-            pending_after_handshake,
-            returned_pending: false,
+            pending_writes_after_handshake,
             pending_shutdowns,
             shutdown_polls,
         },

@@ -126,16 +126,23 @@ def _parser() -> argparse.ArgumentParser:
     source_lineage.add_argument("--parent-sha", required=True)
     source_lineage.add_argument("--candidate-sha", required=True)
     # BEGIN M18 STRUCTURAL DIAGNOSTIC (excluded from timed v6 source identity)
-    structural = commands.add_parser(
-        "validate-structural-diagnostic",
-        help="recompute one bounded non-authoritative structural diagnostic",
-    )
-    structural.add_argument("--evidence", required=True, type=pathlib.Path)
-    structural.add_argument("--repository", required=True, type=pathlib.Path)
-    structural.add_argument("--runner", required=True, type=pathlib.Path)
-    structural.add_argument("--client", required=True, type=pathlib.Path)
-    structural.add_argument("--server", required=True, type=pathlib.Path)
-    structural.add_argument("--candidate-sha", required=True)
+    for command, help_text in (
+        (
+            "validate-structural-diagnostic",
+            "recompute one bounded schema-v7 structural diagnostic",
+        ),
+        (
+            "validate-tcp-pending-surface-diagnostic",
+            "recompute one bounded schema-v8 TCP pending-surface diagnostic",
+        ),
+    ):
+        structural = commands.add_parser(command, help=help_text)
+        structural.add_argument("--evidence", required=True, type=pathlib.Path)
+        structural.add_argument("--repository", required=True, type=pathlib.Path)
+        structural.add_argument("--runner", required=True, type=pathlib.Path)
+        structural.add_argument("--client", required=True, type=pathlib.Path)
+        structural.add_argument("--server", required=True, type=pathlib.Path)
+        structural.add_argument("--candidate-sha", required=True)
     architecture_decision.add_cli_commands(commands)
     build_qualification.add_cli_commands(commands)
     conditional_decision.add_cli_commands(commands)
@@ -361,8 +368,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
             return conditional_decision.run_cli_command(parsed)
         if parsed.command in frame_qualification.COMMANDS:
             return frame_qualification.run_cli_command(parsed)
-        if parsed.command == "validate-structural-diagnostic":
-            row = structural_diagnostic.validate_structural_diagnostic(
+        if parsed.command in (
+            "validate-structural-diagnostic",
+            "validate-tcp-pending-surface-diagnostic",
+        ):
+            validator = (
+                structural_diagnostic.validate_structural_diagnostic
+                if parsed.command == "validate-structural-diagnostic"
+                else structural_diagnostic.validate_tcp_pending_surface_diagnostic
+            )
+            row = validator(
                 parsed.evidence,
                 repository=parsed.repository,
                 runner=parsed.runner,

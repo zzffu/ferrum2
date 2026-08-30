@@ -26,6 +26,11 @@ structural-metrics = [
     "ferrum2-runtime/structural-metrics",
     "ferrum2-shadowsocks/structural-metrics",
 ]
+tcp-pending-surface-diagnostic = [
+    "structural-metrics",
+    "ferrum2-shadowsocks/tcp-pending-surface-diagnostic",
+    "ferrum2-structural/tcp-pending-surface-diagnostic",
+]
 
 [dependencies]
 bytes.workspace = true

@@ -8,7 +8,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 from tools.performance_candidate.cli import main as performance_candidate_main
 from tools.performance_candidate.json_contract import CandidateControlError, U64_MAX
@@ -20,11 +20,15 @@ from tools.performance_candidate.linux.evidence_contract import (
 )
 from tools.performance_candidate.structural_diagnostic import (
     COUNTER_UNITS,
+    PENDING_SURFACE_COUNTER_UNITS,
+    PENDING_SURFACE_SCHEMA_VERSION,
+    PENDING_SURFACE_SCENARIO,
     STRUCTURAL_AGGREGATION,
     STRUCTURAL_KIND,
     STRUCTURAL_SCENARIO,
     STRUCTURAL_SCHEMA_VERSION,
     validate_structural_diagnostic,
+    validate_tcp_pending_surface_diagnostic,
 )
 
 
@@ -79,8 +83,18 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
     def _digest(path: pathlib.Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    def _valid_row(self) -> dict[str, object]:
-        before = {name: 0 for name in COUNTER_UNITS}
+    def _valid_row(
+        self, schema_version: int = STRUCTURAL_SCHEMA_VERSION
+    ) -> dict[str, object]:
+        if schema_version == STRUCTURAL_SCHEMA_VERSION:
+            counter_units = COUNTER_UNITS
+            scenario = STRUCTURAL_SCENARIO
+        elif schema_version == PENDING_SURFACE_SCHEMA_VERSION:
+            counter_units = PENDING_SURFACE_COUNTER_UNITS
+            scenario = PENDING_SURFACE_SCENARIO
+        else:
+            raise AssertionError("unsupported fixture schema")
+        before = {name: 0 for name in counter_units}
         client_after = dict(before)
         server_after = dict(before)
         for name, value in {
@@ -93,20 +107,28 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
             "tcp_fused_relay_buffer_capacity_removed_bytes": 524_288,
         }.items():
             client_after[name] = value
+        if schema_version == PENDING_SURFACE_SCHEMA_VERSION:
+            for name, value in {
+                "tcp_fused_upload_drain_pending_frames": 20,
+                "tcp_fused_upload_drain_pending_polls": 25,
+                "tcp_fused_download_sink_pending_frames": 30,
+                "tcp_fused_download_sink_pending_polls": 35,
+            }.items():
+                client_after[name] = value
         client_delta = dict(client_after)
         server_delta = dict(server_after)
         merged = {
-            name: client_delta[name] + server_delta[name] for name in COUNTER_UNITS
+            name: client_delta[name] + server_delta[name] for name in counter_units
         }
         return {
-            "schema_version": STRUCTURAL_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "kind": STRUCTURAL_KIND,
             "candidate_sha": self.candidate_sha,
             "tree_sha": self.tree_sha,
             "runner_sha256": self._digest(self.runner),
             "client_sha256": self._digest(self.client),
             "server_sha256": self._digest(self.server),
-            "scenario": STRUCTURAL_SCENARIO,
+            "scenario": scenario,
             "warmup_seconds": 1,
             "active_seconds": 15,
             "build_profile": "profiling-structural-metrics",
@@ -118,7 +140,7 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
                     "aggregation": STRUCTURAL_AGGREGATION,
                     "range": {"minimum": 0, "maximum": U64_MAX},
                 }
-                for name, unit in COUNTER_UNITS.items()
+                for name, unit in counter_units.items()
             },
             "snapshots": {
                 "client": {"before": dict(before), "after": client_after},
@@ -147,13 +169,28 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
             "status": "PASS",
         }
 
+    @staticmethod
+    def _set_counter(
+        row: dict[str, object], endpoint: str, counter: str, value: int
+    ) -> None:
+        row["snapshots"][endpoint]["after"][counter] = value
+        row["deltas"][endpoint][counter] = value
+        row["deltas"]["merged"][counter] = sum(
+            row["deltas"][name][counter] for name in ("client", "server")
+        )
+
     def _write(self, row: object) -> None:
         self.evidence.write_text(
             json.dumps(row, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8"
         )
 
-    def _validate(self) -> dict[str, object]:
-        return validate_structural_diagnostic(
+    def _validate(self, *, pending_surface: bool = False) -> dict[str, object]:
+        validator = (
+            validate_tcp_pending_surface_diagnostic
+            if pending_surface
+            else validate_structural_diagnostic
+        )
+        return validator(
             self.evidence,
             repository=self.repository,
             runner=self.runner,
@@ -162,21 +199,13 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
             candidate_sha=self.candidate_sha,
         )
 
-    def test_valid_v7_recomputes_identity_deltas_and_closed_49_family_schema(self) -> None:
-        validated = self._validate()
-        self.assertEqual(len(validated["counter_schema"]), 49)
-        self.assertFalse(validated["performance_authoritative"])
-        self.assertFalse(validated["performance_adoption_allowed"])
-        self.assertGreater(
-            validated["deltas"]["merged"]["tcp_fused_fast_path_connections"], 0
-        )
-
-    def test_supported_controller_entry_validates_v7(self) -> None:
+    def _run_controller(self, command: str) -> tuple[int, str, str]:
         output = io.StringIO()
-        with redirect_stdout(output):
+        error = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
             status = performance_candidate_main(
                 [
-                    "validate-structural-diagnostic",
+                    command,
                     "--evidence",
                     str(self.evidence),
                     "--repository",
@@ -191,9 +220,70 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
                     self.candidate_sha,
                 ]
             )
+        return status, output.getvalue(), error.getvalue()
+
+    def test_valid_v7_recomputes_identity_deltas_and_closed_49_family_schema(self) -> None:
+        validated = self._validate()
+        self.assertEqual(len(validated["counter_schema"]), 49)
+        self.assertFalse(validated["performance_authoritative"])
+        self.assertFalse(validated["performance_adoption_allowed"])
+        self.assertGreater(
+            validated["deltas"]["merged"]["tcp_fused_fast_path_connections"], 0
+        )
+
+    def test_valid_v8_recomputes_closed_53_family_pending_surface_schema(self) -> None:
+        self._write(self._valid_row(PENDING_SURFACE_SCHEMA_VERSION))
+        validated = self._validate(pending_surface=True)
+        self.assertEqual(validated["schema_version"], PENDING_SURFACE_SCHEMA_VERSION)
+        self.assertEqual(validated["scenario"], PENDING_SURFACE_SCENARIO)
+        self.assertEqual(len(validated["counter_schema"]), 53)
+        self.assertFalse(validated["performance_authoritative"])
+        self.assertFalse(validated["performance_adoption_allowed"])
+
+    def test_supported_controller_entry_validates_v7(self) -> None:
+        status, output, error = self._run_controller("validate-structural-diagnostic")
         self.assertEqual(status, 0)
-        self.assertIn("m18_structural_trial\tPASS", output.getvalue())
-        self.assertIn("performance_adoption_allowed=false", output.getvalue())
+        self.assertEqual(error, "")
+        self.assertIn("m18_structural_trial\tPASS", output)
+        self.assertIn("performance_adoption_allowed=false", output)
+
+    def test_schema_specific_controller_entries_are_fail_closed(self) -> None:
+        pending_command = "validate-tcp-pending-surface-diagnostic"
+        self._write(self._valid_row(PENDING_SURFACE_SCHEMA_VERSION))
+        status, output, error = self._run_controller(pending_command)
+        self.assertEqual(status, 0)
+        self.assertEqual(error, "")
+        self.assertIn("m18_structural_trial\tPASS", output)
+
+        cases = (
+            (
+                self._valid_row(PENDING_SURFACE_SCHEMA_VERSION),
+                "validate-structural-diagnostic",
+            ),
+            (self._valid_row(), pending_command),
+            (
+                {**self._valid_row(), "scenario": PENDING_SURFACE_SCENARIO},
+                "validate-structural-diagnostic",
+            ),
+            (
+                {
+                    **self._valid_row(PENDING_SURFACE_SCHEMA_VERSION),
+                    "scenario": STRUCTURAL_SCENARIO,
+                },
+                pending_command,
+            ),
+        )
+        for row, command in cases:
+            with self.subTest(
+                schema_version=row["schema_version"],
+                scenario=row["scenario"],
+                command=command,
+            ):
+                self._write(row)
+                status, output, error = self._run_controller(command)
+                self.assertEqual(status, 2)
+                self.assertEqual(output, "")
+                self.assertIn("performance-candidate:", error)
 
     def test_closed_schema_and_fail_closed_arithmetic_reject_mutations(self) -> None:
         def missing_family(row: dict[str, object]) -> None:
@@ -275,6 +365,73 @@ class StructuralDiagnosticContractTests(unittest.TestCase):
                 self._write(row)
                 with self.assertRaises(CandidateControlError):
                     self._validate()
+
+    def test_v8_pending_surface_invariants_reject_endpoint_mutations(self) -> None:
+        def upload_frames_above_polls(row: dict[str, object]) -> None:
+            self._set_counter(
+                row, "client", "tcp_fused_upload_drain_pending_frames", 26
+            )
+            self._set_counter(
+                row, "server", "tcp_fused_upload_drain_pending_polls", 100
+            )
+
+        def download_frames_above_polls(row: dict[str, object]) -> None:
+            self._set_counter(
+                row, "client", "tcp_fused_download_sink_pending_frames", 36
+            )
+            self._set_counter(
+                row, "server", "tcp_fused_download_sink_pending_polls", 100
+            )
+
+        def upload_frames_above_owned(row: dict[str, object]) -> None:
+            self._set_counter(
+                row, "client", "tcp_fused_upload_drain_pending_frames", 401
+            )
+            self._set_counter(
+                row, "client", "tcp_fused_upload_drain_pending_polls", 401
+            )
+            self._set_counter(row, "server", "tcp_fused_owned_upload_frames", 1_000)
+
+        def download_frames_above_borrowed(row: dict[str, object]) -> None:
+            self._set_counter(
+                row, "client", "tcp_fused_download_sink_pending_frames", 401
+            )
+            self._set_counter(
+                row, "client", "tcp_fused_download_sink_pending_polls", 401
+            )
+            self._set_counter(
+                row, "server", "tcp_fused_borrowed_download_frames", 1_000
+            )
+
+        mutations = {
+            "upload frames above polls": upload_frames_above_polls,
+            "download frames above polls": download_frames_above_polls,
+            "upload frames above owned": upload_frames_above_owned,
+            "download frames above borrowed": download_frames_above_borrowed,
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                row = self._valid_row(PENDING_SURFACE_SCHEMA_VERSION)
+                mutate(row)
+                self._write(row)
+                with self.assertRaises(CandidateControlError):
+                    self._validate(pending_surface=True)
+
+    def test_schema_and_scenario_mismatches_are_rejected(self) -> None:
+        rows = (
+            (self._valid_row(), PENDING_SURFACE_SCENARIO, False),
+            (
+                self._valid_row(PENDING_SURFACE_SCHEMA_VERSION),
+                STRUCTURAL_SCENARIO,
+                True,
+            ),
+        )
+        for row, scenario, pending_surface in rows:
+            with self.subTest(schema_version=row["schema_version"]):
+                row["scenario"] = scenario
+                self._write(row)
+                with self.assertRaises(CandidateControlError):
+                    self._validate(pending_surface=pending_surface)
 
     def test_duplicate_json_keys_and_binary_identity_tampering_are_rejected(self) -> None:
         self.evidence.write_text(

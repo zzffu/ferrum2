@@ -10,6 +10,10 @@ publish.workspace = true
 [features]
 default = []
 structural-diagnostic = ["dep:ferrum2-structural"]
+tcp-pending-surface-diagnostic = [
+    "structural-diagnostic",
+    "ferrum2-structural/tcp-pending-surface-diagnostic",
+]
 
 # END M18 STRUCTURAL DIAGNOSTIC
 [[bin]]
