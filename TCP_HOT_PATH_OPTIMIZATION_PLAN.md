@@ -1003,3 +1003,68 @@ half-close；随后提交并推送：
 diagnostic-only structural counters 量化 `FtbrPartialWrites / FtbrBorrowedDownloadFrames`：只有 download
 partial sink write 命中面明显时，才从 `bf4cd4a6` 开 same-frame ready sink drain sibling；否则直接转向
 不改 frame I/O 的 activity/scheduler lifecycle seam。不得在 `54147afb` 上叠加任何优化。
+
+## 18. partial-write 命中面诊断与 poll-local activity sibling
+
+### 18.1 bf4 structural diagnostic：same-frame sink drain NO-GO
+
+不修改产品代码，直接用 `bf4cd4a6` 的既有 schema-v7 `structural-metrics` 构建运行一次
+diagnostic-only workload：1 秒 warm-up + 15 秒 active、8 workers，正确校验 `6,639,845,376`
+bytes；`status=PASS`、`performance_authoritative=false`、
+`performance_adoption_allowed=false`，结果不参与性能排名。固定身份为：
+
+- candidate：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- tree：`4fcf9a25c47e251eb42aa24f8a6eb62fa1d702c0`；
+- `m4-qualification`：`94d6a920a74b067e1f7bf9b0028ec4fb6d55c8a331e78536b453027c5a0491f9`；
+- `ferrum2-client`：`194f2b0575411c9bdc1e3e0af5d4f35ed26c489e8dd54a444984bbab18394db3`；
+- `ferrum2-server`：`b890b71b3b6e3e31aad2b63fdcdc7445abda1955c4adc63a24978099fbe29d50`。
+
+计数结果：
+
+| 角色 | borrowed download frames | owned upload frames | fused partial writes |
+| --- | ---: | ---: | ---: |
+| client | 217,188 | 217,133 | 0 |
+| server | 217,133 | 217,188 | 0 |
+| 合计 | 434,321 | 434,321 | 0 |
+
+`FtbrPartialWrites / FtbrBorrowedDownloadFrames = 0 / 434,321`。因此“仅在同一已认证 frame 内继续
+Ready partial sink writes”在目标 workload 没有命中面，直接 NO-GO：不实现、不建产品提交、不跑
+正式性能。上传 `drain_staged` 已经在同 poll 循环 Ready partial tunnel writes；ready upload batch 只能
+跨 frame 读取下一 plaintext，也按已关闭的 read-ahead/bounded-drain seam NO-GO。
+
+### 18.2 产品 sibling：poll-local activity deadline reset
+
+现有 `ActivitySignal::mark` 对每次 destination progress 执行 `AtomicBool::swap(true, Release)`，dirty
+首次翻转时还执行 `Notify::notify_one`；idle future 再在 `timer/notified` select 中消费 dirty。specialized
+engine、idle 与 cancellation 实际由同一个外层 biased select 在同一 task 中轮流 poll，顺序固定为
+cancellation、engine、idle：engine 在本轮产生 progress 并返回 Pending 后，idle 必定在同一外层 poll
+中被继续 poll。故可以让 idle 每次被 poll 时先消费 dirty/reset timer，再 poll timer，不需要额外 Notify
+唤醒同一个 task，也不需要 mark 侧的 read-modify-write。
+
+新建 sibling：
+
+- 基线：`bf4cd4a679b4d140615d0b61c89a0dd916b20e2a`；
+- 分支：`codex/tcp-hot-path-stage3-poll-local-activity`；
+- 生产 diff 只允许位于 `crates/ferrum2-runtime/src/relay.rs`：`mark` 用 atomic store 设置 dirty，删除
+  `Notify`；idle 改为 `poll_fn`，每次 poll 先 `take_dirty` 并将 `Sleep` reset 到 `now + timeout`，再 poll
+  timer；
+- 外层 cancellation > engine > idle 优先级、direction stats 的每次 `AtomicU64` 更新、frame/poll/wake、
+  I/O、half-close、buffer、crypto、generic copy、TUN 与测量配置全部保持 `bf4`；
+- common generic lifecycle 也使用同一 activity 机制，必须保持其可观察 idle/bytes/error 合同；正式 direct
+  workload 仍只覆盖 client/server fused 产品路径。
+
+机制测试必须证明：首次/重复 progress 都只延后一个 fresh deadline；t=4 秒的 progress 将 5 秒 timeout
+推迟至 t=9；timer 与 progress 同轮 Ready 时 progress reset 胜出；zero 不重置；engine I/O、cancel、
+正常完成与 idle 的既有优先级和精确 stats 保持；真实 generic 与 fused half-close/backpressure 不变。
+
+候选通过 runtime 全套、client/server compile、相关 Clippy、fmt、diff-check、两路独立审查和三密码套件
+真实进程 bytes + half-close 后，必须先提交推送，再只运行一次固定 CPU `0-3`、3 秒 warm-up + 15 秒
+active、8-stream `tcp-bulk` 正式样本：
+
+- 不高于 `bf4cd4a6` 的 `234,378,581 B/s`：失败、保留冻结、不进 CI；
+- 正向但低于 `+5%`：弱正向、保留冻结、不进 CI；
+- 达到 `+5%` 且吞吐/proxy CPU 效率不低于 `10,111.242 B/s/ms`：本地强正向，只触发一次 hosted
+  direct CI；CI 不重跑。
+
+无论结果如何都保留提交与远端分支，不重跑；若失败，下一产品尝试仍从 `bf4cd4a6` 开 sibling，不在
+本提交上叠加。
