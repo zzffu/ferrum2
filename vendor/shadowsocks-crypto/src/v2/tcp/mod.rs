@@ -121,6 +121,9 @@ impl TcpCipher {
     }
 
     /// Authenticates one body under an explicit u96le nonce.
+    ///
+    /// Authentication failure zeroizes the supplied ciphertext body before
+    /// returning an error.
     pub fn decrypt_packet(&self, nonce: &[u8; 12], ciphertext: &mut [u8], tag: &[u8; 16]) -> Result<(), CryptoError> {
         if self.cipher.decrypt(nonce, ciphertext, tag) {
             Ok(())
@@ -180,5 +183,45 @@ mod tests {
             TcpCipher::try_from_subkey(CipherKind::NONE, &[]),
             Err(CryptoError::InvalidMethod)
         ));
+    }
+
+    #[test]
+    fn decrypt_packet_zeroizes_failed_ciphertext_for_every_method() {
+        let methods = [
+            CipherKind::AEAD2022_BLAKE3_AES_128_GCM,
+            CipherKind::AEAD2022_BLAKE3_AES_256_GCM,
+            CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305,
+        ];
+        let key = [0x51; 32];
+        let nonce = [0x62; 12];
+
+        for kind in methods {
+            let cipher = TcpCipher::try_from_subkey(kind, &key[..kind.key_len()]).unwrap();
+            let plaintext = b"unauthenticated plaintext must not survive failure";
+            let mut ciphertext = plaintext.to_vec();
+            let tag = cipher.encrypt_packet(&nonce, &mut ciphertext).unwrap();
+            assert!(ciphertext.iter().any(|byte| *byte != 0));
+
+            let mut invalid_tag = tag;
+            invalid_tag[0] ^= 0x80;
+            let mut tag_failure = ciphertext.clone();
+            assert_eq!(
+                cipher.decrypt_packet(&nonce, &mut tag_failure, &invalid_tag),
+                Err(CryptoError::AuthenticationFailed)
+            );
+            assert!(tag_failure.iter().all(|byte| *byte == 0));
+
+            let mut body_failure = ciphertext.clone();
+            body_failure[0] ^= 0x40;
+            assert_eq!(
+                cipher.decrypt_packet(&nonce, &mut body_failure, &tag),
+                Err(CryptoError::AuthenticationFailed)
+            );
+            assert!(body_failure.iter().all(|byte| *byte == 0));
+
+            let mut valid = ciphertext.clone();
+            cipher.decrypt_packet(&nonce, &mut valid, &tag).unwrap();
+            assert_eq!(valid, plaintext);
+        }
     }
 }

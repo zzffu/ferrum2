@@ -3,7 +3,6 @@ use std::fmt;
 
 use bytes::BytesMut;
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
-use zeroize::Zeroizing;
 
 use super::{NonceCounter, TcpSubkey};
 #[cfg(test)]
@@ -61,6 +60,9 @@ impl TcpOpener {
     }
 
     /// Authenticates and decrypts in place with empty associated data.
+    ///
+    /// Primitive authentication failure zeroizes the encrypted body without
+    /// advancing the nonce. Nonce exhaustion leaves the buffer and counter unchanged.
     pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
         let tag_start = buffer
@@ -70,12 +72,10 @@ impl TcpOpener {
         let tag: [u8; AEAD_TAG_BYTES] = buffer[tag_start..]
             .try_into()
             .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
-        let mut plaintext = Zeroizing::new(buffer[..tag_start].to_vec());
         self.cipher
-            .decrypt_packet(&nonce, plaintext.as_mut(), &tag)
+            .decrypt_packet(&nonce, &mut buffer[..tag_start], &tag)
             .map_err(|_| AeadError::AuthenticationFailed)?;
         buffer.truncate(tag_start);
-        buffer.copy_from_slice(plaintext.as_ref());
         self.nonce = next;
         Ok(())
     }
@@ -171,6 +171,52 @@ mod tests {
             );
             assert_eq!(ciphertext, original_ciphertext);
             assert_eq!(opener.nonce.current_bytes(), EXHAUSTED_NONCE);
+        }
+    }
+
+    fn paired_subkeys(profile: MethodProfile) -> (TcpSubkey, TcpSubkey) {
+        match profile {
+            MethodProfile::Blake3Aes128Gcm2022 => (
+                TcpSubkey::from_bytes([0x71; AES_128_KEY_BYTES]),
+                TcpSubkey::from_bytes([0x71; AES_128_KEY_BYTES]),
+            ),
+            MethodProfile::Blake3Aes256Gcm2022 | MethodProfile::Blake3ChaCha20Poly13052022 => (
+                TcpSubkey::from_subkey(profile, [0x72; WIDE_KEY_BYTES]),
+                TcpSubkey::from_subkey(profile, [0x72; WIDE_KEY_BYTES]),
+            ),
+        }
+    }
+
+    #[test]
+    fn tcp_opener_zeroizes_failed_body_and_retries_nonce_with_fresh_wire() {
+        let plaintext = b"unauthenticated plaintext is never retained";
+
+        for profile in MethodProfile::ALL {
+            let (seal_subkey, open_subkey) = paired_subkeys(profile);
+            let mut sealer = TcpSealer::new(seal_subkey);
+            let mut opener = TcpOpener::new(open_subkey);
+            let mut valid = BytesMut::with_capacity(plaintext.len() + AEAD_TAG_BYTES);
+            valid.extend_from_slice(plaintext);
+            sealer.seal_in_place(&mut valid).expect("seal fixture");
+
+            let tag_start = valid.len() - AEAD_TAG_BYTES;
+            assert!(valid[..tag_start].iter().any(|byte| *byte != 0));
+            let mut invalid = valid.clone();
+            *invalid.last_mut().expect("tag byte") ^= 0x80;
+            assert_eq!(
+                opener.open_in_place(&mut invalid),
+                Err(AeadError::AuthenticationFailed)
+            );
+            assert!(invalid[..tag_start].iter().all(|byte| *byte == 0));
+            assert_eq!(opener.nonce.current_bytes(), [0; AEAD_NONCE_BYTES]);
+
+            opener
+                .open_in_place(&mut valid)
+                .expect("fresh valid wire reuses failed nonce");
+            assert_eq!(valid.as_ref(), plaintext);
+            let mut expected_nonce = [0; AEAD_NONCE_BYTES];
+            expected_nonce[0] = 1;
+            assert_eq!(opener.nonce.current_bytes(), expected_nonce);
         }
     }
 }

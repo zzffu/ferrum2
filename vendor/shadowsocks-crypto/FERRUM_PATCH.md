@@ -13,8 +13,10 @@ The committed tree is the exact crates.io archive with this bounded delta:
   its unsafe all-zero check.
 - `src/v2/**`: add checked explicit-nonce TCP/UDP operations, a checked no-KDF owner
   for exact-width pre-derived TCP subkeys, AES-UDP header protection, zeroized KDF
-  temporaries, and compile-time `ZeroizeOnDrop` bounds.
+  temporaries, zeroized TCP authentication-failure bodies, and compile-time
+  `ZeroizeOnDrop` bounds.
 
-The patch adds no framing, replay, timestamp, binding, session, routing, config, or
-runtime behavior. To audit it, verify the archive hash, extract it, and run
+The patch is limited to the cryptographic ownership, operations, and failure hygiene
+described above. It adds no framing, replay, timestamp, binding, session, routing, or
+config behavior. To audit it, verify the archive hash, extract it, and run
 `git diff --no-index <extracted>/shadowsocks-crypto-0.7.0 vendor/shadowsocks-crypto`.
