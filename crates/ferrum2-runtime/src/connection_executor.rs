@@ -70,15 +70,14 @@ impl<L> AffineConnectionExecutor<L>
 where
     L: AffineAcceptListener,
 {
-    /// Creates an executor using the process's available logical parallelism.
+    /// Creates an executor with exactly one connection shard.
     pub fn new(
         listener: L,
         max_connections: usize,
         shutdown_grace: Duration,
         registry: OwnerRegistry,
     ) -> Result<Self, SupervisorConfigError> {
-        let shard_count = std::thread::available_parallelism()
-            .unwrap_or_else(|_| NonZeroUsize::new(1).expect("one is non-zero"));
+        let shard_count = NonZeroUsize::new(1).expect("one is non-zero");
         Self::with_shard_count(
             listener,
             max_connections,
@@ -778,6 +777,16 @@ mod tests {
             }
             Ok(transfer)
         }
+    }
+
+    #[test]
+    fn production_constructor_uses_one_connection_shard() {
+        let (listener, _sender, _accept_calls) = TestListener::new();
+        let executor =
+            AffineConnectionExecutor::new(listener, 1, Duration::ZERO, OwnerRegistry::new())
+                .expect("executor");
+
+        assert_eq!(executor.shard_count.get(), 1);
     }
 
     #[tokio::test]
