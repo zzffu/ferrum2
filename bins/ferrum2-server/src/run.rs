@@ -9,8 +9,8 @@ use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_observability::{Metrics, RuleProgram, RuleProgramMode, json_subscriber};
 use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
-    BoundedSupervisor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot, ProcessRootExit,
-    ProcessSupervisor, UdpSessionManager,
+    AffineConnectionExecutor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
+    ProcessRootExit, ProcessSupervisor, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
 use tokio::net::UdpSocket;
@@ -567,7 +567,7 @@ where
             for listen in tcp_listens {
                 listeners.push(bind_listener(listen, listen_backlog)?);
             }
-            let supervisor = BoundedSupervisor::new(
+            let executor = AffineConnectionExecutor::new(
                 ServerTcpListeners {
                     listeners,
                     next: AtomicUsize::new(0),
@@ -579,7 +579,7 @@ where
             .map_err(|_| RunError::StartupProtocol)?;
             Ok(ServerDnsDependentRoot::new(
                 ServerTcpRoot {
-                    supervisor: Some(supervisor),
+                    executor: Some(executor),
                     contexts: Arc::new(tcp_contexts),
                 },
                 tcp_dns_lease,

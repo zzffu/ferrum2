@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 
 use ferrum2_runtime::{
-    AcceptListener, BoundedSupervisor, PreparedProcessRoot, ProcessCancellation, ProcessFuture,
+    AcceptListener, AffineAcceptListener, AffineConnectionExecutor, PreparedProcessRoot,
+    ProcessCancellation, ProcessFuture,
 };
 use tokio::net::TcpListener;
 
@@ -54,9 +55,21 @@ impl AcceptListener for ClientTcpListeners {
         .await
     }
 }
+impl AffineAcceptListener for ClientTcpListeners {
+    type Transfer = (usize, std::net::TcpStream);
+    type AffineStream = (usize, tokio::net::TcpStream);
+
+    fn into_transfer((inbound, stream): Self::Stream) -> io::Result<Self::Transfer> {
+        stream.into_std().map(|stream| (inbound, stream))
+    }
+
+    fn from_transfer((inbound, stream): Self::Transfer) -> io::Result<Self::AffineStream> {
+        tokio::net::TcpStream::from_std(stream).map(|stream| (inbound, stream))
+    }
+}
 
 pub(in crate::run) struct ClientTcpRoot {
-    pub(in crate::run) supervisor: Option<BoundedSupervisor<ClientTcpListeners>>,
+    pub(in crate::run) executor: Option<AffineConnectionExecutor<ClientTcpListeners>>,
     pub(in crate::run) context: Arc<ClientContext>,
     pub(in crate::run) routing: Arc<ClientRouting>,
 }
@@ -70,14 +83,14 @@ impl PreparedProcessRoot<RunError> for ClientTcpRoot {
         mut self: Box<Self>,
         cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
-        let supervisor = self.supervisor.take().expect("prepared TCP root");
+        let executor = self.executor.take().expect("prepared TCP root");
         let context = Arc::clone(&self.context);
         let routing = Arc::clone(&self.routing);
         let handler_context = Arc::clone(&context);
         let mut quiescing = cancellation.clone();
         let mut forced = cancellation.clone();
         Box::pin(async move {
-            let running = supervisor.run_with_cancellation(
+            let running = executor.run_with_cancellation(
                 move |(inbound, stream), cancellation| {
                     let context = Arc::clone(&handler_context);
                     let routing = Arc::clone(&routing);

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod connection_executor;
 mod connector;
 mod deadline;
 mod metrics;
@@ -13,6 +14,7 @@ mod sniff;
 mod supervisor;
 mod udp;
 
+pub use connection_executor::{AffineAcceptListener, AffineConnectionExecutor};
 pub use connector::{
     DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream, SocketInspector,
     SystemSocketInspector, SystemTcpDialer, SystemTcpResolver, TcpConnector, TcpDialer,

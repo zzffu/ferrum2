@@ -16,7 +16,7 @@ use ferrum2_net::NetworkSnapshot;
 use ferrum2_observability::{Metrics, Role, json_subscriber};
 use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
-    BoundedSupervisor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
+    AffineConnectionExecutor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
     MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
     ProcessRootExit, ProcessSupervisor, UdpRuntimeLimits, UdpSessionManager,
 };
@@ -703,7 +703,7 @@ where
                     for listen in listens {
                         listeners.push(bind_listener(listen, listen_backlog)?);
                     }
-                    let supervisor = BoundedSupervisor::new(
+                    let executor = AffineConnectionExecutor::new(
                         ClientTcpListeners {
                             listeners,
                             next: AtomicUsize::new(0),
@@ -716,7 +716,7 @@ where
                     )
                     .map_err(|_| RunError::StartupProtocol)?;
                     Ok(ClientTcpRoot {
-                        supervisor: Some(supervisor),
+                        executor: Some(executor),
                         context: tcp_context,
                         routing: tcp_routing,
                     })

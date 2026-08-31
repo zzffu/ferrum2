@@ -352,7 +352,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
             .into_iter()
             .map(|listen| bind_listener(listen, 16))
             .collect::<Result<Vec<_>, _>>()?;
-        let supervisor = BoundedSupervisor::new(
+        let executor = AffineConnectionExecutor::new(
             ClientTcpListeners {
                 listeners,
                 next: AtomicUsize::new(0),
@@ -364,7 +364,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
         )
         .map_err(|_| RunError::StartupProtocol)?;
         Ok(ClientTcpRoot {
-            supervisor: Some(supervisor),
+            executor: Some(executor),
             context: tcp_context,
             routing: Arc::new(ClientRouting {
                 program,

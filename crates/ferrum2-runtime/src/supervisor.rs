@@ -54,17 +54,17 @@ impl CancellationToken {
 }
 
 #[derive(Debug)]
-struct CancellationSource {
+pub(crate) struct CancellationSource {
     sender: watch::Sender<bool>,
 }
 
 impl CancellationSource {
-    fn new() -> (Self, CancellationToken) {
+    pub(crate) fn new() -> (Self, CancellationToken) {
         let (sender, receiver) = watch::channel(false);
         (Self { sender }, CancellationToken { receiver })
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.sender.send_replace(true);
     }
 }
@@ -424,14 +424,14 @@ async fn reap_children(children: &mut JoinSet<()>) {
     while children.join_next().await.is_some() {}
 }
 
-async fn future_is_ready<F>(mut future: Pin<&mut F>) -> bool
+pub(crate) async fn future_is_ready<F>(mut future: Pin<&mut F>) -> bool
 where
     F: Future + ?Sized,
 {
     std::future::poll_fn(|context| Poll::Ready(future.as_mut().poll(context).is_ready())).await
 }
 
-fn is_transient_accept_error(error: &io::Error) -> bool {
+pub(crate) fn is_transient_accept_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::Interrupted
