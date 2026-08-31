@@ -198,25 +198,40 @@ pub(super) fn poll_write_open<S: TransportIo>(
         return Poll::Ready(Err(error));
     }
     if staged.is_some() {
+        let plaintext_len = staged
+            .as_ref()
+            .expect("caller checked staged write")
+            .plaintext_len;
         match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Ok(())) => {
+                scratch.clear();
+                *staged = None;
+                return Poll::Ready(Ok(plaintext_len));
+            }
         }
     }
     let admitted = source.len().min(MAX_ENCODE_PAYLOAD_LEN);
-    match protocol_cipher_boundary(lifecycle, observer, || {
+    if let Err(error) = protocol_cipher_boundary(lifecycle, observer, || {
         seal_data_chunk_into(sealer, &source[..admitted], scratch)
     }) {
-        Ok(()) => {
-            *staged = Some(StagedWrite {
-                kind: StagedKind::Subsequent,
-                position: 0,
-            });
-            *tx = TxState::Open;
+        return Poll::Ready(Err(error));
+    }
+    *staged = Some(StagedWrite {
+        kind: StagedKind::Subsequent,
+        position: 0,
+        plaintext_len: admitted,
+    });
+    *tx = TxState::Open;
+    match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+        Poll::Ready(Ok(())) => {
+            scratch.clear();
+            *staged = None;
             Poll::Ready(Ok(admitted))
         }
-        Err(error) => Poll::Ready(Err(error)),
     }
 }
 
@@ -228,44 +243,52 @@ pub(super) fn drain_staged<S: TransportIo>(
     observer: &dyn FlowObserver,
     cx: &mut Context<'_>,
 ) -> Poll<Result<(), ShadowsocksError>> {
-    let current = staged.as_mut().expect("caller checked staged wire");
-    let source = &scratch[current.position..];
-    match Pin::new(&mut *io).poll_write(cx, source) {
-        Poll::Pending => Poll::Pending,
-        Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
-            let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
-            Poll::Ready(Err(error))
-        }
-        Poll::Ready(Err(_)) => {
+    loop {
+        let current = staged.as_mut().expect("caller checked staged wire");
+        if current.position > scratch.len() {
             let error = lifecycle.install_transport(observer, TransportPhase::Write);
-            Poll::Ready(Err(error))
+            return Poll::Ready(Err(error));
         }
-        Poll::Ready(Ok(written)) if current.kind == StagedKind::First => {
-            if written != source.len() {
-                let error = lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+        if current.position == scratch.len() {
+            return Poll::Ready(Ok(()));
+        }
+        let source = &scratch[current.position..];
+        match Pin::new(&mut *io).poll_write(cx, source) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(_)) if current.kind == StagedKind::First => {
+                let error = lifecycle.install_detection(io, observer, DetectionReason::WriteFailed);
                 return Poll::Ready(Err(error));
             }
-            scratch.clear();
-            *staged = None;
-            Poll::Ready(Ok(()))
-        }
-        Poll::Ready(Ok(0)) => {
-            let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
-            Poll::Ready(Err(error))
-        }
-        Poll::Ready(Ok(written)) => {
-            current.position += written;
-            if current.position > scratch.len() {
+            Poll::Ready(Err(_)) => {
                 let error = lifecycle.install_transport(observer, TransportPhase::Write);
                 return Poll::Ready(Err(error));
             }
-            if current.position == scratch.len() {
-                scratch.clear();
-                *staged = None;
-                Poll::Ready(Ok(()))
-            } else {
-                cx.waker().wake_by_ref();
-                Poll::Pending
+            Poll::Ready(Ok(written)) if current.kind == StagedKind::First => {
+                if written != source.len() {
+                    let error =
+                        lifecycle.install_detection(io, observer, DetectionReason::ShortWrite);
+                    return Poll::Ready(Err(error));
+                }
+                current.position = scratch.len();
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Ok(0)) => {
+                let error = lifecycle.install_transport(observer, TransportPhase::WriteZero);
+                return Poll::Ready(Err(error));
+            }
+            Poll::Ready(Ok(written)) => {
+                let Some(position) = current.position.checked_add(written) else {
+                    let error = lifecycle.install_transport(observer, TransportPhase::Write);
+                    return Poll::Ready(Err(error));
+                };
+                current.position = position;
+                if current.position > scratch.len() {
+                    let error = lifecycle.install_transport(observer, TransportPhase::Write);
+                    return Poll::Ready(Err(error));
+                }
+                if current.position == scratch.len() {
+                    return Poll::Ready(Ok(()));
+                }
             }
         }
     }
@@ -288,13 +311,11 @@ pub(super) fn poll_flush<S: TransportIo>(
         return Poll::Ready(Ok(()));
     }
     if staged.is_some() {
-        return match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
-            Poll::Ready(Ok(())) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            other => other,
-        };
+        match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
     }
     if tx == TxState::ResponsePending {
         return Poll::Ready(Ok(()));
@@ -326,13 +347,11 @@ pub(super) fn poll_shutdown<S: TransportIo>(
         return Poll::Ready(Ok(()));
     }
     if staged.is_some() {
-        return match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
-            Poll::Ready(Ok(())) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            other => other,
-        };
+        match drain_staged(io, scratch, staged, lifecycle, observer, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
     }
     match Pin::new(io).poll_shutdown(cx) {
         Poll::Pending => Poll::Pending,

@@ -339,6 +339,7 @@ pub struct RecordingIo {
     write_limit_after: Option<(usize, usize)>,
     pending_reads: usize,
     pending_writes: usize,
+    pending_writes_after: Option<(usize, usize)>,
     fail_read: bool,
     fail_read_after: Option<usize>,
     fail_write: bool,
@@ -361,6 +362,7 @@ impl RecordingIo {
                 write_limit_after: None,
                 pending_reads: 0,
                 pending_writes: 0,
+                pending_writes_after: None,
                 fail_read: false,
                 fail_read_after: None,
                 fail_write: false,
@@ -409,6 +411,11 @@ impl RecordingIo {
 
     pub fn with_pending_writes(mut self, polls: usize) -> Self {
         self.pending_writes = polls;
+        self
+    }
+
+    pub fn with_pending_writes_after(mut self, successful_writes: usize, polls: usize) -> Self {
+        self.pending_writes_after = Some((successful_writes, polls));
         self
     }
 
@@ -485,6 +492,18 @@ impl TransportIo for RecordingIo {
             self.pending_writes -= 1;
             cx.waker().wake_by_ref();
             return Poll::Pending;
+        }
+        if let Some((successful, remaining)) = self.pending_writes_after {
+            let completed = self
+                .observation
+                .lock()
+                .expect("observation lock")
+                .write_calls;
+            if completed >= successful && remaining > 0 {
+                self.pending_writes_after = Some((successful, remaining - 1));
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
         }
         let mut observation = self.observation.lock().expect("observation lock");
         observation.write_calls += 1;

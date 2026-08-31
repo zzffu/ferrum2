@@ -2,8 +2,9 @@ mod common;
 
 use std::error::Error;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use ferrum2_core::{ConnectErrorKind, TargetAddr};
 use ferrum2_crypto::{MethodProfile, MethodPsk, MethodSinglePskProvider};
@@ -19,6 +20,18 @@ use common::{
     request_data_frames, salt_from_u64, server_target, shutdown_plain, target, valid_request_wire,
     write_plain,
 };
+
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 fn distinct_provider(
     profile: MethodProfile,
@@ -137,13 +150,13 @@ fn closed_contract_is_copyable_opaque_and_source_free() {
 }
 
 #[tokio::test]
-async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_plus_one() {
+async fn write_consumption_covers_0_1_max_and_max_plus_one_after_wire_drain() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(1000);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let (io, observation) = RecordingIo::new([]);
-    let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 1));
+    let connector = RecordingConnector::succeeds(io);
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
     let mut flow = outbound
         .connect_server()
@@ -156,24 +169,221 @@ async fn write_admission_and_single_scratch_backpressure_cover_0_1_max_and_max_p
     assert_eq!(write_plain(&mut flow, &[]).await, Ok(0));
     assert_eq!(observation.lock().expect("observation").write_calls, 1);
     assert_eq!(write_plain(&mut flow, &[1]).await, Ok(1));
-    assert_eq!(observation.lock().expect("observation").write_calls, 1);
-
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    assert!(matches!(
-        Pin::new(&mut flow).poll_write_plain(&mut cx, &[2; MAX_ENCODE_PAYLOAD_LEN]),
-        Poll::Pending
-    ));
     assert_eq!(observation.lock().expect("observation").write_calls, 2);
-
     assert_eq!(
         write_plain(&mut flow, &[2; MAX_ENCODE_PAYLOAD_LEN]).await,
         Ok(MAX_ENCODE_PAYLOAD_LEN)
     );
+    assert_eq!(observation.lock().expect("observation").write_calls, 3);
     assert_eq!(
         write_plain(&mut flow, &[3; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
         Ok(MAX_ENCODE_PAYLOAD_LEN)
     );
+    assert_eq!(observation.lock().expect("observation").write_calls, 4);
+}
+
+#[tokio::test]
+async fn positive_partial_writes_drain_inline_without_self_wake() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(1004);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 3));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
+    let source = b"partial-ready";
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, source),
+        Poll::Ready(Ok(source.len()))
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+    let observed = observation.lock().expect("observation");
+    assert!(
+        observed.write_calls > 2,
+        "request plus multiple positive partial writes"
+    );
+    let accepted_wire: Vec<u8> = observed.writes[1..]
+        .iter()
+        .flat_map(|attempt| attempt[..attempt.len().min(3)].iter().copied())
+        .collect();
+    assert_eq!(
+        accepted_wire,
+        request_data_frames(&request_salt, &[source]).concat()
+    );
+}
+
+#[tokio::test]
+async fn transport_pending_repoll_uses_saved_plaintext_len_without_reseal() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(1005);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io.with_pending_writes_after(1, 1));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
+    let source = b"pending-prefix";
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, source),
+        Poll::Pending
+    );
+    assert_eq!(
+        observation.lock().expect("observation").write_calls,
+        1,
+        "Pending transport accepted no ciphertext"
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    let same_prefix_at_another_address = source.to_vec();
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, &same_prefix_at_another_address),
+        Poll::Ready(Ok(source.len()))
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    flush_plain(&mut flow).await.expect("flush");
+    let observed = observation.lock().expect("observation");
+    assert_eq!(observed.write_calls, 2, "repoll emitted exactly one frame");
+    assert_eq!(
+        observed.writes[1],
+        request_data_frames(&request_salt, &[source]).concat()
+    );
+}
+
+#[tokio::test]
+async fn flush_drains_pending_ciphertext_before_transport_and_preserves_write_ack() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(1006);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io.with_pending_writes_after(1, 1));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
+    let source = b"flush-pending";
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, source),
+        Poll::Pending
+    );
+    assert_eq!(
+        Pin::new(&mut flow).poll_flush_plain(&mut cx),
+        Poll::Ready(Ok(()))
+    );
+    {
+        let observed = observation.lock().expect("observation");
+        assert_eq!(observed.write_calls, 2);
+        assert_eq!(observed.flush_calls, 1);
+    }
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, source),
+        Poll::Ready(Ok(source.len()))
+    );
+    assert_eq!(
+        observation.lock().expect("observation").write_calls,
+        2,
+        "acknowledging the flushed frame must not reseal"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drains_pending_ciphertext_before_transport_shutdown() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(1007);
+    let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io.with_pending_writes_after(1, 1));
+    let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
+    let mut flow = outbound
+        .connect_server()
+        .await
+        .expect("server connection")
+        .write_request(&target())
+        .await
+        .expect("client");
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, b"shutdown-pending"),
+        Poll::Pending
+    );
+    assert_eq!(
+        Pin::new(&mut flow).poll_shutdown_plain(&mut cx),
+        Poll::Ready(Ok(()))
+    );
+    let observed = observation.lock().expect("observation");
+    assert_eq!(observed.write_calls, 2);
+    assert_eq!(observed.shutdown_calls, 1);
+}
+
+#[tokio::test]
+async fn server_first_response_pending_repoll_does_not_reseal() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let request_salt = salt_from_u64(1008);
+    let response_salt = salt_from_u64(1009);
+    let request = valid_request_wire(NOW, &request_salt);
+    let random = ScriptedRandom::new(response_salt.as_bytes().iter().copied());
+    let (io, observation) = RecordingIo::request(&request);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io.with_pending_writes_after(0, 1))
+        .await
+        .expect("server")
+        .stream;
+    let source = b"first-response";
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, source),
+        Poll::Pending
+    );
+    assert_eq!(observation.lock().expect("observation").write_calls, 0);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+
+    let same_response_at_another_address = source.to_vec();
+    assert_eq!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, &same_response_at_another_address),
+        Poll::Ready(Ok(source.len()))
+    );
+    let expected = encode_response_first_write(&keys, &response_salt, NOW, &request_salt, source)
+        .expect("response wire");
+    let observed = observation.lock().expect("observation");
+    assert_eq!(observed.write_calls, 1);
+    assert_eq!(observed.writes[0], expected);
 }
 
 #[tokio::test]
@@ -201,13 +411,8 @@ async fn response_pending_opposite_direction_failures_keep_protocol_or_transport
         .expect("client");
     assert_eq!(
         write_plain(&mut client, &[0x5a; MAX_ENCODE_PAYLOAD_LEN + 1]).await,
-        Ok(MAX_ENCODE_PAYLOAD_LEN),
-        "response-pending client TX admits its structural maximum without a fatal"
-    );
-    assert_eq!(client.terminal(), None);
-    assert_eq!(
-        flush_plain(&mut client).await,
-        Err(ShadowsocksError::Transport(TransportPhase::Write))
+        Err(ShadowsocksError::Transport(TransportPhase::Write)),
+        "response-pending client TX drains before consuming plaintext"
     );
     assert_eq!(
         client.terminal(),
@@ -335,9 +540,8 @@ async fn transport_phase_table_is_exact_and_fatal_freezes_all_counts() {
             .write_request(&target())
             .await
             .expect("client");
-        assert_eq!(write_plain(&mut flow, b"data").await, Ok(4));
         assert_eq!(
-            flush_plain(&mut flow).await,
+            write_plain(&mut flow, b"data").await,
             Err(ShadowsocksError::Transport(phase))
         );
         assert_eq!(flow.terminal(), Some(FlowTerminal::Transport(phase)));
@@ -398,9 +602,7 @@ async fn real_transport_source_sentinel_is_erased_from_debug_display_and_source_
         .write_request(&target())
         .await
         .expect("client");
-    assert_eq!(write_plain(&mut flow, b"data").await, Ok(4));
-
-    let error = flush_plain(&mut flow)
+    let error = write_plain(&mut flow, b"data")
         .await
         .expect_err("scripted source sentinel");
 

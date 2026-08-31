@@ -133,6 +133,11 @@ where
         }
 
         if self.staged.is_some() {
+            let plaintext_len = self
+                .staged
+                .as_ref()
+                .expect("caller checked staged response")
+                .plaintext_len;
             match drain_staged(
                 &mut self.io,
                 &mut self.encrypt,
@@ -143,7 +148,11 @@ where
             ) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Ok(())) => {
+                    self.encrypt.clear();
+                    self.staged = None;
+                    return Poll::Ready(Ok(plaintext_len));
+                }
             }
         }
 
@@ -193,26 +202,42 @@ where
             self.staged = Some(StagedWrite {
                 kind: StagedKind::First,
                 position: 0,
+                plaintext_len: admitted,
             });
             self.tx = TxState::Open;
-            return Poll::Ready(Ok(admitted));
+        } else {
+            let sealer = self
+                .response_sealer
+                .as_mut()
+                .expect("open server TX has response sealer");
+            if let Err(error) =
+                protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
+                    seal_data_chunk_into(sealer, &source[..admitted], &mut self.encrypt)
+                })
+            {
+                return Poll::Ready(Err(error));
+            }
+            self.staged = Some(StagedWrite {
+                kind: StagedKind::Subsequent,
+                position: 0,
+                plaintext_len: admitted,
+            });
         }
-
-        let sealer = self
-            .response_sealer
-            .as_mut()
-            .expect("open server TX has response sealer");
-        match protocol_cipher_boundary(&mut self.lifecycle, self.observers.flow, || {
-            seal_data_chunk_into(sealer, &source[..admitted], &mut self.encrypt)
-        }) {
-            Ok(()) => {
-                self.staged = Some(StagedWrite {
-                    kind: StagedKind::Subsequent,
-                    position: 0,
-                });
+        match drain_staged(
+            &mut self.io,
+            &mut self.encrypt,
+            &mut self.staged,
+            &mut self.lifecycle,
+            self.observers.flow,
+            cx,
+        ) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                self.encrypt.clear();
+                self.staged = None;
                 Poll::Ready(Ok(admitted))
             }
-            Err(error) => Poll::Ready(Err(error)),
         }
     }
 }

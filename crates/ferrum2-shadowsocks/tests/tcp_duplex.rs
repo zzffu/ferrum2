@@ -208,7 +208,7 @@ async fn pending_response_capability_derives_each_direction_cipher_exactly_once(
 }
 
 #[tokio::test]
-async fn always_ready_one_byte_duplex_uses_at_most_one_io_per_outer_poll_and_is_fair() {
+async fn always_ready_one_byte_duplex_drains_tx_inline_while_rx_remains_bounded() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(807);
@@ -253,21 +253,23 @@ async fn always_ready_one_byte_duplex_uses_at_most_one_io_per_outer_poll_and_is_
             "read outer poll performed multiple I/O"
         );
 
-        let before = after;
-        match Pin::new(&mut flow).poll_write_plain(&mut cx, b"u") {
-            Poll::Ready(Ok(1)) => admitted_upload = true,
-            Poll::Ready(Ok(other)) => panic!("unexpected upload admission {other}"),
-            Poll::Ready(Err(error)) => panic!("unexpected upload error {error:?}"),
-            Poll::Pending => {}
+        if !admitted_upload {
+            let before = after;
+            match Pin::new(&mut flow).poll_write_plain(&mut cx, b"u") {
+                Poll::Ready(Ok(1)) => admitted_upload = true,
+                Poll::Ready(Ok(other)) => panic!("unexpected upload admission {other}"),
+                Poll::Ready(Err(error)) => panic!("unexpected upload error {error:?}"),
+                Poll::Pending => {}
+            }
+            let after = {
+                let observed = observation.lock().expect("observation");
+                observed.read_calls + observed.write_calls
+            };
+            assert!(
+                after - before > 1,
+                "write outer poll must drain positive partial writes inline"
+            );
         }
-        let after = {
-            let observed = observation.lock().expect("observation");
-            observed.read_calls + observed.write_calls
-        };
-        assert!(
-            after - before <= 1,
-            "write outer poll performed multiple I/O"
-        );
         if read_completed && admitted_upload {
             break;
         }

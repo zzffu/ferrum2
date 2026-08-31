@@ -802,9 +802,8 @@ async fn server_response_clock_random_key_and_write_failures_persist_after_mark_
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay)
         .with_observers(&write_observers, &write_observers);
     let mut flow = inbound.accept_stream(io).await.expect("server").stream;
-    assert_eq!(write_plain(&mut flow, b"response").await, Ok(8));
     assert_eq!(
-        flush_plain(&mut flow).await,
+        write_plain(&mut flow, b"response").await,
         Err(ShadowsocksError::Detection(DetectionReason::WriteFailed))
     );
     let frozen = {
@@ -859,8 +858,7 @@ async fn response_first_write_is_one_operation_and_short_write_is_terminal() {
         .expect("authenticated request")
         .stream;
 
-    assert_eq!(write_plain(&mut flow, b"pong").await, Ok(4));
-    let error = flush_plain(&mut flow)
+    let error = write_plain(&mut flow, b"pong")
         .await
         .expect_err("short response write");
 

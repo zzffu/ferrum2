@@ -198,6 +198,7 @@ pub(super) enum StagedKind {
 pub(super) struct StagedWrite {
     kind: StagedKind,
     position: usize,
+    plaintext_len: usize,
 }
 
 pub(super) fn reset_decrypt(scratch: &mut BytesMut) {
