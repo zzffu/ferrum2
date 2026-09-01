@@ -93,7 +93,7 @@ impl UdpCrypto {
         is_live: impl FnMut(&UdpSessionId) -> bool,
     ) -> Result<UdpOutboundSession, RandomError> {
         generate_udp_session_id(random, is_live)
-            .map(|session_id| UdpOutboundSession::new(self.profile(), session_id))
+            .map(|session_id| self.new_outbound_session(session_id))
     }
 
     /// Creates an outbound session distinct from an opposite-direction owner.
@@ -107,7 +107,15 @@ impl UdpCrypto {
         is_live: impl FnMut(&UdpSessionId) -> bool,
     ) -> Result<UdpOutboundSession, RandomError> {
         generate_distinct_udp_session_id(random, opposite_direction, is_live)
-            .map(|session_id| UdpOutboundSession::new(self.profile(), session_id))
+            .map(|session_id| self.new_outbound_session(session_id))
+    }
+
+    fn new_outbound_session(&self, session_id: UdpSessionId) -> UdpOutboundSession {
+        let aes_body_cipher = match &self.inner {
+            UdpCryptoInner::Aes { .. } => Some(self.aes_body_cipher(&session_id)),
+            UdpCryptoInner::ChaCha20Poly1305(_) => None,
+        };
+        UdpOutboundSession::new(self.profile(), session_id, aes_body_cipher)
     }
 
     fn crypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES], encrypt: bool) {
@@ -161,6 +169,7 @@ impl UdpCrypto {
         let result = match &self.inner {
             UdpCryptoInner::Aes { .. } => seal_aes_udp(
                 self,
+                outbound.aes_body_cipher(),
                 &outbound.session_id,
                 packet_id,
                 plaintext_body,
@@ -293,6 +302,7 @@ fn udp_identity(session_id: &UdpSessionId, packet_id: u64) -> [u8; UDP_IDENTITY_
 
 fn seal_aes_udp(
     crypto: &UdpCrypto,
+    cipher: &ShadowsocksUdpCipher,
     session_id: &UdpSessionId,
     packet_id: u64,
     plaintext_body: &[u8],
@@ -305,7 +315,6 @@ fn seal_aes_udp(
 
     let mut nonce = Zeroizing::new([0_u8; AEAD_NONCE_BYTES]);
     nonce.copy_from_slice(&identity[4..UDP_IDENTITY_BYTES]);
-    let cipher = crypto.aes_body_cipher(session_id);
     let body_end = UDP_IDENTITY_BYTES + plaintext_body.len();
     output[UDP_IDENTITY_BYTES..body_end].copy_from_slice(plaintext_body);
     let tag = cipher
@@ -481,7 +490,7 @@ mod tests {
     fn udp_outbound_session_commits_zero_terminal_and_exhausted_states_only_on_success() {
         let crypto = aes128_udp_crypto();
         let session_id = UdpSessionId::from_bytes([0x22; UDP_SESSION_ID_BYTES]);
-        let mut outbound = UdpOutboundSession::new(crypto.profile(), session_id);
+        let mut outbound = crypto.new_outbound_session(session_id);
         let mut output = [0xa5; 64];
 
         let original = output;

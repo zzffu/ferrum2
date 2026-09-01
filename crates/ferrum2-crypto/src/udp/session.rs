@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use shadowsocks_crypto::v2::udp::UdpCipher as ShadowsocksUdpCipher;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::{UDP_SESSION_ID_BYTES, UdpCryptoError};
@@ -144,22 +145,35 @@ impl ZeroizeOnDrop for UdpPacketCounter {}
 
 /// A move-only, method-bound outbound UDP session owner.
 ///
-/// The opaque session ID and its sole packet-ID lineage are created together.
-/// Callers can use the ID for bounded lookup and response binding, but cannot
-/// clone, reset, replace, or detach the lineage used by [`crate::UdpCrypto::seal`].
+/// The opaque session ID, its sole packet-ID lineage, and any AES body cipher
+/// derived from that ID are created together. Callers can use the ID for
+/// bounded lookup and response binding, but cannot clone, reset, replace, or
+/// detach the lineage used by [`crate::UdpCrypto::seal`].
 pub struct UdpOutboundSession {
     pub(super) profile: MethodProfile,
     pub(super) session_id: UdpSessionId,
     pub(super) counter: UdpPacketCounter,
+    pub(super) aes_body_cipher: Option<ShadowsocksUdpCipher>,
 }
 
 impl UdpOutboundSession {
-    pub(super) fn new(profile: MethodProfile, session_id: UdpSessionId) -> Self {
+    pub(super) fn new(
+        profile: MethodProfile,
+        session_id: UdpSessionId,
+        aes_body_cipher: Option<ShadowsocksUdpCipher>,
+    ) -> Self {
         Self {
             profile,
             session_id,
             counter: UdpPacketCounter::new(),
+            aes_body_cipher,
         }
+    }
+
+    pub(super) fn aes_body_cipher(&self) -> &ShadowsocksUdpCipher {
+        self.aes_body_cipher
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("AES outbound sessions own a body cipher"))
     }
 
     /// Returns the opaque session ID for bounded lookup and response binding.
@@ -183,6 +197,7 @@ impl Zeroize for UdpOutboundSession {
     fn zeroize(&mut self) {
         self.session_id.zeroize();
         self.counter.zeroize();
+        self.aes_body_cipher = None;
     }
 }
 
