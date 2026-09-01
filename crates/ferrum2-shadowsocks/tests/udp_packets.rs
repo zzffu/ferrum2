@@ -268,6 +268,48 @@ fn borrowed_response_plans_domain_capacity_before_single_materialization() {
 }
 
 #[test]
+fn aes_request_wire_length_matches_exact_encoder_output() {
+    let profile = MethodProfile::Blake3Aes128Gcm2022;
+    let keys = udp_provider(profile);
+    let random = FillRandom::new(0x20);
+    let clock = FakeClock::new(NOW, 0);
+    let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client session");
+    let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53)).expect("target");
+    let maximum = max_udp_payload_len(profile, false, &target, 0).expect("checked payload maximum");
+    let mut scratch = UdpPacketScratch::new();
+
+    for payload_len in [128, 1_200, maximum, 128] {
+        let exact = client
+            .request_wire_len(&target, payload_len, 0)
+            .expect("request wire length");
+        if payload_len == 128 {
+            assert_eq!(exact, 178);
+        }
+        let payload = vec![0x5a; payload_len];
+        let mut wire = vec![0_u8; exact];
+        assert_eq!(
+            client
+                .encode_request_parts(
+                    &clock,
+                    &random,
+                    &target,
+                    &payload,
+                    0,
+                    &mut wire,
+                    &mut scratch,
+                )
+                .expect("exact request output"),
+            exact
+        );
+    }
+
+    assert_eq!(
+        client.request_wire_len(&target, maximum + 1, 0),
+        Err(UdpPacketError::Bounds)
+    );
+}
+
+#[test]
 fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id() {
     for profile in MethodProfile::ALL {
         let keys = udp_provider(profile);

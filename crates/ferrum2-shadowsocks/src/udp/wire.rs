@@ -58,6 +58,21 @@ pub fn max_udp_payload_len_for_encoded_target(
         .and_then(|length| length.checked_sub(semantic_overhead))
         .ok_or(UdpPacketError::Bounds)
 }
+pub(super) fn udp_wire_len(
+    profile: MethodProfile,
+    response: bool,
+    target: &TargetAddr,
+    payload_len: usize,
+    padding_len: usize,
+) -> Result<usize, UdpPacketError> {
+    let max_payload = max_udp_payload_len(profile, response, target, padding_len)?;
+    let unused_payload = max_payload
+        .checked_sub(payload_len)
+        .ok_or(UdpPacketError::Bounds)?;
+    MAX_UDP_WIRE_LEN
+        .checked_sub(unused_payload)
+        .ok_or(UdpPacketError::Bounds)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_packet(
