@@ -394,6 +394,122 @@ async fn udp_proxy_preserves_positive_and_negative_upstream_responses() {
 }
 
 #[tokio::test]
+async fn udp_listener_forwards_independent_queries_concurrently() {
+    let _network = TEST_NETWORK.lock().await;
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("concurrent upstream bind");
+    let upstream_address = upstream.local_addr().expect("concurrent upstream address");
+    let upstream_task = tokio::spawn(async move {
+        let mut received = Vec::with_capacity(2);
+        let mut wire = [0_u8; 4096];
+        for _ in 0..2 {
+            let (length, peer) =
+                tokio::time::timeout(Duration::from_millis(200), upstream.recv_from(&mut wire))
+                    .await
+                    .expect("both queries reached upstream before either response")
+                    .expect("concurrent upstream query");
+            received.push((
+                Message::from_vec(&wire[..length]).expect("concurrent request"),
+                peer,
+            ));
+        }
+        for (request, peer) in received {
+            let query = request.queries[0].clone();
+            let mut response = Message::response(request.id, OpCode::Query);
+            response
+                .add_query(query.clone())
+                .add_answer(Record::from_rdata(
+                    query.name().clone(),
+                    30,
+                    RData::A(A(Ipv4Addr::new(192, 0, 2, 91))),
+                ));
+            upstream
+                .send_to(&response.to_vec().expect("concurrent response"), peer)
+                .await
+                .expect("concurrent response send");
+        }
+    });
+    let (resolver, mut owner) = TaggedResolver::direct(
+        vec![DnsUpstreamSpec {
+            transport: DnsUpstreamTransport::Udp,
+            target: TargetAddr::ip(upstream_address).expect("non-zero upstream target"),
+            resolved_targets: Box::new([]),
+            detour: None,
+        }],
+        Duration::from_secs(1),
+        NonZeroU16::new(2).expect("two concurrent queries"),
+    )
+    .expect("concurrent resolver");
+    owner.ready().await.expect("concurrent resolver ready");
+    let resolver = Arc::new(resolver);
+    let proxy = Arc::new(final_proxy(
+        Arc::clone(&resolver),
+        DnsStrategy::PreferIpv4,
+        1,
+        0,
+    ));
+    let listen = reserve_paired_addresses(1)[0];
+    let listeners = DnsProxyListeners::bind(
+        vec![listen],
+        8,
+        NonZeroU16::new(1).expect("one TCP connection"),
+        Duration::from_millis(50),
+        proxy,
+    )
+    .await
+    .expect("concurrent listeners");
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let listener_task = tokio::spawn(listeners.run(async move {
+        let _ = stopped.await;
+    }));
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("concurrent client");
+    for id in [0x6101, 0x6102] {
+        let mut request = Message::new(id, MessageType::Query, OpCode::Query);
+        request.add_query(Query::query(
+            Name::from_ascii("concurrent.proxy.example.").expect("concurrent query name"),
+            RecordType::A,
+        ));
+        client
+            .send_to(&request.to_vec().expect("concurrent query"), listen)
+            .await
+            .expect("concurrent query send");
+    }
+    let mut ids = Vec::with_capacity(2);
+    let mut wire = [0_u8; 4096];
+    for _ in 0..2 {
+        let (length, _) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut wire))
+            .await
+            .expect("concurrent response timeout")
+            .expect("concurrent response");
+        ids.push(
+            Message::from_vec(&wire[..length])
+                .expect("concurrent response decode")
+                .id,
+        );
+    }
+    ids.sort_unstable();
+    assert_eq!(ids, [0x6101, 0x6102]);
+    stop.send(()).expect("concurrent listener stop");
+    listener_task
+        .await
+        .expect("concurrent listener join")
+        .expect("concurrent listener result");
+    upstream_task.await.expect("concurrent upstream join");
+    drop(resolver);
+    assert_eq!(
+        owner
+            .shutdown()
+            .await
+            .expect("concurrent resolver shutdown")
+            .runtime_tasks,
+        0
+    );
+}
+
+#[tokio::test]
 async fn udp_proxy_drops_malformed_and_rejects_shape_without_upstream_work() {
     let _network = TEST_NETWORK.lock().await;
     let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
