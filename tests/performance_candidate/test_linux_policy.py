@@ -10,41 +10,72 @@ from tools.performance_candidate.linux import plan as linux_plan
 from tools.performance_candidate.linux import policy as linux_policy
 
 class DecisionPolicyTests(unittest.TestCase):
-    def test_repository_policy_explicitly_requires_new_calibration(self) -> None:
+    def test_repository_policy_contains_reviewed_tcp_calibration(self) -> None:
         policy = linux_policy.load_decision_policy(POLICY_PATH)
         self.assertEqual(policy["schema_version"], 2)
         self.assertRegex(policy["policy_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             policy["policy_id"],
-            "github-hosted-ubuntu-24.04-profiling-v2-calibration-required",
+            "github-hosted-ubuntu-24.04-profiling-v2-reviewed-aa-fbc4c5cad012",
         )
         self.assertEqual(set(policy["scenarios"]), set(linux_catalog.SCENARIO_CATALOG))
+
+        expected_tcp_thresholds = {
+            "tcp-bulk": (1.5, 1.9),
+            "tcp-request-16k": (1.6, 2.0),
+            "tcp-request-1k": (1.0, 1.3),
+            "tcp-request-4k": (0.6, 0.8),
+            "tcp-stream-64k": (1.3, 1.7),
+        }
+        calibrated_fields = (
+            "noise_band_percent",
+            "regression_threshold_percent",
+            "adoption_threshold_percent",
+            "minimum_pairs",
+            "minimum_wins",
+            "minimum_losses",
+            "calibration_source",
+            "calibration_environment",
+        )
         for scenario, entry in policy["scenarios"].items():
             with self.subTest(scenario=scenario):
-                calibrated = [
-                    entry[field]
-                    for field in (
-                        "noise_band_percent",
-                        "regression_threshold_percent",
-                        "adoption_threshold_percent",
-                        "minimum_pairs",
-                        "minimum_wins",
-                        "minimum_losses",
-                        "calibration_source",
-                        "calibration_environment",
-                    )
-                ]
-                self.assertTrue(all(value is None for value in calibrated))
+                calibrated = [entry[field] for field in calibrated_fields]
+                if scenario not in expected_tcp_thresholds:
+                    self.assertTrue(all(value is None for value in calibrated))
+                    continue
 
-    def test_repository_policy_cannot_accept_six_pair_qualification_before_calibration(
+                noise_band, adoption_threshold = expected_tcp_thresholds[scenario]
+                self.assertTrue(all(value is not None for value in calibrated))
+                self.assertEqual(entry["noise_band_percent"], noise_band)
+                self.assertEqual(
+                    entry["regression_threshold_percent"], -adoption_threshold
+                )
+                self.assertEqual(
+                    entry["adoption_threshold_percent"], adoption_threshold
+                )
+                self.assertEqual(entry["minimum_pairs"], 6)
+                self.assertEqual(entry["minimum_wins"], 5)
+                self.assertEqual(entry["minimum_losses"], 4)
+                self.assertIn(
+                    "/runs/33476895420/artifacts/9789589781/",
+                    entry["calibration_source"],
+                )
+                environment = entry["calibration_environment"]
+                self.assertEqual(environment["runner_image"], "ubuntu-24.04")
+                self.assertEqual(environment["pair_schedule"], "abba-six-pairs")
+                self.assertEqual(environment["warmup_seconds"], 3)
+                self.assertEqual(environment["active_seconds"], 30)
+
+    def test_repository_policy_enables_only_calibrated_six_pair_qualification(
         self,
     ) -> None:
         policy = linux_policy.load_decision_policy(POLICY_PATH)
-        for selection in (
-            "tcp-frame-capacity",
-            "udp-payload-matrix",
-            "udp-direct-payload-bounds",
-        ):
+        expected_eligibility = {
+            "tcp-frame-capacity": True,
+            "udp-payload-matrix": False,
+            "udp-direct-payload-bounds": False,
+        }
+        for selection, eligible in expected_eligibility.items():
             with self.subTest(selection=selection):
                 plan = linux_plan.create_plan(
                     mode="qualification",
@@ -54,7 +85,7 @@ class DecisionPolicyTests(unittest.TestCase):
                     pairs="6",
                     decision_policy=policy,
                 )
-                self.assertFalse(plan["adoption_eligible"])
+                self.assertEqual(plan["adoption_eligible"], eligible)
                 for scenario in plan["scenarios"]:
                     contract = scenario["evidence_contract"]
                     for field in (
