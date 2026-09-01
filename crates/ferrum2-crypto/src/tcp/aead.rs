@@ -80,17 +80,14 @@ impl TcpOpener {
     /// advancing the nonce. Nonce exhaustion leaves the buffer and counter unchanged.
     pub fn open_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
         let (nonce, next) = self.nonce.reserve()?;
-        let tag_start = buffer
-            .len()
-            .checked_sub(AEAD_TAG_BYTES)
-            .ok_or(AeadError::AuthenticationFailed)?;
-        let tag: [u8; AEAD_TAG_BYTES] = buffer[tag_start..]
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("validated TCP tag width"));
-        self.cipher
-            .decrypt_packet(&nonce, &mut buffer[..tag_start], &tag)
+        if buffer.len() < AEAD_TAG_BYTES {
+            return Err(AeadError::AuthenticationFailed);
+        }
+        let plaintext_len = self
+            .cipher
+            .decrypt_packet(&nonce, buffer.as_mut())
             .map_err(|_| AeadError::AuthenticationFailed)?;
-        buffer.truncate(tag_start);
+        buffer.truncate(plaintext_len);
         self.nonce = next;
         Ok(())
     }

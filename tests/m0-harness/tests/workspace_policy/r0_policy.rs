@@ -481,6 +481,7 @@ fn root_and_fuzz_locks_resolve_the_reviewed_local_crypto_patch() {
                 "blake3",
                 "chacha20poly1305",
                 "ghash",
+                "aws-lc-rs",
                 "zeroize"
             ]),
             "{relative} crypto dependency drift"
