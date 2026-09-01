@@ -10,7 +10,7 @@ use ferrum2_crypto::{
 };
 
 use super::replay::UdpReplayWindow;
-use super::wire::{encode_packet, open_packet_borrowed, udp_crypto};
+use super::wire::{encode_packet, open_packet_borrowed, udp_crypto, udp_wire_len};
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
 use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE, ValidatedTarget};
 
@@ -80,6 +80,24 @@ impl UdpClientSession {
     /// Returns the opaque live ID for collision-safe process-local registration.
     pub const fn session_id(&self) -> &UdpSessionId {
         self.outbound.session_id()
+    }
+    /// Returns the exact output span required by one request for this session's method.
+    ///
+    /// The calculation is mutation-free so a caller can resize reusable storage
+    /// before encoding without advancing the packet ID.
+    pub fn request_wire_len(
+        &self,
+        target: &TargetAddr,
+        payload_len: usize,
+        padding_len: usize,
+    ) -> Result<usize, UdpPacketError> {
+        udp_wire_len(
+            self.crypto.profile(),
+            false,
+            target,
+            payload_len,
+            padding_len,
+        )
     }
 
     /// Encodes one request into caller-owned bounded output.

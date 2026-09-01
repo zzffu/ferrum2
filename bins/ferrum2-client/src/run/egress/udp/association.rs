@@ -91,6 +91,26 @@ pub(super) struct ClientUdpPlan {
 }
 
 pub(in crate::run::egress) const MAX_UDP_PLAN_HOPS: usize = 8;
+fn encode_request_layer<T, R>(
+    protocol: &mut UdpClientSession,
+    clock: &T,
+    random: &R,
+    target: &TargetAddr,
+    payload: &[u8],
+    output: &mut BytesMut,
+    scratch: &mut UdpPacketScratch,
+) -> Result<usize, UdpPacketError>
+where
+    T: Clock + ?Sized,
+    R: SecureRandom + ?Sized,
+{
+    let exact_len = protocol.request_wire_len(target, payload.len(), 0)?;
+    output.resize(exact_len, 0);
+    let wire_len =
+        protocol.encode_request_parts(clock, random, target, payload, 0, output, scratch)?;
+    debug_assert_eq!(wire_len, exact_len);
+    Ok(wire_len)
+}
 
 impl Drop for ClientUdpAssociation {
     fn drop(&mut self) {
@@ -169,7 +189,6 @@ impl ClientUdpAssociation {
         let upstream_wire = upstream_wire
             .as_mut()
             .expect("proxy UDP association owns its upstream wire buffer");
-        upstream_wire.resize(MAX_UDP_WIRE_LEN, 0);
         let scratch = scratch
             .as_mut()
             .expect("proxy UDP association owns its packet scratch");
@@ -195,12 +214,12 @@ impl ClientUdpAssociation {
                 &intermediate
             };
             wire_len = if layer + 1 == hops.len() {
-                plan.legs[layer].protocol.encode_request_parts(
+                encode_request_layer(
+                    &mut plan.legs[layer].protocol,
                     &egress.clock,
                     &egress.random,
                     target,
                     datagram.payload(),
-                    0,
                     upstream_wire,
                     scratch,
                 )?
@@ -215,12 +234,12 @@ impl ClientUdpAssociation {
                     scratch,
                 )?
             } else {
-                plan.legs[layer].protocol.encode_request_parts(
+                encode_request_layer(
+                    &mut plan.legs[layer].protocol,
                     &egress.clock,
                     &egress.random,
                     target,
                     &inner_wire[..wire_len],
-                    0,
                     upstream_wire,
                     scratch,
                 )?
@@ -228,6 +247,7 @@ impl ClientUdpAssociation {
             wire_in_upstream = layer + 1 == hops.len() || !wire_in_upstream;
         }
         if !wire_in_upstream {
+            upstream_wire.resize(wire_len, 0);
             upstream_wire[..wire_len].copy_from_slice(&inner_wire[..wire_len]);
         }
         Ok(wire_len)
@@ -800,11 +820,8 @@ where
     }
     let inner_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
         .then(|| vec![0_u8; MAX_UDP_WIRE_LEN]);
-    let upstream_wire = matches!(selected, SelectedEgress::Shadowsocks { .. }).then(|| {
-        let mut wire = BytesMut::with_capacity(MAX_UDP_WIRE_LEN);
-        wire.resize(MAX_UDP_WIRE_LEN, 0);
-        wire
-    });
+    let upstream_wire = matches!(selected, SelectedEgress::Shadowsocks { .. })
+        .then(|| BytesMut::with_capacity(MAX_UDP_WIRE_LEN));
     let scratch =
         matches!(selected, SelectedEgress::Shadowsocks { .. }).then(UdpPacketScratch::new);
     let first_server = match selected {
