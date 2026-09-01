@@ -29,11 +29,26 @@ impl TcpSealer {
 
     /// Encrypts and appends the tag in place with empty associated data.
     pub fn seal_in_place(&mut self, buffer: &mut BytesMut) -> Result<(), AeadError> {
+        self.seal_suffix_in_place(buffer, 0)
+    }
+
+    /// Encrypts the bytes starting at `plaintext_start` and appends their tag.
+    ///
+    /// Bytes before `plaintext_start` remain unchanged. An invalid start or nonce
+    /// exhaustion leaves the buffer and counter unchanged.
+    pub fn seal_suffix_in_place(
+        &mut self,
+        buffer: &mut BytesMut,
+        plaintext_start: usize,
+    ) -> Result<(), AeadError> {
+        if plaintext_start > buffer.len() {
+            return Err(AeadError::OperationFailed);
+        }
         let (nonce, next) = self.nonce.reserve()?;
         buffer.reserve(AEAD_TAG_BYTES);
         let tag = self
             .cipher
-            .encrypt_packet(&nonce, buffer.as_mut())
+            .encrypt_packet(&nonce, &mut buffer[plaintext_start..])
             .map_err(|_| AeadError::OperationFailed)?;
         buffer.extend_from_slice(&tag);
         self.nonce = next;
@@ -140,6 +155,28 @@ mod tests {
             );
             assert_eq!(plaintext, original_plaintext);
             assert_eq!(sealer.nonce.current_bytes(), EXHAUSTED_NONCE);
+        }
+    }
+
+    #[test]
+    fn tcp_sealer_encrypts_only_the_selected_suffix() {
+        for profile in MethodProfile::ALL {
+            let (seal_subkey, open_subkey) = paired_subkeys(profile);
+            let prefix = b"framing prefix";
+            let plaintext = b"payload";
+            let mut framed = BytesMut::from(&prefix[..]);
+            framed.extend_from_slice(plaintext);
+
+            TcpSealer::new(seal_subkey)
+                .seal_suffix_in_place(&mut framed, prefix.len())
+                .expect("seal suffix");
+
+            assert_eq!(&framed[..prefix.len()], prefix);
+            let mut encrypted_suffix = framed.split_off(prefix.len());
+            TcpOpener::new(open_subkey)
+                .open_in_place(&mut encrypted_suffix)
+                .expect("open suffix");
+            assert_eq!(encrypted_suffix.as_ref(), plaintext);
         }
     }
 

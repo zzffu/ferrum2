@@ -362,20 +362,14 @@ pub(super) fn seal_data_chunk_into(
         scratch[..].try_into().expect("encrypted length width");
 
     scratch.clear();
+    scratch.extend_from_slice(&length);
     scratch.extend_from_slice(payload);
     sealer
-        .seal_in_place(scratch)
+        .seal_suffix_in_place(scratch, ENCRYPTED_LENGTH_LEN)
         .map_err(frame_from_seal_aead)?;
-    let payload_wire_len = scratch.len();
-    let total = ENCRYPTED_LENGTH_LEN
-        .checked_add(payload_wire_len)
-        .ok_or(FrameError::Bounds)?;
-    if total > MAX_ENCRYPT_WIRE_LEN {
+    if scratch.len() > MAX_ENCRYPT_WIRE_LEN {
         return Err(FrameError::Bounds);
     }
-    scratch.resize(total, 0);
-    scratch.copy_within(0..payload_wire_len, ENCRYPTED_LENGTH_LEN);
-    scratch[..ENCRYPTED_LENGTH_LEN].copy_from_slice(&length);
     Ok(())
 }
 
