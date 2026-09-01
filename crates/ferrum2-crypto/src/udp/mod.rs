@@ -1,7 +1,7 @@
 mod aead;
 mod session;
 
-pub use aead::{UdpCrypto, UdpCryptoError, UdpOpenResult, UdpSealResult};
+pub use aead::{UdpCrypto, UdpCryptoError, UdpOpenCache, UdpOpenResult, UdpSealResult};
 pub use session::{UdpOutboundSession, UdpSessionId};
 
 pub(super) const UDP_SESSION_ID_BYTES: usize = 8;
