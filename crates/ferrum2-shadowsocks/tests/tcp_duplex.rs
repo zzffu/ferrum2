@@ -1,7 +1,9 @@
 mod common;
 
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use ferrum2_shadowsocks::{ClientTcpOutbound, PlainDuplex, ShadowsocksTcpInbound, TcpReplayStore};
 
@@ -11,6 +13,17 @@ use common::{
     request_data_frames, response_wire_and_frames, salt_from_u64, server_target, target,
     valid_request_wire, write_plain,
 };
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[tokio::test]
 async fn client_upload_progresses_while_response_fixed_read_is_pending() {
@@ -208,17 +221,132 @@ async fn pending_response_capability_derives_each_direction_cipher_exactly_once(
 }
 
 #[tokio::test]
-async fn always_ready_one_byte_duplex_uses_at_most_one_io_per_outer_poll_and_is_fair() {
+async fn fully_buffered_subsequent_frame_returns_in_one_poll_without_protocol_wake() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
-    let request_salt = salt_from_u64(807);
-    let response_salt = salt_from_u64(808);
-    let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"x", &[]);
-    let mut reads = vec![response[..59].to_vec()];
-    reads.extend(response[59..].iter().map(|byte| vec![*byte]));
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(807);
+    let request = valid_request_wire(NOW, &salt);
+    let frames = request_data_frames(&salt, &[b"ready"]);
+    let mut complete_frame = frames[0].clone();
+    complete_frame.extend_from_slice(&frames[1]);
+    let (io, observation) = RecordingIo::new([
+        request[..43].to_vec(),
+        request[43..].to_vec(),
+        complete_frame,
+    ]);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 16];
+    let before = observation.lock().expect("observation").read_calls;
+
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("fully buffered frame must complete in one outer poll");
+    };
+
+    assert_eq!(&destination[..read], b"ready");
+    assert_eq!(
+        observation.lock().expect("observation").read_calls - before,
+        2,
+        "length and payload use two immediate transport reads"
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn real_transport_pending_does_not_add_a_protocol_wake() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(808);
+    let request = valid_request_wire(NOW, &salt);
+    let frames = request_data_frames(&salt, &[b"later"]);
+    let (io, observation) = RecordingIo::new([
+        request[..43].to_vec(),
+        request[43..].to_vec(),
+        frames[0].clone(),
+        frames[1].clone(),
+    ]);
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound
+        .accept_stream(io.with_pending_reads_after(2, 1))
+        .await
+        .expect("request")
+        .stream;
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 16];
+    let before = observation.lock().expect("observation").read_calls;
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(observation.lock().expect("observation").read_calls, before);
+    assert_eq!(
+        wake_counter.0.load(Ordering::SeqCst),
+        1,
+        "the scripted transport owns the only wake"
+    );
+}
+
+#[tokio::test]
+async fn one_byte_empty_frame_chain_yields_once_at_the_operation_budget() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let random = ScriptedRandom::new([]);
+    let replay = TcpReplayStore::new(1024).expect("capacity");
+    let salt = salt_from_u64(809);
+    let request = valid_request_wire(NOW, &salt);
+    let frames = request_data_frames(&salt, &[b"", b"", b"visible"]);
+    let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
+    reads.extend(
+        frames
+            .into_iter()
+            .flat_map(|part| part.into_iter().map(|byte| vec![byte])),
+    );
     let (io, observation) = RecordingIo::new(reads);
-    let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 1));
+    let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
+    let mut flow = inbound.accept_stream(io).await.expect("request").stream;
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
+    let mut destination = [0_u8; 16];
+    let before = observation.lock().expect("observation").read_calls;
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
+        Poll::Pending
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").read_calls - before,
+        64
+    );
+    assert_eq!(wake_counter.0.swap(0, Ordering::SeqCst), 1);
+
+    let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
+    else {
+        panic!("saved empty-frame state must reach the nonempty frame");
+    };
+    assert_eq!(&destination[..read], b"visible");
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn partial_tx_drain_is_bounded_and_flush_shutdown_continue_in_poll() {
+    let keys = provider();
+    let clock = FakeClock::new(NOW, 0);
+    let request_salt = salt_from_u64(810);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
+    let (io, observation) = RecordingIo::new([]);
+    let connector = RecordingConnector::succeeds(io.with_write_limit_after(1, 1));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);
     let mut flow = outbound
         .connect_server()
@@ -227,59 +355,71 @@ async fn always_ready_one_byte_duplex_uses_at_most_one_io_per_outer_poll_and_is_
         .write_request(&target())
         .await
         .expect("client");
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    let mut destination = [0_u8; 8];
+    assert_eq!(write_plain(&mut flow, &[7; 100]).await, Ok(100));
+    let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake_counter));
+    let mut cx = Context::from_waker(&waker);
 
-    let mut read_completed = false;
-    let mut admitted_upload = false;
-    for _ in 0..64 {
-        let before = {
-            let observed = observation.lock().expect("observation");
-            observed.read_calls + observed.write_calls
-        };
-        match Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination) {
-            Poll::Ready(Ok(1)) => read_completed = true,
-            Poll::Ready(Ok(other)) => panic!("unexpected response length {other}"),
-            Poll::Ready(Err(error)) => panic!("unexpected response error {error:?}"),
-            Poll::Pending => {}
-        }
-        let after = {
-            let observed = observation.lock().expect("observation");
-            observed.read_calls + observed.write_calls
-        };
-        assert!(
-            after - before <= 1,
-            "read outer poll performed multiple I/O"
+    for expected_writes in [64, 64] {
+        let before = observation.lock().expect("observation").write_calls;
+        assert!(matches!(
+            Pin::new(&mut flow).poll_write_plain(&mut cx, b"new"),
+            Poll::Pending
+        ));
+        assert_eq!(
+            observation.lock().expect("observation").write_calls - before,
+            expected_writes
         );
-
-        let before = after;
-        match Pin::new(&mut flow).poll_write_plain(&mut cx, b"u") {
-            Poll::Ready(Ok(1)) => admitted_upload = true,
-            Poll::Ready(Ok(other)) => panic!("unexpected upload admission {other}"),
-            Poll::Ready(Err(error)) => panic!("unexpected upload error {error:?}"),
-            Poll::Pending => {}
-        }
-        let after = {
-            let observed = observation.lock().expect("observation");
-            observed.read_calls + observed.write_calls
-        };
-        assert!(
-            after - before <= 1,
-            "write outer poll performed multiple I/O"
-        );
-        if read_completed && admitted_upload {
-            break;
+        assert_eq!(wake_counter.0.swap(0, Ordering::SeqCst), 1);
+    }
+    let before = observation.lock().expect("observation").write_calls;
+    assert!(matches!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, b"new"),
+        Poll::Ready(Ok(3))
+    ));
+    assert_eq!(
+        observation.lock().expect("observation").write_calls - before,
+        6
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+    {
+        let observed = observation.lock().expect("observation");
+        let drained = &observed.write_lengths[1..];
+        assert_eq!(drained.len(), 134);
+        for (index, length) in drained.iter().copied().enumerate() {
+            assert_eq!(length, 134 - index, "staged position must not restart");
         }
     }
 
+    let (before_writes, before_flushes) = {
+        let observed = observation.lock().expect("observation");
+        (observed.write_calls, observed.flush_calls)
+    };
+    assert!(matches!(
+        Pin::new(&mut flow).poll_flush_plain(&mut cx),
+        Poll::Ready(Ok(()))
+    ));
+    {
+        let observed = observation.lock().expect("observation");
+        assert_eq!(observed.write_calls - before_writes, 37);
+        assert_eq!(observed.flush_calls - before_flushes, 1);
+    }
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+
+    assert!(matches!(
+        Pin::new(&mut flow).poll_write_plain(&mut cx, b"end!"),
+        Poll::Ready(Ok(4))
+    ));
+    let (before_writes, before_shutdowns) = {
+        let observed = observation.lock().expect("observation");
+        (observed.write_calls, observed.shutdown_calls)
+    };
+    assert!(matches!(
+        Pin::new(&mut flow).poll_shutdown_plain(&mut cx),
+        Poll::Ready(Ok(()))
+    ));
     let observed = observation.lock().expect("observation");
-    assert!(read_completed, "one-byte response made bounded progress");
-    assert_eq!(destination[0], b'x');
-    assert!(admitted_upload, "opposite TX made bounded progress");
-    assert!(observed.read_calls <= 18, "fixed plus 17 payload bytes");
-    assert!(
-        observed.write_calls > 1,
-        "request and upload both progressed"
-    );
+    assert_eq!(observed.write_calls - before_writes, 38);
+    assert_eq!(observed.shutdown_calls - before_shutdowns, 1);
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 }

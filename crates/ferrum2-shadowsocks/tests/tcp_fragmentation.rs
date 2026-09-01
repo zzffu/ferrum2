@@ -187,7 +187,7 @@ impl Wake for WakeCounter {
 }
 
 #[tokio::test]
-async fn authenticated_zero_length_frame_self_wakes_and_never_looks_like_eof() {
+async fn authenticated_zero_length_frame_continues_without_false_eof_or_wake() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new([]);
@@ -197,32 +197,26 @@ async fn authenticated_zero_length_frame_self_wakes_and_never_looks_like_eof() {
     let frames = request_data_frames(&salt, &[b"", b"after-zero"]);
     let mut reads = vec![request[..43].to_vec(), request[43..].to_vec()];
     reads.extend(frames);
-    let (io, _) = RecordingIo::new(reads);
+    let (io, observation) = RecordingIo::new(reads);
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
     let mut flow = inbound.accept_stream(io).await.expect("request").stream;
     let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wake_counter));
     let mut cx = Context::from_waker(&waker);
     let mut destination = [0_u8; 32];
+    let before = observation.lock().expect("observation").read_calls;
 
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
-    assert!(matches!(
-        Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination),
-        Poll::Pending
-    ));
     let Poll::Ready(Ok(read)) = Pin::new(&mut flow).poll_read_plain(&mut cx, &mut destination)
     else {
-        panic!("next nonempty frame must become visible");
+        panic!("empty frame must continue to the next nonempty frame");
     };
     assert_eq!(&destination[..read], b"after-zero");
-    assert!(wake_counter.0.load(Ordering::SeqCst) >= 3);
+    assert_eq!(
+        observation.lock().expect("observation").read_calls - before,
+        4,
+        "two authenticated frames each read length then payload"
+    );
+    assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
