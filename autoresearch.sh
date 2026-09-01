@@ -44,9 +44,8 @@ run_scenario() {
   printf '%s\n' "$output"
 }
 
-udp_small_output="$(run_scenario udp-small-high)"
-udp_mtu_output="$(run_scenario udp-mtu-1200)"
-udp_direct_output="$(run_scenario udp-direct-small-128)"
+dns_direct_output="$(run_scenario dns-direct)"
+dns_detoured_output="$(run_scenario dns-detoured)"
 
 extract_value() {
   local output=$1
@@ -59,10 +58,12 @@ extract_value() {
   return 1
 }
 
-udp_small_datagrams="$(extract_value "$udp_small_output" datagrams)"
-udp_mtu_datagrams="$(extract_value "$udp_mtu_output" datagrams)"
-udp_direct_datagrams="$(extract_value "$udp_direct_output" datagrams)"
+dns_direct_queries="$(extract_value "$dns_direct_output" queries)"
+dns_direct_p99="$(extract_value "$dns_direct_output" p99_nanoseconds)"
+dns_detoured_queries="$(extract_value "$dns_detoured_output" queries)"
+dns_detoured_p99="$(extract_value "$dns_detoured_output" p99_nanoseconds)"
 
-printf 'METRIC udp_small_datagrams_per_second=%s\n' "$((udp_small_datagrams / ACTIVE_SECONDS))"
-printf 'METRIC udp_mtu_1200_datagrams_per_second=%s\n' "$((udp_mtu_datagrams / ACTIVE_SECONDS))"
-printf 'METRIC udp_direct_small_datagrams_per_second=%s\n' "$((udp_direct_datagrams / ACTIVE_SECONDS))"
+printf 'METRIC dns_direct_queries_per_second=%s\n' "$((dns_direct_queries / ACTIVE_SECONDS))"
+printf 'METRIC dns_direct_p99_nanoseconds=%s\n' "$dns_direct_p99"
+printf 'METRIC dns_detoured_queries_per_second=%s\n' "$((dns_detoured_queries / ACTIVE_SECONDS))"
+printf 'METRIC dns_detoured_p99_nanoseconds=%s\n' "$dns_detoured_p99"

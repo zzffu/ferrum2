@@ -8,6 +8,7 @@ use super::profile_contract::{
     EVIDENCE_LINE_MAX_BYTES, ProfileArgs, ProfileOutcome, ProfileRawIdentity, ProfileScenario,
     TCP_SCALE_EVIDENCE_LINE_MAX_BYTES, profile_raw_prefix, resolve_profile_ready_file,
 };
+use super::profile_dns::run_profile_dns;
 use super::profile_tcp::run_profile_tcp;
 use super::profile_udp::run_profile_udp;
 use super::self_check::assert_no_owners;
@@ -16,6 +17,9 @@ use super::tcp_scale;
 pub(super) fn run_profile_scenario(arguments: &ProfileArgs) -> Result<ProfileOutcome, String> {
     let ready_file = resolve_profile_ready_file(&arguments.repository_root, &arguments.ready_file)?;
     match arguments.scenario {
+        ProfileScenario::DnsDirect | ProfileScenario::DnsDetoured => {
+            run_profile_dns(arguments, &ready_file)
+        }
         ProfileScenario::TcpBulk
         | ProfileScenario::TcpStream64k
         | ProfileScenario::TcpRequest1k

@@ -77,6 +77,7 @@ mod evidence_support;
 mod host_identity;
 mod process_support;
 mod profile_contract;
+mod profile_dns;
 mod profile_output;
 mod profile_tcp;
 mod profile_udp;

@@ -21,6 +21,7 @@ pub(super) const PROFILE_WARMUP_SECONDS: std::ops::RangeInclusive<u64> = 1..=60;
 pub(super) const PROFILE_ACTIVE_SECONDS: std::ops::RangeInclusive<u64> = 10..=900;
 pub(super) const PROFILE_UDP_WORKERS: usize = 4;
 pub(super) const PROFILE_UDP_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const PROFILE_DNS_WORKERS: usize = 16;
 pub(super) const PROFILE_UDP_PAYLOAD_BYTES: usize = 128;
 pub(super) const PROFILE_UDP_MTU_PAYLOAD_BYTES: usize = 1_200;
 pub(super) const PROFILE_UDP_PAYLOAD_1472_BYTES: usize = 1_472;
@@ -119,6 +120,8 @@ pub(super) enum ProfileScenario {
     TcpRequest1k,
     TcpRequest4k,
     TcpRequest16k,
+    DnsDirect,
+    DnsDetoured,
     UdpSmallHigh,
     UdpMtu1200,
     UdpPayload1472,
@@ -153,6 +156,8 @@ impl ProfileScenario {
             Some("tcp-request-1k") => Ok(Self::TcpRequest1k),
             Some("tcp-request-4k") => Ok(Self::TcpRequest4k),
             Some("tcp-request-16k") => Ok(Self::TcpRequest16k),
+            Some("dns-direct") => Ok(Self::DnsDirect),
+            Some("dns-detoured") => Ok(Self::DnsDetoured),
             Some("udp-small-high") => Ok(Self::UdpSmallHigh),
             Some("udp-mtu-1200") => Ok(Self::UdpMtu1200),
             Some("udp-payload-1472") => Ok(Self::UdpPayload1472),
@@ -163,10 +168,10 @@ impl ProfileScenario {
             Some("udp-direct-max-65497") => Ok(Self::UdpDirectMax65497),
             _ => Err(
                 "profile scenario must be tcp-bulk, tcp-stream-64k, tcp-scale-10k, \
-                 tcp-request-1k, \
-                 tcp-request-4k, tcp-request-16k, udp-small-high, udp-mtu-1200, \
-                 udp-payload-1472, udp-payload-1500, udp-payload-8192, \
-                 udp-max-wire-65507, udp-direct-small-128, or udp-direct-max-65497"
+                 tcp-request-1k, tcp-request-4k, tcp-request-16k, dns-direct, dns-detoured, \
+                 udp-small-high, udp-mtu-1200, udp-payload-1472, udp-payload-1500, \
+                 udp-payload-8192, udp-max-wire-65507, udp-direct-small-128, or \
+                 udp-direct-max-65497"
                     .to_owned(),
             ),
         }
@@ -180,6 +185,8 @@ impl ProfileScenario {
             Self::TcpRequest1k => "tcp-request-1k",
             Self::TcpRequest4k => "tcp-request-4k",
             Self::TcpRequest16k => "tcp-request-16k",
+            Self::DnsDirect => "dns-direct",
+            Self::DnsDetoured => "dns-detoured",
             Self::UdpSmallHigh => "udp-small-high",
             Self::UdpMtu1200 => "udp-mtu-1200",
             Self::UdpPayload1472 => "udp-payload-1472",
@@ -198,7 +205,9 @@ impl ProfileScenario {
             Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => {
                 Some(PROFILE_TCP_LATENCY_WORKERS)
             }
-            Self::UdpSmallHigh
+            Self::DnsDirect
+            | Self::DnsDetoured
+            | Self::UdpSmallHigh
             | Self::UdpMtu1200
             | Self::UdpPayload1472
             | Self::UdpPayload1500
@@ -252,20 +261,26 @@ impl ProfileScenario {
             Self::TcpRequest1k => 1_024,
             Self::TcpRequest4k => 4_096,
             Self::TcpRequest16k => 16_384,
+            Self::DnsDirect | Self::DnsDetoured => 0,
             _ => self.udp_payload_bytes().expect("UDP scenario payload"),
         }
     }
 
     pub(super) const fn topology_label(self) -> &'static str {
-        match self.udp_topology() {
-            Some(topology) => topology.label(),
-            None => "shadowsocks",
+        match self {
+            Self::DnsDirect => "direct",
+            Self::DnsDetoured => "detoured",
+            _ => match self.udp_topology() {
+                Some(topology) => topology.label(),
+                None => "shadowsocks",
+            },
         }
     }
 
     pub(super) const fn unit(self) -> &'static str {
         match self {
             Self::TcpRequest1k | Self::TcpRequest4k | Self::TcpRequest16k => "nanoseconds",
+            Self::DnsDirect | Self::DnsDetoured => "queries_per_second",
             Self::UdpSmallHigh
             | Self::UdpMtu1200
             | Self::UdpPayload1472

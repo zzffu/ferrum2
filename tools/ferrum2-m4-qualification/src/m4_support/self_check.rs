@@ -93,6 +93,8 @@ pub(super) fn run_self_check() -> Result<String, String> {
         "tcp-request-1k",
         "tcp-request-4k",
         "tcp-request-16k",
+        "dns-direct",
+        "dns-detoured",
         "udp-small-high",
         "udp-mtu-1200",
         "udp-payload-1472",

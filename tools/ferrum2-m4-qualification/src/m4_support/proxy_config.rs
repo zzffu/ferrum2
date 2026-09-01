@@ -78,6 +78,40 @@ pub(super) fn ferrum_dns_resource_client_config(
          [metrics]\nlisten = \"{metrics}\"\n"
     )
 }
+pub(super) fn profile_dns_client_config(
+    proxy: SocketAddrV4,
+    dns_listen: SocketAddrV4,
+    upstream: SocketAddrV4,
+    detour_server: Option<SocketAddrV4>,
+) -> String {
+    let (outbound, outbound_tag, detour) = match detour_server {
+        Some(server) => (
+            render_client_shadowsocks_outbound("dns-hop", server),
+            "dns-hop",
+            "detour = \"dns-hop\"\n",
+        ),
+        None => (
+            "[[outbounds]]\ntag = \"profile-direct\"\ntype = \"direct\"\n".to_owned(),
+            "profile-direct",
+            "",
+        ),
+    };
+    format!(
+        "schema_version = 2\n\
+         [[inbounds]]\ntag = \"profile-in\"\nlisten = \"{proxy}\"\n\
+         {outbound}\
+         [route]\nfinal = \"{outbound_tag}\"\n\
+         [dns]\ntimeout_ms = 2000\nmax_inflight = {DNS_MAX_INFLIGHT}\n\
+         [[dns.inbounds]]\ntag = \"profile-dns\"\nlisten = \"{dns_listen}\"\n\
+         [[dns.servers]]\ntag = \"profile-upstream\"\ntransport = \"udp\"\n\
+         address = \"{upstream}\"\n{detour}\
+         [dns.route]\nfinal = \"profile-upstream\"\n\
+         [runtime]\nmax_connections = 1024\nlisten_backlog = 1024\n\
+         idle_timeout_ms = 60000\n\
+         [udp]\nenabled = false\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
 
 pub(super) fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
     format!(
