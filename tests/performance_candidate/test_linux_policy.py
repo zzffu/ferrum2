@@ -16,16 +16,16 @@ class DecisionPolicyTests(unittest.TestCase):
         self.assertRegex(policy["policy_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             policy["policy_id"],
-            "github-hosted-ubuntu-24.04-profiling-v2-reviewed-aa-fbc4c5cad012",
+            "github-hosted-ubuntu-24.04-profiling-v2-reviewed-aa-d9e7abf0d4ab",
         )
         self.assertEqual(set(policy["scenarios"]), set(linux_catalog.SCENARIO_CATALOG))
 
         expected_tcp_thresholds = {
-            "tcp-bulk": (1.5, 1.9),
-            "tcp-request-16k": (1.6, 2.0),
-            "tcp-request-1k": (1.0, 1.3),
-            "tcp-request-4k": (0.6, 0.8),
-            "tcp-stream-64k": (1.3, 1.7),
+            "tcp-bulk": (3.9, 4.9),
+            "tcp-request-16k": (25.0, 31.3),
+            "tcp-request-1k": (1.9, 2.4),
+            "tcp-request-4k": (2.1, 2.7),
+            "tcp-stream-64k": (2.7, 3.4),
         }
         calibrated_fields = (
             "noise_band_percent",
@@ -57,11 +57,14 @@ class DecisionPolicyTests(unittest.TestCase):
                 self.assertEqual(entry["minimum_wins"], 5)
                 self.assertEqual(entry["minimum_losses"], 4)
                 self.assertIn(
-                    "/runs/33476895420/artifacts/9789589781/",
+                    "/runs/33489033071/artifacts/9794462192/",
                     entry["calibration_source"],
                 )
                 environment = entry["calibration_environment"]
                 self.assertEqual(environment["runner_image"], "ubuntu-24.04")
+                self.assertEqual(
+                    environment["cpu_model"], "AMD EPYC 9V74 80-Core Processor"
+                )
                 self.assertEqual(environment["pair_schedule"], "abba-six-pairs")
                 self.assertEqual(environment["warmup_seconds"], 3)
                 self.assertEqual(environment["active_seconds"], 30)
