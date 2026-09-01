@@ -46,26 +46,54 @@ pub(super) async fn udp_loop(
     proxy: Arc<DnsProxy>,
     mut cancel: watch::Receiver<bool>,
 ) -> io::Result<()> {
+    let socket = Arc::new(socket);
+    let mut children = JoinSet::new();
     let mut request = [0_u8; 4096];
-    loop {
-        let (length, peer) = tokio::select! {
-            result = socket.recv_from(&mut request) => result?,
-            _ = cancelled(&mut cancel) => return Ok(()),
-        };
-        let response = tokio::select! {
-            response = proxy.answer(ProxyIngress::Listener(inbound), ProxyTransport::Udp, &request[..length]) => response,
-            _ = cancelled(&mut cancel) => return Ok(()),
-        };
-        if let Some(response) = response {
-            let sent = socket.send_to(&response, peer).await?;
-            if sent != response.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "short DNS datagram",
-                ));
+    let result = loop {
+        tokio::select! {
+            _ = cancelled(&mut cancel) => break Ok(()),
+            completed = children.join_next(), if !children.is_empty() => {
+                match completed {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(error))) => break Err(error),
+                    Some(Err(_)) | None => {
+                        break Err(io::Error::other("DNS UDP request task stopped"));
+                    }
+                }
+            }
+            received = socket.recv_from(&mut request), if children.len() < proxy.udp_concurrency => {
+                let (length, peer) = match received {
+                    Ok(received) => received,
+                    Err(error) => break Err(error),
+                };
+                let request = request[..length].to_vec();
+                let socket = Arc::clone(&socket);
+                let proxy = Arc::clone(&proxy);
+                children.spawn(async move {
+                    if let Some(response) = proxy
+                        .answer(
+                            ProxyIngress::Listener(inbound),
+                            ProxyTransport::Udp,
+                            &request,
+                        )
+                        .await
+                    {
+                        let sent = socket.send_to(&response, peer).await?;
+                        if sent != response.len() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WriteZero,
+                                "short DNS datagram",
+                            ));
+                        }
+                    }
+                    Ok(())
+                });
             }
         }
-    }
+    };
+    children.abort_all();
+    while children.join_next().await.is_some() {}
+    result
 }
 
 pub(super) async fn tcp_loop(
