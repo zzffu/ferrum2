@@ -449,8 +449,6 @@ fn production_features_preserve_security_and_resource_boundaries() {
             "{target} production graph enables tokio test-util"
         );
         for forbidden in [
-            "aws-lc-rs ",
-            "aws-lc-sys ",
             "quinn ",
             "h3 ",
             "ipconfig ",
@@ -461,6 +459,12 @@ fn production_features_preserve_security_and_resource_boundaries() {
                 !tree.lines().any(|line| line.starts_with(forbidden)),
                 "{target} production graph contains forbidden package {}",
                 forbidden.trim()
+            );
+        }
+        for required in ["aws-lc-rs v1.16.3", "aws-lc-sys v0.40.0"] {
+            assert!(
+                tree.lines().any(|line| line.starts_with(required)),
+                "{target} production graph lacks reviewed package {required}"
             );
         }
     }
@@ -527,7 +531,7 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
     let crypto = package(metadata, "ferrum2-crypto");
     let backend = dependency(crypto, "shadowsocks-crypto", None);
     assert_eq!(backend["uses_default_features"], false);
-    assert_eq!(features(backend), BTreeSet::from(["v2"]));
+    assert_eq!(features(backend), BTreeSet::from(["aws-lc", "v2"]));
 
     let resolved = package(metadata, "shadowsocks-crypto");
     assert_eq!(resolved["version"], "0.7.0");
@@ -562,6 +566,29 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
             "dep:zeroize",
         ])
     );
+    let aws_feature: BTreeSet<_> = vendor_manifest["features"]["aws-lc"]
+        .as_array()
+        .expect("aws-lc feature mapping")
+        .iter()
+        .map(|feature| feature.as_str().expect("aws-lc feature"))
+        .collect();
+    assert_eq!(aws_feature, BTreeSet::from(["dep:aws-lc-rs"]));
+    let aws_lc = &vendor_manifest["dependencies"]["aws-lc-rs"];
+    assert_eq!(aws_lc["version"].as_str(), Some("=1.16.3"));
+    assert_eq!(aws_lc["optional"].as_bool(), Some(true));
+    assert_eq!(aws_lc["default-features"].as_bool(), Some(false));
+    assert_eq!(
+        aws_lc["features"]
+            .as_array()
+            .expect("aws-lc-rs features")
+            .iter()
+            .map(|feature| feature.as_str().expect("aws-lc-rs feature"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["non-fips", "prebuilt-nasm"])
+    );
+    for alternative_source in ["git", "path", "registry", "package"] {
+        assert!(aws_lc.get(alternative_source).is_none());
+    }
     for (dependency, package_name, version, expected_features) in [
         ("aes-v2", "aes", "=0.9.1", &["zeroize"][..]),
         (
@@ -660,7 +687,7 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
         .iter()
         .map(|feature| feature.as_str().expect("resolved feature"))
         .collect();
-    assert_eq!(resolved_features, BTreeSet::from(["v2"]));
+    assert_eq!(resolved_features, BTreeSet::from(["aws-lc", "v2"]));
     let resolved_dependencies: BTreeSet<_> = node["deps"]
         .as_array()
         .expect("backend resolved dependencies")
@@ -682,7 +709,23 @@ fn vendored_crypto_is_v2_only_and_contains_no_unsafe_tokens() {
         })
         .collect();
     assert!(resolved_dependencies.contains("zeroize"));
-    assert!(!resolved_dependencies.contains("aws-lc-rs"));
+    assert!(resolved_dependencies.contains("aws-lc-rs"));
+    for (name, version, license) in [
+        ("aws-lc-rs", "1.16.3", "ISC AND (Apache-2.0 OR ISC)"),
+        (
+            "aws-lc-sys",
+            "0.40.0",
+            "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
+        ),
+    ] {
+        let package = package(metadata, name);
+        assert_eq!(package["version"], version, "{name} version");
+        assert_eq!(package["license"], license, "{name} license");
+        assert_eq!(
+            package["source"], "registry+https://github.com/rust-lang/crates.io-index",
+            "{name} source"
+        );
+    }
     let workspace_members = metadata["workspace_members"]
         .as_array()
         .expect("workspace members");
