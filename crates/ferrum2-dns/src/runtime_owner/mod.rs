@@ -92,6 +92,7 @@ pub struct TaggedResolver {
     sender: Option<mpsc::Sender<Command>>,
     shutdown: Arc<ShutdownSignal>,
     admission: Arc<Semaphore>,
+    max_inflight: usize,
     server_count: usize,
     timeout: Duration,
     counters: Arc<RuntimeCounters>,
@@ -202,6 +203,7 @@ impl TaggedResolver {
                 sender: Some(sender),
                 shutdown: Arc::clone(&shutdown),
                 admission,
+                max_inflight: capacity,
                 server_count,
                 timeout,
                 counters,
@@ -215,6 +217,10 @@ impl TaggedResolver {
                 report: None,
             },
         ))
+    }
+
+    pub(crate) const fn max_inflight(&self) -> usize {
+        self.max_inflight
     }
 
     /// Queries one already-selected tagged server under the shared admission and deadline.

@@ -51,6 +51,7 @@ pub enum ProxyIngress {
 /// Hickory-backed DNS proxy request seam.
 pub struct DnsProxy {
     resolver: Arc<TaggedResolver>,
+    udp_concurrency: usize,
     policy: ProxyPolicy,
     policy_observer: Option<Arc<dyn DnsPolicyObserver>>,
     pub(super) cache: Option<ProxyCache>,
@@ -206,8 +207,10 @@ impl DnsProxy {
         listener_count: usize,
         ordinary_count: usize,
     ) -> Self {
+        let udp_concurrency = resolver.max_inflight();
         Self {
             resolver,
+            udp_concurrency,
             policy: ProxyPolicy {
                 program,
                 registry,
