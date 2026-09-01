@@ -5,24 +5,27 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::{
     kind::{CipherCategory, CipherKind},
     v2::{
-        crypto::{Aes128Gcm, Aes256Gcm, ChaCha20Poly1305},
+        crypto::{
+            aes_gcm::{TcpAes128Gcm, TcpAes256Gcm},
+            ChaCha20Poly1305,
+        },
         CryptoError, BLAKE3_KEY_DERIVE_CONTEXT,
     },
 };
 
 enum CipherVariant {
-    Aes128Gcm(Aes128Gcm),
-    Aes256Gcm(Aes256Gcm),
+    Aes128Gcm(TcpAes128Gcm),
+    Aes256Gcm(TcpAes256Gcm),
     ChaCha20Poly1305(ChaCha20Poly1305),
 }
 
 impl CipherVariant {
     fn try_new(kind: CipherKind, key: &[u8]) -> Result<Self, CryptoError> {
         match kind {
-            CipherKind::AEAD2022_BLAKE3_AES_128_GCM => Aes128Gcm::try_new(key)
+            CipherKind::AEAD2022_BLAKE3_AES_128_GCM => TcpAes128Gcm::try_new(key)
                 .map(Self::Aes128Gcm)
                 .ok_or(CryptoError::InvalidKeyLength),
-            CipherKind::AEAD2022_BLAKE3_AES_256_GCM => Aes256Gcm::try_new(key)
+            CipherKind::AEAD2022_BLAKE3_AES_256_GCM => TcpAes256Gcm::try_new(key)
                 .map(Self::Aes256Gcm)
                 .ok_or(CryptoError::InvalidKeyLength),
             CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305 => ChaCha20Poly1305::try_new(key)
@@ -48,11 +51,20 @@ impl CipherVariant {
         }
     }
 
-    fn decrypt(&self, nonce: &[u8; 12], ciphertext: &mut [u8], tag: &[u8; 16]) -> bool {
+    fn decrypt(&self, nonce: &[u8; 12], ciphertext_and_tag: &mut [u8]) -> bool {
         match self {
-            Self::Aes128Gcm(cipher) => cipher.decrypt(nonce, ciphertext, tag),
-            Self::Aes256Gcm(cipher) => cipher.decrypt(nonce, ciphertext, tag),
-            Self::ChaCha20Poly1305(cipher) => cipher.decrypt(nonce, ciphertext, tag),
+            Self::Aes128Gcm(cipher) => cipher.decrypt_appended(nonce, ciphertext_and_tag),
+            Self::Aes256Gcm(cipher) => cipher.decrypt_appended(nonce, ciphertext_and_tag),
+            Self::ChaCha20Poly1305(cipher) => {
+                let Some(tag_start) = ciphertext_and_tag.len().checked_sub(16) else {
+                    return false;
+                };
+                let (ciphertext, tag) = ciphertext_and_tag.split_at_mut(tag_start);
+                let tag: &[u8; 16] = (&*tag)
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("validated ChaCha20-Poly1305 tag width"));
+                cipher.decrypt(nonce, ciphertext, tag)
+            }
         }
     }
 }
@@ -120,15 +132,20 @@ impl TcpCipher {
             .map_err(|_| CryptoError::OperationFailed)
     }
 
-    /// Authenticates one body under an explicit u96le nonce.
+    /// Authenticates one body and its appended tag under an explicit u96le nonce.
     ///
-    /// Authentication failure zeroizes the supplied ciphertext body before
-    /// returning an error.
-    pub fn decrypt_packet(&self, nonce: &[u8; 12], ciphertext: &mut [u8], tag: &[u8; 16]) -> Result<(), CryptoError> {
-        if self.cipher.decrypt(nonce, ciphertext, tag) {
-            Ok(())
+    /// Authentication failure zeroizes the complete supplied packet before
+    /// returning an error. Success returns the plaintext body length; tag bytes
+    /// remain past that length for the caller to truncate.
+    pub fn decrypt_packet(&self, nonce: &[u8; 12], ciphertext_and_tag: &mut [u8]) -> Result<usize, CryptoError> {
+        let plaintext_len = ciphertext_and_tag
+            .len()
+            .checked_sub(16)
+            .ok_or(CryptoError::AuthenticationFailed)?;
+        if self.cipher.decrypt(nonce, ciphertext_and_tag) {
+            Ok(plaintext_len)
         } else {
-            ciphertext.zeroize();
+            ciphertext_and_tag.zeroize();
             Err(CryptoError::AuthenticationFailed)
         }
     }
@@ -198,29 +215,31 @@ mod tests {
         for kind in methods {
             let cipher = TcpCipher::try_from_subkey(kind, &key[..kind.key_len()]).unwrap();
             let plaintext = b"unauthenticated plaintext must not survive failure";
-            let mut ciphertext = plaintext.to_vec();
-            let tag = cipher.encrypt_packet(&nonce, &mut ciphertext).unwrap();
-            assert!(ciphertext.iter().any(|byte| *byte != 0));
+            let mut encrypted = plaintext.to_vec();
+            let tag = cipher.encrypt_packet(&nonce, &mut encrypted).unwrap();
+            encrypted.extend_from_slice(&tag);
+            assert!(encrypted.iter().any(|byte| *byte != 0));
 
-            let mut invalid_tag = tag;
-            invalid_tag[0] ^= 0x80;
-            let mut tag_failure = ciphertext.clone();
+            let mut tag_failure = encrypted.clone();
+            let tag_start = tag_failure.len() - 16;
+            tag_failure[tag_start] ^= 0x80;
             assert_eq!(
-                cipher.decrypt_packet(&nonce, &mut tag_failure, &invalid_tag),
+                cipher.decrypt_packet(&nonce, &mut tag_failure),
                 Err(CryptoError::AuthenticationFailed)
             );
             assert!(tag_failure.iter().all(|byte| *byte == 0));
 
-            let mut body_failure = ciphertext.clone();
+            let mut body_failure = encrypted.clone();
             body_failure[0] ^= 0x40;
             assert_eq!(
-                cipher.decrypt_packet(&nonce, &mut body_failure, &tag),
+                cipher.decrypt_packet(&nonce, &mut body_failure),
                 Err(CryptoError::AuthenticationFailed)
             );
             assert!(body_failure.iter().all(|byte| *byte == 0));
 
-            let mut valid = ciphertext.clone();
-            cipher.decrypt_packet(&nonce, &mut valid, &tag).unwrap();
+            let mut valid = encrypted.clone();
+            let plaintext_len = cipher.decrypt_packet(&nonce, &mut valid).unwrap();
+            valid.truncate(plaintext_len);
             assert_eq!(valid, plaintext);
         }
     }

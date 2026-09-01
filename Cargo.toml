@@ -45,7 +45,7 @@ ferrum2-observability = { path = "crates/ferrum2-observability", version = "=0.1
 ferrum2-sniff = { path = "crates/ferrum2-sniff", version = "=0.1.0" }
 ferrum2-tun = { path = "crates/ferrum2-tun", version = "=0.1.0", default-features = false }
 ferrum2-platform-windows = { path = "crates/ferrum2-platform-windows", version = "=0.1.0", default-features = false }
-shadowsocks-crypto = { version = "=0.7.0", default-features = false, features = ["v2"] }
+shadowsocks-crypto = { version = "=0.7.0", default-features = false, features = ["aws-lc", "v2"] }
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["tokio", "tls-ring", "https-ring", "webpki-roots"] }
 hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
 hickory-server = { version = "=0.26.1", default-features = false }
