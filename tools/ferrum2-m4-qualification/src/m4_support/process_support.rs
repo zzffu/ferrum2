@@ -19,6 +19,9 @@ pub(super) const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) static ACTIVE_PROCESSES: AtomicUsize = AtomicUsize::new(0);
 pub(super) static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(test)]
+static ECHO_ACCEPTED_NODELAY: Mutex<Option<mpsc::SyncSender<bool>>> = Mutex::new(None);
+
 pub(super) fn v4(address: SocketAddr) -> Result<SocketAddrV4, String> {
     match address {
         SocketAddr::V4(address) => Ok(address),
@@ -330,6 +333,13 @@ impl TargetWorker {
                             Err(error) => return Err(clean_io(error)),
                         }
                     };
+                    stream.set_nodelay(true).map_err(clean_io)?;
+                    #[cfg(test)]
+                    if let Ok(observer) = ECHO_ACCEPTED_NODELAY.lock()
+                        && let Some(observer) = observer.as_ref()
+                    {
+                        let _ = observer.send(stream.nodelay().unwrap_or(false));
+                    }
                     stream
                         .set_read_timeout(Some(Duration::from_millis(200)))
                         .map_err(clean_io)?;
@@ -823,4 +833,48 @@ pub(super) fn json(text: &str) -> String {
 
 pub(super) fn clean_io(error: impl std::fmt::Display) -> String {
     format!("I/O operation failed: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn echo_target_accepted_socket_has_tcp_nodelay() {
+        let listener =
+            TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("bind echo target");
+        let address = listener.local_addr().expect("echo target address");
+        let (observed_sender, observed_receiver) = mpsc::sync_channel(1);
+        {
+            let mut observer = ECHO_ACCEPTED_NODELAY.lock().expect("nodelay observer");
+            assert!(observer.is_none(), "nodelay observer already installed");
+            *observer = Some(observed_sender);
+        }
+
+        let target = TargetWorker::echo(listener, 1).expect("start echo target");
+        let mut client = TcpStream::connect(address).expect("connect echo target");
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set client read timeout");
+        client
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .expect("set client write timeout");
+
+        let nodelay = observed_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("observe accepted echo socket");
+        ECHO_ACCEPTED_NODELAY
+            .lock()
+            .expect("nodelay observer cleanup")
+            .take();
+        assert!(nodelay, "accepted echo socket must enable TCP_NODELAY");
+
+        let payload = [0x5a_u8; 64];
+        let mut echoed = [0_u8; 64];
+        client.write_all(&payload).expect("write echo payload");
+        client.read_exact(&mut echoed).expect("read echo payload");
+        assert_eq!(echoed, payload);
+        drop(client);
+        target.finish().expect("finish echo target");
+    }
 }
