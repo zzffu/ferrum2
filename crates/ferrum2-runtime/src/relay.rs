@@ -1,13 +1,13 @@
 use std::fmt;
-use std::future::{Future, pending};
+use std::future::{Future, pending, poll_fn};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
 
 use crate::OwnerRegistry;
 
@@ -115,7 +115,7 @@ impl std::error::Error for RelayFailure {}
 
 struct ActivityIo<'a, T> {
     inner: &'a mut T,
-    activity: Arc<Notify>,
+    activity: Arc<AtomicBool>,
     bytes_written: u64,
 }
 
@@ -145,7 +145,7 @@ where
         if let Poll::Ready(Ok(written)) = result {
             if written > 0 {
                 self.bytes_written += written as u64;
-                self.activity.notify_one();
+                self.activity.store(true, Ordering::Relaxed);
             }
             Poll::Ready(Ok(written))
         } else {
@@ -208,7 +208,7 @@ where
     B: AsyncRead + AsyncWrite + Unpin,
     C: Future<Output = ()>,
 {
-    let activity = Arc::new(Notify::new());
+    let activity = Arc::new(AtomicBool::new(false));
     let mut inbound = ActivityIo {
         inner: inbound,
         activity: Arc::clone(&activity),
@@ -220,14 +220,17 @@ where
         bytes_written: 0,
     };
     let idle = async move {
-        loop {
-            if tokio::time::timeout(idle_timeout, activity.notified())
-                .await
-                .is_err()
-            {
-                return;
+        let sleep = tokio::time::sleep(idle_timeout);
+        tokio::pin!(sleep);
+        poll_fn(|context| {
+            if activity.swap(false, Ordering::Relaxed) {
+                sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
             }
-        }
+            sleep.as_mut().poll(context)
+        })
+        .await;
     };
     let outcome = {
         let relay = relay_bidirectional(&mut inbound, &mut outbound);
