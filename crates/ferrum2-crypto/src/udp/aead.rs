@@ -45,7 +45,7 @@ struct CachedAesBodyCipher {
     cipher: ShadowsocksUdpCipher,
 }
 
-/// One caller-owned, single-entry cache for authenticated AES UDP opens.
+/// One caller-owned, bounded cache for authenticated AES UDP opens.
 ///
 /// Entries bind the complete method key and session ID and are installed only
 /// after body authentication succeeds. The cache is ignored by ChaCha methods.
