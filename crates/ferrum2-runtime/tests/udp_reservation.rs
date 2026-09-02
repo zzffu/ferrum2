@@ -59,6 +59,55 @@ fn immediate_commit_preserves_budget_and_skips_queue_ownership() {
 }
 
 #[test]
+fn borrowed_immediate_commit_advances_activity_without_buffer_ownership() {
+    let registry = OwnerRegistry::new();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let now = Instant::now();
+    let session = manager.reserve_session(now).expect("session capacity");
+    let reservation = session
+        .reserve_datagram(UdpDirection::ToTarget, 0)
+        .expect("borrowed datagram admission");
+    let handle = session
+        .commit_borrowed_immediate(reservation, now)
+        .expect("borrowed first datagram");
+
+    assert_eq!(registry.snapshot().udp_sessions, 1);
+    assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    assert!(
+        manager
+            .pop(handle, UdpDirection::ToTarget)
+            .expect("live generation")
+            .is_none()
+    );
+
+    let later = now + Duration::from_secs(1);
+    manager
+        .reserve_datagram(handle, UdpDirection::ToTarget, 0)
+        .expect("established borrowed admission")
+        .commit_borrowed_immediate(later)
+        .expect("established borrowed commit");
+    assert_eq!(
+        manager.idle_deadline(handle),
+        Ok(later + MIN_UDP_IDLE_TIMEOUT)
+    );
+    assert!(manager.remove(handle));
+
+    let rejected = manager
+        .reserve_session(now)
+        .expect("replacement session capacity");
+    let owned_reservation = rejected
+        .reserve_datagram(UdpDirection::ToTarget, 1)
+        .expect("owned capacity");
+    assert_eq!(
+        rejected.commit_borrowed_immediate(owned_reservation, now),
+        Err(UdpRuntimeError::Bounds)
+    );
+    assert_eq!(manager.session_count(), 0);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+}
+
+#[test]
 fn immediate_protocol_rejection_rolls_back_every_provisional_owner() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());

@@ -138,6 +138,22 @@ impl PendingUdpSession {
             Err(UdpCommitError::Protocol(never)) => match never {},
         }
     }
+    /// Activates this generation for a synchronously consumed borrowed
+    /// datagram. The reservation must describe no newly owned payload buffer.
+    pub fn commit_borrowed_immediate(
+        mut self,
+        datagram_reservation: PendingUdpDatagram,
+        now: Instant,
+    ) -> Result<UdpSessionHandle, UdpRuntimeError> {
+        if datagram_reservation.handle != self.handle
+            || datagram_reservation.manager.as_ptr() != Arc::as_ptr(&self.manager)
+        {
+            return Err(UdpRuntimeError::Cancelled);
+        }
+        datagram_reservation.commit_borrowed_immediate_inner(now, true)?;
+        self.committed = true;
+        Ok(self.handle)
+    }
 
     /// Atomically activates this generation, commits protocol state, and
     /// returns the accounted first datagram without publishing it to a queue.
@@ -250,6 +266,14 @@ impl PendingUdpDatagram {
             Err(UdpCommitError::Protocol(never)) => match never {},
         }
     }
+    /// Commits accepted activity for a synchronously consumed borrowed
+    /// datagram without manufacturing an owned payload.
+    ///
+    /// The reservation must have zero allocated capacity because the caller
+    /// retains ownership only until this method returns.
+    pub fn commit_borrowed_immediate(self, now: Instant) -> Result<(), UdpRuntimeError> {
+        self.commit_borrowed_immediate_inner(now, false)
+    }
 
     /// Atomically rechecks generation, commits protocol state and activity,
     /// and returns this datagram without publishing it to a queue.
@@ -359,6 +383,38 @@ impl PendingUdpDatagram {
         }
         self.pending = false;
         Ok(accounted)
+    }
+
+    fn commit_borrowed_immediate_inner(
+        mut self,
+        now: Instant,
+        activate_session: bool,
+    ) -> Result<(), UdpRuntimeError> {
+        let manager = self.manager.upgrade().ok_or(UdpRuntimeError::Cancelled)?;
+        let reservation = self.reservation.take().ok_or(UdpRuntimeError::Cancelled)?;
+        if reservation.capacity() != 0 {
+            return Err(UdpRuntimeError::Bounds);
+        }
+        {
+            let mut state = manager
+                .state
+                .lock()
+                .expect("UDP session state lock poisoned");
+            if state.shutting_down {
+                return Err(UdpRuntimeError::Cancelled);
+            }
+            let entry = matching_entry_mut(&mut state, self.handle)?;
+            if entry.committed == activate_session {
+                return Err(UdpRuntimeError::Cancelled);
+            }
+            let index = self.direction.index();
+            debug_assert!(entry.pending[index] > 0);
+            entry.pending[index] -= 1;
+            entry.committed = true;
+            entry.last_activity = now;
+        }
+        self.pending = false;
+        Ok(())
     }
 }
 
