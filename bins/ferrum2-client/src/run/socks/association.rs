@@ -243,32 +243,17 @@ pub(super) async fn relay_udp_association<IO>(
                     continue;
                 }
                 let target = decoded.to_target_addr();
-                let payload_len = decoded.payload().len();
-                let wire_len = match request_prepare_result(
-                    context,
-                    prepared.prepare_borrowed_proxy_request(
-                        &context.egress,
-                        &routing.outbounds,
-                        &target,
-                        decoded.payload(),
-                        Instant::now(),
-                    ),
-                ) {
-                    Ok(wire_len) => wire_len,
-                    Err(true) => continue,
-                    Err(false) => return,
-                };
+                let payload = decoded.payload().to_vec();
                 endpoint.accept(source_port);
-                if !send_prepared_udp_request(
+                if !forward_udp_request(
                     prepared,
                     cancellation,
                     &mut session_cancellation,
                     context,
-                    wire_len,
-                    payload_len,
-                )
-                .await
-                {
+                    routing,
+                    target,
+                    payload,
+                ).await {
                     return;
                 }
             }
@@ -479,26 +464,6 @@ pub(super) async fn classify_udp_association<IO>(
     }
 }
 
-fn request_prepare_result(
-    context: &ClientContext,
-    result: Result<usize, UdpPlanResponseError>,
-) -> Result<usize, bool> {
-    match result {
-        Ok(length) => Ok(length),
-        Err(UdpPlanResponseError::Packet(error)) => Err(record_udp_packet_error(
-            context,
-            Direction::ClientToTarget,
-            UdpPacketPhase::RequestEncode,
-            error,
-        )),
-        Err(UdpPlanResponseError::Runtime(error)) => Err(record_udp_runtime_error(
-            context,
-            Direction::ClientToTarget,
-            error,
-        )),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn forward_udp_request(
     prepared: &mut ClientUdpAssociation,
@@ -510,38 +475,26 @@ pub(super) async fn forward_udp_request(
     payload: Vec<u8>,
 ) -> bool {
     let payload_len = payload.len();
-    let wire_len = match request_prepare_result(
-        context,
-        prepared.prepare_owned_application_request(
-            &context.egress,
-            &routing.outbounds,
-            target,
-            bytes::Bytes::from(payload).into(),
-            Instant::now(),
-        ),
+    let wire_len = match prepared.prepare_owned_application_request(
+        &context.egress,
+        &routing.outbounds,
+        target,
+        bytes::Bytes::from(payload).into(),
+        Instant::now(),
     ) {
-        Ok(wire_len) => wire_len,
-        Err(keep_association) => return keep_association,
+        Ok(length) => length,
+        Err(UdpPlanResponseError::Packet(error)) => {
+            return record_udp_packet_error(
+                context,
+                Direction::ClientToTarget,
+                UdpPacketPhase::RequestEncode,
+                error,
+            );
+        }
+        Err(UdpPlanResponseError::Runtime(error)) => {
+            return record_udp_runtime_error(context, Direction::ClientToTarget, error);
+        }
     };
-    send_prepared_udp_request(
-        prepared,
-        cancellation,
-        session_cancellation,
-        context,
-        wire_len,
-        payload_len,
-    )
-    .await
-}
-
-async fn send_prepared_udp_request(
-    prepared: &mut ClientUdpAssociation,
-    cancellation: &mut CancellationToken,
-    session_cancellation: &mut tokio::sync::watch::Receiver<bool>,
-    context: &ClientContext,
-    wire_len: usize,
-    payload_len: usize,
-) -> bool {
     let Ok(send_deadline) = prepared.idle_deadline() else {
         return false;
     };

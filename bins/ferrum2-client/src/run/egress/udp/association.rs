@@ -112,16 +112,6 @@ where
     Ok(wire_len)
 }
 
-fn encoded_target_len(target: &TargetAddr) -> Result<usize, UdpPlanResponseError> {
-    match target.host() {
-        TargetHostRef::Ip(std::net::IpAddr::V4(_)) => Ok(7),
-        TargetHostRef::Ip(std::net::IpAddr::V6(_)) => Ok(19),
-        TargetHostRef::Domain(name) => 3_usize
-            .checked_add(name.len())
-            .ok_or(UdpPlanResponseError::Packet(UdpPacketError::Bounds)),
-    }
-}
-
 impl Drop for ClientUdpAssociation {
     fn drop(&mut self) {
         self.manager.remove(self.handle);
@@ -179,8 +169,7 @@ impl ClientUdpAssociation {
         &mut self,
         egress: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
-        target: &TargetAddr,
-        payload: &[u8],
+        datagram: &Datagram,
     ) -> Result<usize, UdpPacketError>
     where
         T: Clock,
@@ -212,7 +201,7 @@ impl ClientUdpAssociation {
         for layer in (0..hops.len()).rev() {
             let intermediate;
             let target = if layer + 1 == hops.len() {
-                target
+                datagram.target()
             } else {
                 intermediate = TargetAddr::ip(
                     outbounds
@@ -230,7 +219,7 @@ impl ClientUdpAssociation {
                     &egress.clock,
                     &egress.random,
                     target,
-                    payload,
+                    datagram.payload(),
                     upstream_wire,
                     scratch,
                 )?
@@ -440,49 +429,6 @@ impl ClientUdpAssociation {
         }
     }
 
-    fn commit_borrowed_application_datagram(
-        &mut self,
-        reservation: PendingUdpDatagram,
-        now: Instant,
-    ) -> Result<(), UdpRuntimeError> {
-        match self.pending_session.take() {
-            Some(session) => session
-                .commit_borrowed_immediate(reservation, now)
-                .map(|_| ()),
-            None => reservation.commit_borrowed_immediate(now),
-        }
-    }
-
-    pub(in crate::run) fn prepare_borrowed_proxy_request<C, T, R>(
-        &mut self,
-        engine: &ClientEgressEngine<C, T, R>,
-        outbounds: &[ClientOutboundContext],
-        target: &TargetAddr,
-        payload: &[u8],
-        now: Instant,
-    ) -> Result<usize, UdpPlanResponseError>
-    where
-        T: Clock,
-        R: SecureRandom,
-    {
-        if matches!(self.upstream, ClientUdpUpstream::Direct { .. }) {
-            return Err(UdpPlanResponseError::Packet(
-                UdpPacketError::StateUnavailable,
-            ));
-        }
-        let encoded_target_len = encoded_target_len(target)?;
-        if payload.len() > self.payload_limit(outbounds, false, encoded_target_len) {
-            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
-        }
-        let reservation = self
-            .reserve_application_datagram(0)
-            .map_err(UdpPlanResponseError::Runtime)?;
-        self.commit_borrowed_application_datagram(reservation, now)
-            .map_err(UdpPlanResponseError::Runtime)?;
-        self.encode_request(engine, outbounds, target, payload)
-            .map_err(UdpPlanResponseError::Packet)
-    }
-
     pub(in crate::run) fn payload_limit(
         &self,
         outbounds: &[ClientOutboundContext],
@@ -533,7 +479,13 @@ impl ClientUdpAssociation {
         T: Clock,
         R: SecureRandom,
     {
-        let encoded_target_len = encoded_target_len(&target)?;
+        let encoded_target_len = match target.host() {
+            TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
+            TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
+            TargetHostRef::Domain(name) => 3_usize
+                .checked_add(name.len())
+                .ok_or(UdpPlanResponseError::Packet(UdpPacketError::Bounds))?,
+        };
         if payload.len() > self.payload_limit(outbounds, false, encoded_target_len) {
             return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
         }
@@ -556,13 +508,8 @@ impl ClientUdpAssociation {
             direct_wire.extend_from_slice(datagram.datagram().payload());
             payload_len
         } else {
-            self.encode_request(
-                engine,
-                outbounds,
-                datagram.datagram().target(),
-                datagram.datagram().payload(),
-            )
-            .map_err(UdpPlanResponseError::Packet)?
+            self.encode_request(engine, outbounds, datagram.datagram())
+                .map_err(UdpPlanResponseError::Packet)?
         };
         Ok(wire_len)
     }
