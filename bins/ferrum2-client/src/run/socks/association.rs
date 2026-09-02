@@ -498,14 +498,29 @@ pub(super) async fn forward_udp_request(
     let Ok(send_deadline) = prepared.idle_deadline() else {
         return false;
     };
-    match send_with_lifecycle(
-        prepared.send_encoded_request(wire_len),
-        cancellation,
-        session_cancellation,
-        send_deadline,
-    )
-    .await
+    let sent = if cancellation.is_cancelled()
+        || session_cancellation.has_changed().is_err()
+        || *session_cancellation.borrow()
     {
+        Err(UdpSendError::Cancelled)
+    } else if Instant::now() >= send_deadline {
+        Err(UdpSendError::Idle)
+    } else {
+        match prepared.try_send_encoded_request(wire_len) {
+            Ok(sent) => Ok(sent),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                send_with_lifecycle(
+                    prepared.send_encoded_request(wire_len),
+                    cancellation,
+                    session_cancellation,
+                    send_deadline,
+                )
+                .await
+            }
+            Err(_) => Err(UdpSendError::Io),
+        }
+    };
+    match sent {
         Ok(sent) if sent == wire_len => {}
         Ok(_) | Err(UdpSendError::Io) => {
             record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
