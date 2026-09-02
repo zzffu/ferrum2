@@ -36,6 +36,38 @@ pub struct UdpCrypto {
     inner: UdpCryptoInner,
 }
 
+const AES_OPEN_CACHE_ENTRIES: usize = 4;
+
+struct CachedAesBodyCipher {
+    profile: MethodProfile,
+    psk: Zeroizing<Vec<u8>>,
+    session_id: UdpSessionId,
+    cipher: ShadowsocksUdpCipher,
+}
+
+/// One caller-owned, bounded cache for authenticated AES UDP opens.
+///
+/// Entries bind the complete method key and session ID and are installed only
+/// after body authentication succeeds. The cache is ignored by ChaCha methods.
+#[derive(Default)]
+pub struct UdpOpenCache {
+    aes: Vec<CachedAesBodyCipher>,
+    next_aes_replacement: usize,
+}
+
+impl fmt::Debug for UdpOpenCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("UdpOpenCache([REDACTED])")
+    }
+}
+
+impl Drop for UdpOpenCache {
+    fn drop(&mut self) {
+        self.aes.clear();
+        self.next_aes_replacement = 0;
+    }
+}
+
 impl fmt::Debug for UdpCrypto {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("UdpCrypto([REDACTED])")
@@ -93,7 +125,7 @@ impl UdpCrypto {
         is_live: impl FnMut(&UdpSessionId) -> bool,
     ) -> Result<UdpOutboundSession, RandomError> {
         generate_udp_session_id(random, is_live)
-            .map(|session_id| UdpOutboundSession::new(self.profile(), session_id))
+            .map(|session_id| self.new_outbound_session(session_id))
     }
 
     /// Creates an outbound session distinct from an opposite-direction owner.
@@ -107,7 +139,15 @@ impl UdpCrypto {
         is_live: impl FnMut(&UdpSessionId) -> bool,
     ) -> Result<UdpOutboundSession, RandomError> {
         generate_distinct_udp_session_id(random, opposite_direction, is_live)
-            .map(|session_id| UdpOutboundSession::new(self.profile(), session_id))
+            .map(|session_id| self.new_outbound_session(session_id))
+    }
+
+    fn new_outbound_session(&self, session_id: UdpSessionId) -> UdpOutboundSession {
+        let aes_body_cipher = match &self.inner {
+            UdpCryptoInner::Aes { .. } => Some(self.aes_body_cipher(&session_id)),
+            UdpCryptoInner::ChaCha20Poly1305(_) => None,
+        };
+        UdpOutboundSession::new(self.profile(), session_id, aes_body_cipher)
     }
 
     fn crypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES], encrypt: bool) {
@@ -132,6 +172,45 @@ impl UdpCrypto {
                 unreachable!("AES body operation requires an AES method")
             }
         }
+    }
+
+    fn cached_aes_body_cipher<'a>(
+        &self,
+        cache: &'a UdpOpenCache,
+        session_id: &UdpSessionId,
+    ) -> Option<&'a ShadowsocksUdpCipher> {
+        let UdpCryptoInner::Aes { profile, psk, .. } = &self.inner else {
+            return None;
+        };
+        cache.aes.iter().find_map(|cached| {
+            (cached.profile == *profile
+                && cached.session_id == *session_id
+                && secret_bytes_equal(cached.psk.as_ref(), psk.as_ref()))
+            .then_some(&cached.cipher)
+        })
+    }
+
+    fn cache_aes_body_cipher(
+        &self,
+        cache: &mut UdpOpenCache,
+        session_id: &UdpSessionId,
+        cipher: ShadowsocksUdpCipher,
+    ) {
+        let UdpCryptoInner::Aes { profile, psk, .. } = &self.inner else {
+            unreachable!("AES body cache requires an AES method")
+        };
+        let entry = CachedAesBodyCipher {
+            profile: *profile,
+            psk: Zeroizing::new(psk.to_vec()),
+            session_id: session_id.clone(),
+            cipher,
+        };
+        if cache.aes.len() < AES_OPEN_CACHE_ENTRIES {
+            cache.aes.push(entry);
+            return;
+        }
+        cache.aes[cache.next_aes_replacement] = entry;
+        cache.next_aes_replacement = (cache.next_aes_replacement + 1) % AES_OPEN_CACHE_ENTRIES;
     }
 
     /// Seals one complete method-specific UDP crypto envelope.
@@ -161,6 +240,7 @@ impl UdpCrypto {
         let result = match &self.inner {
             UdpCryptoInner::Aes { .. } => seal_aes_udp(
                 self,
+                outbound.aes_body_cipher(),
                 &outbound.session_id,
                 packet_id,
                 plaintext_body,
@@ -198,7 +278,23 @@ impl UdpCrypto {
         plaintext_output: &mut [u8],
     ) -> Result<UdpOpenResult, UdpCryptoError> {
         match &self.inner {
-            UdpCryptoInner::Aes { .. } => open_aes_udp(self, wire, plaintext_output),
+            UdpCryptoInner::Aes { .. } => open_aes_udp(self, wire, plaintext_output, None),
+            UdpCryptoInner::ChaCha20Poly1305(cipher) => {
+                open_xchacha_udp(cipher, wire, plaintext_output)
+            }
+        }
+    }
+
+    /// Authenticates and opens one envelope while reusing the last body cipher
+    /// authenticated in caller-owned scratch.
+    pub fn open_with_cache(
+        &self,
+        wire: &[u8],
+        plaintext_output: &mut [u8],
+        cache: &mut UdpOpenCache,
+    ) -> Result<UdpOpenResult, UdpCryptoError> {
+        match &self.inner {
+            UdpCryptoInner::Aes { .. } => open_aes_udp(self, wire, plaintext_output, Some(cache)),
             UdpCryptoInner::ChaCha20Poly1305(cipher) => {
                 open_xchacha_udp(cipher, wire, plaintext_output)
             }
@@ -291,8 +387,20 @@ fn udp_identity(session_id: &UdpSessionId, packet_id: u64) -> [u8; UDP_IDENTITY_
     identity
 }
 
+fn secret_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (left, right) in left.iter().zip(right) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
 fn seal_aes_udp(
     crypto: &UdpCrypto,
+    cipher: &ShadowsocksUdpCipher,
     session_id: &UdpSessionId,
     packet_id: u64,
     plaintext_body: &[u8],
@@ -305,7 +413,6 @@ fn seal_aes_udp(
 
     let mut nonce = Zeroizing::new([0_u8; AEAD_NONCE_BYTES]);
     nonce.copy_from_slice(&identity[4..UDP_IDENTITY_BYTES]);
-    let cipher = crypto.aes_body_cipher(session_id);
     let body_end = UDP_IDENTITY_BYTES + plaintext_body.len();
     output[UDP_IDENTITY_BYTES..body_end].copy_from_slice(plaintext_body);
     let tag = cipher
@@ -352,6 +459,7 @@ fn open_aes_udp(
     crypto: &UdpCrypto,
     wire: &[u8],
     plaintext_output: &mut [u8],
+    cache: Option<&mut UdpOpenCache>,
 ) -> Result<UdpOpenResult, UdpCryptoError> {
     let body_len = aes_udp_body_len(wire, plaintext_output)?;
     let mut identity = Zeroizing::new([0_u8; UDP_IDENTITY_BYTES]);
@@ -368,7 +476,7 @@ fn open_aes_udp(
     let mut nonce = Zeroizing::new([0_u8; AEAD_NONCE_BYTES]);
     nonce.copy_from_slice(&identity[4..UDP_IDENTITY_BYTES]);
     let candidate_session = UdpSessionId::from_bytes(session_bytes);
-    let cipher = crypto.aes_body_cipher(&candidate_session);
+    let uncached_cipher;
 
     plaintext_output[..body_len]
         .copy_from_slice(&wire[UDP_IDENTITY_BYTES..UDP_IDENTITY_BYTES + body_len]);
@@ -376,11 +484,33 @@ fn open_aes_udp(
     let tag_bytes: [u8; AEAD_TAG_BYTES] = wire[tag_start..]
         .try_into()
         .unwrap_or_else(|_| unreachable!("validated UDP tag width"));
-    let result = cipher.decrypt_packet(
-        nonce.as_ref(),
-        &mut plaintext_output[..body_len],
-        &tag_bytes,
-    );
+    let result = if let Some(cache) = cache {
+        if let Some(cipher) = crypto.cached_aes_body_cipher(cache, &candidate_session) {
+            cipher.decrypt_packet(
+                nonce.as_ref(),
+                &mut plaintext_output[..body_len],
+                &tag_bytes,
+            )
+        } else {
+            uncached_cipher = crypto.aes_body_cipher(&candidate_session);
+            let result = uncached_cipher.decrypt_packet(
+                nonce.as_ref(),
+                &mut plaintext_output[..body_len],
+                &tag_bytes,
+            );
+            if result.is_ok() {
+                crypto.cache_aes_body_cipher(cache, &candidate_session, uncached_cipher);
+            }
+            result
+        }
+    } else {
+        uncached_cipher = crypto.aes_body_cipher(&candidate_session);
+        uncached_cipher.decrypt_packet(
+            nonce.as_ref(),
+            &mut plaintext_output[..body_len],
+            &tag_bytes,
+        )
+    };
 
     identity.zeroize();
     nonce.zeroize();
@@ -481,7 +611,7 @@ mod tests {
     fn udp_outbound_session_commits_zero_terminal_and_exhausted_states_only_on_success() {
         let crypto = aes128_udp_crypto();
         let session_id = UdpSessionId::from_bytes([0x22; UDP_SESSION_ID_BYTES]);
-        let mut outbound = UdpOutboundSession::new(crypto.profile(), session_id);
+        let mut outbound = crypto.new_outbound_session(session_id);
         let mut output = [0xa5; 64];
 
         let original = output;
@@ -513,5 +643,66 @@ mod tests {
             Err(UdpCryptoError::CounterExhausted)
         ));
         assert_eq!(output, original);
+    }
+
+    #[test]
+    fn udp_open_cache_is_key_bound_and_authentication_failure_does_not_poison() {
+        let first = aes128_udp_crypto();
+        let second_psk = MethodPskBytes::Aes128(Zeroizing::new([0x44; AES_128_KEY_BYTES]));
+        let second = UdpCrypto::from_method_key(&second_psk);
+        let session_id = UdpSessionId::from_bytes([0x55; UDP_SESSION_ID_BYTES]);
+        let mut first_outbound = first.new_outbound_session(session_id.clone());
+        let mut second_outbound = second.new_outbound_session(session_id);
+        let mut first_wire = [0_u8; 64];
+        let mut second_wire = [0_u8; 64];
+        let first_len = first
+            .seal(
+                &mut first_outbound,
+                b"first",
+                &mut first_wire,
+                &SystemRandom,
+            )
+            .expect("first key seals")
+            .wire_len();
+        let second_len = second
+            .seal(
+                &mut second_outbound,
+                b"second",
+                &mut second_wire,
+                &SystemRandom,
+            )
+            .expect("second key seals")
+            .wire_len();
+
+        let mut cache = UdpOpenCache::default();
+        let mut plaintext = [0xa5; 64];
+        let opened = first
+            .open_with_cache(&first_wire[..first_len], &mut plaintext, &mut cache)
+            .expect("first key seeds cache");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"first");
+
+        let opened = second
+            .open_with_cache(&second_wire[..second_len], &mut plaintext, &mut cache)
+            .expect("same session ID under a distinct key coexists exactly");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"second");
+        assert_eq!(cache.aes.len(), 2);
+
+        let opened = first
+            .open_with_cache(&first_wire[..first_len], &mut plaintext, &mut cache)
+            .expect("the first exact key/session entry remains reusable");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"first");
+
+        let mut corrupted = second_wire;
+        corrupted[second_len - 1] ^= 1;
+        assert!(matches!(
+            second.open_with_cache(&corrupted[..second_len], &mut plaintext, &mut cache),
+            Err(UdpCryptoError::AuthenticationFailed)
+        ));
+        assert!(plaintext[..b"second".len()].iter().all(|byte| *byte == 0));
+
+        let opened = second
+            .open_with_cache(&second_wire[..second_len], &mut plaintext, &mut cache)
+            .expect("authentication failure preserves the valid cache entry");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"second");
     }
 }

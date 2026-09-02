@@ -169,7 +169,9 @@ pub(super) fn open_packet_borrowed<'a>(
     }
     scratch.body.clear();
     scratch.body.resize(wire.len(), 0);
-    let opened = crypto.open(wire, &mut scratch.body).map_err(map_crypto)?;
+    let opened = crypto
+        .open_with_cache(wire, &mut scratch.body, &mut scratch.open_cache)
+        .map_err(map_crypto)?;
     scratch.body.truncate(opened.plaintext_len());
     let (target, payload_start) = parse_body(&scratch.body, clock, expected_type, binding)?;
     Ok(BorrowedOpenedPacket {

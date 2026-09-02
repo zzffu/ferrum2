@@ -18,6 +18,7 @@ use std::fmt;
 use std::time::Duration;
 
 use bytes::BytesMut;
+use ferrum2_crypto::UdpOpenCache;
 use thiserror::Error;
 
 /// Hard maximum for one complete Shadowsocks UDP wire datagram.
@@ -37,6 +38,7 @@ const REPLAY_WORDS: usize = 129;
 /// Fixed caller-reusable plaintext storage for packet construction and opening.
 pub struct UdpPacketScratch {
     pub(super) body: BytesMut,
+    pub(super) open_cache: UdpOpenCache,
 }
 
 impl UdpPacketScratch {
@@ -44,6 +46,7 @@ impl UdpPacketScratch {
     pub fn new() -> Self {
         Self {
             body: BytesMut::with_capacity(MAX_UDP_WIRE_LEN),
+            open_cache: UdpOpenCache::default(),
         }
     }
 
