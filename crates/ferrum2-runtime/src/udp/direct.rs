@@ -51,6 +51,11 @@ pub trait DirectUdpSocket: Send + Sync + 'static {
         target: SocketAddr,
     ) -> impl Future<Output = io::Result<usize>> + Send;
 
+    /// Attempts one non-blocking send without waiting for socket readiness.
+    fn try_send_to(&self, _payload: &[u8], _target: SocketAddr) -> io::Result<usize> {
+        Err(io::ErrorKind::WouldBlock.into())
+    }
+
     /// Waits until a non-blocking receive attempt may make progress.
     fn readable(&self) -> impl Future<Output = io::Result<()>> + Send;
 
@@ -67,6 +72,10 @@ pub trait DirectUdpSocket: Send + Sync + 'static {
 impl DirectUdpSocket for UdpSocket {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         UdpSocket::send_to(self, payload, target).await
+    }
+
+    fn try_send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
+        UdpSocket::try_send_to(self, payload, target)
     }
 
     async fn readable(&self) -> io::Result<()> {
@@ -99,6 +108,19 @@ impl DirectUdpSocket for SystemDirectUdpSocket {
             SocketAddr::V6(target) => SocketAddr::V6(target),
         };
         self.socket.send_to(payload, target).await
+    }
+
+    fn try_send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
+        let target = match target {
+            SocketAddr::V4(target) => SocketAddr::V6(SocketAddrV6::new(
+                target.ip().to_ipv6_mapped(),
+                target.port(),
+                0,
+                0,
+            )),
+            SocketAddr::V6(target) => SocketAddr::V6(target),
+        };
+        self.socket.try_send_to(payload, target)
     }
 
     async fn readable(&self) -> io::Result<()> {
@@ -841,6 +863,12 @@ async fn send_candidate<S>(
 where
     S: DirectUdpSocket,
 {
+    match socket.try_send_to(payload, target) {
+        Ok(length) if length == payload.len() => return Ok(()),
+        Ok(_) => return Err(UdpRuntimeError::Send),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(_) => return Err(UdpRuntimeError::Send),
+    }
     match tokio::time::timeout_at(deadline, socket.send_to(payload, target)).await {
         Ok(Ok(length)) if length == payload.len() => Ok(()),
         Ok(Ok(_)) | Ok(Err(_)) | Err(_) => Err(UdpRuntimeError::Send),
