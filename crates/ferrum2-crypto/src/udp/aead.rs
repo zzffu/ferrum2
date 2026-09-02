@@ -634,4 +634,59 @@ mod tests {
         ));
         assert_eq!(output, original);
     }
+
+    #[test]
+    fn udp_open_cache_is_key_bound_and_authentication_failure_does_not_poison() {
+        let first = aes128_udp_crypto();
+        let second_psk = MethodPskBytes::Aes128(Zeroizing::new([0x44; AES_128_KEY_BYTES]));
+        let second = UdpCrypto::from_method_key(&second_psk);
+        let session_id = UdpSessionId::from_bytes([0x55; UDP_SESSION_ID_BYTES]);
+        let mut first_outbound = first.new_outbound_session(session_id.clone());
+        let mut second_outbound = second.new_outbound_session(session_id);
+        let mut first_wire = [0_u8; 64];
+        let mut second_wire = [0_u8; 64];
+        let first_len = first
+            .seal(
+                &mut first_outbound,
+                b"first",
+                &mut first_wire,
+                &SystemRandom,
+            )
+            .expect("first key seals")
+            .wire_len();
+        let second_len = second
+            .seal(
+                &mut second_outbound,
+                b"second",
+                &mut second_wire,
+                &SystemRandom,
+            )
+            .expect("second key seals")
+            .wire_len();
+
+        let mut cache = UdpOpenCache::default();
+        let mut plaintext = [0xa5; 64];
+        let opened = first
+            .open_with_cache(&first_wire[..first_len], &mut plaintext, &mut cache)
+            .expect("first key seeds cache");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"first");
+
+        let opened = second
+            .open_with_cache(&second_wire[..second_len], &mut plaintext, &mut cache)
+            .expect("same session ID under a distinct key replaces cache");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"second");
+
+        let mut corrupted = second_wire;
+        corrupted[second_len - 1] ^= 1;
+        assert!(matches!(
+            second.open_with_cache(&corrupted[..second_len], &mut plaintext, &mut cache),
+            Err(UdpCryptoError::AuthenticationFailed)
+        ));
+        assert!(plaintext[..b"second".len()].iter().all(|byte| *byte == 0));
+
+        let opened = second
+            .open_with_cache(&second_wire[..second_len], &mut plaintext, &mut cache)
+            .expect("authentication failure preserves the valid cache entry");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"second");
+    }
 }
