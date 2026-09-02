@@ -78,6 +78,25 @@ pub(super) fn ferrum_dns_resource_client_config(
          [metrics]\nlisten = \"{metrics}\"\n"
     )
 }
+pub(super) fn profile_dns_client_config(
+    proxy: SocketAddrV4,
+    dns: SocketAddrV4,
+    upstream: SocketAddrV4,
+) -> String {
+    format!(
+        "schema_version = 2\n\
+         [[inbounds]]\ntag = \"profile-proxy\"\nlisten = \"{proxy}\"\noutbound = \"profile-direct\"\n\
+         [[outbounds]]\ntag = \"profile-direct\"\ntype = \"direct\"\n\
+         [dns]\ntimeout_ms = 5000\nmax_inflight = {DNS_MAX_INFLIGHT}\n\
+         [dns.cache]\nenabled = false\nmax_entries = 8192\n\
+         [[dns.inbounds]]\ntag = \"profile-dns\"\nlisten = \"{dns}\"\n\
+         [[dns.servers]]\ntag = \"profile-upstream\"\ntransport = \"udp\"\naddress = \"{upstream}\"\n\
+         [dns.route]\nfinal = \"profile-upstream\"\n\
+         [runtime]\nmax_connections = 128\nlisten_backlog = 128\nidle_timeout_ms = 60000\n\
+         [udp]\nenabled = false\n\
+         [logging]\nlevel = \"error\"\n"
+    )
+}
 
 pub(super) fn profile_direct_udp_client_config(listen: SocketAddrV4) -> String {
     format!(

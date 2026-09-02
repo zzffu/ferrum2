@@ -37,6 +37,8 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
     let server = address(8_388);
     let unselected = address(8_389);
     let direct = proxy_config::profile_direct_udp_client_config(address(10_801));
+    let dns_concurrency =
+        proxy_config::profile_dns_client_config(address(10_805), address(5_359), address(5_360));
     let ordinary = proxy_config::ferrum_client_config(proxy, server, Some(address(9_090)));
     let dns_resource = proxy_config::ferrum_dns_resource_client_config(
         proxy,
@@ -71,6 +73,7 @@ fn generated_client_configs_prepare_and_finish_through_the_real_v2_contract() {
             dns_resource,
             vec![Some(SocketAddr::V4(server))],
         ),
+        ("profile DNS concurrency", dns_concurrency, vec![None]),
         ("profile direct UDP", direct, vec![None]),
         (
             "profile Shadowsocks UDP",

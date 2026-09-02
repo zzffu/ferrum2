@@ -65,7 +65,7 @@ CALIBRATION_ENVIRONMENT_FIELDS = frozenset(
 
 
 UNCALIBRATED_POLICY = {
-    "schema_version": 2,
+    "schema_version": 3,
     "policy_id": "in-memory-uncalibrated-policy",
     "policy_sha256": None,
     "scenarios": {
@@ -117,8 +117,8 @@ def validate_decision_policy(policy: dict[str, object]) -> None:
     if type(policy) is not dict:
         raise CandidateControlError("decision policy must be a JSON object")
     _exact_fields(policy, POLICY_RUNTIME_FIELDS, "decision policy")
-    if type(policy["schema_version"]) is not int or policy["schema_version"] != 2:
-        raise CandidateControlError("decision policy schema_version must be 2")
+    if type(policy["schema_version"]) is not int or policy["schema_version"] != 3:
+        raise CandidateControlError("decision policy schema_version must be 3")
     if type(policy["policy_id"]) is not str or not policy["policy_id"].strip():
         raise CandidateControlError("decision policy_id must be a non-empty string")
     digest = policy["policy_sha256"]

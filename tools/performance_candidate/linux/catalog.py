@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-SUMMARY_SCHEMA_VERSION = 7
+SUMMARY_SCHEMA_VERSION = 8
 
 WARNING_POLICY = {
     "decision_effect": "none",
@@ -38,6 +38,11 @@ SCENARIO_CATALOG = {
     "tcp-request-1k": ("p99_nanoseconds", "lower_is_better", "tcp-request"),
     "tcp-request-4k": ("p99_nanoseconds", "lower_is_better", "tcp-request"),
     "tcp-request-16k": ("p99_nanoseconds", "lower_is_better", "tcp-request"),
+    "dns-udp-concurrency": (
+        "queries_per_second",
+        "higher_is_better",
+        "dns-concurrency",
+    ),
     "udp-small-high": (
         "datagrams_per_second",
         "higher_is_better",
@@ -87,6 +92,7 @@ SCENARIO_EVIDENCE = {
     "tcp-request-1k": ("shadowsocks", 1_024, None, None),
     "tcp-request-4k": ("shadowsocks", 4_096, None, None),
     "tcp-request-16k": ("shadowsocks", 16_384, None, None),
+    "dns-udp-concurrency": ("dns-direct", 46, None, None),
     "udp-small-high": ("shadowsocks", 128, 138, 186),
     "udp-mtu-1200": ("shadowsocks", 1_200, 1_210, 1_258),
     "udp-payload-1472": ("shadowsocks", 1_472, 1_482, 1_530),
@@ -125,6 +131,15 @@ UDP_DIRECT_PAYLOAD_BOUNDS = (
 
 QUALIFICATION_GROUPS = frozenset(
     {"tcp-frame-capacity", "udp-payload-matrix", "udp-direct-payload-bounds"}
+)
+FULL_NON_TUN_SELECTION = "full-non-tun"
+
+
+FULL_NON_TUN_GROUPS = (
+    "tcp-frame-capacity",
+    "udp-payload-matrix",
+    "udp-direct-payload-bounds",
+    "dns-udp-concurrency",
 )
 
 

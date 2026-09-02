@@ -12,11 +12,11 @@ from tools.performance_candidate.linux import policy as linux_policy
 class DecisionPolicyTests(unittest.TestCase):
     def test_repository_policy_explicitly_requires_new_calibration(self) -> None:
         policy = linux_policy.load_decision_policy(POLICY_PATH)
-        self.assertEqual(policy["schema_version"], 2)
+        self.assertEqual(policy["schema_version"], 3)
         self.assertRegex(policy["policy_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             policy["policy_id"],
-            "github-hosted-ubuntu-24.04-profiling-v2-calibration-required",
+            "github-hosted-ubuntu-24.04-profiling-v3-calibration-required",
         )
         self.assertEqual(set(policy["scenarios"]), set(linux_catalog.SCENARIO_CATALOG))
         for scenario, entry in policy["scenarios"].items():

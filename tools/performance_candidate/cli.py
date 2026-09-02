@@ -11,9 +11,15 @@ from collections.abc import Sequence
 
 from tools.performance_candidate.identity import validate_git_relation
 from tools.performance_candidate.json_contract import CandidateControlError, _strict_json
+from tools.performance_candidate.linux.aggregate import run_aggregate_command
+from tools.performance_candidate.linux.calibration import (
+    derive_run_calibration,
+    write_run_calibration,
+)
 from tools.performance_candidate.linux.decision import run_summary_command
 from tools.performance_candidate.linux.policy import load_decision_policy
 from tools.performance_candidate.linux.plan import create_plan, load_plan, validate_measurement_inputs, write_plan
+from tools.performance_candidate.linux.schedule import scenario_schedule, schedule_tsv
 from tools.performance_candidate.linux.scale import load_scale_safety_policy
 from tools.performance_candidate.linux.scale_lineage import build_scale_lineage, load_scale_lineage, validate_scale_source_lineage
 from tools.performance_candidate.output import _atomic_text
@@ -55,6 +61,14 @@ def _parser() -> argparse.ArgumentParser:
     scenarios.add_argument("--plan", required=True, type=pathlib.Path)
     scenarios.add_argument("--policy", required=True, type=pathlib.Path)
     scenarios.add_argument("--scale-policy", type=pathlib.Path)
+    schedule = commands.add_parser(
+        "schedule", help="emit one deterministic scenario execution schedule"
+    )
+    schedule.add_argument("--plan", required=True, type=pathlib.Path)
+    schedule.add_argument("--policy", required=True, type=pathlib.Path)
+    schedule.add_argument("--scale-policy", type=pathlib.Path)
+    schedule.add_argument("--scenario", required=True)
+    schedule.add_argument("--self-calibrated", action="store_true")
     trial_contract = commands.add_parser(
         "linux-trial-contract",
         help="emit one plan-bound Linux producer/controller/recipe contract",
@@ -79,6 +93,27 @@ def _parser() -> argparse.ArgumentParser:
     summary.add_argument("--repository", type=pathlib.Path)
     summary.add_argument("--output", required=True, type=pathlib.Path)
     summary.add_argument("--markdown", required=True, type=pathlib.Path)
+    calibration = commands.add_parser(
+        "calibrate",
+        help="validate same-binary evidence and write a run-scoped decision policy",
+    )
+    calibration.add_argument("--base-policy", required=True, type=pathlib.Path)
+    calibration.add_argument("--plan", required=True, type=pathlib.Path)
+    calibration.add_argument("--left-root", required=True, type=pathlib.Path)
+    calibration.add_argument("--right-root", required=True, type=pathlib.Path)
+    calibration.add_argument("--baseline-sha", required=True)
+    calibration.add_argument("--source", required=True)
+    calibration.add_argument("--policy", required=True, type=pathlib.Path)
+    calibration.add_argument("--output", required=True, type=pathlib.Path)
+    aggregate = commands.add_parser(
+        "aggregate",
+        help="validate and combine the full non-TUN qualification matrix",
+    )
+    aggregate.add_argument("--summary-root", required=True, type=pathlib.Path)
+    aggregate.add_argument("--parent-sha", required=True)
+    aggregate.add_argument("--candidate-sha", required=True)
+    aggregate.add_argument("--output", required=True, type=pathlib.Path)
+    aggregate.add_argument("--markdown", required=True, type=pathlib.Path)
     lineage = commands.add_parser(
         "scale-lineage", help="verify and bind H -> P16 -> C32 scale lineage"
     )
@@ -178,12 +213,31 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parsed = _parser().parse_args(arguments)
     if parsed.command == "summarize":
         return run_summary_command(parsed)
+    if parsed.command == "aggregate":
+        return run_aggregate_command(parsed)
     if parsed.command == "windows-tun-summarize":
         return run_windows_tun_summary_command(parsed)
     try:
         if parsed.command == "validate-inputs":
             validate_measurement_inputs(
                 parsed.warmup_seconds, parsed.active_seconds, parsed.pairs
+            )
+            return 0
+        if parsed.command == "calibrate":
+            decision_policy = load_decision_policy(parsed.base_policy)
+            plan = load_plan(parsed.plan, decision_policy=decision_policy)
+            report, policy = derive_run_calibration(
+                plan=plan,
+                left_root=parsed.left_root,
+                right_root=parsed.right_root,
+                baseline_sha=parsed.baseline_sha,
+                source=parsed.source,
+            )
+            write_run_calibration(
+                report=report,
+                policy=policy,
+                report_output=parsed.output,
+                policy_output=parsed.policy,
             )
             return 0
         if parsed.command == "plan":
@@ -224,6 +278,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
             for scenario in plan["scenarios"]:
                 print(scenario["scenario"])
+            return 0
+        if parsed.command == "schedule":
+            decision_policy = load_decision_policy(parsed.policy)
+            scale_policy = (
+                None
+                if parsed.scale_policy is None
+                else load_scale_safety_policy(parsed.scale_policy)
+            )
+            plan = load_plan(
+                parsed.plan,
+                decision_policy=decision_policy,
+                scale_safety_policy=scale_policy,
+            )
+            operations = scenario_schedule(
+                plan=plan,
+                scenario=parsed.scenario,
+                self_calibrated=parsed.self_calibrated,
+            )
+            print(schedule_tsv(operations), end="")
             return 0
         if parsed.command == "linux-trial-contract":
             decision_policy = load_decision_policy(parsed.policy)

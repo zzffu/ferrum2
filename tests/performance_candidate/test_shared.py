@@ -148,6 +148,24 @@ class ScenarioPlanTests(unittest.TestCase):
             self.entries("qualification", "udp-small-high"),
             [("udp-small-high", "primary"), ("udp-mtu-1200", "guard")],
         )
+    def test_dns_concurrency_qualification_has_exact_direct_contract(self) -> None:
+        plan = self.plan("qualification", "dns-udp-concurrency")
+        self.assertEqual(plan["scenario_group"], "dns")
+        self.assertEqual(plan["selected_scenario"], "dns-udp-concurrency")
+        self.assertEqual(len(plan["scenarios"]), 1)
+        scenario = plan["scenarios"][0]
+        self.assertEqual(
+            (
+                scenario["role"],
+                scenario["topology"],
+                scenario["application_payload_bytes"],
+                scenario["socks_datagram_bytes"],
+                scenario["upstream_wire_bytes"],
+                scenario["evidence_contract"]["unit"],
+            ),
+            ("primary", "dns-direct", 46, None, None, "queries_per_second"),
+        )
+
 
     def test_udp_payload_matrix_records_exact_shadowsocks_bounds(self) -> None:
         plan = self.plan("qualification", "udp-payload-matrix")
@@ -269,5 +287,41 @@ class ScenarioPlanTests(unittest.TestCase):
             choices,
             set(linux_catalog.SCENARIO_CATALOG)
             | set(linux_catalog.QUALIFICATION_GROUPS)
-            | {linux_scale.SCALE_SCENARIO},
+            | {linux_catalog.FULL_NON_TUN_SELECTION, linux_scale.SCALE_SCENARIO},
+        )
+
+    def test_workflow_binds_product_commits_independently_from_controller(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("REQUESTED_CANDIDATE_SHA: ${{ inputs.candidate_sha }}", workflow)
+        self.assertIn('CANDIDATE_DIR="$RUNNER_TEMP/ferrum2-candidate"', workflow)
+        self.assertNotIn('CANDIDATE_DIR="$GITHUB_WORKSPACE"', workflow)
+        self.assertIn(
+            'git worktree add --detach "$CANDIDATE_DIR" "$CANDIDATE_SHA"',
+            workflow,
+        )
+        self.assertIn(
+            '--repository "$CONTROLLER_DIR" \\\n'
+            '              --parent-sha "$PARENT_SHA" \\\n'
+            '              --candidate-sha "$CANDIDATE_SHA"',
+            workflow,
+        )
+
+    def test_workflow_runs_calibrated_matrix_and_preserves_ordinary_modes(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("          - calibrated-qualification", workflow)
+        self.assertIn("          - qualification", workflow)
+        self.assertIn("          - diagnostic", workflow)
+        self.assertIn(
+            '["tcp-frame-capacity","udp-payload-matrix",'
+            '"udp-direct-payload-bounds","dns-udp-concurrency"]',
+            workflow,
+        )
+        self.assertIn("-m tools.performance_candidate schedule", workflow)
+        self.assertIn("-m tools.performance_candidate calibrate", workflow)
+        self.assertIn("aggregate-full-non-tun:", workflow)
+        self.assertIn(
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            workflow,
         )

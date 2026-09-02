@@ -93,6 +93,7 @@ pub(super) fn run_self_check() -> Result<String, String> {
         "tcp-request-1k",
         "tcp-request-4k",
         "tcp-request-16k",
+        "dns-udp-concurrency",
         "udp-small-high",
         "udp-mtu-1200",
         "udp-payload-1472",
@@ -260,7 +261,7 @@ pub(super) fn run_self_check() -> Result<String, String> {
         return Err("valid raw profile arguments were not preserved".to_owned());
     }
     if !profile_raw_prefix(&raw_profile, raw)
-        .starts_with("\"schema_version\":4,\"kind\":\"m18_profile_trial\"")
+        .starts_with("\"schema_version\":5,\"kind\":\"m18_profile_trial\"")
     {
         return Err("raw profile trial omitted its explicit schema version".to_owned());
     }

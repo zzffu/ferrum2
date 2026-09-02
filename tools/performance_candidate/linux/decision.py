@@ -152,6 +152,7 @@ def summarize_evidence(
     parent_sha: str,
     candidate_sha: str,
     repository: pathlib.Path | None = None,
+    allow_same_commit: bool = False,
 ) -> dict[str, object]:
     """Validate paired raw evidence and calculate per-pair directional deltas."""
 
@@ -162,7 +163,7 @@ def summarize_evidence(
         raise CandidateControlError("summary identities must be full commit SHAs")
     parent_sha = parent_sha.lower()
     candidate_sha = candidate_sha.lower()
-    if parent_sha == candidate_sha:
+    if parent_sha == candidate_sha and not allow_same_commit:
         raise CandidateControlError("summary parent and candidate must be different")
     is_scale = plan["selection"] == SCALE_SCENARIO
     if is_scale:

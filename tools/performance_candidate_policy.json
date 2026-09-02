@@ -1,6 +1,18 @@
 {
-  "policy_id": "github-hosted-ubuntu-24.04-profiling-v2-calibration-required",
+  "policy_id": "github-hosted-ubuntu-24.04-profiling-v3-calibration-required",
   "scenarios": {
+    "dns-udp-concurrency": {
+      "adoption_threshold_percent": null,
+      "calibration_environment": null,
+      "calibration_source": null,
+      "direction": "higher_is_better",
+      "metric": "queries_per_second",
+      "minimum_losses": null,
+      "minimum_pairs": null,
+      "minimum_wins": null,
+      "noise_band_percent": null,
+      "regression_threshold_percent": null
+    },
     "tcp-bulk": {
       "adoption_threshold_percent": null,
       "calibration_environment": null,
@@ -158,5 +170,5 @@
       "regression_threshold_percent": null
     }
   },
-  "schema_version": 2
+  "schema_version": 3
 }

@@ -11,7 +11,7 @@ from tools.performance_candidate.json_contract import CandidateControlError
 
 
 EVIDENCE_CONTRACT_SCHEMA_VERSION = 1
-PROFILE_TRIAL_SCHEMA_VERSION = 4
+PROFILE_TRIAL_SCHEMA_VERSION = 5
 RUNNER_IMAGE = "ubuntu-24.04"
 
 
@@ -74,6 +74,7 @@ def metric_unit(metric: str) -> str:
             "bytes_per_second": "bytes_per_second",
             "datagrams_per_second": "datagrams_per_second",
             "p99_nanoseconds": "nanoseconds",
+            "queries_per_second": "queries_per_second",
         }[metric]
     except KeyError as error:
         raise CandidateControlError(f"unsupported performance metric unit: {metric}") from error

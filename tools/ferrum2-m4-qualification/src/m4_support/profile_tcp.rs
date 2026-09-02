@@ -139,6 +139,9 @@ pub(super) fn run_profile_tcp(
                     ProfileScenario::TcpScale10k => {
                         unreachable!("dedicated scale runner reached ordinary TCP worker")
                     }
+                    ProfileScenario::DnsUdpConcurrency => {
+                        unreachable!("TCP runner received DNS scenario")
+                    }
                     ProfileScenario::UdpSmallHigh
                     | ProfileScenario::UdpMtu1200
                     | ProfileScenario::UdpPayload1472
