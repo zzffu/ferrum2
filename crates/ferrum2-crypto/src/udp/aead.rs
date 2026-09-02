@@ -36,6 +36,8 @@ pub struct UdpCrypto {
     inner: UdpCryptoInner,
 }
 
+const AES_OPEN_CACHE_ENTRIES: usize = 4;
+
 struct CachedAesBodyCipher {
     profile: MethodProfile,
     psk: Zeroizing<Vec<u8>>,
@@ -49,7 +51,8 @@ struct CachedAesBodyCipher {
 /// after body authentication succeeds. The cache is ignored by ChaCha methods.
 #[derive(Default)]
 pub struct UdpOpenCache {
-    aes: Option<CachedAesBodyCipher>,
+    aes: Vec<CachedAesBodyCipher>,
+    next_aes_replacement: usize,
 }
 
 impl fmt::Debug for UdpOpenCache {
@@ -60,7 +63,8 @@ impl fmt::Debug for UdpOpenCache {
 
 impl Drop for UdpOpenCache {
     fn drop(&mut self) {
-        self.aes = None;
+        self.aes.clear();
+        self.next_aes_replacement = 0;
     }
 }
 
@@ -178,7 +182,7 @@ impl UdpCrypto {
         let UdpCryptoInner::Aes { profile, psk, .. } = &self.inner else {
             return None;
         };
-        cache.aes.as_ref().and_then(|cached| {
+        cache.aes.iter().find_map(|cached| {
             (cached.profile == *profile
                 && cached.session_id == *session_id
                 && secret_bytes_equal(cached.psk.as_ref(), psk.as_ref()))
@@ -195,12 +199,18 @@ impl UdpCrypto {
         let UdpCryptoInner::Aes { profile, psk, .. } = &self.inner else {
             unreachable!("AES body cache requires an AES method")
         };
-        cache.aes = Some(CachedAesBodyCipher {
+        let entry = CachedAesBodyCipher {
             profile: *profile,
             psk: Zeroizing::new(psk.to_vec()),
             session_id: session_id.clone(),
             cipher,
-        });
+        };
+        if cache.aes.len() < AES_OPEN_CACHE_ENTRIES {
+            cache.aes.push(entry);
+            return;
+        }
+        cache.aes[cache.next_aes_replacement] = entry;
+        cache.next_aes_replacement = (cache.next_aes_replacement + 1) % AES_OPEN_CACHE_ENTRIES;
     }
 
     /// Seals one complete method-specific UDP crypto envelope.
@@ -673,8 +683,14 @@ mod tests {
 
         let opened = second
             .open_with_cache(&second_wire[..second_len], &mut plaintext, &mut cache)
-            .expect("same session ID under a distinct key replaces cache");
+            .expect("same session ID under a distinct key coexists exactly");
         assert_eq!(&plaintext[..opened.plaintext_len()], b"second");
+        assert_eq!(cache.aes.len(), 2);
+
+        let opened = first
+            .open_with_cache(&first_wire[..first_len], &mut plaintext, &mut cache)
+            .expect("the first exact key/session entry remains reusable");
+        assert_eq!(&plaintext[..opened.plaintext_len()], b"first");
 
         let mut corrupted = second_wire;
         corrupted[second_len - 1] ^= 1;
