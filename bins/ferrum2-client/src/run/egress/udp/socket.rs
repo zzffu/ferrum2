@@ -272,6 +272,15 @@ impl ClientProxyUdpSocket {
         }
     }
 
+    pub(super) fn try_send(&self, payload: &[u8]) -> io::Result<usize> {
+        match self {
+            #[cfg(any(not(windows), test))]
+            Self::Connected(socket) => socket.try_send(payload),
+            #[cfg(any(windows, test))]
+            Self::Addressed { socket, peer } => socket.try_send_to(payload, *peer),
+        }
+    }
+
     pub(super) async fn receive(&self, payload: &mut BytesMut) -> io::Result<usize> {
         match self {
             #[cfg(any(not(windows), test))]

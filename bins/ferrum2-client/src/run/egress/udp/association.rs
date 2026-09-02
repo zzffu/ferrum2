@@ -578,6 +578,25 @@ impl ClientUdpAssociation {
         drop(reservation);
     }
 
+    pub(in crate::run) fn try_send_encoded_request(&self, wire_len: usize) -> io::Result<usize> {
+        #[cfg(test)]
+        if self
+            .io_fault
+            .as_ref()
+            .is_some_and(|plan| plan.fails(UdpIoOperation::UpstreamSend))
+        {
+            return Err(io::Error::other("injected upstream send failure"));
+        }
+        let ClientUdpUpstream::Shadowsocks(socket) = &self.upstream else {
+            return Err(io::ErrorKind::WouldBlock.into());
+        };
+        let upstream_wire = self
+            .upstream_wire
+            .as_ref()
+            .expect("proxy UDP association owns its upstream wire buffer");
+        socket.try_send(&upstream_wire[..wire_len])
+    }
+
     pub(in crate::run) async fn send_encoded_request(
         &mut self,
         wire_len: usize,
