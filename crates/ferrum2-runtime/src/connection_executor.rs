@@ -610,27 +610,32 @@ async fn drain_fatal_shards(
     cancellation_source: &CancellationSource,
     force_sender: &watch::Sender<bool>,
 ) {
-    cancellation_source.cancel();
-    if let DrainMode::Relative(grace) = drain_mode {
-        let deadline = Instant::now() + grace;
-        while remaining > 0 {
-            tokio::select! {
-                event = events.recv() => {
-                    let Some(_event) = event else {
-                        return;
-                    };
-                    remaining -= 1;
+    match drain_mode {
+        DrainMode::Relative(grace) => {
+            cancellation_source.cancel();
+            let deadline = Instant::now() + grace;
+            while remaining > 0 {
+                tokio::select! {
+                    event = events.recv() => {
+                        let Some(_event) = event else {
+                            return;
+                        };
+                        remaining -= 1;
+                    }
+                    () = tokio::time::sleep_until(deadline) => break,
                 }
-                () = tokio::time::sleep_until(deadline) => break,
+            }
+            if remaining > 0 {
+                tokio::task::yield_now().await;
+                force_shards(force_sender);
+                wait_for_shards(events, remaining).await;
             }
         }
-        if remaining > 0 {
-            tokio::task::yield_now().await;
+        DrainMode::Process(_) => {
+            if remaining > 0 {
+                force_process_shards(events, remaining, force_sender, cancellation_source).await;
+            }
         }
-    }
-    if remaining > 0 {
-        force_shards(force_sender);
-        wait_for_shards(events, remaining).await;
     }
 }
 
@@ -678,18 +683,34 @@ async fn drain_shards(
     };
 
     if remaining > 0 {
-        cancellation_source.cancel();
         if poll_cancelled_handler {
+            cancellation_source.cancel();
             tokio::task::yield_now().await;
+            force_shards(force_sender);
+            wait_for_shards(events, remaining).await;
+        } else {
+            force_process_shards(events, remaining, force_sender, cancellation_source).await;
         }
-        force_shards(force_sender);
-        wait_for_shards(events, remaining).await;
     }
     failure.map_or(Ok(()), Err)
 }
 
 fn force_shards(force_sender: &watch::Sender<bool>) {
     force_sender.send_replace(true);
+}
+
+async fn force_process_shards(
+    events: &mut mpsc::UnboundedReceiver<ShardEvent>,
+    remaining: usize,
+    force_sender: &watch::Sender<bool>,
+    cancellation_source: &CancellationSource,
+) {
+    // Shards run on separate OS threads. Do not wake cancellation-aware
+    // handlers until every shard has observed force and accounted for its
+    // remaining work; otherwise a handler can finish in that cross-thread gap.
+    force_shards(force_sender);
+    wait_for_shards(events, remaining).await;
+    cancellation_source.cancel();
 }
 
 async fn wait_for_shards(events: &mut mpsc::UnboundedReceiver<ShardEvent>, mut remaining: usize) {
@@ -802,6 +823,28 @@ mod tests {
         assert_eq!(shard_index, 1);
         reservation.send(3);
         assert_eq!(second_receiver.recv().await, Some(3));
+    }
+
+    #[tokio::test]
+    async fn process_force_accounts_shards_before_waking_handler_cancellation() {
+        let (force_sender, mut force_receiver) = watch::channel(false);
+        let (cancellation_source, cancellation) = CancellationSource::new();
+        let observed_cancellation = cancellation.clone();
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+
+        let ((), ()) = tokio::join!(
+            force_process_shards(&mut event_receiver, 1, &force_sender, &cancellation_source,),
+            async move {
+                force_receiver.changed().await.expect("force signal");
+                assert!(*force_receiver.borrow());
+                assert!(!observed_cancellation.is_cancelled());
+                event_sender
+                    .send(ShardEvent { result: Ok(()) })
+                    .expect("accounted shard");
+            },
+        );
+
+        assert!(cancellation.is_cancelled());
     }
 
     #[tokio::test]
