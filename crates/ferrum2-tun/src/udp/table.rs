@@ -54,7 +54,6 @@ enum Slot {
         source: SocketAddr,
         payload_bound: usize,
         sender: mpsc::Sender<UdpDatagram>,
-        peer_policy: Arc<PeerPolicy>,
         lease: Arc<AssociationLease>,
         deadline_millis: i64,
     },
@@ -62,7 +61,6 @@ enum Slot {
         source: SocketAddr,
         payload_bound: usize,
         sender: mpsc::Sender<UdpDatagram>,
-        peer_policy: Arc<PeerPolicy>,
         lease: Arc<AssociationLease>,
         deadline_millis: i64,
     },
@@ -243,25 +241,11 @@ impl UdpTable {
             return Admission::Dropped;
         }
 
-        if let Some(slot) = self.index.get(&endpoints.source).copied() {
-            let closed = self
-                .slots
-                .get(slot)
-                .and_then(Option::as_ref)
-                .is_none_or(|entry| entry.lease().phase() == LeasePhase::Closed);
-            if closed {
-                if let Some(id) = self.generations.current(slot) {
-                    self.remove(id);
-                }
-            } else {
-                return self.enqueue_existing(
-                    slot,
-                    endpoints,
-                    payload,
-                    ingress_payload_bound,
-                    now_millis,
-                );
-            }
+        if let Some(slot) = self.index.get(&endpoints.source).copied()
+            && let Some(admission) =
+                self.enqueue_existing(slot, endpoints, payload, ingress_payload_bound, now_millis)
+        {
+            return admission;
         }
 
         if !admitting {
@@ -304,14 +288,13 @@ impl UdpTable {
             self.control_sender.clone(),
             self.wake.clone(),
             self.events.clone(),
+            PeerPolicy::new(self.filtering, endpoints.source.ip()),
         ));
-        let peer_policy = Arc::new(PeerPolicy::new(self.filtering, endpoints.source.ip()));
         let deadline_millis = now_millis.saturating_add(CANDIDATE_TIMEOUT_MILLIS);
         self.slots[slot] = Some(Slot::Candidate {
             source: endpoints.source,
             payload_bound: response_payload_bound,
             sender,
-            peer_policy: Arc::clone(&peer_policy),
             lease: Arc::clone(&lease),
             deadline_millis,
         });
@@ -327,9 +310,7 @@ impl UdpTable {
             packet_payload_bound: response_payload_bound,
             receiver: Some(receiver),
             lease,
-            peer_policy,
             responses: self.response_sender.clone(),
-            wake: self.wake.clone(),
             handed_off: false,
         };
         if self.candidates.try_send(candidate).is_err() {
@@ -349,12 +330,25 @@ impl UdpTable {
         payload: &[u8],
         ingress_payload_bound: usize,
         now_millis: i64,
-    ) -> Admission {
-        let Some(id) = self.generations.current(slot) else {
+    ) -> Option<Admission> {
+        let id = self.generations.current(slot);
+        let Some(entry) = self.slots.get_mut(slot).and_then(Option::as_mut) else {
+            if let Some(id) = id {
+                self.remove(id);
+            }
+            return None;
+        };
+        if entry.lease().phase() == LeasePhase::Closed {
+            if let Some(id) = id {
+                self.remove(id);
+            }
+            return None;
+        }
+        let Some(id) = id else {
             self.events.emit(TunEvent::UdpStaleGeneration);
             self.events
                 .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
-            return Admission::Dropped;
+            return Some(Admission::Dropped);
         };
         let datagram = UdpDatagram {
             source: endpoints.source,
@@ -362,8 +356,8 @@ impl UdpTable {
             payload: Arc::from(payload),
         };
         let mut refresh_deadline = None;
-        let admission = match self.slots.get_mut(slot).and_then(Option::as_mut) {
-            Some(Slot::Candidate { sender, .. }) => {
+        let admission = match entry {
+            Slot::Candidate { sender, .. } => {
                 if payload.len() > ingress_payload_bound {
                     self.events.emit(TunEvent::PacketRejected(
                         TunRejectReason::InvalidTransportLength,
@@ -378,11 +372,11 @@ impl UdpTable {
                     Admission::CandidateQueued
                 }
             }
-            Some(Slot::Association {
+            Slot::Association {
                 sender,
                 deadline_millis,
                 ..
-            }) => {
+            } => {
                 if payload.len() > ingress_payload_bound {
                     self.events.emit(TunEvent::PacketRejected(
                         TunRejectReason::InvalidTransportLength,
@@ -399,12 +393,11 @@ impl UdpTable {
                     Admission::Mapped
                 }
             }
-            None => Admission::Dropped,
         };
         if let Some(deadline_millis) = refresh_deadline {
             self.schedule_deadline(id, deadline_millis);
         }
-        admission
+        Some(admission)
     }
 
     #[cfg(test)]
@@ -505,7 +498,6 @@ impl UdpTable {
         let Some(Slot::Candidate {
             source,
             sender,
-            peer_policy,
             lease: slot_lease,
             ..
         }) = self.slots[id.slot].take()
@@ -519,7 +511,6 @@ impl UdpTable {
             source,
             payload_bound: commit.selected_payload_bound,
             sender,
-            peer_policy,
             lease: slot_lease,
             deadline_millis,
         });
@@ -573,13 +564,11 @@ impl UdpTable {
                     source,
                     payload_bound,
                     lease,
-                    peer_policy,
                     ..
                 }) => (
                     response.lease.phase() == LeasePhase::Association
                         && *source == response.association_source
-                        && Arc::ptr_eq(lease, &response.lease)
-                        && Arc::ptr_eq(peer_policy, &response.peer_policy),
+                        && Arc::ptr_eq(lease, &response.lease),
                     *payload_bound,
                 ),
                 _ => (false, 0),
@@ -606,7 +595,7 @@ impl UdpTable {
             );
             return ResponseProcessOutcome::Dropped(UdpResponseDropReason::MalformedResponse);
         }
-        match response.peer_policy.allows(response.response_source) {
+        match response.lease.peer_policy.allows(response.response_source) {
             Err(()) => {
                 if was_pending {
                     self.events.emit(TunEvent::UdpPendingResponses(0));

@@ -856,11 +856,19 @@ pub(crate) fn ipv6_unicast(address: Ipv6Addr) -> bool {
 pub(crate) fn internet_checksum(parts: &[&[u8]]) -> u16 {
     let mut sum = 0_u32;
     for part in parts {
-        let mut chunks = part.chunks_exact(2);
-        for chunk in &mut chunks {
+        let mut words = part.chunks_exact(8);
+        for chunk in &mut words {
+            let packed = u64::from_be_bytes(chunk.try_into().expect("checksum chunk is 8 bytes"));
+            sum += (packed >> 48) as u32
+                + ((packed >> 32) & 0xffff) as u32
+                + ((packed >> 16) & 0xffff) as u32
+                + (packed & 0xffff) as u32;
+        }
+        let mut tail = words.remainder().chunks_exact(2);
+        for chunk in &mut tail {
             sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
         }
-        if let Some(byte) = chunks.remainder().first() {
+        if let Some(byte) = tail.remainder().first() {
             sum += u32::from(*byte) << 8;
         }
     }

@@ -34,6 +34,9 @@ ipv6_address = "fd00::2/126"
 [[outbounds]]
 tag = "fallback"
 server = "192.0.2.10:8388"
+type = "shadowsocks"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
 [[outbounds]]
 tag = "direct"
 type = "direct"
@@ -67,9 +70,6 @@ transport = "udp"
 address = "127.0.0.1:5301"
 [dns.route]
 final = "resolver"
-[shadowsocks]
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
 "#,
     )
     .expect("TUN UDP modes config");

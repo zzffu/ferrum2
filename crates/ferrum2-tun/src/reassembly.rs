@@ -142,38 +142,6 @@ impl ReassemblyTable {
             );
         }
 
-        let layout = match layout_for(packet, fragment) {
-            Some(layout) => layout,
-            None => {
-                self.entries.remove(&fragment.key);
-                return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
-            }
-        };
-        if !self.entries.contains_key(&fragment.key) {
-            if self.entries.len() >= MAX_REASSEMBLY_ENTRIES {
-                return ReassemblyOutcome::Dropped(ReassemblyDropReason::Limit);
-            }
-            self.compact_deadlines_if_needed();
-            let deadline_millis = now_millis.saturating_add(REASSEMBLY_TIMEOUT_MILLIS);
-            let deadline_id = self.next_deadline_id;
-            self.next_deadline_id = self.next_deadline_id.wrapping_add(1);
-            self.entries.insert(
-                fragment.key,
-                Entry {
-                    deadline_millis,
-                    deadline_id,
-                    layout: layout.clone(),
-                    final_payload_len: None,
-                    pieces: Vec::new(),
-                },
-            );
-            self.deadlines.push(Reverse(DeadlineEntry {
-                deadline_millis,
-                deadline_id,
-                key: fragment.key,
-            }));
-        }
-
         let payload_end = match fragment.offset.checked_add(fragment.payload_len) {
             Some(end) if end <= MAX_REASSEMBLED_PACKET => end,
             _ => {
@@ -181,15 +149,50 @@ impl ReassemblyTable {
                 return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
             }
         };
-        let entry = self
-            .entries
-            .get_mut(&fragment.key)
-            .expect("entry was inserted or already present");
-        if !layouts_compatible(&entry.layout, &layout) {
-            self.entries.remove(&fragment.key);
-            return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
+        let mut layout = Some(match layout_for(packet, fragment) {
+            Some(layout) => layout,
+            None => {
+                self.entries.remove(&fragment.key);
+                return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
+            }
+        });
+        self.compact_deadlines_if_needed();
+        let at_entry_limit = self.entries.len() >= MAX_REASSEMBLY_ENTRIES;
+        let (entry, existing) = match self.entries.entry(fragment.key) {
+            std::collections::hash_map::Entry::Occupied(occupied) => (occupied.into_mut(), true),
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                if at_entry_limit {
+                    return ReassemblyOutcome::Dropped(ReassemblyDropReason::Limit);
+                }
+                let deadline_millis = now_millis.saturating_add(REASSEMBLY_TIMEOUT_MILLIS);
+                let deadline_id = self.next_deadline_id;
+                self.next_deadline_id = self.next_deadline_id.wrapping_add(1);
+                self.deadlines.push(Reverse(DeadlineEntry {
+                    deadline_millis,
+                    deadline_id,
+                    key: fragment.key,
+                }));
+                (
+                    vacant.insert(Entry {
+                        deadline_millis,
+                        deadline_id,
+                        layout: layout.take().expect("new entry retains incoming layout"),
+                        final_payload_len: None,
+                        pieces: Vec::new(),
+                    }),
+                    false,
+                )
+            }
+        };
+
+        if existing {
+            let layout = layout.expect("existing entry compares the incoming layout");
+            if !layouts_compatible(&entry.layout, &layout) {
+                self.entries.remove(&fragment.key);
+                return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
+            }
+            merge_first_header(&mut entry.layout, layout);
         }
-        merge_first_header(&mut entry.layout, layout);
 
         if entry.pieces.len() == MAX_FRAGMENTS_PER_ENTRY {
             self.entries.remove(&fragment.key);
@@ -247,7 +250,9 @@ impl ReassemblyTable {
     }
 
     pub(crate) fn next_deadline_millis(&mut self) -> Option<i64> {
-        self.prune_stale_deadlines();
+        if self.deadlines.len() != self.entries.len() {
+            self.prune_stale_deadlines();
+        }
         self.deadlines
             .peek()
             .map(|Reverse(deadline)| deadline.deadline_millis)
@@ -255,15 +260,15 @@ impl ReassemblyTable {
 
     pub(crate) fn expire(&mut self, now_millis: i64) -> usize {
         let mut expired = 0;
-        loop {
-            self.prune_stale_deadlines();
-            let Some(Reverse(deadline)) = self.deadlines.peek().copied() else {
-                break;
-            };
-            if deadline.deadline_millis > now_millis {
-                break;
-            }
-            self.deadlines.pop();
+        while self
+            .deadlines
+            .peek()
+            .is_some_and(|Reverse(deadline)| deadline.deadline_millis <= now_millis)
+        {
+            let Reverse(deadline) = self
+                .deadlines
+                .pop()
+                .expect("peeked reassembly deadline remains present");
             if self.deadline_is_current(deadline) {
                 self.entries.remove(&deadline.key);
                 expired += 1;
@@ -412,6 +417,7 @@ fn reconstruct(entry: Entry, final_payload_len: usize) -> Option<Vec<u8>> {
             let checksum = internet_checksum(&[&header]);
             header[10..12].copy_from_slice(&checksum.to_be_bytes());
             let mut packet = header;
+            packet.reserve_exact(final_payload_len);
             append_pieces(&mut packet, entry.pieces);
             Some(packet)
         }
@@ -432,6 +438,7 @@ fn reconstruct(entry: Entry, final_payload_len: usize) -> Option<Vec<u8>> {
             normalized_prefix[4..6]
                 .copy_from_slice(&u16::try_from(total_len - 40).ok()?.to_be_bytes());
             let mut packet = normalized_prefix;
+            packet.reserve_exact(final_payload_len);
             append_pieces(&mut packet, entry.pieces);
             Some(packet)
         }
