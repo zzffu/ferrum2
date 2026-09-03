@@ -215,8 +215,7 @@ impl AssociationLease {
         controls: sync_mpsc::Sender<ControlNotice>,
         wake: OwnerWake,
         events: TunEventSink,
-        filtering: UdpFiltering,
-        local_ip: IpAddr,
+        peer_policy: PeerPolicy,
     ) -> Self {
         Self {
             id,
@@ -227,7 +226,7 @@ impl AssociationLease {
             controls,
             wake,
             events,
-            peer_policy: PeerPolicy::new(filtering, local_ip),
+            peer_policy,
         }
     }
 

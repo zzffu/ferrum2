@@ -12,9 +12,9 @@ use super::OWNER_EVENT_QUANTUM;
 use super::{
     AssociationLease, CANDIDATE_TIMEOUT_MILLIS, ControlNotice, ControlNoticeKind,
     DATAGRAM_QUEUE_PACKETS, GenerationId, GenerationTable, InjectOutcome, LeasePhase,
-    OwnerResponse, RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION, UdpCandidate, UdpCommitError,
-    UdpDatagram, UdpDatagramEndpoints, UdpFiltering, emit_response_drop, same_ip_family,
-    valid_unicast_ip,
+    OwnerResponse, PeerPolicy, RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION, UdpCandidate,
+    UdpCommitError, UdpDatagram, UdpDatagramEndpoints, UdpFiltering, emit_response_drop,
+    same_ip_family, valid_unicast_ip,
 };
 use crate::{OwnerWake, TunEvent, TunEventSink, TunRejectReason, UdpResponseDropReason};
 
@@ -288,8 +288,7 @@ impl UdpTable {
             self.control_sender.clone(),
             self.wake.clone(),
             self.events.clone(),
-            self.filtering,
-            endpoints.source.ip(),
+            PeerPolicy::new(self.filtering, endpoints.source.ip()),
         ));
         let deadline_millis = now_millis.saturating_add(CANDIDATE_TIMEOUT_MILLIS);
         self.slots[slot] = Some(Slot::Candidate {

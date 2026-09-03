@@ -910,8 +910,7 @@ fn adf_peer_reservations_are_bounded_and_authorize_only_on_commit() {
                 controls,
                 OwnerWake::default(),
                 TunEventSink::default(),
-                filtering,
-                "198.18.0.1".parse().unwrap(),
+                PeerPolicy::new(filtering, "198.18.0.1".parse().unwrap()),
             )),
         }
     }
