@@ -204,6 +204,7 @@ struct AssociationLease {
     controls: sync_mpsc::Sender<ControlNotice>,
     wake: OwnerWake,
     events: TunEventSink,
+    peer_policy: PeerPolicy,
 }
 
 impl AssociationLease {
@@ -214,6 +215,8 @@ impl AssociationLease {
         controls: sync_mpsc::Sender<ControlNotice>,
         wake: OwnerWake,
         events: TunEventSink,
+        filtering: UdpFiltering,
+        local_ip: IpAddr,
     ) -> Self {
         Self {
             id,
@@ -224,6 +227,7 @@ impl AssociationLease {
             controls,
             wake,
             events,
+            peer_policy: PeerPolicy::new(filtering, local_ip),
         }
     }
 
@@ -326,7 +330,7 @@ impl AssociationLease {
 struct PeerPolicy {
     filtering: UdpFiltering,
     local_ip: IpAddr,
-    peers: Mutex<PeerEntries>,
+    peers: Option<Mutex<PeerEntries>>,
 }
 
 struct PeerEntries {
@@ -339,9 +343,11 @@ impl PeerPolicy {
         Self {
             filtering,
             local_ip,
-            peers: Mutex::new(PeerEntries {
-                authorized: HashSet::with_capacity(UDP_ADF_PEER_CAP),
-                reserved: HashMap::new(),
+            peers: (filtering == UdpFiltering::AddressDependent).then(|| {
+                Mutex::new(PeerEntries {
+                    authorized: HashSet::new(),
+                    reserved: HashMap::new(),
+                })
             }),
         }
     }
@@ -353,7 +359,11 @@ impl PeerPolicy {
         if self.filtering == UdpFiltering::EndpointIndependent {
             return UdpPeerAuthorization::NotRequired;
         }
-        let mut peers = lock_unpoisoned(&self.peers);
+        let mut peers = lock_unpoisoned(
+            self.peers
+                .as_ref()
+                .expect("address-dependent policy owns peer state"),
+        );
         if peers.authorized.contains(&peer) {
             return UdpPeerAuthorization::AlreadyAuthorized;
         }
@@ -368,7 +378,11 @@ impl PeerPolicy {
     }
 
     fn finish_reservation(&self, peer: IpAddr, authorize: bool) -> UdpPeerAuthorization {
-        let mut peers = lock_unpoisoned(&self.peers);
+        let mut peers = lock_unpoisoned(
+            self.peers
+                .as_ref()
+                .expect("address-dependent policy owns peer state"),
+        );
         if peers.authorized.contains(&peer) {
             return UdpPeerAuthorization::AlreadyAuthorized;
         }
@@ -396,16 +410,20 @@ impl PeerPolicy {
             return Err(());
         }
         Ok(self.filtering == UdpFiltering::EndpointIndependent
-            || lock_unpoisoned(&self.peers)
-                .authorized
-                .contains(&source.ip()))
+            || lock_unpoisoned(
+                self.peers
+                    .as_ref()
+                    .expect("address-dependent policy owns peer state"),
+            )
+            .authorized
+            .contains(&source.ip()))
     }
 }
 
 /// A unique-capacity ADF reservation which authorizes only after explicit commit.
 #[must_use = "an uncommitted UDP peer reservation is released on drop"]
 pub struct UdpPeerReservation {
-    policy: Arc<PeerPolicy>,
+    policy: Arc<AssociationLease>,
     peer: IpAddr,
     active: bool,
 }
@@ -413,14 +431,14 @@ pub struct UdpPeerReservation {
 impl UdpPeerReservation {
     pub fn commit(mut self) -> UdpPeerAuthorization {
         self.active = false;
-        self.policy.finish_reservation(self.peer, true)
+        self.policy.peer_policy.finish_reservation(self.peer, true)
     }
 }
 
 impl Drop for UdpPeerReservation {
     fn drop(&mut self) {
         if self.active {
-            let _ = self.policy.finish_reservation(self.peer, false);
+            let _ = self.policy.peer_policy.finish_reservation(self.peer, false);
         }
     }
 }
@@ -428,27 +446,33 @@ impl Drop for UdpPeerReservation {
 /// Cloneable handle used to authorize ADF peers only after outbound acceptance.
 #[derive(Clone)]
 pub struct UdpPeerPolicyHandle {
-    inner: Arc<PeerPolicy>,
+    inner: Arc<AssociationLease>,
 }
 
 impl UdpPeerPolicyHandle {
     pub fn filtering(&self) -> UdpFiltering {
-        self.inner.filtering
+        self.inner.peer_policy.filtering
     }
 
     pub fn authorize_peer(&self, peer: IpAddr) -> UdpPeerAuthorization {
-        self.inner.authorize(peer)
+        self.inner.peer_policy.authorize(peer)
     }
 
     /// Reserves bounded ADF capacity without authorizing responses before send succeeds.
     pub fn reserve_peer(&self, peer: IpAddr) -> UdpPeerReservationOutcome {
-        if !same_ip_family(self.inner.local_ip, peer) || !valid_unicast_ip(peer) {
+        if !same_ip_family(self.inner.peer_policy.local_ip, peer) || !valid_unicast_ip(peer) {
             return UdpPeerReservationOutcome::InvalidPeer;
         }
-        if self.inner.filtering == UdpFiltering::EndpointIndependent {
+        if self.inner.peer_policy.filtering == UdpFiltering::EndpointIndependent {
             return UdpPeerReservationOutcome::NotRequired;
         }
-        let mut peers = lock_unpoisoned(&self.inner.peers);
+        let mut peers = lock_unpoisoned(
+            self.inner
+                .peer_policy
+                .peers
+                .as_ref()
+                .expect("address-dependent policy owns peer state"),
+        );
         if peers.authorized.contains(&peer) {
             return UdpPeerReservationOutcome::AlreadyAuthorized;
         }
@@ -471,7 +495,6 @@ impl UdpPeerPolicyHandle {
 
 struct OwnerResponse {
     lease: Arc<AssociationLease>,
-    peer_policy: Arc<PeerPolicy>,
     association_source: SocketAddr,
     response_source: SocketAddr,
     payload: Vec<u8>,
@@ -492,10 +515,7 @@ pub struct UdpResponseSink {
     source: SocketAddr,
     payload_bound: usize,
     lease: Arc<AssociationLease>,
-    peer_policy: Arc<PeerPolicy>,
     responses: mpsc::Sender<OwnerResponse>,
-    wake: OwnerWake,
-    events: TunEventSink,
 }
 
 impl UdpResponseSink {
@@ -506,9 +526,9 @@ impl UdpResponseSink {
     /// Queues one response while preserving its actual remote source endpoint.
     pub fn send(&self, source: SocketAddr, payload: &[u8]) -> UdpResponseSendOutcome {
         if self.lease.is_stale() {
-            self.events.emit(TunEvent::UdpStaleGeneration);
+            self.lease.events.emit(TunEvent::UdpStaleGeneration);
             emit_response_drop(
-                &self.events,
+                &self.lease.events,
                 UdpResponseDropReason::StaleGeneration,
                 TunRejectReason::StaleGeneration,
             );
@@ -516,7 +536,7 @@ impl UdpResponseSink {
         }
         if self.lease.phase() != LeasePhase::Association {
             emit_response_drop(
-                &self.events,
+                &self.lease.events,
                 UdpResponseDropReason::AssociationClosed,
                 TunRejectReason::UdpResponseClosed,
             );
@@ -524,25 +544,25 @@ impl UdpResponseSink {
         }
         if payload.len() > self.payload_bound {
             emit_response_drop(
-                &self.events,
+                &self.lease.events,
                 UdpResponseDropReason::MalformedResponse,
                 TunRejectReason::InvalidTransportLength,
             );
             return UdpResponseSendOutcome::PayloadTooLarge;
         }
-        match self.peer_policy.allows(source) {
+        match self.lease.peer_policy.allows(source) {
             Err(()) => {
                 emit_response_drop(
-                    &self.events,
+                    &self.lease.events,
                     UdpResponseDropReason::MalformedResponse,
                     TunRejectReason::InvalidSource,
                 );
                 return UdpResponseSendOutcome::InvalidSource;
             }
             Ok(false) => {
-                self.events.emit(TunEvent::UdpResponseFiltered);
+                self.lease.events.emit(TunEvent::UdpResponseFiltered);
                 emit_response_drop(
-                    &self.events,
+                    &self.lease.events,
                     UdpResponseDropReason::Filtered,
                     TunRejectReason::UdpResponseFiltered,
                 );
@@ -552,20 +572,19 @@ impl UdpResponseSink {
         }
         let response = OwnerResponse {
             lease: Arc::clone(&self.lease),
-            peer_policy: Arc::clone(&self.peer_policy),
             association_source: self.source,
             response_source: source,
             payload: payload.to_vec(),
         };
         match self.responses.try_send(response) {
             Ok(()) => {
-                self.wake.signal();
+                self.lease.wake.signal();
                 UdpResponseSendOutcome::Queued
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.events.emit(TunEvent::UdpResponseQueueFull);
+                self.lease.events.emit(TunEvent::UdpResponseQueueFull);
                 emit_response_drop(
-                    &self.events,
+                    &self.lease.events,
                     UdpResponseDropReason::QueueFull,
                     TunRejectReason::UdpQueueFull,
                 );
@@ -573,7 +592,7 @@ impl UdpResponseSink {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 emit_response_drop(
-                    &self.events,
+                    &self.lease.events,
                     UdpResponseDropReason::AssociationClosed,
                     TunRejectReason::UdpResponseClosed,
                 );
@@ -591,9 +610,7 @@ pub struct UdpCandidate {
     packet_payload_bound: usize,
     receiver: Option<mpsc::Receiver<UdpDatagram>>,
     lease: Arc<AssociationLease>,
-    peer_policy: Arc<PeerPolicy>,
     responses: mpsc::Sender<OwnerResponse>,
-    wake: OwnerWake,
     handed_off: bool,
 }
 
@@ -641,13 +658,10 @@ impl UdpCandidate {
                 source: self.source,
                 payload_bound: selected_payload_bound,
                 lease: Arc::clone(&self.lease),
-                peer_policy: Arc::clone(&self.peer_policy),
                 responses: self.responses.clone(),
-                wake: self.wake.clone(),
-                events: self.lease.events.clone(),
             },
             peer_policy: UdpPeerPolicyHandle {
-                inner: Arc::clone(&self.peer_policy),
+                inner: Arc::clone(&self.lease),
             },
             lease: Arc::clone(&self.lease),
         };

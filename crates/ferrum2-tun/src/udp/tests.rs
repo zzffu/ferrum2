@@ -898,8 +898,21 @@ async fn c19_eim_adf_eif_and_actual_response_source_are_enforced() {
 #[test]
 fn adf_peer_reservations_are_bounded_and_authorize_only_on_commit() {
     fn handle(filtering: UdpFiltering) -> UdpPeerPolicyHandle {
+        let (controls, _) = std::sync::mpsc::channel();
         UdpPeerPolicyHandle {
-            inner: Arc::new(PeerPolicy::new(filtering, "198.18.0.1".parse().unwrap())),
+            inner: Arc::new(AssociationLease::new(
+                GenerationId {
+                    slot: 0,
+                    generation: 0,
+                },
+                0,
+                Arc::new(AtomicU64::new(0)),
+                controls,
+                OwnerWake::default(),
+                TunEventSink::default(),
+                filtering,
+                "198.18.0.1".parse().unwrap(),
+            )),
         }
     }
 
@@ -914,9 +927,15 @@ fn adf_peer_reservations_are_bounded_and_authorize_only_on_commit() {
     let peer = "192.0.2.1".parse().unwrap();
     let first = reserved(policy.reserve_peer(peer));
     let second = reserved(policy.reserve_peer(peer));
-    assert_eq!(policy.inner.allows(v4("192.0.2.1:53")), Ok(false));
+    assert_eq!(
+        policy.inner.peer_policy.allows(v4("192.0.2.1:53")),
+        Ok(false)
+    );
     assert_eq!(first.commit(), UdpPeerAuthorization::Authorized);
-    assert_eq!(policy.inner.allows(v4("192.0.2.1:5353")), Ok(true));
+    assert_eq!(
+        policy.inner.peer_policy.allows(v4("192.0.2.1:5353")),
+        Ok(true)
+    );
     assert_eq!(second.commit(), UdpPeerAuthorization::AlreadyAuthorized);
     assert!(matches!(
         policy.reserve_peer(peer),
