@@ -81,6 +81,19 @@ def _same_number(actual: object, expected: float, field: str) -> None:
         raise CandidateControlError(f"{field} does not match the raw paired evidence")
 
 
+def _cpu_cost_regressed(
+    baseline_cpu: float,
+    candidate_cpu: float,
+    *,
+    work_ratio: float,
+    maximum_regression_percent: float,
+) -> bool:
+    if baseline_cpu == 0:
+        return candidate_cpu > 0
+    cpu_cost_ratio = (candidate_cpu / baseline_cpu) / work_ratio
+    return (cpu_cost_ratio - 1.0) * 100.0 > maximum_regression_percent
+
+
 def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, object]:
     cleanup = _read_object(root / "cleanup.json", "Windows TUN cleanup evidence")
     _exact_fields(
@@ -285,11 +298,39 @@ def _validate_paired_summary(
         ]
         pairs_improved = sum(value > 1.0 for value in ratios)
         majority = pairs_improved > plan["pair_count"] // 2
+        baseline_client_cpu = statistics.median(
+            row["client_cpu_percent"] for row in rows if row["member"] == "baseline"
+        )
+        candidate_client_cpu = statistics.median(
+            row["client_cpu_percent"] for row in rows if row["member"] == "candidate"
+        )
+        baseline_server_cpu = statistics.median(
+            row["server_cpu_percent"] for row in rows if row["member"] == "baseline"
+        )
+        candidate_server_cpu = statistics.median(
+            row["server_cpu_percent"] for row in rows if row["member"] == "candidate"
+        )
+        maximum_cpu_regression = policy["maximum_non_target_regression_percent"]
+        cpu_cost_regressed = _cpu_cost_regressed(
+            baseline_client_cpu,
+            candidate_client_cpu,
+            work_ratio=median_ratio,
+            maximum_regression_percent=maximum_cpu_regression,
+        ) or _cpu_cost_regressed(
+            baseline_server_cpu,
+            candidate_server_cpu,
+            work_ratio=median_ratio,
+            maximum_regression_percent=maximum_cpu_regression,
+        )
         status = (
-            "candidate-win"
+            "regression"
+            if cpu_cost_regressed
+            or (
+                median_ratio <= 0.98
+                and sum(value < 1.0 for value in ratios) > plan["pair_count"] // 2
+            )
+            else "candidate-win"
             if median_ratio >= 1.02 and majority
-            else "regression"
-            if median_ratio <= 0.98 and sum(value < 1.0 for value in ratios) > plan["pair_count"] // 2
             else "within-noise-band"
         )
         for field, expected in (
@@ -298,10 +339,10 @@ def _validate_paired_summary(
             ("minimum_pair_ratio", min(ratios)),
             ("maximum_pair_ratio", max(ratios)),
             ("median_absolute_deviation", mad),
-            ("baseline_client_cpu_percent_median", statistics.median(row["client_cpu_percent"] for row in rows if row["member"] == "baseline")),
-            ("candidate_client_cpu_percent_median", statistics.median(row["client_cpu_percent"] for row in rows if row["member"] == "candidate")),
-            ("baseline_server_cpu_percent_median", statistics.median(row["server_cpu_percent"] for row in rows if row["member"] == "baseline")),
-            ("candidate_server_cpu_percent_median", statistics.median(row["server_cpu_percent"] for row in rows if row["member"] == "candidate")),
+            ("baseline_client_cpu_percent_median", baseline_client_cpu),
+            ("candidate_client_cpu_percent_median", candidate_client_cpu),
+            ("baseline_server_cpu_percent_median", baseline_server_cpu),
+            ("candidate_server_cpu_percent_median", candidate_server_cpu),
         ):
             _same_number(scenario[field], expected, field)
         if (

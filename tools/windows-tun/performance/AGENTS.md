@@ -24,7 +24,9 @@ RunId ledger.
 Every mutation belongs to one try/finally transaction and is recorded incrementally in
 `%LOCALAPPDATA%\Ferrum2\host-performance\<RunId>\recovery.json`. Recovery validates adapter, route,
 process, file, and port identity before removing only the ledger-owned resource; mismatch fails
-closed. Cleanup is part of benchmark success. Quick runs selected data-plane scenarios with at least
+closed. After successful cleanup, retain external evidence and remove the transient RunId tree,
+including exported sources, Cargo targets, and logs. Cleanup is part of benchmark success. Quick runs
+selected data-plane scenarios with at least
 three interleaved pairs; Confirm runs affected scenarios with at least five pairs and retains raw
 per-pair metrics; Lifecycle defaults to 20 and caps at 100 complete product-start, TUN-probe, and
 product-stop cycles. The retired 1000-reset durability soak is never run by autoresearch.

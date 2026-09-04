@@ -23,6 +23,34 @@ function Get-Ferrum2HostPerformanceRoot {
     return Join-Path $env:LOCALAPPDATA "Ferrum2\host-performance"
 }
 
+function Remove-Ferrum2HostPerformanceRunRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$RunId
+    )
+    if ($RunId -cnotmatch '^[0-9a-f]{12}$') {
+        throw "host performance RunId is invalid"
+    }
+    $recoveryRoot = [IO.Path]::GetFullPath((Get-Ferrum2HostPerformanceRoot))
+    $expectedRunRoot = [IO.Path]::GetFullPath((Join-Path $recoveryRoot $RunId))
+    $actualRunRoot = [IO.Path]::GetFullPath($RunRoot)
+    if (-not $actualRunRoot.Equals($expectedRunRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "host performance run root identity is invalid"
+    }
+    if (-not (Test-Path -LiteralPath $actualRunRoot)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $actualRunRoot -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "host performance run root is not a plain directory"
+    }
+    Remove-Item -LiteralPath $actualRunRoot -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $actualRunRoot) {
+        throw "host performance run root remains after cleanup"
+    }
+}
+
 function Enter-Ferrum2HostPerformanceMutex {
     $created = $false
     $mutex = [Threading.Mutex]::new($true, "Global\Ferrum2HostPerformance", [ref]$created)
@@ -435,24 +463,37 @@ function Remove-Ferrum2LedgerResources {
         }
     }
     foreach ($row in @($Ledger.resources.routes)) {
+        $routeState = [string]$row.state
+        if ($routeState -notin @("planned", "created")) {
+            throw "owned route ledger state is invalid"
+        }
         $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix ([string]$row.destination_prefix) `
             -InterfaceIndex ([uint32]$row.interface_index) -ErrorAction SilentlyContinue | Where-Object {
                 [string]$_.NextHop -ceq [string]$row.next_hop
             })
         if ($routes.Count -gt 1) { throw "owned route identity is not unique" }
         if ($routes.Count -eq 1) {
-            if ([string]$row.state -ceq "created" -and
-                [uint16]$routes[0].RouteMetric -ne [uint16]$row.route_metric) {
+            if ($routeState -cne "created") {
+                throw "planned route presence is ambiguous; refusing removal"
+            }
+            if ([uint16]$routes[0].RouteMetric -ne [uint16]$row.route_metric) {
                 throw "owned route metric identity mismatch"
             }
             Remove-NetRoute -InputObject $routes[0] -Confirm:$false -ErrorAction Stop
         }
     }
     foreach ($row in @($Ledger.resources.addresses)) {
+        $addressState = [string]$row.state
+        if ($addressState -notin @("planned", "created")) {
+            throw "owned address ledger state is invalid"
+        }
         $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress ([string]$row.address) `
             -InterfaceIndex ([uint32]$row.interface_index) -ErrorAction SilentlyContinue)
         if ($addresses.Count -gt 1) { throw "owned address identity is not unique" }
         if ($addresses.Count -eq 1) {
+            if ($addressState -cne "created") {
+                throw "planned address presence is ambiguous; refusing removal"
+            }
             if ([int]$addresses[0].PrefixLength -ne [int]$row.prefix_length) {
                 throw "owned address prefix identity mismatch"
             }
@@ -461,10 +502,20 @@ function Remove-Ferrum2LedgerResources {
     }
     $adapterRow = $Ledger.resources.adapter
     if ($null -ne $adapterRow) {
+        $adapterState = [string]$adapterRow.state
+        if ($adapterState -notin @("planned", "created")) {
+            throw "owned adapter ledger state is invalid"
+        }
         $adapters = @(Get-NetAdapter -IncludeHidden -Name ([string]$adapterRow.name) `
             -ErrorAction SilentlyContinue)
         if ($adapters.Count -gt 1) { throw "owned adapter identity is not unique" }
         if ($adapters.Count -eq 1) {
+            if ($adapterState -cne "created") {
+                throw "planned adapter presence is ambiguous; refusing removal"
+            }
+            if ($null -eq $adapterRow.interface_guid) {
+                throw "owned adapter GUID identity is unavailable"
+            }
             $actualGuid = ([Guid]$adapters[0].InterfaceGuid).ToString("D").ToLowerInvariant()
             if ($null -ne $adapterRow.interface_guid -and
                 $actualGuid -cne [string]$adapterRow.interface_guid) {
@@ -523,16 +574,10 @@ function Invoke-Ferrum2HostPerformanceRecovery {
     foreach ($entry in $ledgers) {
         try {
             Remove-Ferrum2LedgerResources -Ledger $entry.document -LedgerPath $entry.path
+            Remove-Ferrum2HostPerformanceRunRoot `
+                -RunRoot (Split-Path -Parent $entry.path) `
+                -RunId ([string]$entry.document.run_id)
             $recovered += 1
-            $reportPath = Join-Path (Split-Path -Parent $entry.path) "recovery-report.json"
-            Write-AtomicJsonFile -Path $reportPath -Document ([pscustomobject][ordered]@{
-                schema_version = 1
-                kind = "ferrum2.windows-tun.host-performance-recovery-report"
-                run_id = $entry.document.run_id
-                status = "PASS"
-                recovered_utc = [DateTime]::UtcNow.ToString("O")
-                resources_remaining = 0
-            })
         } catch {
             $entry.document.recovery.attempts = [int]$entry.document.recovery.attempts + 1
             $entry.document.recovery.last_error = [string]$_.Exception.Message
@@ -540,7 +585,11 @@ function Invoke-Ferrum2HostPerformanceRecovery {
             throw
         }
     }
-    return [pscustomobject][ordered]@{ status = "PASS"; pending = $ledgers.Count; recovered = $recovered }
+    return [pscustomobject][ordered]@{
+        status = "PASS"
+        pending = $ledgers.Count
+        recovered = $recovered
+    }
 }
 
 function Complete-Ferrum2HostPerformanceCleanup {
@@ -555,26 +604,28 @@ function Complete-Ferrum2HostPerformanceCleanup {
         $Context.ledger.state = "cleaned"
         $Context.ledger.recovery.last_error = $null
         Write-Ferrum2HostPerformanceLedger -Context $Context
-        $report = [pscustomobject][ordered]@{
-            schema_version = 1
-            kind = "ferrum2.windows-tun.host-performance-cleanup"
-            run_id = $Context.run_id
-            status = "PASS"
-            benchmark_succeeded = $Succeeded
-            adapter_remaining = 0
-            routes_remaining = 0
-            addresses_remaining = 0
-            processes_remaining = 0
-            ports_remaining = 0
-            completed_utc = [DateTime]::UtcNow.ToString("O")
-        }
-        Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "cleanup.json") `
-            -Document $report
-        return $report
+        Remove-Ferrum2HostPerformanceRunRoot -RunRoot $Context.run_root `
+            -RunId $Context.run_id
     } catch {
         $Context.ledger.state = "recovery_required"
         $Context.ledger.recovery.last_error = [string]$_.Exception.Message
         Write-Ferrum2HostPerformanceLedger -Context $Context
         throw
     }
+    $report = [pscustomobject][ordered]@{
+        schema_version = 1
+        kind = "ferrum2.windows-tun.host-performance-cleanup"
+        run_id = $Context.run_id
+        status = "PASS"
+        benchmark_succeeded = $Succeeded
+        adapter_remaining = 0
+        routes_remaining = 0
+        addresses_remaining = 0
+        processes_remaining = 0
+        ports_remaining = 0
+        completed_utc = [DateTime]::UtcNow.ToString("O")
+    }
+    Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "cleanup.json") `
+        -Document $report
+    return $report
 }

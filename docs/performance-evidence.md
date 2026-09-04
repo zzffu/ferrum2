@@ -50,7 +50,9 @@ pairs; it retains every pair and reports median ratio, range, outliers, CPU, thr
 and errors without hiding regressions in an aggregate score. `Lifecycle` is separate, defaults to 20
 and caps at 100 complete product-start, TUN-probe, and product-stop cycles; it never changes a
 default route or disables or enables a physical adapter. The retired 1000-reset durability soak is
-disabled and cannot restart the host network.
+disabled and cannot restart the host network. The non-target CPU guard compares client and server
+CPU cost per unit of reported work against the policy limit; it does not mistake proportionally
+higher utilization from higher throughput for a regression.
 
 Every real run requires an already elevated shell and the literal
 `-AcknowledgeHostNetworkMutation` switch. The runner uses dedicated RFC 2544 addresses and only exact

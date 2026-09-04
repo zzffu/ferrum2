@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import re
 
@@ -14,6 +15,13 @@ from tools.performance_candidate.json_contract import (
 from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_PROFILES
 
 WINDOWS_TUN_PLAN_MAX_BYTES = 512 * 1024
+_PERFORMANCE_SOURCE_BUNDLE = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "tools"
+    / "powershell"
+    / "Ferrum2.Performance"
+    / "bundle.json"
+)
 _PLAN_FIELDS = frozenset(
     {
         "schema_version",
@@ -129,10 +137,15 @@ def validate_windows_tun_plan(
         raise CandidateControlError("Windows TUN host plan identity is invalid")
     if mode not in WINDOWS_TUN_PROFILES:
         raise CandidateControlError("Windows TUN host plan mode is invalid")
-    _sha(
+    bundle_digest = _sha(
         plan["performance_source_bundle_sha256"],
         "performance_source_bundle_sha256",
     )
+    expected_bundle_digest = hashlib.sha256(_PERFORMANCE_SOURCE_BUNDLE.read_bytes()).hexdigest()
+    if bundle_digest != expected_bundle_digest:
+        raise CandidateControlError(
+            "Windows TUN plan does not identify the reviewed performance source bundle"
+        )
     if _commit_sha(plan["baseline_sha"], "baseline_sha") != baseline_sha:
         raise CandidateControlError("Windows TUN plan baseline SHA changed")
     if _commit_sha(plan["candidate_sha"], "candidate_sha") != candidate_sha:

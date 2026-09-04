@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -18,7 +19,9 @@ ROOT = Path(__file__).resolve().parents[2]
 POLICY = ROOT / "tools" / "windows_tun_performance_policy.json"
 BASELINE = "1" * 40
 CANDIDATE = "2" * 40
-DIGEST = "a" * 64
+DIGEST = hashlib.sha256(
+    (ROOT / "tools" / "powershell" / "Ferrum2.Performance" / "bundle.json").read_bytes()
+).hexdigest()
 
 
 def write_json(path: Path, value: object) -> None:
@@ -253,6 +256,14 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 plan_for(mode), baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode=mode
             )
 
+    def test_plan_rejects_unreviewed_performance_bundle_digest(self) -> None:
+        plan = plan_for("Quick")
+        plan["performance_source_bundle_sha256"] = "f" * 64
+        with self.assertRaisesRegex(CandidateControlError, "reviewed performance source bundle"):
+            validate_windows_tun_plan(
+                plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
+            )
+
     def test_plan_rejects_guest_fallback_and_default_soak(self) -> None:
         plan = plan_for("Quick")
         plan["qualification"]["vm_start"] = True
@@ -355,6 +366,41 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
             self.assertEqual(
                 [row["qualification_status"] for row in report["scenario_decisions"]],
                 ["candidate-win", "candidate-win"],
+            )
+            for planned in plan["trials"]:
+                if planned["member"] != "candidate":
+                    continue
+                trial_path = root / "trials" / f"{planned['sequence']:03d}" / "trial.json"
+                trial = json.loads(trial_path.read_text(encoding="utf-8"))
+                trial["client_cpu_percent"] = 40.0
+                write_json(trial_path, trial)
+            summary_document = json.loads(
+                (root / "summary.json").read_text(encoding="utf-8")
+            )
+            for scenario in summary_document["scenarios"]:
+                scenario["candidate_client_cpu_percent_median"] = 40.0
+            write_json(root / "summary.json", summary_document)
+            with self.assertRaisesRegex(CandidateControlError, "scenario decision"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    policy_path=POLICY,
+                )
+            for scenario in summary_document["scenarios"]:
+                scenario["qualification_status"] = "regression"
+            write_json(root / "summary.json", summary_document)
+            report = validate_windows_tun_host_evidence(
+                evidence_root=root,
+                baseline_sha=BASELINE,
+                candidate_sha=CANDIDATE,
+                mode="Quick",
+                policy_path=POLICY,
+            )
+            self.assertEqual(
+                [row["qualification_status"] for row in report["scenario_decisions"]],
+                ["regression", "regression"],
             )
             dirty = json.loads((root / "cleanup.json").read_text(encoding="utf-8"))
             dirty["routes_remaining"] = 1

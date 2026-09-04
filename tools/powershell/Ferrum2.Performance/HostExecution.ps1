@@ -849,6 +849,20 @@ function Get-Ferrum2Median {
     return ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2.0
 }
 
+function Test-Ferrum2CpuCostRegression {
+    param(
+        [Parameter(Mandatory = $true)][double]$BaselineCpu,
+        [Parameter(Mandatory = $true)][double]$CandidateCpu,
+        [Parameter(Mandatory = $true)][double]$WorkRatio,
+        [Parameter(Mandatory = $true)][double]$MaximumRegressionPercent
+    )
+    if ($BaselineCpu -eq 0) {
+        return $CandidateCpu -gt 0
+    }
+    $cpuCostRatio = ($CandidateCpu / $BaselineCpu) / $WorkRatio
+    return (($cpuCostRatio - 1.0) * 100.0) -gt $MaximumRegressionPercent
+}
+
 function New-Ferrum2HostSummary {
     param(
         [Parameter(Mandatory = $true)][object]$Plan,
@@ -888,13 +902,38 @@ function New-Ferrum2HostSummary {
             } | ForEach-Object { [int]$_.pair })
         }
         $pairsImproved = @($ratios | Where-Object { $_ -gt 1.0 }).Count
-        $qualificationStatus = if ($medianRatio -ge 1.02 -and
+        $baselineClientCpu = Get-Ferrum2Median -Values @(
+            $rows | Where-Object member -CEQ "baseline" |
+                ForEach-Object { [double]$_.client_cpu_percent }
+        )
+        $candidateClientCpu = Get-Ferrum2Median -Values @(
+            $rows | Where-Object member -CEQ "candidate" |
+                ForEach-Object { [double]$_.client_cpu_percent }
+        )
+        $baselineServerCpu = Get-Ferrum2Median -Values @(
+            $rows | Where-Object member -CEQ "baseline" |
+                ForEach-Object { [double]$_.server_cpu_percent }
+        )
+        $candidateServerCpu = Get-Ferrum2Median -Values @(
+            $rows | Where-Object member -CEQ "candidate" |
+                ForEach-Object { [double]$_.server_cpu_percent }
+        )
+        $maximumCpuRegressionPercent = 2.0
+        $cpuCostRegressed =
+            (Test-Ferrum2CpuCostRegression -BaselineCpu $baselineClientCpu `
+                -CandidateCpu $candidateClientCpu -WorkRatio $medianRatio `
+                -MaximumRegressionPercent $maximumCpuRegressionPercent) -or
+            (Test-Ferrum2CpuCostRegression -BaselineCpu $baselineServerCpu `
+                -CandidateCpu $candidateServerCpu -WorkRatio $medianRatio `
+                -MaximumRegressionPercent $maximumCpuRegressionPercent)
+        $qualificationStatus = if ($cpuCostRegressed -or
+            ($medianRatio -le 0.98 -and
+                @($ratios | Where-Object { $_ -lt 1.0 }).Count -gt
+                    [Math]::Floor($Plan.pair_count / 2))) {
+            "regression"
+        } elseif ($medianRatio -ge 1.02 -and
             $pairsImproved -gt [Math]::Floor($Plan.pair_count / 2)) {
             "candidate-win"
-        } elseif ($medianRatio -le 0.98 -and
-            @($ratios | Where-Object { $_ -lt 1.0 }).Count -gt
-                [Math]::Floor($Plan.pair_count / 2)) {
-            "regression"
         } else {
             "within-noise-band"
         }
@@ -910,22 +949,10 @@ function New-Ferrum2HostSummary {
             median_absolute_deviation = $medianAbsoluteDeviation
             outlier_pairs = @($outlierPairs)
             pairs_improved = $pairsImproved
-            baseline_client_cpu_percent_median = Get-Ferrum2Median -Values @(
-                $rows | Where-Object member -CEQ "baseline" |
-                    ForEach-Object { [double]$_.client_cpu_percent }
-            )
-            candidate_client_cpu_percent_median = Get-Ferrum2Median -Values @(
-                $rows | Where-Object member -CEQ "candidate" |
-                    ForEach-Object { [double]$_.client_cpu_percent }
-            )
-            baseline_server_cpu_percent_median = Get-Ferrum2Median -Values @(
-                $rows | Where-Object member -CEQ "baseline" |
-                    ForEach-Object { [double]$_.server_cpu_percent }
-            )
-            candidate_server_cpu_percent_median = Get-Ferrum2Median -Values @(
-                $rows | Where-Object member -CEQ "candidate" |
-                    ForEach-Object { [double]$_.server_cpu_percent }
-            )
+            baseline_client_cpu_percent_median = $baselineClientCpu
+            candidate_client_cpu_percent_median = $candidateClientCpu
+            baseline_server_cpu_percent_median = $baselineServerCpu
+            candidate_server_cpu_percent_median = $candidateServerCpu
             client_failure_counter_delta = 0
             server_failure_counter_delta = 0
             qualification_status = $qualificationStatus
@@ -1084,10 +1111,40 @@ function Invoke-Ferrum2HostSafetyCheck {
         -Network $Network -Loopback $Loopback -Sequence 3
     [Ferrum2PerfProcessGroup]::CloseGroup()
     Start-Sleep -Milliseconds 500
+    $addressRows = @($Context.ledger.resources.addresses)
+    if ($addressRows.Count -ne 1) {
+        throw "safety check expected one owned support address"
+    }
+    $addressRows[0].state = "planned"
     $Context.ledger.state = "recovery_required"
     Write-Ferrum2HostPerformanceLedger -Context $Context
+    $plannedAddressRefused = $false
+    try {
+        Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
+    } catch {
+        if ([string]$_.Exception.Message -cne
+            "planned address presence is ambiguous; refusing removal") {
+            throw
+        }
+        $plannedAddressRefused = $true
+    }
+    $remainingAddress = @(Get-NetIPAddress -AddressFamily IPv4 `
+        -IPAddress $Network.support_address -InterfaceIndex $Loopback.interface_index `
+        -ErrorAction SilentlyContinue)
+    if (-not $plannedAddressRefused -or $remainingAddress.Count -ne 1) {
+        throw "planned address ambiguity did not fail closed"
+    }
+    $addressRows[0].state = "created"
+    Write-Ferrum2HostPerformanceLedger -Context $Context
     Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
-    [void]$checks.Add([pscustomobject]@{ name = "fault-job-close-and-stale-ledger-recovery"; status = "PASS" })
+    [void]$checks.Add([pscustomobject]@{
+        name = "planned-address-ambiguity-fails-closed"
+        status = "PASS"
+    })
+    [void]$checks.Add([pscustomobject]@{
+        name = "fault-job-close-and-stale-ledger-recovery"
+        status = "PASS"
+    })
     $report = [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-safety-check"
