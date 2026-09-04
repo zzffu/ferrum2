@@ -146,6 +146,44 @@ async fn c2_response_backpressure_preserves_current_event_and_does_not_consume_n
 }
 
 #[tokio::test]
+async fn response_wake_is_coalesced_until_the_owner_observes_an_empty_queue() {
+    let (mut table, mut candidates, wakes) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
+    assert_eq!(
+        table.admit(endpoints(10_000, "192.0.2.1:53"), b"q", 1_392, 0, true),
+        Admission::Provisional
+    );
+    let association = commit(&mut table, candidates.recv().await.unwrap(), 1).await;
+    let sink = association.response_sink();
+    let wakes_before_responses = wakes.load(Ordering::Relaxed);
+
+    assert_eq!(
+        sink.send(v4("192.0.2.1:53"), b"first"),
+        UdpResponseSendOutcome::Queued
+    );
+    assert_eq!(
+        sink.send(v4("192.0.2.1:53"), b"second"),
+        UdpResponseSendOutcome::Queued
+    );
+    assert_eq!(wakes.load(Ordering::Relaxed), wakes_before_responses + 1);
+
+    for now_millis in 2..=3 {
+        assert_eq!(
+            table.process_one_response(now_millis, |_, _| InjectOutcome::Injected),
+            ResponseProcessOutcome::Injected
+        );
+    }
+    assert_eq!(
+        table.process_one_response(4, |_, _| InjectOutcome::Injected),
+        ResponseProcessOutcome::Idle
+    );
+    assert_eq!(
+        sink.send(v4("192.0.2.1:53"), b"third"),
+        UdpResponseSendOutcome::Queued
+    );
+    assert_eq!(wakes.load(Ordering::Relaxed), wakes_before_responses + 2);
+}
+
+#[tokio::test]
 async fn delayed_then_rejected_response_counts_one_terminal_drop_and_reject() {
     let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -438,7 +476,7 @@ async fn c8_lifecycle_control_is_reliable_when_data_queues_are_congested() {
     assert_eq!(table.process_one_control(3, true), Some(false));
     assert_eq!(table.active_associations(), 0);
     assert_eq!(table.active_entries(), 0);
-    assert!(wakes.load(Ordering::Relaxed) >= queued + 2);
+    assert!(wakes.load(Ordering::Relaxed) >= 3);
 }
 
 #[tokio::test]

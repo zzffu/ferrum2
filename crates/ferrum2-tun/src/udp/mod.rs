@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc as sync_mpsc};
 
 use tokio::sync::{mpsc, oneshot};
@@ -499,6 +499,39 @@ struct OwnerResponse {
     payload: Vec<u8>,
 }
 
+struct ResponseWake {
+    pending: AtomicBool,
+    wake: OwnerWake,
+}
+
+impl ResponseWake {
+    fn new(wake: OwnerWake) -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            wake,
+        }
+    }
+
+    fn signal(&self) {
+        if !self.pending.load(Ordering::Relaxed)
+            && self
+                .pending
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.wake.signal();
+        }
+    }
+
+    fn clear(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn mark_pending(&self) {
+        self.pending.store(true, Ordering::Release);
+    }
+}
+
 fn emit_response_drop(
     events: &TunEventSink,
     reason: UdpResponseDropReason,
@@ -515,6 +548,7 @@ pub struct UdpResponseSink {
     payload_bound: usize,
     lease: Arc<AssociationLease>,
     responses: mpsc::Sender<OwnerResponse>,
+    response_wake: Arc<ResponseWake>,
 }
 
 impl UdpResponseSink {
@@ -577,7 +611,7 @@ impl UdpResponseSink {
         };
         match self.responses.try_send(response) {
             Ok(()) => {
-                self.lease.wake.signal();
+                self.response_wake.signal();
                 UdpResponseSendOutcome::Queued
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -610,6 +644,7 @@ pub struct UdpCandidate {
     receiver: Option<mpsc::Receiver<UdpDatagram>>,
     lease: Arc<AssociationLease>,
     responses: mpsc::Sender<OwnerResponse>,
+    response_wake: Arc<ResponseWake>,
     handed_off: bool,
 }
 
@@ -658,6 +693,7 @@ impl UdpCandidate {
                 payload_bound: selected_payload_bound,
                 lease: Arc::clone(&self.lease),
                 responses: self.responses.clone(),
+                response_wake: Arc::clone(&self.response_wake),
             },
             peer_policy: UdpPeerPolicyHandle {
                 inner: Arc::clone(&self.lease),
