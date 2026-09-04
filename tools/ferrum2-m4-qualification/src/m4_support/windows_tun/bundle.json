@@ -5,13 +5,13 @@
   "files": [
     {
       "path": "contract.rs",
-      "bytes": 18063,
-      "sha256": "6b1b8c6d8ef3c94f339719c47544dc1a9ae979c1583de5c12a508c2b6c567859"
+      "bytes": 19709,
+      "sha256": "9897d7757d8233a4426753cdd9c955b11ca0ebfd32be0ebe7b3300ce6158fe40"
     },
     {
       "path": "diagnostic.rs",
-      "bytes": 26853,
-      "sha256": "7242addbcaafff004614756af635b0290d6384273105c00fa8bd8286b55e42e7"
+      "bytes": 27144,
+      "sha256": "a5c95853892f2480dec6f65286c73d8e0a8ce6b8d8bc814ec03205a6314e47bd"
     },
     {
       "path": "mod.rs",
@@ -20,8 +20,8 @@
     },
     {
       "path": "scenarios.rs",
-      "bytes": 17376,
-      "sha256": "682b5d12d2bca7a2b8658cf89276c9c3ab0c61691af573a10e36612332c86fb8"
+      "bytes": 18490,
+      "sha256": "ec005e2a1c526b18e0405de565396e3d99d0b94c23c6ea9f1e962dd70c2099fd"
     },
     {
       "path": "self_check.rs",
@@ -30,8 +30,8 @@
     },
     {
       "path": "self_check/cli_contract.rs",
-      "bytes": 15207,
-      "sha256": "28d6d5118563d0845b4c5d052e37aea3b66bc54127a119028b72142c1d5d2869"
+      "bytes": 16457,
+      "sha256": "2edaeae73574ffab4aee54c7864f009fa3a46b61f54b27f0c0f51e02d72e874b"
     },
     {
       "path": "self_check/diagnostic.rs",
@@ -40,8 +40,8 @@
     },
     {
       "path": "self_check/workload.rs",
-      "bytes": 9305,
-      "sha256": "80996d2c63531f30be22c73268ca51a2eca61deeaf12ed56f97d8717d504331e"
+      "bytes": 9431,
+      "sha256": "863017b2faf561ea0b8972ef7d90e5c778072afe398413874f530a8a407112ff"
     },
     {
       "path": "support.rs",
@@ -49,14 +49,14 @@
       "sha256": "a0babb6714c4b21866c13cf391c08ed71747d37be32ad0b0b4ed4078dcd5b2cb"
     },
     {
+      "path": "workload.rs",
+      "bytes": 30593,
+      "sha256": "0b6c12cd5cbb42f55b42eb8c65697d81ce07d6887db9f6eb3c55b0cb8fe9b778"
+    },
+    {
       "path": "workload_diagnostic.rs",
       "bytes": 16409,
       "sha256": "24282670edf31888392e38dd02f81547f6694eee5b7a7c375a083c0ae21f6260"
-    },
-    {
-      "path": "workload.rs",
-      "bytes": 29137,
-      "sha256": "1b410c66eb5c60a9b91db117b11780810fa7b869fc44389be264f583ac9a98a3"
     }
   ]
 }

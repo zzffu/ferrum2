@@ -6,7 +6,8 @@ use super::super::diagnostic::{
     FRAGMENT_ACK_LEN, FRAGMENT_ACK_WINDOW, FRAGMENT_BATCH, FRAGMENT_IPV4_RESPONSE_BOUND,
     FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER, FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS,
     FragmentAckBatch, FragmentPhase, FragmentWorkloadAccounting, IPV4_HEADER_LEN,
-    PERFORMANCE_TUN_MTU, SUPPORT_UNDERLAY_IPV4_MTU, UDP_BATCH, UDP_HEADER_LEN,
+    PERFORMANCE_TUN_MTU, SUPPORT_UNDERLAY_IPV4_MTU, UDP_BATCH, UDP_HEADER_LEN, UDP_PACKET_TIMEOUT,
+    UDP_RECEIVE_ATTEMPTS,
 };
 use super::super::workload::{
     elapsed_rate, fragment_ack, fragment_ack_for_request, fragment_ack_sequence,
@@ -28,7 +29,10 @@ pub(super) fn check_basics() -> Result<Vec<u8>, String> {
 }
 
 pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
-    if UDP_BATCH != 8 {
+    if UDP_BATCH != 1
+        || UDP_RECEIVE_ATTEMPTS != 3
+        || UDP_PACKET_TIMEOUT != Duration::from_millis(10)
+    {
         return Err("Windows TUN UDP packet-rate batch recipe is invalid".to_owned());
     }
     if ASSOCIATIONS != 8_192
@@ -104,7 +108,7 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
     if fragment_ack_sequence(&invalid_ack_request_len).is_ok() {
         return Err("fragment ACK with an invalid request length was accepted".to_owned());
     }
-    if FRAGMENT_BATCH != 8
+    if FRAGMENT_BATCH != 4
         || FRAGMENT_ACK_WINDOW != Duration::from_millis(500)
         || fragment_retry_budget(0) != 1
         || fragment_retry_budget(1) != 1
@@ -115,7 +119,7 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
     }
     let mut ordered_batch = FragmentAckBatch::new(100, FRAGMENT_BATCH)?;
     let mut ordered_accounting = FragmentWorkloadAccounting::default();
-    for sequence in [107, 100, 106, 101, 105, 102, 104, 103] {
+    for sequence in [103, 100, 102, 101] {
         ordered_accounting.observe_ack(&mut ordered_batch, sequence)?;
     }
     if !ordered_batch.complete()
@@ -126,7 +130,7 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
     }
     let mut multiple_missing_batch = FragmentAckBatch::new(150, FRAGMENT_BATCH)?;
     let mut multiple_missing_accounting = FragmentWorkloadAccounting::default();
-    for sequence in 150..156 {
+    for sequence in 150..152 {
         multiple_missing_accounting.observe_ack(&mut multiple_missing_batch, sequence)?;
     }
     if multiple_missing_batch.sole_missing_sequence().is_ok() {
@@ -135,7 +139,7 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
     let mut retry_batch = FragmentAckBatch::new(200, FRAGMENT_BATCH)?;
     let mut retry_accounting = FragmentWorkloadAccounting::default();
     retry_accounting.record_initial_attempts(FragmentPhase::Warmup, FRAGMENT_BATCH as u64)?;
-    for sequence in 200..208 {
+    for sequence in 200..204 {
         if sequence != 203 {
             retry_accounting.observe_ack(&mut retry_batch, sequence)?;
         }
@@ -144,13 +148,13 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
     if retry_batch.complete()
         || retry_batch.sole_missing_sequence()? != 203
         || !retry_diagnostic.contains("first=200")
-        || !retry_diagnostic.contains("end=208")
+        || !retry_diagnostic.contains("end=204")
         || !retry_diagnostic.contains("seen=")
         || !retry_diagnostic.contains("missing=1")
         || !retry_diagnostic.contains("missing_sequences=[203]")
         || !retry_diagnostic.contains("budget=1")
         || retry_accounting.observe_ack(&mut retry_batch, 200).is_ok()
-        || retry_accounting.observe_ack(&mut retry_batch, 208).is_ok()
+        || retry_accounting.observe_ack(&mut retry_batch, 204).is_ok()
     {
         return Err("Windows TUN missing/future fragment ACK mutation was accepted".to_owned());
     }
@@ -163,7 +167,7 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
         || retry_accounting
             .record_retransmission(FragmentPhase::Warmup, 204, 1)
             .is_ok()
-        || retry_accounting.warmup_request_attempts != 9
+        || retry_accounting.warmup_request_attempts != 5
         || retry_accounting.retransmissions != 1
         || retry_accounting.ack_window_expirations != 1
         || retry_accounting.duplicate_or_stale_acks != 1

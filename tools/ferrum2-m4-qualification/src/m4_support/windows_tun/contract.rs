@@ -6,6 +6,7 @@ use super::diagnostic::{
 use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::{Component, PathBuf};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Scenario {
@@ -45,11 +46,18 @@ impl Scenario {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkloadWindow {
+    pub(crate) warmup: Duration,
+    pub(crate) active: Duration,
+}
+
 pub(crate) struct WorkloadArgs {
     pub(crate) scenario: Scenario,
     pub(crate) target_ip: IpAddr,
     pub(crate) tcp_port: u16,
     pub(crate) udp_port: u16,
+    pub(crate) window: Option<WorkloadWindow>,
     pub(crate) output: PathBuf,
     pub(crate) association_source: Option<UdpAssociationSourceArgs>,
     pub(crate) diagnostic: Option<UdpWorkloadDiagnosticArgs>,
@@ -118,6 +126,17 @@ pub(crate) fn parse_canonical_nonzero_u64(value: String, flag: &str) -> Result<u
         ));
     }
     Ok(parsed)
+}
+pub(crate) fn parse_workload_seconds(
+    value: String,
+    flag: &str,
+    maximum: u64,
+) -> Result<Duration, String> {
+    let seconds = parse_canonical_nonzero_u64(value, flag)?;
+    if seconds > maximum {
+        return Err(format!("{flag} cannot exceed {maximum} seconds"));
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 pub(crate) fn parse_diagnostic_max_events(value: String) -> Result<usize, String> {
@@ -244,6 +263,8 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
     let mut tcp_port = None;
     let mut udp_port = None;
     let mut output = None;
+    let mut warmup_seconds = None;
+    let mut active_seconds = None;
     let mut diagnostic_ledger = None;
     let mut diagnostic_run_nonce = None;
     let mut diagnostic_max_events = None;
@@ -258,6 +279,8 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
             "--tcp-port" => take_unique(&mut tcp_port, value, &flag)?,
             "--udp-port" => take_unique(&mut udp_port, value, &flag)?,
             "--output" => take_unique(&mut output, value, &flag)?,
+            "--warmup-seconds" => take_unique(&mut warmup_seconds, value, &flag)?,
+            "--active-seconds" => take_unique(&mut active_seconds, value, &flag)?,
             "--diagnostic-ledger" => take_unique(&mut diagnostic_ledger, value, &flag)?,
             "--diagnostic-run-nonce" => take_unique(&mut diagnostic_run_nonce, value, &flag)?,
             "--diagnostic-max-events" => take_unique(&mut diagnostic_max_events, value, &flag)?,
@@ -287,6 +310,31 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
     }
     if output.parent().is_none_or(|parent| !parent.is_dir()) {
         return Err("Windows TUN workload output parent must exist".to_owned());
+    }
+    let window = match (warmup_seconds, active_seconds) {
+        (None, None) => None,
+        (Some(warmup), Some(active)) => Some(WorkloadWindow {
+            warmup: parse_workload_seconds(warmup, "--warmup-seconds", 60)?,
+            active: parse_workload_seconds(active, "--active-seconds", 300)?,
+        }),
+        _ => {
+            return Err(
+                "--warmup-seconds and --active-seconds must be supplied together".to_owned(),
+            );
+        }
+    };
+    if window.is_some()
+        && !matches!(
+            scenario,
+            Scenario::TcpSingle
+                | Scenario::TcpFairness
+                | Scenario::UdpPackets
+                | Scenario::Fragments
+        )
+    {
+        return Err(
+            "explicit workload windows are unsupported for count-based scenarios".to_owned(),
+        );
     }
     let diagnostic_ledger = parse_diagnostic_ledger_args(
         diagnostic_ledger,
@@ -344,6 +392,7 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
         tcp_port: parse_port(tcp_port, "--tcp-port")?,
         udp_port: parse_port(udp_port, "--udp-port")?,
         output,
+        window,
         association_source,
         diagnostic,
     })

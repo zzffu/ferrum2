@@ -7,7 +7,7 @@ import json
 import pathlib
 
 from tools.performance_candidate.json_contract import CandidateControlError, read_bounded_closed_json
-from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, MODES, PAIR_COUNTS, PAIR_SCHEDULE, QUALIFICATION_GROUPS, QUALIFICATION_ONLY_SELECTIONS, SCENARIO_CATALOG, SCENARIO_EVIDENCE, TCP_REQUEST_SCENARIOS, UDP_DIRECT_PAYLOAD_BOUNDS, UDP_SS_PAYLOAD_MATRIX, WARMUP_SECONDS
+from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, MODES, PAIR_COUNTS, PAIR_SCHEDULE, QUALIFICATION_GROUPS, SCENARIO_CATALOG, SCENARIO_EVIDENCE, TCP_REQUEST_SCENARIOS, UDP_DIRECT_PAYLOAD_BOUNDS, UDP_SS_PAYLOAD_MATRIX, WARMUP_SECONDS
 from tools.performance_candidate.linux.evidence_contract import scenario_evidence_contract
 from tools.performance_candidate.linux.policy import MEASUREMENT_ENVIRONMENT, UNCALIBRATED_POLICY, _scenario_policy_is_applicable, validate_decision_policy
 from tools.performance_candidate.linux.scale import SCALE_SCENARIO, _scale_scenario_entry, validate_scale_lineage_shape, validate_scale_safety_policy
@@ -140,14 +140,9 @@ def create_plan(
 
     if mode not in MODES:
         raise CandidateControlError("mode must be diagnostic or qualification")
-    if selection in QUALIFICATION_ONLY_SELECTIONS:
-        raise CandidateControlError(
-            "Windows TUN lifecycle selection is qualification-only; use "
-            "windows-tun-m17 for paired performance evidence"
-        )
     if selection == WINDOWS_TUN_SELECTION:
         raise CandidateControlError(
-            "windows-tun-m17 uses the dedicated windows-tun-plan command"
+            "windows-tun-host uses the dedicated host performance runner"
         )
     if mode == "diagnostic" and selection not in SCENARIO_CATALOG:
         raise CandidateControlError("diagnostic selection must be one profile workload")

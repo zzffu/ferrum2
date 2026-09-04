@@ -1,11 +1,12 @@
 use super::contract::{
-    ProbeArgs, Scenario, parse_probe, parse_udp_diagnostic_finalize, parse_workload,
+    ProbeArgs, Scenario, WorkloadWindow, parse_probe, parse_udp_diagnostic_finalize, parse_workload,
 };
 use super::diagnostic::{
     FRAGMENT_ACTIVE, FRAGMENT_MINIMUM_DATAGRAMS, FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER,
     FRAGMENT_WARMUP, FragmentPhase, FragmentWorkloadAccounting, IO_TIMEOUT, RING_BURST_ATTEMPTS,
     ROUTE_DATAGRAMS_PER_TARGET, ROUTE_PAYLOAD, ROUTE_SOURCE_SLOTS, ROUTE_TARGET_SLOTS,
-    UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_PAYLOAD, UdpDiagnosticFinalizeArgs,
+    TCP_FAIRNESS_ACTIVE, TCP_FAIRNESS_WARMUP, TCP_SINGLE_ACTIVE, TCP_SINGLE_WARMUP, UDP_ACTIVE,
+    UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_PAYLOAD, UDP_WARMUP, UdpDiagnosticFinalizeArgs,
     udp_diagnostic_finalize_marker,
 };
 use super::workload::{
@@ -21,7 +22,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub(crate) fn route_target_addresses(
     target_ip: IpAddr,
@@ -197,12 +198,16 @@ pub(crate) fn udp_route_once(target_ip: IpAddr, base_port: u16) -> Result<Value,
     }))
 }
 
-pub(crate) fn fragments(address: SocketAddr) -> Result<Value, String> {
+pub(crate) fn fragments(
+    address: SocketAddr,
+    warmup: Duration,
+    active: Duration,
+) -> Result<Value, String> {
     let socket = connected_udp(address)?;
     let mut reply = [0_u8; FRAGMENT_REPLY_BUFFER];
     let mut sequence = 0_u64;
     let mut accounting = FragmentWorkloadAccounting::default();
-    let warmup_deadline = Instant::now() + FRAGMENT_WARMUP;
+    let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
         sequence = fragment_workload_batch_round_trip(
             &socket,
@@ -213,7 +218,7 @@ pub(crate) fn fragments(address: SocketAddr) -> Result<Value, String> {
         )?;
     }
     let start = Instant::now();
-    let deadline = start + FRAGMENT_ACTIVE;
+    let deadline = start + active;
     while Instant::now() < deadline
         || accounting.active_unique_datagrams < FRAGMENT_MINIMUM_DATAGRAMS
     {
@@ -297,12 +302,17 @@ pub(crate) fn ring_full(address: SocketAddr) -> Result<Value, String> {
 pub(crate) fn write_observation(
     path: &Path,
     scenario: Scenario,
+    window: Option<WorkloadWindow>,
     observation: Value,
 ) -> Result<(), String> {
     let document = json!({
-        "schema_version": 1,
-        "kind": "windows_tun_guest_workload",
+        "schema_version": 2,
+        "kind": "windows_tun_workload",
         "scenario": scenario.label(),
+        "window": window.map(|window| json!({
+            "warmup_seconds": window.warmup.as_secs(),
+            "active_seconds": window.active.as_secs(),
+        })),
         "observation": observation,
         "status": "PASS"
     });
@@ -337,10 +347,24 @@ pub(crate) fn run_workload(arguments: &[OsString]) -> Result<String, String> {
             _ => arguments.udp_port,
         },
     );
+    let explicit_window = arguments
+        .window
+        .map(|window| (window.warmup, window.active));
     let observation = match arguments.scenario {
-        Scenario::TcpSingle => tcp_single(address)?,
-        Scenario::TcpFairness => tcp_fairness(address)?,
-        Scenario::UdpPackets => udp_packets(address)?,
+        Scenario::TcpSingle => {
+            let (warmup, active) =
+                explicit_window.unwrap_or((TCP_SINGLE_WARMUP, TCP_SINGLE_ACTIVE));
+            tcp_single(address, warmup, active)?
+        }
+        Scenario::TcpFairness => {
+            let (warmup, active) =
+                explicit_window.unwrap_or((TCP_FAIRNESS_WARMUP, TCP_FAIRNESS_ACTIVE));
+            tcp_fairness(address, warmup, active)?
+        }
+        Scenario::UdpPackets => {
+            let (warmup, active) = explicit_window.unwrap_or((UDP_WARMUP, UDP_ACTIVE));
+            udp_packets(address, warmup, active)?
+        }
         Scenario::UdpAssociations => udp_associations(
             address,
             arguments.association_source.as_ref().ok_or_else(|| {
@@ -349,10 +373,18 @@ pub(crate) fn run_workload(arguments: &[OsString]) -> Result<String, String> {
             arguments.diagnostic.as_ref(),
         )?,
         Scenario::UdpRouteOnce => udp_route_once(arguments.target_ip, arguments.udp_port)?,
-        Scenario::Fragments => fragments(address)?,
+        Scenario::Fragments => {
+            let (warmup, active) = explicit_window.unwrap_or((FRAGMENT_WARMUP, FRAGMENT_ACTIVE));
+            fragments(address, warmup, active)?
+        }
         Scenario::RingFull => ring_full(address)?,
     };
-    write_observation(&arguments.output, arguments.scenario, observation)?;
+    write_observation(
+        &arguments.output,
+        arguments.scenario,
+        arguments.window,
+        observation,
+    )?;
     Ok(format!(
         "windows_tun_workload status=PASS scenario={}",
         arguments.scenario.label()

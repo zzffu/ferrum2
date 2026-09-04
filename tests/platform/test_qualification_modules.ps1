@@ -719,15 +719,22 @@ foreach ($configuredEntrypoint in @(
         "configured topology plan parameter is absent: $configuredEntrypoint"
 }
 $performanceRunnerInterfaceAst = Get-ScriptAst (Join-Path $repositoryRoot `
-    'tools\windows-tun\performance\run_windows_tun_performance_hyperv.ps1')
+    'tools\windows-tun\performance\run_windows_tun_performance_host.ps1')
 $performanceRunnerInterfaceParameters = @(
     $performanceRunnerInterfaceAst.ParamBlock.Parameters |
         ForEach-Object { $_.Name.VariablePath.UserPath }
 )
-Assert-True ('TopologyPlanPath' -cin $performanceRunnerInterfaceParameters -and
-    'ValidationOnly' -cin $performanceRunnerInterfaceParameters -and
-    'ValidationPairCount' -cin $performanceRunnerInterfaceParameters) `
-    'performance runner does not expose the configured topology plan'
+$expectedPerformanceRunnerParameters = @(
+    'PlanOnly', 'RecoveryOnly', 'SafetyCheck', 'Mode', 'BaselineSha',
+    'CandidateSha', 'EvidenceDirectory', 'AcknowledgeHostNetworkMutation'
+)
+Assert-True (
+    $performanceRunnerInterfaceParameters.Count -eq
+        $expectedPerformanceRunnerParameters.Count -and
+    @($expectedPerformanceRunnerParameters | Where-Object {
+        $_ -cnotin $performanceRunnerInterfaceParameters
+    }).Count -eq 0
+) 'host performance runner public interface changed'
 $topologyReadonlyValues = @(Get-AstStringValue (Get-ScriptAst (Join-Path $repositoryRoot `
     'tools\windows-tun\lab\windows_tun_hyperv_support_topology_readonly.ps1')))
 Assert-True (@(
@@ -837,7 +844,7 @@ Assert-True (@($forbiddenOwners | Where-Object {
 }).Count -eq 0) 'performance PowerShell duplicated a HostHyperV owner'
 
 $performanceRunnerPath = Join-Path $repositoryRoot `
-    'tools\windows-tun\performance\run_windows_tun_performance_hyperv.ps1'
+    'tools\windows-tun\performance\run_windows_tun_performance_host.ps1'
 $tokens = $null
 $errors = $null
 $performanceRunnerAst = [Management.Automation.Language.Parser]::ParseFile(
@@ -847,31 +854,33 @@ Assert-True ($errors.Count -eq 0) 'performance runner parser failed'
 $sourceAssignments = @($performanceRunnerAst.FindAll({
     param($node)
     $node -is [Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text -ceq '$performanceSourcePaths'
+        $node.Left.Extent.Text -ceq '$expectedPaths'
 }, $true))
 Assert-True ($sourceAssignments.Count -eq 1) `
     'performance source-map owner is missing or duplicated'
 $expectedPerformancePaths = @($sourceAssignments[0].Right.FindAll({
-    param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst]
+    param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+        $node.Value -cmatch '/'
 }, $true) | ForEach-Object { $_.Value })
-Assert-True (@($labSourcePaths | Where-Object {
-    $_ -cnotin $expectedPerformancePaths
-}).Count -eq 0) 'performance source closure omits a directly loaded Lab source'
 $performanceSourceBundlePath = Join-Path $repositoryRoot `
     'tools\powershell\Ferrum2.Performance\bundle.json'
 $performanceSourceBundle = Get-Content -LiteralPath $performanceSourceBundlePath -Raw -Encoding utf8 |
     ConvertFrom-Json -Depth 8 -ErrorAction Stop
 $actualPerformancePaths = @($performanceSourceBundle.files.path)
-Assert-True ($expectedPerformancePaths.Count -eq 38 -and
+Assert-True ($expectedPerformancePaths.Count -eq 8 -and
     @($expectedPerformancePaths | Where-Object {
         $_ -cnotin $actualPerformancePaths
     }).Count -eq 0 -and @($actualPerformancePaths | Where-Object {
         $_ -cnotin $expectedPerformancePaths
-    }).Count -eq 0) 'performance source bundle is not the exact 38-file set'
+    }).Count -eq 0) 'performance source bundle is not the exact host-only set'
+Assert-True (@($actualPerformancePaths | Where-Object {
+    $_ -cmatch '(HyperV|Guest|Checkpoint|Topology|RuntimeStaging|Ferrum2\.WindowsTun\.Lab)'
+}).Count -eq 0) 'performance source bundle retains a VM execution dependency'
 $performanceSourceBundleHash = Assert-Ferrum2BootstrapSourceManifest `
     -ManifestPath $performanceSourceBundlePath -RepositoryRoot $repositoryRoot `
-    -ExpectedKind 'ferrum2.windows-tun-performance-source-bundle.v1' `
-    -ExpectedEntrypoint 'tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1' `
+    -ExpectedKind 'ferrum2.windows-tun-performance-source-bundle.v2' `
+    -ExpectedEntrypoint 'tools/windows-tun/performance/run_windows_tun_performance_host.ps1' `
     -ExpectedPaths $expectedPerformancePaths
 Assert-True ($performanceSourceBundleHash -cmatch '^[0-9a-f]{64}$') `
     'performance source-bundle identity is invalid'

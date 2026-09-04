@@ -20,7 +20,10 @@ pub(crate) const TCP_FAIRNESS_READINESS_PAYLOAD: usize = 1_024;
 pub(crate) const UDP_WARMUP: Duration = Duration::from_secs(5);
 pub(crate) const UDP_ACTIVE: Duration = Duration::from_secs(30);
 pub(crate) const UDP_PAYLOAD: usize = 1_200;
-pub(crate) const UDP_BATCH: usize = 8;
+/// Keeps exactly one datagram outstanding so every loss remains observable.
+pub(crate) const UDP_BATCH: usize = 1;
+pub(crate) const UDP_RECEIVE_ATTEMPTS: usize = 3;
+pub(crate) const UDP_PACKET_TIMEOUT: Duration = Duration::from_millis(10);
 pub(crate) const UDP_MINIMUM_DATAGRAMS: u64 = 4_096;
 pub(crate) const ASSOCIATIONS: usize = 8_192;
 pub(crate) const ASSOCIATION_BOOTSTRAP_BATCH: usize = 1;
@@ -30,7 +33,8 @@ pub(crate) const ASSOCIATION_WARMUP: Duration = Duration::from_secs(5);
 pub(crate) const FRAGMENT_WARMUP: Duration = Duration::from_secs(5);
 pub(crate) const FRAGMENT_ACTIVE: Duration = Duration::from_secs(30);
 pub(crate) const FRAGMENT_PAYLOAD: usize = 1_440;
-pub(crate) const FRAGMENT_BATCH: usize = 8;
+/// Keeps one fragment request burst within the product's fixed per-session queue depth.
+pub(crate) const FRAGMENT_BATCH: usize = 4;
 pub(crate) const FRAGMENT_MINIMUM_DATAGRAMS: u64 = 4_096;
 pub(crate) const FRAGMENT_ACK_WINDOW: Duration = Duration::from_millis(500);
 pub(crate) const FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS: u64 = 1_000_000;

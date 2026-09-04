@@ -2,10 +2,10 @@ use super::diagnostic::{
     ASSOCIATIONS, FRAGMENT_ACK_LEN, FRAGMENT_ACK_TAG, FRAGMENT_ACK_WINDOW, FRAGMENT_BATCH,
     FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER, FRAGMENT_REQUEST_TAG,
     FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS, FragmentAckBatch, FragmentPhase,
-    FragmentWorkloadAccounting, IO_TIMEOUT, SUPPORT_TCP_IDLE_TIMEOUT, TCP_FAIRNESS_ACTIVE,
-    TCP_FAIRNESS_FLOWS, TCP_FAIRNESS_PAYLOAD, TCP_FAIRNESS_READINESS_PAYLOAD, TCP_FAIRNESS_WARMUP,
-    TCP_SINGLE_ACTIVE, TCP_SINGLE_MINIMUM_BYTES, TCP_SINGLE_PAYLOAD, TCP_SINGLE_WARMUP, UDP_ACTIVE,
-    UDP_BATCH, UDP_MINIMUM_DATAGRAMS, UDP_PAYLOAD, UDP_WARMUP, UdpAssociationSourceArgs,
+    FragmentWorkloadAccounting, IO_TIMEOUT, SUPPORT_TCP_IDLE_TIMEOUT, TCP_FAIRNESS_FLOWS,
+    TCP_FAIRNESS_PAYLOAD, TCP_FAIRNESS_READINESS_PAYLOAD, TCP_SINGLE_MINIMUM_BYTES,
+    TCP_SINGLE_PAYLOAD, UDP_BATCH, UDP_MINIMUM_DATAGRAMS, UDP_PACKET_TIMEOUT, UDP_PAYLOAD,
+    UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
 };
 use serde_json::{Value, json};
 use std::io::{ErrorKind, Read, Write};
@@ -78,13 +78,17 @@ pub(crate) fn elapsed_rate(units: u64, elapsed: Duration, name: &str) -> Result<
     u64::try_from(rate.max(1)).map_err(|_| format!("{name} rate overflow"))
 }
 
-pub(crate) fn tcp_single(address: SocketAddr) -> Result<Value, String> {
+pub(crate) fn tcp_single(
+    address: SocketAddr,
+    warmup: Duration,
+    active: Duration,
+) -> Result<Value, String> {
     let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
         .map_err(|error| format!("TCP single-flow connect failed: {error}"))?;
     configure_tcp(&stream)?;
     let payload = checked_payload(TCP_SINGLE_PAYLOAD, 1);
     let mut reply = vec![0; payload.len()];
-    let warmup_deadline = Instant::now() + TCP_SINGLE_WARMUP;
+    let warmup_deadline = Instant::now() + warmup;
     let mut warmup_bytes = 0_u64;
     while Instant::now() < warmup_deadline {
         tcp_round_trip(&mut stream, &payload, &mut reply)?;
@@ -93,7 +97,7 @@ pub(crate) fn tcp_single(address: SocketAddr) -> Result<Value, String> {
             .ok_or_else(|| "TCP single-flow warmup byte count overflow".to_owned())?;
     }
     let start = Instant::now();
-    let deadline = start + TCP_SINGLE_ACTIVE;
+    let deadline = start + active;
     let mut checked_bytes = 0_u64;
     while Instant::now() < deadline {
         tcp_round_trip(&mut stream, &payload, &mut reply)?;
@@ -122,7 +126,11 @@ pub(crate) fn tcp_single(address: SocketAddr) -> Result<Value, String> {
     }))
 }
 
-pub(crate) fn tcp_fairness(address: SocketAddr) -> Result<Value, String> {
+pub(crate) fn tcp_fairness(
+    address: SocketAddr,
+    warmup: Duration,
+    active: Duration,
+) -> Result<Value, String> {
     let start = Arc::new(OnceLock::new());
     let cancel = Arc::new(AtomicBool::new(false));
     let mut streams = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
@@ -154,11 +162,11 @@ pub(crate) fn tcp_fairness(address: SocketAddr) -> Result<Value, String> {
                     }
                     thread::sleep(Duration::from_millis(1));
                 };
-                let warmup_deadline = common_start + TCP_FAIRNESS_WARMUP;
+                let warmup_deadline = common_start + warmup;
                 while Instant::now() < warmup_deadline {
                     tcp_round_trip(&mut stream, &payload, &mut reply)?;
                 }
-                let deadline = warmup_deadline + TCP_FAIRNESS_ACTIVE;
+                let deadline = warmup_deadline + active;
                 let mut bytes = 0_u64;
                 while Instant::now() < deadline {
                     tcp_round_trip(&mut stream, &payload, &mut reply)?;
@@ -482,6 +490,35 @@ pub(crate) fn udp_batch_round_trip(
     }
     Ok(end_sequence)
 }
+fn udp_packet_socket(address: SocketAddr) -> Result<UdpSocket, String> {
+    let socket = connected_udp(address)?;
+    socket
+        .set_read_timeout(Some(UDP_PACKET_TIMEOUT))
+        .map_err(|error| format!("set UDP packet-rate read timeout failed: {error}"))?;
+    Ok(socket)
+}
+
+fn udp_packet_round_trip_with_recovery(
+    socket: &mut UdpSocket,
+    address: SocketAddr,
+    first_sequence: u64,
+    reply: &mut [u8],
+) -> Result<(u64, u64), String> {
+    let mut receive_retries = 0_u64;
+    loop {
+        match udp_batch_round_trip(socket, UDP_PAYLOAD, UDP_BATCH, first_sequence, reply) {
+            Ok(next_sequence) => return Ok((next_sequence, receive_retries)),
+            Err(error)
+                if error.starts_with("UDP batch receive failed:")
+                    && (receive_retries as usize) + 1 < UDP_RECEIVE_ATTEMPTS =>
+            {
+                receive_retries += 1;
+                *socket = udp_packet_socket(address)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 pub(crate) fn fragment_batch_round_trip(
     socket: &UdpSocket,
@@ -661,35 +698,48 @@ pub(crate) fn fragment_workload_batch_round_trip(
     Ok(batch.end_sequence)
 }
 
-pub(crate) fn udp_packets(address: SocketAddr) -> Result<Value, String> {
-    let socket = connected_udp(address)?;
+pub(crate) fn udp_packets(
+    address: SocketAddr,
+    warmup: Duration,
+    active: Duration,
+) -> Result<Value, String> {
+    let mut socket = udp_packet_socket(address)?;
     let mut reply = vec![0; UDP_PAYLOAD];
-    let mut sequence = 0_u64;
-    let warmup_deadline = Instant::now() + UDP_WARMUP;
+    let (mut sequence, _) =
+        udp_packet_round_trip_with_recovery(&mut socket, address, 0, &mut reply)?;
+    let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
-        sequence = udp_batch_round_trip(&socket, UDP_PAYLOAD, UDP_BATCH, sequence, &mut reply)?;
+        (sequence, _) =
+            udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
     }
     let start = Instant::now();
-    let deadline = start + UDP_ACTIVE;
+    let deadline = start + active;
     let mut datagrams = 0_u64;
-    while Instant::now() < deadline {
-        sequence = udp_batch_round_trip(&socket, UDP_PAYLOAD, UDP_BATCH, sequence, &mut reply)?;
+    let mut receive_retries = 0_u64;
+    while Instant::now() < deadline || datagrams < UDP_MINIMUM_DATAGRAMS {
+        let (next_sequence, retries) =
+            udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
+        sequence = next_sequence;
+        receive_retries = receive_retries
+            .checked_add(retries)
+            .ok_or_else(|| "UDP receive retry count overflow".to_owned())?;
         datagrams = datagrams
             .checked_add(UDP_BATCH as u64)
             .ok_or_else(|| "UDP datagram count overflow".to_owned())?;
     }
     let elapsed = start.elapsed();
-    if datagrams < UDP_MINIMUM_DATAGRAMS {
-        return Err("UDP packet-rate correctness coverage is below 4096 echoes".to_owned());
-    }
     Ok(json!({
         "measurements": {
             "packet_rate": elapsed_rate(datagrams, elapsed, "UDP packet rate")?
+        },
+        "counters": {
+            "receive_retries": receive_retries
         },
         "checked_units": datagrams,
         "checks": {
             "every_reply_accounted": true,
             "payload_exact": true,
+            "receive_retries_penalized": true,
             "no_gso": true
         }
     }))
