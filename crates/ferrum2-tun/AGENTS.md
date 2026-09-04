@@ -36,8 +36,8 @@ The library suite is hosted-safe and runs on ordinary Linux and hosted Windows. 
 tests may exercise unsupported-target stubs, pure packet/state logic, and injected owner/adapter
 operations. The default `live-backend` feature is additive and forwards the platform production
 backend; hosted test commands must disable default features so that backend is not compiled into the
-test dependency graph. Tests must never create a real adapter or mutate route, DNS, WFP, interface, or Hyper-V
-state. Such behavior belongs in the pinned local Hyper-V qualification runner.
+test dependency graph. Tests must never create a real adapter or mutate live route, DNS, WFP, or
+interface state. Such behavior belongs only in the explicitly acknowledged host qualification runner.
 
 Keep `live-backend` selection at module boundaries. `process` and `network` each choose one live or
 hosted implementation; owner-only lifecycle, supervisor, TCP, and runtime code belongs in their
@@ -45,4 +45,4 @@ focused runtime/live submodules. Shared packet, stack, cancellation, and bridge 
 per-item feature predicates. Platform configuration validity belongs to the platform constructors;
 the TUN process layer validates only its own flow, buffer, timeout, and mapping resource limits.
 
-The reviewed static packet contract lives in `tests/fixtures/packets/reassembly-v1.hex` with exact provenance in `tests/fixtures/packets/PROVENANCE.toml`. Keep it distinct from the seed sets under `fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}/`; the reviewed synthetic config and strict-route seeds are recorded in `fuzz/corpus/PROVENANCE.toml`. The fuzz crate has empty default features. Hosted Linux CI may format, check, compile, run the deterministic smoke corpus, and run sanitizer-backed libFuzzer campaigns only against these four pure in-memory targets. The required campaign budget is one hour total, divided equally across the targets, with evolved corpora, logs, and crash artifacts retained as workflow evidence. It must never open a real TUN adapter, invoke Hyper-V, mutate host networking, or qualify the unsupported Linux adapter path.
+The reviewed static packet contract lives in `tests/fixtures/packets/reassembly-v1.hex` with exact provenance in `tests/fixtures/packets/PROVENANCE.toml`. Keep it distinct from the seed sets under `fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}/`; the reviewed synthetic config and strict-route seeds are recorded in `fuzz/corpus/PROVENANCE.toml`. The fuzz crate has empty default features. Hosted Linux CI may format, check, compile, run the deterministic smoke corpus, and run sanitizer-backed libFuzzer campaigns only against these four pure in-memory targets. The required campaign budget is one hour total, divided equally across the targets, with evolved corpora, logs, and crash artifacts retained as workflow evidence. It must never open a real TUN adapter, start a virtualization workload, mutate host networking, or qualify the unsupported Linux adapter path.

@@ -10,5 +10,5 @@ workflow-controller behavior in `ci`, performance-controller contracts in `perfo
 privileged workflows in `platform`.
 
 Do not make ordinary test discovery execute privileged, hosted-provider, or performance workloads.
-The public Windows TUN qualification interface is a `Core`, `Endurance`, or `Release` campaign;
-individual profiles are internal supervised workers, not operator commands.
+The public Windows TUN correctness interface is PlanOnly, RecoveryOnly, or one explicitly
+acknowledged host run with a fixed eight-check plan and no profile selector.

@@ -9,7 +9,7 @@ per-RunId ownership, fail-closed recovery, bounded values, and diagnostic output
 execution, elevation, adapter creation, and timing variability out of this suite.
 
 Host runner source-capture tests prove that the closed performance bundle contains every imported
-local owner before execution, excludes Lab VM/topology/checkpoint/guest staging sources, and binds
-exact byte lengths and SHA-256 values. Contract tests cover the small public parameter surface,
+local owner before execution, excludes qualification sources, and binds exact byte lengths and
+SHA-256 values. Contract tests cover the small public parameter surface,
 nonmutating PlanOnly, explicit authorization, exact-resource cleanup, and fail-closed stale-ledger
 behavior without invoking a privileged runner path.

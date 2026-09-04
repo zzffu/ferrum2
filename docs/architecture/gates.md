@@ -25,9 +25,8 @@ external repository setting; unknown values stay marked as gaps rather than bein
 | G-FUZZ-REQUIRED | `tun-fuzz-deterministic.yml:required` | every triggered fuzz workflow run | the same typed controller requires successful impact classification and either all three applicable fuzz gates or their exact unaffected skipped state | 5m; ordinary Linux | closed dependency set and typed result enum | stable independent fuzz context; external branch-protection readback pending |
 | G-LIFECYCLE | `lifecycle-stress.yml:lifecycle-cycles` | every push on every branch + manual | 20 cycles/category and at least 100/binary exact ignored test | 40m; ordinary hosted Linux | exact SHA/clean checkout; test reaps children | push-triggered non-required workflow |
 | G-PERF | `performance-candidate.yml:paired-profile` | manual only | correctness builds/tests and the only accepted six-pair `abba-six-pairs` schedule; Linux plan/trial/summary schemas v6/v4/v7 | 180m; performance | raw evidence retained 30 days; worktrees/processes removed in `always()` | manual performance; calibration required after schema/pair identity change |
-| G-HV-PROFILES | local Windows TUN qualification runner | manual approved host; never CI; public `-Suite Core`, `Endurance`, or `Release` only | Core runs fragments/DNS/UDP/ring; Endurance runs reset/restart; Release runs all six in that fixed order; deterministic smoke is excluded | 30m probe / per-profile bounded supervisor; privileged guest only | schema-4 ledger and build-once candidate artifacts are reused; every profile gets a fresh restore/start/stage/cleanup/stop/restore transaction; main staged v6, host v7, campaign v1; final Off | approved local only; live pending |
-| G-HV-HARDKILL | local `run_windows_tun_hard_kill_hyperv.ps1` | separate manual gate | independently versioned three-case hard-kill qualification | 2h; privileged guest only | static contract v4, staged input v4, host run v4, independent 21-file runtime closure and 25-file host source closure, final Off | approved local only; live pending |
-| G-PS-STATIC | `m0.yml:platform / windows-msvc:Validate Windows qualification static contracts`; local hard-kill `-DescribeContract` | PR/push for module and static-supervisor tests; DescribeContract remains an operator readback | neutral qualification controller bundles; independent exact eight-source host-performance closure; module exports and closed failure contracts; no VM/credential access during static checks | ordinary Windows | no network mutation | wired without live Hyper-V or Wintun execution |
+| G-WIN-HOST-QUAL | local `run_windows_tun_qualification_host.ps1` | manual authorized Windows host; never CI | one exact candidate build plus Wintun create/delete, TCP+UDP, `/32` isolation, live strict-route WFP, network-notification identity retention, forced process-tree recovery, and zero residue | 900s outer / 840s worker / 600s build; elevated and explicitly acknowledged | closed qualification source identity; plan/build/runtime/worker/cleanup/final evidence; `QUALIFIED` only below 900s with every cleanup count zero | qualified 2026-09-04 |
+| G-PS-STATIC | `m0.yml:platform / windows-msvc:Validate Windows qualification static contracts` | PR/push static contract | module export, closed qualification source bundle, fixed PlanOnly contract, acknowledgement fail-closed behavior, and retired-source absence | ordinary Windows; nonmutating | no network mutation and no live qualification claim | wired |
 
 ## R0 readback rules
 
@@ -48,10 +47,11 @@ external repository setting; unknown values stay marked as gaps rather than bein
   settings are external, that readback remains a gap.
 - Hosted Linux executes the target-neutral TUN/Windows-platform library suites, deterministic smoke,
   and four pure in-memory sanitizer fuzz targets. Hosted Windows executes the injected Windows unit
-  suite. Hosted jobs never execute real Wintun, adapter, route, DNS, WFP, checkpoint, or Hyper-V
-  operations and never claim privileged qualification evidence. Policy compares the complete
-  nonempty statement sequence for each mandatory hosted/smoke/campaign step, so a conditional shell
-  wrapper cannot satisfy the gate by merely retaining the command text.
-- Windows TUN qualification and performance have disjoint execution paths. Qualification owns the
-  `Ferrum2.WindowsTun.Lab` mechanics, `lab_checkpoint`, suites, live witnesses, and pass/fail.
-  Performance owns its independent eight-source host closure, paired trials, recovery, and thresholds.
+  suite. Hosted jobs never execute real Wintun, adapter, route, DNS, or WFP operations and never
+  claim privileged qualification evidence. Policy compares the complete nonempty statement sequence
+  for each mandatory hosted/smoke/campaign step, so a conditional shell wrapper cannot satisfy the
+  gate by merely retaining the command text.
+- Windows TUN qualification and performance have separate public entrypoints, plans, evidence, and
+  verdicts. Qualification may reuse reviewed private host ownership and execution primitives, but
+  owns its fixed correctness witnesses and 900-second supervisor. Performance owns paired trials,
+  lifecycle cycles, recovery evidence, and thresholds.

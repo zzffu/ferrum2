@@ -1,22 +1,22 @@
 # Platform Qualification Script Guidelines
 
-This directory owns privileged and hosted qualification orchestration. The public Main runner exposes
-only `-Suite Core`, `Endurance`, or `Release`; its six live profiles are internal workers executed in
-fixed order. Build the candidate artifacts once per campaign, but give every profile a fresh
-restore/start/stage/cleanup/stop/restore transaction. Hard owns the independent hard-kill gate. Keep
-the 28-file Main and 21-file Hard runtime closures independently enumerated and hash-verified before
-importing any script; hard-kill must not depend on Main runtime functions.
+This directory owns the unprivileged native contract and the sole privileged Windows TUN correctness
+entrypoint, `run_windows_tun_qualification_host.ps1`. The public correctness interface has only
+`-PlanOnly`, `-RecoveryOnly`, and the acknowledged real run; do not add profiles, suites, repeat
+counts, guest stages, or alternate runners.
 
-Static contract scripts may run on a development host. `native_contract.py` owns the loopback-only,
-unprivileged binary behavior checks; `qualify_native.py` is the thin local/hosted entrypoint. Local
-execution uses `qualify_native.py --local-contract`, while hosted evidence mode must bind the exact
-GitHub SHA, runner identity, clean checkout, and artifact paths. Hyper-V adapter and underlay cases
-run only in their designated environment and must preserve bounded cleanup and structured evidence.
-Pure Rust tests and deterministic TUN smoke belong to ordinary CI, not this guest controller. Shared
-VM, topology, staging, and bundle mechanics come from `Ferrum2.WindowsTun.Lab`; qualification policy
-and evidence remain local to this tree.
+The real run builds one exact candidate and executes the fixed eight-check plan. Its outer deadline
+is 900 seconds, worker deadline is 840 seconds, and build deadline is 600 seconds. It requires an
+already elevated PowerShell process and `-AcknowledgeHostNetworkMutation`, never auto-elevates, and
+may touch only ledger-owned Wintun, RFC 2544 `/32` route/address, process, port, and dynamic
+strict-route WFP identities. Default routes, host DNS, physical adapters, WLAN, firewall rules,
+sing-box, and unrelated resources are outside the transaction.
 
-PowerShell libraries must not execute workflows when dot-sourced. Update the relevant source-bundle
-manifest whenever an owned script changes or moves.
-Identity ledger schema 4, main staged v6/host v7/campaign v1, and hard static/staged/host v4 are the
-only accepted evidence versions. Topology contracts use `lab_checkpoint`; do not add a legacy alias.
+`native_contract.py` owns loopback-only binary behavior; `qualify_native.py` is its thin local/hosted
+entrypoint. Hosted evidence mode binds the exact GitHub SHA, runner identity, clean checkout, and
+artifact paths. Static contracts and `-PlanOnly` are nonmutating and must not claim live evidence.
+
+PowerShell libraries must not execute workflows when dot-sourced. The qualification source bundle
+must enumerate every consumed file by canonical path, exact byte length, and SHA-256. Update it
+atomically whenever an owned or shared source changes. A verdict requires all eight checks, the
+requested candidate and bundle identities, less than 900 seconds, and zero cleanup residue.

@@ -43,10 +43,10 @@ Linux exercises target-neutral logic and unsupported-target behavior; hosted Win
 exercises injected operation seams. `live-backend` is the positive production capability and remains
 enabled by default and by `--all-features`; hosted test commands must disable default features so the
 live Windows module is absent from their dependency graph. Tests must not call `Adapter::create` or
-invoke route, address, DNS, WFP, interface, or Hyper-V mutators. Live correctness qualification
-remains in the pinned local Hyper-V guest. Live performance may run directly on Windows only through
-the repository's dedicated host performance runner, from an already elevated shell, with explicit
-network-mutation acknowledgement and per-run transactional ownership/recovery. That runner must not
-change default routes, host DNS, WFP, physical adapters, WLAN, sing-box, or unrelated resources.
+invoke live route, address, DNS, WFP, or interface mutators. Live correctness runs directly on
+Windows only through the repository's dedicated 900-second host qualification runner. Live
+performance uses its separate host performance runner. Both require an already elevated shell,
+explicit network-mutation acknowledgement, and per-run transactional ownership/recovery; neither may
+change default routes, host DNS, physical adapters, WLAN, sing-box, or unrelated resources.
 Hosted unit tests prove transaction semantics, not live-driver behavior; CI must not claim privileged
 TUN evidence.

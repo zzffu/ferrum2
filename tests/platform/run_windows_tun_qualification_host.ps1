@@ -1,0 +1,205 @@
+#requires -Version 7.4
+
+<#
+.SYNOPSIS
+Runs the bounded, explicitly authorized Windows-host Wintun correctness qualification.
+
+.DESCRIPTION
+PlanOnly is unprivileged and nonmutating. RecoveryOnly removes only identities retained in the
+transaction ledger. A real qualification requires an already elevated shell and the literal
+-AcknowledgeHostNetworkMutation switch. The complete supervised run is capped at 900 seconds.
+#>
+
+[CmdletBinding(DefaultParameterSetName = "Run")]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
+    [switch]$PlanOnly,
+    [Parameter(Mandatory = $true, ParameterSetName = "Recovery")]
+    [switch]$RecoveryOnly,
+    [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string]$CandidateSha,
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+    [string]$EvidenceDirectory,
+    [Parameter(ParameterSetName = "Run")]
+    [switch]$AcknowledgeHostNetworkMutation
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$maximumElapsedSeconds = 900
+$workerTimeoutSeconds = 840
+$supervisorTimer = [Diagnostics.Stopwatch]::StartNew()
+$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') `
+    -ErrorAction Stop).Path
+$moduleRoot = Join-Path $repositoryRoot 'tools\powershell\Ferrum2.Qualification.Host'
+. (Join-Path $moduleRoot 'SourceBundle.ps1')
+$sourceBundle = Read-Ferrum2HostQualificationSourceBundle `
+    -RepositoryRoot $repositoryRoot `
+    -ManifestPath (Join-Path $moduleRoot 'bundle.json')
+
+if ($PlanOnly -or $RecoveryOnly) {
+    Import-Module -Name (Join-Path $moduleRoot 'Ferrum2.Qualification.Host.psd1') `
+        -Force -ErrorAction Stop
+    $arguments = @{
+        RepositoryRoot = $repositoryRoot
+        QualificationSourceBundleSha256 = $sourceBundle.sha256
+    }
+    if ($PlanOnly) {
+        $arguments.PlanOnly = [Management.Automation.SwitchParameter]$true
+        $arguments.CandidateSha = $CandidateSha
+    } else {
+        $arguments.RecoveryOnly = [Management.Automation.SwitchParameter]$true
+    }
+    Invoke-Ferrum2HostQualification @arguments | ConvertTo-Json -Depth 20
+    exit 0
+}
+
+if (-not $AcknowledgeHostNetworkMutation) {
+    throw 'host qualification requires -AcknowledgeHostNetworkMutation'
+}
+if ($EvidenceDirectory -match '["\r\n]' -or
+    [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
+    throw 'host qualification evidence path is invalid'
+}
+$resolvedEvidence = [IO.Path]::GetFullPath($EvidenceDirectory).TrimEnd('\', '/')
+if (Test-Path -LiteralPath $resolvedEvidence) {
+    throw 'host qualification evidence directory baseline must be absent'
+}
+
+$supervisorRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'ferrum2-host-qualification-supervisor-' + [Guid]::NewGuid().ToString('N')
+)
+New-Item -ItemType Directory -Path $supervisorRoot -ErrorAction Stop | Out-Null
+$stdoutPath = Join-Path $supervisorRoot 'worker.stdout.log'
+$stderrPath = Join-Path $supervisorRoot 'worker.stderr.log'
+$processOwnerPath = Join-Path $repositoryRoot `
+    'tools\powershell\Ferrum2.Performance\PerformanceProcessOwner.cs'
+Add-Type -Path $processOwnerPath -ErrorAction Stop
+$pwsh = [string](Get-Command pwsh -CommandType Application -ErrorAction Stop).Source
+$worker = Join-Path $PSScriptRoot 'invoke_windows_tun_qualification_host_worker.ps1'
+$workerArguments = @(
+    '-NoProfile'
+    '-File', ('"' + $worker + '"')
+    '-CandidateSha', $CandidateSha
+    '-EvidenceDirectory', ('"' + $resolvedEvidence + '"')
+    '-QualificationSourceBundleSha256', $sourceBundle.sha256
+    '-AcknowledgeHostNetworkMutation'
+) -join ' '
+$workerPid = $null
+$timedOut = $false
+try {
+    $workerPid = [Ferrum2PerfProcessGroup]::Start(
+        $pwsh, $workerArguments, $repositoryRoot, $stdoutPath, $stderrPath
+    )
+    if (-not [Ferrum2PerfProcessGroup]::Wait(
+            [uint32]$workerPid, [uint32]($workerTimeoutSeconds * 1000))) {
+        $timedOut = $true
+        [Ferrum2PerfProcessGroup]::CloseGroup()
+    } else {
+        $exitCode = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$workerPid)
+        [Ferrum2PerfProcessGroup]::Close([uint32]$workerPid)
+        [Ferrum2PerfProcessGroup]::CloseGroup()
+        if ($exitCode -ne 0) {
+            throw "host qualification worker failed; stderr=$stderrPath"
+        }
+    }
+    if ($timedOut) {
+        $recoveryStdout = Join-Path $supervisorRoot 'recovery.stdout.log'
+        $recoveryStderr = Join-Path $supervisorRoot 'recovery.stderr.log'
+        $recoveryArguments = @(
+            '-NoProfile'
+            '-File', ('"' + $PSCommandPath + '"')
+            '-RecoveryOnly'
+        ) -join ' '
+        $recoveryPid = [Ferrum2PerfProcessGroup]::Start(
+            $pwsh, $recoveryArguments, $repositoryRoot, $recoveryStdout, $recoveryStderr
+        )
+        if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$recoveryPid, 45000)) {
+            [Ferrum2PerfProcessGroup]::CloseGroup()
+            throw 'host qualification timed out and bounded recovery also timed out'
+        }
+        $recoveryExit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$recoveryPid)
+        [Ferrum2PerfProcessGroup]::Close([uint32]$recoveryPid)
+        [Ferrum2PerfProcessGroup]::CloseGroup()
+        if ($recoveryExit -ne 0) {
+            throw "host qualification timed out and recovery failed; stderr=$recoveryStderr"
+        }
+        throw "host qualification exceeded the $workerTimeoutSeconds-second worker limit"
+    }
+
+    $workerResultPath = Join-Path $resolvedEvidence 'qualification-worker.json'
+    $cleanupPath = Join-Path $resolvedEvidence 'qualification-cleanup.json'
+    if (-not (Test-Path -LiteralPath $workerResultPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $cleanupPath -PathType Leaf)) {
+        throw 'host qualification worker evidence is incomplete'
+    }
+    $workerResult = Get-Content -LiteralPath $workerResultPath -Raw -Encoding utf8 |
+        ConvertFrom-Json -Depth 20 -ErrorAction Stop
+    $cleanup = Get-Content -LiteralPath $cleanupPath -Raw -Encoding utf8 |
+        ConvertFrom-Json -Depth 10 -ErrorAction Stop
+    $expectedChecks = @(
+        'single-candidate-build',
+        'wintun-create-and-delete',
+        'tcp-and-udp-through-owned-tun',
+        'narrow-route-isolation',
+        'strict-route-wfp-live-readback',
+        'network-notification-retains-wfp-identity',
+        'forced-process-tree-recovery',
+        'zero-residue-cleanup'
+    )
+    $actualChecks = @($workerResult.checks)
+    $actualCheckNames = @($actualChecks | ForEach-Object { [string]$_.name })
+    $supervisorTimer.Stop()
+    if ($workerResult.status -cne 'PASS' -or $workerResult.qualification -ne $true -or
+        $workerResult.candidate_sha -cne $CandidateSha -or
+        $workerResult.qualification_source_bundle_sha256 -cne $sourceBundle.sha256 -or
+        ($actualCheckNames -join '|') -cne ($expectedChecks -join '|') -or
+        @($actualChecks | Where-Object { $_.status -cne 'PASS' }).Count -ne 0 -or
+        $cleanup.status -cne 'PASS' -or $cleanup.adapter_remaining -ne 0 -or
+        $cleanup.routes_remaining -ne 0 -or $cleanup.addresses_remaining -ne 0 -or
+        $cleanup.processes_remaining -ne 0 -or $cleanup.ports_remaining -ne 0 -or
+        $supervisorTimer.Elapsed.TotalSeconds -ge $maximumElapsedSeconds) {
+        throw 'host qualification verdict or bounded cleanup is invalid'
+    }
+    $result = [pscustomobject][ordered]@{
+        schema_version = 1
+        kind = 'ferrum2.windows-tun.host-qualification'
+        status = 'QUALIFIED'
+        qualification = $true
+        candidate_sha = $CandidateSha
+        qualification_source_bundle_sha256 = $sourceBundle.sha256
+        maximum_elapsed_seconds = $maximumElapsedSeconds
+        supervisor_elapsed_seconds = $supervisorTimer.Elapsed.TotalSeconds
+        checks = @($workerResult.checks)
+        route_proofs = @($workerResult.route_proofs)
+        strict_route_wfp = $workerResult.strict_route_wfp
+        cleanup = $cleanup
+    }
+    $resultPath = Join-Path $resolvedEvidence 'qualification.json'
+    [IO.File]::WriteAllText(
+        $resultPath,
+        (($result | ConvertTo-Json -Depth 20) + "`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $result | ConvertTo-Json -Depth 20
+} finally {
+    [Ferrum2PerfProcessGroup]::CloseGroup()
+    if (Test-Path -LiteralPath $supervisorRoot -PathType Container) {
+        if (Test-Path -LiteralPath $resolvedEvidence -PathType Container) {
+            foreach ($entry in @(
+                @{ Source = $stdoutPath; Name = 'supervisor.stdout.log' },
+                @{ Source = $stderrPath; Name = 'supervisor.stderr.log' }
+            )) {
+                if (Test-Path -LiteralPath $entry.Source -PathType Leaf) {
+                    Copy-Item -LiteralPath $entry.Source `
+                        -Destination (Join-Path $resolvedEvidence $entry.Name) -Force `
+                        -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        Remove-Item -LiteralPath $supervisorRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

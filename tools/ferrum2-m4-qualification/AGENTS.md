@@ -6,9 +6,9 @@
 ordinary/hosted modes are `throughput`, `resource`, `dns-resource`, `profile-workload`, and
 `self-check`. The Windows TUN modes are `windows-tun-workload`, `windows-tun-probe`,
 `windows-tun-support`, and `windows-tun-udp-diagnostic-finalize`; compile them on ordinary hosts,
-but execute them only inside the approved Hyper-V correctness-qualification procedure or as
-job-contained children of the explicitly authorized
-`tools/windows-tun/performance/run_windows_tun_performance_host.ps1` runner. Keep argument parsing
+but execute them only as job-contained children of the explicitly authorized
+`tests/platform/run_windows_tun_qualification_host.ps1` correctness runner or
+`tools/windows-tun/performance/run_windows_tun_performance_host.ps1` performance runner. Keep argument parsing
 and execution fail-closed: reject unsupported modes, unbounded durations, malformed identities,
 unsafe paths, and incomplete readiness evidence before starting work.
 

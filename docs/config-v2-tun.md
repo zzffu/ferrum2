@@ -3,8 +3,8 @@
 Ferrum2's managed Windows TUN supports IPv4-only, IPv6-only, and dual-stack sessions. The two
 interface-address fields are optional individually, but at least one must be present.
 
-Privileged Windows acceptance is restricted to the approved Hyper-V guest and is documented in the
-[`M17 Windows TUN qualification runbook`](windows-tun-m17-qualification.md).
+Privileged Windows acceptance runs through the bounded, explicitly authorized host procedure in the
+[`Windows TUN correctness qualification runbook`](windows-tun-qualification.md).
 
 A complete dual-stack direct-egress example is available at
 [`docs/examples/client-v2-tun.toml`](examples/client-v2-tun.toml).
@@ -105,10 +105,11 @@ association freeze, so an initial query to the configured synthetic address does
 Internet outbound. Address-dependent filtering authorizes a remote IP only after a successful send;
 endpoint-independent filtering accepts any otherwise-valid same-family response source.
 
-The privileged `udp-policy` qualification sends parsed DNS, fixed-structure 1,200-byte QUIC v1
-Initial, STUN multi-server, WebRTC ICE-candidate, and sequenced game-style datagrams through the
-live TUN. It also proves one frozen Direct or Shadowsocks multi-target association, IPv4/IPv6
-coverage, live capacity drop-new without eviction, congested queues, and stale generations.
+The privileged host qualification sends TCP and UDP probes through one run-owned IPv4 TUN before and
+after a real network notification. It proves run-owned `/32` route isolation, live strict-route WFP
+identity, process-tree recovery, and zero residue. Detailed UDP mapping, filtering, capacity, queue,
+and stale-generation behavior remains covered by the hosted-safe Rust suites rather than a long live
+profile matrix.
 
 ## Automatic and strict routing
 

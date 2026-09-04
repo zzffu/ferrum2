@@ -38,16 +38,15 @@ instead of embedding process-tree interop in the runner.
 `tools/powershell/Ferrum2.Performance/bundle.json` is the canonical closed host-performance source
 bundle. It binds every consumed runner, module, collector, scenario, and C# owner by canonical path,
 byte length, and SHA-256. Its complete-file digest is the Windows performance runner identity and is
-recorded from plan through raw evidence and summary. The bundle contains no qualification source and
-no Lab VM, checkpoint, PowerShell Direct, guest staging, or topology owner. Any source, file-map,
-schema, recipe, or paired-schedule change requires atomic producer/consumer updates and a new
-baseline; stale calibration or evidence is not comparable.
+recorded from plan through raw evidence and summary. The bundle contains no qualification source.
+Any source, file-map, schema, recipe, or paired-schedule change requires atomic producer/consumer
+updates and a new baseline; stale calibration or evidence is not comparable.
 
-`Quick` is the autoresearch feedback profile: one to three selected data-plane scenarios, short
-warmup and active windows, and at least three interleaved baseline/candidate pairs. `Confirm` runs all
-directly affected data-plane scenarios with longer windows and at least five interleaved or balanced
-pairs; it retains every pair and reports median ratio, range, outliers, CPU, throughput/PPS, drops,
-and errors without hiding regressions in an aggregate score. `Lifecycle` is separate, defaults to 20
+`Quick` is the autoresearch feedback profile: two data-plane scenarios, short warmup and active
+windows, and three interleaved baseline/candidate pairs, for 12 trials. `Confirm` runs three
+data-plane scenarios with longer windows and five interleaved pairs, for 30 trials; it retains every
+pair and reports median ratio, range, outliers, CPU, throughput/PPS, drops, and errors without hiding
+regressions in an aggregate score. `Lifecycle` is separate, defaults to 20
 and caps at 100 complete product-start, TUN-probe, and product-stop cycles; it never changes a
 default route or disables or enables a physical adapter. The retired 1000-reset durability soak is
 disabled and cannot restart the host network. The non-target CPU guard compares client and server
@@ -78,9 +77,10 @@ External artifact retrieval must use an immutable identity. Missing or changed r
 
 ## Ordinary and privileged boundaries
 
-Ordinary CI may compile controllers, validate tracked fixtures, parse PowerShell, reconstruct the
-closed bundle, and run deterministic contract tests. It must not create a real adapter or claim
-Wintun, WFP, or host-network evidence. `-PlanOnly` is unprivileged and nonmutating. Real Windows TUN
-performance evidence may be created only by the dedicated host runner from an already elevated shell
-with explicit acknowledgement; success requires exported raw evidence and verified per-run cleanup.
-Hyper-V remains a separate correctness-qualification boundary and is not a performance fallback.
+Ordinary CI may compile controllers, validate tracked fixtures, parse PowerShell, reconstruct closed
+bundles, and run deterministic contract tests. It must not create a real adapter or claim Wintun,
+WFP, or host-network evidence. `-PlanOnly` is unprivileged and nonmutating. Real Windows TUN
+performance evidence may be created only by the dedicated host performance runner from an already
+elevated shell with explicit acknowledgement; success requires exported raw evidence and verified
+per-run cleanup. Correctness uses its separate bounded host runner, fixed check set, source identity,
+and `qualification.json` verdict; neither public runner nor verdict is a fallback for the other.

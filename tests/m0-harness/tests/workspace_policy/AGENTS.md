@@ -14,8 +14,8 @@ violated rule and exact owner or path.
 
 Hosted TUN safety is a Rust build seam, not a source-token policy. Library-test builds must exclude
 the live Windows adapter owner and FFI backend, selecting only target-neutral logic and injected or
-fail-closed adapters. Keep privileged adapter, route, address, DNS, WFP, process-launch, and Hyper-V
-operations behind production-only module declarations.
+fail-closed adapters. Keep privileged adapter, route, address, DNS, WFP, and process-launch operations
+behind production-only module declarations and the dedicated local host runners.
 
 Mandatory hosted execution is a closed step-shape contract, not an existence check. Linux hosted
 tests, each Windows hosted library test, deterministic smoke, and the sanitizer campaign must retain

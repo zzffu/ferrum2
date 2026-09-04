@@ -122,8 +122,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Windows TUN performance is privileged and is executed only by the
-          # approved local Hyper-V runner. CI exercises the network-free control plane.
+          # Windows TUN performance is privileged and runs only through the dedicated,
+          # explicitly acknowledged host runner. CI exercises the network-free control plane.
           python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
       - name: Test Rule ordinary controller
         shell: bash
@@ -442,10 +442,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & pwsh -NoProfile -File tests\platform\test_qualification_modules.ps1
-          if ($LASTEXITCODE -ne 0) { throw "qualification module contract failed" }
-          & pwsh -NoProfile -File tests\platform\test_windows_tun_hyperv_static_contract.ps1
-          if ($LASTEXITCODE -ne 0) { throw "Hyper-V static contract failed" }
+          & pwsh -NoProfile -File tests\platform\test_windows_tun_host_qualification.ps1
+          if ($LASTEXITCODE -ne 0) { throw "host qualification static contract failed" }
       - name: Build and run native GNU artifacts
         if: matrix.profile == 'linux-gnu'
         shell: bash

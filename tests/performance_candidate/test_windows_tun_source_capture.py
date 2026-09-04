@@ -60,7 +60,7 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         ):
             self.assertNotIn(f"${obsolete}", self.runner)
 
-    def test_runner_has_no_hyperv_or_sing_box_control_surface(self) -> None:
+    def test_runner_has_no_vm_or_sing_box_control_surface(self) -> None:
         lowered = self.runner.lower()
         for forbidden in (
             "restore-vmsnapshot",
@@ -99,7 +99,7 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
             "GuestTransaction.ps1",
             "HostVmTransaction.ps1",
             "RuntimeStaging.ps1",
-            "windows_tun_hyperv_support_topology_plan.json",
+            "Ferrum2.Qualification.Host",
         ):
             self.assertNotIn(obsolete, PERFORMANCE_BUNDLE.read_text(encoding="utf-8"))
 

@@ -22,9 +22,8 @@ throughput is not mislabeled as a regression.
 
 The Windows TUN recipe binds this package only to the canonical host runner and collectors under
 `tools/windows-tun/performance`, host owners under `tools/powershell/Ferrum2.Performance`, the Rust
-workload harness, and the verified performance source bundle. It must not bind Lab VM/topology,
-checkpoint, guest staging, PowerShell Direct, or qualification sources. Repository source paths stay
-canonical; there is no flat guest deployment map.
+workload harness, and the verified performance source bundle, excluding qualification sources.
+Repository source paths stay canonical.
 
 The performance source bundle is a closed host source set. Moving or changing any bound source
 changes runner identity and requires coordinated producer/consumer updates plus a fresh baseline.
@@ -44,7 +43,7 @@ python -B -c "import tools.performance_candidate.cli; import tools.performance_c
 Static tests and manifest reconstruction are the ordinary behavioral gates. They must not execute a
 real TUN workload. Live Windows TUN performance is allowed only through the canonical host runner from
 an already elevated shell with explicit network-mutation acknowledgement and verified per-RunId
-cleanup. Hyper-V is a separate correctness-qualification path, not a performance fallback.
+cleanup. The separate host correctness runner and its verdict are not a performance fallback.
 
 Tests mirror production owners: shared and Linux plan/policy/summary/scale behavior have separate
 modules; Windows host plan, trial, recovery/cleanup, and summary behavior use narrow fixture helpers.

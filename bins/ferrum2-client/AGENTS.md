@@ -49,9 +49,9 @@ cargo build -p ferrum2-client --bin ferrum2-client --locked
 ```
 
 Add focused unit tests beside the affected `run/` module. Changes visible across processes, configuration versions, SOCKS, UDP, DNS, or TUN also require the relevant `tests/m0-harness` integration test.
-Execute every TUN-related test binary and privileged qualification profile only in the pinned local
-Hyper-V guest. Host iteration may compile those tests with `--no-run`, but must not create or alter a
-host TUN, route, DNS lease, firewall rule, or WFP object.
+Ordinary test binaries must not create or alter a host TUN, route, DNS lease, firewall rule, or WFP
+object. Live correctness is exercised only by the explicitly acknowledged, elevated, 900-second
+host qualification runner defined in `tests/platform`.
 
 ## Safety and Observability
 

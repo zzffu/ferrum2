@@ -230,10 +230,10 @@ class FuzzContractTests(unittest.TestCase):
         contract = fuzz_contract.load_contract(REPOSITORY_POLICY)
 
         for relative in [
-            "tests/platform/Main.CampaignController.ps1",
+            "tests/platform/run_windows_tun_qualification_host.ps1",
             "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
             "tools/windows-tun/performance/run_windows_tun_performance_host.ps1",
-            "tools/windows_tun_hyperv_support_topology_plan.json",
+            "tools/powershell/Ferrum2.Qualification.Host/HostQualification.ps1",
             "tools/windows_tun_performance_policy.json",
         ]:
             with self.subTest(relative=relative):

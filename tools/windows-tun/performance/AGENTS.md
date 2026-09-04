@@ -27,12 +27,12 @@ Administrators and writable only by Administrators and SYSTEM. Recovery validate
 process, file, and port identity before removing only the ledger-owned resource; mismatch fails
 closed. After successful cleanup, retain external evidence and remove the transient RunId tree,
 including exported sources, Cargo targets, and logs. Cleanup is part of benchmark success. Quick runs
-selected data-plane scenarios with at least
-three interleaved pairs; Confirm runs affected scenarios with at least five pairs and retains raw
-per-pair metrics; Lifecycle defaults to 20 and caps at 100 complete product-start, TUN-probe, and
-product-stop cycles. The retired 1000-reset durability soak is never run by autoresearch.
+two data-plane scenarios with three interleaved pairs, for 12 trials; Confirm runs three scenarios
+with five pairs, for 30 trials, and retains raw per-pair metrics. Lifecycle defaults to 20 and caps
+at 100 complete product-start, TUN-probe, and product-stop cycles. The retired 1000-reset durability
+soak is never run by autoresearch.
 
 The performance source manifest is a closed host-runner source set. Any source change requires an
 atomic refresh of canonical paths, exact byte lengths, SHA-256 values, recipe bindings, and tests.
-Performance must not import Lab VM/checkpoint/staging owners or qualification modules. Parse/static
+Performance must not import virtual-machine, checkpoint, guest-staging, or qualification owners. Parse/static
 tests may run ordinarily; real execution occurs only by an informed operator using the public runner.
