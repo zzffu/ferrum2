@@ -665,6 +665,25 @@ function Get-Ferrum2ProcessCpuMilliseconds {
     return $process.TotalProcessorTime.TotalMilliseconds
 }
 
+function Export-Ferrum2OwnedCommandFailureLogs {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][object]$Process,
+        [Parameter(Mandatory = $true)][string]$LogPrefix
+    )
+    $failureRoot = Join-Path $Context.evidence_directory "process-logs"
+    New-Item -ItemType Directory -Path $failureRoot -Force -ErrorAction Stop | Out-Null
+    foreach ($stream in @("stdout", "stderr")) {
+        $source = [string]$Process.$stream
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source `
+                -Destination (Join-Path $failureRoot "$LogPrefix.$stream.log") `
+                -Force -ErrorAction Stop
+        }
+    }
+    return $failureRoot
+}
+
 function Invoke-Ferrum2OwnedCommand {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
@@ -679,12 +698,18 @@ function Invoke-Ferrum2OwnedCommand {
         -Purpose $LogPrefix
     if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$process.pid, [uint32]($TimeoutSeconds * 1000))) {
         [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$process.pid)
-        throw "owned command timed out: $LogPrefix"
+        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+            -Process $process -LogPrefix $LogPrefix
+        throw "owned command timed out: $LogPrefix; logs: $failureLogs"
     }
     $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$process.pid)
     [Ferrum2PerfProcessGroup]::Close([uint32]$process.pid)
     Remove-Ferrum2OwnedProcessRecord -Context $Context -ProcessId $process.pid
-    if ($exit -ne 0) { throw "owned command failed: $LogPrefix" }
+    if ($exit -ne 0) {
+        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+            -Process $process -LogPrefix $LogPrefix
+        throw "owned command failed: $LogPrefix; logs: $failureLogs"
+    }
     return $process
 }
 
