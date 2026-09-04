@@ -6,18 +6,36 @@ use super::super::diagnostic::{
     FRAGMENT_ACK_LEN, FRAGMENT_ACK_WINDOW, FRAGMENT_BATCH, FRAGMENT_IPV4_RESPONSE_BOUND,
     FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER, FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS,
     FragmentAckBatch, FragmentPhase, FragmentWorkloadAccounting, IPV4_HEADER_LEN,
-    PERFORMANCE_TUN_MTU, SUPPORT_UNDERLAY_IPV4_MTU, UDP_BATCH, UDP_HEADER_LEN, UDP_PACKET_TIMEOUT,
-    UDP_RECEIVE_ATTEMPTS,
+    PERFORMANCE_TUN_MTU, SUPPORT_UNDERLAY_IPV4_MTU, TCP_REQUEST_LATENCY_SAMPLE_CAP,
+    TCP_REQUEST_MINIMUM_TRANSACTIONS, TCP_REQUEST_PAYLOAD, UDP_BATCH, UDP_HEADER_LEN,
+    UDP_LATENCY_SAMPLE_CAP, UDP_PACKET_TIMEOUT, UDP_RECEIVE_ATTEMPTS,
 };
 use super::super::workload::{
     elapsed_rate, fragment_ack, fragment_ack_for_request, fragment_ack_sequence,
     fragment_batch_failure, fragment_request, fragment_request_sequence, fragment_retry_budget,
-    sequenced_payload,
+    percentile_99, record_latency_sample, sequenced_payload,
 };
 
 pub(super) fn check_basics() -> Result<Vec<u8>, String> {
     if elapsed_rate(10, Duration::from_secs(2), "self-check")? != 5 {
         return Err("Windows TUN integer rate calculation is invalid".to_owned());
+    }
+    if percentile_99(vec![1, 2, 3, 4], "self-check")? != 4
+        || percentile_99(Vec::new(), "self-check").is_ok()
+    {
+        return Err("Windows TUN p99 calculation is invalid".to_owned());
+    }
+    let mut latency_samples = Vec::with_capacity(2);
+    for (observed, latency) in [10_u64, 20, 30, 40].into_iter().enumerate() {
+        record_latency_sample(&mut latency_samples, observed as u64, latency, 2)?;
+    }
+    if latency_samples.len() != 2
+        || latency_samples
+            .iter()
+            .any(|value| ![10_u64, 20, 30, 40].contains(value))
+        || record_latency_sample(&mut latency_samples, 4, 50, 0).is_ok()
+    {
+        return Err("Windows TUN bounded latency sampling is invalid".to_owned());
     }
     let payload = sequenced_payload(32, 0x0102_0304_0506_0708)?;
     if payload[..8] != 0x0102_0304_0506_0708_u64.to_be_bytes()
@@ -34,6 +52,13 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
         || UDP_PACKET_TIMEOUT != Duration::from_millis(10)
     {
         return Err("Windows TUN UDP packet-rate batch recipe is invalid".to_owned());
+    }
+    if TCP_REQUEST_PAYLOAD != 1_024
+        || TCP_REQUEST_MINIMUM_TRANSACTIONS != 1_024
+        || TCP_REQUEST_LATENCY_SAMPLE_CAP != 2_000_000
+        || UDP_LATENCY_SAMPLE_CAP != 2_000_000
+    {
+        return Err("Windows TUN latency recipe is invalid".to_owned());
     }
     if ASSOCIATIONS != 8_192
         || ASSOCIATION_BOOTSTRAP_BATCH != 1
@@ -185,6 +210,7 @@ pub(super) fn check_recipe(payload: &[u8]) -> Result<(), String> {
     }
     let labels = [
         "tcp-single-flow",
+        "tcp-request-1k-p99",
         "tcp-256-flow-fairness",
         "udp-packets-per-second",
         "udp-8192-association-lookup-expiry",

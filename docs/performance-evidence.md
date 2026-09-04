@@ -19,7 +19,16 @@ workflow inputs -> controller plan -> m4 profile-workload producer
 -> bounded JSONL trials -> controller summary -> reviewed policy decision
 ```
 
-The Windows evidence chain is:
+The Windows evidence chain selects one topology per run:
+
+```text
+ClientDirect: workload -> real Wintun -> ferrum2-client TUN/TCP/UDP stack
+              -> client direct egress -> local support echo
+EndToEnd:     workload -> real Wintun -> ferrum2-client -> ferrum2-server
+              -> server direct egress -> local support echo
+```
+
+Both continue through the same closed evidence path:
 
 ```text
 host PowerShell transaction -> closed profile plan -> independently built baseline/candidate
@@ -30,8 +39,9 @@ host PowerShell transaction -> closed profile plan -> independently built baseli
 The Windows performance PowerShell implementation is owned by
 `tools/powershell/Ferrum2.Performance`. Its only public composition root is
 `tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. The runner interface exposes
-planning, recovery, `Quick`, `Confirm`, and `Lifecycle`; it hides adapter names, benchmark addresses,
-ports, process IDs, routes, temporary files, ledgers, cleanup, and evidence construction.
+planning, recovery, one required `ClientDirect|EndToEnd` topology, and the `Quick`, `Confirm`, and
+`Lifecycle` profiles; it hides adapter names, benchmark addresses, ports, process IDs, routes,
+temporary files, ledgers, cleanup, and evidence construction.
 `PerformanceProcessOwner.cs` places every spawned product and support process in one kill-on-close job
 instead of embedding process-tree interop in the runner.
 
@@ -42,23 +52,28 @@ recorded from plan through raw evidence and summary. The bundle contains no qual
 Any source, file-map, schema, recipe, or paired-schedule change requires atomic producer/consumer
 updates and a new baseline; stale calibration or evidence is not comparable.
 
-`Quick` is the autoresearch feedback profile: two data-plane scenarios, short warmup and active
-windows, and three interleaved baseline/candidate pairs, for 12 trials. `Confirm` runs three
-data-plane scenarios with longer windows and five interleaved pairs, for 30 trials; it retains every
-pair and reports median ratio, range, outliers, CPU, throughput/PPS, drops, and errors without hiding
-regressions in an aggregate score. `Lifecycle` is separate, defaults to 20
-and caps at 100 complete product-start, TUN-probe, and product-stop cycles; it never changes a
-default route or disables or enables a physical adapter. The retired 1000-reset durability soak is
-disabled and cannot restart the host network. The non-target CPU guard compares client and server
-CPU cost per unit of reported work against the policy limit; it does not mistake proportionally
-higher utilization from higher throughput for a regression.
+`Quick` is the autoresearch feedback profile. Per selected topology it measures TCP single-flow
+throughput, 1 KiB TCP request p99 latency, UDP packet rate, and fragment-reassembly throughput using
+three interleaved baseline/candidate pairs, for 24 trials. `Confirm` adds 256-flow TCP fairness and
+uses five longer-window pairs, for 50 trials per selected topology. Run the two topologies separately
+when both attribution and complete client/server behavior are required; evidence never mixes them.
+
+Every raw trial records the primary metric and direction, checked work, I/O completions, applicable
+p99 latency, client CPU and peak working set, and failure counters. `EndToEnd` also records server CPU,
+peak working set, and failure counters; those server fields are null in `ClientDirect`. Summaries
+retain every pair and report direction-normalized improvement ratios, range, outliers, checked work,
+I/O, latency, CPU, and memory. The non-target CPU guard normalizes CPU by checked work rather than by
+the primary metric, so a lower-is-better latency result cannot invert CPU-cost accounting.
+
+`Lifecycle` is separate: 20 complete product-start, TUN-probe, and product-stop cycles under the
+selected topology. It never changes a default route or disables or enables a physical adapter.
 
 Every real run requires an already elevated shell and the literal
 `-AcknowledgeHostNetworkMutation` switch. The runner uses dedicated RFC 2544 addresses and only exact
-benchmark routes; it must prove benchmark traffic enters the owned TUN and underlay, support, and
-127.0.0.1:1080 traffic do not. Each mutation is recorded incrementally in a per-RunId recovery ledger.
-Success requires identity-safe cleanup plus readback proving no owned adapter, route, process, or port
-remains.
+benchmark routes. Both topologies must prove benchmark traffic enters the owned TUN and support
+egress excludes it; `EndToEnd` additionally proves the client/server underlay excludes it. Each
+mutation is recorded incrementally in a per-RunId recovery ledger. Success requires identity-safe
+cleanup plus readback proving no owned adapter, route, process, or port remains.
 
 Closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`, `REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`. Only the first two are accepted. Invalid evidence exits 2, regression exits 3, and inconclusive or calibration-required results exit 4.
 

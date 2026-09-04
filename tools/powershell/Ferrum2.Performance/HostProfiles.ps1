@@ -20,6 +20,23 @@ function Get-Ferrum2CpuCostRatio {
     }
     return ($CandidateCpu / $BaselineCpu) / $WorkRatio
 }
+function Get-Ferrum2ImprovementRatio {
+    param(
+        [Parameter(Mandatory = $true)][double]$Baseline,
+        [Parameter(Mandatory = $true)][double]$Candidate,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("higher_is_better", "lower_is_better")]
+        [string]$Direction
+    )
+    if ($Baseline -le 0 -or $Candidate -le 0) {
+        throw "paired performance values must be positive"
+    }
+    if ($Direction -ceq "higher_is_better") {
+        return $Candidate / $Baseline
+    }
+    return $Baseline / $Candidate
+}
+
 
 function Test-Ferrum2PairedCpuCostRegression {
     param(
@@ -38,6 +55,7 @@ function New-Ferrum2HostSummary {
         [Parameter(Mandatory = $true)][object]$Plan,
         [Parameter(Mandatory = $true)][object[]]$Trials
     )
+    $serverPresent = [string]$Plan.topology -ceq "EndToEnd"
     $scenarios = [Collections.Generic.List[object]]::new()
     foreach ($scenario in $Plan.scenarios) {
         $rows = @($Trials | Where-Object { [string]$_.scenario -ceq [string]$scenario.name })
@@ -48,23 +66,32 @@ function New-Ferrum2HostSummary {
         foreach ($pair in 1..$Plan.pair_count) {
             $baseline = @($rows | Where-Object { $_.pair -eq $pair -and $_.member -ceq "baseline" })
             $candidate = @($rows | Where-Object { $_.pair -eq $pair -and $_.member -ceq "candidate" })
-            if ($baseline.Count -ne 1 -or $candidate.Count -ne 1) { throw "paired trial evidence is incomplete" }
-            $ratio = [double]$candidate[0].value / [double]$baseline[0].value
+            if ($baseline.Count -ne 1 -or $candidate.Count -ne 1) {
+                throw "paired trial evidence is incomplete"
+            }
+            $ratio = Get-Ferrum2ImprovementRatio -Baseline ([double]$baseline[0].value) `
+                -Candidate ([double]$candidate[0].value) -Direction $scenario.direction
             [void]$ratios.Add($ratio)
+            $workRatio = [double]$candidate[0].checked_units /
+                [double]$baseline[0].checked_units
             [void]$clientCpuCostRatios.Add((Get-Ferrum2CpuCostRatio `
                 -BaselineCpu ([double]$baseline[0].client_cpu_percent) `
                 -CandidateCpu ([double]$candidate[0].client_cpu_percent) `
-                -WorkRatio $ratio))
-            [void]$serverCpuCostRatios.Add((Get-Ferrum2CpuCostRatio `
-                -BaselineCpu ([double]$baseline[0].server_cpu_percent) `
-                -CandidateCpu ([double]$candidate[0].server_cpu_percent) `
-                -WorkRatio $ratio))
+                -WorkRatio $workRatio))
+            if ($serverPresent) {
+                [void]$serverCpuCostRatios.Add((Get-Ferrum2CpuCostRatio `
+                    -BaselineCpu ([double]$baseline[0].server_cpu_percent) `
+                    -CandidateCpu ([double]$candidate[0].server_cpu_percent) `
+                    -WorkRatio $workRatio))
+            }
             [void]$pairs.Add([pscustomobject][ordered]@{
                 pair = $pair
                 order = $baseline[0].order
                 baseline = $baseline[0].value
                 candidate = $candidate[0].value
-                ratio = $ratio
+                baseline_checked_units = $baseline[0].checked_units
+                candidate_checked_units = $candidate[0].checked_units
+                improvement_ratio = $ratio
             })
         }
         $ratioValues = $ratios.ToArray()
@@ -77,19 +104,23 @@ function New-Ferrum2HostSummary {
             @()
         } else {
             @($pairs | Where-Object {
-                [Math]::Abs([double]$_.ratio - $medianRatio) -gt
+                [Math]::Abs([double]$_.improvement_ratio - $medianRatio) -gt
                     (3.0 * $medianAbsoluteDeviation)
             } | ForEach-Object { [int]$_.pair })
         }
         $pairsImproved = @($ratios | Where-Object { $_ -gt 1.0 }).Count
         $maximumCpuRegressionPercent = 2.0
+        $serverCpuCostRegressed = $false
+        if ($serverPresent) {
+            $serverCpuCostRegressed = Test-Ferrum2PairedCpuCostRegression `
+                -Ratios $serverCpuCostRatios.ToArray() `
+                -MaximumRegressionPercent $maximumCpuRegressionPercent
+        }
         $cpuCostRegressed =
             (Test-Ferrum2PairedCpuCostRegression `
                 -Ratios $clientCpuCostRatios.ToArray() `
                 -MaximumRegressionPercent $maximumCpuRegressionPercent) -or
-            (Test-Ferrum2PairedCpuCostRegression `
-                -Ratios $serverCpuCostRatios.ToArray() `
-                -MaximumRegressionPercent $maximumCpuRegressionPercent)
+            $serverCpuCostRegressed
         $baselineClientCpu = Get-Ferrum2Median -Values @(
             $rows | Where-Object member -CEQ "baseline" |
                 ForEach-Object { [double]$_.client_cpu_percent }
@@ -98,14 +129,31 @@ function New-Ferrum2HostSummary {
             $rows | Where-Object member -CEQ "candidate" |
                 ForEach-Object { [double]$_.client_cpu_percent }
         )
-        $baselineServerCpu = Get-Ferrum2Median -Values @(
-            $rows | Where-Object member -CEQ "baseline" |
-                ForEach-Object { [double]$_.server_cpu_percent }
-        )
-        $candidateServerCpu = Get-Ferrum2Median -Values @(
-            $rows | Where-Object member -CEQ "candidate" |
-                ForEach-Object { [double]$_.server_cpu_percent }
-        )
+        $baselineServerCpu = if ($serverPresent) {
+            Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "baseline" |
+                    ForEach-Object { [double]$_.server_cpu_percent }
+            )
+        } else { $null }
+        $candidateServerCpu = if ($serverPresent) {
+            Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "candidate" |
+                    ForEach-Object { [double]$_.server_cpu_percent }
+            )
+        } else { $null }
+        $hasP99 = $null -ne $rows[0].p99_nanoseconds
+        $baselineP99 = if ($hasP99) {
+            Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "baseline" |
+                    ForEach-Object { [double]$_.p99_nanoseconds }
+            )
+        } else { $null }
+        $candidateP99 = if ($hasP99) {
+            Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "candidate" |
+                    ForEach-Object { [double]$_.p99_nanoseconds }
+            )
+        } else { $null }
         $qualificationStatus = if ($cpuCostRegressed -or
             ($medianRatio -le 0.98 -and
                 @($ratios | Where-Object { $_ -lt 1.0 }).Count -gt
@@ -119,36 +167,78 @@ function New-Ferrum2HostSummary {
         }
         [void]$scenarios.Add([pscustomobject][ordered]@{
             scenario = $scenario.name
+            topology = $Plan.topology
             metric = $scenario.metric
             unit = $scenario.unit
+            direction = $scenario.direction
             pairs = $pairs.ToArray()
-            median_pair_ratio = $medianRatio
+            median_pair_improvement_ratio = $medianRatio
             median_pair_improvement_percent = ($medianRatio - 1.0) * 100.0
-            minimum_pair_ratio = ($ratios | Measure-Object -Minimum).Minimum
-            maximum_pair_ratio = ($ratios | Measure-Object -Maximum).Maximum
+            minimum_pair_improvement_ratio = ($ratios | Measure-Object -Minimum).Minimum
+            maximum_pair_improvement_ratio = ($ratios | Measure-Object -Maximum).Maximum
             median_absolute_deviation = $medianAbsoluteDeviation
             outlier_pairs = @($outlierPairs)
             pairs_improved = $pairsImproved
+            baseline_checked_units_median = Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "baseline" |
+                    ForEach-Object { [double]$_.checked_units }
+            )
+            candidate_checked_units_median = Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "candidate" |
+                    ForEach-Object { [double]$_.checked_units }
+            )
+            baseline_io_completions_median = Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "baseline" |
+                    ForEach-Object { [double]$_.io_completions }
+            )
+            candidate_io_completions_median = Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "candidate" |
+                    ForEach-Object { [double]$_.io_completions }
+            )
+            baseline_p99_nanoseconds_median = $baselineP99
+            candidate_p99_nanoseconds_median = $candidateP99
             baseline_client_cpu_percent_median = $baselineClientCpu
             candidate_client_cpu_percent_median = $candidateClientCpu
             baseline_server_cpu_percent_median = $baselineServerCpu
             candidate_server_cpu_percent_median = $candidateServerCpu
+            baseline_client_peak_working_set_bytes_median = Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "baseline" |
+                    ForEach-Object { [double]$_.client_peak_working_set_bytes }
+            )
+            candidate_client_peak_working_set_bytes_median = Get-Ferrum2Median -Values @(
+                $rows | Where-Object member -CEQ "candidate" |
+                    ForEach-Object { [double]$_.client_peak_working_set_bytes }
+            )
+            baseline_server_peak_working_set_bytes_median = if ($serverPresent) {
+                Get-Ferrum2Median -Values @(
+                    $rows | Where-Object member -CEQ "baseline" |
+                        ForEach-Object { [double]$_.server_peak_working_set_bytes }
+                )
+            } else { $null }
+            candidate_server_peak_working_set_bytes_median = if ($serverPresent) {
+                Get-Ferrum2Median -Values @(
+                    $rows | Where-Object member -CEQ "candidate" |
+                        ForEach-Object { [double]$_.server_peak_working_set_bytes }
+                )
+            } else { $null }
             client_failure_counter_delta = 0
-            server_failure_counter_delta = 0
+            server_failure_counter_delta = if ($serverPresent) { 0 } else { $null }
             qualification_status = $qualificationStatus
         })
     }
     return [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "ferrum2.windows-tun.host-performance-summary"
         run_id = $Context.run_id
         performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         mode = $Plan.mode
+        topology = $Plan.topology
         baseline_sha = $Plan.baseline_sha
         candidate_sha = $Plan.candidate_sha
         pair_count = $Plan.pair_count
         scenarios = $scenarios.ToArray()
         threshold_percent = 2.0
+        maximum_non_target_cpu_regression_percent = 2.0
         status = "PASS"
     }
 }
@@ -203,7 +293,8 @@ function Invoke-Ferrum2HostLifecycleProfile {
             $timer = [Diagnostics.Stopwatch]::StartNew()
             try {
                 $runtime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-                    -Network $Network -Loopback $Loopback -Sequence $cycle
+                    -Network $Network -Loopback $Loopback -Sequence $cycle `
+                    -Topology $Plan.topology
                 [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Builds.harness `
                     -Arguments "windows-tun-probe --target-ip $($Network.support_address) --tcp-port $($support.tcp_port) --udp-port $($support.udp_port)" `
                     -WorkingDirectory (Split-Path -Parent $Builds.harness) `
@@ -240,11 +331,12 @@ function Invoke-Ferrum2HostLifecycleProfile {
     $ordered = @($cycleLatencies | Sort-Object)
     $p95Index = [Math]::Min($ordered.Count - 1, [int][Math]::Ceiling($ordered.Count * 0.95) - 1)
     $summary = [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "ferrum2.windows-tun.host-lifecycle-summary"
         run_id = $Context.run_id
         performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         mode = "Lifecycle"
+        topology = $Plan.topology
         candidate_sha = $Plan.candidate_sha
         lifecycle_cycles = [int]$Plan.lifecycle_cycles
         lifecycle_action = "product-start-probe-stop"
@@ -261,7 +353,6 @@ function Invoke-Ferrum2HostLifecycleProfile {
         physical_adapter_mutations = 0
         wlan_mutations = 0
         dns_mutations = 0
-        long_durability_soak = "not-run"
         status = "PASS"
     }
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "summary.json") -Document $summary
@@ -286,11 +377,11 @@ function Invoke-Ferrum2HostSafetyCheck {
             detail = "Recovery ledger root is owned by Administrators and writable only by Administrators and SYSTEM."
         })
     $createRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-        -Network $Network -Loopback $Loopback -Sequence 1
+        -Network $Network -Loopback $Loopback -Sequence 1 -Topology "EndToEnd"
     Stop-Ferrum2ProductTrial -Context $Context -Runtime $createRuntime
     [void]$checks.Add([pscustomobject]@{ name = "create-immediate-cleanup"; status = "PASS" })
     $smokeRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-        -Network $Network -Loopback $Loopback -Sequence 2
+        -Network $Network -Loopback $Loopback -Sequence 2 -Topology "EndToEnd"
     try {
         [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Builds.harness `
             -Arguments "windows-tun-probe --target-ip $($Network.support_address) --tcp-port $($support.tcp_port) --udp-port $($support.udp_port)" `
@@ -299,7 +390,7 @@ function Invoke-Ferrum2HostSafetyCheck {
     } finally { Stop-Ferrum2ProductTrial -Context $Context -Runtime $smokeRuntime }
     [void]$checks.Add([pscustomobject]@{ name = "shortest-tun-smoke"; status = "PASS" })
     $faultRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-        -Network $Network -Loopback $Loopback -Sequence 3
+        -Network $Network -Loopback $Loopback -Sequence 3 -Topology "EndToEnd"
     [Ferrum2PerfProcessGroup]::CloseGroup()
     Start-Sleep -Milliseconds 500
     $addressRows = @($Context.ledger.resources.addresses)

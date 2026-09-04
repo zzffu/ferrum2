@@ -1,9 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "kind": "ferrum2.windows-tun.host-performance-policy",
   "selection": "windows-tun-host",
+  "topologies": [
+    "ClientDirect",
+    "EndToEnd"
+  ],
   "threshold_percent": 2.0,
-  "maximum_non_target_regression_percent": 2.0,
+  "maximum_non_target_cpu_regression_percent": 2.0,
   "require_majority_pairs": true,
   "profiles": {
     "Quick": {
@@ -12,6 +16,8 @@
       "active_seconds": 10,
       "lifecycle_cycles": 0,
       "scenarios": [
+        "tcp-single-flow",
+        "tcp-request-1k-p99",
         "udp-packets-per-second",
         "fragment-reassembly-throughput"
       ]
@@ -22,9 +28,11 @@
       "active_seconds": 30,
       "lifecycle_cycles": 0,
       "scenarios": [
+        "tcp-single-flow",
+        "tcp-request-1k-p99",
         "udp-packets-per-second",
         "fragment-reassembly-throughput",
-        "tcp-single-flow"
+        "tcp-256-flow-fairness"
       ]
     },
     "Lifecycle": {
@@ -34,10 +42,5 @@
       "lifecycle_cycles": 20,
       "scenarios": []
     }
-  },
-  "soak": {
-    "enabled_by_default": false,
-    "cycles": 1000,
-    "candidate_decision_input": false
   }
 }

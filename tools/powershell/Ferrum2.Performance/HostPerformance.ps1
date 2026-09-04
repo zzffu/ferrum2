@@ -15,6 +15,10 @@ function Invoke-Ferrum2HostPerformance {
         [string]$Mode = "Quick",
         [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
         [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+        [ValidateSet("ClientDirect", "EndToEnd")]
+        [string]$Topology,
+        [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
+        [Parameter(Mandatory = $true, ParameterSetName = "Run")]
         [Parameter(Mandatory = $true, ParameterSetName = "Safety")]
         [ValidatePattern('^[0-9a-f]{40}$')]
         [string]$BaselineSha,
@@ -35,11 +39,18 @@ function Invoke-Ferrum2HostPerformance {
         [Parameter(Mandatory = $true)]
         [string]$RepositoryRoot
     )
+    $effectiveTopology = if ($SafetyCheck) {
+        "EndToEnd"
+    } elseif ($RecoveryOnly) {
+        $null
+    } else {
+        $Topology
+    }
     if ($PlanOnly) {
         [void](Resolve-Ferrum2CommitSha -RepositoryRoot $RepositoryRoot -Sha $BaselineSha)
         [void](Resolve-Ferrum2CommitSha -RepositoryRoot $RepositoryRoot -Sha $CandidateSha)
-        return New-Ferrum2HostPerformancePlan -Mode $Mode -BaselineSha $BaselineSha `
-            -CandidateSha $CandidateSha `
+        return New-Ferrum2HostPerformancePlan -Mode $Mode -Topology $effectiveTopology `
+            -BaselineSha $BaselineSha -CandidateSha $CandidateSha `
             -PerformanceSourceBundleSha256 $PerformanceSourceBundleSha256
     }
     $mutex = $null
@@ -61,10 +72,11 @@ function Invoke-Ferrum2HostPerformance {
         $effectiveMode = if ($SafetyCheck) { "Quick" } else { $Mode }
         $context = New-Ferrum2HostPerformanceContext -RepositoryRoot $RepositoryRoot `
             -EvidenceDirectory $EvidenceDirectory `
-            -Mode $(if ($SafetyCheck) { "Safety" } else { $Mode }) `
+            -Mode "$(if ($SafetyCheck) { 'Safety' } else { $Mode }))/$effectiveTopology" `
             -BaselineSha $BaselineSha -CandidateSha $CandidateSha `
             -PerformanceSourceBundleSha256 $PerformanceSourceBundleSha256
-        $plan = New-Ferrum2HostPerformancePlan -Mode $effectiveMode -BaselineSha $BaselineSha `
+        $plan = New-Ferrum2HostPerformancePlan -Mode $effectiveMode `
+            -Topology $effectiveTopology -BaselineSha $BaselineSha `
             -CandidateSha $CandidateSha `
             -PerformanceSourceBundleSha256 $PerformanceSourceBundleSha256 `
             -RunId $context.run_id
@@ -112,11 +124,12 @@ function Invoke-Ferrum2HostPerformance {
                 $cleanupTimer.Stop()
                 if ($null -ne $totalTimer) { $totalTimer.Stop() }
                 $runtime = [pscustomobject][ordered]@{
-                    schema_version = 1
+                    schema_version = 2
                     kind = "ferrum2.windows-tun.host-performance-runtime"
                     run_id = $context.run_id
                     performance_source_bundle_sha256 = $context.performance_source_bundle_sha256
                     mode = if ($SafetyCheck) { "Safety" } else { $Mode }
+                    topology = $effectiveTopology
                     build_seconds = $buildSeconds
                     execution_seconds = $executionSeconds
                     cleanup_seconds = $cleanupTimer.Elapsed.TotalSeconds

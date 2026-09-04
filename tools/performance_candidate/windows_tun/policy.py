@@ -13,6 +13,7 @@ from tools.performance_candidate.windows_tun.recipe import (
     WINDOWS_TUN_PROFILES,
     WINDOWS_TUN_SELECTION,
     WINDOWS_TUN_THRESHOLD_PERCENT,
+    WINDOWS_TUN_TOPOLOGIES,
 )
 
 WINDOWS_TUN_POLICY_MAX_BYTES = 64 * 1024
@@ -21,11 +22,11 @@ _POLICY_FIELDS = frozenset(
         "schema_version",
         "kind",
         "selection",
+        "topologies",
         "threshold_percent",
-        "maximum_non_target_regression_percent",
+        "maximum_non_target_cpu_regression_percent",
         "require_majority_pairs",
         "profiles",
-        "soak",
     }
 )
 _PROFILE_FIELDS = frozenset(
@@ -44,16 +45,18 @@ def validate_windows_tun_policy(value: object) -> dict[str, object]:
         raise CandidateControlError("Windows TUN policy must be a JSON object")
     policy = value
     _exact_fields(policy, _POLICY_FIELDS, "Windows TUN policy")
-    if policy["schema_version"] != 1:
+    if policy["schema_version"] != 2:
         raise CandidateControlError("Windows TUN policy schema_version is invalid")
     if policy["kind"] != "ferrum2.windows-tun.host-performance-policy":
         raise CandidateControlError("Windows TUN policy kind is invalid")
     if policy["selection"] != WINDOWS_TUN_SELECTION:
         raise CandidateControlError("Windows TUN policy selection is invalid")
+    if policy["topologies"] != sorted(WINDOWS_TUN_TOPOLOGIES):
+        raise CandidateControlError("Windows TUN policy topology set is invalid")
     if policy["threshold_percent"] != WINDOWS_TUN_THRESHOLD_PERCENT:
         raise CandidateControlError("Windows TUN policy threshold is invalid")
-    if policy["maximum_non_target_regression_percent"] != 2.0:
-        raise CandidateControlError("Windows TUN non-target regression bound is invalid")
+    if policy["maximum_non_target_cpu_regression_percent"] != 2.0:
+        raise CandidateControlError("Windows TUN non-target CPU regression bound is invalid")
     if policy["require_majority_pairs"] is not True:
         raise CandidateControlError("Windows TUN policy must require a pair majority")
     profiles = policy["profiles"]
@@ -77,20 +80,6 @@ def validate_windows_tun_policy(value: object) -> dict[str, object]:
         expected_scenarios = [row[0] for row in expected["scenarios"]]
         if type(scenarios) is not list or scenarios != expected_scenarios:
             raise CandidateControlError(f"Windows TUN {mode} scenario set changed")
-    soak = policy["soak"]
-    if type(soak) is not dict:
-        raise CandidateControlError("Windows TUN soak policy must be an object")
-    _exact_fields(
-        soak,
-        frozenset({"enabled_by_default", "cycles", "candidate_decision_input"}),
-        "Windows TUN soak policy",
-    )
-    if (
-        soak["enabled_by_default"] is not False
-        or soak["candidate_decision_input"] is not False
-        or _integer(soak["cycles"], "soak.cycles", minimum=1000, maximum=1000) != 1000
-    ):
-        raise CandidateControlError("Windows TUN soak must remain isolated and opt-in")
     return policy
 
 

@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 WINDOWS_TUN_SELECTION = "windows-tun-host"
 WINDOWS_TUN_MODES = frozenset({"Quick", "Confirm", "Lifecycle"})
+WINDOWS_TUN_TOPOLOGIES = frozenset({"ClientDirect", "EndToEnd"})
 WINDOWS_TUN_THRESHOLD_PERCENT = 2.0
 WINDOWS_TUN_PERFORMANCE_SOURCE_PATHS = (
     "tools/powershell/Ferrum2.Performance/Ferrum2.Performance.psd1",
@@ -19,6 +20,23 @@ WINDOWS_TUN_PERFORMANCE_SOURCE_PATHS = (
     "tools/windows-tun/performance/run_windows_tun_performance_host.ps1",
 )
 
+_QUICK_SCENARIOS = (
+    ("tcp-single-flow", "throughput", "bytes_per_second", "higher_is_better"),
+    ("tcp-request-1k-p99", "p99_nanoseconds", "nanoseconds", "lower_is_better"),
+    (
+        "udp-packets-per-second",
+        "packet_rate",
+        "packets_per_second",
+        "higher_is_better",
+    ),
+    (
+        "fragment-reassembly-throughput",
+        "reassembly_rate",
+        "bytes_per_second",
+        "higher_is_better",
+    ),
+)
+
 WINDOWS_TUN_PROFILES = MappingProxyType(
     {
         "Quick": MappingProxyType(
@@ -27,14 +45,7 @@ WINDOWS_TUN_PROFILES = MappingProxyType(
                 "warmup_seconds": 2,
                 "active_seconds": 10,
                 "lifecycle_cycles": 0,
-                "scenarios": (
-                    ("udp-packets-per-second", "packet_rate", "packets_per_second"),
-                    (
-                        "fragment-reassembly-throughput",
-                        "reassembly_rate",
-                        "bytes_per_second",
-                    ),
-                ),
+                "scenarios": _QUICK_SCENARIOS,
             }
         ),
         "Confirm": MappingProxyType(
@@ -43,14 +54,14 @@ WINDOWS_TUN_PROFILES = MappingProxyType(
                 "warmup_seconds": 5,
                 "active_seconds": 30,
                 "lifecycle_cycles": 0,
-                "scenarios": (
-                    ("udp-packets-per-second", "packet_rate", "packets_per_second"),
+                "scenarios": _QUICK_SCENARIOS
+                + (
                     (
-                        "fragment-reassembly-throughput",
-                        "reassembly_rate",
-                        "bytes_per_second",
+                        "tcp-256-flow-fairness",
+                        "fairness",
+                        "jain_ppb",
+                        "higher_is_better",
                     ),
-                    ("tcp-single-flow", "throughput", "bytes_per_second"),
                 ),
             }
         ),
@@ -66,8 +77,45 @@ WINDOWS_TUN_PROFILES = MappingProxyType(
     }
 )
 
+WINDOWS_TUN_WORKLOAD_MEASUREMENTS = MappingProxyType(
+    {
+        "tcp-single-flow": frozenset(
+            {"throughput", "cpu_payload_bytes", "io_completions"}
+        ),
+        "tcp-request-1k-p99": frozenset({"p99_nanoseconds", "io_completions"}),
+        "tcp-256-flow-fairness": frozenset(
+            {"fairness", "aggregate_throughput", "io_completions"}
+        ),
+        "udp-packets-per-second": frozenset(
+            {"packet_rate", "p99_nanoseconds", "io_completions"}
+        ),
+        "fragment-reassembly-throughput": frozenset(
+            {"reassembly_rate", "io_completions"}
+        ),
+    }
+)
+
 WINDOWS_TUN_WORKLOAD_CHECKS = MappingProxyType(
     {
+        "tcp-single-flow": frozenset(
+            {"single_flow_only", "payload_exact", "no_gso"}
+        ),
+        "tcp-request-1k-p99": frozenset(
+            {
+                "single_flow_only",
+                "payload_exact",
+                "bounded_latency_samples",
+                "no_gso",
+            }
+        ),
+        "tcp-256-flow-fairness": frozenset(
+            {
+                "all_256_flows_ready",
+                "all_256_flows_nonzero",
+                "payload_exact",
+                "no_gso",
+            }
+        ),
         "udp-packets-per-second": frozenset(
             {
                 "every_reply_accounted",
@@ -82,13 +130,6 @@ WINDOWS_TUN_WORKLOAD_CHECKS = MappingProxyType(
                 "no_gso",
                 "all_sequences_acknowledged",
                 "bounded_retransmissions",
-            }
-        ),
-        "tcp-single-flow": frozenset(
-            {
-                "single_flow_only",
-                "payload_exact",
-                "no_gso",
             }
         ),
     }

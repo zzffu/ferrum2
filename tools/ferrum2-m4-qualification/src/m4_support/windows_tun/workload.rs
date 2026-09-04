@@ -4,9 +4,10 @@ use super::diagnostic::{
     FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER, FRAGMENT_REQUEST_TAG,
     FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS, FragmentAckBatch, FragmentPhase,
     FragmentWorkloadAccounting, IO_TIMEOUT, SUPPORT_TCP_IDLE_TIMEOUT, TCP_FAIRNESS_FLOWS,
-    TCP_FAIRNESS_PAYLOAD, TCP_FAIRNESS_READINESS_PAYLOAD, TCP_SINGLE_MINIMUM_BYTES,
-    TCP_SINGLE_PAYLOAD, UDP_BATCH, UDP_MINIMUM_DATAGRAMS, UDP_PACKET_TIMEOUT, UDP_PAYLOAD,
-    UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
+    TCP_FAIRNESS_PAYLOAD, TCP_FAIRNESS_READINESS_PAYLOAD, TCP_REQUEST_LATENCY_SAMPLE_CAP,
+    TCP_REQUEST_MINIMUM_TRANSACTIONS, TCP_REQUEST_PAYLOAD, TCP_SINGLE_MINIMUM_BYTES,
+    TCP_SINGLE_PAYLOAD, UDP_BATCH, UDP_LATENCY_SAMPLE_CAP, UDP_MINIMUM_DATAGRAMS,
+    UDP_PACKET_TIMEOUT, UDP_PAYLOAD, UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
 };
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
@@ -78,6 +79,44 @@ pub(crate) fn elapsed_rate(units: u64, elapsed: Duration, name: &str) -> Result<
         .ok_or_else(|| format!("{name} rate numerator overflow"))?
         / nanos;
     u64::try_from(rate.max(1)).map_err(|_| format!("{name} rate overflow"))
+}
+pub(crate) fn percentile_99(mut values: Vec<u64>, name: &str) -> Result<u64, String> {
+    if values.is_empty() {
+        return Err(format!("{name} has no latency samples"));
+    }
+    values.sort_unstable();
+    let rank = values
+        .len()
+        .checked_mul(99)
+        .ok_or_else(|| format!("{name} percentile rank overflow"))?
+        .div_ceil(100);
+    Ok(values[rank.saturating_sub(1)])
+}
+pub(crate) fn record_latency_sample(
+    samples: &mut Vec<u64>,
+    observed: u64,
+    latency: u64,
+    capacity: usize,
+) -> Result<(), String> {
+    if capacity == 0 {
+        return Err("latency sample capacity is zero".to_owned());
+    }
+    if samples.len() < capacity {
+        samples.push(latency);
+        return Ok(());
+    }
+    let range = observed
+        .checked_add(1)
+        .ok_or_else(|| "latency observation count overflow".to_owned())?;
+    let mut mixed = observed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    let replacement = mixed % range;
+    if replacement < capacity as u64 {
+        samples[replacement as usize] = latency;
+    }
+    Ok(())
 }
 
 pub(crate) fn wait_for_active_release(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
@@ -170,15 +209,73 @@ pub(crate) fn tcp_single(
     let cpu_payload_bytes = warmup_bytes
         .checked_add(checked_bytes)
         .ok_or_else(|| "TCP single-flow total byte count overflow".to_owned())?;
+    let transactions = checked_bytes / (TCP_SINGLE_PAYLOAD as u64);
+    let io_completions = transactions
+        .checked_mul(2)
+        .ok_or_else(|| "TCP single-flow I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
             "throughput": elapsed_rate(checked_bytes, elapsed, "TCP throughput")?,
-            "cpu_payload_bytes": cpu_payload_bytes
+            "cpu_payload_bytes": cpu_payload_bytes,
+            "io_completions": io_completions
         },
         "checked_units": checked_bytes,
         "checks": {
             "single_flow_only": true,
             "payload_exact": true,
+            "no_gso": true
+        }
+    }))
+}
+pub(crate) fn tcp_request_latency(
+    address: SocketAddr,
+    warmup: Duration,
+    active: Duration,
+    active_markers: Option<&ActiveWindowMarkers>,
+) -> Result<Value, String> {
+    let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
+        .map_err(|error| format!("TCP request connect failed: {error}"))?;
+    configure_tcp(&stream)?;
+    let payload = checked_payload(TCP_REQUEST_PAYLOAD, 7);
+    let mut reply = vec![0; payload.len()];
+    let warmup_deadline = Instant::now() + warmup;
+    while Instant::now() < warmup_deadline {
+        tcp_round_trip(&mut stream, &payload, &mut reply)?;
+    }
+    let mut latencies = Vec::with_capacity(TCP_REQUEST_LATENCY_SAMPLE_CAP);
+    let mut transactions = 0_u64;
+    wait_for_active_release(active_markers)?;
+    let deadline = Instant::now() + active;
+    while Instant::now() < deadline || transactions < TCP_REQUEST_MINIMUM_TRANSACTIONS {
+        let started = Instant::now();
+        tcp_round_trip(&mut stream, &payload, &mut reply)?;
+        let latency = u64::try_from(started.elapsed().as_nanos())
+            .map_err(|_| "TCP request latency overflow".to_owned())?;
+        record_latency_sample(
+            &mut latencies,
+            transactions,
+            latency,
+            TCP_REQUEST_LATENCY_SAMPLE_CAP,
+        )?;
+        transactions = transactions
+            .checked_add(1)
+            .ok_or_else(|| "TCP request transaction count overflow".to_owned())?;
+    }
+    signal_active_complete(active_markers)?;
+    let p99_nanoseconds = percentile_99(latencies, "TCP request")?;
+    let io_completions = transactions
+        .checked_mul(2)
+        .ok_or_else(|| "TCP request I/O completion count overflow".to_owned())?;
+    Ok(json!({
+        "measurements": {
+            "p99_nanoseconds": p99_nanoseconds,
+            "io_completions": io_completions
+        },
+        "checked_units": transactions,
+        "checks": {
+            "single_flow_only": true,
+            "payload_exact": true,
+            "bounded_latency_samples": true,
             "no_gso": true
         }
     }))
@@ -296,6 +393,15 @@ pub(crate) fn tcp_fairness(
         sum.checked_add(u128::from(*value))
             .ok_or_else(|| "fairness sum overflow".to_owned())
     })?;
+    let checked_bytes =
+        u64::try_from(sum).map_err(|_| "fairness checked byte count overflow".to_owned())?;
+    if checked_bytes % (TCP_FAIRNESS_PAYLOAD as u64) != 0 {
+        return Err("fairness transaction accounting is not payload aligned".to_owned());
+    }
+    let transactions = checked_bytes / (TCP_FAIRNESS_PAYLOAD as u64);
+    let io_completions = transactions
+        .checked_mul(2)
+        .ok_or_else(|| "fairness I/O completion count overflow".to_owned())?;
     let squares = values.iter().try_fold(0_u128, |sum, value| {
         let value = u128::from(*value);
         sum.checked_add(
@@ -315,8 +421,12 @@ pub(crate) fn tcp_fairness(
     let jain_ppb =
         u64::try_from(numerator / denominator).map_err(|_| "fairness index overflow".to_owned())?;
     Ok(json!({
-        "measurements": {"fairness": jain_ppb},
-        "checked_units": TCP_FAIRNESS_FLOWS,
+        "measurements": {
+            "fairness": jain_ppb,
+            "aggregate_throughput": elapsed_rate(checked_bytes, active, "fairness throughput")?,
+            "io_completions": io_completions
+        },
+        "checked_units": checked_bytes,
         "checks": {
             "all_256_flows_ready": true,
             "all_256_flows_nonzero": true,
@@ -796,14 +906,24 @@ pub(crate) fn udp_packets(
         (sequence, _) =
             udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
     }
+    let mut latencies = Vec::with_capacity(UDP_LATENCY_SAMPLE_CAP);
+    let mut datagrams = 0_u64;
+    let mut receive_retries = 0_u64;
     wait_for_active_release(active_markers)?;
     let start = Instant::now();
     let deadline = start + active;
-    let mut datagrams = 0_u64;
-    let mut receive_retries = 0_u64;
     while Instant::now() < deadline || datagrams < UDP_MINIMUM_DATAGRAMS {
+        let started = Instant::now();
         let (next_sequence, retries) =
             udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
+        let latency = u64::try_from(started.elapsed().as_nanos())
+            .map_err(|_| "UDP packet latency overflow".to_owned())?;
+        record_latency_sample(
+            &mut latencies,
+            datagrams / UDP_BATCH as u64,
+            latency,
+            UDP_LATENCY_SAMPLE_CAP,
+        )?;
         sequence = next_sequence;
         receive_retries = receive_retries
             .checked_add(retries)
@@ -814,9 +934,15 @@ pub(crate) fn udp_packets(
     }
     let elapsed = start.elapsed();
     signal_active_complete(active_markers)?;
+    let p99_nanoseconds = percentile_99(latencies, "UDP packet")?;
+    let io_completions = datagrams
+        .checked_mul(2)
+        .ok_or_else(|| "UDP I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
-            "packet_rate": elapsed_rate(datagrams, elapsed, "UDP packet rate")?
+            "packet_rate": elapsed_rate(datagrams, elapsed, "UDP packet rate")?,
+            "p99_nanoseconds": p99_nanoseconds,
+            "io_completions": io_completions
         },
         "counters": {
             "receive_retries": receive_retries

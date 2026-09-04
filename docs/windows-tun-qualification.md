@@ -118,7 +118,9 @@ adapter or claim live correctness.
 
 Correctness qualification does not call the public performance runner and does not apply performance
 thresholds. Performance remains at
-`tools/windows-tun/performance/run_windows_tun_performance_host.ps1`: Quick is 12 trials (two
-scenarios, three interleaved pairs), Confirm is 30 trials (three scenarios, five pairs), and Lifecycle
-is 20 complete product-start/probe/stop cycles. Performance evidence cannot substitute for
-`qualification.json`, and qualification evidence cannot substitute for a performance result.
+`tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. Each run selects either the
+serverless ClientDirect topology or the complete EndToEnd client/server topology. Per topology,
+Quick is 24 trials (four scenarios, three interleaved pairs), Confirm is 50 trials (five scenarios,
+five pairs), and Lifecycle is 20 complete product-start/probe/stop cycles. Performance evidence
+cannot substitute for `qualification.json`, and qualification evidence cannot substitute for a
+performance result.

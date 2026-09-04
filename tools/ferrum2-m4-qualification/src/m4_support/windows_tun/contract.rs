@@ -11,6 +11,7 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Scenario {
     TcpSingle,
+    TcpRequest,
     TcpFairness,
     UdpPackets,
     UdpAssociations,
@@ -23,6 +24,7 @@ impl Scenario {
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         match value {
             "tcp-single-flow" => Ok(Self::TcpSingle),
+            "tcp-request-1k-p99" => Ok(Self::TcpRequest),
             "tcp-256-flow-fairness" => Ok(Self::TcpFairness),
             "udp-packets-per-second" => Ok(Self::UdpPackets),
             "udp-8192-association-lookup-expiry" => Ok(Self::UdpAssociations),
@@ -36,6 +38,7 @@ impl Scenario {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::TcpSingle => "tcp-single-flow",
+            Self::TcpRequest => "tcp-request-1k-p99",
             Self::TcpFairness => "tcp-256-flow-fairness",
             Self::UdpPackets => "udp-packets-per-second",
             Self::UdpAssociations => "udp-8192-association-lookup-expiry",
@@ -342,6 +345,7 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
         && !matches!(
             scenario,
             Scenario::TcpSingle
+                | Scenario::TcpRequest
                 | Scenario::TcpFairness
                 | Scenario::UdpPackets
                 | Scenario::Fragments

@@ -1,24 +1,41 @@
 Set-StrictMode -Version Latest
 
+$script:HostQuickScenarios = @(
+    [pscustomobject][ordered]@{
+        name = "tcp-single-flow"; metric = "throughput"
+        unit = "bytes_per_second"; direction = "higher_is_better"
+    }
+    [pscustomobject][ordered]@{
+        name = "tcp-request-1k-p99"; metric = "p99_nanoseconds"
+        unit = "nanoseconds"; direction = "lower_is_better"
+    }
+    [pscustomobject][ordered]@{
+        name = "udp-packets-per-second"; metric = "packet_rate"
+        unit = "packets_per_second"; direction = "higher_is_better"
+    }
+    [pscustomobject][ordered]@{
+        name = "fragment-reassembly-throughput"; metric = "reassembly_rate"
+        unit = "bytes_per_second"; direction = "higher_is_better"
+    }
+)
+
 $script:HostProfileDefinitions = @{
     Quick = [pscustomobject][ordered]@{
         pair_count = 3
         warmup_seconds = 2
         active_seconds = 10
-        scenarios = @(
-            [pscustomobject][ordered]@{ name = "udp-packets-per-second"; metric = "packet_rate"; unit = "packets_per_second" }
-            [pscustomobject][ordered]@{ name = "fragment-reassembly-throughput"; metric = "reassembly_rate"; unit = "bytes_per_second" }
-        )
+        scenarios = @($script:HostQuickScenarios)
         lifecycle_cycles = 0
     }
     Confirm = [pscustomobject][ordered]@{
         pair_count = 5
         warmup_seconds = 5
         active_seconds = 30
-        scenarios = @(
-            [pscustomobject][ordered]@{ name = "udp-packets-per-second"; metric = "packet_rate"; unit = "packets_per_second" }
-            [pscustomobject][ordered]@{ name = "fragment-reassembly-throughput"; metric = "reassembly_rate"; unit = "bytes_per_second" }
-            [pscustomobject][ordered]@{ name = "tcp-single-flow"; metric = "throughput"; unit = "bytes_per_second" }
+        scenarios = @($script:HostQuickScenarios) + @(
+            [pscustomobject][ordered]@{
+                name = "tcp-256-flow-fairness"; metric = "fairness"
+                unit = "jain_ppb"; direction = "higher_is_better"
+            }
         )
         lifecycle_cycles = 0
     }
@@ -44,7 +61,10 @@ function New-HostPairTrials {
     param(
         [Parameter(Mandatory = $true)][string]$BaselineSha,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][object]$Profile
+        [Parameter(Mandatory = $true)][object]$Profile,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("ClientDirect", "EndToEnd")]
+        [string]$Topology
     )
     $trials = [Collections.Generic.List[object]]::new()
     [int]$sequence = 0
@@ -70,6 +90,8 @@ function New-HostPairTrials {
                     scenario = $scenario.name
                     metric = $scenario.metric
                     unit = $scenario.unit
+                    topology = $Topology
+                    direction = $scenario.direction
                     member = $member.label
                     commit_sha = $member.sha
                     warmup_seconds = $Profile.warmup_seconds
@@ -87,6 +109,9 @@ function New-Ferrum2HostPerformancePlan {
         [Parameter(Mandatory = $true)]
         [ValidateSet("Quick", "Confirm", "Lifecycle")]
         [string]$Mode,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("ClientDirect", "EndToEnd")]
+        [string]$Topology,
         [Parameter(Mandatory = $true)][string]$BaselineSha,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
         [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256,
@@ -101,21 +126,24 @@ function New-Ferrum2HostPerformancePlan {
             [pscustomobject][ordered]@{
                 sequence = 1
                 scenario = "product-lifecycle"
+                topology = $Topology
                 member = "candidate"
                 commit_sha = $CandidateSha
                 lifecycle_cycles = $profile.lifecycle_cycles
                 action = "product-start-probe-stop"
             }
         } else {
-            New-HostPairTrials -BaselineSha $BaselineSha -CandidateSha $CandidateSha -Profile $profile
+            New-HostPairTrials -BaselineSha $BaselineSha -CandidateSha $CandidateSha `
+                -Profile $profile -Topology $Topology
         }
     )
     return [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "ferrum2.windows-tun.host-performance-plan"
         run_id = $RunId
         execution = "explicit-authorized-windows-host"
         mode = $Mode
+        topology = $Topology
         baseline_sha = $BaselineSha
         candidate_sha = $CandidateSha
         performance_source_bundle_sha256 = $PerformanceSourceBundleSha256
@@ -137,13 +165,6 @@ function New-Ferrum2HostPerformancePlan {
             forbidden_mutations = @("default route", "system DNS", "physical adapters", "WLAN", "firewall", "WFP", "sing-box")
             cleanup = "exact RunId ledger identities in try/finally"
             recovery = "%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json"
-        }
-        qualification = [pscustomobject][ordered]@{
-            product_lifecycle_cycles = $profile.lifecycle_cycles
-            long_durability_soak = "excluded"
-            vm_start = $false
-            checkpoint_restore = $false
-            guest_staging = $false
         }
     }
 }

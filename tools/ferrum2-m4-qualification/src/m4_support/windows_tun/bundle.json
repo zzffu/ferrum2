@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "kind": "ferrum2.m4-windows-tun-source-bundle.v2",
+  "kind": "ferrum2.m4-windows-tun-source-bundle.v3",
   "entrypoint": "src/main.rs",
   "files": [
     {
@@ -120,13 +120,13 @@
     },
     {
       "path": "src/m4_support/windows_tun/contract.rs",
-      "bytes": 20311,
-      "sha256": "83556e3e9a2af928f68877ac5be26d813e84c6594c9b78cfbf2e22157547bdf3"
+      "bytes": 20478,
+      "sha256": "faa37e725bad135aec8a5934794b5c373c8371502463e36c2f9325bac7378745"
     },
     {
       "path": "src/m4_support/windows_tun/diagnostic.rs",
-      "bytes": 27144,
-      "sha256": "a5c95853892f2480dec6f65286c73d8e0a8ce6b8d8bc814ec03205a6314e47bd"
+      "bytes": 27535,
+      "sha256": "bf07b971e723b78eb06e9fb4da48ca102935e1860da6c5fd805e46c461fefb4b"
     },
     {
       "path": "src/m4_support/windows_tun/mod.rs",
@@ -135,8 +135,8 @@
     },
     {
       "path": "src/m4_support/windows_tun/scenarios.rs",
-      "bytes": 18849,
-      "sha256": "44aadc572ca05b981bce36318b878fd6f876a23f0beb4e6f2810dc71a794efc4"
+      "bytes": 19438,
+      "sha256": "a7cf565147568837213bc9ac3c958654e15a2a0b1b9a7f53471a16a7e39b4a39"
     },
     {
       "path": "src/m4_support/windows_tun/self_check/cli_contract.rs",
@@ -150,8 +150,8 @@
     },
     {
       "path": "src/m4_support/windows_tun/self_check/workload.rs",
-      "bytes": 9431,
-      "sha256": "863017b2faf561ea0b8972ef7d90e5c778072afe398413874f530a8a407112ff"
+      "bytes": 10624,
+      "sha256": "ab184d77bb57d622ed9e8a9acbb9c11ab4786d4bb09085f8f0c522b3d3f6bdf7"
     },
     {
       "path": "src/m4_support/windows_tun/self_check.rs",
@@ -165,8 +165,8 @@
     },
     {
       "path": "src/m4_support/windows_tun/workload.rs",
-      "bytes": 34002,
-      "sha256": "c51df91bab959b34f444094e3f682868bbad6cf008855fda2ee2414d8681ff89"
+      "bytes": 39055,
+      "sha256": "d1d6c08f6a4b1ec313b8015b76dd108f4b6f41e653305f793bab53868669b847"
     },
     {
       "path": "src/m4_support/windows_tun/workload_diagnostic.rs",

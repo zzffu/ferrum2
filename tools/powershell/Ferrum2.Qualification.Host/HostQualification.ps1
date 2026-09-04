@@ -27,6 +27,9 @@ function Write-Ferrum2TrialConfigs {
         [Parameter(Mandatory = $true)][object]$Network,
         [Parameter(Mandatory = $true)][object]$Loopback,
         [Parameter(Mandatory = $true)][string]$AdapterName,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("EndToEnd")]
+        [string]$Topology,
         [Parameter(Mandatory = $true)][uint16]$ServerPort,
         [Parameter(Mandatory = $true)][uint16]$ClientMetricsPort,
         [Parameter(Mandatory = $true)][uint16]$ServerMetricsPort,
@@ -34,7 +37,7 @@ function Write-Ferrum2TrialConfigs {
     )
     $configs = & $script:BaseWriteFerrum2TrialConfigs `
         -Context $Context -Network $Network -Loopback $Loopback `
-        -AdapterName $AdapterName -ServerPort $ServerPort `
+        -AdapterName $AdapterName -Topology $Topology -ServerPort $ServerPort `
         -ClientMetricsPort $ClientMetricsPort -ServerMetricsPort $ServerMetricsPort `
         -Sequence $Sequence
     $text = [IO.File]::ReadAllText([string]$configs.client)
@@ -356,7 +359,7 @@ function Invoke-Ferrum2HostQualificationChecks {
     $notificationWitness = $null
 
     $createRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 1
+        -Network $Network -Loopback $Loopback -Sequence 1 -Topology "EndToEnd"
     Stop-Ferrum2ProductTrial -Context $Context -Runtime $createRuntime
     Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'create-cleanup'
     $checks.Add([pscustomobject][ordered]@{
@@ -364,7 +367,7 @@ function Invoke-Ferrum2HostQualificationChecks {
     })
 
     $smokeRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 2
+        -Network $Network -Loopback $Loopback -Sequence 2 -Topology "EndToEnd"
     try {
         $metricsBefore = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port
         if ((Get-Ferrum2MetricValue $metricsBefore 'ferrum2_tun_strict_route_requested') -ne 1 -or
@@ -438,7 +441,7 @@ function Invoke-Ferrum2HostQualificationChecks {
     }
 
     $faultRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 3
+        -Network $Network -Loopback $Loopback -Sequence 3 -Topology "EndToEnd"
     [void](Get-Ferrum2QualificationWfpWitness -Context $Context `
         -Runtime $faultRuntime -Label 'before-forced-close')
     [Ferrum2PerfProcessGroup]::CloseGroup()

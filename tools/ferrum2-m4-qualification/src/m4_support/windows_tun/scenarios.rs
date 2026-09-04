@@ -6,15 +6,15 @@ use super::diagnostic::{
     FRAGMENT_ACTIVE, FRAGMENT_MINIMUM_DATAGRAMS, FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER,
     FRAGMENT_WARMUP, FragmentPhase, FragmentWorkloadAccounting, IO_TIMEOUT, RING_BURST_ATTEMPTS,
     ROUTE_DATAGRAMS_PER_TARGET, ROUTE_PAYLOAD, ROUTE_SOURCE_SLOTS, ROUTE_TARGET_SLOTS,
-    TCP_FAIRNESS_ACTIVE, TCP_FAIRNESS_WARMUP, TCP_SINGLE_ACTIVE, TCP_SINGLE_WARMUP, UDP_ACTIVE,
-    UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_PAYLOAD, UDP_WARMUP, UdpDiagnosticFinalizeArgs,
-    udp_diagnostic_finalize_marker,
+    TCP_FAIRNESS_ACTIVE, TCP_FAIRNESS_WARMUP, TCP_REQUEST_ACTIVE, TCP_REQUEST_WARMUP,
+    TCP_SINGLE_ACTIVE, TCP_SINGLE_WARMUP, UDP_ACTIVE, UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_PAYLOAD,
+    UDP_WARMUP, UdpDiagnosticFinalizeArgs, udp_diagnostic_finalize_marker,
 };
 use super::workload::{
     checked_payload, configure_tcp, connected_udp, elapsed_rate, fragment_batch_round_trip,
     fragment_retry_budget, fragment_workload_batch_round_trip, sequenced_payload,
-    signal_active_complete, tcp_fairness, tcp_round_trip, tcp_single, udp_packets, udp_round_trip,
-    unconnected_udp, wait_for_active_release,
+    signal_active_complete, tcp_fairness, tcp_request_latency, tcp_round_trip, tcp_single,
+    udp_packets, udp_round_trip, unconnected_udp, wait_for_active_release,
 };
 use super::workload_diagnostic::udp_associations;
 use serde_json::{Value, json};
@@ -254,9 +254,14 @@ pub(crate) fn fragments(
     {
         return Err("fragment workload accounting invariants failed".to_owned());
     }
+    let io_completions = accounting
+        .active_request_attempts
+        .checked_mul(2)
+        .ok_or_else(|| "fragment I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
-            "reassembly_rate": elapsed_rate(bytes, elapsed, "fragment reassembly")?
+            "reassembly_rate": elapsed_rate(bytes, elapsed, "fragment reassembly")?,
+            "io_completions": io_completions
         },
         "checked_units": accounting.active_unique_datagrams,
         "accounting": {
@@ -311,7 +316,7 @@ pub(crate) fn write_observation(
     observation: Value,
 ) -> Result<(), String> {
     let document = json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "windows_tun_workload",
         "scenario": scenario.label(),
         "window": window.map(|window| json!({
@@ -348,7 +353,9 @@ pub(crate) fn run_workload(arguments: &[OsString]) -> Result<String, String> {
     let address = SocketAddr::new(
         arguments.target_ip,
         match arguments.scenario {
-            Scenario::TcpSingle | Scenario::TcpFairness => arguments.tcp_port,
+            Scenario::TcpSingle | Scenario::TcpRequest | Scenario::TcpFairness => {
+                arguments.tcp_port
+            }
             _ => arguments.udp_port,
         },
     );
@@ -360,6 +367,11 @@ pub(crate) fn run_workload(arguments: &[OsString]) -> Result<String, String> {
             let (warmup, active) =
                 explicit_window.unwrap_or((TCP_SINGLE_WARMUP, TCP_SINGLE_ACTIVE));
             tcp_single(address, warmup, active, arguments.active_markers.as_ref())?
+        }
+        Scenario::TcpRequest => {
+            let (warmup, active) =
+                explicit_window.unwrap_or((TCP_REQUEST_WARMUP, TCP_REQUEST_ACTIVE));
+            tcp_request_latency(address, warmup, active, arguments.active_markers.as_ref())?
         }
         Scenario::TcpFairness => {
             let (warmup, active) =

@@ -7,6 +7,7 @@ import unittest
 
 from tools.performance_candidate.windows_tun.recipe import (
     WINDOWS_TUN_PERFORMANCE_SOURCE_PATHS,
+    WINDOWS_TUN_PROFILES,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,7 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         for name in (
             "PlanOnly",
             "Mode",
+            "Topology",
             "BaselineSha",
             "CandidateSha",
             "EvidenceDirectory",
@@ -82,7 +84,7 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(
             manifest["kind"],
-            "ferrum2.windows-tun-performance-source-bundle.v2",
+            "ferrum2.windows-tun-performance-source-bundle.v3",
         )
         self.assertEqual(
             manifest["entrypoint"],
@@ -107,7 +109,7 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         manifest = json.loads(M4_BUNDLE.read_text(encoding="utf-8"))
         self.assertEqual(
             (manifest["kind"], manifest["entrypoint"]),
-            ("ferrum2.m4-windows-tun-source-bundle.v2", "src/main.rs"),
+            ("ferrum2.m4-windows-tun-source-bundle.v3", "src/main.rs"),
         )
         rows = {row["path"]: row for row in manifest["files"]}
         actual = {"Cargo.toml"}
@@ -166,7 +168,7 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         self.assertIn("process owner is already loaded", completed.stderr)
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")
-    def test_plan_only_is_unprivileged_and_excludes_long_soak(self) -> None:
+    def test_plan_only_is_unprivileged_and_closes_each_topology(self) -> None:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=ROOT,
@@ -184,6 +186,8 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
                 "-PlanOnly",
                 "-Mode",
                 "Quick",
+                "-Topology",
+                "ClientDirect",
                 "-BaselineSha",
                 sha,
                 "-CandidateSha",
@@ -196,13 +200,21 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         )
         plan = json.loads(completed.stdout)
         self.assertEqual(plan["execution"], "explicit-authorized-windows-host")
+        self.assertEqual(plan["schema_version"], 2)
+        self.assertEqual(plan["topology"], "ClientDirect")
         self.assertEqual(plan["pair_count"], 3)
-        self.assertEqual(plan["trial_count"], 12)
-        self.assertEqual(plan["qualification"]["product_lifecycle_cycles"], 0)
-        self.assertEqual(plan["qualification"]["long_durability_soak"], "excluded")
-        self.assertFalse(plan["qualification"]["vm_start"])
-        self.assertFalse(plan["qualification"]["checkpoint_restore"])
-        self.assertFalse(plan["qualification"]["guest_staging"])
+        self.assertEqual(plan["scenario_count"], 4)
+        self.assertEqual(plan["trial_count"], 24)
+        self.assertEqual(
+            [scenario["direction"] for scenario in plan["scenarios"]],
+            [
+                "higher_is_better",
+                "lower_is_better",
+                "higher_is_better",
+                "higher_is_better",
+            ],
+        )
+        self.assertNotIn("qualification", plan)
         lifecycle_command = completed.args.copy()
         lifecycle_command[lifecycle_command.index("Quick")] = "Lifecycle"
         lifecycle_plan = json.loads(
@@ -216,6 +228,37 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         )
         self.assertIsInstance(lifecycle_plan["trials"], list)
         self.assertEqual(len(lifecycle_plan["trials"]), 1)
+        end_to_end_command = completed.args.copy()
+        end_to_end_command[
+            end_to_end_command.index("ClientDirect")
+        ] = "EndToEnd"
+        end_to_end_plan = json.loads(
+            subprocess.run(
+                end_to_end_command,
+                cwd=ROOT,
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout
+        )
+        self.assertEqual(end_to_end_plan["topology"], "EndToEnd")
+        self.assertEqual(end_to_end_plan["trial_count"], 24)
+        confirm_command = completed.args.copy()
+        confirm_command[confirm_command.index("Quick")] = "Confirm"
+        confirm_plan = json.loads(
+            subprocess.run(
+                confirm_command,
+                cwd=ROOT,
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout
+        )
+        self.assertEqual(confirm_plan["trial_count"], 50)
+        self.assertEqual(
+            [scenario["name"] for scenario in confirm_plan["scenarios"]],
+            [row[0] for row in WINDOWS_TUN_PROFILES["Confirm"]["scenarios"]],
+        )
 
 
 if __name__ == "__main__":

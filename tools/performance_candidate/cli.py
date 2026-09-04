@@ -23,7 +23,10 @@ from tools.performance_candidate.linux.scale import load_scale_safety_policy
 from tools.performance_candidate.linux.scale_lineage import build_scale_lineage, load_scale_lineage, validate_scale_source_lineage
 from tools.performance_candidate.output import _atomic_text
 from tools.performance_candidate.status import qualification_exit_code
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_MODES
+from tools.performance_candidate.windows_tun.recipe import (
+    WINDOWS_TUN_MODES,
+    WINDOWS_TUN_TOPOLOGIES,
+)
 from tools.performance_candidate.windows_tun.summary import (
     validate_windows_tun_host_evidence,
 )
@@ -144,6 +147,9 @@ def _parser() -> argparse.ArgumentParser:
     windows_tun_validate.add_argument("--candidate-sha", required=True)
     windows_tun_validate.add_argument(
         "--mode", required=True, choices=sorted(WINDOWS_TUN_MODES)
+    )
+    windows_tun_validate.add_argument(
+        "--topology", required=True, choices=sorted(WINDOWS_TUN_TOPOLOGIES)
     )
     windows_tun_validate.add_argument(
         "--policy", required=True, type=pathlib.Path
@@ -310,6 +316,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 baseline_sha=parsed.baseline_sha,
                 candidate_sha=parsed.candidate_sha,
                 mode=parsed.mode,
+                topology=parsed.topology,
                 policy_path=parsed.policy,
             )
             print(json.dumps(report, sort_keys=True, allow_nan=False))

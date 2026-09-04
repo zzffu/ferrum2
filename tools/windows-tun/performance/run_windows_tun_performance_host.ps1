@@ -6,14 +6,15 @@ Runs explicitly authorized, transactional Windows-host Wintun performance profil
 
 .DESCRIPTION
 PlanOnly is nonmutating and unprivileged. Real execution requires an already elevated shell plus
--AcknowledgeHostNetworkMutation. The runner owns one RunId-scoped Wintun adapter at a time, exact
-RFC 2544 support addresses and routes, product/support process trees, ports, temporary files,
-evidence, and a durable recovery ledger. Cleanup removes only identities recorded by that ledger.
-The runner never changes default routes, DNS, physical adapters, WLAN, firewall, WFP, or sing-box.
+-AcknowledgeHostNetworkMutation. Each run selects ClientDirect (no ferrum2-server) or EndToEnd
+(client plus ferrum2-server). The runner owns one RunId-scoped Wintun adapter at a time, exact RFC
+2544 support addresses and routes, product/support process trees, ports, temporary files, evidence,
+and a durable recovery ledger. Cleanup removes only identities recorded by that ledger. The runner
+never changes default routes, DNS, physical adapters, WLAN, firewall, WFP, or sing-box.
 
-Quick runs two affected data-path scenarios with three interleaved pairs. Confirm runs three
-scenarios with five interleaved pairs and longer windows. Lifecycle performs 20 complete
-product-start, TUN-probe, and product-stop cycles. No mode runs a long durability soak.
+Quick runs four data-path metrics with three interleaved pairs. Confirm adds 256-flow fairness and
+runs five interleaved pairs. Lifecycle performs 20 complete product-start, TUN-probe, and
+product-stop cycles.
 #>
 
 [CmdletBinding(DefaultParameterSetName = "Run")]
@@ -28,6 +29,10 @@ param(
     [Parameter(ParameterSetName = "Run")]
     [ValidateSet("Quick", "Confirm", "Lifecycle")]
     [string]$Mode = "Quick",
+    [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
+    [Parameter(Mandatory = $true, ParameterSetName = "Run")]
+    [ValidateSet("ClientDirect", "EndToEnd")]
+    [string]$Topology,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
@@ -78,7 +83,7 @@ function Read-Ferrum2PerformanceSourceBundle {
     if (($properties -join "|") -cne "entrypoint|files|kind|schema_version" -or
         [int]$manifest.schema_version -ne 1 -or
         [string]$manifest.kind -cne
-            "ferrum2.windows-tun-performance-source-bundle.v2" -or
+            "ferrum2.windows-tun-performance-source-bundle.v3" -or
         [string]$manifest.entrypoint -cne
             "tools/windows-tun/performance/run_windows_tun_performance_host.ps1") {
         throw "performance source bundle contract is invalid"
@@ -131,7 +136,7 @@ $arguments = @{
     PerformanceSourceBundleSha256 = $sourceBundle.sha256
 }
 foreach ($name in @(
-    "PlanOnly", "RecoveryOnly", "Mode", "BaselineSha", "CandidateSha",
+    "PlanOnly", "RecoveryOnly", "Mode", "Topology", "BaselineSha", "CandidateSha",
     "EvidenceDirectory", "AcknowledgeHostNetworkMutation"
 )) {
     if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }

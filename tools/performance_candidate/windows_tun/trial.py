@@ -6,7 +6,11 @@ import math
 import re
 
 from tools.performance_candidate.json_contract import CandidateControlError, _exact_fields
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_WORKLOAD_CHECKS
+from tools.performance_candidate.windows_tun.recipe import (
+    WINDOWS_TUN_TOPOLOGIES,
+    WINDOWS_TUN_WORKLOAD_CHECKS,
+    WINDOWS_TUN_WORKLOAD_MEASUREMENTS,
+)
 
 WINDOWS_TUN_TRIAL_MAX_BYTES = 512 * 1024
 _TRIAL_FIELDS = frozenset(
@@ -18,23 +22,31 @@ _TRIAL_FIELDS = frozenset(
         "sequence",
         "pair",
         "order",
+        "topology",
         "scenario",
         "member",
         "commit_sha",
         "metric",
         "unit",
+        "direction",
         "value",
         "warmup_seconds",
         "active_seconds",
         "cpu_sample_seconds",
+        "io_completions",
+        "p99_nanoseconds",
         "client_cpu_percent",
+        "server_present",
         "server_cpu_percent",
+        "client_peak_working_set_bytes",
+        "server_peak_working_set_bytes",
         "client_failure_counter_delta",
         "server_failure_counter_delta",
         "checked_units",
         "loopback_interface_index",
         "loopback_interface_alias",
         "route_proofs",
+        "workload_measurements",
         "workload_checks",
         "status",
     }
@@ -61,6 +73,12 @@ def _finite_positive(value: object, field: str, *, allow_zero: bool = False) -> 
     return number
 
 
+def _positive_int(value: object, field: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise CandidateControlError(f"{field} must be a positive integer")
+    return value
+
+
 def _run_network_identity(run_id: str) -> tuple[str, str]:
     value = int(run_id[:4], 16)
     third = (value >> 8) & 0xFF
@@ -73,27 +91,37 @@ def _validate_route_proofs(
     *,
     run_id: str,
     sequence: int,
+    topology: str,
     loopback_interface_index: int,
     loopback_interface_alias: str,
 ) -> None:
-    if type(value) is not list or len(value) != 4:
-        raise CandidateControlError("Windows TUN trial must contain four route proofs")
+    if topology not in WINDOWS_TUN_TOPOLOGIES:
+        raise CandidateControlError("Windows TUN trial topology is invalid")
+    direct = topology == "ClientDirect"
     expected_purposes = [
         "benchmark-application-to-test-tun",
-        "server-to-support-without-test-tun",
-        "product-underlay-control",
-        "sing-box-proxy-excluded",
+        (
+            "client-direct-to-support-without-test-tun"
+            if direct
+            else "server-to-support-without-test-tun"
+        ),
     ]
+    if not direct:
+        expected_purposes.append("product-underlay-control")
+    expected_purposes.append("sing-box-proxy-excluded")
+    if type(value) is not list or len(value) != len(expected_purposes):
+        raise CandidateControlError("Windows TUN trial route proof count changed")
     if [row.get("purpose") for row in value if type(row) is dict] != expected_purposes:
-        raise CandidateControlError("Windows TUN route proof purpose closure changed")
+        raise CandidateControlError("Windows TUN trial route proof purpose closure changed")
     tun_address, support_address = _run_network_identity(run_id)
     expected_alias = f"Ferrum2Perf-{run_id}-{sequence:03d}"
     expected_endpoints = [
         (support_address, tun_address, f"{support_address}/32"),
         (support_address, support_address, f"{support_address}/32"),
-        ("127.0.0.1", "127.0.0.1", "127.0.0.1/32"),
-        ("127.0.0.1", "127.0.0.1", "127.0.0.1/32"),
     ]
+    if not direct:
+        expected_endpoints.append(("127.0.0.1", "127.0.0.1", "127.0.0.1/32"))
+    expected_endpoints.append(("127.0.0.1", "127.0.0.1", "127.0.0.1/32"))
     for index, (row, endpoints) in enumerate(zip(value, expected_endpoints, strict=True)):
         if type(row) is not dict:
             raise CandidateControlError("Windows TUN route proof must be an object")
@@ -117,7 +145,25 @@ def _validate_route_proofs(
             row["interface_index"] != loopback_interface_index
             or row["interface_alias"] != loopback_interface_alias
         ):
-            raise CandidateControlError("underlay/support traffic did not prove loopback exclusion")
+            raise CandidateControlError("egress/control traffic did not prove loopback exclusion")
+
+
+def _validate_workload_measurements(trial: dict[str, object]) -> None:
+    scenario = str(trial["scenario"])
+    expected = WINDOWS_TUN_WORKLOAD_MEASUREMENTS.get(scenario)
+    measurements = trial["workload_measurements"]
+    if expected is None or type(measurements) is not dict or frozenset(measurements) != expected:
+        raise CandidateControlError("Windows TUN workload measurement closure is invalid")
+    for name, value in measurements.items():
+        _positive_int(value, f"workload_measurements.{name}")
+    primary = measurements[str(trial["metric"])]
+    if not math.isclose(float(trial["value"]), float(primary), rel_tol=0.0, abs_tol=0.0):
+        raise CandidateControlError("Windows TUN primary metric does not match workload evidence")
+    if trial["io_completions"] != measurements["io_completions"]:
+        raise CandidateControlError("Windows TUN I/O completion count does not match workload evidence")
+    expected_p99 = measurements.get("p99_nanoseconds")
+    if trial["p99_nanoseconds"] != expected_p99:
+        raise CandidateControlError("Windows TUN p99 latency does not match workload evidence")
 
 
 def validate_windows_tun_trial(
@@ -132,7 +178,7 @@ def validate_windows_tun_trial(
     trial = value
     _exact_fields(trial, _TRIAL_FIELDS, "Windows TUN host trial")
     if (
-        trial["schema_version"] != 1
+        trial["schema_version"] != 2
         or trial["kind"] != "ferrum2.windows-tun.host-performance-trial"
         or type(trial["run_id"]) is not str
         or re.fullmatch(r"[0-9a-f]{12}", trial["run_id"]) is None
@@ -146,11 +192,13 @@ def validate_windows_tun_trial(
         "sequence",
         "pair",
         "order",
+        "topology",
         "scenario",
         "member",
         "commit_sha",
         "metric",
         "unit",
+        "direction",
         "warmup_seconds",
         "active_seconds",
     ):
@@ -166,11 +214,32 @@ def validate_windows_tun_trial(
         <= float(trial["active_seconds"]) + 60.0
     ):
         raise CandidateControlError("Windows TUN trial CPU sample window is invalid")
+    _positive_int(trial["io_completions"], "io_completions")
+    _positive_int(trial["checked_units"], "checked_units")
+    _positive_int(trial["client_peak_working_set_bytes"], "client_peak_working_set_bytes")
     _finite_positive(trial["client_cpu_percent"], "client_cpu_percent", allow_zero=True)
-    _finite_positive(trial["server_cpu_percent"], "server_cpu_percent", allow_zero=True)
-    _finite_positive(trial["checked_units"], "checked_units")
-    if trial["client_failure_counter_delta"] != 0 or trial["server_failure_counter_delta"] != 0:
-        raise CandidateControlError("Windows TUN trial recorded a product failure counter")
+    if trial["client_failure_counter_delta"] != 0:
+        raise CandidateControlError("Windows TUN trial recorded a client failure counter")
+    server_present = trial["topology"] == "EndToEnd"
+    if trial["server_present"] is not server_present:
+        raise CandidateControlError("Windows TUN server presence does not match topology")
+    if server_present:
+        _finite_positive(trial["server_cpu_percent"], "server_cpu_percent", allow_zero=True)
+        _positive_int(
+            trial["server_peak_working_set_bytes"], "server_peak_working_set_bytes"
+        )
+        if trial["server_failure_counter_delta"] != 0:
+            raise CandidateControlError("Windows TUN trial recorded a server failure counter")
+    elif any(
+        trial[field] is not None
+        for field in (
+            "server_cpu_percent",
+            "server_peak_working_set_bytes",
+            "server_failure_counter_delta",
+        )
+    ):
+        raise CandidateControlError("client-direct trial retained server measurements")
+    _validate_workload_measurements(trial)
     loopback_index = trial["loopback_interface_index"]
     loopback_alias = trial["loopback_interface_alias"]
     if (
@@ -193,6 +262,7 @@ def validate_windows_tun_trial(
         trial["route_proofs"],
         run_id=run_id,
         sequence=trial["sequence"],
+        topology=trial["topology"],
         loopback_interface_index=loopback_index,
         loopback_interface_alias=loopback_alias,
     )

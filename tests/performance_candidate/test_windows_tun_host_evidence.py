@@ -1,9 +1,10 @@
 import copy
 from contextlib import redirect_stdout
 import hashlib
-import json
 import io
+import json
 from pathlib import Path
+import statistics
 import tempfile
 import unittest
 
@@ -38,11 +39,11 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def plan_for(mode: str) -> dict[str, object]:
+def plan_for(mode: str, topology: str = "EndToEnd") -> dict[str, object]:
     profile = WINDOWS_TUN_PROFILES[mode]
     scenarios = [
-        {"name": name, "metric": metric, "unit": unit}
-        for name, metric, unit in profile["scenarios"]
+        {"name": name, "metric": metric, "unit": unit, "direction": direction}
+        for name, metric, unit, direction in profile["scenarios"]
     ]
     trials = []
     if mode == "Lifecycle":
@@ -50,6 +51,7 @@ def plan_for(mode: str) -> dict[str, object]:
             {
                 "sequence": 1,
                 "scenario": "product-lifecycle",
+                "topology": topology,
                 "member": "candidate",
                 "commit_sha": CANDIDATE,
                 "lifecycle_cycles": 20,
@@ -61,7 +63,11 @@ def plan_for(mode: str) -> dict[str, object]:
         for scenario in scenarios:
             for pair in range(1, profile["pair_count"] + 1):
                 order = "baseline-candidate" if pair % 2 else "candidate-baseline"
-                members = ("baseline", "candidate") if pair % 2 else ("candidate", "baseline")
+                members = (
+                    ("baseline", "candidate")
+                    if pair % 2
+                    else ("candidate", "baseline")
+                )
                 for member in members:
                     sequence += 1
                     trials.append(
@@ -72,19 +78,24 @@ def plan_for(mode: str) -> dict[str, object]:
                             "scenario": scenario["name"],
                             "metric": scenario["metric"],
                             "unit": scenario["unit"],
+                            "topology": topology,
+                            "direction": scenario["direction"],
                             "member": member,
-                            "commit_sha": BASELINE if member == "baseline" else CANDIDATE,
+                            "commit_sha": (
+                                BASELINE if member == "baseline" else CANDIDATE
+                            ),
                             "warmup_seconds": profile["warmup_seconds"],
                             "active_seconds": profile["active_seconds"],
                             "initial_product_state": "fresh-processes-and-adapter",
                         }
                     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "ferrum2.windows-tun.host-performance-plan",
         "run_id": RUN_ID,
         "execution": "explicit-authorized-windows-host",
         "mode": mode,
+        "topology": topology,
         "baseline_sha": BASELINE,
         "candidate_sha": CANDIDATE,
         "performance_source_bundle_sha256": DIGEST,
@@ -119,13 +130,6 @@ def plan_for(mode: str) -> dict[str, object]:
             "cleanup": "exact RunId ledger identities in try/finally",
             "recovery": "%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json",
         },
-        "qualification": {
-            "product_lifecycle_cycles": profile["lifecycle_cycles"],
-            "long_durability_soak": "excluded",
-            "vm_start": False,
-            "checkpoint_restore": False,
-            "guest_staging": False,
-        },
     }
 
 
@@ -136,7 +140,8 @@ def route_proofs(planned: dict[str, object]) -> list[dict[str, object]]:
     tun_address = f"198.18.{third}.{block + 2}"
     support_address = f"198.19.{third}.{block + 1}"
     adapter_alias = f"Ferrum2Perf-{RUN_ID}-{planned['sequence']:03d}"
-    return [
+    direct = planned["topology"] == "ClientDirect"
+    proofs = [
         {
             "purpose": "benchmark-application-to-test-tun",
             "remote_address": support_address,
@@ -147,7 +152,11 @@ def route_proofs(planned: dict[str, object]) -> list[dict[str, object]]:
             "next_hop": "0.0.0.0",
         },
         {
-            "purpose": "server-to-support-without-test-tun",
+            "purpose": (
+                "client-direct-to-support-without-test-tun"
+                if direct
+                else "server-to-support-without-test-tun"
+            ),
             "remote_address": support_address,
             "local_address": support_address,
             "interface_index": LOOPBACK_INDEX,
@@ -155,15 +164,20 @@ def route_proofs(planned: dict[str, object]) -> list[dict[str, object]]:
             "destination_prefix": f"{support_address}/32",
             "next_hop": "0.0.0.0",
         },
-        {
-            "purpose": "product-underlay-control",
-            "remote_address": "127.0.0.1",
-            "local_address": "127.0.0.1",
-            "interface_index": LOOPBACK_INDEX,
-            "interface_alias": LOOPBACK_ALIAS,
-            "destination_prefix": "127.0.0.1/32",
-            "next_hop": "0.0.0.0",
-        },
+    ]
+    if not direct:
+        proofs.append(
+            {
+                "purpose": "product-underlay-control",
+                "remote_address": "127.0.0.1",
+                "local_address": "127.0.0.1",
+                "interface_index": LOOPBACK_INDEX,
+                "interface_alias": LOOPBACK_ALIAS,
+                "destination_prefix": "127.0.0.1/32",
+                "next_hop": "0.0.0.0",
+            }
+        )
+    proofs.append(
         {
             "purpose": "sing-box-proxy-excluded",
             "remote_address": "127.0.0.1",
@@ -172,36 +186,77 @@ def route_proofs(planned: dict[str, object]) -> list[dict[str, object]]:
             "interface_alias": LOOPBACK_ALIAS,
             "destination_prefix": "127.0.0.1/32",
             "next_hop": "0.0.0.0",
-        },
-    ]
+        }
+    )
+    return proofs
 
 
-def trial_for(planned: dict[str, object], value: float) -> dict[str, object]:
+def workload_measurements(planned: dict[str, object], value: int) -> dict[str, int]:
+    scenario = planned["scenario"]
+    if scenario == "tcp-single-flow":
+        return {
+            "throughput": value,
+            "cpu_payload_bytes": value * int(planned["active_seconds"]),
+            "io_completions": 1000,
+        }
+    if scenario == "tcp-request-1k-p99":
+        return {"p99_nanoseconds": value, "io_completions": 1000}
+    if scenario == "tcp-256-flow-fairness":
+        return {
+            "fairness": value,
+            "aggregate_throughput": value * 10,
+            "io_completions": 1000,
+        }
+    if scenario == "udp-packets-per-second":
+        return {
+            "packet_rate": value,
+            "p99_nanoseconds": 50_000,
+            "io_completions": 1000,
+        }
+    if scenario == "fragment-reassembly-throughput":
+        return {"reassembly_rate": value, "io_completions": 1000}
+    raise AssertionError(f"unhandled test scenario: {scenario}")
+
+
+def trial_for(planned: dict[str, object], value: int) -> dict[str, object]:
+    measurements = workload_measurements(planned, value)
+    server_present = planned["topology"] == "EndToEnd"
+    baseline = planned["member"] == "baseline"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "ferrum2.windows-tun.host-performance-trial",
         "run_id": RUN_ID,
         "performance_source_bundle_sha256": DIGEST,
         "sequence": planned["sequence"],
         "pair": planned["pair"],
         "order": planned["order"],
+        "topology": planned["topology"],
         "scenario": planned["scenario"],
         "member": planned["member"],
         "commit_sha": planned["commit_sha"],
         "metric": planned["metric"],
         "unit": planned["unit"],
-        "value": value,
+        "direction": planned["direction"],
+        "value": float(value),
         "warmup_seconds": planned["warmup_seconds"],
         "active_seconds": planned["active_seconds"],
         "cpu_sample_seconds": float(planned["active_seconds"]) + 0.01,
-        "client_cpu_percent": 20.0 if planned["member"] == "baseline" else 18.0,
-        "server_cpu_percent": 10.0 if planned["member"] == "baseline" else 9.0,
+        "io_completions": measurements["io_completions"],
+        "p99_nanoseconds": measurements.get("p99_nanoseconds"),
+        "client_cpu_percent": 20.0 if baseline else 18.0,
+        "server_present": server_present,
+        "server_cpu_percent": (10.0 if baseline else 9.0) if server_present else None,
+        "client_peak_working_set_bytes": 64 * 1024 * 1024,
+        "server_peak_working_set_bytes": (
+            32 * 1024 * 1024 if server_present else None
+        ),
         "client_failure_counter_delta": 0.0,
-        "server_failure_counter_delta": 0.0,
-        "checked_units": 1000.0,
+        "server_failure_counter_delta": 0.0 if server_present else None,
+        "checked_units": 1000,
         "loopback_interface_index": LOOPBACK_INDEX,
         "loopback_interface_alias": LOOPBACK_ALIAS,
         "route_proofs": route_proofs(planned),
+        "workload_measurements": measurements,
         "workload_checks": {
             check: True
             for check in WINDOWS_TUN_WORKLOAD_CHECKS[str(planned["scenario"])]
@@ -210,7 +265,7 @@ def trial_for(planned: dict[str, object], value: float) -> dict[str, object]:
     }
 
 
-def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
+def write_common(root: Path, mode: str, topology: str, plan: dict[str, object]) -> None:
     write_json(root / "plan.json", plan)
     member_fields = {
         "root": "C:/fixture",
@@ -231,7 +286,11 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
             "run_id": RUN_ID,
             "performance_source_bundle_sha256": DIGEST,
             "baseline": {"label": "baseline", "commit_sha": BASELINE, **member_fields},
-            "candidate": {"label": "candidate", "commit_sha": CANDIDATE, **member_fields},
+            "candidate": {
+                "label": "candidate",
+                "commit_sha": CANDIDATE,
+                **member_fields,
+            },
             "shared_harness_sha256": DIGEST,
             "shared_harness_commit_sha": BASELINE,
             "shared_source_bundle_sha256": DIGEST,
@@ -259,11 +318,12 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
     write_json(
         root / "runtime.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "ferrum2.windows-tun.host-performance-runtime",
             "run_id": RUN_ID,
             "performance_source_bundle_sha256": DIGEST,
             "mode": mode,
+            "topology": topology,
             "build_seconds": 1.0,
             "execution_seconds": 2.0,
             "cleanup_seconds": 0.1,
@@ -273,250 +333,419 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
     )
 
 
-class WindowsTunHostEvidenceTests(unittest.TestCase):
-    def test_policy_and_plans_split_feedback_from_soak(self) -> None:
-        policy = load_windows_tun_policy(POLICY)
-        self.assertFalse(policy["soak"]["enabled_by_default"])
-        self.assertFalse(policy["soak"]["candidate_decision_input"])
-        self.assertEqual(policy["soak"]["cycles"], 1000)
-        for mode in ("Quick", "Confirm", "Lifecycle"):
-            validate_windows_tun_plan(
-                plan_for(mode), baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode=mode
-            )
+def write_trials(root: Path, plan: dict[str, object]) -> list[dict[str, object]]:
+    pair_ratios = (1.03, 1.04, 0.99)
+    rows = []
+    for planned in plan["trials"]:
+        baseline_value = 100_000
+        ratio = pair_ratios[int(planned["pair"]) - 1]
+        candidate_value = (
+            round(baseline_value * ratio)
+            if planned["direction"] == "higher_is_better"
+            else round(baseline_value / ratio)
+        )
+        value = baseline_value if planned["member"] == "baseline" else candidate_value
+        trial = trial_for(planned, value)
+        rows.append(trial)
+        write_json(
+            root / "trials" / f"{planned['sequence']:03d}" / "trial.json", trial
+        )
+    return rows
 
-    def test_plan_rejects_unreviewed_performance_bundle_digest(self) -> None:
+
+def median_or_none(rows: list[dict[str, object]], field: str) -> float | None:
+    values = [row[field] for row in rows]
+    if any(value is None for value in values):
+        return None
+    return statistics.median(values)
+
+
+def summary_for(plan: dict[str, object], trials: list[dict[str, object]]) -> dict[str, object]:
+    server_present = plan["topology"] == "EndToEnd"
+    scenarios = []
+    for planned_scenario in plan["scenarios"]:
+        rows = [row for row in trials if row["scenario"] == planned_scenario["name"]]
+        pairs = []
+        ratios = []
+        for pair_number in range(1, int(plan["pair_count"]) + 1):
+            baseline = next(
+                row
+                for row in rows
+                if row["pair"] == pair_number and row["member"] == "baseline"
+            )
+            candidate = next(
+                row
+                for row in rows
+                if row["pair"] == pair_number and row["member"] == "candidate"
+            )
+            ratio = (
+                candidate["value"] / baseline["value"]
+                if planned_scenario["direction"] == "higher_is_better"
+                else baseline["value"] / candidate["value"]
+            )
+            ratios.append(ratio)
+            pairs.append(
+                {
+                    "pair": pair_number,
+                    "order": baseline["order"],
+                    "baseline": baseline["value"],
+                    "candidate": candidate["value"],
+                    "baseline_checked_units": baseline["checked_units"],
+                    "candidate_checked_units": candidate["checked_units"],
+                    "improvement_ratio": ratio,
+                }
+            )
+        median_ratio = statistics.median(ratios)
+        mad = statistics.median(abs(value - median_ratio) for value in ratios)
+        outliers = (
+            []
+            if mad == 0
+            else [
+                number
+                for number, ratio in enumerate(ratios, 1)
+                if abs(ratio - median_ratio) > 3.0 * mad
+            ]
+        )
+        baseline_rows = [row for row in rows if row["member"] == "baseline"]
+        candidate_rows = [row for row in rows if row["member"] == "candidate"]
+        scenarios.append(
+            {
+                "scenario": planned_scenario["name"],
+                "topology": plan["topology"],
+                "metric": planned_scenario["metric"],
+                "unit": planned_scenario["unit"],
+                "direction": planned_scenario["direction"],
+                "pairs": pairs,
+                "median_pair_improvement_ratio": median_ratio,
+                "median_pair_improvement_percent": (median_ratio - 1.0) * 100.0,
+                "minimum_pair_improvement_ratio": min(ratios),
+                "maximum_pair_improvement_ratio": max(ratios),
+                "median_absolute_deviation": mad,
+                "outlier_pairs": outliers,
+                "pairs_improved": sum(value > 1.0 for value in ratios),
+                "baseline_checked_units_median": statistics.median(
+                    row["checked_units"] for row in baseline_rows
+                ),
+                "candidate_checked_units_median": statistics.median(
+                    row["checked_units"] for row in candidate_rows
+                ),
+                "baseline_io_completions_median": statistics.median(
+                    row["io_completions"] for row in baseline_rows
+                ),
+                "candidate_io_completions_median": statistics.median(
+                    row["io_completions"] for row in candidate_rows
+                ),
+                "baseline_p99_nanoseconds_median": median_or_none(
+                    baseline_rows, "p99_nanoseconds"
+                ),
+                "candidate_p99_nanoseconds_median": median_or_none(
+                    candidate_rows, "p99_nanoseconds"
+                ),
+                "baseline_client_cpu_percent_median": statistics.median(
+                    row["client_cpu_percent"] for row in baseline_rows
+                ),
+                "candidate_client_cpu_percent_median": statistics.median(
+                    row["client_cpu_percent"] for row in candidate_rows
+                ),
+                "baseline_server_cpu_percent_median": (
+                    statistics.median(
+                        row["server_cpu_percent"] for row in baseline_rows
+                    )
+                    if server_present
+                    else None
+                ),
+                "candidate_server_cpu_percent_median": (
+                    statistics.median(
+                        row["server_cpu_percent"] for row in candidate_rows
+                    )
+                    if server_present
+                    else None
+                ),
+                "baseline_client_peak_working_set_bytes_median": statistics.median(
+                    row["client_peak_working_set_bytes"] for row in baseline_rows
+                ),
+                "candidate_client_peak_working_set_bytes_median": statistics.median(
+                    row["client_peak_working_set_bytes"] for row in candidate_rows
+                ),
+                "baseline_server_peak_working_set_bytes_median": (
+                    statistics.median(
+                        row["server_peak_working_set_bytes"] for row in baseline_rows
+                    )
+                    if server_present
+                    else None
+                ),
+                "candidate_server_peak_working_set_bytes_median": (
+                    statistics.median(
+                        row["server_peak_working_set_bytes"] for row in candidate_rows
+                    )
+                    if server_present
+                    else None
+                ),
+                "client_failure_counter_delta": 0,
+                "server_failure_counter_delta": 0 if server_present else None,
+                "qualification_status": "candidate-win",
+            }
+        )
+    return {
+        "schema_version": 2,
+        "kind": "ferrum2.windows-tun.host-performance-summary",
+        "run_id": RUN_ID,
+        "performance_source_bundle_sha256": DIGEST,
+        "mode": plan["mode"],
+        "topology": plan["topology"],
+        "baseline_sha": BASELINE,
+        "candidate_sha": CANDIDATE,
+        "pair_count": plan["pair_count"],
+        "scenarios": scenarios,
+        "threshold_percent": 2.0,
+        "maximum_non_target_cpu_regression_percent": 2.0,
+        "status": "PASS",
+    }
+
+
+def lifecycle_summary(plan: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "kind": "ferrum2.windows-tun.host-lifecycle-summary",
+        "run_id": RUN_ID,
+        "performance_source_bundle_sha256": DIGEST,
+        "mode": "Lifecycle",
+        "topology": plan["topology"],
+        "candidate_sha": CANDIDATE,
+        "lifecycle_cycles": 20,
+        "lifecycle_action": "product-start-probe-stop",
+        "cycle_latencies_ms": [float(value) for value in range(1, 21)],
+        "cycle_latency_median_ms": 10.5,
+        "cycle_latency_p95_ms": 19.0,
+        "cycle_latency_minimum_ms": 1.0,
+        "cycle_latency_maximum_ms": 20.0,
+        "probe_failures": 0,
+        "between_cycle_adapter_remaining": 0,
+        "between_cycle_routes_remaining": 0,
+        "between_cycle_product_processes_remaining": 0,
+        "between_cycle_product_ports_remaining": 0,
+        "physical_adapter_mutations": 0,
+        "wlan_mutations": 0,
+        "dns_mutations": 0,
+        "status": "PASS",
+    }
+
+
+class WindowsTunHostEvidenceTests(unittest.TestCase):
+    def test_policy_and_plans_close_both_topologies_and_profiles(self) -> None:
+        policy = load_windows_tun_policy(POLICY)
+        self.assertEqual(policy["topologies"], ["ClientDirect", "EndToEnd"])
+        self.assertEqual(len(WINDOWS_TUN_PROFILES["Quick"]["scenarios"]), 4)
+        self.assertEqual(len(WINDOWS_TUN_PROFILES["Confirm"]["scenarios"]), 5)
+        for topology in ("ClientDirect", "EndToEnd"):
+            for mode in ("Quick", "Confirm", "Lifecycle"):
+                validate_windows_tun_plan(
+                    plan_for(mode, topology),
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode=mode,
+                    topology=topology,
+                )
+
+    def test_plan_rejects_unreviewed_or_open_contract(self) -> None:
         plan = plan_for("Quick")
         plan["performance_source_bundle_sha256"] = "f" * 64
-        with self.assertRaisesRegex(CandidateControlError, "reviewed performance source bundle"):
+        with self.assertRaisesRegex(
+            CandidateControlError, "reviewed performance source bundle"
+        ):
             validate_windows_tun_plan(
-                plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
-            )
-
-    def test_plan_rejects_guest_fallback_and_default_soak(self) -> None:
-        plan = plan_for("Quick")
-        plan["qualification"]["vm_start"] = True
-        with self.assertRaisesRegex(CandidateControlError, "isolation"):
-            validate_windows_tun_plan(
-                plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
+                plan,
+                baseline_sha=BASELINE,
+                candidate_sha=CANDIDATE,
+                mode="Quick",
+                topology="EndToEnd",
             )
         plan = plan_for("Quick")
-        plan["qualification"]["long_durability_soak"] = "included"
-        with self.assertRaisesRegex(CandidateControlError, "isolation"):
+        plan["qualification"] = {"vm_start": True}
+        with self.assertRaisesRegex(CandidateControlError, "schema mismatch"):
             validate_windows_tun_plan(
-                plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
+                plan,
+                baseline_sha=BASELINE,
+                candidate_sha=CANDIDATE,
+                mode="Quick",
+                topology="EndToEnd",
             )
         plan = plan_for("Quick")
         plan["run_id"] = "fixture-run"
         with self.assertRaisesRegex(CandidateControlError, "transaction identity"):
             validate_windows_tun_plan(
-                plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
+                plan,
+                baseline_sha=BASELINE,
+                candidate_sha=CANDIDATE,
+                mode="Quick",
+                topology="EndToEnd",
             )
 
-    def test_trial_rejects_failure_counters_and_recursive_route(self) -> None:
-        planned = plan_for("Quick")["trials"][0]
-        trial = trial_for(planned, 1000.0)
-        identity = {
-            "planned_trial": planned,
-            "run_id": RUN_ID,
-            "performance_source_bundle_sha256": DIGEST,
-        }
-        validate_windows_tun_trial(trial, **identity)
-        failed = copy.deepcopy(trial)
-        failed["client_failure_counter_delta"] = 1.0
-        with self.assertRaisesRegex(CandidateControlError, "failure counter"):
-            validate_windows_tun_trial(failed, **identity)
-        mistimed = copy.deepcopy(trial)
-        mistimed["cpu_sample_seconds"] = planned["active_seconds"] - 0.1
-        with self.assertRaisesRegex(CandidateControlError, "CPU sample window"):
-            validate_windows_tun_trial(mistimed, **identity)
-        recursive = copy.deepcopy(trial)
-        recursive["route_proofs"][2]["interface_index"] = 73
-        with self.assertRaisesRegex(CandidateControlError, "loopback exclusion"):
-            validate_windows_tun_trial(recursive, **identity)
-        stale = copy.deepcopy(trial)
-        stale["performance_source_bundle_sha256"] = "f" * 64
-        with self.assertRaisesRegex(CandidateControlError, "identity"):
-            validate_windows_tun_trial(stale, **identity)
-        spliced_route = copy.deepcopy(trial)
-        spliced_route["route_proofs"][0]["interface_alias"] = (
-            f"Ferrum2Perf-{'f' * 12}-001"
-        )
-        with self.assertRaisesRegex(CandidateControlError, "run-owned TUN path"):
-            validate_windows_tun_trial(spliced_route, **identity)
-        truncated_checks = copy.deepcopy(trial)
-        truncated_checks["workload_checks"] = {"payload_exact": True}
-        with self.assertRaisesRegex(CandidateControlError, "check closure"):
-            validate_windows_tun_trial(truncated_checks, **identity)
+    def test_trials_close_server_presence_routes_and_workload_measurements(self) -> None:
+        for topology, proof_count in (("ClientDirect", 3), ("EndToEnd", 4)):
+            planned = plan_for("Quick", topology)["trials"][0]
+            trial = trial_for(planned, 100_000)
+            identity = {
+                "planned_trial": planned,
+                "run_id": RUN_ID,
+                "performance_source_bundle_sha256": DIGEST,
+            }
+            validate_windows_tun_trial(trial, **identity)
+            self.assertEqual(len(trial["route_proofs"]), proof_count)
+            self.assertEqual(trial["server_present"], topology == "EndToEnd")
+            wrong_server = copy.deepcopy(trial)
+            wrong_server["server_present"] = not wrong_server["server_present"]
+            with self.assertRaisesRegex(CandidateControlError, "server presence"):
+                validate_windows_tun_trial(wrong_server, **identity)
+            mismatched = copy.deepcopy(trial)
+            mismatched["workload_measurements"][planned["metric"]] += 1
+            with self.assertRaisesRegex(CandidateControlError, "primary metric"):
+                validate_windows_tun_trial(mismatched, **identity)
+            failed = copy.deepcopy(trial)
+            failed["client_failure_counter_delta"] = 1.0
+            with self.assertRaisesRegex(CandidateControlError, "failure counter"):
+                validate_windows_tun_trial(failed, **identity)
+            recursive = copy.deepcopy(trial)
+            recursive["route_proofs"][1]["interface_index"] = 73
+            with self.assertRaisesRegex(CandidateControlError, "loopback exclusion"):
+                validate_windows_tun_trial(recursive, **identity)
 
-    def test_complete_paired_evidence_is_reduced_from_raw_trials(self) -> None:
-        plan = plan_for("Quick")
+    def test_paired_evidence_validates_direct_and_end_to_end_metrics(self) -> None:
+        for topology in ("ClientDirect", "EndToEnd"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                plan = plan_for("Quick", topology)
+                write_common(root, "Quick", topology, plan)
+                trials = write_trials(root, plan)
+                summary = summary_for(plan, trials)
+                write_json(root / "summary.json", summary)
+                report = validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    topology=topology,
+                    policy_path=POLICY,
+                )
+                self.assertEqual(report["status"], "CANDIDATE_WIN")
+                self.assertEqual(report["topology"], topology)
+                self.assertEqual(len(report["scenario_decisions"]), 4)
+                request = next(
+                    row
+                    for row in summary["scenarios"]
+                    if row["scenario"] == "tcp-request-1k-p99"
+                )
+                self.assertGreater(request["median_pair_improvement_ratio"], 1.0)
+                request_trials = [
+                    row
+                    for row in trials
+                    if row["scenario"] == "tcp-request-1k-p99"
+                ]
+                baseline_request = next(
+                    row for row in request_trials if row["member"] == "baseline"
+                )
+                candidate_request = next(
+                    row for row in request_trials if row["member"] == "candidate"
+                )
+                self.assertLess(
+                    candidate_request["p99_nanoseconds"],
+                    baseline_request["p99_nanoseconds"],
+                )
+
+    def test_cpu_cost_uses_checked_work_not_latency_improvement_ratio(self) -> None:
+        topology = "ClientDirect"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            write_common(root, "Quick", plan)
-            ratios = (1.03, 1.04, 0.99)
-            trial_rows = []
-            for planned in plan["trials"]:
-                value = 1000.0 if planned["member"] == "baseline" else 1000.0 * ratios[planned["pair"] - 1]
-                trial = trial_for(planned, value)
-                trial_rows.append(trial)
-                write_json(root / "trials" / f"{planned['sequence']:03d}" / "trial.json", trial)
-            summaries = []
-            for scenario in plan["scenarios"]:
-                rows = [row for row in trial_rows if row["scenario"] == scenario["name"]]
-                pairs = []
-                for pair, ratio in enumerate(ratios, 1):
-                    baseline = next(row for row in rows if row["pair"] == pair and row["member"] == "baseline")
-                    candidate = next(row for row in rows if row["pair"] == pair and row["member"] == "candidate")
-                    pairs.append(
-                        {
-                            "pair": pair,
-                            "order": baseline["order"],
-                            "baseline": baseline["value"],
-                            "candidate": candidate["value"],
-                            "ratio": ratio,
-                        }
+            plan = plan_for("Quick", topology)
+            write_common(root, "Quick", topology, plan)
+            trials = write_trials(root, plan)
+            for trial in trials:
+                if trial["member"] == "candidate":
+                    trial["checked_units"] = 2000
+                    trial["client_cpu_percent"] = 30.0
+                    write_json(
+                        root / "trials" / f"{trial['sequence']:03d}" / "trial.json",
+                        trial,
                     )
-                summaries.append(
-                    {
-                        "scenario": scenario["name"],
-                        "metric": scenario["metric"],
-                        "unit": scenario["unit"],
-                        "pairs": pairs,
-                        "median_pair_ratio": 1.03,
-                        "median_pair_improvement_percent": 3.0,
-                        "minimum_pair_ratio": 0.99,
-                        "maximum_pair_ratio": 1.04,
-                        "median_absolute_deviation": 0.01,
-                        "outlier_pairs": [3],
-                        "pairs_improved": 2,
-                        "baseline_client_cpu_percent_median": 20.0,
-                        "candidate_client_cpu_percent_median": 18.0,
-                        "baseline_server_cpu_percent_median": 10.0,
-                        "candidate_server_cpu_percent_median": 9.0,
-                        "client_failure_counter_delta": 0,
-                        "server_failure_counter_delta": 0,
-                        "qualification_status": "candidate-win",
-                    }
-                )
-            write_json(
-                root / "summary.json",
-                {
-                    "schema_version": 1,
-                    "kind": "ferrum2.windows-tun.host-performance-summary",
-                    "run_id": RUN_ID,
-                    "performance_source_bundle_sha256": DIGEST,
-                    "mode": "Quick",
-                    "baseline_sha": BASELINE,
-                    "candidate_sha": CANDIDATE,
-                    "pair_count": 3,
-                    "scenarios": summaries,
-                    "threshold_percent": 2.0,
-                    "status": "PASS",
-                },
-            )
+            write_json(root / "summary.json", summary_for(plan, trials))
             report = validate_windows_tun_host_evidence(
                 evidence_root=root,
                 baseline_sha=BASELINE,
                 candidate_sha=CANDIDATE,
                 mode="Quick",
+                topology=topology,
                 policy_path=POLICY,
             )
             self.assertEqual(report["status"], "CANDIDATE_WIN")
-            self.assertEqual(
-                [row["qualification_status"] for row in report["scenario_decisions"]],
-                ["candidate-win", "candidate-win"],
-            )
-            cleanup = json.loads((root / "cleanup.json").read_text(encoding="utf-8"))
-            runtime = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
-            spliced_cleanup = copy.deepcopy(cleanup)
-            spliced_runtime = copy.deepcopy(runtime)
-            spliced_cleanup["run_id"] = "fedcba654321"
-            spliced_runtime["run_id"] = "fedcba654321"
-            write_json(root / "cleanup.json", spliced_cleanup)
-            write_json(root / "runtime.json", spliced_runtime)
-            with self.assertRaisesRegex(CandidateControlError, "cleanup evidence"):
-                validate_windows_tun_host_evidence(
-                    evidence_root=root,
-                    baseline_sha=BASELINE,
-                    candidate_sha=CANDIDATE,
-                    mode="Quick",
-                    policy_path=POLICY,
-                )
-            write_json(root / "cleanup.json", cleanup)
-            write_json(root / "runtime.json", runtime)
+
+    def test_evidence_rejects_spliced_builds_cleanup_and_decisions(self) -> None:
+        topology = "EndToEnd"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = plan_for("Quick", topology)
+            write_common(root, "Quick", topology, plan)
+            trials = write_trials(root, plan)
+            summary = summary_for(plan, trials)
+            write_json(root / "summary.json", summary)
             builds = json.loads((root / "builds.json").read_text(encoding="utf-8"))
-            inconsistent = copy.deepcopy(builds)
-            inconsistent["candidate"]["harness_sha256"] = "b" * 64
-            write_json(root / "builds.json", inconsistent)
-            with self.assertRaisesRegex(CandidateControlError, "shared harness"):
-                validate_windows_tun_host_evidence(
-                    evidence_root=root,
-                    baseline_sha=BASELINE,
-                    candidate_sha=CANDIDATE,
-                    mode="Quick",
-                    policy_path=POLICY,
-                )
-            inconsistent = copy.deepcopy(builds)
-            inconsistent["baseline"]["harness_sha256"] = "b" * 64
-            write_json(root / "builds.json", inconsistent)
-            with self.assertRaisesRegex(CandidateControlError, "shared harness"):
-                validate_windows_tun_host_evidence(
-                    evidence_root=root,
-                    baseline_sha=BASELINE,
-                    candidate_sha=CANDIDATE,
-                    mode="Quick",
-                    policy_path=POLICY,
-                )
-            unexpected = copy.deepcopy(builds)
-            unexpected["baseline"]["unexpected"] = True
-            write_json(root / "builds.json", unexpected)
-            with self.assertRaisesRegex(CandidateControlError, "schema mismatch"):
-                validate_windows_tun_host_evidence(
-                    evidence_root=root,
-                    baseline_sha=BASELINE,
-                    candidate_sha=CANDIDATE,
-                    mode="Quick",
-                    policy_path=POLICY,
-                )
+            builds["candidate"]["harness_sha256"] = "b" * 64
             write_json(root / "builds.json", builds)
-            baseline_cpu = (100.0, 101.0, 1.0)
-            candidate_cpu = (106.0, 1.0, 2.1)
-            for planned in plan["trials"]:
-                trial_path = root / "trials" / f"{planned['sequence']:03d}" / "trial.json"
-                trial = json.loads(trial_path.read_text(encoding="utf-8"))
-                values = baseline_cpu if planned["member"] == "baseline" else candidate_cpu
-                trial["client_cpu_percent"] = values[planned["pair"] - 1]
-                write_json(trial_path, trial)
-            summary_document = json.loads(
-                (root / "summary.json").read_text(encoding="utf-8")
-            )
-            for scenario in summary_document["scenarios"]:
-                scenario["baseline_client_cpu_percent_median"] = 100.0
-                scenario["candidate_client_cpu_percent_median"] = 2.1
-            write_json(root / "summary.json", summary_document)
+            with self.assertRaisesRegex(CandidateControlError, "shared harness"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    topology=topology,
+                    policy_path=POLICY,
+                )
+            write_common(root, "Quick", topology, plan)
+            dirty = json.loads((root / "cleanup.json").read_text(encoding="utf-8"))
+            dirty["routes_remaining"] = 1
+            write_json(root / "cleanup.json", dirty)
+            with self.assertRaisesRegex(CandidateControlError, "not clean"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    topology=topology,
+                    policy_path=POLICY,
+                )
+            write_common(root, "Quick", topology, plan)
+            summary["scenarios"][0]["qualification_status"] = "regression"
+            write_json(root / "summary.json", summary)
             with self.assertRaisesRegex(CandidateControlError, "scenario decision"):
                 validate_windows_tun_host_evidence(
                     evidence_root=root,
                     baseline_sha=BASELINE,
                     candidate_sha=CANDIDATE,
                     mode="Quick",
+                    topology=topology,
                     policy_path=POLICY,
                 )
-            for scenario in summary_document["scenarios"]:
+
+    def test_cli_returns_regression_exit_code(self) -> None:
+        topology = "EndToEnd"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = plan_for("Quick", topology)
+            write_common(root, "Quick", topology, plan)
+            trials = write_trials(root, plan)
+            for trial in trials:
+                if trial["member"] == "candidate":
+                    trial["client_cpu_percent"] = 30.0
+                    trial["server_cpu_percent"] = 20.0
+                    write_json(
+                        root / "trials" / f"{trial['sequence']:03d}" / "trial.json",
+                        trial,
+                    )
+            summary = summary_for(plan, trials)
+            for scenario in summary["scenarios"]:
+                scenario["candidate_client_cpu_percent_median"] = 30.0
+                scenario["candidate_server_cpu_percent_median"] = 20.0
                 scenario["qualification_status"] = "regression"
-            write_json(root / "summary.json", summary_document)
-            report = validate_windows_tun_host_evidence(
-                evidence_root=root,
-                baseline_sha=BASELINE,
-                candidate_sha=CANDIDATE,
-                mode="Quick",
-                policy_path=POLICY,
-            )
-            self.assertEqual(
-                [row["qualification_status"] for row in report["scenario_decisions"]],
-                ["regression", "regression"],
-            )
-            self.assertEqual(report["status"], "REGRESSION")
+            write_json(root / "summary.json", summary)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(
                     controller_cli.main(
@@ -530,76 +759,43 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                             CANDIDATE,
                             "--mode",
                             "Quick",
+                            "--topology",
+                            topology,
                             "--policy",
                             str(POLICY),
                         ]
                     ),
                     3,
                 )
-            dirty = json.loads((root / "cleanup.json").read_text(encoding="utf-8"))
-            dirty["routes_remaining"] = 1
-            write_json(root / "cleanup.json", dirty)
-            with self.assertRaisesRegex(CandidateControlError, "not clean"):
-                validate_windows_tun_host_evidence(
-                    evidence_root=root,
-                    baseline_sha=BASELINE,
-                    candidate_sha=CANDIDATE,
-                    mode="Quick",
-                    policy_path=POLICY,
-                )
 
-    def test_lifecycle_evidence_is_short_and_never_mutates_physical_network(self) -> None:
-        plan = plan_for("Lifecycle")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            write_common(root, "Lifecycle", plan)
-            write_json(
-                root / "summary.json",
-                {
-                    "schema_version": 1,
-                    "kind": "ferrum2.windows-tun.host-lifecycle-summary",
-                    "run_id": RUN_ID,
-                    "performance_source_bundle_sha256": DIGEST,
-                    "mode": "Lifecycle",
-                    "candidate_sha": CANDIDATE,
-                    "lifecycle_cycles": 20,
-                    "lifecycle_action": "product-start-probe-stop",
-                    "cycle_latencies_ms": [float(value) for value in range(1, 21)],
-                    "cycle_latency_median_ms": 10.5,
-                    "cycle_latency_p95_ms": 19.0,
-                    "cycle_latency_minimum_ms": 1.0,
-                    "cycle_latency_maximum_ms": 20.0,
-                    "probe_failures": 0,
-                    "between_cycle_adapter_remaining": 0,
-                    "between_cycle_routes_remaining": 0,
-                    "between_cycle_product_processes_remaining": 0,
-                    "between_cycle_product_ports_remaining": 0,
-                    "physical_adapter_mutations": 0,
-                    "wlan_mutations": 0,
-                    "dns_mutations": 0,
-                    "long_durability_soak": "not-run",
-                    "status": "PASS",
-                },
-            )
-            report = validate_windows_tun_host_evidence(
-                evidence_root=root,
-                baseline_sha=BASELINE,
-                candidate_sha=CANDIDATE,
-                mode="Lifecycle",
-                policy_path=POLICY,
-            )
-            self.assertEqual(report["scenario_decisions"], [])
-            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
-            summary["between_cycle_adapter_remaining"] = 1
-            write_json(root / "summary.json", summary)
-            with self.assertRaisesRegex(CandidateControlError, "contract is invalid"):
-                validate_windows_tun_host_evidence(
+    def test_lifecycle_evidence_runs_under_selected_topology(self) -> None:
+        for topology in ("ClientDirect", "EndToEnd"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                plan = plan_for("Lifecycle", topology)
+                write_common(root, "Lifecycle", topology, plan)
+                write_json(root / "summary.json", lifecycle_summary(plan))
+                report = validate_windows_tun_host_evidence(
                     evidence_root=root,
                     baseline_sha=BASELINE,
                     candidate_sha=CANDIDATE,
                     mode="Lifecycle",
+                    topology=topology,
                     policy_path=POLICY,
                 )
+                self.assertEqual(report["scenario_decisions"], [])
+                summary = lifecycle_summary(plan)
+                summary["between_cycle_adapter_remaining"] = 1
+                write_json(root / "summary.json", summary)
+                with self.assertRaisesRegex(CandidateControlError, "contract is invalid"):
+                    validate_windows_tun_host_evidence(
+                        evidence_root=root,
+                        baseline_sha=BASELINE,
+                        candidate_sha=CANDIDATE,
+                        mode="Lifecycle",
+                        topology=topology,
+                        policy_path=POLICY,
+                    )
 
 
 if __name__ == "__main__":

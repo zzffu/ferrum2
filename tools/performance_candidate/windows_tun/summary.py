@@ -32,37 +32,61 @@ _SUMMARY_FIELDS = frozenset(
         "run_id",
         "performance_source_bundle_sha256",
         "mode",
+        "topology",
         "baseline_sha",
         "candidate_sha",
         "pair_count",
         "scenarios",
         "threshold_percent",
+        "maximum_non_target_cpu_regression_percent",
         "status",
     }
 )
 _SCENARIO_FIELDS = frozenset(
     {
         "scenario",
+        "topology",
         "metric",
         "unit",
+        "direction",
         "pairs",
-        "median_pair_ratio",
+        "median_pair_improvement_ratio",
         "median_pair_improvement_percent",
-        "minimum_pair_ratio",
-        "maximum_pair_ratio",
+        "minimum_pair_improvement_ratio",
+        "maximum_pair_improvement_ratio",
         "median_absolute_deviation",
         "outlier_pairs",
         "pairs_improved",
+        "baseline_checked_units_median",
+        "candidate_checked_units_median",
+        "baseline_io_completions_median",
+        "candidate_io_completions_median",
+        "baseline_p99_nanoseconds_median",
+        "candidate_p99_nanoseconds_median",
         "baseline_client_cpu_percent_median",
         "candidate_client_cpu_percent_median",
         "baseline_server_cpu_percent_median",
         "candidate_server_cpu_percent_median",
+        "baseline_client_peak_working_set_bytes_median",
+        "candidate_client_peak_working_set_bytes_median",
+        "baseline_server_peak_working_set_bytes_median",
+        "candidate_server_peak_working_set_bytes_median",
         "client_failure_counter_delta",
         "server_failure_counter_delta",
         "qualification_status",
     }
 )
-_PAIR_FIELDS = frozenset({"pair", "order", "baseline", "candidate", "ratio"})
+_PAIR_FIELDS = frozenset(
+    {
+        "pair",
+        "order",
+        "baseline",
+        "candidate",
+        "baseline_checked_units",
+        "candidate_checked_units",
+        "improvement_ratio",
+    }
+)
 _BUILD_MEMBER_FIELDS = frozenset(
     {
         "label",
@@ -126,6 +150,7 @@ def _validate_cleanup(
     root: pathlib.Path,
     *,
     expected_mode: str,
+    expected_topology: str,
     run_id: str,
     performance_source_bundle_sha256: str,
 ) -> dict[str, object]:
@@ -180,6 +205,7 @@ def _validate_cleanup(
                 "run_id",
                 "performance_source_bundle_sha256",
                 "mode",
+                "topology",
                 "build_seconds",
                 "execution_seconds",
                 "cleanup_seconds",
@@ -190,12 +216,13 @@ def _validate_cleanup(
         "Windows TUN runtime evidence",
     )
     if (
-        runtime["schema_version"] != 1
+        runtime["schema_version"] != 2
         or runtime["kind"] != "ferrum2.windows-tun.host-performance-runtime"
         or runtime["run_id"] != cleanup["run_id"]
         or runtime["performance_source_bundle_sha256"]
         != performance_source_bundle_sha256
         or runtime["mode"] != expected_mode
+        or runtime["topology"] != expected_topology
         or runtime["cleanup_status"] != "PASS"
     ):
         raise CandidateControlError("Windows TUN runtime identity is invalid")
@@ -315,136 +342,251 @@ def _validate_paired_summary(
     summary = _read_object(root / "summary.json", "Windows TUN paired summary")
     _exact_fields(summary, _SUMMARY_FIELDS, "Windows TUN paired summary")
     if (
-        summary["schema_version"] != 1
+        summary["schema_version"] != 2
         or summary["kind"] != "ferrum2.windows-tun.host-performance-summary"
         or summary["run_id"] != plan["run_id"]
         or summary["performance_source_bundle_sha256"]
         != plan["performance_source_bundle_sha256"]
         or summary["mode"] != plan["mode"]
+        or summary["topology"] != plan["topology"]
         or summary["baseline_sha"] != plan["baseline_sha"]
         or summary["candidate_sha"] != plan["candidate_sha"]
         or summary["pair_count"] != plan["pair_count"]
         or summary["threshold_percent"] != policy["threshold_percent"]
+        or summary["maximum_non_target_cpu_regression_percent"]
+        != policy["maximum_non_target_cpu_regression_percent"]
         or summary["status"] != "PASS"
     ):
         raise CandidateControlError("Windows TUN paired summary identity is invalid")
-    if type(summary["scenarios"]) is not list or len(summary["scenarios"]) != len(plan["scenarios"]):
+    if type(summary["scenarios"]) is not list or len(summary["scenarios"]) != len(
+        plan["scenarios"]
+    ):
         raise CandidateControlError("Windows TUN paired scenario closure is invalid")
-    for planned_scenario, scenario in zip(plan["scenarios"], summary["scenarios"], strict=True):
+    server_present = plan["topology"] == "EndToEnd"
+    for planned_scenario, scenario in zip(
+        plan["scenarios"], summary["scenarios"], strict=True
+    ):
         if type(scenario) is not dict:
             raise CandidateControlError("Windows TUN scenario summary must be an object")
         _exact_fields(scenario, _SCENARIO_FIELDS, "Windows TUN scenario summary")
         for field, planned_field in (
             ("scenario", "name"),
+            ("topology", "topology"),
             ("metric", "metric"),
             ("unit", "unit"),
+            ("direction", "direction"),
         ):
-            if scenario[field] != planned_scenario[planned_field]:
+            planned_value = (
+                plan[planned_field]
+                if planned_field == "topology"
+                else planned_scenario[planned_field]
+            )
+            if scenario[field] != planned_value:
                 raise CandidateControlError(f"Windows TUN scenario {field} changed")
         rows = [row for row in trials if row["scenario"] == scenario["scenario"]]
         expected_pairs = []
-        ratios = []
-        client_cpu_cost_ratios = []
-        server_cpu_cost_ratios = []
+        ratios: list[float] = []
+        client_cpu_cost_ratios: list[float] = []
+        server_cpu_cost_ratios: list[float] = []
         for pair_number in range(1, plan["pair_count"] + 1):
-            baseline = [row for row in rows if row["pair"] == pair_number and row["member"] == "baseline"]
-            candidate = [row for row in rows if row["pair"] == pair_number and row["member"] == "candidate"]
+            baseline = [
+                row
+                for row in rows
+                if row["pair"] == pair_number and row["member"] == "baseline"
+            ]
+            candidate = [
+                row
+                for row in rows
+                if row["pair"] == pair_number and row["member"] == "candidate"
+            ]
             if len(baseline) != 1 or len(candidate) != 1:
-                raise CandidateControlError("Windows TUN raw paired evidence is incomplete")
-            ratio = candidate[0]["value"] / baseline[0]["value"]
+                raise CandidateControlError(
+                    "Windows TUN raw paired evidence is incomplete"
+                )
+            baseline_row = baseline[0]
+            candidate_row = candidate[0]
+            ratio = (
+                candidate_row["value"] / baseline_row["value"]
+                if scenario["direction"] == "higher_is_better"
+                else baseline_row["value"] / candidate_row["value"]
+            )
+            work_ratio = (
+                candidate_row["checked_units"] / baseline_row["checked_units"]
+            )
             ratios.append(ratio)
             client_cpu_cost_ratios.append(
                 _cpu_cost_ratio(
-                    baseline[0]["client_cpu_percent"],
-                    candidate[0]["client_cpu_percent"],
-                    work_ratio=ratio,
+                    baseline_row["client_cpu_percent"],
+                    candidate_row["client_cpu_percent"],
+                    work_ratio=work_ratio,
                 )
             )
-            server_cpu_cost_ratios.append(
-                _cpu_cost_ratio(
-                    baseline[0]["server_cpu_percent"],
-                    candidate[0]["server_cpu_percent"],
-                    work_ratio=ratio,
+            if server_present:
+                server_cpu_cost_ratios.append(
+                    _cpu_cost_ratio(
+                        baseline_row["server_cpu_percent"],
+                        candidate_row["server_cpu_percent"],
+                        work_ratio=work_ratio,
+                    )
                 )
+            expected_pairs.append(
+                (pair_number, baseline_row, candidate_row, ratio)
             )
-            expected_pairs.append((pair_number, baseline[0], candidate[0], ratio))
         pairs = scenario["pairs"]
         if type(pairs) is not list or len(pairs) != plan["pair_count"]:
             raise CandidateControlError("Windows TUN pair summary count is invalid")
-        for row, (number, baseline, candidate, ratio) in zip(pairs, expected_pairs, strict=True):
+        for row, (number, baseline, candidate, ratio) in zip(
+            pairs, expected_pairs, strict=True
+        ):
             if type(row) is not dict:
                 raise CandidateControlError("Windows TUN pair summary must be an object")
             _exact_fields(row, _PAIR_FIELDS, "Windows TUN pair summary")
             if row["pair"] != number or row["order"] != baseline["order"]:
                 raise CandidateControlError("Windows TUN pair identity changed")
-            _same_number(row["baseline"], baseline["value"], "pair.baseline")
-            _same_number(row["candidate"], candidate["value"], "pair.candidate")
-            _same_number(row["ratio"], ratio, "pair.ratio")
+            for field, expected in (
+                ("baseline", baseline["value"]),
+                ("candidate", candidate["value"]),
+                ("baseline_checked_units", baseline["checked_units"]),
+                ("candidate_checked_units", candidate["checked_units"]),
+                ("improvement_ratio", ratio),
+            ):
+                _same_number(row[field], expected, f"pair.{field}")
         median_ratio = statistics.median(ratios)
         deviations = [abs(value - median_ratio) for value in ratios]
         mad = statistics.median(deviations)
-        outliers = [] if mad == 0 else [
-            number
-            for number, ratio in enumerate(ratios, 1)
-            if abs(ratio - median_ratio) > 3.0 * mad
-        ]
+        outliers = (
+            []
+            if mad == 0
+            else [
+                number
+                for number, ratio in enumerate(ratios, 1)
+                if abs(ratio - median_ratio) > 3.0 * mad
+            ]
+        )
         pairs_improved = sum(value > 1.0 for value in ratios)
         majority = pairs_improved > plan["pair_count"] // 2
-        baseline_client_cpu = statistics.median(
-            row["client_cpu_percent"] for row in rows if row["member"] == "baseline"
-        )
-        candidate_client_cpu = statistics.median(
-            row["client_cpu_percent"] for row in rows if row["member"] == "candidate"
-        )
-        baseline_server_cpu = statistics.median(
-            row["server_cpu_percent"] for row in rows if row["member"] == "baseline"
-        )
-        candidate_server_cpu = statistics.median(
-            row["server_cpu_percent"] for row in rows if row["member"] == "candidate"
-        )
-        maximum_cpu_regression = policy["maximum_non_target_regression_percent"]
+        baseline_rows = [row for row in rows if row["member"] == "baseline"]
+        candidate_rows = [row for row in rows if row["member"] == "candidate"]
+        has_p99 = all(row["p99_nanoseconds"] is not None for row in rows)
+        expected_numbers = {
+            "median_pair_improvement_ratio": median_ratio,
+            "median_pair_improvement_percent": (median_ratio - 1.0) * 100.0,
+            "minimum_pair_improvement_ratio": min(ratios),
+            "maximum_pair_improvement_ratio": max(ratios),
+            "median_absolute_deviation": mad,
+            "baseline_checked_units_median": statistics.median(
+                row["checked_units"] for row in baseline_rows
+            ),
+            "candidate_checked_units_median": statistics.median(
+                row["checked_units"] for row in candidate_rows
+            ),
+            "baseline_io_completions_median": statistics.median(
+                row["io_completions"] for row in baseline_rows
+            ),
+            "candidate_io_completions_median": statistics.median(
+                row["io_completions"] for row in candidate_rows
+            ),
+            "baseline_client_cpu_percent_median": statistics.median(
+                row["client_cpu_percent"] for row in baseline_rows
+            ),
+            "candidate_client_cpu_percent_median": statistics.median(
+                row["client_cpu_percent"] for row in candidate_rows
+            ),
+            "baseline_client_peak_working_set_bytes_median": statistics.median(
+                row["client_peak_working_set_bytes"] for row in baseline_rows
+            ),
+            "candidate_client_peak_working_set_bytes_median": statistics.median(
+                row["client_peak_working_set_bytes"] for row in candidate_rows
+            ),
+        }
+        optional_numbers = {
+            "baseline_p99_nanoseconds_median": (
+                statistics.median(row["p99_nanoseconds"] for row in baseline_rows)
+                if has_p99
+                else None
+            ),
+            "candidate_p99_nanoseconds_median": (
+                statistics.median(row["p99_nanoseconds"] for row in candidate_rows)
+                if has_p99
+                else None
+            ),
+            "baseline_server_cpu_percent_median": (
+                statistics.median(row["server_cpu_percent"] for row in baseline_rows)
+                if server_present
+                else None
+            ),
+            "candidate_server_cpu_percent_median": (
+                statistics.median(row["server_cpu_percent"] for row in candidate_rows)
+                if server_present
+                else None
+            ),
+            "baseline_server_peak_working_set_bytes_median": (
+                statistics.median(
+                    row["server_peak_working_set_bytes"] for row in baseline_rows
+                )
+                if server_present
+                else None
+            ),
+            "candidate_server_peak_working_set_bytes_median": (
+                statistics.median(
+                    row["server_peak_working_set_bytes"] for row in candidate_rows
+                )
+                if server_present
+                else None
+            ),
+        }
+        for field, expected in expected_numbers.items():
+            _same_number(scenario[field], expected, field)
+        for field, expected in optional_numbers.items():
+            if expected is None:
+                if scenario[field] is not None:
+                    raise CandidateControlError(
+                        f"{field} must be null for this topology/scenario"
+                    )
+            else:
+                _same_number(scenario[field], expected, field)
+        maximum_cpu_regression = policy[
+            "maximum_non_target_cpu_regression_percent"
+        ]
         cpu_cost_regressed = _paired_cpu_cost_regressed(
             client_cpu_cost_ratios,
             maximum_regression_percent=maximum_cpu_regression,
-        ) or _paired_cpu_cost_regressed(
-            server_cpu_cost_ratios,
-            maximum_regression_percent=maximum_cpu_regression,
+        ) or (
+            server_present
+            and _paired_cpu_cost_regressed(
+                server_cpu_cost_ratios,
+                maximum_regression_percent=maximum_cpu_regression,
+            )
         )
         status = (
             "regression"
             if cpu_cost_regressed
             or (
                 median_ratio <= 0.98
-                and sum(value < 1.0 for value in ratios) > plan["pair_count"] // 2
+                and sum(value < 1.0 for value in ratios)
+                > plan["pair_count"] // 2
             )
             else "candidate-win"
             if median_ratio >= 1.02 and majority
             else "within-noise-band"
         )
-        for field, expected in (
-            ("median_pair_ratio", median_ratio),
-            ("median_pair_improvement_percent", (median_ratio - 1.0) * 100.0),
-            ("minimum_pair_ratio", min(ratios)),
-            ("maximum_pair_ratio", max(ratios)),
-            ("median_absolute_deviation", mad),
-            ("baseline_client_cpu_percent_median", baseline_client_cpu),
-            ("candidate_client_cpu_percent_median", candidate_client_cpu),
-            ("baseline_server_cpu_percent_median", baseline_server_cpu),
-            ("candidate_server_cpu_percent_median", candidate_server_cpu),
-        ):
-            _same_number(scenario[field], expected, field)
         if (
             scenario["outlier_pairs"] != outliers
             or scenario["pairs_improved"] != pairs_improved
             or scenario["client_failure_counter_delta"] != 0
-            or scenario["server_failure_counter_delta"] != 0
+            or scenario["server_failure_counter_delta"]
+            != (0 if server_present else None)
             or scenario["qualification_status"] != status
         ):
-            raise CandidateControlError("Windows TUN scenario decision does not match raw evidence")
+            raise CandidateControlError(
+                "Windows TUN scenario decision does not match raw evidence"
+            )
     return summary
 
 
-def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> dict[str, object]:
+def _validate_lifecycle_summary(
+    root: pathlib.Path, plan: dict[str, object]
+) -> dict[str, object]:
     summary = _read_object(root / "summary.json", "Windows TUN lifecycle summary")
     expected_fields = frozenset(
         {
@@ -453,6 +595,7 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
             "run_id",
             "performance_source_bundle_sha256",
             "mode",
+            "topology",
             "candidate_sha",
             "lifecycle_cycles",
             "lifecycle_action",
@@ -469,18 +612,18 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
             "physical_adapter_mutations",
             "wlan_mutations",
             "dns_mutations",
-            "long_durability_soak",
             "status",
         }
     )
     _exact_fields(summary, expected_fields, "Windows TUN lifecycle summary")
     if (
-        summary["schema_version"] != 1
+        summary["schema_version"] != 2
         or summary["kind"] != "ferrum2.windows-tun.host-lifecycle-summary"
         or summary["run_id"] != plan["run_id"]
         or summary["performance_source_bundle_sha256"]
         != plan["performance_source_bundle_sha256"]
         or summary["mode"] != "Lifecycle"
+        or summary["topology"] != plan["topology"]
         or summary["candidate_sha"] != plan["candidate_sha"]
         or summary["lifecycle_cycles"] != 20
         or summary["lifecycle_action"] != "product-start-probe-stop"
@@ -492,7 +635,6 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
         or summary["physical_adapter_mutations"] != 0
         or summary["wlan_mutations"] != 0
         or summary["dns_mutations"] != 0
-        or summary["long_durability_soak"] != "not-run"
         or summary["status"] != "PASS"
     ):
         raise CandidateControlError("Windows TUN lifecycle summary contract is invalid")
@@ -520,6 +662,7 @@ def validate_windows_tun_host_evidence(
     baseline_sha: str,
     candidate_sha: str,
     mode: str,
+    topology: str,
     policy_path: pathlib.Path,
 ) -> dict[str, object]:
     policy = load_windows_tun_policy(policy_path)
@@ -528,6 +671,7 @@ def validate_windows_tun_host_evidence(
         baseline_sha=baseline_sha,
         candidate_sha=candidate_sha,
         mode=mode,
+        topology=topology,
     )
     _validate_builds(
         evidence_root,
@@ -544,6 +688,7 @@ def validate_windows_tun_host_evidence(
     runtime = _validate_cleanup(
         evidence_root,
         expected_mode=mode,
+        expected_topology=topology,
         run_id=plan["run_id"],
         performance_source_bundle_sha256=plan["performance_source_bundle_sha256"],
     )
@@ -572,9 +717,10 @@ def validate_windows_tun_host_evidence(
         else WITHIN_CALIBRATED_BAND
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "ferrum2.windows-tun.host-evidence-validation",
         "mode": mode,
+        "topology": topology,
         "baseline_sha": baseline_sha,
         "candidate_sha": candidate_sha,
         "run_id": runtime["run_id"],
