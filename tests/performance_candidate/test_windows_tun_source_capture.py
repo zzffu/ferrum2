@@ -18,16 +18,13 @@ RUNNER = (
     / "run_windows_tun_performance_host.ps1"
 )
 MODULE_ROOT = ROOT / "tools" / "powershell" / "Ferrum2.Performance"
+MODULE_MANIFEST = MODULE_ROOT / "Ferrum2.Performance.psd1"
 PROCESS_OWNER = MODULE_ROOT / "PerformanceProcessOwner.cs"
 OWNERSHIP = MODULE_ROOT / "HostOwnership.ps1"
 PERFORMANCE_BUNDLE = MODULE_ROOT / "bundle.json"
-M4_BUNDLE_ROOT = (
-    ROOT
-    / "tools"
-    / "ferrum2-m4-qualification"
-    / "src"
-    / "m4_support"
-    / "windows_tun"
+M4_PACKAGE_ROOT = ROOT / "tools" / "ferrum2-m4-qualification"
+M4_BUNDLE = (
+    M4_PACKAGE_ROOT / "src" / "m4_support" / "windows_tun" / "bundle.json"
 )
 
 
@@ -106,17 +103,21 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
         ):
             self.assertNotIn(obsolete, PERFORMANCE_BUNDLE.read_text(encoding="utf-8"))
 
-    def test_workload_source_bundle_covers_every_windows_tun_rust_owner(self) -> None:
-        manifest_path = M4_BUNDLE_ROOT / "bundle.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    def test_workload_source_bundle_covers_complete_harness_source(self) -> None:
+        manifest = json.loads(M4_BUNDLE.read_text(encoding="utf-8"))
+        self.assertEqual(
+            (manifest["kind"], manifest["entrypoint"]),
+            ("ferrum2.m4-windows-tun-source-bundle.v2", "src/main.rs"),
+        )
         rows = {row["path"]: row for row in manifest["files"]}
-        actual = {
-            path.relative_to(M4_BUNDLE_ROOT).as_posix()
-            for path in M4_BUNDLE_ROOT.rglob("*.rs")
-        }
+        actual = {"Cargo.toml"}
+        actual.update(
+            path.relative_to(M4_PACKAGE_ROOT).as_posix()
+            for path in (M4_PACKAGE_ROOT / "src").rglob("*.rs")
+        )
         self.assertEqual(set(rows), actual)
         for relative, row in rows.items():
-            payload = (M4_BUNDLE_ROOT / relative).read_bytes()
+            payload = (M4_PACKAGE_ROOT / relative).read_bytes()
             self.assertEqual(row["bytes"], len(payload))
             self.assertEqual(row["sha256"], hashlib.sha256(payload).hexdigest())
 
@@ -143,6 +144,26 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
             "Enable-NetAdapter",
         ):
             self.assertNotIn(forbidden, self.ownership)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")
+    def test_process_owner_rejects_a_second_module_load(self) -> None:
+        manifest = str(MODULE_MANIFEST).replace("'", "''")
+        completed = subprocess.run(
+            [
+                "pwsh",
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                f"Import-Module '{manifest}' -ErrorAction Stop; "
+                f"Import-Module '{manifest}' -Force -ErrorAction Stop",
+            ],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("process owner is already loaded", completed.stderr)
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")
     def test_plan_only_is_unprivileged_and_excludes_long_soak(self) -> None:

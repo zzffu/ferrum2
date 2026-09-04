@@ -193,6 +193,7 @@ def trial_for(planned: dict[str, object], value: float) -> dict[str, object]:
         "value": value,
         "warmup_seconds": planned["warmup_seconds"],
         "active_seconds": planned["active_seconds"],
+        "cpu_sample_seconds": float(planned["active_seconds"]) + 0.01,
         "client_cpu_percent": 20.0 if planned["member"] == "baseline" else 18.0,
         "server_cpu_percent": 10.0 if planned["member"] == "baseline" else 9.0,
         "client_failure_counter_delta": 0.0,
@@ -324,6 +325,10 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
         failed["client_failure_counter_delta"] = 1.0
         with self.assertRaisesRegex(CandidateControlError, "failure counter"):
             validate_windows_tun_trial(failed, **identity)
+        mistimed = copy.deepcopy(trial)
+        mistimed["cpu_sample_seconds"] = planned["active_seconds"] - 0.1
+        with self.assertRaisesRegex(CandidateControlError, "CPU sample window"):
+            validate_windows_tun_trial(mistimed, **identity)
         recursive = copy.deepcopy(trial)
         recursive["route_proofs"][2]["interface_index"] = 73
         with self.assertRaisesRegex(CandidateControlError, "loopback exclusion"):
@@ -442,6 +447,17 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
             builds = json.loads((root / "builds.json").read_text(encoding="utf-8"))
             inconsistent = copy.deepcopy(builds)
             inconsistent["candidate"]["harness_sha256"] = "b" * 64
+            write_json(root / "builds.json", inconsistent)
+            with self.assertRaisesRegex(CandidateControlError, "shared harness"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    policy_path=POLICY,
+                )
+            inconsistent = copy.deepcopy(builds)
+            inconsistent["baseline"]["harness_sha256"] = "b" * 64
             write_json(root / "builds.json", inconsistent)
             with self.assertRaisesRegex(CandidateControlError, "shared harness"):
                 validate_windows_tun_host_evidence(

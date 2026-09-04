@@ -272,7 +272,10 @@ def _validate_builds(
             raise CandidateControlError("baseline and candidate workload source contracts differ")
         if member["wintun_dll_sha256"] != builds["wintun_dll_sha256"]:
             raise CandidateControlError("Windows TUN build Wintun identities differ")
-    if builds["candidate"]["harness_sha256"] != builds["shared_harness_sha256"]:
+    if any(
+        builds[label]["harness_sha256"] != builds["shared_harness_sha256"]
+        for label in ("baseline", "candidate")
+    ):
         raise CandidateControlError("Windows TUN shared harness identity is inconsistent")
     return builds
 

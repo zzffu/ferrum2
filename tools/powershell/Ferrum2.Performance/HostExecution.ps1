@@ -96,9 +96,8 @@ function Export-Ferrum2CommitTree {
 
 function Get-Ferrum2M4SourceBundleIdentity {
     param([Parameter(Mandatory = $true)][string]$SourceRoot)
-    $bundleRoot = Join-Path $SourceRoot `
-        "tools\ferrum2-m4-qualification\src\m4_support\windows_tun"
-    $manifestPath = Join-Path $bundleRoot "bundle.json"
+    $packageRoot = Join-Path $SourceRoot "tools\ferrum2-m4-qualification"
+    $manifestPath = Join-Path $packageRoot "src\m4_support\windows_tun\bundle.json"
     $manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
     if ($manifestItem.PSIsContainer -or $manifestItem.Length -le 0 -or
         $manifestItem.Length -gt 1MB -or
@@ -110,14 +109,17 @@ function Get-Ferrum2M4SourceBundleIdentity {
     $manifestProperties = @($manifest.PSObject.Properties.Name | Sort-Object)
     if (($manifestProperties -join "|") -cne "entrypoint|files|kind|schema_version" -or
         [int]$manifest.schema_version -ne 1 -or
-        [string]$manifest.kind -cne "ferrum2.m4-windows-tun-source-bundle.v1" -or
-        [string]$manifest.entrypoint -cne "mod.rs") {
+        [string]$manifest.kind -cne "ferrum2.m4-windows-tun-source-bundle.v2" -or
+        [string]$manifest.entrypoint -cne "src/main.rs") {
         throw "M4 Windows TUN source bundle manifest contract is invalid"
     }
-    $actualPaths = @(Get-ChildItem -LiteralPath $bundleRoot -Filter "*.rs" -File -Recurse |
-        ForEach-Object {
-            [IO.Path]::GetRelativePath($bundleRoot, $_.FullName).Replace("\", "/")
-        } | Sort-Object)
+    $actualPaths = @(
+        "Cargo.toml"
+        Get-ChildItem -LiteralPath (Join-Path $packageRoot "src") -Filter "*.rs" -File -Recurse |
+            ForEach-Object {
+                [IO.Path]::GetRelativePath($packageRoot, $_.FullName).Replace("\", "/")
+            }
+    ) | Sort-Object
     $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path } | Sort-Object)
     if ($manifestPaths.Count -eq 0 -or
         ($manifestPaths -join "|") -cne ($actualPaths -join "|")) {
@@ -135,7 +137,7 @@ function Get-Ferrum2M4SourceBundleIdentity {
             [string]$row.sha256 -cnotmatch '^[0-9a-f]{64}$') {
             throw "M4 Windows TUN source bundle member identity is invalid"
         }
-        $path = Join-Path $bundleRoot $relativePath
+        $path = Join-Path $packageRoot $relativePath
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
         if ($item.PSIsContainer -or
             ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
@@ -225,6 +227,9 @@ function Initialize-Ferrum2HostBuilds {
     if ([string]$baseline.source_bundle_sha256 -cne
         [string]$candidate.source_bundle_sha256) {
         throw "baseline and candidate M4 workload source bundles differ"
+    }
+    if ([string]$baseline.harness_sha256 -cne [string]$candidate.harness_sha256) {
+        throw "baseline and candidate M4 harness binaries differ"
     }
     $manifest = [pscustomobject][ordered]@{
         schema_version = 1
@@ -691,6 +696,31 @@ function Export-Ferrum2OwnedCommandFailureLogs {
     return $failureRoot
 }
 
+function Complete-Ferrum2OwnedCommand {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][object]$Process,
+        [Parameter(Mandatory = $true)][string]$LogPrefix,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+    if (-not [Ferrum2PerfProcessGroup]::Wait(
+            [uint32]$Process.pid, [uint32]($TimeoutSeconds * 1000))) {
+        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$Process.pid)
+        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+            -Process $Process -LogPrefix $LogPrefix
+        throw "owned command timed out: $LogPrefix; logs: $failureLogs"
+    }
+    $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$Process.pid)
+    [Ferrum2PerfProcessGroup]::Close([uint32]$Process.pid)
+    Remove-Ferrum2OwnedProcessRecord -Context $Context -ProcessId $Process.pid
+    if ($exit -ne 0) {
+        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+            -Process $Process -LogPrefix $LogPrefix
+        throw "owned command failed: $LogPrefix; logs: $failureLogs"
+    }
+    return $Process
+}
+
 function Invoke-Ferrum2OwnedCommand {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
@@ -703,21 +733,8 @@ function Invoke-Ferrum2OwnedCommand {
     $process = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Application `
         -Arguments $Arguments -WorkingDirectory $WorkingDirectory -LogPrefix $LogPrefix `
         -Purpose $LogPrefix
-    if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$process.pid, [uint32]($TimeoutSeconds * 1000))) {
-        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$process.pid)
-        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-            -Process $process -LogPrefix $LogPrefix
-        throw "owned command timed out: $LogPrefix; logs: $failureLogs"
-    }
-    $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$process.pid)
-    [Ferrum2PerfProcessGroup]::Close([uint32]$process.pid)
-    Remove-Ferrum2OwnedProcessRecord -Context $Context -ProcessId $process.pid
-    if ($exit -ne 0) {
-        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-            -Process $process -LogPrefix $LogPrefix
-        throw "owned command failed: $LogPrefix; logs: $failureLogs"
-    }
-    return $process
+    return Complete-Ferrum2OwnedCommand -Context $Context -Process $process `
+        -LogPrefix $LogPrefix -TimeoutSeconds $TimeoutSeconds
 }
 
 function Invoke-Ferrum2HostTrial {
@@ -739,18 +756,32 @@ function Invoke-Ferrum2HostTrial {
             -Loopback $Loopback -Sequence $Trial.sequence
         $metricsBefore = Get-Ferrum2Metrics -Port $runtime.client_metrics_port
         $serverMetricsBefore = Get-Ferrum2Metrics -Port $runtime.server_metrics_port
-        $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
-        $serverCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
         $output = Join-Path $trialRoot "workload.json"
+        $activeReadyMarker = [IO.Path]::ChangeExtension($output, "active-ready")
+        $activeCompleteMarker = [IO.Path]::ChangeExtension($output, "active-complete")
         $arguments = "windows-tun-workload --scenario $($Trial.scenario) --target-ip $($Network.support_address) " +
             "--tcp-port $($Support.tcp_port) --udp-port $($Support.udp_port) " +
             "--warmup-seconds $($Trial.warmup_seconds) --active-seconds $($Trial.active_seconds) " +
             "--output `"$output`""
-        [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Harness -Arguments $arguments `
-            -WorkingDirectory (Split-Path -Parent $Harness) -LogPrefix "trial-$($Trial.sequence)-workload" `
-            -TimeoutSeconds ([int]$Trial.warmup_seconds + [int]$Trial.active_seconds + 60))
+        $workloadLogPrefix = "trial-$($Trial.sequence)-workload"
+        $workloadProcess = Start-Ferrum2OwnedNativeProcess -Context $Context `
+            -Application $Harness -Arguments $arguments `
+            -WorkingDirectory (Split-Path -Parent $Harness) -LogPrefix $workloadLogPrefix `
+            -Purpose $workloadLogPrefix
+        Wait-Ferrum2Text -Path $activeReadyMarker -Pattern '^ready\r?\n?$' `
+            -TimeoutSeconds ([int]$Trial.warmup_seconds + 30)
+        $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
+        $serverCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
+        $cpuSampleStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        Remove-Item -LiteralPath $activeReadyMarker -Force -ErrorAction Stop
+        Wait-Ferrum2Text -Path $activeCompleteMarker -Pattern '^complete\r?\n?$' `
+            -TimeoutSeconds ([int]$Trial.active_seconds + 60)
         $clientCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
         $serverCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
+        $cpuSampleStopwatch.Stop()
+        Remove-Item -LiteralPath $activeCompleteMarker -Force -ErrorAction Stop
+        [void](Complete-Ferrum2OwnedCommand -Context $Context -Process $workloadProcess `
+            -LogPrefix $workloadLogPrefix -TimeoutSeconds 60)
         $metricsAfter = Get-Ferrum2Metrics -Port $runtime.client_metrics_port
         $serverMetricsAfter = Get-Ferrum2Metrics -Port $runtime.server_metrics_port
         Write-NewUtf8File -Path (Join-Path $trialRoot "client-metrics-before.txt") -Text $metricsBefore
@@ -779,12 +810,14 @@ function Invoke-Ferrum2HostTrial {
         if (-not [double]::IsFinite($checkedUnits) -or $checkedUnits -le 0) {
             throw "workload checked-unit count is invalid"
         }
+        [double]$cpuSampleSeconds = $cpuSampleStopwatch.Elapsed.TotalSeconds
+        if (-not [double]::IsFinite($cpuSampleSeconds) -or $cpuSampleSeconds -le 0) {
+            throw "trial CPU sample window is invalid"
+        }
         [double]$clientCpuPercent =
-            (($clientCpuAfter - $clientCpuBefore) / ([double]$Trial.active_seconds * 1000.0)) *
-                100.0
+            (($clientCpuAfter - $clientCpuBefore) / ($cpuSampleSeconds * 1000.0)) * 100.0
         [double]$serverCpuPercent =
-            (($serverCpuAfter - $serverCpuBefore) / ([double]$Trial.active_seconds * 1000.0)) *
-                100.0
+            (($serverCpuAfter - $serverCpuBefore) / ($cpuSampleSeconds * 1000.0)) * 100.0
         [double]$clientFailureDelta =
             (Get-Ferrum2FailureCounterTotal $metricsAfter) -
                 (Get-Ferrum2FailureCounterTotal $metricsBefore)
@@ -813,6 +846,7 @@ function Invoke-Ferrum2HostTrial {
             value = $metricValue
             warmup_seconds = $Trial.warmup_seconds
             active_seconds = $Trial.active_seconds
+            cpu_sample_seconds = $cpuSampleSeconds
             client_cpu_percent = $clientCpuPercent
             server_cpu_percent = $serverCpuPercent
             client_failure_counter_delta = $clientFailureDelta

@@ -26,6 +26,7 @@ _TRIAL_FIELDS = frozenset(
         "value",
         "warmup_seconds",
         "active_seconds",
+        "cpu_sample_seconds",
         "client_cpu_percent",
         "server_cpu_percent",
         "client_failure_counter_delta",
@@ -156,6 +157,15 @@ def validate_windows_tun_trial(
         if trial[field] != planned_trial[field]:
             raise CandidateControlError(f"Windows TUN trial {field} does not match its plan")
     _finite_positive(trial["value"], "value")
+    cpu_sample_seconds = _finite_positive(
+        trial["cpu_sample_seconds"], "cpu_sample_seconds"
+    )
+    if not (
+        float(trial["active_seconds"])
+        <= cpu_sample_seconds
+        <= float(trial["active_seconds"]) + 60.0
+    ):
+        raise CandidateControlError("Windows TUN trial CPU sample window is invalid")
     _finite_positive(trial["client_cpu_percent"], "client_cpu_percent", allow_zero=True)
     _finite_positive(trial["server_cpu_percent"], "server_cpu_percent", allow_zero=True)
     _finite_positive(trial["checked_units"], "checked_units")

@@ -1,3 +1,4 @@
+use super::contract::ActiveWindowMarkers;
 use super::diagnostic::{
     ASSOCIATIONS, FRAGMENT_ACK_LEN, FRAGMENT_ACK_TAG, FRAGMENT_ACK_WINDOW, FRAGMENT_BATCH,
     FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER, FRAGMENT_REQUEST_TAG,
@@ -8,6 +9,7 @@ use super::diagnostic::{
     UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
 };
 use serde_json::{Value, json};
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,10 +80,64 @@ pub(crate) fn elapsed_rate(units: u64, elapsed: Duration, name: &str) -> Result<
     u64::try_from(rate.max(1)).map_err(|_| format!("{name} rate overflow"))
 }
 
+pub(crate) fn wait_for_active_release(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
+    let Some(marker) = markers.map(|markers| &markers.ready) else {
+        return Ok(());
+    };
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+        .map_err(|error| format!("create active-window ready marker failed: {error}"))?;
+    let write_result = output
+        .write_all(b"ready\n")
+        .and_then(|()| output.sync_all())
+        .map_err(|error| format!("write active-window ready marker failed: {error}"));
+    drop(output);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(marker);
+        return Err(error);
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while marker
+        .try_exists()
+        .map_err(|error| format!("inspect active-window ready marker failed: {error}"))?
+    {
+        if Instant::now() >= deadline {
+            let _ = fs::remove_file(marker);
+            return Err("active-window ready marker was not released within 30 seconds".to_owned());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
+pub(crate) fn signal_active_complete(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
+    let Some(marker) = markers.map(|markers| &markers.complete) else {
+        return Ok(());
+    };
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+        .map_err(|error| format!("create active-window complete marker failed: {error}"))?;
+    let write_result = output
+        .write_all(b"complete\n")
+        .and_then(|()| output.sync_all())
+        .map_err(|error| format!("write active-window complete marker failed: {error}"));
+    drop(output);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(marker);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(crate) fn tcp_single(
     address: SocketAddr,
     warmup: Duration,
     active: Duration,
+    active_markers: Option<&ActiveWindowMarkers>,
 ) -> Result<Value, String> {
     let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
         .map_err(|error| format!("TCP single-flow connect failed: {error}"))?;
@@ -96,6 +152,7 @@ pub(crate) fn tcp_single(
             .checked_add(payload.len() as u64)
             .ok_or_else(|| "TCP single-flow warmup byte count overflow".to_owned())?;
     }
+    wait_for_active_release(active_markers)?;
     let start = Instant::now();
     let deadline = start + active;
     let mut checked_bytes = 0_u64;
@@ -106,6 +163,7 @@ pub(crate) fn tcp_single(
             .ok_or_else(|| "TCP single-flow byte count overflow".to_owned())?;
     }
     let elapsed = start.elapsed();
+    signal_active_complete(active_markers)?;
     if checked_bytes < TCP_SINGLE_MINIMUM_BYTES {
         return Err("TCP single-flow correctness coverage is below 64 MiB".to_owned());
     }
@@ -130,8 +188,10 @@ pub(crate) fn tcp_fairness(
     address: SocketAddr,
     warmup: Duration,
     active: Duration,
+    active_markers: Option<&ActiveWindowMarkers>,
 ) -> Result<Value, String> {
     let start = Arc::new(OnceLock::new());
+    let active_start = Arc::new(OnceLock::new());
     let cancel = Arc::new(AtomicBool::new(false));
     let mut streams = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
     for flow in 0..TCP_FAIRNESS_FLOWS {
@@ -147,6 +207,7 @@ pub(crate) fn tcp_fairness(
     let mut workers = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
     for (flow, mut stream) in streams.into_iter().enumerate() {
         let worker_start = Arc::clone(&start);
+        let worker_active_start = Arc::clone(&active_start);
         let worker_cancel = Arc::clone(&cancel);
         let worker = thread::Builder::new()
             .name(format!("tun-fairness-{flow:03}"))
@@ -166,7 +227,16 @@ pub(crate) fn tcp_fairness(
                 while Instant::now() < warmup_deadline {
                     tcp_round_trip(&mut stream, &payload, &mut reply)?;
                 }
-                let deadline = warmup_deadline + active;
+                let active_start = loop {
+                    if let Some(start) = worker_active_start.get() {
+                        break *start;
+                    }
+                    if worker_cancel.load(Ordering::Acquire) {
+                        return Err("fairness active window was cancelled".to_owned());
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                };
+                let deadline = active_start + active;
                 let mut bytes = 0_u64;
                 while Instant::now() < deadline {
                     tcp_round_trip(&mut stream, &payload, &mut reply)?;
@@ -187,9 +257,20 @@ pub(crate) fn tcp_fairness(
             }
         }
     }
+    let common_start = Instant::now() + Duration::from_millis(100);
     start
-        .set(Instant::now() + Duration::from_millis(100))
+        .set(common_start)
         .map_err(|_| "fairness start was already set".to_owned())?;
+    if let Some(delay) = (common_start + warmup).checked_duration_since(Instant::now()) {
+        thread::sleep(delay);
+    }
+    let mut active_release = wait_for_active_release(active_markers);
+    if active_release.is_ok() && active_start.set(Instant::now()).is_err() {
+        active_release = Err("fairness active start was already set".to_owned());
+    }
+    if active_release.is_err() {
+        cancel.store(true, Ordering::Release);
+    }
     let mut values = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
     let mut first_failure = None;
     for worker in workers {
@@ -203,6 +284,8 @@ pub(crate) fn tcp_fairness(
             }
         }
     }
+    active_release?;
+    signal_active_complete(active_markers)?;
     if let Some(error) = first_failure {
         return Err(error);
     }
@@ -702,6 +785,7 @@ pub(crate) fn udp_packets(
     address: SocketAddr,
     warmup: Duration,
     active: Duration,
+    active_markers: Option<&ActiveWindowMarkers>,
 ) -> Result<Value, String> {
     let mut socket = udp_packet_socket(address)?;
     let mut reply = vec![0; UDP_PAYLOAD];
@@ -712,6 +796,7 @@ pub(crate) fn udp_packets(
         (sequence, _) =
             udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
     }
+    wait_for_active_release(active_markers)?;
     let start = Instant::now();
     let deadline = start + active;
     let mut datagrams = 0_u64;
@@ -728,6 +813,7 @@ pub(crate) fn udp_packets(
             .ok_or_else(|| "UDP datagram count overflow".to_owned())?;
     }
     let elapsed = start.elapsed();
+    signal_active_complete(active_markers)?;
     Ok(json!({
         "measurements": {
             "packet_rate": elapsed_rate(datagrams, elapsed, "UDP packet rate")?
