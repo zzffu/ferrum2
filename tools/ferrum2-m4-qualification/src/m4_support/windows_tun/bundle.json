@@ -125,8 +125,8 @@
     },
     {
       "path": "src/m4_support/windows_tun/diagnostic.rs",
-      "bytes": 27535,
-      "sha256": "bf07b971e723b78eb06e9fb4da48ca102935e1860da6c5fd805e46c461fefb4b"
+      "bytes": 27533,
+      "sha256": "474d43048c14d492067025bb1c3ffef9609f5cdd5ef79abc7496b58f3a5d0035"
     },
     {
       "path": "src/m4_support/windows_tun/mod.rs",
