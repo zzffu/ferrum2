@@ -15,8 +15,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
-      "bytes": 46476,
-      "sha256": "4066cc731a1fe540bcd0f45954bac2c2c97edbc0cdca1fd752f74764323850d7"
+      "bytes": 46477,
+      "sha256": "d0d45c431102d6b3a887b59be7ec56da4ab940ebead4bda78d7221b70ca72b64"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostOwnership.ps1",

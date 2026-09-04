@@ -489,7 +489,7 @@ max_buffered_bytes = 268435456
 idle_timeout_ms = 60000
 [runtime]
 shutdown_grace_ms = 30000
-idle_timeout_ms = 1000
+idle_timeout_ms = 60000
 [metrics]
 listen = "127.0.0.1:$ClientMetricsPort"
 "@
