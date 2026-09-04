@@ -30,8 +30,8 @@ pub(super) const STRICT_ROUTE_SESSION_KEY: GUID =
     GUID::from_u128(0x8ea35b4e_6629_4e26_9776_95c5bf9c6b01);
 pub(super) const STRICT_ROUTE_SUBLAYER_KEY: GUID =
     GUID::from_u128(0xddbc2fa2_d52f_4a79_8a63_8446c308cf02);
-// Windows 10 BFE canonicalizes a requested 0x7fff custom sublayer to 0x7ffe.
-pub(super) const STRICT_ROUTE_SUBLAYER_WEIGHT: u16 = 0x7ffe;
+// BFE may assign the closest available sublayer weight; `WfpSession` retains that readback.
+pub(super) const STRICT_ROUTE_SUBLAYER_WEIGHT: u16 = 0x7fff;
 pub(super) const STRICT_ROUTE_SESSION_NAME: &str = "Ferrum2 strict route dynamic session";
 pub(super) const STRICT_ROUTE_SUBLAYER_NAME: &str = "Ferrum2 strict route";
 
@@ -72,7 +72,10 @@ pub(super) type PlatformStrictRouteSession = StrictRouteSession<PlatformStrictRo
 
 pub(super) struct PlatformStrictRouteOperations;
 
-pub(super) struct WfpSession(HANDLE);
+pub(super) struct WfpSession {
+    handle: HANDLE,
+    sublayer_weight: Option<u16>,
+}
 
 pub(super) struct FwpmOwned<T>(*mut T);
 
@@ -234,7 +237,10 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
         if engine.is_null() {
             Err(Error)
         } else {
-            Ok(WfpSession(engine))
+            Ok(WfpSession {
+                handle: engine,
+                sublayer_weight: None,
+            })
         }
     }
 
@@ -258,7 +264,7 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
     }
 
     fn begin_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error> {
-        if unsafe { FwpmTransactionBegin0(session.0, 0) } == ERROR_SUCCESS {
+        if unsafe { FwpmTransactionBegin0(session.handle, 0) } == ERROR_SUCCESS {
             Ok(())
         } else {
             Err(Error)
@@ -276,11 +282,18 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
             weight: STRICT_ROUTE_SUBLAYER_WEIGHT,
             ..FWPM_SUBLAYER0::default()
         };
-        if unsafe { FwpmSubLayerAdd0(session.0, &sublayer, null_mut()) } == ERROR_SUCCESS {
-            Ok(())
-        } else {
-            Err(Error)
+        if unsafe { FwpmSubLayerAdd0(session.handle, &sublayer, null_mut()) } != ERROR_SUCCESS {
+            return Err(Error);
         }
+        let mut raw = null_mut();
+        let status =
+            unsafe { FwpmSubLayerGetByKey0(session.handle, &STRICT_ROUTE_SUBLAYER_KEY, &mut raw) };
+        let allocation = FwpmOwned(raw);
+        if status != ERROR_SUCCESS {
+            return Err(Error);
+        }
+        session.sublayer_weight = Some(allocation.get()?.weight);
+        Ok(())
     }
 
     fn add_filter(
@@ -353,7 +366,7 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
             ..FWPM_FILTER0::default()
         };
         let mut id = 0_u64;
-        let status = unsafe { FwpmFilterAdd0(session.0, &filter, null_mut(), &mut id) };
+        let status = unsafe { FwpmFilterAdd0(session.handle, &filter, null_mut(), &mut id) };
         drop((luid_values, app_blobs));
         if status == ERROR_SUCCESS && id != 0 {
             Ok(id)
@@ -363,7 +376,9 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
     }
 
     fn commit_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error> {
-        if unsafe { FwpmTransactionCommit0(session.0) } == ERROR_SUCCESS {
+        if session.sublayer_weight.is_some()
+            && unsafe { FwpmTransactionCommit0(session.handle) } == ERROR_SUCCESS
+        {
             Ok(())
         } else {
             Err(Error)
@@ -371,17 +386,17 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
     }
 
     fn abort_transaction(&mut self, session: &mut Self::Session) -> Result<(), Error> {
-        if unsafe { FwpmTransactionAbort0(session.0) } == ERROR_SUCCESS {
-            Ok(())
-        } else {
-            Err(Error)
+        if unsafe { FwpmTransactionAbort0(session.handle) } != ERROR_SUCCESS {
+            return Err(Error);
         }
+        session.sublayer_weight = None;
+        Ok(())
     }
 
     fn sublayer_matches(&self, session: &Self::Session) -> Result<bool, Error> {
         let mut raw = null_mut();
         let status =
-            unsafe { FwpmSubLayerGetByKey0(session.0, &STRICT_ROUTE_SUBLAYER_KEY, &mut raw) };
+            unsafe { FwpmSubLayerGetByKey0(session.handle, &STRICT_ROUTE_SUBLAYER_KEY, &mut raw) };
         let allocation = FwpmOwned(raw);
         if !wfp_readback_present(status, FWP_E_SUBLAYER_NOT_FOUND)? {
             return Ok(false);
@@ -396,7 +411,9 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
                 && sublayer.providerKey.is_null()
                 && sublayer.providerData.size == 0
                 && sublayer.providerData.data.is_null()
-                && sublayer.weight == STRICT_ROUTE_SUBLAYER_WEIGHT,
+                && session
+                    .sublayer_weight
+                    .is_some_and(|expected| sublayer.weight == expected),
         )
     }
 
@@ -407,7 +424,7 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
         rule: &StrictRouteRule,
     ) -> Result<bool, Error> {
         let mut raw = null_mut();
-        let status = unsafe { FwpmFilterGetById0(session.0, id, &mut raw) };
+        let status = unsafe { FwpmFilterGetById0(session.handle, id, &mut raw) };
         let allocation = FwpmOwned(raw);
         if !wfp_readback_present(status, FWP_E_FILTER_NOT_FOUND)? {
             return Ok(false);
@@ -418,13 +435,14 @@ impl StrictRouteOperations for PlatformStrictRouteOperations {
     }
 
     fn close_dynamic_session(&mut self, session: &mut Self::Session) -> Result<(), Error> {
-        if session.0.is_null() {
+        if session.handle.is_null() {
             return Err(Error);
         }
-        if unsafe { FwpmEngineClose0(session.0) } != ERROR_SUCCESS {
+        if unsafe { FwpmEngineClose0(session.handle) } != ERROR_SUCCESS {
             return Err(Error);
         }
-        session.0 = null_mut();
+        session.handle = null_mut();
+        session.sublayer_weight = None;
         Ok(())
     }
 }
