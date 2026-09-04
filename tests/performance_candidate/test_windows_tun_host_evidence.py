@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[2]
 POLICY = ROOT / "tools" / "windows_tun_performance_policy.json"
 BASELINE = "1" * 40
 CANDIDATE = "2" * 40
+RUN_ID = "abc123def456"
+LOOPBACK_INDEX = 42
+LOOPBACK_ALIAS = "Renamed loopback interface"
 DIGEST = hashlib.sha256(
     (ROOT / "tools" / "powershell" / "Ferrum2.Performance" / "bundle.json").read_bytes()
 ).hexdigest()
@@ -73,6 +76,7 @@ def plan_for(mode: str) -> dict[str, object]:
     return {
         "schema_version": 1,
         "kind": "ferrum2.windows-tun.host-performance-plan",
+        "run_id": RUN_ID,
         "execution": "explicit-authorized-windows-host",
         "mode": mode,
         "baseline_sha": BASELINE,
@@ -134,8 +138,8 @@ def route_proofs() -> list[dict[str, object]]:
             "purpose": "server-to-support-without-test-tun",
             "remote_address": "198.19.0.1",
             "local_address": "198.19.0.1",
-            "interface_index": 1,
-            "interface_alias": "Loopback Pseudo-Interface 1",
+            "interface_index": LOOPBACK_INDEX,
+            "interface_alias": LOOPBACK_ALIAS,
             "destination_prefix": "198.19.0.1/32",
             "next_hop": "0.0.0.0",
         },
@@ -143,8 +147,8 @@ def route_proofs() -> list[dict[str, object]]:
             "purpose": "product-underlay-control",
             "remote_address": "127.0.0.1",
             "local_address": "127.0.0.1",
-            "interface_index": 1,
-            "interface_alias": "Loopback Pseudo-Interface 1",
+            "interface_index": LOOPBACK_INDEX,
+            "interface_alias": LOOPBACK_ALIAS,
             "destination_prefix": "127.0.0.1/32",
             "next_hop": "0.0.0.0",
         },
@@ -152,8 +156,8 @@ def route_proofs() -> list[dict[str, object]]:
             "purpose": "sing-box-proxy-excluded",
             "remote_address": "127.0.0.1",
             "local_address": "127.0.0.1",
-            "interface_index": 1,
-            "interface_alias": "Loopback Pseudo-Interface 1",
+            "interface_index": LOOPBACK_INDEX,
+            "interface_alias": LOOPBACK_ALIAS,
             "destination_prefix": "127.0.0.1/32",
             "next_hop": "0.0.0.0",
         },
@@ -164,6 +168,8 @@ def trial_for(planned: dict[str, object], value: float) -> dict[str, object]:
     return {
         "schema_version": 1,
         "kind": "ferrum2.windows-tun.host-performance-trial",
+        "run_id": RUN_ID,
+        "performance_source_bundle_sha256": DIGEST,
         "sequence": planned["sequence"],
         "pair": planned["pair"],
         "order": planned["order"],
@@ -180,6 +186,8 @@ def trial_for(planned: dict[str, object], value: float) -> dict[str, object]:
         "client_failure_counter_delta": 0.0,
         "server_failure_counter_delta": 0.0,
         "checked_units": 1000.0,
+        "loopback_interface_index": LOOPBACK_INDEX,
+        "loopback_interface_alias": LOOPBACK_ALIAS,
         "route_proofs": route_proofs(),
         "workload_checks": {"payload_exact": True, "every_reply_accounted": True},
         "status": "PASS",
@@ -204,6 +212,8 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
         {
             "schema_version": 1,
             "kind": "ferrum2.windows-tun.host-build-manifest",
+            "run_id": RUN_ID,
+            "performance_source_bundle_sha256": DIGEST,
             "baseline": {"label": "baseline", "commit_sha": BASELINE, **member_fields},
             "candidate": {"label": "candidate", "commit_sha": CANDIDATE, **member_fields},
             "shared_harness_sha256": DIGEST,
@@ -218,7 +228,8 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
         {
             "schema_version": 1,
             "kind": "ferrum2.windows-tun.host-performance-cleanup",
-            "run_id": "fixture-run",
+            "run_id": RUN_ID,
+            "performance_source_bundle_sha256": DIGEST,
             "status": "PASS",
             "benchmark_succeeded": True,
             "adapter_remaining": 0,
@@ -234,7 +245,8 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
         {
             "schema_version": 1,
             "kind": "ferrum2.windows-tun.host-performance-runtime",
-            "run_id": "fixture-run",
+            "run_id": RUN_ID,
+            "performance_source_bundle_sha256": DIGEST,
             "mode": mode,
             "build_seconds": 1.0,
             "execution_seconds": 2.0,
@@ -277,19 +289,34 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
             validate_windows_tun_plan(
                 plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
             )
+        plan = plan_for("Quick")
+        plan["run_id"] = "fixture-run"
+        with self.assertRaisesRegex(CandidateControlError, "transaction identity"):
+            validate_windows_tun_plan(
+                plan, baseline_sha=BASELINE, candidate_sha=CANDIDATE, mode="Quick"
+            )
 
     def test_trial_rejects_failure_counters_and_recursive_route(self) -> None:
         planned = plan_for("Quick")["trials"][0]
         trial = trial_for(planned, 1000.0)
-        validate_windows_tun_trial(trial, planned_trial=planned)
+        identity = {
+            "planned_trial": planned,
+            "run_id": RUN_ID,
+            "performance_source_bundle_sha256": DIGEST,
+        }
+        validate_windows_tun_trial(trial, **identity)
         failed = copy.deepcopy(trial)
         failed["client_failure_counter_delta"] = 1.0
         with self.assertRaisesRegex(CandidateControlError, "failure counter"):
-            validate_windows_tun_trial(failed, planned_trial=planned)
+            validate_windows_tun_trial(failed, **identity)
         recursive = copy.deepcopy(trial)
         recursive["route_proofs"][2]["interface_index"] = 73
         with self.assertRaisesRegex(CandidateControlError, "loopback exclusion"):
-            validate_windows_tun_trial(recursive, planned_trial=planned)
+            validate_windows_tun_trial(recursive, **identity)
+        stale = copy.deepcopy(trial)
+        stale["performance_source_bundle_sha256"] = "f" * 64
+        with self.assertRaisesRegex(CandidateControlError, "identity"):
+            validate_windows_tun_trial(stale, **identity)
 
     def test_complete_paired_evidence_is_reduced_from_raw_trials(self) -> None:
         plan = plan_for("Quick")
@@ -346,6 +373,8 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "kind": "ferrum2.windows-tun.host-performance-summary",
+                    "run_id": RUN_ID,
+                    "performance_source_bundle_sha256": DIGEST,
                     "mode": "Quick",
                     "baseline_sha": BASELINE,
                     "candidate_sha": CANDIDATE,
@@ -367,6 +396,24 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 [row["qualification_status"] for row in report["scenario_decisions"]],
                 ["candidate-win", "candidate-win"],
             )
+            cleanup = json.loads((root / "cleanup.json").read_text(encoding="utf-8"))
+            runtime = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
+            spliced_cleanup = copy.deepcopy(cleanup)
+            spliced_runtime = copy.deepcopy(runtime)
+            spliced_cleanup["run_id"] = "fedcba654321"
+            spliced_runtime["run_id"] = "fedcba654321"
+            write_json(root / "cleanup.json", spliced_cleanup)
+            write_json(root / "runtime.json", spliced_runtime)
+            with self.assertRaisesRegex(CandidateControlError, "cleanup evidence"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    policy_path=POLICY,
+                )
+            write_json(root / "cleanup.json", cleanup)
+            write_json(root / "runtime.json", runtime)
             builds = json.loads((root / "builds.json").read_text(encoding="utf-8"))
             inconsistent = copy.deepcopy(builds)
             inconsistent["candidate"]["harness_sha256"] = "b" * 64
@@ -450,6 +497,8 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "kind": "ferrum2.windows-tun.host-lifecycle-summary",
+                    "run_id": RUN_ID,
+                    "performance_source_bundle_sha256": DIGEST,
                     "mode": "Lifecycle",
                     "candidate_sha": CANDIDATE,
                     "lifecycle_cycles": 20,

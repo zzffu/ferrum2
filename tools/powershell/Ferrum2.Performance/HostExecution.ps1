@@ -241,6 +241,8 @@ function Initialize-Ferrum2HostBuilds {
     $manifest = [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-build-manifest"
+        run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         baseline = $baseline
         candidate = $candidate
         shared_harness_sha256 = $candidate.harness_sha256
@@ -501,24 +503,31 @@ function Invoke-Ferrum2ConfigCheck {
 function Get-Ferrum2RouteProof {
     param(
         [Parameter(Mandatory = $true)][string]$RemoteAddress,
-        [Parameter(Mandatory = $true)][string]$LocalAddress,
-        [Parameter(Mandatory = $true)][uint32]$InterfaceIndex,
-        [Parameter(Mandatory = $true)][string]$Purpose
+        [Parameter(Mandatory = $true)][uint32]$ExpectedInterfaceIndex,
+        [Parameter(Mandatory = $true)][string]$Purpose,
+        [AllowNull()][string]$LocalAddress = $null
     )
-    $rows = @(Find-NetRoute -RemoteIPAddress $RemoteAddress -LocalIPAddress $LocalAddress `
-        -InterfaceIndex $InterfaceIndex -ErrorAction Stop)
+    $lookup = @{
+        RemoteIPAddress = $RemoteAddress
+        ErrorAction = "Stop"
+    }
+    if ($PSBoundParameters.ContainsKey("LocalAddress")) {
+        $lookup.LocalIPAddress = $LocalAddress
+        $lookup.InterfaceIndex = $ExpectedInterfaceIndex
+    }
+    $rows = @(Find-NetRoute @lookup)
     $source = @($rows | Where-Object { $_.CimClass.CimClassName -ceq "MSFT_NetIPAddress" })
     $route = @($rows | Where-Object { $_.CimClass.CimClassName -ceq "MSFT_NetRoute" })
     if ($source.Count -ne 1 -or $route.Count -ne 1 -or
-        [uint32]$source[0].InterfaceIndex -ne $InterfaceIndex -or
-        [uint32]$route[0].InterfaceIndex -ne $InterfaceIndex) {
-        throw "actual route lookup did not preserve the $Purpose interface"
+        [uint32]$source[0].InterfaceIndex -ne $ExpectedInterfaceIndex -or
+        [uint32]$route[0].InterfaceIndex -ne $ExpectedInterfaceIndex) {
+        throw "actual route lookup did not select the $Purpose interface"
     }
     return [pscustomobject][ordered]@{
         purpose = $Purpose
         remote_address = $RemoteAddress
-        local_address = $LocalAddress
-        interface_index = $InterfaceIndex
+        local_address = [string]$source[0].IPAddress
+        interface_index = [uint32]$route[0].InterfaceIndex
         interface_alias = [string]$route[0].InterfaceAlias
         destination_prefix = [string]$route[0].DestinationPrefix
         next_hop = [string]$route[0].NextHop
@@ -533,15 +542,16 @@ function Get-Ferrum2TrialRouteProofs {
     )
     return @(
         Get-Ferrum2RouteProof -RemoteAddress $Network.support_address `
-            -LocalAddress $Network.tun_address -InterfaceIndex $TunInterfaceIndex `
+            -ExpectedInterfaceIndex $TunInterfaceIndex `
             -Purpose "benchmark-application-to-test-tun"
         Get-Ferrum2RouteProof -RemoteAddress $Network.support_address `
-            -LocalAddress $Network.support_address -InterfaceIndex $Loopback.interface_index `
+            -LocalAddress $Network.support_address `
+            -ExpectedInterfaceIndex $Loopback.interface_index `
             -Purpose "server-to-support-without-test-tun"
         Get-Ferrum2RouteProof -RemoteAddress "127.0.0.1" -LocalAddress "127.0.0.1" `
-            -InterfaceIndex $Loopback.interface_index -Purpose "product-underlay-control"
+            -ExpectedInterfaceIndex $Loopback.interface_index -Purpose "product-underlay-control"
         Get-Ferrum2RouteProof -RemoteAddress "127.0.0.1" -LocalAddress "127.0.0.1" `
-            -InterfaceIndex $Loopback.interface_index -Purpose "sing-box-proxy-excluded"
+            -ExpectedInterfaceIndex $Loopback.interface_index -Purpose "sing-box-proxy-excluded"
     )
 }
 
@@ -793,6 +803,8 @@ function Invoke-Ferrum2HostTrial {
         $observation = [pscustomobject][ordered]@{
             schema_version = 1
             kind = "ferrum2.windows-tun.host-performance-trial"
+            run_id = $Context.run_id
+            performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
             sequence = $Trial.sequence
             pair = $Trial.pair
             order = $Trial.order
@@ -809,6 +821,8 @@ function Invoke-Ferrum2HostTrial {
             client_failure_counter_delta = $clientFailureDelta
             server_failure_counter_delta = $serverFailureDelta
             checked_units = $checkedUnits
+            loopback_interface_index = [uint32]$Loopback.interface_index
+            loopback_interface_alias = [string]$Loopback.interface_alias
             route_proofs = $runtime.route_proofs
             workload_checks = $workload.observation.checks
             status = "PASS"

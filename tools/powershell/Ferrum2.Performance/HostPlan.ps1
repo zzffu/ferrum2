@@ -89,8 +89,12 @@ function New-Ferrum2HostPerformancePlan {
         [string]$Mode,
         [Parameter(Mandatory = $true)][string]$BaselineSha,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256
+        [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256,
+        [AllowNull()][object]$RunId = $null
     )
+    if ($null -ne $RunId -and [string]$RunId -cnotmatch '^[0-9a-f]{12}$') {
+        throw "host performance plan RunId is invalid"
+    }
     $profile = Get-HostProfileDefinition -Mode $Mode
     $trials = @(
         if ($Mode -ceq "Lifecycle") {
@@ -109,6 +113,7 @@ function New-Ferrum2HostPerformancePlan {
     return [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-performance-plan"
+        run_id = $RunId
         execution = "explicit-authorized-windows-host"
         mode = $Mode
         baseline_sha = $BaselineSha

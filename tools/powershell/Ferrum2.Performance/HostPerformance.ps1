@@ -59,13 +59,15 @@ function Invoke-Ferrum2HostPerformance {
             -Acknowledged ([bool]$AcknowledgeHostNetworkMutation)
         Assert-NoPendingFerrum2HostPerformanceRecovery
         $effectiveMode = if ($SafetyCheck) { "Quick" } else { $Mode }
-        $plan = New-Ferrum2HostPerformancePlan -Mode $effectiveMode -BaselineSha $BaselineSha `
-            -CandidateSha $CandidateSha `
-            -PerformanceSourceBundleSha256 $PerformanceSourceBundleSha256
         $context = New-Ferrum2HostPerformanceContext -RepositoryRoot $RepositoryRoot `
             -EvidenceDirectory $EvidenceDirectory `
             -Mode $(if ($SafetyCheck) { "Safety" } else { $Mode }) `
-            -BaselineSha $BaselineSha -CandidateSha $CandidateSha
+            -BaselineSha $BaselineSha -CandidateSha $CandidateSha `
+            -PerformanceSourceBundleSha256 $PerformanceSourceBundleSha256
+        $plan = New-Ferrum2HostPerformancePlan -Mode $effectiveMode -BaselineSha $BaselineSha `
+            -CandidateSha $CandidateSha `
+            -PerformanceSourceBundleSha256 $PerformanceSourceBundleSha256 `
+            -RunId $context.run_id
         $totalTimer = [Diagnostics.Stopwatch]::StartNew()
         Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory "plan.json") -Document $plan
         $network = New-Ferrum2HostNetworkIdentity -RunId $context.run_id
@@ -113,6 +115,7 @@ function Invoke-Ferrum2HostPerformance {
                     schema_version = 1
                     kind = "ferrum2.windows-tun.host-performance-runtime"
                     run_id = $context.run_id
+                    performance_source_bundle_sha256 = $context.performance_source_bundle_sha256
                     mode = if ($SafetyCheck) { "Safety" } else { $Mode }
                     build_seconds = $buildSeconds
                     execution_seconds = $executionSeconds

@@ -34,6 +34,7 @@ function Test-Ferrum2PairedCpuCostRegression {
 
 function New-Ferrum2HostSummary {
     param(
+        [Parameter(Mandatory = $true)][object]$Context,
         [Parameter(Mandatory = $true)][object]$Plan,
         [Parameter(Mandatory = $true)][object[]]$Trials
     )
@@ -140,6 +141,8 @@ function New-Ferrum2HostSummary {
     return [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-performance-summary"
+        run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         mode = $Plan.mode
         baseline_sha = $Plan.baseline_sha
         candidate_sha = $Plan.candidate_sha
@@ -173,7 +176,8 @@ function Invoke-Ferrum2HostPairedProfile {
         [string]$_.purpose -notmatch '^support-'
     })
     Write-Ferrum2HostPerformanceLedger -Context $Context
-    $summary = New-Ferrum2HostSummary -Plan $Plan -Trials $observations.ToArray()
+    $summary = New-Ferrum2HostSummary -Context $Context -Plan $Plan `
+        -Trials $observations.ToArray()
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "summary.json") -Document $summary
     return $summary
 }
@@ -238,6 +242,8 @@ function Invoke-Ferrum2HostLifecycleProfile {
     $summary = [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-lifecycle-summary"
+        run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         mode = "Lifecycle"
         candidate_sha = $Plan.candidate_sha
         lifecycle_cycles = [int]$Plan.lifecycle_cycles
@@ -333,6 +339,8 @@ function Invoke-Ferrum2HostSafetyCheck {
     $report = [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-safety-check"
+        run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         checks = $checks.ToArray()
         route_proofs = $smokeRuntime.route_proofs
         adapter_remaining = 0

@@ -24,6 +24,8 @@ _SUMMARY_FIELDS = frozenset(
     {
         "schema_version",
         "kind",
+        "run_id",
+        "performance_source_bundle_sha256",
         "mode",
         "baseline_sha",
         "candidate_sha",
@@ -115,7 +117,13 @@ def _paired_cpu_cost_regressed(
     return median_ratio > 1.0 + maximum_regression_percent / 100.0 and majority
 
 
-def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, object]:
+def _validate_cleanup(
+    root: pathlib.Path,
+    *,
+    expected_mode: str,
+    run_id: str,
+    performance_source_bundle_sha256: str,
+) -> dict[str, object]:
     cleanup = _read_object(root / "cleanup.json", "Windows TUN cleanup evidence")
     _exact_fields(
         cleanup,
@@ -124,6 +132,7 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
                 "schema_version",
                 "kind",
                 "run_id",
+                "performance_source_bundle_sha256",
                 "status",
                 "benchmark_succeeded",
                 "adapter_remaining",
@@ -139,6 +148,9 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
     if (
         cleanup["schema_version"] != 1
         or cleanup["kind"] != "ferrum2.windows-tun.host-performance-cleanup"
+        or cleanup["run_id"] != run_id
+        or cleanup["performance_source_bundle_sha256"]
+        != performance_source_bundle_sha256
         or cleanup["status"] != "PASS"
         or cleanup["benchmark_succeeded"] is not True
         or any(
@@ -161,6 +173,7 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
                 "schema_version",
                 "kind",
                 "run_id",
+                "performance_source_bundle_sha256",
                 "mode",
                 "build_seconds",
                 "execution_seconds",
@@ -175,6 +188,8 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
         runtime["schema_version"] != 1
         or runtime["kind"] != "ferrum2.windows-tun.host-performance-runtime"
         or runtime["run_id"] != cleanup["run_id"]
+        or runtime["performance_source_bundle_sha256"]
+        != performance_source_bundle_sha256
         or runtime["mode"] != expected_mode
         or runtime["cleanup_status"] != "PASS"
     ):
@@ -185,7 +200,12 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
 
 
 def _validate_builds(
-    root: pathlib.Path, *, baseline_sha: str, candidate_sha: str
+    root: pathlib.Path,
+    *,
+    baseline_sha: str,
+    candidate_sha: str,
+    run_id: str,
+    performance_source_bundle_sha256: str,
 ) -> dict[str, object]:
     builds = _read_object(root / "builds.json", "Windows TUN build evidence")
     _exact_fields(
@@ -194,6 +214,8 @@ def _validate_builds(
             {
                 "schema_version",
                 "kind",
+                "run_id",
+                "performance_source_bundle_sha256",
                 "baseline",
                 "candidate",
                 "shared_harness_sha256",
@@ -208,6 +230,9 @@ def _validate_builds(
     if (
         builds["schema_version"] != 1
         or builds["kind"] != "ferrum2.windows-tun.host-build-manifest"
+        or builds["run_id"] != run_id
+        or builds["performance_source_bundle_sha256"]
+        != performance_source_bundle_sha256
         or builds["shared_harness_commit_sha"] != candidate_sha
     ):
         raise CandidateControlError("Windows TUN build evidence identity is invalid")
@@ -256,7 +281,16 @@ def _load_trials(root: pathlib.Path, plan: dict[str, object]) -> list[dict[str, 
             maximum_bytes=WINDOWS_TUN_TRIAL_MAX_BYTES,
             source=f"Windows TUN trial {planned['sequence']}",
         )
-        trials.append(validate_windows_tun_trial(document.value, planned_trial=planned))
+        trials.append(
+            validate_windows_tun_trial(
+                document.value,
+                planned_trial=planned,
+                run_id=plan["run_id"],
+                performance_source_bundle_sha256=plan[
+                    "performance_source_bundle_sha256"
+                ],
+            )
+        )
     actual_paths = sorted((root / "trials").glob("*/trial.json"))
     if len(actual_paths) != len(trials):
         raise CandidateControlError("Windows TUN trial evidence closure is not exact")
@@ -275,6 +309,9 @@ def _validate_paired_summary(
     if (
         summary["schema_version"] != 1
         or summary["kind"] != "ferrum2.windows-tun.host-performance-summary"
+        or summary["run_id"] != plan["run_id"]
+        or summary["performance_source_bundle_sha256"]
+        != plan["performance_source_bundle_sha256"]
         or summary["mode"] != plan["mode"]
         or summary["baseline_sha"] != plan["baseline_sha"]
         or summary["candidate_sha"] != plan["candidate_sha"]
@@ -405,6 +442,8 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
         {
             "schema_version",
             "kind",
+            "run_id",
+            "performance_source_bundle_sha256",
             "mode",
             "candidate_sha",
             "lifecycle_cycles",
@@ -430,6 +469,9 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
     if (
         summary["schema_version"] != 1
         or summary["kind"] != "ferrum2.windows-tun.host-lifecycle-summary"
+        or summary["run_id"] != plan["run_id"]
+        or summary["performance_source_bundle_sha256"]
+        != plan["performance_source_bundle_sha256"]
         or summary["mode"] != "Lifecycle"
         or summary["candidate_sha"] != plan["candidate_sha"]
         or summary["lifecycle_cycles"] != 20
@@ -480,14 +522,23 @@ def validate_windows_tun_host_evidence(
         mode=mode,
     )
     _validate_builds(
-        evidence_root, baseline_sha=baseline_sha, candidate_sha=candidate_sha
+        evidence_root,
+        baseline_sha=baseline_sha,
+        candidate_sha=candidate_sha,
+        run_id=plan["run_id"],
+        performance_source_bundle_sha256=plan["performance_source_bundle_sha256"],
     )
     summary = (
         _validate_lifecycle_summary(evidence_root, plan)
         if mode == "Lifecycle"
         else _validate_paired_summary(evidence_root, plan=plan, policy=policy)
     )
-    runtime = _validate_cleanup(evidence_root, expected_mode=mode)
+    runtime = _validate_cleanup(
+        evidence_root,
+        expected_mode=mode,
+        run_id=plan["run_id"],
+        performance_source_bundle_sha256=plan["performance_source_bundle_sha256"],
+    )
     return {
         "schema_version": 1,
         "kind": "ferrum2.windows-tun.host-evidence-validation",

@@ -214,7 +214,8 @@ function New-Ferrum2HostPerformanceContext {
         [Parameter(Mandatory = $true)][string]$EvidenceDirectory,
         [Parameter(Mandatory = $true)][string]$Mode,
         [Parameter(Mandatory = $true)][string]$BaselineSha,
-        [Parameter(Mandatory = $true)][string]$CandidateSha
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256
     )
     $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
     $evidenceCreated = $false
@@ -244,6 +245,7 @@ function New-Ferrum2HostPerformanceContext {
             mode = $Mode
             baseline_sha = $BaselineSha
             candidate_sha = $CandidateSha
+            performance_source_bundle_sha256 = $PerformanceSourceBundleSha256
             repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
             evidence_directory = $evidence
             created_utc = [DateTime]::UtcNow.ToString("O")
@@ -266,6 +268,7 @@ function New-Ferrum2HostPerformanceContext {
             ledger_path = Join-Path $runRoot "recovery.json"
             repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
             evidence_directory = $evidence
+            performance_source_bundle_sha256 = $PerformanceSourceBundleSha256
             ledger = $ledger
         }
         Write-Ferrum2HostPerformanceLedger -Context $context
@@ -743,6 +746,7 @@ function Complete-Ferrum2HostPerformanceCleanup {
         schema_version = 1
         kind = "ferrum2.windows-tun.host-performance-cleanup"
         run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         status = "PASS"
         benchmark_succeeded = $Succeeded
         adapter_remaining = 0
