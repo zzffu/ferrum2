@@ -238,7 +238,7 @@ def _validate_builds(
         or builds["run_id"] != run_id
         or builds["performance_source_bundle_sha256"]
         != performance_source_bundle_sha256
-        or builds["shared_harness_commit_sha"] != candidate_sha
+        or builds["shared_harness_commit_sha"] != baseline_sha
     ):
         raise CandidateControlError("Windows TUN build evidence identity is invalid")
     for field in (

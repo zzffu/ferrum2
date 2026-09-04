@@ -233,7 +233,7 @@ def write_common(root: Path, mode: str, plan: dict[str, object]) -> None:
             "baseline": {"label": "baseline", "commit_sha": BASELINE, **member_fields},
             "candidate": {"label": "candidate", "commit_sha": CANDIDATE, **member_fields},
             "shared_harness_sha256": DIGEST,
-            "shared_harness_commit_sha": CANDIDATE,
+            "shared_harness_commit_sha": BASELINE,
             "shared_source_bundle_sha256": DIGEST,
             "wintun_archive_sha256": DIGEST,
             "wintun_dll_sha256": DIGEST,
