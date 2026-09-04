@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import ipaddress
 import math
 import re
 
 from tools.performance_candidate.json_contract import CandidateControlError, _exact_fields
+from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_WORKLOAD_CHECKS
 
 WINDOWS_TUN_TRIAL_MAX_BYTES = 512 * 1024
 _TRIAL_FIELDS = frozenset(
@@ -60,9 +60,18 @@ def _finite_positive(value: object, field: str, *, allow_zero: bool = False) -> 
     return number
 
 
+def _run_network_identity(run_id: str) -> tuple[str, str]:
+    value = int(run_id[:4], 16)
+    third = (value >> 8) & 0xFF
+    block = (value & 0xFF) % 63 * 4
+    return f"198.18.{third}.{block + 2}", f"198.19.{third}.{block + 1}"
+
+
 def _validate_route_proofs(
     value: object,
     *,
+    run_id: str,
+    sequence: int,
     loopback_interface_index: int,
     loopback_interface_alias: str,
 ) -> None:
@@ -76,37 +85,36 @@ def _validate_route_proofs(
     ]
     if [row.get("purpose") for row in value if type(row) is dict] != expected_purposes:
         raise CandidateControlError("Windows TUN route proof purpose closure changed")
-    for index, row in enumerate(value):
+    tun_address, support_address = _run_network_identity(run_id)
+    expected_alias = f"Ferrum2Perf-{run_id}-{sequence:03d}"
+    expected_endpoints = [
+        (support_address, tun_address, f"{support_address}/32"),
+        (support_address, support_address, f"{support_address}/32"),
+        ("127.0.0.1", "127.0.0.1", "127.0.0.1/32"),
+        ("127.0.0.1", "127.0.0.1", "127.0.0.1/32"),
+    ]
+    for index, (row, endpoints) in enumerate(zip(value, expected_endpoints, strict=True)):
         if type(row) is not dict:
             raise CandidateControlError("Windows TUN route proof must be an object")
         _exact_fields(row, _ROUTE_FIELDS, "Windows TUN route proof")
         if type(row["interface_index"]) is not int or row["interface_index"] <= 0:
             raise CandidateControlError("Windows TUN route proof interface index is invalid")
-        try:
-            remote = ipaddress.ip_address(row["remote_address"])
-            local = ipaddress.ip_address(row["local_address"])
-            prefix = ipaddress.ip_network(row["destination_prefix"], strict=False)
-        except (TypeError, ValueError) as error:
-            raise CandidateControlError("Windows TUN route proof address is invalid") from error
+        remote_address, local_address, destination_prefix = endpoints
         if (
-            remote.version != 4
-            or local.version != 4
-            or prefix.prefixlen != 32
-            or remote not in prefix
+            row["remote_address"] != remote_address
+            or row["local_address"] != local_address
+            or row["destination_prefix"] != destination_prefix
+            or row["next_hop"] != "0.0.0.0"
         ):
-            raise CandidateControlError("Windows TUN route proof must use its narrow IPv4 route")
+            raise CandidateControlError("Windows TUN route proof is not bound to its RunId")
         if index == 0:
-            if (
-                not str(row["interface_alias"]).startswith("Ferrum2Perf-")
-                or row["next_hop"] != "0.0.0.0"
-                or not remote in ipaddress.ip_network("198.18.0.0/15")
-                or not local in ipaddress.ip_network("198.18.0.0/15")
-            ):
-                raise CandidateControlError("benchmark traffic did not prove the owned TUN path")
+            if row["interface_alias"] != expected_alias:
+                raise CandidateControlError(
+                    "benchmark traffic did not prove the run-owned TUN path"
+                )
         elif (
             row["interface_index"] != loopback_interface_index
             or row["interface_alias"] != loopback_interface_alias
-            or row["next_hop"] != "0.0.0.0"
         ):
             raise CandidateControlError("underlay/support traffic did not prove loopback exclusion")
 
@@ -163,10 +171,18 @@ def validate_windows_tun_trial(
     ):
         raise CandidateControlError("Windows TUN loopback identity is invalid")
     checks = trial["workload_checks"]
-    if type(checks) is not dict or not checks or any(value is not True for value in checks.values()):
-        raise CandidateControlError("Windows TUN workload checks did not all pass")
+    expected_checks = WINDOWS_TUN_WORKLOAD_CHECKS.get(str(trial["scenario"]))
+    if (
+        expected_checks is None
+        or type(checks) is not dict
+        or frozenset(checks) != expected_checks
+        or any(value is not True for value in checks.values())
+    ):
+        raise CandidateControlError("Windows TUN workload check closure is invalid")
     _validate_route_proofs(
         trial["route_proofs"],
+        run_id=run_id,
+        sequence=trial["sequence"],
         loopback_interface_index=loopback_index,
         loopback_interface_alias=loopback_alias,
     )

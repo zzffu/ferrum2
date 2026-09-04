@@ -1,14 +1,20 @@
 import copy
+from contextlib import redirect_stdout
 import hashlib
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
 
+from tools.performance_candidate import cli as controller_cli
 from tools.performance_candidate.json_contract import CandidateControlError
 from tools.performance_candidate.windows_tun.plan import validate_windows_tun_plan
 from tools.performance_candidate.windows_tun.policy import load_windows_tun_policy
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_PROFILES
+from tools.performance_candidate.windows_tun.recipe import (
+    WINDOWS_TUN_PROFILES,
+    WINDOWS_TUN_WORKLOAD_CHECKS,
+)
 from tools.performance_candidate.windows_tun.summary import (
     validate_windows_tun_host_evidence,
 )
@@ -123,24 +129,30 @@ def plan_for(mode: str) -> dict[str, object]:
     }
 
 
-def route_proofs() -> list[dict[str, object]]:
+def route_proofs(planned: dict[str, object]) -> list[dict[str, object]]:
+    value = int(RUN_ID[:4], 16)
+    third = (value >> 8) & 0xFF
+    block = (value & 0xFF) % 63 * 4
+    tun_address = f"198.18.{third}.{block + 2}"
+    support_address = f"198.19.{third}.{block + 1}"
+    adapter_alias = f"Ferrum2Perf-{RUN_ID}-{planned['sequence']:03d}"
     return [
         {
             "purpose": "benchmark-application-to-test-tun",
-            "remote_address": "198.19.0.1",
-            "local_address": "198.18.0.2",
+            "remote_address": support_address,
+            "local_address": tun_address,
             "interface_index": 73,
-            "interface_alias": "Ferrum2Perf-fixture-001",
-            "destination_prefix": "198.19.0.1/32",
+            "interface_alias": adapter_alias,
+            "destination_prefix": f"{support_address}/32",
             "next_hop": "0.0.0.0",
         },
         {
             "purpose": "server-to-support-without-test-tun",
-            "remote_address": "198.19.0.1",
-            "local_address": "198.19.0.1",
+            "remote_address": support_address,
+            "local_address": support_address,
             "interface_index": LOOPBACK_INDEX,
             "interface_alias": LOOPBACK_ALIAS,
-            "destination_prefix": "198.19.0.1/32",
+            "destination_prefix": f"{support_address}/32",
             "next_hop": "0.0.0.0",
         },
         {
@@ -188,8 +200,11 @@ def trial_for(planned: dict[str, object], value: float) -> dict[str, object]:
         "checked_units": 1000.0,
         "loopback_interface_index": LOOPBACK_INDEX,
         "loopback_interface_alias": LOOPBACK_ALIAS,
-        "route_proofs": route_proofs(),
-        "workload_checks": {"payload_exact": True, "every_reply_accounted": True},
+        "route_proofs": route_proofs(planned),
+        "workload_checks": {
+            check: True
+            for check in WINDOWS_TUN_WORKLOAD_CHECKS[str(planned["scenario"])]
+        },
         "status": "PASS",
     }
 
@@ -317,6 +332,16 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
         stale["performance_source_bundle_sha256"] = "f" * 64
         with self.assertRaisesRegex(CandidateControlError, "identity"):
             validate_windows_tun_trial(stale, **identity)
+        spliced_route = copy.deepcopy(trial)
+        spliced_route["route_proofs"][0]["interface_alias"] = (
+            f"Ferrum2Perf-{'f' * 12}-001"
+        )
+        with self.assertRaisesRegex(CandidateControlError, "run-owned TUN path"):
+            validate_windows_tun_trial(spliced_route, **identity)
+        truncated_checks = copy.deepcopy(trial)
+        truncated_checks["workload_checks"] = {"payload_exact": True}
+        with self.assertRaisesRegex(CandidateControlError, "check closure"):
+            validate_windows_tun_trial(truncated_checks, **identity)
 
     def test_complete_paired_evidence_is_reduced_from_raw_trials(self) -> None:
         plan = plan_for("Quick")
@@ -391,7 +416,7 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 mode="Quick",
                 policy_path=POLICY,
             )
-            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(report["status"], "CANDIDATE_WIN")
             self.assertEqual(
                 [row["qualification_status"] for row in report["scenario_decisions"]],
                 ["candidate-win", "candidate-win"],
@@ -475,6 +500,26 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 [row["qualification_status"] for row in report["scenario_decisions"]],
                 ["regression", "regression"],
             )
+            self.assertEqual(report["status"], "REGRESSION")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    controller_cli.main(
+                        [
+                            "windows-tun-validate-host-evidence",
+                            "--evidence-root",
+                            str(root),
+                            "--baseline-sha",
+                            BASELINE,
+                            "--candidate-sha",
+                            CANDIDATE,
+                            "--mode",
+                            "Quick",
+                            "--policy",
+                            str(POLICY),
+                        ]
+                    ),
+                    3,
+                )
             dirty = json.loads((root / "cleanup.json").read_text(encoding="utf-8"))
             dirty["routes_remaining"] = 1
             write_json(root / "cleanup.json", dirty)

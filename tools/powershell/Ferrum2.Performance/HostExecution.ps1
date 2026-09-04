@@ -151,29 +151,18 @@ function Get-Ferrum2M4SourceBundleIdentity {
 
 function Invoke-Ferrum2CargoBuild {
     param(
+        [Parameter(Mandatory = $true)][object]$Context,
         [Parameter(Mandatory = $true)][string]$SourceRoot,
         [Parameter(Mandatory = $true)][string]$TargetRoot,
-        [Parameter(Mandatory = $true)][string]$LogRoot
+        [Parameter(Mandatory = $true)][string]$Label
     )
-    $stdout = Join-Path $LogRoot "cargo.stdout.log"
-    $stderr = Join-Path $LogRoot "cargo.stderr.log"
-    $arguments = @(
-        "build", "--release", "--locked", "--offline", "--target", $script:WindowsRustTarget,
-        "-p", "ferrum2-client", "-p", "ferrum2-server", "-p", "ferrum2-m4-qualification"
-    )
-    $process = Start-Process -FilePath "cargo" -ArgumentList $arguments `
-        -WorkingDirectory $SourceRoot -Environment @{ CARGO_TARGET_DIR = $TargetRoot } `
-        -PassThru -NoNewWindow -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr -ErrorAction Stop
-    try {
-        $process.WaitForExit()
-        $exitCode = $process.ExitCode
-    } finally {
-        $process.Dispose()
-    }
-    if ($exitCode -ne 0) {
-        throw "offline host performance build failed; inspect bounded local build logs"
-    }
+    $cargo = [string](Get-Command cargo -CommandType Application -ErrorAction Stop).Source
+    $arguments = "build --release --locked --offline --target $script:WindowsRustTarget " +
+        "--target-dir `"$TargetRoot`" -p ferrum2-client -p ferrum2-server " +
+        "-p ferrum2-m4-qualification"
+    [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $cargo `
+        -Arguments $arguments -WorkingDirectory $SourceRoot -LogPrefix "cargo-$Label" `
+        -TimeoutSeconds 1800)
 }
 
 function Build-Ferrum2HostMember {
@@ -186,11 +175,10 @@ function Build-Ferrum2HostMember {
     $memberRoot = Join-Path $Context.run_root "builds\$Label"
     $sourceRoot = Join-Path $memberRoot "source"
     $targetRoot = Join-Path $memberRoot "target"
-    $logRoot = Join-Path $memberRoot "logs"
-    New-Item -ItemType Directory -Path $logRoot -Force -ErrorAction Stop | Out-Null
     Export-Ferrum2CommitTree -RepositoryRoot $Context.repository_root -Sha $Sha -Destination $sourceRoot
     $sourceBundleSha256 = Get-Ferrum2M4SourceBundleIdentity -SourceRoot $sourceRoot
-    Invoke-Ferrum2CargoBuild -SourceRoot $sourceRoot -TargetRoot $targetRoot -LogRoot $logRoot
+    Invoke-Ferrum2CargoBuild -Context $Context -SourceRoot $sourceRoot `
+        -TargetRoot $targetRoot -Label $Label
     $binaryRoot = Join-Path $targetRoot "$($script:WindowsRustTarget)\release"
     $client = Join-Path $binaryRoot "ferrum2-client.exe"
     $server = Join-Path $binaryRoot "ferrum2-server.exe"

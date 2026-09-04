@@ -65,3 +65,31 @@ WINDOWS_TUN_PROFILES = MappingProxyType(
         ),
     }
 )
+
+WINDOWS_TUN_WORKLOAD_CHECKS = MappingProxyType(
+    {
+        "udp-packets-per-second": frozenset(
+            {
+                "every_reply_accounted",
+                "payload_exact",
+                "receive_retries_penalized",
+                "no_gso",
+            }
+        ),
+        "fragment-reassembly-throughput": frozenset(
+            {
+                "payload_exact",
+                "no_gso",
+                "all_sequences_acknowledged",
+                "bounded_retransmissions",
+            }
+        ),
+        "tcp-single-flow": frozenset(
+            {
+                "single_flow_only",
+                "payload_exact",
+                "no_gso",
+            }
+        ),
+    }
+)

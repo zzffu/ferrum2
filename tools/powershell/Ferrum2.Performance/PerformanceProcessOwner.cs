@@ -132,23 +132,25 @@ public static class Ferrum2PerfProcessGroup {
             var job = CreateJobObject(IntPtr.Zero, null);
             if (job == IntPtr.Zero)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW");
-            var limits = new ExtendedLimitInformation();
-            limits.basicLimitInformation.limitFlags = JobObjectLimitKillOnJobClose;
-            var bytes = Marshal.SizeOf(typeof(ExtendedLimitInformation));
-            var buffer = Marshal.AllocHGlobal(bytes);
+            IntPtr buffer = IntPtr.Zero;
             try {
+                var limits = new ExtendedLimitInformation();
+                limits.basicLimitInformation.limitFlags = JobObjectLimitKillOnJobClose;
+                var bytes = Marshal.SizeOf(typeof(ExtendedLimitInformation));
+                buffer = Marshal.AllocHGlobal(bytes);
                 Marshal.StructureToPtr(limits, buffer, false);
                 if (!SetInformationJobObject(
-                    job, JobObjectExtendedLimitInformation, buffer, checked((uint)bytes))) {
-                    var error = Marshal.GetLastWin32Error();
-                    CloseHandle(job);
-                    throw new Win32Exception(error, "SetInformationJobObject");
-                }
+                    job, JobObjectExtendedLimitInformation, buffer, checked((uint)bytes)))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "SetInformationJobObject");
+                JobHandle = job;
+                return JobHandle;
+            } catch {
+                CloseHandle(job);
+                throw;
             } finally {
-                Marshal.FreeHGlobal(buffer);
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
             }
-            JobHandle = job;
-            return JobHandle;
         }
     }
     private static IntPtr OpenInheritable(string path, uint access, uint disposition) {
@@ -170,7 +172,8 @@ public static class Ferrum2PerfProcessGroup {
         if (String.IsNullOrWhiteSpace(stdoutPath) || String.IsNullOrWhiteSpace(stderrPath))
             throw new ArgumentException("stdout and stderr redirection paths are required");
         var command = new StringBuilder("\"" + application + "\" " + arguments);
-        ProcessInformation process;
+        var process = new ProcessInformation();
+        var processCreated = false;
         IntPtr stdoutHandle = IntPtr.Zero;
         IntPtr stderrHandle = IntPtr.Zero;
         IntPtr stdinHandle = IntPtr.Zero;
@@ -215,21 +218,27 @@ public static class Ferrum2PerfProcessGroup {
                 directory, ref startup, out process))
                 throw new Win32Exception(Marshal.GetLastWin32Error(),
                     "CreateProcessW redirected");
+            processCreated = true;
             var job = EnsureJob();
-            if (!AssignProcessToJobObject(job, process.process)) {
-                var error = Marshal.GetLastWin32Error();
+            if (!AssignProcessToJobObject(job, process.process))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(), "AssignProcessToJobObject");
+            if (ResumeThread(process.thread) == UInt32.MaxValue)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread");
+            var processId = checked((int)process.processId);
+            CloseHandle(process.thread);
+            process.thread = IntPtr.Zero;
+            lock (Sync) Handles.Add(process.processId, process.process);
+            process.process = IntPtr.Zero;
+            return processId;
+        } catch {
+            if (processCreated && process.process != IntPtr.Zero) {
                 TerminateProcess(process.process, 1);
-                CloseHandle(process.thread);
                 CloseHandle(process.process);
-                throw new Win32Exception(error, "AssignProcessToJobObject");
             }
-            if (ResumeThread(process.thread) == UInt32.MaxValue) {
-                var error = Marshal.GetLastWin32Error();
-                TerminateProcess(process.process, 1);
+            if (processCreated && process.thread != IntPtr.Zero)
                 CloseHandle(process.thread);
-                CloseHandle(process.process);
-                throw new Win32Exception(error, "ResumeThread");
-            }
+            throw;
         } finally {
             if (attributeList != IntPtr.Zero) {
                 if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
@@ -243,9 +252,6 @@ public static class Ferrum2PerfProcessGroup {
             if (stderrHandle != IntPtr.Zero && stderrHandle != InvalidHandleValue)
                 CloseHandle(stderrHandle);
         }
-        CloseHandle(process.thread);
-        lock (Sync) Handles.Add(process.processId, process.process);
-        return checked((int)process.processId);
     }
     public static bool Wait(uint processId, uint milliseconds) {
         IntPtr handle; lock (Sync) if (!Handles.TryGetValue(processId, out handle)) return false;

@@ -12,6 +12,11 @@ from tools.performance_candidate.json_contract import (
     _exact_fields,
     read_bounded_closed_json,
 )
+from tools.performance_candidate.status import (
+    CANDIDATE_WIN,
+    REGRESSION,
+    WITHIN_CALIBRATED_BAND,
+)
 from tools.performance_candidate.windows_tun.plan import load_windows_tun_plan
 from tools.performance_candidate.windows_tun.policy import load_windows_tun_policy
 from tools.performance_candidate.windows_tun.trial import (
@@ -539,6 +544,30 @@ def validate_windows_tun_host_evidence(
         run_id=plan["run_id"],
         performance_source_bundle_sha256=plan["performance_source_bundle_sha256"],
     )
+    scenario_decisions = (
+        []
+        if mode == "Lifecycle"
+        else [
+            {
+                "scenario": row["scenario"],
+                "qualification_status": row["qualification_status"],
+                "median_pair_improvement_percent": row[
+                    "median_pair_improvement_percent"
+                ],
+            }
+            for row in summary["scenarios"]
+        ]
+    )
+    qualification_statuses = {
+        row["qualification_status"] for row in scenario_decisions
+    }
+    status = (
+        REGRESSION
+        if "regression" in qualification_statuses
+        else CANDIDATE_WIN
+        if "candidate-win" in qualification_statuses
+        else WITHIN_CALIBRATED_BAND
+    )
     return {
         "schema_version": 1,
         "kind": "ferrum2.windows-tun.host-evidence-validation",
@@ -546,15 +575,6 @@ def validate_windows_tun_host_evidence(
         "baseline_sha": baseline_sha,
         "candidate_sha": candidate_sha,
         "run_id": runtime["run_id"],
-        "scenario_decisions": []
-        if mode == "Lifecycle"
-        else [
-            {
-                "scenario": row["scenario"],
-                "qualification_status": row["qualification_status"],
-                "median_pair_improvement_percent": row["median_pair_improvement_percent"],
-            }
-            for row in summary["scenarios"]
-        ],
-        "status": "PASS",
+        "scenario_decisions": scenario_decisions,
+        "status": status,
     }
