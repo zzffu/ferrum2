@@ -138,17 +138,23 @@ pub(crate) fn wait_for_active_release(markers: Option<&ActiveWindowMarkers>) -> 
         return Err(error);
     }
     let deadline = Instant::now() + Duration::from_secs(30);
-    while marker
-        .try_exists()
-        .map_err(|error| format!("inspect active-window ready marker failed: {error}"))?
-    {
+    loop {
+        match fs::metadata(marker) {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect active-window ready marker failed: {error}"
+                ));
+            }
+        }
         if Instant::now() >= deadline {
             let _ = fs::remove_file(marker);
             return Err("active-window ready marker was not released within 30 seconds".to_owned());
         }
         thread::sleep(Duration::from_millis(1));
     }
-    Ok(())
 }
 
 pub(crate) fn signal_active_complete(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {

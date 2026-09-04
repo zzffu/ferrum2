@@ -165,8 +165,8 @@
     },
     {
       "path": "src/m4_support/windows_tun/workload.rs",
-      "bytes": 39055,
-      "sha256": "d1d6c08f6a4b1ec313b8015b76dd108f4b6f41e653305f793bab53868669b847"
+      "bytes": 39319,
+      "sha256": "1f744f061cbc1eb021aef0eebe6c56b7e216e7f949fb72f38969fb5b501d99e7"
     },
     {
       "path": "src/m4_support/windows_tun/workload_diagnostic.rs",
