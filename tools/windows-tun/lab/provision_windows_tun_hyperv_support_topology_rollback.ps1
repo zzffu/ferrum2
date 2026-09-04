@@ -112,15 +112,15 @@ function Remove-TopologyRollbackCheckpoint {
     param([Parameter(Mandatory)] [object]$State)
 
     $vm = Get-VM -Id ([Guid][string]$State.Plan.vm.id) -ErrorAction Stop
-    $rows = if ($State.CreatedCheckpointId -ne [Guid]::Empty) {
-        @(Get-VMSnapshot -VM $vm -ErrorAction Stop | Where-Object {
+    $rows = @(if ($State.CreatedCheckpointId -ne [Guid]::Empty) {
+        Get-VMSnapshot -VM $vm -ErrorAction Stop | Where-Object {
             $_.Id -eq $State.CreatedCheckpointId
-        })
+        }
     } else {
-        @(Get-NewLabCheckpointCandidate -Plan $State.Plan `
+        Get-NewLabCheckpointCandidate -Plan $State.Plan `
             -InitialCheckpointIds $State.InitialCheckpointIds `
-            -ProvisioningName $State.CreatedCheckpointProvisioningName)
-    }
+            -ProvisioningName $State.CreatedCheckpointProvisioningName
+    })
     if ($rows.Count -eq 0) { return }
     if ($rows.Count -ne 1 -or
         $State.InitialCheckpointIds -ccontains $rows[0].Id.ToString('D') -or
@@ -270,6 +270,168 @@ function Assert-TopologyRollbackTerminalState {
         [string]$preflight.host_tun.name -cne [string]$State.InitialTun.name -or
         [string]$preflight.host_tun.status -cne 'Up') {
         throw 'protected host tun0 identity changed during rollback'
+    }
+}
+
+function Get-TopologyReprovisionState {
+    param(
+        [Parameter(Mandatory)] [object]$PlanDocument,
+        [Parameter(Mandatory)] [string]$ManifestPath,
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ExpectedManifestSha256,
+        [Parameter(Mandatory)] [string]$RepositoryRoot,
+        [Parameter(Mandatory)] [int]$TimeoutSeconds
+    )
+
+    $resolved = Resolve-Ferrum2HostInput -RepositoryRoot $RepositoryRoot `
+        -Path $ManifestPath -Label 'existing topology identity manifest' `
+        -Kind ExternalFile -MaximumBytes 131072
+    $document = Read-Ferrum2JsonDocument -Path $resolved -MaximumBytes 131072 -SingleLine
+    if ([string]$document.Sha256 -cne $ExpectedManifestSha256) {
+        throw 'existing topology identity manifest hash mismatch'
+    }
+
+    $manifest = $document.Value
+    $plan = $PlanDocument.Value
+    foreach ($contract in @(
+        @($manifest, @(
+            'schema', 'created_utc', 'topology_plan_sha256',
+            'provisioning_source_manifest_sha256', 'provisioning_source_bundle_sha256', 'vm',
+            'source_checkpoint', 'lab_checkpoint', 'management_adapter', 'support',
+            'protected_host_tun', 'constraints'
+        ), 'existing topology manifest'),
+        @($manifest.vm, @('name', 'id', 'terminal_state', 'automatic_checkpoints_enabled'),
+            'existing topology VM'),
+        @($manifest.source_checkpoint, @('name', 'id', 'type'),
+            'existing source checkpoint'),
+        @($manifest.lab_checkpoint, @(
+            'name', 'id', 'type', 'parent_id', 'support_vm_adapter_snapshot_id',
+            'restore_verified'
+        ), 'existing lab checkpoint'),
+        @($manifest.support, @('switch', 'vm_adapter', 'guest'),
+            'existing support topology'),
+        @($manifest.support.switch, @(
+            'switch_name', 'switch_id', 'switch_type', 'management_os_adapter_id',
+            'management_os_device_id', 'host_interface_alias', 'host_interface_guid',
+            'host_interface_index', 'host_mac_address', 'host_ipv4', 'prefix_length', 'network',
+            'gateway', 'dns_servers', 'mtu_bytes', 'nat_enabled', 'ics_enabled',
+            'selected_source_ipv4', 'selected_route_prefix', 'selected_route_next_hop'
+        ), 'existing support switch'),
+        @($manifest.support.vm_adapter, @(
+            'name', 'id', 'switch_id', 'mac_address', 'dynamic_mac_address',
+            'virtual_system_identifiers'
+        ), 'existing support VM adapter'),
+        @($manifest.protected_host_tun, @(
+            'present', 'name', 'interface_guid', 'interface_index', 'status'
+        ), 'existing protected host TUN')
+    )) {
+        Assert-Ferrum2ClosedProperties -Value $contract[0] `
+            -Expected ([string[]]$contract[1]) -Label ([string]$contract[2])
+    }
+
+    foreach ($hashName in @(
+        'topology_plan_sha256', 'provisioning_source_manifest_sha256',
+        'provisioning_source_bundle_sha256'
+    )) {
+        if ($manifest.$hashName -isnot [string] -or
+            [string]$manifest.$hashName -cnotmatch '^[0-9a-f]{64}$') {
+            throw "existing topology manifest $hashName is invalid"
+        }
+    }
+
+    $vmId = ConvertTo-Ferrum2CanonicalGuid -Value $manifest.vm.id `
+        -Label 'existing topology VM'
+    $sourceCheckpointId = ConvertTo-Ferrum2CanonicalGuid `
+        -Value $manifest.source_checkpoint.id -Label 'existing source checkpoint'
+    $labCheckpointId = ConvertTo-Ferrum2CanonicalGuid `
+        -Value $manifest.lab_checkpoint.id -Label 'existing lab checkpoint'
+    $labParentId = ConvertTo-Ferrum2CanonicalGuid `
+        -Value $manifest.lab_checkpoint.parent_id -Label 'existing lab checkpoint parent'
+    $switchId = ConvertTo-Ferrum2CanonicalGuid -Value $manifest.support.switch.switch_id `
+        -Label 'existing support switch'
+    $adapterSwitchId = ConvertTo-Ferrum2CanonicalGuid `
+        -Value $manifest.support.vm_adapter.switch_id -Label 'existing support adapter switch'
+    $plannedVmId = ConvertTo-Ferrum2CanonicalGuid -Value $plan.vm.id -Label 'planned VM'
+    $plannedSourceId = ConvertTo-Ferrum2CanonicalGuid -Value $plan.source_checkpoint.id `
+        -Label 'planned source checkpoint'
+    $supportMac = ConvertTo-Ferrum2CanonicalMacAddress `
+        -Value ([string]$manifest.support.vm_adapter.mac_address) `
+        -Label 'existing support VM adapter'
+    $plannedSupportMac = ConvertTo-Ferrum2CanonicalMacAddress `
+        -Value ([string]$plan.support.vm_mac_address) -Label 'planned support VM adapter'
+    $virtualSystemIdentifiers = @($manifest.support.vm_adapter.virtual_system_identifiers |
+        ForEach-Object {
+            [Guid](ConvertTo-Ferrum2CanonicalGuid -Value $_ `
+                -Label 'existing support VM adapter identifier')
+        })
+
+    if ($manifest.schema -isnot [long] -or [long]$manifest.schema -ne 1 -or
+        [string]$manifest.topology_plan_sha256 -cne [string]$PlanDocument.Sha256 -or
+        $vmId -cne $plannedVmId -or [string]$manifest.vm.name -cne [string]$plan.vm.name -or
+        [string]$manifest.vm.terminal_state -cne 'Off' -or
+        $manifest.vm.automatic_checkpoints_enabled -isnot [bool] -or
+        $manifest.vm.automatic_checkpoints_enabled -ne $false -or
+        $sourceCheckpointId -cne $plannedSourceId -or
+        [string]$manifest.source_checkpoint.name -cne [string]$plan.source_checkpoint.name -or
+        [string]$manifest.source_checkpoint.type -cne [string]$plan.source_checkpoint.type -or
+        $labCheckpointId -ceq $sourceCheckpointId -or $labParentId -cne $sourceCheckpointId -or
+        [string]$manifest.lab_checkpoint.name -cne [string]$plan.lab_checkpoint.name -or
+        [string]$manifest.lab_checkpoint.type -cne [string]$plan.lab_checkpoint.type -or
+        $manifest.lab_checkpoint.restore_verified -isnot [bool] -or
+        $manifest.lab_checkpoint.restore_verified -ne $true -or
+        [string]$manifest.support.switch.switch_name -cne [string]$plan.support.switch_name -or
+        [string]$manifest.support.switch.switch_type -cne 'Internal' -or
+        $switchId -cne $adapterSwitchId -or
+        [string]$manifest.support.switch.host_ipv4 -cne [string]$plan.support.host_ipv4 -or
+        [int]$manifest.support.switch.prefix_length -ne [int]$plan.support.prefix_length -or
+        [string]$manifest.support.switch.network -cne [string]$plan.support.network -or
+        $null -ne $manifest.support.switch.gateway -or
+        @($manifest.support.switch.dns_servers).Count -ne 0 -or
+        $manifest.support.switch.nat_enabled -isnot [bool] -or
+        $manifest.support.switch.nat_enabled -ne $false -or
+        $manifest.support.switch.ics_enabled -isnot [bool] -or
+        $manifest.support.switch.ics_enabled -ne $false -or
+        [string]$manifest.support.vm_adapter.name -cne
+            [string]$plan.support.vm_adapter_name -or
+        $supportMac -cne $plannedSupportMac -or
+        $manifest.support.vm_adapter.dynamic_mac_address -isnot [bool] -or
+        $manifest.support.vm_adapter.dynamic_mac_address -ne $false -or
+        $virtualSystemIdentifiers.Count -ne 2 -or
+        @($virtualSystemIdentifiers | Sort-Object -Unique).Count -ne 2 -or
+        $manifest.protected_host_tun.present -isnot [bool] -or
+        $manifest.protected_host_tun.present -ne $true -or
+        [string]$manifest.protected_host_tun.name -cne 'tun0' -or
+        [string]$manifest.protected_host_tun.status -cne 'Up') {
+        throw 'existing topology manifest is not bound to the approved provisioned topology'
+    }
+
+    $null = Get-Ferrum2VmAdapterInstanceGuid `
+        -AdapterId ([string]$manifest.support.vm_adapter.id) `
+        -ExpectedOwnerId ([Guid]$vmId) -Label 'existing support VM adapter'
+    $currentTun = Get-HostTunIdentity
+    if ($currentTun.present -ne $true -or
+        [string]$currentTun.name -cne [string]$manifest.protected_host_tun.name -or
+        [string]$currentTun.interface_guid -cne
+            [string]$manifest.protected_host_tun.interface_guid -or
+        [string]$currentTun.status -cne [string]$manifest.protected_host_tun.status) {
+        throw 'protected host tun0 identity changed before reprovisioning'
+    }
+
+    [pscustomobject][ordered]@{
+        Plan = $plan
+        CreatedSwitchId = [Guid]$switchId
+        CreatedVmAdapterId = [string]$manifest.support.vm_adapter.id
+        CreatedVmAdapterVirtualSystemIdentifiers = [Guid[]]$virtualSystemIdentifiers
+        VmAdapterCreationAttempted = $true
+        CreatedCheckpointId = [Guid]$labCheckpointId
+        CreatedCheckpointProvisioningName = [string]$manifest.lab_checkpoint.name
+        CheckpointCreationAttempted = $true
+        InitialCheckpointIds = [string[]]@($sourceCheckpointId)
+        InitialTun = $currentTun
+        TimeoutSeconds = $TimeoutSeconds
+        ExistingManifestPath = [string]$document.Path
+        ExistingManifestSha256 = [string]$document.Sha256
     }
 }
 

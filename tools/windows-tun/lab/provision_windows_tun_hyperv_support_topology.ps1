@@ -7,14 +7,15 @@
 Creates the explicitly authorized isolated Hyper-V support topology for Windows TUN lab workflows.
 
 .DESCRIPTION
-This is a one-time, fail-closed transaction. It validates the closed provisioning source bundle,
-requires -Apply, a fixed authorization token, and an absent manifest path outside the repository.
-It restores the pinned source checkpoint, creates
-one Internal vSwitch and one static-MAC VM NIC, configures only the two new support interfaces,
-creates and verifies a new Standard checkpoint, writes generated identities to the manifest, and
-leaves the VM Off. On failure it audits ownership before restoring the source checkpoint and
-removes only resources whose preassigned ID or random transaction marker proves they belong to
-this invocation; ambiguous concurrent state is left intact for explicit recovery.
+This is a fail-closed transaction. It validates the closed provisioning source bundle, requires
+-Apply, an operation-specific authorization token, and an absent manifest path outside the
+repository. CREATE provisions from the unique source state. REPROVISION first audits and removes
+the exact topology bound to a caller-pinned existing manifest, restores the source state, and then
+performs the same provisioning transaction. Provisioning creates one Internal vSwitch and one
+static-MAC VM NIC, configures only the two new support interfaces, creates and verifies a new
+Standard checkpoint, writes generated identities to the manifest, and leaves the VM Off. On
+failure it audits ownership before restoring the source checkpoint and removes only resources whose
+preassigned ID or random transaction marker proves ownership; ambiguous state remains intact.
 
 The script does not configure NAT, ICS, firewall policy, the Default Switch, a physical adapter,
 or host tun0. Use -WhatIf to execute the complete read-only preflight without loading a credential
@@ -32,7 +33,10 @@ param(
     [switch]$Apply,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("CREATE-FERRUM2-INTERNAL-SUPPORT-V1")]
+    [ValidateSet(
+        "CREATE-FERRUM2-INTERNAL-SUPPORT-V1",
+        "REPROVISION-FERRUM2-INTERNAL-SUPPORT-V1"
+    )]
     [string]$AuthorizationToken,
 
     [Parameter(Mandatory = $true)]
@@ -40,6 +44,11 @@ param(
 
     [Parameter(Mandatory = $true)]
     [string]$TopologyPlanPath,
+
+    [string]$ExistingManifestPath,
+
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$ExistingManifestSha256,
 
     [string]$CredentialPath,
 
@@ -168,18 +177,82 @@ $script:guestProvisioningScript = [scriptblock]::Create(
 )
 Assert-ProvisioningSourceIdentity
 
-if (-not $Apply -or $AuthorizationToken -cne 'CREATE-FERRUM2-INTERNAL-SUPPORT-V1') {
+if (-not $Apply) {
     throw 'the explicit topology authorization contract is invalid'
+}
+$reprovisionRequested = (
+    $AuthorizationToken -ceq 'REPROVISION-FERRUM2-INTERNAL-SUPPORT-V1'
+)
+$existingManifestPathSupplied = (
+    -not [string]::IsNullOrWhiteSpace($ExistingManifestPath)
+)
+$existingManifestShaSupplied = (
+    -not [string]::IsNullOrWhiteSpace($ExistingManifestSha256)
+)
+if ($reprovisionRequested -ne
+        ($existingManifestPathSupplied -and $existingManifestShaSupplied) -or
+    (-not $reprovisionRequested -and
+        ($existingManifestPathSupplied -or $existingManifestShaSupplied))) {
+    throw 'the reprovision topology manifest parameter group is invalid'
 }
 
 $planDocument = Read-TopologyPlan -Path $TopologyPlanPath
 $plan = $planDocument.Value
-$initialContext = Get-Ferrum2PinnedVmContext `
-    -Identity (New-Ferrum2PinnedVmIdentity -Plan $plan)
-$initialPreflight = Get-ReadOnlyPreflight -Context $initialContext -Plan $plan
 $resolvedManifestPath = Resolve-Ferrum2HostOutputFile `
     -RepositoryRoot $script:repositoryRoot -Path $ManifestPath `
     -Label 'topology identity manifest' -Extension '.json'
+$script:provisioningVmIdentity = New-Ferrum2PinnedVmIdentity -Plan $plan
+$target = "VM $($plan.vm.id) isolated support topology"
+
+if ($reprovisionRequested) {
+    $reprovisionState = Get-TopologyReprovisionState `
+        -PlanDocument $planDocument -ManifestPath $ExistingManifestPath `
+        -ExpectedManifestSha256 $ExistingManifestSha256 `
+        -RepositoryRoot $script:repositoryRoot -TimeoutSeconds $ShutdownTimeoutSeconds
+    Get-TopologyRollbackOwnership -State $reprovisionState
+    if (-not $PSCmdlet.ShouldProcess(
+            $target,
+            'remove the exact manifest-bound topology, restore source, create, configure, ' +
+                'checkpoint, and verify'
+        )) {
+        [pscustomobject][ordered]@{
+            schema = 1
+            status = 'not_applied'
+            operation = 'reprovision'
+            topology_plan_sha256 = $planDocument.Sha256
+            existing_manifest_path = $reprovisionState.ExistingManifestPath
+            existing_manifest_sha256 = $reprovisionState.ExistingManifestSha256
+            replacement_ownership_audited = $true
+            manifest_path = $resolvedManifestPath
+        } | ConvertTo-Json -Depth 8
+        return
+    }
+    $rollbackArguments = @{
+        Plan = $reprovisionState.Plan
+        CreatedSwitchId = $reprovisionState.CreatedSwitchId
+        CreatedVmAdapterId = $reprovisionState.CreatedVmAdapterId
+        CreatedVmAdapterVirtualSystemIdentifiers = @(
+            $reprovisionState.CreatedVmAdapterVirtualSystemIdentifiers
+        )
+        VmAdapterCreationAttempted = $reprovisionState.VmAdapterCreationAttempted
+        CreatedCheckpointId = $reprovisionState.CreatedCheckpointId
+        CreatedCheckpointProvisioningName = (
+            $reprovisionState.CreatedCheckpointProvisioningName
+        )
+        CheckpointCreationAttempted = $reprovisionState.CheckpointCreationAttempted
+        InitialCheckpointIds = $reprovisionState.InitialCheckpointIds
+        InitialTun = $reprovisionState.InitialTun
+        TimeoutSeconds = $reprovisionState.TimeoutSeconds
+    }
+    $reprovisionFailures = @(Invoke-TopologyRollback @rollbackArguments)
+    if ($reprovisionFailures.Count -ne 0) {
+        throw "existing topology removal failed: $($reprovisionFailures -join '; ')"
+    }
+}
+
+$initialContext = Get-Ferrum2PinnedVmContext `
+    -Identity $script:provisioningVmIdentity
+$initialPreflight = Get-ReadOnlyPreflight -Context $initialContext -Plan $plan
 $state = New-ProvisioningTransactionState -PlanDocument $planDocument `
     -InitialPreflight $initialPreflight -ManifestPath $resolvedManifestPath `
     -CredentialPath $CredentialPath -ReadinessTimeoutSeconds $ReadinessTimeoutSeconds `
@@ -187,11 +260,12 @@ $state = New-ProvisioningTransactionState -PlanDocument $planDocument `
     -SourceIdentity $script:provisioningSourceIdentity
 $script:provisioningVmIdentity = $state.VmIdentity
 
-$target = "VM $($plan.vm.id) isolated support topology"
-if (-not $PSCmdlet.ShouldProcess($target, 'create, configure, checkpoint, and verify')) {
+if (-not $reprovisionRequested -and
+    -not $PSCmdlet.ShouldProcess($target, 'create, configure, checkpoint, and verify')) {
     [pscustomobject][ordered]@{
         schema = 1
         status = 'not_applied'
+        operation = 'create'
         topology_plan_sha256 = $planDocument.Sha256
         preflight = $initialPreflight
         manifest_path = $resolvedManifestPath

@@ -40,6 +40,25 @@ pwsh -File tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology.p
     -ManifestPath 'C:\Ferrum2\lab-topology-manifest.json'
 ```
 
+Replace an existing manifest-bound topology when its generated runtime identities have become stale.
+Pin both the old and new manifest paths; the new path must not exist:
+
+```powershell
+$oldManifest = 'C:\Ferrum2\lab-topology-manifest.json'
+pwsh -File tools/windows-tun/lab/provision_windows_tun_hyperv_support_topology.ps1 `
+    -Apply `
+    -AuthorizationToken REPROVISION-FERRUM2-INTERNAL-SUPPORT-V1 `
+    -TopologyPlanPath $plan `
+    -ExistingManifestPath $oldManifest `
+    -ExistingManifestSha256 (Get-FileHash $oldManifest -Algorithm SHA256).Hash.ToLowerInvariant() `
+    -ManifestPath 'C:\Ferrum2\lab-topology-manifest-replacement.json'
+```
+
+Reprovisioning first audits that the live VM adapter, checkpoint, Internal switch, and protected
+host TUN match the pinned existing manifest. It then uses the provisioning rollback owner to restore
+the exact source checkpoint and remove only those manifest-bound resources before running the normal
+create transaction. A failed ownership audit does not mutate state.
+
 Pass that same `-TopologyPlanPath` to the qualification, probe, hard-kill, and performance entry
 points together with the generated manifest. The plan and manifest hashes are checked throughout
 each run; changing either file requires reprovisioning rather than an in-place override.
