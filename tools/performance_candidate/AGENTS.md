@@ -16,7 +16,9 @@ baseline/candidate and build identities, metric units, correctness results, clea
 order, source digests, and applicability unless a dedicated schema change updates every producer and
 consumer atomically. Policy decides retention and regression; observation producers must not invent
 thresholds. Windows Quick uses at least three interleaved pairs and Confirm at least five; the
-selected profile and scenario recipes are evidence identity.
+selected profile and scenario recipes are evidence identity. The non-target CPU guard compares
+client and server CPU per unit of reported work, so additional CPU that is fully explained by higher
+throughput is not mislabeled as a regression.
 
 The Windows TUN recipe binds this package only to the canonical host runner and collectors under
 `tools/windows-tun/performance`, host owners under `tools/powershell/Ferrum2.Performance`, the Rust
