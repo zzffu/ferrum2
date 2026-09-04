@@ -157,22 +157,24 @@ impl Adapter {
         self.network_catalog.clone()
     }
 
-    /// Replaces only the generation-bound underlay snapshot.
+    /// Replaces only the generation-bound underlay snapshot and returns the number of network
+    /// notification generations incorporated by the refresh.
     ///
     /// The adapter, Wintun session, managed addresses and routes, DNS leases, notification
     /// subscriptions, and strict-route WFP session remain owned by this adapter.
-    pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
+    pub fn refresh_underlay(&mut self) -> Result<u64, Error> {
         if self.managed_health()? != ManagedTunHealth::Healthy {
             return Err(Error::recoverable_session());
         }
         let Some(config) = self.config.managed_network().cloned() else {
-            return Ok(None);
+            return Ok(0);
         };
         let owned = InterfaceIdentity {
             luid: unsafe { self.luid.Value },
             index: self.interface_index,
         };
         let state = self.managed.as_mut().ok_or(Error)?;
+        let validated_generation = state.validated_generation;
         let generation = state.notifications.generation_counter();
         let next = classify_underlay_refresh(refresh_underlay_with(
             &config,
@@ -182,8 +184,10 @@ impl Adapter {
             generation,
             &mut PlatformUnderlay,
         ))?;
-        state.policy = next.clone();
-        Ok(Some(next))
+        state.policy = next;
+        Ok(state
+            .validated_generation
+            .wrapping_sub(validated_generation))
     }
 
     /// Reads back only Ferrum2-owned adapter, address, route, DNS, and strict-route state.

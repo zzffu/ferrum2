@@ -372,18 +372,17 @@ pub(crate) fn owner_main(
                 drop(flows);
                 drop(datagrams);
                 drop(stack);
-                if let Some(reason) = reset_reason {
-                    events.emit(TunEvent::NetworkResetFailed(reason));
-                }
-                if disposition == NetworkResetHealthDisposition::Retry && reset_reason.is_some() {
+                if disposition == NetworkResetHealthDisposition::Retry
+                    && let Some(reason) = reset_reason
+                {
                     let delay = backoff.next_delay();
                     lifecycle
-                        .back_off(
-                            OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
-                            delay,
-                        )
-                        .expect("transient reset health failure preserves the adapter");
+                        .back_off(OwnerAttempt::reset(adapter, reason, false), delay)
+                        .expect("transient reset health preserves the logical reset attempt");
                     continue;
+                }
+                if let Some(reason) = reset_reason {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
                 }
                 if let NetworkResetHealthDisposition::FullRebuild(damage) = disposition
                     && !attempt.is_starting()
@@ -493,14 +492,10 @@ pub(crate) fn owner_main(
                 drop(datagrams);
                 drop(stack);
                 if let Some(reason) = reset_reason {
-                    events.emit(TunEvent::NetworkResetFailed(reason));
                     let delay = backoff.next_delay();
                     lifecycle
-                        .back_off(
-                            OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
-                            delay,
-                        )
-                        .expect("snapshot retry preserves reset ownership");
+                        .back_off(OwnerAttempt::reset(adapter, reason, false), delay)
+                        .expect("snapshot retry preserves the logical reset attempt");
                     continue;
                 }
                 clear_owner_work(&current_work);

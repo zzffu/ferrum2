@@ -106,6 +106,15 @@ pub(crate) fn refresh_network_runtime(
             Ok(_) if !adapter_underlay_is_current(adapter) => {
                 settle_pending = true;
             }
+            Ok(notification_span) if notification_span > 1 => {
+                // One refresh consumed a burst that continued after semantic revalidation. Keep
+                // the initiating reset open until a second capture sees the settled Windows state.
+                if !wait_owner_delay(control, TRANSIENT_UNDERLAY_SETTLE) {
+                    events.emit(TunEvent::NetworkResetFailed(reason));
+                    return NetworkResetRefreshOutcome::Stopped;
+                }
+                settle_pending = false;
+            }
             Ok(_) if settle_pending => {
                 // Windows can publish the remaining address and route notifications after the
                 // interface first becomes readable. Keep them inside this logical reset, then

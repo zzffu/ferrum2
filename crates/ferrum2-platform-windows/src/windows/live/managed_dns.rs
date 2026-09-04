@@ -77,7 +77,7 @@ pub(super) fn read_dns_settings(
         ..DNS_INTERFACE_SETTINGS::default()
     };
     if unsafe { GetInterfaceDnsSettings(interface, &mut settings) } != ERROR_SUCCESS {
-        return Err(Error);
+        return Err(Error::recoverable_session());
     }
     // SAFETY: a successful GetInterfaceDnsSettings call owns `NameServer` through `settings`
     // until FreeInterfaceDnsSettings. The API contract supplies a readable NUL-terminated UTF-16

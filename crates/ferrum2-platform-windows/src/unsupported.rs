@@ -106,7 +106,7 @@ impl Adapter {
     pub fn network_interface_catalog(&self) -> WindowsNetworkInterfaceCatalog {
         WindowsNetworkInterfaceCatalog::system()
     }
-    pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
+    pub fn refresh_underlay(&mut self) -> Result<u64, Error> {
         Err(UNSUPPORTED)
     }
     pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {

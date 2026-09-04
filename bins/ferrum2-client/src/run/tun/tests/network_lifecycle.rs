@@ -101,6 +101,52 @@ async fn non_tun_network_reset_registers_hooks_before_publishing_generation() {
 }
 
 #[tokio::test]
+async fn tun_reset_accepts_snapshot_already_published_by_concurrent_notifier() {
+    use ferrum2_net::NetworkSnapshot;
+    use ferrum2_runtime::{NetworkResetIntent, NetworkResetReason as RuntimeNetworkResetReason};
+
+    let registry = OwnerRegistry::new();
+    let (path, context) = udp_test_context_for_server(registry.clone(), reserve_address());
+    let initial = Arc::new(NetworkSnapshot::new(1, None, None).expect("initial snapshot"));
+    let coordinator = network_reset_coordinator(initial, registry);
+    let runtime = ClientNetworkResetRuntime::new(&context, coordinator);
+    runtime
+        .initialize(Arc::new(
+            NetworkSnapshot::new(2, None, None).expect("initial TUN snapshot"),
+        ))
+        .await
+        .expect("initialize TUN network lifecycle");
+
+    let concurrent = Arc::new(NetworkSnapshot::new(3, None, None).expect("concurrent snapshot"));
+    runtime
+        .coordinator
+        .reset_network(
+            Arc::clone(&concurrent),
+            NetworkResetIntent::Ordinary(RuntimeNetworkResetReason::InterfaceChanged),
+        )
+        .await
+        .expect("concurrent notifier reset");
+    runtime
+        .reset(
+            Arc::clone(&concurrent),
+            ferrum2_tun::TunNetworkResetReason::NetworkChange,
+        )
+        .await
+        .expect("coalesced TUN reset");
+
+    assert_eq!(runtime.coordinator.status().published_generation(), 3);
+    assert!(
+        runtime
+            .hooks
+            .iter()
+            .all(|hook| hook.accepted_generation.load(Ordering::Acquire) == 3)
+    );
+
+    drop(runtime);
+    std::fs::remove_file(path).expect("remove config");
+}
+
+#[tokio::test]
 async fn managed_tun_lifecycle_cancelled_prepare_cleanup_failure_maps_to_shutdown_cleanup() {
     let entered = Arc::new(Notify::new());
     let prepare_entered = Arc::clone(&entered);

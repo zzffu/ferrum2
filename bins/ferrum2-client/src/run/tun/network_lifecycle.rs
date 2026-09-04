@@ -398,6 +398,31 @@ impl ClientNetworkResetRuntime {
         }
     }
 
+    fn require_current_or_next_generation(
+        &self,
+        snapshot: &NetworkSnapshot,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        let published = self.coordinator.snapshots().snapshot();
+        if snapshot == published.as_ref() {
+            return Ok(());
+        }
+        let Some(expected) = published.generation().checked_add(1) else {
+            return Err(ferrum2_tun::TunNetworkResetError);
+        };
+        if snapshot.generation() == expected {
+            Ok(())
+        } else {
+            Err(ferrum2_tun::TunNetworkResetError)
+        }
+    }
+
+    fn snapshot_is_applied(&self, snapshot: &NetworkSnapshot) -> bool {
+        snapshot == self.coordinator.snapshots().snapshot().as_ref()
+            && self.hooks.iter().all(|hook| {
+                hook.accepted_generation.load(Ordering::Acquire) == snapshot.generation()
+            })
+    }
+
     fn take_hook_udp_associations(&self) -> usize {
         self.hook_udp_associations.swap(0, Ordering::AcqRel)
     }
@@ -429,8 +454,8 @@ impl ClientNetworkResetRuntime {
         snapshot: Arc<NetworkSnapshot>,
         reason: ferrum2_tun::TunNetworkResetReason,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
-        self.require_next_generation(&snapshot)?;
         self.register_hooks()?;
+        self.require_current_or_next_generation(&snapshot)?;
         let reason = match reason {
             ferrum2_tun::TunNetworkResetReason::NetworkChange => {
                 RuntimeNetworkResetReason::InterfaceChanged
@@ -452,6 +477,7 @@ impl ClientNetworkResetRuntime {
                 self.metrics.set_network_generation(snapshot.generation());
                 Ok(())
             }
+            NetworkResetOutcome::Noop if self.snapshot_is_applied(&snapshot) => Ok(()),
             NetworkResetOutcome::Noop
             | NetworkResetOutcome::FullRebuildRequired(_)
             | NetworkResetOutcome::FullRebuildAcknowledged => {
