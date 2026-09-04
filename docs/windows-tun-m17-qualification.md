@@ -178,12 +178,14 @@ not import qualification profiles, Lab VM/checkpoint/staging owners, or turn cor
 into a performance verdict. Hyper-V qualification is not a performance fallback.
 
 The performance source manifest is an independent closed host source identity. It hash-binds the
-public runner, module manifest, four `Ferrum2.Performance` host owners, module loader, and C# process
+public runner, module manifest, five `Ferrum2.Performance` host owners, module loader, and C# process
 owner by canonical path, exact byte length, and SHA-256. A separate M4 source bundle binds every Rust
 workload owner. Neither closure contains `Ferrum2.WindowsTun.Lab` VM owners,
-`Ferrum2.Qualification.Evidence`, or `Ferrum2.Qualification.HostHyperV` sources. Host performance
-evidence additionally binds both source identities, the selected profile, baseline/candidate commits,
-route proofs, per-RunId recovery ledger, and verified zero-residue cleanup.
+`Ferrum2.Qualification.Evidence`, or `Ferrum2.Qualification.HostHyperV` sources. Each accepted plan,
+build manifest, trial, summary, safety report, runtime, and cleanup JSON from one Host performance run
+carries the same RunId and performance-source identity; evidence also
+binds the M4 source, selected profile, baseline/candidate commits, unconstrained workload route proof,
+and verified zero-residue cleanup.
 
 Likewise, diagnostic performance runs must identify themselves as non-qualifying and cannot satisfy
 this gate.

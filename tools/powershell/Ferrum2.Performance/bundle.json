@@ -10,38 +10,43 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/Ferrum2.Performance.psm1",
-      "bytes": 442,
-      "sha256": "862d02ef6536586c64bd51695936369dcfc7a056c3ca9cd23b776411dfa53f6a"
+      "bytes": 558,
+      "sha256": "11696a44c8c60fe368f91d0a08ff65f2a070429e94f515c674d565f940dfb0a1"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
-      "bytes": 54630,
-      "sha256": "222b2328a4a78fdc8dfe3cd4784aa99d206e2c9527c42cdc0c8347063229a860"
+      "bytes": 41471,
+      "sha256": "45208f140edc438df2e3526c2da297854cb2f60b7c75e7a315222783b9498b53"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostOwnership.ps1",
-      "bytes": 26320,
-      "sha256": "3ac8c123bb0921633743e473b8fea3cf087970bbedb24abb02201770708c50f8"
+      "bytes": 32432,
+      "sha256": "7056ca41b031509cc0c6214e087b29e0f88e0e06fece5eab2509d462f3535d4e"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostPerformance.ps1",
-      "bytes": 6426,
-      "sha256": "bf0aecc0ca3a5032f0df204b5c19ef515ca5276e01d8f98c68232b4be8582bd7"
+      "bytes": 6636,
+      "sha256": "bc96607d734bbb6c47289c067d7877e33eade9db5914bbde86f1c1ffb5bd360b"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostPlan.ps1",
-      "bytes": 5818,
-      "sha256": "efdb22bff615fede449da128c46cad95192950718510b9d3c74f50e9be143bcf"
+      "bytes": 6024,
+      "sha256": "166a078559c7289fb608155836d3b76322df3612cf796cb43b79860acdaacf6d"
+    },
+    {
+      "path": "tools/powershell/Ferrum2.Performance/HostProfiles.ps1",
+      "bytes": 17292,
+      "sha256": "edeb468f065635381e89274a074fdcb4e321c4c0556b3519700b481ea557212e"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
-      "bytes": 15556,
-      "sha256": "e6cd5a017b362191fbde23835adf7420619dd8ae8275dabd849236dca34e1e84"
+      "bytes": 15828,
+      "sha256": "1641dd54d0c1109a5ed643fcdb0807dda1e1d382a8bef2d8226a85bad8182162"
     },
     {
       "path": "tools/windows-tun/performance/run_windows_tun_performance_host.ps1",
-      "bytes": 6877,
-      "sha256": "e64141d04b56b7c6eb00507290b7afe68e5505935a0a14504dfe70d9e621bf4d"
+      "bytes": 6599,
+      "sha256": "8a0e3401343fadf7b5fe7a6456988e078b87781ad9dae145be184dafad162674"
     }
   ]
 }

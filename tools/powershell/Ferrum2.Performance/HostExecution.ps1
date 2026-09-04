@@ -96,9 +96,8 @@ function Export-Ferrum2CommitTree {
 
 function Get-Ferrum2M4SourceBundleIdentity {
     param([Parameter(Mandatory = $true)][string]$SourceRoot)
-    $bundleRoot = Join-Path $SourceRoot `
-        "tools\ferrum2-m4-qualification\src\m4_support\windows_tun"
-    $manifestPath = Join-Path $bundleRoot "bundle.json"
+    $packageRoot = Join-Path $SourceRoot "tools\ferrum2-m4-qualification"
+    $manifestPath = Join-Path $packageRoot "src\m4_support\windows_tun\bundle.json"
     $manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
     if ($manifestItem.PSIsContainer -or $manifestItem.Length -le 0 -or
         $manifestItem.Length -gt 1MB -or
@@ -110,14 +109,17 @@ function Get-Ferrum2M4SourceBundleIdentity {
     $manifestProperties = @($manifest.PSObject.Properties.Name | Sort-Object)
     if (($manifestProperties -join "|") -cne "entrypoint|files|kind|schema_version" -or
         [int]$manifest.schema_version -ne 1 -or
-        [string]$manifest.kind -cne "ferrum2.m4-windows-tun-source-bundle.v1" -or
-        [string]$manifest.entrypoint -cne "mod.rs") {
+        [string]$manifest.kind -cne "ferrum2.m4-windows-tun-source-bundle.v2" -or
+        [string]$manifest.entrypoint -cne "src/main.rs") {
         throw "M4 Windows TUN source bundle manifest contract is invalid"
     }
-    $actualPaths = @(Get-ChildItem -LiteralPath $bundleRoot -Filter "*.rs" -File -Recurse |
-        ForEach-Object {
-            [IO.Path]::GetRelativePath($bundleRoot, $_.FullName).Replace("\", "/")
-        } | Sort-Object)
+    $actualPaths = @(
+        "Cargo.toml"
+        Get-ChildItem -LiteralPath (Join-Path $packageRoot "src") -Filter "*.rs" -File -Recurse |
+            ForEach-Object {
+                [IO.Path]::GetRelativePath($packageRoot, $_.FullName).Replace("\", "/")
+            }
+    ) | Sort-Object
     $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path } | Sort-Object)
     if ($manifestPaths.Count -eq 0 -or
         ($manifestPaths -join "|") -cne ($actualPaths -join "|")) {
@@ -135,7 +137,7 @@ function Get-Ferrum2M4SourceBundleIdentity {
             [string]$row.sha256 -cnotmatch '^[0-9a-f]{64}$') {
             throw "M4 Windows TUN source bundle member identity is invalid"
         }
-        $path = Join-Path $bundleRoot $relativePath
+        $path = Join-Path $packageRoot $relativePath
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
         if ($item.PSIsContainer -or
             ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
@@ -151,29 +153,18 @@ function Get-Ferrum2M4SourceBundleIdentity {
 
 function Invoke-Ferrum2CargoBuild {
     param(
+        [Parameter(Mandatory = $true)][object]$Context,
         [Parameter(Mandatory = $true)][string]$SourceRoot,
         [Parameter(Mandatory = $true)][string]$TargetRoot,
-        [Parameter(Mandatory = $true)][string]$LogRoot
+        [Parameter(Mandatory = $true)][string]$Label
     )
-    $stdout = Join-Path $LogRoot "cargo.stdout.log"
-    $stderr = Join-Path $LogRoot "cargo.stderr.log"
-    $arguments = @(
-        "build", "--release", "--locked", "--offline", "--target", $script:WindowsRustTarget,
-        "-p", "ferrum2-client", "-p", "ferrum2-server", "-p", "ferrum2-m4-qualification"
-    )
-    $process = Start-Process -FilePath "cargo" -ArgumentList $arguments `
-        -WorkingDirectory $SourceRoot -Environment @{ CARGO_TARGET_DIR = $TargetRoot } `
-        -PassThru -NoNewWindow -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr -ErrorAction Stop
-    try {
-        $process.WaitForExit()
-        $exitCode = $process.ExitCode
-    } finally {
-        $process.Dispose()
-    }
-    if ($exitCode -ne 0) {
-        throw "offline host performance build failed; inspect bounded local build logs"
-    }
+    $cargo = [string](Get-Command cargo -CommandType Application -ErrorAction Stop).Source
+    $arguments = "build --release --locked --offline --target $script:WindowsRustTarget " +
+        "--target-dir `"$TargetRoot`" -p ferrum2-client -p ferrum2-server " +
+        "-p ferrum2-m4-qualification"
+    [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $cargo `
+        -Arguments $arguments -WorkingDirectory $SourceRoot -LogPrefix "cargo-$Label" `
+        -TimeoutSeconds 1800)
 }
 
 function Build-Ferrum2HostMember {
@@ -186,11 +177,10 @@ function Build-Ferrum2HostMember {
     $memberRoot = Join-Path $Context.run_root "builds\$Label"
     $sourceRoot = Join-Path $memberRoot "source"
     $targetRoot = Join-Path $memberRoot "target"
-    $logRoot = Join-Path $memberRoot "logs"
-    New-Item -ItemType Directory -Path $logRoot -Force -ErrorAction Stop | Out-Null
     Export-Ferrum2CommitTree -RepositoryRoot $Context.repository_root -Sha $Sha -Destination $sourceRoot
     $sourceBundleSha256 = Get-Ferrum2M4SourceBundleIdentity -SourceRoot $sourceRoot
-    Invoke-Ferrum2CargoBuild -SourceRoot $sourceRoot -TargetRoot $targetRoot -LogRoot $logRoot
+    Invoke-Ferrum2CargoBuild -Context $Context -SourceRoot $sourceRoot `
+        -TargetRoot $targetRoot -Label $Label
     $binaryRoot = Join-Path $targetRoot "$($script:WindowsRustTarget)\release"
     $client = Join-Path $binaryRoot "ferrum2-client.exe"
     $server = Join-Path $binaryRoot "ferrum2-server.exe"
@@ -238,9 +228,14 @@ function Initialize-Ferrum2HostBuilds {
         [string]$candidate.source_bundle_sha256) {
         throw "baseline and candidate M4 workload source bundles differ"
     }
+    if ([string]$baseline.harness_sha256 -cne [string]$candidate.harness_sha256) {
+        throw "baseline and candidate M4 harness binaries differ"
+    }
     $manifest = [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-build-manifest"
+        run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         baseline = $baseline
         candidate = $candidate
         shared_harness_sha256 = $candidate.harness_sha256
@@ -493,32 +488,46 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 
 function Invoke-Ferrum2ConfigCheck {
-    param([string]$Binary, [string]$Config)
-    & $Binary --config $Config --check-config | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "product configuration check failed" }
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][string]$Binary,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$LogPrefix
+    )
+    [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Binary `
+        -Arguments "--config `"$Config`" --check-config" `
+        -WorkingDirectory (Split-Path -Parent $Binary) -LogPrefix $LogPrefix `
+        -TimeoutSeconds 60)
 }
 
 function Get-Ferrum2RouteProof {
     param(
         [Parameter(Mandatory = $true)][string]$RemoteAddress,
-        [Parameter(Mandatory = $true)][string]$LocalAddress,
-        [Parameter(Mandatory = $true)][uint32]$InterfaceIndex,
-        [Parameter(Mandatory = $true)][string]$Purpose
+        [Parameter(Mandatory = $true)][uint32]$ExpectedInterfaceIndex,
+        [Parameter(Mandatory = $true)][string]$Purpose,
+        [AllowNull()][string]$LocalAddress = $null
     )
-    $rows = @(Find-NetRoute -RemoteIPAddress $RemoteAddress -LocalIPAddress $LocalAddress `
-        -InterfaceIndex $InterfaceIndex -ErrorAction Stop)
+    $lookup = @{
+        RemoteIPAddress = $RemoteAddress
+        ErrorAction = "Stop"
+    }
+    if ($PSBoundParameters.ContainsKey("LocalAddress")) {
+        $lookup.LocalIPAddress = $LocalAddress
+        $lookup.InterfaceIndex = $ExpectedInterfaceIndex
+    }
+    $rows = @(Find-NetRoute @lookup)
     $source = @($rows | Where-Object { $_.CimClass.CimClassName -ceq "MSFT_NetIPAddress" })
     $route = @($rows | Where-Object { $_.CimClass.CimClassName -ceq "MSFT_NetRoute" })
     if ($source.Count -ne 1 -or $route.Count -ne 1 -or
-        [uint32]$source[0].InterfaceIndex -ne $InterfaceIndex -or
-        [uint32]$route[0].InterfaceIndex -ne $InterfaceIndex) {
-        throw "actual route lookup did not preserve the $Purpose interface"
+        [uint32]$source[0].InterfaceIndex -ne $ExpectedInterfaceIndex -or
+        [uint32]$route[0].InterfaceIndex -ne $ExpectedInterfaceIndex) {
+        throw "actual route lookup did not select the $Purpose interface"
     }
     return [pscustomobject][ordered]@{
         purpose = $Purpose
         remote_address = $RemoteAddress
-        local_address = $LocalAddress
-        interface_index = $InterfaceIndex
+        local_address = [string]$source[0].IPAddress
+        interface_index = [uint32]$route[0].InterfaceIndex
         interface_alias = [string]$route[0].InterfaceAlias
         destination_prefix = [string]$route[0].DestinationPrefix
         next_hop = [string]$route[0].NextHop
@@ -533,15 +542,16 @@ function Get-Ferrum2TrialRouteProofs {
     )
     return @(
         Get-Ferrum2RouteProof -RemoteAddress $Network.support_address `
-            -LocalAddress $Network.tun_address -InterfaceIndex $TunInterfaceIndex `
+            -ExpectedInterfaceIndex $TunInterfaceIndex `
             -Purpose "benchmark-application-to-test-tun"
         Get-Ferrum2RouteProof -RemoteAddress $Network.support_address `
-            -LocalAddress $Network.support_address -InterfaceIndex $Loopback.interface_index `
+            -LocalAddress $Network.support_address `
+            -ExpectedInterfaceIndex $Loopback.interface_index `
             -Purpose "server-to-support-without-test-tun"
         Get-Ferrum2RouteProof -RemoteAddress "127.0.0.1" -LocalAddress "127.0.0.1" `
-            -InterfaceIndex $Loopback.interface_index -Purpose "product-underlay-control"
+            -ExpectedInterfaceIndex $Loopback.interface_index -Purpose "product-underlay-control"
         Get-Ferrum2RouteProof -RemoteAddress "127.0.0.1" -LocalAddress "127.0.0.1" `
-            -InterfaceIndex $Loopback.interface_index -Purpose "sing-box-proxy-excluded"
+            -ExpectedInterfaceIndex $Loopback.interface_index -Purpose "sing-box-proxy-excluded"
     )
 }
 
@@ -593,8 +603,10 @@ function Start-Ferrum2ProductTrial {
     $configs = Write-Ferrum2TrialConfigs -Context $Context -Network $Network -Loopback $Loopback `
         -AdapterName $adapterName -ServerPort $serverPort -ClientMetricsPort $clientMetrics `
         -ServerMetricsPort $serverMetrics -Sequence $Sequence
-    Invoke-Ferrum2ConfigCheck -Binary $Member.client -Config $configs.client
-    Invoke-Ferrum2ConfigCheck -Binary $Member.server -Config $configs.server
+    Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.client `
+        -Config $configs.client -LogPrefix "trial-$Sequence-client-config-check"
+    Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.server `
+        -Config $configs.server -LogPrefix "trial-$Sequence-server-config-check"
     $server = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.server `
         -Arguments "--config `"$($configs.server)`"" -WorkingDirectory (Split-Path -Parent $Member.server) `
         -LogPrefix "trial-$Sequence-server" -Purpose "trial-$Sequence-server"
@@ -684,6 +696,31 @@ function Export-Ferrum2OwnedCommandFailureLogs {
     return $failureRoot
 }
 
+function Complete-Ferrum2OwnedCommand {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][object]$Process,
+        [Parameter(Mandatory = $true)][string]$LogPrefix,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+    if (-not [Ferrum2PerfProcessGroup]::Wait(
+            [uint32]$Process.pid, [uint32]($TimeoutSeconds * 1000))) {
+        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$Process.pid)
+        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+            -Process $Process -LogPrefix $LogPrefix
+        throw "owned command timed out: $LogPrefix; logs: $failureLogs"
+    }
+    $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$Process.pid)
+    [Ferrum2PerfProcessGroup]::Close([uint32]$Process.pid)
+    Remove-Ferrum2OwnedProcessRecord -Context $Context -ProcessId $Process.pid
+    if ($exit -ne 0) {
+        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+            -Process $Process -LogPrefix $LogPrefix
+        throw "owned command failed: $LogPrefix; logs: $failureLogs"
+    }
+    return $Process
+}
+
 function Invoke-Ferrum2OwnedCommand {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
@@ -696,21 +733,8 @@ function Invoke-Ferrum2OwnedCommand {
     $process = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Application `
         -Arguments $Arguments -WorkingDirectory $WorkingDirectory -LogPrefix $LogPrefix `
         -Purpose $LogPrefix
-    if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$process.pid, [uint32]($TimeoutSeconds * 1000))) {
-        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$process.pid)
-        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-            -Process $process -LogPrefix $LogPrefix
-        throw "owned command timed out: $LogPrefix; logs: $failureLogs"
-    }
-    $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$process.pid)
-    [Ferrum2PerfProcessGroup]::Close([uint32]$process.pid)
-    Remove-Ferrum2OwnedProcessRecord -Context $Context -ProcessId $process.pid
-    if ($exit -ne 0) {
-        $failureLogs = Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-            -Process $process -LogPrefix $LogPrefix
-        throw "owned command failed: $LogPrefix; logs: $failureLogs"
-    }
-    return $process
+    return Complete-Ferrum2OwnedCommand -Context $Context -Process $process `
+        -LogPrefix $LogPrefix -TimeoutSeconds $TimeoutSeconds
 }
 
 function Invoke-Ferrum2HostTrial {
@@ -732,18 +756,32 @@ function Invoke-Ferrum2HostTrial {
             -Loopback $Loopback -Sequence $Trial.sequence
         $metricsBefore = Get-Ferrum2Metrics -Port $runtime.client_metrics_port
         $serverMetricsBefore = Get-Ferrum2Metrics -Port $runtime.server_metrics_port
-        $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
-        $serverCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
         $output = Join-Path $trialRoot "workload.json"
+        $activeReadyMarker = [IO.Path]::ChangeExtension($output, "active-ready")
+        $activeCompleteMarker = [IO.Path]::ChangeExtension($output, "active-complete")
         $arguments = "windows-tun-workload --scenario $($Trial.scenario) --target-ip $($Network.support_address) " +
             "--tcp-port $($Support.tcp_port) --udp-port $($Support.udp_port) " +
             "--warmup-seconds $($Trial.warmup_seconds) --active-seconds $($Trial.active_seconds) " +
             "--output `"$output`""
-        [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Harness -Arguments $arguments `
-            -WorkingDirectory (Split-Path -Parent $Harness) -LogPrefix "trial-$($Trial.sequence)-workload" `
-            -TimeoutSeconds ([int]$Trial.warmup_seconds + [int]$Trial.active_seconds + 60))
+        $workloadLogPrefix = "trial-$($Trial.sequence)-workload"
+        $workloadProcess = Start-Ferrum2OwnedNativeProcess -Context $Context `
+            -Application $Harness -Arguments $arguments `
+            -WorkingDirectory (Split-Path -Parent $Harness) -LogPrefix $workloadLogPrefix `
+            -Purpose $workloadLogPrefix
+        Wait-Ferrum2Text -Path $activeReadyMarker -Pattern '^ready\r?\n?$' `
+            -TimeoutSeconds ([int]$Trial.warmup_seconds + 30)
+        $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
+        $serverCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
+        $cpuSampleStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        Remove-Item -LiteralPath $activeReadyMarker -Force -ErrorAction Stop
+        Wait-Ferrum2Text -Path $activeCompleteMarker -Pattern '^complete\r?\n?$' `
+            -TimeoutSeconds ([int]$Trial.active_seconds + 60)
         $clientCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
         $serverCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
+        $cpuSampleStopwatch.Stop()
+        Remove-Item -LiteralPath $activeCompleteMarker -Force -ErrorAction Stop
+        [void](Complete-Ferrum2OwnedCommand -Context $Context -Process $workloadProcess `
+            -LogPrefix $workloadLogPrefix -TimeoutSeconds 60)
         $metricsAfter = Get-Ferrum2Metrics -Port $runtime.client_metrics_port
         $serverMetricsAfter = Get-Ferrum2Metrics -Port $runtime.server_metrics_port
         Write-NewUtf8File -Path (Join-Path $trialRoot "client-metrics-before.txt") -Text $metricsBefore
@@ -772,12 +810,14 @@ function Invoke-Ferrum2HostTrial {
         if (-not [double]::IsFinite($checkedUnits) -or $checkedUnits -le 0) {
             throw "workload checked-unit count is invalid"
         }
+        [double]$cpuSampleSeconds = $cpuSampleStopwatch.Elapsed.TotalSeconds
+        if (-not [double]::IsFinite($cpuSampleSeconds) -or $cpuSampleSeconds -le 0) {
+            throw "trial CPU sample window is invalid"
+        }
         [double]$clientCpuPercent =
-            (($clientCpuAfter - $clientCpuBefore) / ([double]$Trial.active_seconds * 1000.0)) *
-                100.0
+            (($clientCpuAfter - $clientCpuBefore) / ($cpuSampleSeconds * 1000.0)) * 100.0
         [double]$serverCpuPercent =
-            (($serverCpuAfter - $serverCpuBefore) / ([double]$Trial.active_seconds * 1000.0)) *
-                100.0
+            (($serverCpuAfter - $serverCpuBefore) / ($cpuSampleSeconds * 1000.0)) * 100.0
         [double]$clientFailureDelta =
             (Get-Ferrum2FailureCounterTotal $metricsAfter) -
                 (Get-Ferrum2FailureCounterTotal $metricsBefore)
@@ -793,6 +833,8 @@ function Invoke-Ferrum2HostTrial {
         $observation = [pscustomobject][ordered]@{
             schema_version = 1
             kind = "ferrum2.windows-tun.host-performance-trial"
+            run_id = $Context.run_id
+            performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
             sequence = $Trial.sequence
             pair = $Trial.pair
             order = $Trial.order
@@ -804,11 +846,14 @@ function Invoke-Ferrum2HostTrial {
             value = $metricValue
             warmup_seconds = $Trial.warmup_seconds
             active_seconds = $Trial.active_seconds
+            cpu_sample_seconds = $cpuSampleSeconds
             client_cpu_percent = $clientCpuPercent
             server_cpu_percent = $serverCpuPercent
             client_failure_counter_delta = $clientFailureDelta
             server_failure_counter_delta = $serverFailureDelta
             checked_units = $checkedUnits
+            loopback_interface_index = [uint32]$Loopback.interface_index
+            loopback_interface_alias = [string]$Loopback.interface_alias
             route_proofs = $runtime.route_proofs
             workload_checks = $workload.observation.checks
             status = "PASS"
@@ -838,325 +883,4 @@ function Invoke-Ferrum2HostTrial {
         if ($null -ne $runtime) { Stop-Ferrum2ProductTrial -Context $Context -Runtime $runtime }
         if (-not $succeeded) { Set-Ferrum2HostPerformanceState -Context $Context -State "trial_failed" }
     }
-}
-
-function Get-Ferrum2Median {
-    param([Parameter(Mandatory = $true)][double[]]$Values)
-    if ($Values.Count -eq 0) { throw "median requires at least one value" }
-    $sorted = @($Values | Sort-Object)
-    $middle = [int][Math]::Floor($sorted.Count / 2)
-    if (($sorted.Count % 2) -eq 1) { return [double]$sorted[$middle] }
-    return ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2.0
-}
-
-function Test-Ferrum2CpuCostRegression {
-    param(
-        [Parameter(Mandatory = $true)][double]$BaselineCpu,
-        [Parameter(Mandatory = $true)][double]$CandidateCpu,
-        [Parameter(Mandatory = $true)][double]$WorkRatio,
-        [Parameter(Mandatory = $true)][double]$MaximumRegressionPercent
-    )
-    if ($BaselineCpu -eq 0) {
-        return $CandidateCpu -gt 0
-    }
-    $cpuCostRatio = ($CandidateCpu / $BaselineCpu) / $WorkRatio
-    return (($cpuCostRatio - 1.0) * 100.0) -gt $MaximumRegressionPercent
-}
-
-function New-Ferrum2HostSummary {
-    param(
-        [Parameter(Mandatory = $true)][object]$Plan,
-        [Parameter(Mandatory = $true)][object[]]$Trials
-    )
-    $scenarios = [Collections.Generic.List[object]]::new()
-    foreach ($scenario in $Plan.scenarios) {
-        $rows = @($Trials | Where-Object { [string]$_.scenario -ceq [string]$scenario.name })
-        $ratios = [Collections.Generic.List[double]]::new()
-        $pairs = [Collections.Generic.List[object]]::new()
-        foreach ($pair in 1..$Plan.pair_count) {
-            $baseline = @($rows | Where-Object { $_.pair -eq $pair -and $_.member -ceq "baseline" })
-            $candidate = @($rows | Where-Object { $_.pair -eq $pair -and $_.member -ceq "candidate" })
-            if ($baseline.Count -ne 1 -or $candidate.Count -ne 1) { throw "paired trial evidence is incomplete" }
-            $ratio = [double]$candidate[0].value / [double]$baseline[0].value
-            [void]$ratios.Add($ratio)
-            [void]$pairs.Add([pscustomobject][ordered]@{
-                pair = $pair
-                order = $baseline[0].order
-                baseline = $baseline[0].value
-                candidate = $candidate[0].value
-                ratio = $ratio
-            })
-        }
-        $ratioValues = $ratios.ToArray()
-        $medianRatio = Get-Ferrum2Median -Values $ratioValues
-        $deviations = @($ratioValues | ForEach-Object {
-            [Math]::Abs([double]$_ - $medianRatio)
-        })
-        $medianAbsoluteDeviation = Get-Ferrum2Median -Values $deviations
-        $outlierPairs = if ($medianAbsoluteDeviation -eq 0) {
-            @()
-        } else {
-            @($pairs | Where-Object {
-                [Math]::Abs([double]$_.ratio - $medianRatio) -gt
-                    (3.0 * $medianAbsoluteDeviation)
-            } | ForEach-Object { [int]$_.pair })
-        }
-        $pairsImproved = @($ratios | Where-Object { $_ -gt 1.0 }).Count
-        $baselineClientCpu = Get-Ferrum2Median -Values @(
-            $rows | Where-Object member -CEQ "baseline" |
-                ForEach-Object { [double]$_.client_cpu_percent }
-        )
-        $candidateClientCpu = Get-Ferrum2Median -Values @(
-            $rows | Where-Object member -CEQ "candidate" |
-                ForEach-Object { [double]$_.client_cpu_percent }
-        )
-        $baselineServerCpu = Get-Ferrum2Median -Values @(
-            $rows | Where-Object member -CEQ "baseline" |
-                ForEach-Object { [double]$_.server_cpu_percent }
-        )
-        $candidateServerCpu = Get-Ferrum2Median -Values @(
-            $rows | Where-Object member -CEQ "candidate" |
-                ForEach-Object { [double]$_.server_cpu_percent }
-        )
-        $maximumCpuRegressionPercent = 2.0
-        $cpuCostRegressed =
-            (Test-Ferrum2CpuCostRegression -BaselineCpu $baselineClientCpu `
-                -CandidateCpu $candidateClientCpu -WorkRatio $medianRatio `
-                -MaximumRegressionPercent $maximumCpuRegressionPercent) -or
-            (Test-Ferrum2CpuCostRegression -BaselineCpu $baselineServerCpu `
-                -CandidateCpu $candidateServerCpu -WorkRatio $medianRatio `
-                -MaximumRegressionPercent $maximumCpuRegressionPercent)
-        $qualificationStatus = if ($cpuCostRegressed -or
-            ($medianRatio -le 0.98 -and
-                @($ratios | Where-Object { $_ -lt 1.0 }).Count -gt
-                    [Math]::Floor($Plan.pair_count / 2))) {
-            "regression"
-        } elseif ($medianRatio -ge 1.02 -and
-            $pairsImproved -gt [Math]::Floor($Plan.pair_count / 2)) {
-            "candidate-win"
-        } else {
-            "within-noise-band"
-        }
-        [void]$scenarios.Add([pscustomobject][ordered]@{
-            scenario = $scenario.name
-            metric = $scenario.metric
-            unit = $scenario.unit
-            pairs = $pairs.ToArray()
-            median_pair_ratio = $medianRatio
-            median_pair_improvement_percent = ($medianRatio - 1.0) * 100.0
-            minimum_pair_ratio = ($ratios | Measure-Object -Minimum).Minimum
-            maximum_pair_ratio = ($ratios | Measure-Object -Maximum).Maximum
-            median_absolute_deviation = $medianAbsoluteDeviation
-            outlier_pairs = @($outlierPairs)
-            pairs_improved = $pairsImproved
-            baseline_client_cpu_percent_median = $baselineClientCpu
-            candidate_client_cpu_percent_median = $candidateClientCpu
-            baseline_server_cpu_percent_median = $baselineServerCpu
-            candidate_server_cpu_percent_median = $candidateServerCpu
-            client_failure_counter_delta = 0
-            server_failure_counter_delta = 0
-            qualification_status = $qualificationStatus
-        })
-    }
-    return [pscustomobject][ordered]@{
-        schema_version = 1
-        kind = "ferrum2.windows-tun.host-performance-summary"
-        mode = $Plan.mode
-        baseline_sha = $Plan.baseline_sha
-        candidate_sha = $Plan.candidate_sha
-        pair_count = $Plan.pair_count
-        scenarios = $scenarios.ToArray()
-        threshold_percent = 2.0
-        status = "PASS"
-    }
-}
-
-function Invoke-Ferrum2HostPairedProfile {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$Plan,
-        [Parameter(Mandatory = $true)][object]$Builds,
-        [Parameter(Mandatory = $true)][object]$Network,
-        [Parameter(Mandatory = $true)][object]$Loopback
-    )
-    [void](Add-Ferrum2OwnedAddress -Context $Context -Loopback $Loopback `
-        -Address $Network.support_address -PrefixLength $Network.support_prefix_length)
-    $support = Start-Ferrum2Support -Context $Context -Harness $Builds.harness -Network $Network
-    $observations = [Collections.Generic.List[object]]::new()
-    foreach ($trial in $Plan.trials) {
-        $member = if ($trial.member -ceq "baseline") { $Builds.baseline } else { $Builds.candidate }
-        [void]$observations.Add((Invoke-Ferrum2HostTrial -Context $Context -Trial $trial `
-            -Member $member -Harness $Builds.harness -Network $Network -Loopback $Loopback `
-            -Support $support))
-    }
-    Stop-Ferrum2OwnedProcess -Context $Context -ProcessId $support.process.pid
-    $Context.ledger.resources.ports = @($Context.ledger.resources.ports | Where-Object {
-        [string]$_.purpose -notmatch '^support-'
-    })
-    Write-Ferrum2HostPerformanceLedger -Context $Context
-    $summary = New-Ferrum2HostSummary -Plan $Plan -Trials $observations.ToArray()
-    Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "summary.json") -Document $summary
-    return $summary
-}
-
-function Invoke-Ferrum2HostLifecycleProfile {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$Plan,
-        [Parameter(Mandatory = $true)][object]$Builds,
-        [Parameter(Mandatory = $true)][object]$Network,
-        [Parameter(Mandatory = $true)][object]$Loopback
-    )
-    [void](Add-Ferrum2OwnedAddress -Context $Context -Loopback $Loopback `
-        -Address $Network.support_address -PrefixLength $Network.support_prefix_length)
-    $support = $null
-    $cycleLatencies = [Collections.Generic.List[double]]::new()
-    try {
-        $support = Start-Ferrum2Support -Context $Context -Harness $Builds.harness -Network $Network
-        $supportProcessCount = @($Context.ledger.resources.processes).Count
-        $supportPortCount = @($Context.ledger.resources.ports).Count
-        foreach ($cycle in 1..$Plan.lifecycle_cycles) {
-            $runtime = $null
-            $timer = [Diagnostics.Stopwatch]::StartNew()
-            try {
-                $runtime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-                    -Network $Network -Loopback $Loopback -Sequence $cycle
-                [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Builds.harness `
-                    -Arguments "windows-tun-probe --target-ip $($Network.support_address) --tcp-port $($support.tcp_port) --udp-port $($support.udp_port)" `
-                    -WorkingDirectory (Split-Path -Parent $Builds.harness) `
-                    -LogPrefix "lifecycle-$cycle-probe" -TimeoutSeconds 60)
-            } finally {
-                if ($null -ne $runtime) {
-                    Stop-Ferrum2ProductTrial -Context $Context -Runtime $runtime
-                }
-            }
-            $timer.Stop()
-            if ($null -ne $Context.ledger.resources.adapter -or
-                @($Context.ledger.resources.routes).Count -ne 0 -or
-                @($Context.ledger.resources.processes).Count -ne $supportProcessCount -or
-                @($Context.ledger.resources.ports).Count -ne $supportPortCount) {
-                throw "lifecycle cycle $cycle retained a product-owned resource"
-            }
-            [void]$cycleLatencies.Add($timer.Elapsed.TotalMilliseconds)
-        }
-    } finally {
-        if ($null -ne $support) {
-            Stop-Ferrum2OwnedProcess -Context $Context -ProcessId $support.process.pid
-            $Context.ledger.resources.ports = @($Context.ledger.resources.ports | Where-Object {
-                [string]$_.purpose -notmatch '^support-'
-            })
-            Write-Ferrum2HostPerformanceLedger -Context $Context
-        }
-    }
-    if ($null -ne $Context.ledger.resources.adapter -or
-        @($Context.ledger.resources.routes).Count -ne 0 -or
-        @($Context.ledger.resources.processes).Count -ne 0 -or
-        @($Context.ledger.resources.ports).Count -ne 0) {
-        throw "Lifecycle retained a product or support resource"
-    }
-    $ordered = @($cycleLatencies | Sort-Object)
-    $p95Index = [Math]::Min($ordered.Count - 1, [int][Math]::Ceiling($ordered.Count * 0.95) - 1)
-    $summary = [pscustomobject][ordered]@{
-        schema_version = 1
-        kind = "ferrum2.windows-tun.host-lifecycle-summary"
-        mode = "Lifecycle"
-        candidate_sha = $Plan.candidate_sha
-        lifecycle_cycles = [int]$Plan.lifecycle_cycles
-        lifecycle_action = "product-start-probe-stop"
-        cycle_latencies_ms = $cycleLatencies.ToArray()
-        cycle_latency_median_ms = Get-Ferrum2Median -Values $cycleLatencies.ToArray()
-        cycle_latency_p95_ms = [double]$ordered[$p95Index]
-        cycle_latency_minimum_ms = [double]$ordered[0]
-        cycle_latency_maximum_ms = [double]$ordered[-1]
-        probe_failures = 0
-        between_cycle_adapter_remaining = 0
-        between_cycle_routes_remaining = 0
-        between_cycle_product_processes_remaining = 0
-        between_cycle_product_ports_remaining = 0
-        physical_adapter_mutations = 0
-        wlan_mutations = 0
-        dns_mutations = 0
-        long_durability_soak = "not-run"
-        status = "PASS"
-    }
-    Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "summary.json") -Document $summary
-    return $summary
-}
-
-function Invoke-Ferrum2HostSafetyCheck {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$Builds,
-        [Parameter(Mandatory = $true)][object]$Network,
-        [Parameter(Mandatory = $true)][object]$Loopback
-    )
-    [void](Add-Ferrum2OwnedAddress -Context $Context -Loopback $Loopback `
-        -Address $Network.support_address -PrefixLength $Network.support_prefix_length)
-    $support = Start-Ferrum2Support -Context $Context -Harness $Builds.harness -Network $Network
-    $checks = [Collections.Generic.List[object]]::new()
-    $createRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-        -Network $Network -Loopback $Loopback -Sequence 1
-    Stop-Ferrum2ProductTrial -Context $Context -Runtime $createRuntime
-    [void]$checks.Add([pscustomobject]@{ name = "create-immediate-cleanup"; status = "PASS" })
-    $smokeRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-        -Network $Network -Loopback $Loopback -Sequence 2
-    try {
-        [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Builds.harness `
-            -Arguments "windows-tun-probe --target-ip $($Network.support_address) --tcp-port $($support.tcp_port) --udp-port $($support.udp_port)" `
-            -WorkingDirectory (Split-Path -Parent $Builds.harness) -LogPrefix "safety-smoke" `
-            -TimeoutSeconds 60)
-    } finally { Stop-Ferrum2ProductTrial -Context $Context -Runtime $smokeRuntime }
-    [void]$checks.Add([pscustomobject]@{ name = "shortest-tun-smoke"; status = "PASS" })
-    $faultRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Builds.candidate `
-        -Network $Network -Loopback $Loopback -Sequence 3
-    [Ferrum2PerfProcessGroup]::CloseGroup()
-    Start-Sleep -Milliseconds 500
-    $addressRows = @($Context.ledger.resources.addresses)
-    if ($addressRows.Count -ne 1) {
-        throw "safety check expected one owned support address"
-    }
-    $addressRows[0].state = "planned"
-    $Context.ledger.state = "recovery_required"
-    Write-Ferrum2HostPerformanceLedger -Context $Context
-    $plannedAddressRefused = $false
-    try {
-        Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
-    } catch {
-        if ([string]$_.Exception.Message -cne
-            "planned address presence is ambiguous; refusing removal") {
-            throw
-        }
-        $plannedAddressRefused = $true
-    }
-    $remainingAddress = @(Get-NetIPAddress -AddressFamily IPv4 `
-        -IPAddress $Network.support_address -InterfaceIndex $Loopback.interface_index `
-        -ErrorAction SilentlyContinue)
-    if (-not $plannedAddressRefused -or $remainingAddress.Count -ne 1) {
-        throw "planned address ambiguity did not fail closed"
-    }
-    $addressRows[0].state = "created"
-    Write-Ferrum2HostPerformanceLedger -Context $Context
-    Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
-    [void]$checks.Add([pscustomobject]@{
-        name = "planned-address-ambiguity-fails-closed"
-        status = "PASS"
-    })
-    [void]$checks.Add([pscustomobject]@{
-        name = "fault-job-close-and-stale-ledger-recovery"
-        status = "PASS"
-    })
-    $report = [pscustomobject][ordered]@{
-        schema_version = 1
-        kind = "ferrum2.windows-tun.host-safety-check"
-        checks = $checks.ToArray()
-        route_proofs = $smokeRuntime.route_proofs
-        adapter_remaining = 0
-        routes_remaining = 0
-        addresses_remaining = 0
-        processes_remaining = 0
-        ports_remaining = 0
-        status = "PASS"
-    }
-    Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "safety-check.json") -Document $report
-    return $report
 }

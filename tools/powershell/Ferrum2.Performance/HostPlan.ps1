@@ -89,8 +89,12 @@ function New-Ferrum2HostPerformancePlan {
         [string]$Mode,
         [Parameter(Mandatory = $true)][string]$BaselineSha,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256
+        [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256,
+        [AllowNull()][object]$RunId = $null
     )
+    if ($null -ne $RunId -and [string]$RunId -cnotmatch '^[0-9a-f]{12}$') {
+        throw "host performance plan RunId is invalid"
+    }
     $profile = Get-HostProfileDefinition -Mode $Mode
     $trials = @(
         if ($Mode -ceq "Lifecycle") {
@@ -109,6 +113,7 @@ function New-Ferrum2HostPerformancePlan {
     return [pscustomobject][ordered]@{
         schema_version = 1
         kind = "ferrum2.windows-tun.host-performance-plan"
+        run_id = $RunId
         execution = "explicit-authorized-windows-host"
         mode = $Mode
         baseline_sha = $BaselineSha
@@ -131,7 +136,7 @@ function New-Ferrum2HostPerformancePlan {
             mutations = @("one run-owned Wintun adapter", "run-owned RFC2544 loopback support address", "run-owned narrow routes")
             forbidden_mutations = @("default route", "system DNS", "physical adapters", "WLAN", "firewall", "WFP", "sing-box")
             cleanup = "exact RunId ledger identities in try/finally"
-            recovery = "%LOCALAPPDATA%/Ferrum2/host-performance/<RunId>/recovery.json"
+            recovery = "%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json"
         }
         qualification = [pscustomobject][ordered]@{
             product_lifecycle_cycles = $profile.lifecycle_cycles

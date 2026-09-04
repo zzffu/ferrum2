@@ -27,6 +27,7 @@ _PLAN_FIELDS = frozenset(
         "schema_version",
         "kind",
         "execution",
+        "run_id",
         "mode",
         "baseline_sha",
         "candidate_sha",
@@ -71,6 +72,12 @@ def _sha(value: object, field: str) -> str:
 def _commit_sha(value: object, field: str) -> str:
     if type(value) is not str or re.fullmatch(r"[0-9a-f]{40}", value) is None:
         raise CandidateControlError(f"{field} must be a lowercase commit SHA")
+    return value
+
+
+def _run_id(value: object) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{12}", value) is None:
+        raise CandidateControlError("run_id must be a lowercase transaction identity")
     return value
 
 
@@ -135,6 +142,7 @@ def validate_windows_tun_plan(
         or plan["mode"] != mode
     ):
         raise CandidateControlError("Windows TUN host plan identity is invalid")
+    _run_id(plan["run_id"])
     if mode not in WINDOWS_TUN_PROFILES:
         raise CandidateControlError("Windows TUN host plan mode is invalid")
     bundle_digest = _sha(

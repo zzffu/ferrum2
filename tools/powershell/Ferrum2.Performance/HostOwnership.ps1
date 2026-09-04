@@ -6,6 +6,16 @@ function Test-Ferrum2HostPerformanceAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-Ferrum2PlainDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return $item.PSIsContainer -and
+        -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+}
+
 function Assert-Ferrum2HostPerformanceAuthorization {
     param([Parameter(Mandatory = $true)][bool]$Acknowledged)
     if (-not (Test-Ferrum2HostPerformanceAdministrator)) {
@@ -17,10 +27,108 @@ function Assert-Ferrum2HostPerformanceAuthorization {
 }
 
 function Get-Ferrum2HostPerformanceRoot {
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        throw "LOCALAPPDATA is required for the host performance recovery root"
+    if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        throw "PROGRAMDATA is unavailable; the protected recovery root cannot be resolved."
     }
-    return Join-Path $env:LOCALAPPDATA "Ferrum2\host-performance"
+    return Join-Path $env:ProgramData "Ferrum2HostPerformance-v2"
+}
+
+function New-Ferrum2HostPerformanceRootSecurity {
+    $administrators = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $system = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $users = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-545")
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($administrators)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($entry in @(
+            @{
+                Identity = $administrators
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+            },
+            @{
+                Identity = $system
+                Rights = [Security.AccessControl.FileSystemRights]::FullControl
+            },
+            @{
+                Identity = $users
+                Rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            }
+        )) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $entry.Identity,
+            $entry.Rights,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    return $security
+}
+
+function Assert-Ferrum2HostPerformanceRootSecurity {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    if (-not (Test-Ferrum2PlainDirectory -Path $Root)) {
+        throw "Host performance recovery root is not a plain directory: $Root"
+    }
+    $expectedAcl = New-Ferrum2HostPerformanceRootSecurity
+    $actualAcl = Get-Acl -LiteralPath $Root -ErrorAction Stop
+    $actualOwner = $actualAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($actualOwner -cne "S-1-5-32-544" -or -not $actualAcl.AreAccessRulesProtected) {
+        throw "Host performance recovery root ACL is not the reviewed administrator-owned contract: $Root"
+    }
+    $expectedRules = @($expectedAcl.GetAccessRules(
+            $true, $false, [Security.Principal.SecurityIdentifier]
+        ) | ForEach-Object {
+            "$($_.IdentityReference.Value)|$([int64]$_.FileSystemRights)|" +
+                "$([int]$_.InheritanceFlags)|$([int]$_.PropagationFlags)|" +
+                "$([int]$_.AccessControlType)|$($_.IsInherited)"
+        } | Sort-Object)
+    $actualRules = @($actualAcl.GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier]
+        ) | ForEach-Object {
+            "$($_.IdentityReference.Value)|$([int64]$_.FileSystemRights)|" +
+                "$([int]$_.InheritanceFlags)|$([int]$_.PropagationFlags)|" +
+                "$([int]$_.AccessControlType)|$($_.IsInherited)"
+        } | Sort-Object)
+    if ($actualRules.Count -ne $expectedRules.Count -or
+        ($actualRules -join "`n") -cne ($expectedRules -join "`n")) {
+        throw "Host performance recovery root ACL is not the reviewed administrator-owned contract: $Root"
+    }
+}
+
+function Initialize-Ferrum2HostPerformanceRoot {
+    if (-not (Test-Ferrum2HostPerformanceAdministrator)) {
+        throw "Creating or validating the host performance recovery root requires elevation."
+    }
+    $root = Get-Ferrum2HostPerformanceRoot
+    if (Test-Path -LiteralPath $root) {
+        Assert-Ferrum2HostPerformanceRootSecurity -Root $root
+        return $root
+    }
+
+    $temporary = Join-Path $env:ProgramData (
+        ".Ferrum2HostPerformance-v2-$([Guid]::NewGuid().ToString('N')).tmp"
+    )
+    $temporaryCreated = $false
+    try {
+        New-Item -ItemType Directory -Path $temporary -ErrorAction Stop | Out-Null
+        $temporaryCreated = $true
+        Set-Acl -LiteralPath $temporary `
+            -AclObject (New-Ferrum2HostPerformanceRootSecurity) -ErrorAction Stop
+        Assert-Ferrum2HostPerformanceRootSecurity -Root $temporary
+        [IO.Directory]::Move($temporary, $root)
+        $temporaryCreated = $false
+        Assert-Ferrum2HostPerformanceRootSecurity -Root $root
+        return $root
+    } catch {
+        if ($temporaryCreated -and (Test-Ferrum2PlainDirectory -Path $temporary)) {
+            Remove-Item -LiteralPath $temporary -Force -Recurse -ErrorAction SilentlyContinue
+        }
+        throw
+    }
 }
 
 function Remove-Ferrum2HostPerformanceRunRoot {
@@ -32,6 +140,7 @@ function Remove-Ferrum2HostPerformanceRunRoot {
         throw "host performance RunId is invalid"
     }
     $recoveryRoot = [IO.Path]::GetFullPath((Get-Ferrum2HostPerformanceRoot))
+    Assert-Ferrum2HostPerformanceRootSecurity -Root $recoveryRoot
     $expectedRunRoot = [IO.Path]::GetFullPath((Join-Path $recoveryRoot $RunId))
     $actualRunRoot = [IO.Path]::GetFullPath($RunRoot)
     if (-not $actualRunRoot.Equals($expectedRunRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -105,54 +214,78 @@ function New-Ferrum2HostPerformanceContext {
         [Parameter(Mandatory = $true)][string]$EvidenceDirectory,
         [Parameter(Mandatory = $true)][string]$Mode,
         [Parameter(Mandatory = $true)][string]$BaselineSha,
-        [Parameter(Mandatory = $true)][string]$CandidateSha
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$PerformanceSourceBundleSha256
     )
-    $runId = [Guid]::NewGuid().ToString("N").Substring(0, 12)
-    $recoveryRoot = Get-Ferrum2HostPerformanceRoot
-    $runRoot = Join-Path $recoveryRoot $runId
-    if (Test-Path -LiteralPath $runRoot) {
-        throw "generated host performance RunId already exists"
-    }
-    New-Item -ItemType Directory -Path $runRoot -ErrorAction Stop | Out-Null
     $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
-    if (Test-Path -LiteralPath $evidence) {
-        throw "host performance evidence directory baseline must be absent"
-    }
-    New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
-    $ledger = [pscustomobject][ordered]@{
-        schema_version = 1
-        kind = "ferrum2.windows-tun.host-performance-recovery"
-        run_id = $runId
-        state = "initializing"
-        mode = $Mode
-        baseline_sha = $BaselineSha
-        candidate_sha = $CandidateSha
-        repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
-        evidence_directory = $evidence
-        created_utc = [DateTime]::UtcNow.ToString("O")
-        updated_utc = [DateTime]::UtcNow.ToString("O")
-        resources = [pscustomobject][ordered]@{
-            processes = @()
-            adapter = $null
-            addresses = @()
-            routes = @()
-            ports = @()
+    $evidenceCreated = $false
+    $runRootCreated = $false
+    $runRoot = $null
+    $runId = $null
+    try {
+        if (Test-Path -LiteralPath $evidence) {
+            throw "host performance evidence directory baseline must be absent"
         }
-        recovery = [pscustomobject][ordered]@{
-            attempts = 0
-            last_error = $null
+        New-Item -ItemType Directory -Path $evidence -ErrorAction Stop | Out-Null
+        $evidenceCreated = $true
+
+        $runId = [Guid]::NewGuid().ToString("N").Substring(0, 12)
+        $recoveryRoot = Initialize-Ferrum2HostPerformanceRoot
+        $runRoot = Join-Path $recoveryRoot $runId
+        if (Test-Path -LiteralPath $runRoot) {
+            throw "generated host performance RunId already exists"
         }
+        New-Item -ItemType Directory -Path $runRoot -ErrorAction Stop | Out-Null
+        $runRootCreated = $true
+        $ledger = [pscustomobject][ordered]@{
+            schema_version = 1
+            kind = "ferrum2.windows-tun.host-performance-recovery"
+            run_id = $runId
+            state = "initializing"
+            mode = $Mode
+            baseline_sha = $BaselineSha
+            candidate_sha = $CandidateSha
+            performance_source_bundle_sha256 = $PerformanceSourceBundleSha256
+            repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
+            evidence_directory = $evidence
+            created_utc = [DateTime]::UtcNow.ToString("O")
+            updated_utc = [DateTime]::UtcNow.ToString("O")
+            resources = [pscustomobject][ordered]@{
+                processes = @()
+                adapter = $null
+                addresses = @()
+                routes = @()
+                ports = @()
+            }
+            recovery = [pscustomobject][ordered]@{
+                attempts = 0
+                last_error = $null
+            }
+        }
+        $context = [pscustomobject]@{
+            run_id = $runId
+            run_root = $runRoot
+            ledger_path = Join-Path $runRoot "recovery.json"
+            repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
+            evidence_directory = $evidence
+            performance_source_bundle_sha256 = $PerformanceSourceBundleSha256
+            ledger = $ledger
+        }
+        Write-Ferrum2HostPerformanceLedger -Context $context
+        return $context
+    } catch {
+        $failure = $_
+        if ($runRootCreated) {
+            Remove-Ferrum2HostPerformanceRunRoot -RunRoot $runRoot -RunId $runId
+        }
+        if ($evidenceCreated -and (Test-Ferrum2PlainDirectory -Path $evidence)) {
+            $children = @(Get-ChildItem -LiteralPath $evidence -Force -ErrorAction Stop)
+            if ($children.Count -eq 0) {
+                Remove-Item -LiteralPath $evidence -Force -ErrorAction Stop
+            }
+        }
+        throw $failure
     }
-    $context = [pscustomobject]@{
-        run_id = $runId
-        run_root = $runRoot
-        ledger_path = Join-Path $runRoot "recovery.json"
-        repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
-        evidence_directory = $evidence
-        ledger = $ledger
-    }
-    Write-Ferrum2HostPerformanceLedger -Context $context
-    return $context
 }
 
 function Set-Ferrum2HostPerformanceState {
@@ -166,11 +299,8 @@ function Set-Ferrum2HostPerformanceState {
 
 function Get-Ferrum2HostPerformanceLedgers {
     $root = Get-Ferrum2HostPerformanceRoot
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return @() }
-    $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
-    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        throw "host performance recovery root must not be a reparse point"
-    }
+    if (-not (Test-Path -LiteralPath $root)) { return @() }
+    Assert-Ferrum2HostPerformanceRootSecurity -Root $root
     $rows = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop)
     if ($rows.Count -gt 128) {
         throw "host performance recovery root exceeds 128 run directories"
@@ -439,10 +569,15 @@ function Stop-Ferrum2OwnedProcess {
     if ($row.Count -ne 1) { throw "owned process record is not unique for PID $ProcessId" }
     $process = Assert-Ferrum2ProcessIdentity -Row $row[0]
     if ($null -ne $process) {
-        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$ProcessId)
-        if (-not [Ferrum2PerfProcessGroup]::Wait(
-                [uint32]$ProcessId, [uint32]$TimeoutMilliseconds)) {
-            throw "owned process did not terminate within the cleanup deadline"
+        $exitedGracefully = [Ferrum2PerfProcessGroup]::Break([uint32]$ProcessId) -and
+            [Ferrum2PerfProcessGroup]::Wait(
+                [uint32]$ProcessId, [uint32]$TimeoutMilliseconds)
+        if (-not $exitedGracefully) {
+            [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$ProcessId)
+            if (-not [Ferrum2PerfProcessGroup]::Wait(
+                    [uint32]$ProcessId, [uint32]5000)) {
+                throw "owned process did not terminate within the cleanup deadline"
+            }
         }
     }
     [Ferrum2PerfProcessGroup]::Close([uint32]$ProcessId)
@@ -535,12 +670,13 @@ function Remove-Ferrum2LedgerResources {
     }
     foreach ($row in @($Ledger.resources.ports)) {
         if ([string]$row.protocol -ceq "tcp") {
-            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([uint16]$row.port) `
+            $listeners = @(Get-NetTCPConnection -State Listen `
+                -LocalAddress ([string]$row.address) -LocalPort ([uint16]$row.port) `
                 -ErrorAction SilentlyContinue)
             if ($listeners.Count -ne 0) { throw "owned TCP port remains in use: $($row.port)" }
         } else {
-            $listeners = @(Get-NetUDPEndpoint -LocalPort ([uint16]$row.port) `
-                -ErrorAction SilentlyContinue)
+            $listeners = @(Get-NetUDPEndpoint -LocalAddress ([string]$row.address) `
+                -LocalPort ([uint16]$row.port) -ErrorAction SilentlyContinue)
             if ($listeners.Count -ne 0) { throw "owned UDP port remains in use: $($row.port)" }
         }
     }
@@ -616,6 +752,7 @@ function Complete-Ferrum2HostPerformanceCleanup {
         schema_version = 1
         kind = "ferrum2.windows-tun.host-performance-cleanup"
         run_id = $Context.run_id
+        performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         status = "PASS"
         benchmark_succeeded = $Succeeded
         adapter_remaining = 0

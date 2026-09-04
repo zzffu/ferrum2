@@ -51,6 +51,10 @@ pub(crate) struct WorkloadWindow {
     pub(crate) warmup: Duration,
     pub(crate) active: Duration,
 }
+pub(crate) struct ActiveWindowMarkers {
+    pub(crate) ready: PathBuf,
+    pub(crate) complete: PathBuf,
+}
 
 pub(crate) struct WorkloadArgs {
     pub(crate) scenario: Scenario,
@@ -59,6 +63,7 @@ pub(crate) struct WorkloadArgs {
     pub(crate) udp_port: u16,
     pub(crate) window: Option<WorkloadWindow>,
     pub(crate) output: PathBuf,
+    pub(crate) active_markers: Option<ActiveWindowMarkers>,
     pub(crate) association_source: Option<UdpAssociationSourceArgs>,
     pub(crate) diagnostic: Option<UdpWorkloadDiagnosticArgs>,
 }
@@ -323,6 +328,16 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
             );
         }
     };
+    let active_markers = window.map(|_| ActiveWindowMarkers {
+        ready: output.with_extension("active-ready"),
+        complete: output.with_extension("active-complete"),
+    });
+    if active_markers
+        .as_ref()
+        .is_some_and(|markers| markers.ready.exists() || markers.complete.exists())
+    {
+        return Err("Windows TUN active-window marker baseline must be absent".to_owned());
+    }
     if window.is_some()
         && !matches!(
             scenario,
@@ -393,6 +408,7 @@ pub(crate) fn parse_workload(arguments: &[OsString]) -> Result<WorkloadArgs, Str
         udp_port: parse_port(udp_port, "--udp-port")?,
         output,
         window,
+        active_markers,
         association_source,
         diagnostic,
     })

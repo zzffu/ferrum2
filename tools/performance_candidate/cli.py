@@ -22,6 +22,7 @@ from tools.performance_candidate.linux.schedule import scenario_schedule, schedu
 from tools.performance_candidate.linux.scale import load_scale_safety_policy
 from tools.performance_candidate.linux.scale_lineage import build_scale_lineage, load_scale_lineage, validate_scale_source_lineage
 from tools.performance_candidate.output import _atomic_text
+from tools.performance_candidate.status import qualification_exit_code
 from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_MODES
 from tools.performance_candidate.windows_tun.summary import (
     validate_windows_tun_host_evidence,
@@ -312,7 +313,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 policy_path=parsed.policy,
             )
             print(json.dumps(report, sort_keys=True, allow_nan=False))
-            return 0
+            return qualification_exit_code(report["status"])
         raise AssertionError(f"unhandled command: {parsed.command}")
     except CandidateControlError as error:
         print(f"performance-candidate: {error}", file=sys.stderr)

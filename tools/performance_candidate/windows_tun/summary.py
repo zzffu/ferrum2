@@ -12,6 +12,11 @@ from tools.performance_candidate.json_contract import (
     _exact_fields,
     read_bounded_closed_json,
 )
+from tools.performance_candidate.status import (
+    CANDIDATE_WIN,
+    REGRESSION,
+    WITHIN_CALIBRATED_BAND,
+)
 from tools.performance_candidate.windows_tun.plan import load_windows_tun_plan
 from tools.performance_candidate.windows_tun.policy import load_windows_tun_policy
 from tools.performance_candidate.windows_tun.trial import (
@@ -24,6 +29,8 @@ _SUMMARY_FIELDS = frozenset(
     {
         "schema_version",
         "kind",
+        "run_id",
+        "performance_source_bundle_sha256",
         "mode",
         "baseline_sha",
         "candidate_sha",
@@ -56,6 +63,21 @@ _SCENARIO_FIELDS = frozenset(
     }
 )
 _PAIR_FIELDS = frozenset({"pair", "order", "baseline", "candidate", "ratio"})
+_BUILD_MEMBER_FIELDS = frozenset(
+    {
+        "label",
+        "commit_sha",
+        "root",
+        "client",
+        "server",
+        "harness",
+        "client_sha256",
+        "server_sha256",
+        "harness_sha256",
+        "source_bundle_sha256",
+        "wintun_dll_sha256",
+    }
+)
 
 
 def _read_object(path: pathlib.Path, source: str) -> dict[str, object]:
@@ -81,20 +103,32 @@ def _same_number(actual: object, expected: float, field: str) -> None:
         raise CandidateControlError(f"{field} does not match the raw paired evidence")
 
 
-def _cpu_cost_regressed(
+def _cpu_cost_ratio(
     baseline_cpu: float,
     candidate_cpu: float,
     *,
     work_ratio: float,
-    maximum_regression_percent: float,
-) -> bool:
+) -> float:
     if baseline_cpu == 0:
-        return candidate_cpu > 0
-    cpu_cost_ratio = (candidate_cpu / baseline_cpu) / work_ratio
-    return (cpu_cost_ratio - 1.0) * 100.0 > maximum_regression_percent
+        return 1.0 if candidate_cpu == 0 else math.inf
+    return (candidate_cpu / baseline_cpu) / work_ratio
 
 
-def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, object]:
+def _paired_cpu_cost_regressed(
+    ratios: list[float], *, maximum_regression_percent: float
+) -> bool:
+    median_ratio = statistics.median(ratios)
+    majority = sum(value > 1.0 for value in ratios) > len(ratios) // 2
+    return median_ratio > 1.0 + maximum_regression_percent / 100.0 and majority
+
+
+def _validate_cleanup(
+    root: pathlib.Path,
+    *,
+    expected_mode: str,
+    run_id: str,
+    performance_source_bundle_sha256: str,
+) -> dict[str, object]:
     cleanup = _read_object(root / "cleanup.json", "Windows TUN cleanup evidence")
     _exact_fields(
         cleanup,
@@ -103,6 +137,7 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
                 "schema_version",
                 "kind",
                 "run_id",
+                "performance_source_bundle_sha256",
                 "status",
                 "benchmark_succeeded",
                 "adapter_remaining",
@@ -118,6 +153,9 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
     if (
         cleanup["schema_version"] != 1
         or cleanup["kind"] != "ferrum2.windows-tun.host-performance-cleanup"
+        or cleanup["run_id"] != run_id
+        or cleanup["performance_source_bundle_sha256"]
+        != performance_source_bundle_sha256
         or cleanup["status"] != "PASS"
         or cleanup["benchmark_succeeded"] is not True
         or any(
@@ -140,6 +178,7 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
                 "schema_version",
                 "kind",
                 "run_id",
+                "performance_source_bundle_sha256",
                 "mode",
                 "build_seconds",
                 "execution_seconds",
@@ -154,6 +193,8 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
         runtime["schema_version"] != 1
         or runtime["kind"] != "ferrum2.windows-tun.host-performance-runtime"
         or runtime["run_id"] != cleanup["run_id"]
+        or runtime["performance_source_bundle_sha256"]
+        != performance_source_bundle_sha256
         or runtime["mode"] != expected_mode
         or runtime["cleanup_status"] != "PASS"
     ):
@@ -164,7 +205,12 @@ def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, ob
 
 
 def _validate_builds(
-    root: pathlib.Path, *, baseline_sha: str, candidate_sha: str
+    root: pathlib.Path,
+    *,
+    baseline_sha: str,
+    candidate_sha: str,
+    run_id: str,
+    performance_source_bundle_sha256: str,
 ) -> dict[str, object]:
     builds = _read_object(root / "builds.json", "Windows TUN build evidence")
     _exact_fields(
@@ -173,6 +219,8 @@ def _validate_builds(
             {
                 "schema_version",
                 "kind",
+                "run_id",
+                "performance_source_bundle_sha256",
                 "baseline",
                 "candidate",
                 "shared_harness_sha256",
@@ -187,6 +235,9 @@ def _validate_builds(
     if (
         builds["schema_version"] != 1
         or builds["kind"] != "ferrum2.windows-tun.host-build-manifest"
+        or builds["run_id"] != run_id
+        or builds["performance_source_bundle_sha256"]
+        != performance_source_bundle_sha256
         or builds["shared_harness_commit_sha"] != candidate_sha
     ):
         raise CandidateControlError("Windows TUN build evidence identity is invalid")
@@ -200,8 +251,14 @@ def _validate_builds(
             raise CandidateControlError(f"Windows TUN build {field} is invalid")
     for label, sha in (("baseline", baseline_sha), ("candidate", candidate_sha)):
         member = builds[label]
-        if type(member) is not dict or member.get("label") != label or member.get("commit_sha") != sha:
+        if type(member) is not dict:
+            raise CandidateControlError(f"Windows TUN {label} build must be an object")
+        _exact_fields(member, _BUILD_MEMBER_FIELDS, f"Windows TUN {label} build")
+        if member["label"] != label or member["commit_sha"] != sha:
             raise CandidateControlError(f"Windows TUN {label} build identity is invalid")
+        for field in ("root", "client", "server", "harness"):
+            if type(member[field]) is not str or not member[field]:
+                raise CandidateControlError(f"Windows TUN {label} build {field} is invalid")
         for field in (
             "client_sha256",
             "server_sha256",
@@ -213,6 +270,13 @@ def _validate_builds(
                 raise CandidateControlError(f"Windows TUN {label} build {field} is invalid")
         if member["source_bundle_sha256"] != builds["shared_source_bundle_sha256"]:
             raise CandidateControlError("baseline and candidate workload source contracts differ")
+        if member["wintun_dll_sha256"] != builds["wintun_dll_sha256"]:
+            raise CandidateControlError("Windows TUN build Wintun identities differ")
+    if any(
+        builds[label]["harness_sha256"] != builds["shared_harness_sha256"]
+        for label in ("baseline", "candidate")
+    ):
+        raise CandidateControlError("Windows TUN shared harness identity is inconsistent")
     return builds
 
 
@@ -225,7 +289,16 @@ def _load_trials(root: pathlib.Path, plan: dict[str, object]) -> list[dict[str, 
             maximum_bytes=WINDOWS_TUN_TRIAL_MAX_BYTES,
             source=f"Windows TUN trial {planned['sequence']}",
         )
-        trials.append(validate_windows_tun_trial(document.value, planned_trial=planned))
+        trials.append(
+            validate_windows_tun_trial(
+                document.value,
+                planned_trial=planned,
+                run_id=plan["run_id"],
+                performance_source_bundle_sha256=plan[
+                    "performance_source_bundle_sha256"
+                ],
+            )
+        )
     actual_paths = sorted((root / "trials").glob("*/trial.json"))
     if len(actual_paths) != len(trials):
         raise CandidateControlError("Windows TUN trial evidence closure is not exact")
@@ -244,6 +317,9 @@ def _validate_paired_summary(
     if (
         summary["schema_version"] != 1
         or summary["kind"] != "ferrum2.windows-tun.host-performance-summary"
+        or summary["run_id"] != plan["run_id"]
+        or summary["performance_source_bundle_sha256"]
+        != plan["performance_source_bundle_sha256"]
         or summary["mode"] != plan["mode"]
         or summary["baseline_sha"] != plan["baseline_sha"]
         or summary["candidate_sha"] != plan["candidate_sha"]
@@ -268,6 +344,8 @@ def _validate_paired_summary(
         rows = [row for row in trials if row["scenario"] == scenario["scenario"]]
         expected_pairs = []
         ratios = []
+        client_cpu_cost_ratios = []
+        server_cpu_cost_ratios = []
         for pair_number in range(1, plan["pair_count"] + 1):
             baseline = [row for row in rows if row["pair"] == pair_number and row["member"] == "baseline"]
             candidate = [row for row in rows if row["pair"] == pair_number and row["member"] == "candidate"]
@@ -275,6 +353,20 @@ def _validate_paired_summary(
                 raise CandidateControlError("Windows TUN raw paired evidence is incomplete")
             ratio = candidate[0]["value"] / baseline[0]["value"]
             ratios.append(ratio)
+            client_cpu_cost_ratios.append(
+                _cpu_cost_ratio(
+                    baseline[0]["client_cpu_percent"],
+                    candidate[0]["client_cpu_percent"],
+                    work_ratio=ratio,
+                )
+            )
+            server_cpu_cost_ratios.append(
+                _cpu_cost_ratio(
+                    baseline[0]["server_cpu_percent"],
+                    candidate[0]["server_cpu_percent"],
+                    work_ratio=ratio,
+                )
+            )
             expected_pairs.append((pair_number, baseline[0], candidate[0], ratio))
         pairs = scenario["pairs"]
         if type(pairs) is not list or len(pairs) != plan["pair_count"]:
@@ -311,15 +403,11 @@ def _validate_paired_summary(
             row["server_cpu_percent"] for row in rows if row["member"] == "candidate"
         )
         maximum_cpu_regression = policy["maximum_non_target_regression_percent"]
-        cpu_cost_regressed = _cpu_cost_regressed(
-            baseline_client_cpu,
-            candidate_client_cpu,
-            work_ratio=median_ratio,
+        cpu_cost_regressed = _paired_cpu_cost_regressed(
+            client_cpu_cost_ratios,
             maximum_regression_percent=maximum_cpu_regression,
-        ) or _cpu_cost_regressed(
-            baseline_server_cpu,
-            candidate_server_cpu,
-            work_ratio=median_ratio,
+        ) or _paired_cpu_cost_regressed(
+            server_cpu_cost_ratios,
             maximum_regression_percent=maximum_cpu_regression,
         )
         status = (
@@ -362,6 +450,8 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
         {
             "schema_version",
             "kind",
+            "run_id",
+            "performance_source_bundle_sha256",
             "mode",
             "candidate_sha",
             "lifecycle_cycles",
@@ -387,6 +477,9 @@ def _validate_lifecycle_summary(root: pathlib.Path, plan: dict[str, object]) -> 
     if (
         summary["schema_version"] != 1
         or summary["kind"] != "ferrum2.windows-tun.host-lifecycle-summary"
+        or summary["run_id"] != plan["run_id"]
+        or summary["performance_source_bundle_sha256"]
+        != plan["performance_source_bundle_sha256"]
         or summary["mode"] != "Lifecycle"
         or summary["candidate_sha"] != plan["candidate_sha"]
         or summary["lifecycle_cycles"] != 20
@@ -437,14 +530,47 @@ def validate_windows_tun_host_evidence(
         mode=mode,
     )
     _validate_builds(
-        evidence_root, baseline_sha=baseline_sha, candidate_sha=candidate_sha
+        evidence_root,
+        baseline_sha=baseline_sha,
+        candidate_sha=candidate_sha,
+        run_id=plan["run_id"],
+        performance_source_bundle_sha256=plan["performance_source_bundle_sha256"],
     )
     summary = (
         _validate_lifecycle_summary(evidence_root, plan)
         if mode == "Lifecycle"
         else _validate_paired_summary(evidence_root, plan=plan, policy=policy)
     )
-    runtime = _validate_cleanup(evidence_root, expected_mode=mode)
+    runtime = _validate_cleanup(
+        evidence_root,
+        expected_mode=mode,
+        run_id=plan["run_id"],
+        performance_source_bundle_sha256=plan["performance_source_bundle_sha256"],
+    )
+    scenario_decisions = (
+        []
+        if mode == "Lifecycle"
+        else [
+            {
+                "scenario": row["scenario"],
+                "qualification_status": row["qualification_status"],
+                "median_pair_improvement_percent": row[
+                    "median_pair_improvement_percent"
+                ],
+            }
+            for row in summary["scenarios"]
+        ]
+    )
+    qualification_statuses = {
+        row["qualification_status"] for row in scenario_decisions
+    }
+    status = (
+        REGRESSION
+        if "regression" in qualification_statuses
+        else CANDIDATE_WIN
+        if "candidate-win" in qualification_statuses
+        else WITHIN_CALIBRATED_BAND
+    )
     return {
         "schema_version": 1,
         "kind": "ferrum2.windows-tun.host-evidence-validation",
@@ -452,15 +578,6 @@ def validate_windows_tun_host_evidence(
         "baseline_sha": baseline_sha,
         "candidate_sha": candidate_sha,
         "run_id": runtime["run_id"],
-        "scenario_decisions": []
-        if mode == "Lifecycle"
-        else [
-            {
-                "scenario": row["scenario"],
-                "qualification_status": row["qualification_status"],
-                "median_pair_improvement_percent": row["median_pair_improvement_percent"],
-            }
-            for row in summary["scenarios"]
-        ],
-        "status": "PASS",
+        "scenario_decisions": scenario_decisions,
+        "status": status,
     }
