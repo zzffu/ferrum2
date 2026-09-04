@@ -156,12 +156,14 @@ function Invoke-Ferrum2CargoBuild {
         [Parameter(Mandatory = $true)][object]$Context,
         [Parameter(Mandatory = $true)][string]$SourceRoot,
         [Parameter(Mandatory = $true)][string]$TargetRoot,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$IncludeHarness
     )
     $cargo = [string](Get-Command cargo -CommandType Application -ErrorAction Stop).Source
+    $packages = "-p ferrum2-client -p ferrum2-server"
+    if ($IncludeHarness) { $packages += " -p ferrum2-m4-qualification" }
     $arguments = "build --release --locked --offline --target $script:WindowsRustTarget " +
-        "--target-dir `"$TargetRoot`" -p ferrum2-client -p ferrum2-server " +
-        "-p ferrum2-m4-qualification"
+        "--target-dir `"$TargetRoot`" $packages"
     [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $cargo `
         -Arguments $arguments -WorkingDirectory $SourceRoot -LogPrefix "cargo-$Label" `
         -TimeoutSeconds 1800)
@@ -172,7 +174,8 @@ function Build-Ferrum2HostMember {
         [Parameter(Mandatory = $true)][object]$Context,
         [Parameter(Mandatory = $true)][string]$Label,
         [Parameter(Mandatory = $true)][string]$Sha,
-        [Parameter(Mandatory = $true)][string]$WintunDll
+        [Parameter(Mandatory = $true)][string]$WintunDll,
+        [switch]$IncludeHarness
     )
     $memberRoot = Join-Path $Context.run_root "builds\$Label"
     $sourceRoot = Join-Path $memberRoot "source"
@@ -180,16 +183,22 @@ function Build-Ferrum2HostMember {
     Export-Ferrum2CommitTree -RepositoryRoot $Context.repository_root -Sha $Sha -Destination $sourceRoot
     $sourceBundleSha256 = Get-Ferrum2M4SourceBundleIdentity -SourceRoot $sourceRoot
     Invoke-Ferrum2CargoBuild -Context $Context -SourceRoot $sourceRoot `
-        -TargetRoot $targetRoot -Label $Label
+        -TargetRoot $targetRoot -Label $Label -IncludeHarness:$IncludeHarness
     $binaryRoot = Join-Path $targetRoot "$($script:WindowsRustTarget)\release"
     $client = Join-Path $binaryRoot "ferrum2-client.exe"
     $server = Join-Path $binaryRoot "ferrum2-server.exe"
-    $harness = Join-Path $binaryRoot "m4-qualification.exe"
-    foreach ($path in @($client, $server, $harness)) {
+    foreach ($path in @($client, $server)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "host performance build output is missing: $path"
         }
     }
+    $harness = if ($IncludeHarness) {
+        $path = Join-Path $binaryRoot "m4-qualification.exe"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "host performance shared harness is missing: $path"
+        }
+        $path
+    } else { $null }
     $dllTarget = Join-Path $binaryRoot "wintun.dll"
     Copy-Item -LiteralPath $WintunDll -Destination $dllTarget -ErrorAction Stop
     return [pscustomobject][ordered]@{
@@ -201,7 +210,9 @@ function Build-Ferrum2HostMember {
         harness = $harness
         client_sha256 = (Get-FileHash $client -Algorithm SHA256).Hash.ToLowerInvariant()
         server_sha256 = (Get-FileHash $server -Algorithm SHA256).Hash.ToLowerInvariant()
-        harness_sha256 = (Get-FileHash $harness -Algorithm SHA256).Hash.ToLowerInvariant()
+        harness_sha256 = if ($IncludeHarness) {
+            (Get-FileHash $harness -Algorithm SHA256).Hash.ToLowerInvariant()
+        } else { $null }
         source_bundle_sha256 = $sourceBundleSha256
         wintun_dll_sha256 = (Get-FileHash $dllTarget -Algorithm SHA256).Hash.ToLowerInvariant()
     }
@@ -221,13 +232,15 @@ function Initialize-Ferrum2HostBuilds {
     $dll = Join-Path $assetRoot "wintun.dll"
     $dllHash = Expand-Ferrum2WintunDll -Archive $archive -Destination $dll
     $baseline = Build-Ferrum2HostMember -Context $Context -Label "baseline" -Sha $BaselineSha `
-        -WintunDll $dll
+        -WintunDll $dll -IncludeHarness
     $candidate = Build-Ferrum2HostMember -Context $Context -Label "candidate" -Sha $CandidateSha `
         -WintunDll $dll
     if ([string]$baseline.source_bundle_sha256 -cne
         [string]$candidate.source_bundle_sha256) {
         throw "baseline and candidate M4 workload source bundles differ"
     }
+    $candidate.harness = $baseline.harness
+    $candidate.harness_sha256 = $baseline.harness_sha256
     if ([string]$baseline.harness_sha256 -cne [string]$candidate.harness_sha256) {
         throw "baseline and candidate M4 harness binaries differ"
     }
@@ -238,14 +251,14 @@ function Initialize-Ferrum2HostBuilds {
         performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         baseline = $baseline
         candidate = $candidate
-        shared_harness_sha256 = $candidate.harness_sha256
-        shared_harness_commit_sha = $CandidateSha
-        shared_source_bundle_sha256 = $candidate.source_bundle_sha256
+        shared_harness_sha256 = $baseline.harness_sha256
+        shared_harness_commit_sha = $BaselineSha
+        shared_source_bundle_sha256 = $baseline.source_bundle_sha256
         wintun_archive_sha256 = $script:ExpectedWintunZipSha256
         wintun_dll_sha256 = $dllHash
     }
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "builds.json") -Document $manifest
-    return [pscustomobject]@{ baseline = $baseline; candidate = $candidate; harness = $candidate.harness }
+    return [pscustomobject]@{ baseline = $baseline; candidate = $candidate; harness = $baseline.harness }
 }
 
 function Test-Ferrum2TcpPortAvailable {
