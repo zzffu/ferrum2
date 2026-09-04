@@ -64,19 +64,27 @@ pub(super) fn commit_final_udp_response(
     .map_err(UdpPlanResponseError::Runtime)?;
     let (datagram, commit) = pending.materialize().into_parts();
     commits.push(commit);
-    let sessions = plan
-        .legs
-        .iter()
-        .map(|leg| &leg.protocol)
-        .collect::<Vec<_>>();
-    reservation
-        .commit_immediate_with(datagram, Instant::now(), || {
+    let result = if plan.legs.len() == 1 && commits.len() == 1 {
+        let commit = commits.pop().expect("single response commit was checked");
+        reservation.commit_immediate_with(datagram, Instant::now(), || {
+            plan.legs[0]
+                .protocol
+                .commit_response(commit, clock.monotonic_now())
+        })
+    } else {
+        let sessions = plan
+            .legs
+            .iter()
+            .map(|leg| &leg.protocol)
+            .collect::<Vec<_>>();
+        reservation.commit_immediate_with(datagram, Instant::now(), || {
             UdpClientSession::commit_responses(&sessions, commits, clock.monotonic_now())
         })
-        .map_err(|error| match error {
-            UdpCommitError::Protocol(error) => UdpPlanResponseError::Packet(error),
-            UdpCommitError::Runtime(error) => UdpPlanResponseError::Runtime(error),
-        })
+    };
+    result.map_err(|error| match error {
+        UdpCommitError::Protocol(error) => UdpPlanResponseError::Packet(error),
+        UdpCommitError::Runtime(error) => UdpPlanResponseError::Runtime(error),
+    })
 }
 
 pub(in crate::run) enum UdpPlanResponseError {

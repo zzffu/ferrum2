@@ -12,7 +12,7 @@ use super::OWNER_EVENT_QUANTUM;
 use super::{
     AssociationLease, CANDIDATE_TIMEOUT_MILLIS, ControlNotice, ControlNoticeKind,
     DATAGRAM_QUEUE_PACKETS, GenerationId, GenerationTable, InjectOutcome, LeasePhase,
-    OwnerResponse, PeerPolicy, RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION, UdpCandidate,
+    OwnerResponse, PeerPolicy, RESPONSE_QUEUE_PACKETS_PER_ASSOCIATION, ResponseWake, UdpCandidate,
     UdpCommitError, UdpDatagram, UdpDatagramEndpoints, UdpFiltering, emit_response_drop,
     same_ip_family, valid_unicast_ip,
 };
@@ -111,6 +111,7 @@ pub(crate) struct UdpTable {
     control_sender: sync_mpsc::Sender<ControlNotice>,
     responses: mpsc::Receiver<OwnerResponse>,
     response_sender: mpsc::Sender<OwnerResponse>,
+    response_wake: Arc<ResponseWake>,
     pending_response: Option<OwnerResponse>,
     filtering: UdpFiltering,
     idle_millis: i64,
@@ -151,6 +152,7 @@ impl UdpTable {
         let (control_sender, controls) = sync_mpsc::channel();
         let (response_sender, responses) = mpsc::channel(response_capacity);
         let session_epoch = Arc::new(AtomicU64::new(session_generation));
+        let response_wake = Arc::new(ResponseWake::new(wake.clone()));
         (
             Self {
                 slots: std::iter::repeat_with(|| None)
@@ -168,6 +170,7 @@ impl UdpTable {
                 control_sender,
                 responses,
                 response_sender,
+                response_wake,
                 pending_response: None,
                 filtering,
                 idle_millis: duration_millis(idle),
@@ -311,6 +314,7 @@ impl UdpTable {
             receiver: Some(receiver),
             lease,
             responses: self.response_sender.clone(),
+            response_wake: Arc::clone(&self.response_wake),
             handed_off: false,
         };
         if self.candidates.try_send(candidate).is_err() {
@@ -529,6 +533,22 @@ impl UdpTable {
         Some(true)
     }
 
+    fn try_take_response(&mut self) -> Option<OwnerResponse> {
+        match self.responses.try_recv() {
+            Ok(response) => Some(response),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.response_wake.clear();
+                None
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {
+                self.response_wake.clear();
+                let response = self.responses.try_recv().ok()?;
+                self.response_wake.mark_pending();
+                Some(response)
+            }
+        }
+    }
+
     /// Processes at most one response and retains it on internal backpressure.
     pub(crate) fn process_one_response(
         &mut self,
@@ -537,9 +557,9 @@ impl UdpTable {
     ) -> ResponseProcessOutcome {
         let (response, was_pending) = match self.pending_response.take() {
             Some(response) => (response, true),
-            None => match self.responses.try_recv() {
-                Ok(response) => (response, false),
-                Err(_) => return ResponseProcessOutcome::Idle,
+            None => match self.try_take_response() {
+                Some(response) => (response, false),
+                None => return ResponseProcessOutcome::Idle,
             },
         };
         let id = response.lease.id;
@@ -811,6 +831,7 @@ impl UdpTable {
         while self.responses.try_recv().is_ok() {
             emit_response_drop(&self.events, reason, reject_reason);
         }
+        self.response_wake.clear();
     }
 
     fn remove(&mut self, id: GenerationId) {

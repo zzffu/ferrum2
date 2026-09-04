@@ -149,18 +149,22 @@ impl ReassemblyTable {
                 return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
             }
         };
-        let mut layout = Some(match layout_for(packet, fragment) {
-            Some(layout) => layout,
-            None => {
-                self.entries.remove(&fragment.key);
-                return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
-            }
-        });
         self.compact_deadlines_if_needed();
         let at_entry_limit = self.entries.len() >= MAX_REASSEMBLY_ENTRIES;
-        let (entry, existing) = match self.entries.entry(fragment.key) {
-            std::collections::hash_map::Entry::Occupied(occupied) => (occupied.into_mut(), true),
+        let entry = match self.entries.entry(fragment.key) {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                if !layout_matches_packet(&occupied.get().layout, packet, fragment)
+                    || !capture_first_header(&mut occupied.get_mut().layout, packet, fragment)
+                {
+                    occupied.remove();
+                    return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
+                }
+                occupied.into_mut()
+            }
             std::collections::hash_map::Entry::Vacant(vacant) => {
+                let Some(layout) = layout_for(packet, fragment) else {
+                    return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
+                };
                 if at_entry_limit {
                     return ReassemblyOutcome::Dropped(ReassemblyDropReason::Limit);
                 }
@@ -172,27 +176,15 @@ impl ReassemblyTable {
                     deadline_id,
                     key: fragment.key,
                 }));
-                (
-                    vacant.insert(Entry {
-                        deadline_millis,
-                        deadline_id,
-                        layout: layout.take().expect("new entry retains incoming layout"),
-                        final_payload_len: None,
-                        pieces: Vec::new(),
-                    }),
-                    false,
-                )
+                vacant.insert(Entry {
+                    deadline_millis,
+                    deadline_id,
+                    layout,
+                    final_payload_len: None,
+                    pieces: Vec::new(),
+                })
             }
         };
-
-        if existing {
-            let layout = layout.expect("existing entry compares the incoming layout");
-            if !layouts_compatible(&entry.layout, &layout) {
-                self.entries.remove(&fragment.key);
-                return ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed);
-            }
-            merge_first_header(&mut entry.layout, layout);
-        }
 
         if entry.pieces.len() == MAX_FRAGMENTS_PER_ENTRY {
             self.entries.remove(&fragment.key);
@@ -348,55 +340,61 @@ fn layout_for(packet: &[u8], fragment: ParsedFragment) -> Option<Layout> {
     }
 }
 
-fn layouts_compatible(current: &Layout, incoming: &Layout) -> bool {
-    match (current, incoming) {
+fn layout_matches_packet(current: &Layout, packet: &[u8], fragment: ParsedFragment) -> bool {
+    match (current, fragment.reconstruction) {
         (
             Layout::Ipv4 {
-                normalized_header: current,
-                ..
+                normalized_header, ..
             },
-            Layout::Ipv4 {
-                normalized_header: incoming,
-                ..
-            },
-        ) => current == incoming,
+            FragmentReconstruction::Ipv4 { header_len },
+        ) => packet.get(..header_len).is_some_and(|header| {
+            header.len() >= 12
+                && normalized_header.len() == header.len()
+                && normalized_header[..2] == header[..2]
+                && normalized_header[4..6] == header[4..6]
+                && normalized_header[8..10] == header[8..10]
+                && normalized_header[12..] == header[12..]
+        }),
         (
             Layout::Ipv6 {
-                normalized_prefix: current_prefix,
+                normalized_prefix,
                 fragment_header_offset: current_fragment,
                 previous_next_header_offset: current_previous,
                 upper_protocol: current_protocol,
             },
-            Layout::Ipv6 {
-                normalized_prefix: incoming_prefix,
-                fragment_header_offset: incoming_fragment,
-                previous_next_header_offset: incoming_previous,
-                upper_protocol: incoming_protocol,
+            FragmentReconstruction::Ipv6 {
+                fragment_header_offset,
+                previous_next_header_offset,
             },
-        ) => {
-            current_prefix == incoming_prefix
-                && current_fragment == incoming_fragment
-                && current_previous == incoming_previous
-                && current_protocol == incoming_protocol
-        }
+        ) => packet.get(..fragment_header_offset).is_some_and(|prefix| {
+            prefix.len() >= 6
+                && normalized_prefix.len() == prefix.len()
+                && normalized_prefix[..4] == prefix[..4]
+                && normalized_prefix[6..] == prefix[6..]
+                && *current_fragment == fragment_header_offset
+                && *current_previous == previous_next_header_offset
+                && *current_protocol == fragment.upper_protocol
+        }),
         _ => false,
     }
 }
 
-fn merge_first_header(current: &mut Layout, incoming: Layout) {
-    if let (
-        Layout::Ipv4 {
-            normalized_header,
-            first_header,
-        },
-        Layout::Ipv4 {
-            normalized_header: incoming_normalized,
-            first_header: Some(incoming_first),
-        },
-    ) = (current, incoming)
-    {
-        *normalized_header = incoming_normalized;
-        *first_header = Some(incoming_first);
+fn capture_first_header(current: &mut Layout, packet: &[u8], fragment: ParsedFragment) -> bool {
+    if fragment.offset != 0 {
+        return true;
+    }
+    match (current, fragment.reconstruction) {
+        (Layout::Ipv4 { first_header, .. }, FragmentReconstruction::Ipv4 { header_len }) => {
+            let Some(header) = packet.get(..header_len) else {
+                return false;
+            };
+            if first_header.is_none() {
+                *first_header = Some(header.to_vec());
+            }
+            true
+        }
+        (Layout::Ipv6 { .. }, FragmentReconstruction::Ipv6 { .. }) => true,
+        _ => false,
     }
 }
 
