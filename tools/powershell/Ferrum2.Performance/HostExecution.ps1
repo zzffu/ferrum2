@@ -763,6 +763,7 @@ function Invoke-Ferrum2HostTrial {
     $trialRoot = Join-Path $Context.evidence_directory ("trials\{0:D3}" -f $Trial.sequence)
     New-Item -ItemType Directory -Path $trialRoot -ErrorAction Stop | Out-Null
     $runtime = $null
+    $workloadProcess = $null
     $succeeded = $false
     try {
         $runtime = Start-Ferrum2ProductTrial -Context $Context -Member $Member -Network $Network `
@@ -781,18 +782,26 @@ function Invoke-Ferrum2HostTrial {
             -Application $Harness -Arguments $arguments `
             -WorkingDirectory (Split-Path -Parent $Harness) -LogPrefix $workloadLogPrefix `
             -Purpose $workloadLogPrefix
-        Wait-Ferrum2Text -Path $activeReadyMarker -Pattern '^ready\r?\n?$' `
-            -TimeoutSeconds ([int]$Trial.warmup_seconds + 30)
-        $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
-        $serverCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
-        $cpuSampleStopwatch = [Diagnostics.Stopwatch]::StartNew()
-        Remove-Item -LiteralPath $activeReadyMarker -Force -ErrorAction Stop
-        Wait-Ferrum2Text -Path $activeCompleteMarker -Pattern '^complete\r?\n?$' `
-            -TimeoutSeconds ([int]$Trial.active_seconds + 60)
-        $clientCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
-        $serverCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
-        $cpuSampleStopwatch.Stop()
-        Remove-Item -LiteralPath $activeCompleteMarker -Force -ErrorAction Stop
+        try {
+            Wait-Ferrum2Text -Path $activeReadyMarker -Pattern '^ready\r?\n?$' `
+                -TimeoutSeconds ([int]$Trial.warmup_seconds + 30)
+            $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
+            $serverCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
+            $cpuSampleStopwatch = [Diagnostics.Stopwatch]::StartNew()
+            Remove-Item -LiteralPath $activeReadyMarker -Force -ErrorAction Stop
+            Wait-Ferrum2Text -Path $activeCompleteMarker -Pattern '^complete\r?\n?$' `
+                -TimeoutSeconds ([int]$Trial.active_seconds + 60)
+            $clientCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
+            $serverCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.server.pid
+            $cpuSampleStopwatch.Stop()
+            Remove-Item -LiteralPath $activeCompleteMarker -Force -ErrorAction Stop
+        } catch {
+            $markerFailure = $_
+            Stop-Ferrum2OwnedProcess -Context $Context -ProcessId $workloadProcess.pid
+            [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+                -Process $workloadProcess -LogPrefix $workloadLogPrefix)
+            throw $markerFailure
+        }
         [void](Complete-Ferrum2OwnedCommand -Context $Context -Process $workloadProcess `
             -LogPrefix $workloadLogPrefix -TimeoutSeconds 60)
         $metricsAfter = Get-Ferrum2Metrics -Port $runtime.client_metrics_port
@@ -876,6 +885,10 @@ function Invoke-Ferrum2HostTrial {
         return $observation
     } catch {
         $failure = $_
+        if ($null -ne $workloadProcess) {
+            [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+                -Process $workloadProcess -LogPrefix $workloadLogPrefix)
+        }
         if ($null -ne $runtime) {
             foreach ($endpoint in @(
                 [pscustomobject]@{ name = "client"; port = $runtime.client_metrics_port },
