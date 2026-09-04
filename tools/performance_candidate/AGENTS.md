@@ -2,15 +2,33 @@
 
 ## Purpose and Entry Point
 
-The only supported command entry point is `python -B -m tools.performance_candidate`. Do not add a script shim or a second CLI. `cli.py` only wires commands; shared JSON, identity, output, and pairing contracts have named owners; Linux and Windows TUN behavior stays in their respective subpackages. Scale lineage, trial validation, and decisions are separate owners. Windows UDP schema/value/ledger/capture/source validation and network-model identity/route/lifecycle logic are likewise separated; `windows_tun/network_model.py` is the small production model composition root, not a test helper.
+The only supported command entry point is `python -B -m tools.performance_candidate`. Do not add a
+script shim or a second CLI. `cli.py` only wires commands; shared JSON, identity, output, and pairing
+contracts have named owners; Linux and Windows TUN behavior stays in their respective subpackages.
+Scale lineage, trial validation, and decisions are separate owners. Windows host plan, trial,
+recovery, cleanup, route-proof, and summary validation likewise have narrow owners; keep the
+composition root small rather than rebuilding the former guest/network-model facade.
 
 ## Contract Ownership
 
-Keep evidence parsing fail-closed and bounded. Preserve exact JSON fields, schema versions, parent/candidate and build identities, metric units, correctness results, cleanup results, pair order, source digests, and calibration applicability unless a dedicated schema change updates every producer and consumer atomically. The only terminal states are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`, `REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`; qualification accepts only the first two. Linux and Windows use six pre-registered ABBA pairs. Policy decides adoption and regression; observation producers must not invent thresholds.
+Keep evidence parsing fail-closed and bounded. Preserve exact JSON fields, schema versions,
+baseline/candidate and build identities, metric units, correctness results, cleanup results, pair
+order, source digests, and applicability unless a dedicated schema change updates every producer and
+consumer atomically. Policy decides retention and regression; observation producers must not invent
+thresholds. Windows Quick uses at least three interleaved pairs and Confirm at least five; the
+selected profile and scenario recipes are evidence identity.
 
-The Windows TUN recipe binds this package to the canonical runner and collectors under `tools/windows-tun/performance`, neutral topology and network-path scripts under `tools/windows-tun/lab`, the modules under `tools/powershell`, the topology inputs, the Rust qualification harness, the verified `network_model_bundle.json`, and `tools/powershell/Ferrum2.Performance/bundle.json`. Repository source paths retain their complete `tools/windows-tun/{performance,lab}/` prefix. The guest controller is intentionally a flat staging directory, so its file map addresses staged scripts by basename; a flat staging name is not an alternate repository source path.
+The Windows TUN recipe binds this package only to the canonical host runner and collectors under
+`tools/windows-tun/performance`, host owners under `tools/powershell/Ferrum2.Performance`, the Rust
+workload harness, and the verified performance source bundle. It must not bind Lab VM/topology,
+checkpoint, guest staging, PowerShell Direct, or qualification sources. Repository source paths stay
+canonical; there is no flat guest deployment map.
 
-The performance source bundle is a closed 38-file set containing the three performance entry scripts, 25 `Ferrum2.Performance` sources, the six-file neutral `Ferrum2.WindowsTun.Lab` module, and the four Lab runtime helpers executed directly by the runner. It must hash-bind those helpers and must not bind `Ferrum2.Qualification.Evidence` or `Ferrum2.Qualification.HostHyperV`. Moving or changing any bound source changes recipe identity and requires coordinated consumer updates and fresh calibration review. Update recipe paths, source manifests, exact byte lengths, per-file SHA-256 values, and complete-manifest hashes atomically. The complete-file digests, rather than entrypoint-only hashes, are recorded in plans and raw evidence. The runtime controller bundle is a distinct guest-staging identity and must bind the exact guest subset plus the lab bootstrap. Its canonical `controller_bundle_sha256` is required by every Windows controller command and is carried through plan v5, trial v5, summary/calibration v4, and policy v4 applicability.
+The performance source bundle is a closed host source set. Moving or changing any bound source
+changes runner identity and requires coordinated producer/consumer updates plus a fresh baseline.
+Update recipe paths, source manifests, exact byte lengths, per-file SHA-256 values, and
+complete-manifest hashes atomically. Plans and raw evidence record the complete bundle digest, not an
+entrypoint-only hash.
 
 ## Verification
 
@@ -18,9 +36,14 @@ Use static checks before running any performance workflow:
 
 ```text
 python -B -m compileall -q tools/performance_candidate
-python -B -c "import tools.performance_candidate.cli; import tools.performance_candidate.windows_tun.network_model"
+python -B -c "import tools.performance_candidate.cli; import tools.performance_candidate.windows_tun.summary"
 ```
 
-The repository-level performance controller tests and approved Hyper-V procedure remain the behavioral gates. On an ordinary host, do not run performance workloads, Hyper-V orchestration, a real TUN session, or deterministic TUN smoke; restrict verification to static parsing, imports, manifest reconstruction, and non-workload contract tests. Live Windows TUN work is allowed only inside the approved guest boundary.
+Static tests and manifest reconstruction are the ordinary behavioral gates. They must not execute a
+real TUN workload. Live Windows TUN performance is allowed only through the canonical host runner from
+an already elevated shell with explicit network-mutation acknowledgement and verified per-RunId
+cleanup. Hyper-V is a separate correctness-qualification path, not a performance fallback.
 
-Tests mirror production owners: shared and Linux plan/policy/summary/scale behavior have separate modules, while Windows TUN plan/summary, trial, UDP diagnostics, and network-model behavior have separate modules with narrow fixture mixins. Do not recreate a monolithic controller test or import an obsolete facade.
+Tests mirror production owners: shared and Linux plan/policy/summary/scale behavior have separate
+modules; Windows host plan, trial, recovery/cleanup, and summary behavior use narrow fixture helpers.
+Do not keep guest schemas, topology identities, or compatibility readers.

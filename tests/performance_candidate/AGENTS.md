@@ -1,13 +1,15 @@
 # Performance Candidate Controller Test Guidelines
 
-These Python unit tests validate candidate-side plan, trial, summary, topology, and bundle-identity
-contracts without running benchmarks or privileged networking. Keep fixtures bounded and use explicit
-module imports so tests cannot accidentally accept ambient helpers.
+These tests validate stable JSON, identity, pairing, policy, plan, trial, recovery, cleanup, and
+summary contracts without running live benchmarks or mutating host network state. Use
+`unittest`, compact JSON fixtures, and repository-relative paths.
 
-Assert exact schema versions, required fields, lineage hashes, and failure behavior. Workload execution
-belongs to the external performance workflow, not this test suite.
+Assert exact schemas, source hashes, profile identity, interleaved pair order, route proofs,
+per-RunId ownership, fail-closed recovery, bounded values, and diagnostic output. Keep workload
+execution, elevation, adapter creation, and timing variability out of this suite.
 
-The runner source-capture contract must prove its canonical Lab closure capture precedes every
-PowerShell module or owner load, the bootstrap executes its captured bytes, the runner has no local
-capture/stage helpers, and guest file maps use the same locked snapshot. These are offline
-control-plane assertions; never invoke the runner here.
+Host runner source-capture tests prove that the closed performance bundle contains every imported
+local owner before execution, excludes Lab VM/topology/checkpoint/guest staging sources, and binds
+exact byte lengths and SHA-256 values. Contract tests cover the small public parameter surface,
+nonmutating PlanOnly, explicit authorization, exact-resource cleanup, and fail-closed stale-ledger
+behavior without invoking a privileged runner path.

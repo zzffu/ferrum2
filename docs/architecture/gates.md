@@ -27,7 +27,7 @@ external repository setting; unknown values stay marked as gaps rather than bein
 | G-PERF | `performance-candidate.yml:paired-profile` | manual only | correctness builds/tests and the only accepted six-pair `abba-six-pairs` schedule; Linux plan/trial/summary schemas v6/v4/v7 | 180m; performance | raw evidence retained 30 days; worktrees/processes removed in `always()` | manual performance; calibration required after schema/pair identity change |
 | G-HV-PROFILES | local Windows TUN qualification runner | manual approved host; never CI; public `-Suite Core`, `Endurance`, or `Release` only | Core runs fragments/DNS/UDP/ring; Endurance runs reset/restart; Release runs all six in that fixed order; deterministic smoke is excluded | 30m probe / per-profile bounded supervisor; privileged guest only | schema-4 ledger and build-once candidate artifacts are reused; every profile gets a fresh restore/start/stage/cleanup/stop/restore transaction; main staged v6, host v7, campaign v1; final Off | approved local only; live pending |
 | G-HV-HARDKILL | local `run_windows_tun_hard_kill_hyperv.ps1` | separate manual gate | independently versioned three-case hard-kill qualification | 2h; privileged guest only | static contract v4, staged input v4, host run v4, independent 21-file runtime closure and 25-file host source closure, final Off | approved local only; live pending |
-| G-PS-STATIC | `m0.yml:platform / windows-msvc:Validate Windows qualification static contracts`; local hard-kill `-DescribeContract` | PR/push for module and static-supervisor tests; DescribeContract remains an operator readback | neutral controller-bundle schema, closed qualification runtime maps, 38-source performance closure with four hash-bound Lab runtime owners, module exports and closed failure contracts; no VM/credential access | ordinary Windows | no network mutation | wired without live Hyper-V execution |
+| G-PS-STATIC | `m0.yml:platform / windows-msvc:Validate Windows qualification static contracts`; local hard-kill `-DescribeContract` | PR/push for module and static-supervisor tests; DescribeContract remains an operator readback | neutral qualification controller bundles; independent exact eight-source host-performance closure; module exports and closed failure contracts; no VM/credential access during static checks | ordinary Windows | no network mutation | wired without live Hyper-V or Wintun execution |
 
 ## R0 readback rules
 
@@ -52,6 +52,6 @@ external repository setting; unknown values stay marked as gaps rather than bein
   operations and never claim privileged qualification evidence. Policy compares the complete
   nonempty statement sequence for each mandatory hosted/smoke/campaign step, so a conditional shell
   wrapper cannot satisfy the gate by merely retaining the command text.
-- Windows TUN qualification and performance share only `Ferrum2.WindowsTun.Lab` mechanics and the
-  `lab_checkpoint` topology contract. Qualification owns suites, live witnesses and pass/fail;
-  performance owns its independent 38-source closure, trials, calibration and thresholds.
+- Windows TUN qualification and performance have disjoint execution paths. Qualification owns the
+  `Ferrum2.WindowsTun.Lab` mechanics, `lab_checkpoint`, suites, live witnesses, and pass/fail.
+  Performance owns its independent eight-source host closure, paired trials, recovery, and thresholds.

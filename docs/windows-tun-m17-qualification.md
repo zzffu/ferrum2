@@ -172,17 +172,18 @@ identity accounting.
 ## Performance separation
 
 Windows TUN performance is not qualification evidence. Its canonical runner is
-`tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1`. Performance owns scenarios,
-trial ordering, collectors, calibration, ABBA comparison, and thresholds. It may reuse only neutral
-Lab mechanics; it must not import qualification profiles or turn correctness evidence into a
-performance verdict.
+`tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. Performance owns host resource
+transactions, scenarios, pair ordering, collectors, recovery, raw evidence, and thresholds. It must
+not import qualification profiles, Lab VM/checkpoint/staging owners, or turn correctness evidence
+into a performance verdict. Hyper-V qualification is not a performance fallback.
 
-The performance source manifest is an independent closed 38-source identity: three scripts under
-`tools/windows-tun/performance`, 25 `Ferrum2.Performance` owners, the six-file
-`Ferrum2.WindowsTun.Lab` module, and four Lab helpers that the runner executes directly: the guest
-path probe, host path helper, topology read-only owner, and topology runtime. The manifest hash-binds
-all four helpers. The performance closure contains no `Ferrum2.Qualification.Evidence` or
-`Ferrum2.Qualification.HostHyperV` source.
+The performance source manifest is an independent closed host source identity. It hash-binds the
+public runner, module manifest, four `Ferrum2.Performance` host owners, module loader, and C# process
+owner by canonical path, exact byte length, and SHA-256. A separate M4 source bundle binds every Rust
+workload owner. Neither closure contains `Ferrum2.WindowsTun.Lab` VM owners,
+`Ferrum2.Qualification.Evidence`, or `Ferrum2.Qualification.HostHyperV` sources. Host performance
+evidence additionally binds both source identities, the selected profile, baseline/candidate commits,
+route proofs, per-RunId recovery ledger, and verified zero-residue cleanup.
 
 Likewise, diagnostic performance runs must identify themselves as non-qualifying and cannot satisfy
 this gate.
