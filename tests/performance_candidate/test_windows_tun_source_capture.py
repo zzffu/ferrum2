@@ -50,10 +50,10 @@ class WindowsTunHostRunnerContractTests(unittest.TestCase):
             "EvidenceDirectory",
             "AcknowledgeHostNetworkMutation",
             "RecoveryOnly",
-            "SafetyCheck",
         ):
             self.assertIn(f"${name}", self.runner)
         for obsolete in (
+            "SafetyCheck",
             "VmName",
             "Checkpoint",
             "TopologyManifest",

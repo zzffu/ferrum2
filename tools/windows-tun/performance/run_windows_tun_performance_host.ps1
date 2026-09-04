@@ -24,9 +24,6 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "Recovery")]
     [switch]$RecoveryOnly,
 
-    [Parameter(Mandatory = $true, ParameterSetName = "Safety")]
-    [switch]$SafetyCheck,
-
     [Parameter(ParameterSetName = "Plan")]
     [Parameter(ParameterSetName = "Run")]
     [ValidateSet("Quick", "Confirm", "Lifecycle")]
@@ -34,22 +31,18 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
-    [Parameter(Mandatory = $true, ParameterSetName = "Safety")]
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$BaselineSha,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Plan")]
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
-    [Parameter(Mandatory = $true, ParameterSetName = "Safety")]
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$CandidateSha,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
-    [Parameter(Mandatory = $true, ParameterSetName = "Safety")]
     [string]$EvidenceDirectory,
 
     [Parameter(ParameterSetName = "Run")]
-    [Parameter(ParameterSetName = "Safety")]
     [switch]$AcknowledgeHostNetworkMutation
 )
 
@@ -138,7 +131,7 @@ $arguments = @{
     PerformanceSourceBundleSha256 = $sourceBundle.sha256
 }
 foreach ($name in @(
-    "PlanOnly", "RecoveryOnly", "SafetyCheck", "Mode", "BaselineSha", "CandidateSha",
+    "PlanOnly", "RecoveryOnly", "Mode", "BaselineSha", "CandidateSha",
     "EvidenceDirectory", "AcknowledgeHostNetworkMutation"
 )) {
     if ($PSBoundParameters.ContainsKey($name)) { $arguments[$name] = $PSBoundParameters[$name] }

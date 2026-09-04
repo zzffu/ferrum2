@@ -483,9 +483,16 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 }
 
 function Invoke-Ferrum2ConfigCheck {
-    param([string]$Binary, [string]$Config)
-    & $Binary --config $Config --check-config | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "product configuration check failed" }
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][string]$Binary,
+        [Parameter(Mandatory = $true)][string]$Config,
+        [Parameter(Mandatory = $true)][string]$LogPrefix
+    )
+    [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Binary `
+        -Arguments "--config `"$Config`" --check-config" `
+        -WorkingDirectory (Split-Path -Parent $Binary) -LogPrefix $LogPrefix `
+        -TimeoutSeconds 60)
 }
 
 function Get-Ferrum2RouteProof {
@@ -591,8 +598,10 @@ function Start-Ferrum2ProductTrial {
     $configs = Write-Ferrum2TrialConfigs -Context $Context -Network $Network -Loopback $Loopback `
         -AdapterName $adapterName -ServerPort $serverPort -ClientMetricsPort $clientMetrics `
         -ServerMetricsPort $serverMetrics -Sequence $Sequence
-    Invoke-Ferrum2ConfigCheck -Binary $Member.client -Config $configs.client
-    Invoke-Ferrum2ConfigCheck -Binary $Member.server -Config $configs.server
+    Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.client `
+        -Config $configs.client -LogPrefix "trial-$Sequence-client-config-check"
+    Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.server `
+        -Config $configs.server -LogPrefix "trial-$Sequence-server-config-check"
     $server = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.server `
         -Arguments "--config `"$($configs.server)`"" -WorkingDirectory (Split-Path -Parent $Member.server) `
         -LogPrefix "trial-$Sequence-server" -Purpose "trial-$Sequence-server"

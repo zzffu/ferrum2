@@ -725,8 +725,8 @@ $performanceRunnerInterfaceParameters = @(
         ForEach-Object { $_.Name.VariablePath.UserPath }
 )
 $expectedPerformanceRunnerParameters = @(
-    'PlanOnly', 'RecoveryOnly', 'SafetyCheck', 'Mode', 'BaselineSha',
-    'CandidateSha', 'EvidenceDirectory', 'AcknowledgeHostNetworkMutation'
+    'PlanOnly', 'RecoveryOnly', 'Mode', 'BaselineSha', 'CandidateSha',
+    'EvidenceDirectory', 'AcknowledgeHostNetworkMutation'
 )
 Assert-True (
     $performanceRunnerInterfaceParameters.Count -eq

@@ -569,10 +569,15 @@ function Stop-Ferrum2OwnedProcess {
     if ($row.Count -ne 1) { throw "owned process record is not unique for PID $ProcessId" }
     $process = Assert-Ferrum2ProcessIdentity -Row $row[0]
     if ($null -ne $process) {
-        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$ProcessId)
-        if (-not [Ferrum2PerfProcessGroup]::Wait(
-                [uint32]$ProcessId, [uint32]$TimeoutMilliseconds)) {
-            throw "owned process did not terminate within the cleanup deadline"
+        $exitedGracefully = [Ferrum2PerfProcessGroup]::Break([uint32]$ProcessId) -and
+            [Ferrum2PerfProcessGroup]::Wait(
+                [uint32]$ProcessId, [uint32]$TimeoutMilliseconds)
+        if (-not $exitedGracefully) {
+            [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$ProcessId)
+            if (-not [Ferrum2PerfProcessGroup]::Wait(
+                    [uint32]$ProcessId, [uint32]5000)) {
+                throw "owned process did not terminate within the cleanup deadline"
+            }
         }
     }
     [Ferrum2PerfProcessGroup]::Close([uint32]$ProcessId)
@@ -665,12 +670,13 @@ function Remove-Ferrum2LedgerResources {
     }
     foreach ($row in @($Ledger.resources.ports)) {
         if ([string]$row.protocol -ceq "tcp") {
-            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([uint16]$row.port) `
+            $listeners = @(Get-NetTCPConnection -State Listen `
+                -LocalAddress ([string]$row.address) -LocalPort ([uint16]$row.port) `
                 -ErrorAction SilentlyContinue)
             if ($listeners.Count -ne 0) { throw "owned TCP port remains in use: $($row.port)" }
         } else {
-            $listeners = @(Get-NetUDPEndpoint -LocalPort ([uint16]$row.port) `
-                -ErrorAction SilentlyContinue)
+            $listeners = @(Get-NetUDPEndpoint -LocalAddress ([string]$row.address) `
+                -LocalPort ([uint16]$row.port) -ErrorAction SilentlyContinue)
             if ($listeners.Count -ne 0) { throw "owned UDP port remains in use: $($row.port)" }
         }
     }
