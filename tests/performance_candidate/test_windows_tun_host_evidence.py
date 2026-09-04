@@ -107,7 +107,7 @@ def plan_for(mode: str) -> dict[str, object]:
                 "sing-box",
             ],
             "cleanup": "exact RunId ledger identities in try/finally",
-            "recovery": "%LOCALAPPDATA%/Ferrum2/host-performance/<RunId>/recovery.json",
+            "recovery": "%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json",
         },
         "qualification": {
             "product_lifecycle_cycles": profile["lifecycle_cycles"],
@@ -367,18 +367,44 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
                 [row["qualification_status"] for row in report["scenario_decisions"]],
                 ["candidate-win", "candidate-win"],
             )
+            builds = json.loads((root / "builds.json").read_text(encoding="utf-8"))
+            inconsistent = copy.deepcopy(builds)
+            inconsistent["candidate"]["harness_sha256"] = "b" * 64
+            write_json(root / "builds.json", inconsistent)
+            with self.assertRaisesRegex(CandidateControlError, "shared harness"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    policy_path=POLICY,
+                )
+            unexpected = copy.deepcopy(builds)
+            unexpected["baseline"]["unexpected"] = True
+            write_json(root / "builds.json", unexpected)
+            with self.assertRaisesRegex(CandidateControlError, "schema mismatch"):
+                validate_windows_tun_host_evidence(
+                    evidence_root=root,
+                    baseline_sha=BASELINE,
+                    candidate_sha=CANDIDATE,
+                    mode="Quick",
+                    policy_path=POLICY,
+                )
+            write_json(root / "builds.json", builds)
+            baseline_cpu = (100.0, 101.0, 1.0)
+            candidate_cpu = (106.0, 1.0, 2.1)
             for planned in plan["trials"]:
-                if planned["member"] != "candidate":
-                    continue
                 trial_path = root / "trials" / f"{planned['sequence']:03d}" / "trial.json"
                 trial = json.loads(trial_path.read_text(encoding="utf-8"))
-                trial["client_cpu_percent"] = 40.0
+                values = baseline_cpu if planned["member"] == "baseline" else candidate_cpu
+                trial["client_cpu_percent"] = values[planned["pair"] - 1]
                 write_json(trial_path, trial)
             summary_document = json.loads(
                 (root / "summary.json").read_text(encoding="utf-8")
             )
             for scenario in summary_document["scenarios"]:
-                scenario["candidate_client_cpu_percent_median"] = 40.0
+                scenario["baseline_client_cpu_percent_median"] = 100.0
+                scenario["candidate_client_cpu_percent_median"] = 2.1
             write_json(root / "summary.json", summary_document)
             with self.assertRaisesRegex(CandidateControlError, "scenario decision"):
                 validate_windows_tun_host_evidence(

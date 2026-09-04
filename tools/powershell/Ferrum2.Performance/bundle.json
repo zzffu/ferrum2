@@ -10,18 +10,18 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/Ferrum2.Performance.psm1",
-      "bytes": 442,
-      "sha256": "862d02ef6536586c64bd51695936369dcfc7a056c3ca9cd23b776411dfa53f6a"
+      "bytes": 466,
+      "sha256": "aca0291623853f2fa16ae6854435ee9fb2a059c7d46e392fe594ee33fed1fc3f"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
-      "bytes": 54630,
-      "sha256": "222b2328a4a78fdc8dfe3cd4784aa99d206e2c9527c42cdc0c8347063229a860"
+      "bytes": 39044,
+      "sha256": "d3904db289d5d2faf33ed9fc5c57de1a7577721a352628123bd865a615b921d8"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostOwnership.ps1",
-      "bytes": 26320,
-      "sha256": "3ac8c123bb0921633743e473b8fea3cf087970bbedb24abb02201770708c50f8"
+      "bytes": 31772,
+      "sha256": "c85c749b1ebaa91bc333efacdb0402ef2ecbdf590094327f01123a59206ce7d4"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostPerformance.ps1",
@@ -31,7 +31,12 @@
     {
       "path": "tools/powershell/Ferrum2.Performance/HostPlan.ps1",
       "bytes": 5818,
-      "sha256": "efdb22bff615fede449da128c46cad95192950718510b9d3c74f50e9be143bcf"
+      "sha256": "5f00a73126a865ff08a3a86b2c374b70e901daf57b903c1211851abe7f927e13"
+    },
+    {
+      "path": "tools/powershell/Ferrum2.Performance/HostProfiles.ps1",
+      "bytes": 16854,
+      "sha256": "c489262ab3fc8e0f5551bd9c648908880f6feeea51ca2b923bb4fb4ac7c2751c"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs",
@@ -40,8 +45,8 @@
     },
     {
       "path": "tools/windows-tun/performance/run_windows_tun_performance_host.ps1",
-      "bytes": 6877,
-      "sha256": "e64141d04b56b7c6eb00507290b7afe68e5505935a0a14504dfe70d9e621bf4d"
+      "bytes": 6942,
+      "sha256": "7a0b5513a85326609cea3b4068babf847db81a1ee8d25fafdcc698f60319f899"
     }
   ]
 }

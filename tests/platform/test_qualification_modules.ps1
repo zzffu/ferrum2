@@ -868,7 +868,7 @@ $performanceSourceBundlePath = Join-Path $repositoryRoot `
 $performanceSourceBundle = Get-Content -LiteralPath $performanceSourceBundlePath -Raw -Encoding utf8 |
     ConvertFrom-Json -Depth 8 -ErrorAction Stop
 $actualPerformancePaths = @($performanceSourceBundle.files.path)
-Assert-True ($expectedPerformancePaths.Count -eq 8 -and
+Assert-True ($expectedPerformancePaths.Count -eq 9 -and
     @($expectedPerformancePaths | Where-Object {
         $_ -cnotin $actualPerformancePaths
     }).Count -eq 0 -and @($actualPerformancePaths | Where-Object {

@@ -56,6 +56,21 @@ _SCENARIO_FIELDS = frozenset(
     }
 )
 _PAIR_FIELDS = frozenset({"pair", "order", "baseline", "candidate", "ratio"})
+_BUILD_MEMBER_FIELDS = frozenset(
+    {
+        "label",
+        "commit_sha",
+        "root",
+        "client",
+        "server",
+        "harness",
+        "client_sha256",
+        "server_sha256",
+        "harness_sha256",
+        "source_bundle_sha256",
+        "wintun_dll_sha256",
+    }
+)
 
 
 def _read_object(path: pathlib.Path, source: str) -> dict[str, object]:
@@ -81,17 +96,23 @@ def _same_number(actual: object, expected: float, field: str) -> None:
         raise CandidateControlError(f"{field} does not match the raw paired evidence")
 
 
-def _cpu_cost_regressed(
+def _cpu_cost_ratio(
     baseline_cpu: float,
     candidate_cpu: float,
     *,
     work_ratio: float,
-    maximum_regression_percent: float,
-) -> bool:
+) -> float:
     if baseline_cpu == 0:
-        return candidate_cpu > 0
-    cpu_cost_ratio = (candidate_cpu / baseline_cpu) / work_ratio
-    return (cpu_cost_ratio - 1.0) * 100.0 > maximum_regression_percent
+        return 1.0 if candidate_cpu == 0 else math.inf
+    return (candidate_cpu / baseline_cpu) / work_ratio
+
+
+def _paired_cpu_cost_regressed(
+    ratios: list[float], *, maximum_regression_percent: float
+) -> bool:
+    median_ratio = statistics.median(ratios)
+    majority = sum(value > 1.0 for value in ratios) > len(ratios) // 2
+    return median_ratio > 1.0 + maximum_regression_percent / 100.0 and majority
 
 
 def _validate_cleanup(root: pathlib.Path, *, expected_mode: str) -> dict[str, object]:
@@ -200,8 +221,14 @@ def _validate_builds(
             raise CandidateControlError(f"Windows TUN build {field} is invalid")
     for label, sha in (("baseline", baseline_sha), ("candidate", candidate_sha)):
         member = builds[label]
-        if type(member) is not dict or member.get("label") != label or member.get("commit_sha") != sha:
+        if type(member) is not dict:
+            raise CandidateControlError(f"Windows TUN {label} build must be an object")
+        _exact_fields(member, _BUILD_MEMBER_FIELDS, f"Windows TUN {label} build")
+        if member["label"] != label or member["commit_sha"] != sha:
             raise CandidateControlError(f"Windows TUN {label} build identity is invalid")
+        for field in ("root", "client", "server", "harness"):
+            if type(member[field]) is not str or not member[field]:
+                raise CandidateControlError(f"Windows TUN {label} build {field} is invalid")
         for field in (
             "client_sha256",
             "server_sha256",
@@ -213,6 +240,10 @@ def _validate_builds(
                 raise CandidateControlError(f"Windows TUN {label} build {field} is invalid")
         if member["source_bundle_sha256"] != builds["shared_source_bundle_sha256"]:
             raise CandidateControlError("baseline and candidate workload source contracts differ")
+        if member["wintun_dll_sha256"] != builds["wintun_dll_sha256"]:
+            raise CandidateControlError("Windows TUN build Wintun identities differ")
+    if builds["candidate"]["harness_sha256"] != builds["shared_harness_sha256"]:
+        raise CandidateControlError("Windows TUN shared harness identity is inconsistent")
     return builds
 
 
@@ -268,6 +299,8 @@ def _validate_paired_summary(
         rows = [row for row in trials if row["scenario"] == scenario["scenario"]]
         expected_pairs = []
         ratios = []
+        client_cpu_cost_ratios = []
+        server_cpu_cost_ratios = []
         for pair_number in range(1, plan["pair_count"] + 1):
             baseline = [row for row in rows if row["pair"] == pair_number and row["member"] == "baseline"]
             candidate = [row for row in rows if row["pair"] == pair_number and row["member"] == "candidate"]
@@ -275,6 +308,20 @@ def _validate_paired_summary(
                 raise CandidateControlError("Windows TUN raw paired evidence is incomplete")
             ratio = candidate[0]["value"] / baseline[0]["value"]
             ratios.append(ratio)
+            client_cpu_cost_ratios.append(
+                _cpu_cost_ratio(
+                    baseline[0]["client_cpu_percent"],
+                    candidate[0]["client_cpu_percent"],
+                    work_ratio=ratio,
+                )
+            )
+            server_cpu_cost_ratios.append(
+                _cpu_cost_ratio(
+                    baseline[0]["server_cpu_percent"],
+                    candidate[0]["server_cpu_percent"],
+                    work_ratio=ratio,
+                )
+            )
             expected_pairs.append((pair_number, baseline[0], candidate[0], ratio))
         pairs = scenario["pairs"]
         if type(pairs) is not list or len(pairs) != plan["pair_count"]:
@@ -311,15 +358,11 @@ def _validate_paired_summary(
             row["server_cpu_percent"] for row in rows if row["member"] == "candidate"
         )
         maximum_cpu_regression = policy["maximum_non_target_regression_percent"]
-        cpu_cost_regressed = _cpu_cost_regressed(
-            baseline_client_cpu,
-            candidate_client_cpu,
-            work_ratio=median_ratio,
+        cpu_cost_regressed = _paired_cpu_cost_regressed(
+            client_cpu_cost_ratios,
             maximum_regression_percent=maximum_cpu_regression,
-        ) or _cpu_cost_regressed(
-            baseline_server_cpu,
-            candidate_server_cpu,
-            work_ratio=median_ratio,
+        ) or _paired_cpu_cost_regressed(
+            server_cpu_cost_ratios,
             maximum_regression_percent=maximum_cpu_regression,
         )
         status = (

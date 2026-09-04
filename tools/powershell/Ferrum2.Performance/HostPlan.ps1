@@ -131,7 +131,7 @@ function New-Ferrum2HostPerformancePlan {
             mutations = @("one run-owned Wintun adapter", "run-owned RFC2544 loopback support address", "run-owned narrow routes")
             forbidden_mutations = @("default route", "system DNS", "physical adapters", "WLAN", "firewall", "WFP", "sing-box")
             cleanup = "exact RunId ledger identities in try/finally"
-            recovery = "%LOCALAPPDATA%/Ferrum2/host-performance/<RunId>/recovery.json"
+            recovery = "%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json"
         }
         qualification = [pscustomobject][ordered]@{
             product_lifecycle_cycles = $profile.lifecycle_cycles

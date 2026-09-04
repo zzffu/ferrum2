@@ -22,7 +22,8 @@ adapter, change WLAN, alter firewall/WFP, touch sing-box, or clean resources not
 RunId ledger.
 
 Every mutation belongs to one try/finally transaction and is recorded incrementally in
-`%LOCALAPPDATA%\Ferrum2\host-performance\<RunId>\recovery.json`. Recovery validates adapter, route,
+`%PROGRAMDATA%\Ferrum2HostPerformance-v2\<RunId>\recovery.json`, beneath an exact ACL owned by
+Administrators and writable only by Administrators and SYSTEM. Recovery validates adapter, route,
 process, file, and port identity before removing only the ledger-owned resource; mismatch fails
 closed. After successful cleanup, retain external evidence and remove the transient RunId tree,
 including exported sources, Cargo targets, and logs. Cleanup is part of benchmark success. Quick runs
