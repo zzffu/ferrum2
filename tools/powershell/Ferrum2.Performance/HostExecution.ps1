@@ -670,15 +670,6 @@ function Start-Ferrum2ProductTrial {
     Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.client `
         -Config $configs.client -LogPrefix "trial-$Sequence-client-config-check"
     $server = $null
-    if ($Topology -ceq "EndToEnd") {
-        Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.server `
-            -Config $configs.server -LogPrefix "trial-$Sequence-server-config-check"
-        $server = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.server `
-            -Arguments "--config `"$($configs.server)`"" `
-            -WorkingDirectory (Split-Path -Parent $Member.server) `
-            -LogPrefix "trial-$Sequence-server" -Purpose "trial-$Sequence-server"
-        [void](Wait-Ferrum2Metric -Port $serverMetrics -Name "ferrum2_network_generation" -Minimum 1)
-    }
     $client = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.client `
         -Arguments "--config `"$($configs.client)`"" `
         -WorkingDirectory (Split-Path -Parent $Member.client) `
@@ -702,6 +693,15 @@ function Start-Ferrum2ProductTrial {
     }
     $Context.ledger.resources.routes = @($Context.ledger.resources.routes) + @($routeRow)
     Write-Ferrum2HostPerformanceLedger -Context $Context
+    if ($Topology -ceq "EndToEnd") {
+        Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.server `
+            -Config $configs.server -LogPrefix "trial-$Sequence-server-config-check"
+        $server = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.server `
+            -Arguments "--config `"$($configs.server)`"" `
+            -WorkingDirectory (Split-Path -Parent $Member.server) `
+            -LogPrefix "trial-$Sequence-server" -Purpose "trial-$Sequence-server"
+        [void](Wait-Ferrum2Metric -Port $serverMetrics -Name "ferrum2_network_generation" -Minimum 1)
+    }
     $proofs = Get-Ferrum2TrialRouteProofs -Network $Network -Loopback $Loopback `
         -TunInterfaceIndex ([uint32]$adapter.ifIndex) -Topology $Topology
     return [pscustomobject]@{
