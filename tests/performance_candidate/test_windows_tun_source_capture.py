@@ -1,6 +1,13 @@
+import json
+import hashlib
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
 
+from tools.performance_candidate.windows_tun.recipe import (
+    WINDOWS_TUN_PERFORMANCE_SOURCE_PATHS,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = (
@@ -8,214 +15,207 @@ RUNNER = (
     / "tools"
     / "windows-tun"
     / "performance"
-    / "run_windows_tun_performance_hyperv.ps1"
+    / "run_windows_tun_performance_host.ps1"
 )
-BOOTSTRAP = (
-    ROOT
-    / "tools"
-    / "powershell"
-    / "Ferrum2.WindowsTun.Lab"
-    / "BundleBootstrap.ps1"
-)
-HOST_VM_TRANSACTION = (
-    ROOT
-    / "tools"
-    / "powershell"
-    / "Ferrum2.Performance"
-    / "HostVmTransaction.ps1"
-)
-GUEST_TRANSACTION = (
-    ROOT
-    / "tools"
-    / "powershell"
-    / "Ferrum2.Performance"
-    / "GuestTransaction.ps1"
-)
-COLLECTOR = (
-    ROOT
-    / "tools"
-    / "windows-tun"
-    / "performance"
-    / "collect_windows_tun_performance_trial.ps1"
-)
-UDP_COLLECTOR = (
-    ROOT
-    / "tools"
-    / "windows-tun"
-    / "performance"
-    / "collect_windows_tun_udp_boundary_diagnostic.ps1"
+MODULE_ROOT = ROOT / "tools" / "powershell" / "Ferrum2.Performance"
+MODULE_MANIFEST = MODULE_ROOT / "Ferrum2.Performance.psd1"
+PROCESS_OWNER = MODULE_ROOT / "PerformanceProcessOwner.cs"
+OWNERSHIP = MODULE_ROOT / "HostOwnership.ps1"
+PERFORMANCE_BUNDLE = MODULE_ROOT / "bundle.json"
+M4_PACKAGE_ROOT = ROOT / "tools" / "ferrum2-m4-qualification"
+M4_BUNDLE = (
+    M4_PACKAGE_ROOT / "src" / "m4_support" / "windows_tun" / "bundle.json"
 )
 
 
-class WindowsTunSourceCaptureTests(unittest.TestCase):
+class WindowsTunHostRunnerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = RUNNER.read_text(encoding="utf-8")
-        cls.bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
-        cls.host_vm_transaction = HOST_VM_TRANSACTION.read_text(encoding="utf-8")
-        cls.guest_transaction = GUEST_TRANSACTION.read_text(encoding="utf-8")
-        cls.collectors = (
-            COLLECTOR.read_text(encoding="utf-8"),
-            UDP_COLLECTOR.read_text(encoding="utf-8"),
+        cls.runner = RUNNER.read_text(encoding="utf-8")
+        cls.process_owner = PROCESS_OWNER.read_text(encoding="utf-8")
+        cls.ownership = OWNERSHIP.read_text(encoding="utf-8")
+        cls.performance_bundle = json.loads(
+            PERFORMANCE_BUNDLE.read_text(encoding="utf-8")
         )
 
-    def test_verified_sources_are_captured_before_any_module_or_owner_load(self) -> None:
-        source = self.source
-        closure_capture = source.index(
-            "$verifiedPerformanceSource = Read-Ferrum2BootstrapFlatSourceClosure"
-        )
-        stage_creation = source.index(
-            "$capturedSourceStage = Open-Ferrum2BootstrapLockedStage"
-        )
-        first_module_load = source.index("Import-Module $labModulePath")
-        first_owner_load = source.index(". $hostContractPath")
+    def test_public_interface_is_host_only_and_small(self) -> None:
+        for name in (
+            "PlanOnly",
+            "Mode",
+            "BaselineSha",
+            "CandidateSha",
+            "EvidenceDirectory",
+            "AcknowledgeHostNetworkMutation",
+            "RecoveryOnly",
+        ):
+            self.assertIn(f"${name}", self.runner)
+        for obsolete in (
+            "SafetyCheck",
+            "VmName",
+            "Checkpoint",
+            "TopologyManifest",
+            "CredentialPath",
+            "WintunZip",
+            "SupportPid",
+        ):
+            self.assertNotIn(f"${obsolete}", self.runner)
 
-        self.assertLess(closure_capture, stage_creation)
-        self.assertLess(stage_creation, first_module_load)
-        self.assertLess(first_module_load, first_owner_load)
+    def test_runner_has_no_hyperv_or_sing_box_control_surface(self) -> None:
+        lowered = self.runner.lower()
+        for forbidden in (
+            "restore-vmsnapshot",
+            "start-vm",
+            "invoke-command -vm",
+            "set-dnsclientserveraddress",
+            "disable-netadapter",
+            "enable-netadapter",
+            "sing-box.exe",
+        ):
+            self.assertNotIn(forbidden, lowered)
+
+    def test_source_bundle_is_exact_and_content_addressed(self) -> None:
+        manifest = self.performance_bundle
         self.assertEqual(
-            source.count("[IO.File]::ReadAllBytes($performanceSourceBundlePath)"),
-            1,
+            set(manifest),
+            {"schema_version", "kind", "entrypoint", "files"},
         )
-        self.assertIn("-ManifestBytes $performanceSourceBundleBytes", source)
-
-    def test_bootstrap_executes_the_bytes_compared_with_its_manifest_entry(self) -> None:
-        source = self.source
-
-        self.assertIn(
-            "$bundleBootstrapBytes = [IO.File]::ReadAllBytes($bundleBootstrapPath)",
-            source,
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(
+            manifest["kind"],
+            "ferrum2.windows-tun-performance-source-bundle.v2",
         )
-        self.assertIn(
-            "[Security.Cryptography.SHA256]::HashData($bundleBootstrapBytes)",
-            source,
+        self.assertEqual(
+            manifest["entrypoint"],
+            "tools/windows-tun/performance/run_windows_tun_performance_host.ps1",
         )
-        self.assertIn(
-            ". ([scriptblock]::Create($utf8Strict.GetString($bundleBootstrapBytes)))",
-            source,
-        )
-        self.assertNotIn(". $bundleBootstrapPath", source)
-
-    def test_all_late_powershell_loads_and_guest_maps_use_the_locked_stage(self) -> None:
-        source = self.source
-
-        self.assertIn("[IO.FileShare]::Read", self.bootstrap)
-        self.assertIn(
-            "-RepositoryRoot $capturedRepositoryRoot)",
-            source,
-        )
-        self.assertIn(
-            "$performanceModuleRoot = Join-Path $capturedRepositoryRoot",
-            source,
-        )
-        self.assertIn(
-            "$topologyRuntimePath = Join-Path $capturedLabRoot",
-            source,
-        )
-        self.assertIn(
-            "finally {\n    Close-Ferrum2BootstrapLockedStage -Stage "
-            "$capturedSourceStage\n}",
-            source,
-        )
-
-    def test_capture_helpers_bind_the_canonical_required_root(self) -> None:
-        source = self.source
-        self.assertIn(
-            "-RepositoryRoot $repositoryRoot -RequiredRoot $repositoryRoot",
-            source,
-        )
-        self.assertIn(
-            "-RequiredRoot $RequiredRoot -RelativePath $RelativePath",
-            self.bootstrap,
-        )
-
-    def test_runner_uses_the_canonical_lab_capture_api_without_local_helpers(self) -> None:
-        source = self.source
-
-        for helper in (
-            "Read-Ferrum2CapturedFile",
-            "Get-Ferrum2CapturedSha256",
-            "Get-Ferrum2CapturedSourceClosure",
-            "Add-Ferrum2CapturedDependency",
-            "New-Ferrum2CapturedSourceStage",
-            "Remove-Ferrum2CapturedSourceStage",
+        rows = {row["path"]: row for row in manifest["files"]}
+        self.assertEqual(set(rows), set(WINDOWS_TUN_PERFORMANCE_SOURCE_PATHS))
+        for relative, row in rows.items():
+            payload = (ROOT / relative).read_bytes()
+            self.assertEqual(row["bytes"], len(payload))
+            self.assertEqual(row["sha256"], hashlib.sha256(payload).hexdigest())
+        for obsolete in (
+            "run_windows_tun_performance_hyperv.ps1",
+            "GuestTransaction.ps1",
+            "HostVmTransaction.ps1",
+            "RuntimeStaging.ps1",
+            "windows_tun_hyperv_support_topology_plan.json",
         ):
-            self.assertNotIn(f"function {helper}", source)
-        for canonical in (
-            "Read-Ferrum2BootstrapFlatSourceClosure",
-            "Add-Ferrum2BootstrapSourceDependency",
-            "Open-Ferrum2BootstrapLockedStage",
-            "Close-Ferrum2BootstrapLockedStage",
+            self.assertNotIn(obsolete, PERFORMANCE_BUNDLE.read_text(encoding="utf-8"))
+
+    def test_workload_source_bundle_covers_complete_harness_source(self) -> None:
+        manifest = json.loads(M4_BUNDLE.read_text(encoding="utf-8"))
+        self.assertEqual(
+            (manifest["kind"], manifest["entrypoint"]),
+            ("ferrum2.m4-windows-tun-source-bundle.v2", "src/main.rs"),
+        )
+        rows = {row["path"]: row for row in manifest["files"]}
+        actual = {"Cargo.toml"}
+        actual.update(
+            path.relative_to(M4_PACKAGE_ROOT).as_posix()
+            for path in (M4_PACKAGE_ROOT / "src").rglob("*.rs")
+        )
+        self.assertEqual(set(rows), actual)
+        for relative, row in rows.items():
+            payload = (M4_PACKAGE_ROOT / relative).read_bytes()
+            self.assertEqual(row["bytes"], len(payload))
+            self.assertEqual(row["sha256"], hashlib.sha256(payload).hexdigest())
+
+    def test_process_owner_contains_descendants_in_kill_on_close_job(self) -> None:
+        self.assertIn("AssignProcessToJobObject", self.process_owner)
+        self.assertIn("JobObjectLimitKillOnJobClose", self.process_owner)
+        self.assertIn("CreateSuspended", self.process_owner)
+        self.assertIn("ResumeThread", self.process_owner)
+        self.assertIn("CloseGroup", self.process_owner)
+
+    def test_cleanup_uses_ledger_identities_not_global_name_sweeps(self) -> None:
+        self.assertIn("Remove-Ferrum2LedgerResources", self.ownership)
+        self.assertIn("process identity mismatch", self.ownership)
+        self.assertIn("owned adapter GUID identity mismatch", self.ownership)
+        self.assertIn("/remove-device $pnpId", self.ownership)
+        self.assertIn('expected_interface_description = "Ferrum2 Tunnel"', self.ownership)
+        for forbidden in (
+            "Get-NetAdapter | Remove",
+            "Stop-Process -Name",
+            "0.0.0.0/0",
+            "::/0",
+            "Set-DnsClientServerAddress",
+            "Disable-NetAdapter",
+            "Enable-NetAdapter",
         ):
-            self.assertIn(f"function {canonical}", self.bootstrap)
+            self.assertNotIn(forbidden, self.ownership)
 
-    def test_guest_bundle_manifest_stays_within_its_controller_root(self) -> None:
-        self.assertIn(
-            'Join-Path $performanceControllerBundleRoot "controller-bundle.json"',
-            self.host_vm_transaction,
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")
+    def test_process_owner_rejects_a_second_module_load(self) -> None:
+        manifest = str(MODULE_MANIFEST).replace("'", "''")
+        completed = subprocess.run(
+            [
+                "pwsh",
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                f"Import-Module '{manifest}' -ErrorAction Stop; "
+                f"Import-Module '{manifest}' -Force -ErrorAction Stop",
+            ],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
         )
-        self.assertIn(
-            'Join-Path $controllerBundleRoot "controller-bundle.json"',
-            self.guest_transaction,
-        )
-        self.assertNotIn(
-            'Join-Path $InputRoot "controller-bundle.json"',
-            self.guest_transaction,
-        )
-        for collector in self.collectors:
-            self.assertIn(
-                'Join-Path $PSScriptRoot "controller-bundle.json"',
-                collector,
-            )
-            self.assertNotIn(
-                "Split-Path -Parent $PSScriptRoot",
-                collector,
-            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("process owner is already loaded", completed.stderr)
 
-    def test_guest_transaction_returns_only_its_closed_result(self) -> None:
-        self.assertIn(
-            "[void](Add-Type -Path $processOwnerSource)",
-            self.guest_transaction,
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")
+    def test_plan_only_is_unprivileged_and_excludes_long_soak(self) -> None:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        completed = subprocess.run(
+            [
+                "pwsh",
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                str(RUNNER),
+                "-PlanOnly",
+                "-Mode",
+                "Quick",
+                "-BaselineSha",
+                sha,
+                "-CandidateSha",
+                sha,
+            ],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
         )
-        self.assertTrue(self.guest_transaction.rstrip().endswith("$guestControllerResult"))
-
-    def test_udp_diagnostic_exits_before_formal_evidence_reduction(self) -> None:
-        result = self.source.index(". $hostUdpResultPath")
-        diagnostic_exit = self.source.index(
-            "if ($instrumentedDiagnosticMode) {\n    exit 0\n}",
-            result,
+        plan = json.loads(completed.stdout)
+        self.assertEqual(plan["execution"], "explicit-authorized-windows-host")
+        self.assertEqual(plan["pair_count"], 3)
+        self.assertEqual(plan["trial_count"], 12)
+        self.assertEqual(plan["qualification"]["product_lifecycle_cycles"], 0)
+        self.assertEqual(plan["qualification"]["long_durability_soak"], "excluded")
+        self.assertFalse(plan["qualification"]["vm_start"])
+        self.assertFalse(plan["qualification"]["checkpoint_restore"])
+        self.assertFalse(plan["qualification"]["guest_staging"])
+        lifecycle_command = completed.args.copy()
+        lifecycle_command[lifecycle_command.index("Quick")] = "Lifecycle"
+        lifecycle_plan = json.loads(
+            subprocess.run(
+                lifecycle_command,
+                cwd=ROOT,
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout
         )
-        formal_evidence = self.source.index("$rawEvidence =", result)
-
-        self.assertLess(result, diagnostic_exit)
-        self.assertLess(diagnostic_exit, formal_evidence)
-
-    def test_script_validation_selects_bounded_pairs_and_skips_reduction(self) -> None:
-        source = self.source
-        raw_evidence = source.index('$rawEvidence =')
-        validation = source.index('if ($scriptValidationMode) {', raw_evidence)
-        reducer = source.index('$summaryArguments =', validation)
-
-        self.assertLess(raw_evidence, validation)
-        self.assertLess(validation, reducer)
-        self.assertIn("qualification = $false", source[validation:reducer])
-        self.assertIn("formal_plan_trials = @($plan.trials).Count", source)
-        self.assertIn(
-            "[int]$_.pair -le $scriptValidationPairCount",
-            self.host_vm_transaction,
-        )
-        self.assertIn(
-            "[int]$_.pair -le $ValidationPairCountValue",
-            self.guest_transaction,
-        )
-        self.assertIn(
-            "$executionTrials.Count -ne (18 * $scriptValidationPairCount)",
-            self.host_vm_transaction,
-        )
-        self.assertIn(
-            "$executionTrials.Count -ne (18 * $ValidationPairCountValue)",
-            self.guest_transaction,
-        )
+        self.assertIsInstance(lifecycle_plan["trials"], list)
+        self.assertEqual(len(lifecycle_plan["trials"]), 1)
 
 
 if __name__ == "__main__":

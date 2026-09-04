@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import pathlib
 import sys
@@ -23,12 +22,11 @@ from tools.performance_candidate.linux.schedule import scenario_schedule, schedu
 from tools.performance_candidate.linux.scale import load_scale_safety_policy
 from tools.performance_candidate.linux.scale_lineage import build_scale_lineage, load_scale_lineage, validate_scale_source_lineage
 from tools.performance_candidate.output import _atomic_text
-from tools.performance_candidate.windows_tun.plan import create_windows_tun_plan, load_windows_tun_plan
-from tools.performance_candidate.windows_tun.policy import load_windows_tun_policy
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_RUN_KINDS
-from tools.performance_candidate.windows_tun.summary import run_windows_tun_summary_command
-from tools.performance_candidate.windows_tun.trial import WINDOWS_TUN_TRIAL_MAX_BYTES, validate_windows_tun_trial
-from tools.performance_candidate.windows_tun.udp_diagnostic import validate_windows_tun_udp_diagnostic
+from tools.performance_candidate.status import qualification_exit_code
+from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_MODES
+from tools.performance_candidate.windows_tun.summary import (
+    validate_windows_tun_host_evidence,
+)
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -135,77 +133,21 @@ def _parser() -> argparse.ArgumentParser:
     source_lineage.add_argument("--head-sha", required=True)
     source_lineage.add_argument("--parent-sha", required=True)
     source_lineage.add_argument("--candidate-sha", required=True)
-    windows_tun_plan = commands.add_parser(
-        "windows-tun-plan",
-        help="write the fixed nine-scenario Windows TUN paired plan",
+    windows_tun_validate = commands.add_parser(
+        "windows-tun-validate-host-evidence",
+        help="validate one cleanup-complete Windows-host TUN evidence bundle",
     )
-    windows_tun_plan.add_argument(
-        "--run-kind", required=True, choices=sorted(WINDOWS_TUN_RUN_KINDS)
-    )
-    windows_tun_plan.add_argument("--policy", required=True, type=pathlib.Path)
-    windows_tun_plan.add_argument("--output", required=True, type=pathlib.Path)
-    windows_tun_trials = commands.add_parser(
-        "windows-tun-trials",
-        help="emit scenario/member/pair/order rows from a canonical Windows TUN plan",
-    )
-    windows_tun_trials.add_argument("--plan", required=True, type=pathlib.Path)
-    windows_tun_trials.add_argument("--policy", required=True, type=pathlib.Path)
-    windows_tun_validate_trial = commands.add_parser(
-        "windows-tun-validate-trial",
-        help="validate one raw approved-guest Windows TUN trial",
-    )
-    windows_tun_validate_trial.add_argument(
-        "--plan", required=True, type=pathlib.Path
-    )
-    windows_tun_validate_trial.add_argument(
-        "--trial", required=True, type=pathlib.Path
-    )
-    windows_tun_validate_trial.add_argument("--parent-sha", required=True)
-    windows_tun_validate_trial.add_argument("--candidate-sha", required=True)
-    windows_tun_validate_trial.add_argument(
-        "--policy", required=True, type=pathlib.Path
-    )
-    windows_tun_validate_udp_diagnostic = commands.add_parser(
-        "windows-tun-validate-udp-diagnostic",
-        help="validate one bounded non-qualification Windows TUN UDP diagnostic",
-    )
-    windows_tun_validate_udp_diagnostic.add_argument(
-        "--plan", required=True, type=pathlib.Path
-    )
-    windows_tun_validate_udp_diagnostic.add_argument(
+    windows_tun_validate.add_argument(
         "--evidence-root", required=True, type=pathlib.Path
     )
-    windows_tun_validate_udp_diagnostic.add_argument("--parent-sha", required=True)
-    windows_tun_validate_udp_diagnostic.add_argument("--candidate-sha", required=True)
-    windows_tun_validate_udp_diagnostic.add_argument(
+    windows_tun_validate.add_argument("--baseline-sha", required=True)
+    windows_tun_validate.add_argument("--candidate-sha", required=True)
+    windows_tun_validate.add_argument(
+        "--mode", required=True, choices=sorted(WINDOWS_TUN_MODES)
+    )
+    windows_tun_validate.add_argument(
         "--policy", required=True, type=pathlib.Path
     )
-    windows_tun_summary = commands.add_parser(
-        "windows-tun-summarize",
-        help="validate and summarize paired Windows TUN evidence",
-    )
-    windows_tun_summary.add_argument("--plan", required=True, type=pathlib.Path)
-    windows_tun_summary.add_argument(
-        "--evidence-root", required=True, type=pathlib.Path
-    )
-    windows_tun_summary.add_argument("--parent-sha", required=True)
-    windows_tun_summary.add_argument("--candidate-sha", required=True)
-    windows_tun_summary.add_argument("--policy", required=True, type=pathlib.Path)
-    windows_tun_summary.add_argument("--output", required=True, type=pathlib.Path)
-    windows_tun_summary.add_argument("--markdown", required=True, type=pathlib.Path)
-    windows_tun_summary.add_argument(
-        "--calibration-output", type=pathlib.Path
-    )
-    for windows_command in (
-        windows_tun_plan,
-        windows_tun_trials,
-        windows_tun_validate_trial,
-        windows_tun_validate_udp_diagnostic,
-        windows_tun_summary,
-    ):
-        windows_command.add_argument(
-            "--controller-bundle-sha256", required=True
-        )
     return parser
 
 
@@ -215,8 +157,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return run_summary_command(parsed)
     if parsed.command == "aggregate":
         return run_aggregate_command(parsed)
-    if parsed.command == "windows-tun-summarize":
-        return run_windows_tun_summary_command(parsed)
     try:
         if parsed.command == "validate-inputs":
             validate_measurement_inputs(
@@ -364,106 +304,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 parsed.candidate_sha,
             )
             return 0
-        if parsed.command == "windows-tun-plan":
-            policy = load_windows_tun_policy(
-                parsed.policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            plan = create_windows_tun_plan(
-                run_kind=parsed.run_kind,
-                decision_policy=policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            _atomic_text(
-                parsed.output,
-                json.dumps(plan, sort_keys=True, indent=2, allow_nan=False) + "\n",
-            )
-            return 0
-        if parsed.command == "windows-tun-trials":
-            policy = load_windows_tun_policy(
-                parsed.policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            plan = load_windows_tun_plan(
-                parsed.plan,
-                decision_policy=policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            for trial in plan["trials"]:
-                print(
-                    "\t".join(
-                        str(trial[field])
-                        for field in (
-                            "sequence",
-                            "scenario",
-                            "member",
-                            "pair",
-                            "order",
-                        )
-                    )
-                )
-            return 0
-        if parsed.command == "windows-tun-validate-trial":
-            policy = load_windows_tun_policy(
-                parsed.policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            plan = load_windows_tun_plan(
-                parsed.plan,
-                decision_policy=policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            try:
-                raw = parsed.trial.read_bytes()
-            except OSError as error:
-                raise CandidateControlError(
-                    "unable to read Windows TUN trial"
-                ) from error
-            if len(raw) > WINDOWS_TUN_TRIAL_MAX_BYTES:
-                raise CandidateControlError("Windows TUN trial exceeds the size bound")
-            try:
-                row = _strict_json(
-                    raw.decode("utf-8"), source="Windows TUN trial"
-                )
-            except UnicodeError as error:
-                raise CandidateControlError(
-                    "Windows TUN trial must be UTF-8"
-                ) from error
-            scenario, pair, member = validate_windows_tun_trial(
-                row,
-                plan=plan,
-                parent_sha=parsed.parent_sha,
-                candidate_sha=parsed.candidate_sha,
-            )
-            print(f"{scenario}\t{member}\t{pair}\t{row['order']}")
-            return 0
-        if parsed.command == "windows-tun-validate-udp-diagnostic":
-            policy = load_windows_tun_policy(
-                parsed.policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            plan = load_windows_tun_plan(
-                parsed.plan,
-                decision_policy=policy,
-                controller_bundle_sha256=parsed.controller_bundle_sha256,
-            )
-            try:
-                plan_sha256 = hashlib.sha256(parsed.plan.read_bytes()).hexdigest()
-            except OSError as error:
-                raise CandidateControlError("unable to hash Windows TUN plan") from error
-            row = validate_windows_tun_udp_diagnostic(
-                plan=plan,
-                plan_sha256=plan_sha256,
+        if parsed.command == "windows-tun-validate-host-evidence":
+            report = validate_windows_tun_host_evidence(
                 evidence_root=parsed.evidence_root,
-                parent_sha=parsed.parent_sha,
+                baseline_sha=parsed.baseline_sha,
                 candidate_sha=parsed.candidate_sha,
+                mode=parsed.mode,
+                policy_path=parsed.policy,
             )
-            trial = row["trial"]
-            print(
-                f"{trial['scenario']}\t{trial['member']}\t{trial['pair']}\t"
-                f"{row['trial_status']}\t{row['evidence_status']}\tqualification=false"
-            )
-            return 0
+            print(json.dumps(report, sort_keys=True, allow_nan=False))
+            return qualification_exit_code(report["status"])
         raise AssertionError(f"unhandled command: {parsed.command}")
     except CandidateControlError as error:
         print(f"performance-candidate: {error}", file=sys.stderr)

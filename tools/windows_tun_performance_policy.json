@@ -1,329 +1,43 @@
 {
-  "policy_id": "windows-tun-network-model-calibration-required-v5",
-  "scenarios": {
-    "fragment-reassembly-throughput": {
-      "metrics": {
-        "reassembly_rate": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "reassembled_payload_bytes_per_second"
-        }
-      }
+  "schema_version": 1,
+  "kind": "ferrum2.windows-tun.host-performance-policy",
+  "selection": "windows-tun-host",
+  "threshold_percent": 2.0,
+  "maximum_non_target_regression_percent": 2.0,
+  "require_majority_pairs": true,
+  "profiles": {
+    "Quick": {
+      "pair_count": 3,
+      "warmup_seconds": 2,
+      "active_seconds": 10,
+      "lifecycle_cycles": 0,
+      "scenarios": [
+        "udp-packets-per-second",
+        "fragment-reassembly-throughput"
+      ]
     },
-    "idle-cpu-wakeup": {
-      "metrics": {
-        "cpu_idle_cost": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "cpu_nanoseconds_per_second"
-        },
-        "wakeups": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "process_context_switches_per_second"
-        }
-      }
+    "Confirm": {
+      "pair_count": 5,
+      "warmup_seconds": 5,
+      "active_seconds": 30,
+      "lifecycle_cycles": 0,
+      "scenarios": [
+        "udp-packets-per-second",
+        "fragment-reassembly-throughput",
+        "tcp-single-flow"
+      ]
     },
-    "network-lifecycle": {
-      "metrics": {
-        "full_rebuild_p50": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "p50_full_rebuild_nanoseconds"
-        },
-        "full_rebuild_p95": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "p95_full_rebuild_nanoseconds"
-        },
-        "full_rebuild_p99": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "p99_full_rebuild_nanoseconds"
-        },
-        "interface_resolver_cache_hit": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "cache_hits_per_million_resolutions"
-        },
-        "interface_switch_recovery": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "interface_switch_recovery_nanoseconds"
-        },
-        "reset_p50": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "p50_reset_network_nanoseconds"
-        },
-        "reset_p95": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "p95_reset_network_nanoseconds"
-        },
-        "reset_p99": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "p99_reset_network_nanoseconds"
-        }
-      }
-    },
-    "udp-route-once": {
-      "metrics": {
-        "association_creation_rate": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "associations_per_second"
-        },
-        "multi_target_packet_rate": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "multi_target_datagrams_per_second"
-        },
-        "router_invocations_avoided": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "avoided_router_invocations"
-        }
-      }
-    },
-    "tcp-256-flow-fairness": {
-      "metrics": {
-        "fairness": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "jain_index_parts_per_billion"
-        }
-      }
-    },
-    "tcp-single-flow": {
-      "metrics": {
-        "cpu_cost": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "cpu_nanoseconds_per_gibibyte"
-        },
-        "throughput": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "bytes_per_second"
-        }
-      }
-    },
-    "udp-8192-association-lookup-expiry": {
-      "metrics": {
-        "expiry_cost": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "nanoseconds_per_8192_expirations"
-        },
-        "lookup_rate": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "lookups_per_second"
-        }
-      }
-    },
-    "udp-packets-per-second": {
-      "metrics": {
-        "packet_rate": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "higher_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "datagrams_per_second"
-        }
-      }
-    },
-    "wintun-ring-full-drop-rate": {
-      "metrics": {
-        "drop_rate": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "dropped_packets_per_million_responses"
-        },
-        "pending_response_peak": {
-          "adoption_threshold_percent": null,
-          "calibration_artifact_sha256": null,
-          "calibration_environment": null,
-          "calibration_source": null,
-          "direction": "lower_is_better",
-          "minimum_losses": null,
-          "minimum_pairs": null,
-          "minimum_wins": null,
-          "noise_band_percent": null,
-          "regression_threshold_percent": null,
-          "unit": "pending_udp_responses"
-        }
-      }
+    "Lifecycle": {
+      "pair_count": 0,
+      "warmup_seconds": 0,
+      "active_seconds": 0,
+      "lifecycle_cycles": 20,
+      "scenarios": []
     }
   },
-  "schema_version": 4,
-  "selection": "windows-tun-m17"
+  "soak": {
+    "enabled_by_default": false,
+    "cycles": 1000,
+    "candidate_decision_input": false
+  }
 }

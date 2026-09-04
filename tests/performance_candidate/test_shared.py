@@ -246,29 +246,26 @@ class ScenarioPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(json_contract.CandidateControlError, "diagnostic"):
             self.plan("diagnostic", "udp-payload-matrix")
 
-    def test_only_named_windows_tun_lifecycle_profiles_are_qualification_only(
-        self,
-    ) -> None:
-        for selection in (
+    def test_windows_tun_host_selection_uses_only_the_dedicated_runner(self) -> None:
+        with self.assertRaisesRegex(
+            json_contract.CandidateControlError,
+            "dedicated host performance runner",
+        ):
+            self.plan("qualification", windows_recipe.WINDOWS_TUN_SELECTION)
+        for obsolete in (
             "windows-tun-network-reset-10",
             "windows-tun-network-reset-100",
             "windows-tun-network-reset-1000",
             "windows-tun-scheduler-ring-full",
+            "windows-tun-route-detect",
+            "windows-tun-unregistered",
         ):
-            with self.subTest(selection=selection):
+            with self.subTest(selection=obsolete):
                 with self.assertRaisesRegex(
                     json_contract.CandidateControlError,
-                    "lifecycle selection is qualification-only",
+                    "selection",
                 ):
-                    self.plan("qualification", selection)
-        with self.assertRaisesRegex(json_contract.CandidateControlError, "selection"):
-            self.plan("qualification", "windows-tun-route-detect")
-        with self.assertRaisesRegex(
-            json_contract.CandidateControlError, "dedicated windows-tun-plan"
-        ):
-            self.plan("qualification", windows_recipe.WINDOWS_TUN_SELECTION)
-        with self.assertRaisesRegex(json_contract.CandidateControlError, "selection"):
-            self.plan("qualification", "windows-tun-unregistered")
+                    self.plan("qualification", obsolete)
 
     def test_workflow_exposes_only_controller_plannable_selections(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

@@ -22,40 +22,44 @@ workflow inputs -> controller plan -> m4 profile-workload producer
 The Windows evidence chain is:
 
 ```text
-host PowerShell transaction -> controller plan -> staged Rust/PowerShell producers
--> bounded raw trials and network-model observations
--> controller validation/summary -> reviewed Windows policy decision
+host PowerShell transaction -> closed profile plan -> independently built baseline/candidate
+-> interleaved real-Wintun trials -> bounded raw evidence
+-> host validation/paired summary -> reviewed decision
 ```
 
 The Windows performance PowerShell implementation is owned by
-`tools/powershell/Ferrum2.Performance`. The three public scripts remain composition
-roots: the host script owns CLI/transaction/final cleanup, the trial collector
-dispatches to scenario owners, and the UDP diagnostic dispatches to its source and
-evidence owners. `PerformanceProcessOwner.cs` owns the guest process/job-object
-interop instead of embedding C# in a script. The module exports only
-`Get-Ferrum2PerformanceGuestFileMap`, which defines the exact guest staging surface.
+`tools/powershell/Ferrum2.Performance`. Its only public composition root is
+`tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. The runner interface exposes
+planning, recovery, `Quick`, `Confirm`, and `Lifecycle`; it hides adapter names, benchmark addresses,
+ports, process IDs, routes, temporary files, ledgers, cleanup, and evidence construction.
+`PerformanceProcessOwner.cs` places every spawned product and support process in one kill-on-close job
+instead of embedding process-tree interop in the runner.
 
-`tools/powershell/Ferrum2.Performance/bundle.json` is the canonical static source
-bundle. It binds every host, guest, collector, diagnostic, scenario, module, C#,
-controller-bundle bootstrap, and consumed Common, Evidence, and HostHyperV source
-by path, byte length, and SHA-256. HostContract owns only policy, plan, and
-performance-specific composition; filesystem trust, VM identity/lifecycle, credential,
-and PowerShell Direct contracts come from the HostHyperV façade. Its complete-file digest is the Windows
-performance recipe/runner identity. At runtime, the host composes a separate
-runtime controller bundle from the guest subset, the two guest entrypoints, this
-source manifest, and the qualification modules; the controller-bundle root digest
-is recorded in the schema-v3 identity ledger and propagated through Windows plan
-v4, trial v5, summary/calibration v4, and policy v4. A source, file-map, or module change
-therefore requires manifest regeneration and fresh calibration review.
+`tools/powershell/Ferrum2.Performance/bundle.json` is the canonical closed host-performance source
+bundle. It binds every consumed runner, module, collector, scenario, and C# owner by canonical path,
+byte length, and SHA-256. Its complete-file digest is the Windows performance runner identity and is
+recorded from plan through raw evidence and summary. The bundle contains no qualification source and
+no Lab VM, checkpoint, PowerShell Direct, guest staging, or topology owner. Any source, file-map,
+schema, recipe, or paired-schedule change requires atomic producer/consumer updates and a new
+baseline; stale calibration or evidence is not comparable.
 
-Schema, recipe, source-path, source-hash, runner image, observed CPU/kernel stratum, or paired schedule changes require atomic producer/consumer updates. Linux trial schema v4 binds explicit units, deterministic cleanup, environment identity, and producer/controller/semantic-recipe/bundle digests. Both Linux and Windows use the pre-registered six-pair ABBA schedule; Windows therefore emits 108 ordinary trials. Any binding change makes existing calibration inapplicable until reviewed evidence is regenerated.
+`Quick` is the autoresearch feedback profile: one to three selected data-plane scenarios, short
+warmup and active windows, and at least three interleaved baseline/candidate pairs. `Confirm` runs all
+directly affected data-plane scenarios with longer windows and at least five interleaved or balanced
+pairs; it retains every pair and reports median ratio, range, outliers, CPU, throughput/PPS, drops,
+and errors without hiding regressions in an aggregate score. `Lifecycle` is separate, defaults to 20
+and caps at 100 complete product-start, TUN-probe, and product-stop cycles; it never changes a
+default route or disables or enables a physical adapter. The retired 1000-reset durability soak is
+disabled and cannot restart the host network. The non-target CPU guard compares client and server
+CPU cost per unit of reported work against the policy limit; it does not mistake proportionally
+higher utilization from higher throughput for a regression.
 
-The Windows runner's explicit `-ValidationOnly` mode is control-path evidence, not performance
-evidence. `-ValidationPairCount 1` executes one complete pair for each of the nine scenarios while
-retaining the canonical 108-trial plan as its reviewed input. Its result is
-`script-validation.json` with `qualification: false`; it skips summary reduction, calibration
-generation, adoption, and regression decisions. The ordinary runner continues to require all six
-pairs and exactly 108 trials.
+Every real run requires an already elevated shell and the literal
+`-AcknowledgeHostNetworkMutation` switch. The runner uses dedicated RFC 2544 addresses and only exact
+benchmark routes; it must prove benchmark traffic enters the owned TUN and underlay, support, and
+127.0.0.1:1080 traffic do not. Each mutation is recorded incrementally in a per-RunId recovery ledger.
+Success requires identity-safe cleanup plus readback proving no owned adapter, route, process, or port
+remains.
 
 Closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`, `REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`. Only the first two are accepted. Invalid evidence exits 2, regression exits 3, and inconclusive or calibration-required results exit 4.
 
@@ -74,4 +78,9 @@ External artifact retrieval must use an immutable identity. Missing or changed r
 
 ## Ordinary and privileged boundaries
 
-Ordinary CI may compile controllers, validate tracked fixtures, and run deterministic contract tests. It must not claim local Hyper-V, Wintun, WFP, or host-network evidence. Only the approved Hyper-V procedure may create Windows TUN performance evidence, and success requires exported raw evidence, complete cleanup, restoration of the same checkpoint, and the VM left Off.
+Ordinary CI may compile controllers, validate tracked fixtures, parse PowerShell, reconstruct the
+closed bundle, and run deterministic contract tests. It must not create a real adapter or claim
+Wintun, WFP, or host-network evidence. `-PlanOnly` is unprivileged and nonmutating. Real Windows TUN
+performance evidence may be created only by the dedicated host runner from an already elevated shell
+with explicit acknowledgement; success requires exported raw evidence and verified per-run cleanup.
+Hyper-V remains a separate correctness-qualification boundary and is not a performance fallback.

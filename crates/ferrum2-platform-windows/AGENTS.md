@@ -38,12 +38,15 @@ cargo test -p ferrum2-platform-windows --lib --no-default-features --features fu
 cargo check -p ferrum2-platform-windows --all-features --locked
 ```
 
-The explicit no-default-feature library suite is hosted-safe on ordinary Linux and hosted Windows. Linux exercises
-target-neutral logic and unsupported-target behavior; hosted Windows additionally exercises injected
-operation seams. `live-backend` is the positive production capability and remains enabled by default
-and by `--all-features`; hosted test commands must disable default features so the live Windows module
-is absent from their dependency graph. Tests must not call `Adapter::create` or invoke route, address, DNS, WFP, interface,
-or Hyper-V mutators. Live Wintun/WFP behavior and adapter profiles run only in the pinned local
-Hyper-V guest. The local qualification runner must restore the approved checkpoint, stage host-built
-artifacts, export evidence, restore the same checkpoint again, and leave the VM Off. Hosted unit tests
-prove transaction semantics, not live-driver behavior; CI must not claim privileged TUN evidence.
+The explicit no-default-feature library suite is hosted-safe on ordinary Linux and hosted Windows.
+Linux exercises target-neutral logic and unsupported-target behavior; hosted Windows additionally
+exercises injected operation seams. `live-backend` is the positive production capability and remains
+enabled by default and by `--all-features`; hosted test commands must disable default features so the
+live Windows module is absent from their dependency graph. Tests must not call `Adapter::create` or
+invoke route, address, DNS, WFP, interface, or Hyper-V mutators. Live correctness qualification
+remains in the pinned local Hyper-V guest. Live performance may run directly on Windows only through
+the repository's dedicated host performance runner, from an already elevated shell, with explicit
+network-mutation acknowledgement and per-run transactional ownership/recovery. That runner must not
+change default routes, host DNS, WFP, physical adapters, WLAN, sing-box, or unrelated resources.
+Hosted unit tests prove transaction semantics, not live-driver behavior; CI must not claim privileged
+TUN evidence.

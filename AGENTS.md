@@ -46,8 +46,13 @@ python -X utf8 tests/platform/qualify_native.py --local-contract --profile windo
 The client test binary is compile-only on ordinary hosts. The hosted `ferrum2-tun` and
 `ferrum2-platform-windows` library suites are safe by contract: they use target-neutral logic,
 unsupported-target stubs, or injected Windows operations and run in ordinary Linux and hosted Windows
-CI. Tests that create a real adapter or mutate route, DNS, WFP, interface, or Hyper-V state do not
-belong in either hosted library suite; keep them in the approved local Hyper-V qualification runner.
+CI. Tests must never create a real adapter or mutate route, DNS, WFP, interface, or Hyper-V state.
+Privileged correctness qualification remains confined to the approved local Hyper-V runner. The sole
+host-performance exception is the operator-facing
+`tools/windows-tun/performance/run_windows_tun_performance_host.ps1`: real execution requires an
+already elevated shell, the explicit `-AcknowledgeHostNetworkMutation` switch, dedicated benchmark
+addresses and narrow routes, and transaction/recovery verification for only that run's resources. It
+must not change a default route, host DNS, a physical adapter, WLAN, sing-box, or unrelated state.
 The deterministic TUN smoke corpus and sanitizer-backed, pure in-memory fuzz targets run only in their
 bounded Linux CI workflow. `tests/platform/qualify_native.py --local-contract` may execute its
 unprivileged loopback binary contract locally; omitting `--local-contract` retains hosted-CI identity

@@ -231,8 +231,8 @@ class FuzzContractTests(unittest.TestCase):
 
         for relative in [
             "tests/platform/Main.CampaignController.ps1",
-            "tools/powershell/Ferrum2.Performance/HostContract.ps1",
-            "tools/windows-tun/performance/run_windows_tun_performance_hyperv.ps1",
+            "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
+            "tools/windows-tun/performance/run_windows_tun_performance_host.ps1",
             "tools/windows_tun_hyperv_support_topology_plan.json",
             "tools/windows_tun_performance_policy.json",
         ]:

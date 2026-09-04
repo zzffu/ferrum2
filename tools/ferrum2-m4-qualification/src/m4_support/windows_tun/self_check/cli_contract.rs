@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::net::IpAddr;
 
 use super::super::contract::{
@@ -38,10 +38,55 @@ pub(super) fn check() -> Result<(), String> {
         || parsed.tcp_port != 443
         || parsed.udp_port != 53
         || parsed.output != output
+        || parsed.window.is_some()
+        || parsed.active_markers.is_some()
         || parsed.association_source.is_some()
         || parsed.diagnostic.is_some()
     {
         return Err("Windows TUN workload arguments were not preserved".to_owned());
+    }
+    let mut timed = arguments.clone();
+    timed.extend([
+        OsString::from("--warmup-seconds"),
+        OsString::from("2"),
+        OsString::from("--active-seconds"),
+        OsString::from("10"),
+    ]);
+    let timed_parsed = parse_workload(&timed)?;
+    let active_ready = output.with_extension("active-ready");
+    let active_complete = output.with_extension("active-complete");
+    if timed_parsed
+        .window
+        .is_none_or(|window| window.warmup.as_secs() != 2 || window.active.as_secs() != 10)
+        || timed_parsed.active_markers.as_ref().is_none_or(|markers| {
+            markers.ready != active_ready || markers.complete != active_complete
+        })
+    {
+        return Err("explicit Windows TUN workload window was not preserved".to_owned());
+    }
+    for marker in [&active_ready, &active_complete] {
+        File::create(marker)
+            .map_err(|error| format!("create active-window self-check marker failed: {error}"))?;
+        if parse_workload(&timed).is_ok() {
+            return Err("existing active-window marker was accepted".to_owned());
+        }
+        fs::remove_file(marker)
+            .map_err(|error| format!("remove active-window self-check marker failed: {error}"))?;
+    }
+    let mut incomplete_window = arguments.clone();
+    incomplete_window.extend([OsString::from("--warmup-seconds"), OsString::from("2")]);
+    let mut zero_window = timed.clone();
+    zero_window[11] = OsString::from("0");
+    let mut oversized_window = timed.clone();
+    oversized_window[13] = OsString::from("301");
+    let mut count_window = timed.clone();
+    count_window[1] = OsString::from("wintun-ring-full-drop-rate");
+    if parse_workload(&incomplete_window).is_ok()
+        || parse_workload(&zero_window).is_ok()
+        || parse_workload(&oversized_window).is_ok()
+        || parse_workload(&count_window).is_ok()
+    {
+        return Err("invalid Windows TUN workload window was accepted".to_owned());
     }
     let mut duplicate = arguments.clone();
     duplicate.extend([

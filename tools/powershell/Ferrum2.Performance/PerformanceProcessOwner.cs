@@ -9,10 +9,14 @@ using System.Threading;
 public static class Ferrum2PerfProcessGroup {
     private const uint CreateNewConsole = 0x00000010;
     private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateSuspended = 0x00000004;
+    private const uint AttachParentProcess = 0xffffffff;
     private const int StartfUseShowWindow = 0x00000001;
     private const int StartfUseStdHandles = 0x00000100;
     private const uint FileAppendData = 0x00000004;
     private const uint GenericRead = 0x80000000;
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectExtendedLimitInformation = 9;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint FileShareDelete = 0x00000004;
@@ -23,6 +27,7 @@ public static class Ferrum2PerfProcessGroup {
     private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
     private static readonly Dictionary<uint, IntPtr> Handles = new Dictionary<uint, IntPtr>();
     private static readonly object Sync = new object();
+    private static IntPtr JobHandle = IntPtr.Zero;
     private static readonly ManualResetEvent ConsoleControlReceived = new ManualResetEvent(false);
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -57,11 +62,41 @@ public static class Ferrum2PerfProcessGroup {
     private struct ProcessInformation {
         public IntPtr process; public IntPtr thread; public uint processId; public uint threadId;
     }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters {
+        public ulong readOperationCount; public ulong writeOperationCount;
+        public ulong otherOperationCount; public ulong readTransferCount;
+        public ulong writeTransferCount; public ulong otherTransferCount;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicLimitInformation {
+        public long perProcessUserTimeLimit; public long perJobUserTimeLimit;
+        public uint limitFlags; public UIntPtr minimumWorkingSetSize;
+        public UIntPtr maximumWorkingSetSize; public uint activeProcessLimit;
+        public UIntPtr affinity; public uint priorityClass; public uint schedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExtendedLimitInformation {
+        public BasicLimitInformation basicLimitInformation;
+        public IoCounters ioInfo;
+        public UIntPtr processMemoryLimit; public UIntPtr jobMemoryLimit;
+        public UIntPtr peakProcessMemoryUsed; public UIntPtr peakJobMemoryUsed;
+    }
     [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateProcessExtended(string application, StringBuilder command,
         IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags,
         IntPtr environment, string directory, ref StartupInfoEx startup,
         out ProcessInformation process);
+    [DllImport("kernel32.dll", EntryPoint = "CreateJobObjectW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(
+        IntPtr jobAttributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr job, int informationClass,
+        IntPtr information, uint informationLength);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateFileW(string fileName, uint desiredAccess, uint shareMode,
         ref SecurityAttributes securityAttributes, uint creationDisposition,
@@ -91,6 +126,33 @@ public static class Ferrum2PerfProcessGroup {
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GenerateConsoleCtrlEvent(uint control, uint group);
 
+    private static IntPtr EnsureJob() {
+        lock (Sync) {
+            if (JobHandle != IntPtr.Zero) return JobHandle;
+            var job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW");
+            IntPtr buffer = IntPtr.Zero;
+            try {
+                var limits = new ExtendedLimitInformation();
+                limits.basicLimitInformation.limitFlags = JobObjectLimitKillOnJobClose;
+                var bytes = Marshal.SizeOf(typeof(ExtendedLimitInformation));
+                buffer = Marshal.AllocHGlobal(bytes);
+                Marshal.StructureToPtr(limits, buffer, false);
+                if (!SetInformationJobObject(
+                    job, JobObjectExtendedLimitInformation, buffer, checked((uint)bytes)))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "SetInformationJobObject");
+                JobHandle = job;
+                return JobHandle;
+            } catch {
+                CloseHandle(job);
+                throw;
+            } finally {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
     private static IntPtr OpenInheritable(string path, uint access, uint disposition) {
         var security = new SecurityAttributes {
             length = Marshal.SizeOf(typeof(SecurityAttributes)),
@@ -110,7 +172,8 @@ public static class Ferrum2PerfProcessGroup {
         if (String.IsNullOrWhiteSpace(stdoutPath) || String.IsNullOrWhiteSpace(stderrPath))
             throw new ArgumentException("stdout and stderr redirection paths are required");
         var command = new StringBuilder("\"" + application + "\" " + arguments);
-        ProcessInformation process;
+        var process = new ProcessInformation();
+        var processCreated = false;
         IntPtr stdoutHandle = IntPtr.Zero;
         IntPtr stderrHandle = IntPtr.Zero;
         IntPtr stdinHandle = IntPtr.Zero;
@@ -151,10 +214,31 @@ public static class Ferrum2PerfProcessGroup {
                 throw new Win32Exception(Marshal.GetLastWin32Error(),
                     "UpdateProcThreadAttribute handle list");
             if (!CreateProcessExtended(application, command, IntPtr.Zero, IntPtr.Zero, true,
-                CreateNewConsole | ExtendedStartupInfoPresent, IntPtr.Zero, directory,
-                ref startup, out process))
+                CreateNewConsole | CreateSuspended | ExtendedStartupInfoPresent, IntPtr.Zero,
+                directory, ref startup, out process))
                 throw new Win32Exception(Marshal.GetLastWin32Error(),
                     "CreateProcessW redirected");
+            processCreated = true;
+            var job = EnsureJob();
+            if (!AssignProcessToJobObject(job, process.process))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(), "AssignProcessToJobObject");
+            if (ResumeThread(process.thread) == UInt32.MaxValue)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread");
+            var processId = checked((int)process.processId);
+            CloseHandle(process.thread);
+            process.thread = IntPtr.Zero;
+            lock (Sync) Handles.Add(process.processId, process.process);
+            process.process = IntPtr.Zero;
+            return processId;
+        } catch {
+            if (processCreated && process.process != IntPtr.Zero) {
+                TerminateProcess(process.process, 1);
+                CloseHandle(process.process);
+            }
+            if (processCreated && process.thread != IntPtr.Zero)
+                CloseHandle(process.thread);
+            throw;
         } finally {
             if (attributeList != IntPtr.Zero) {
                 if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
@@ -168,9 +252,6 @@ public static class Ferrum2PerfProcessGroup {
             if (stderrHandle != IntPtr.Zero && stderrHandle != InvalidHandleValue)
                 CloseHandle(stderrHandle);
         }
-        CloseHandle(process.thread);
-        lock (Sync) Handles.Add(process.processId, process.process);
-        return checked((int)process.processId);
     }
     public static bool Wait(uint processId, uint milliseconds) {
         IntPtr handle; lock (Sync) if (!Handles.TryGetValue(processId, out handle)) return false;
@@ -184,8 +265,8 @@ public static class Ferrum2PerfProcessGroup {
     public static bool Break(uint processId) {
         IntPtr handle; lock (Sync) if (!Handles.TryGetValue(processId, out handle)) return false;
         FreeConsole();
-        if (!AttachConsole(processId)) return false;
         try {
+            if (!AttachConsole(processId)) return false;
             if (!SetConsoleCtrlHandler(IgnoreConsoleControl, true)) return false;
             try {
                 ConsoleControlReceived.Reset();
@@ -198,6 +279,7 @@ public static class Ferrum2PerfProcessGroup {
             }
         } finally {
             FreeConsole();
+            AttachConsole(AttachParentProcess);
         }
     }
     public static bool Terminate(uint processId) {
@@ -208,5 +290,13 @@ public static class Ferrum2PerfProcessGroup {
         IntPtr handle;
         lock (Sync) { if (!Handles.TryGetValue(processId, out handle)) return; Handles.Remove(processId); }
         CloseHandle(handle);
+    }
+    public static void CloseGroup() {
+        IntPtr job;
+        lock (Sync) {
+            job = JobHandle;
+            JobHandle = IntPtr.Zero;
+        }
+        if (job != IntPtr.Zero) CloseHandle(job);
     }
 }

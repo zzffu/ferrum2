@@ -2,7 +2,15 @@
 
 ## Purpose and Interfaces
 
-`m4-qualification` is a bounded qualification executable, not production runtime code. Its ordinary/hosted modes are `throughput`, `resource`, `dns-resource`, `profile-workload`, and `self-check`. The privileged Windows guest modes are `windows-tun-workload`, `windows-tun-probe`, `windows-tun-support`, and `windows-tun-udp-diagnostic-finalize`; compile them on ordinary hosts, but execute them only inside the approved Hyper-V guest procedure. Keep argument parsing and execution fail-closed: reject unsupported modes, unbounded durations, malformed identities, unsafe paths, and incomplete readiness evidence before starting work.
+`m4-qualification` is a bounded qualification executable, not production runtime code. Its
+ordinary/hosted modes are `throughput`, `resource`, `dns-resource`, `profile-workload`, and
+`self-check`. The Windows TUN modes are `windows-tun-workload`, `windows-tun-probe`,
+`windows-tun-support`, and `windows-tun-udp-diagnostic-finalize`; compile them on ordinary hosts,
+but execute them only inside the approved Hyper-V correctness-qualification procedure or as
+job-contained children of the explicitly authorized
+`tools/windows-tun/performance/run_windows_tun_performance_host.ps1` runner. Keep argument parsing
+and execution fail-closed: reject unsupported modes, unbounded durations, malformed identities,
+unsafe paths, and incomplete readiness evidence before starting work.
 
 The `profile-workload` JSONL schema is consumed by the `tools.performance_candidate` Python package, its tests, and the performance workflow. Coordinate changes across those consumers. Preserve one complete record per trial, explicit parent/candidate identity, metric units, environment identity, correctness status, deterministic cleanup, and plan-bound producer/controller/semantic-recipe/bundle digests. This producer records observations; adoption and regression thresholds belong in the reviewed candidate policy, not here.
 

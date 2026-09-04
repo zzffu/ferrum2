@@ -141,19 +141,3 @@ FULL_NON_TUN_GROUPS = (
     "udp-direct-payload-bounds",
     "dns-udp-concurrency",
 )
-
-
-QUALIFICATION_ONLY_SELECTIONS = frozenset(
-    {
-        "windows-tun-network-reset-10",
-        "windows-tun-network-reset-100",
-        "windows-tun-network-reset-1000",
-        "windows-tun-restart-10",
-        "windows-tun-restart-100",
-        "windows-tun-restart-1000",
-        "windows-tun-fragments",
-        "windows-tun-dual-stack-dns",
-        "windows-tun-udp-policy",
-        "windows-tun-scheduler-ring-full",
-    }
-)

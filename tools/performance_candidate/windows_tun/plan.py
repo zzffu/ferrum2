@@ -1,165 +1,252 @@
-"""windows tun plan owner."""
+"""Validation for the nonmutating Windows-host TUN execution plan."""
 
 from __future__ import annotations
 
-import copy
+import hashlib
 import pathlib
+import re
 
-from tools.performance_candidate.windows_tun.recipe import recipe_sha256, scenario_catalog, scenario_contracts
-from tools.performance_candidate.json_contract import CandidateControlError, _canonical_json_bytes, _exact_fields, read_bounded_closed_json
-from tools.performance_candidate.windows_tun.policy import validate_windows_tun_policy, windows_tun_policy_is_calibrated
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_PAIR_COUNT, WINDOWS_TUN_PAIR_SCHEDULE, WINDOWS_TUN_RUN_KINDS, WINDOWS_TUN_SELECTION
+from tools.performance_candidate.json_contract import (
+    CandidateControlError,
+    SHA256,
+    _exact_fields,
+    read_bounded_closed_json,
+)
+from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_PROFILES
 
-WINDOWS_TUN_PLAN_SCHEMA_VERSION = 5
-WINDOWS_TUN_PLAN_MAX_BYTES = 4 * 1024 * 1024
-
-WINDOWS_TUN_DIAGNOSTIC_PROFILES = {
-    "UdpFlowBoundary": {
-        "scenario": "udp-8192-association-lookup-expiry",
-        "member": "parent",
-        "pair": 1,
-        "order": 1,
-    }
-}
-
-
-WINDOWS_TUN_PLAN_FIELDS = frozenset(
+WINDOWS_TUN_PLAN_MAX_BYTES = 512 * 1024
+_PERFORMANCE_SOURCE_BUNDLE = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "tools"
+    / "powershell"
+    / "Ferrum2.Performance"
+    / "bundle.json"
+)
+_PLAN_FIELDS = frozenset(
     {
         "schema_version",
         "kind",
-        "selection",
-        "run_kind",
-        "pairs",
-        "pair_schedule",
-        "recipe_sha256",
-        "controller_bundle_sha256",
+        "execution",
+        "run_id",
+        "mode",
+        "baseline_sha",
+        "candidate_sha",
+        "performance_source_bundle_sha256",
+        "pair_count",
+        "warmup_seconds",
+        "active_seconds",
+        "lifecycle_cycles",
+        "scenario_count",
+        "trial_count",
         "scenarios",
         "trials",
-        "diagnostic_profiles",
-        "decision_policy",
-        "calibration_complete",
-        "adoption_eligible",
+        "safety",
+        "qualification",
     }
+)
+_TRIAL_FIELDS = frozenset(
+    {
+        "sequence",
+        "pair",
+        "order",
+        "scenario",
+        "metric",
+        "unit",
+        "member",
+        "commit_sha",
+        "warmup_seconds",
+        "active_seconds",
+        "initial_product_state",
+    }
+)
+_LIFECYCLE_TRIAL_FIELDS = frozenset(
+    {"sequence", "scenario", "member", "commit_sha", "lifecycle_cycles", "action"}
 )
 
 
-def create_windows_tun_plan(
-    *,
-    run_kind: str,
-    decision_policy: dict[str, object],
-    controller_bundle_sha256: str,
-) -> dict[str, object]:
-    if run_kind not in WINDOWS_TUN_RUN_KINDS:
-        raise CandidateControlError(
-            "Windows TUN run_kind must be comparison or calibration-aa"
-        )
-    policy = copy.deepcopy(decision_policy)
-    validate_windows_tun_policy(
-        policy, controller_bundle_sha256=controller_bundle_sha256
+def _sha(value: object, field: str) -> str:
+    if type(value) is not str or SHA256.fullmatch(value) is None:
+        raise CandidateControlError(f"{field} must be a lowercase SHA-256 identity")
+    return value
+
+def _commit_sha(value: object, field: str) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise CandidateControlError(f"{field} must be a lowercase commit SHA")
+    return value
+
+
+def _run_id(value: object) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{12}", value) is None:
+        raise CandidateControlError("run_id must be a lowercase transaction identity")
+    return value
+
+
+def _exact_safety(plan: dict[str, object]) -> None:
+    safety = plan["safety"]
+    if type(safety) is not dict:
+        raise CandidateControlError("Windows TUN plan safety must be an object")
+    _exact_fields(
+        safety,
+        frozenset(
+            {
+                "requires_elevation",
+                "requires_explicit_acknowledgement",
+                "automatic_elevation",
+                "address_family",
+                "route_scope",
+                "mutations",
+                "forbidden_mutations",
+                "cleanup",
+                "recovery",
+            }
+        ),
+        "Windows TUN plan safety",
     )
-    contracts = scenario_contracts()
-    trials: list[dict[str, object]] = []
-    sequence = 0
-    # The canonical JSON form sorts object keys for hashing, but trial execution
-    # follows the reviewed declaration order. Never derive an ordered schedule
-    # from canonical object keys.
-    for scenario in scenario_catalog():
-        for pair in range(1, WINDOWS_TUN_PAIR_COUNT + 1):
-            members = ("parent", "candidate") if pair % 2 else ("candidate", "parent")
-            for order, member in enumerate(members, start=1):
-                sequence += 1
-                trials.append(
-                    {
+    if (
+        safety["requires_elevation"] is not True
+        or safety["requires_explicit_acknowledgement"] is not True
+        or safety["automatic_elevation"] is not False
+        or safety["address_family"] != "RFC2544 198.18.0.0/15"
+        or safety["route_scope"] != "run-owned /32 only"
+    ):
+        raise CandidateControlError("Windows TUN plan weakened the host authorization contract")
+    if safety["mutations"] != [
+        "one run-owned Wintun adapter",
+        "run-owned RFC2544 loopback support address",
+        "run-owned narrow routes",
+    ]:
+        raise CandidateControlError("Windows TUN plan mutation closure changed")
+    if safety["forbidden_mutations"] != [
+        "default route",
+        "system DNS",
+        "physical adapters",
+        "WLAN",
+        "firewall",
+        "WFP",
+        "sing-box",
+    ]:
+        raise CandidateControlError("Windows TUN plan forbidden mutation closure changed")
+
+
+def validate_windows_tun_plan(
+    value: object, *, baseline_sha: str, candidate_sha: str, mode: str
+) -> dict[str, object]:
+    if type(value) is not dict:
+        raise CandidateControlError("Windows TUN host plan must be a JSON object")
+    plan = value
+    _exact_fields(plan, _PLAN_FIELDS, "Windows TUN host plan")
+    if (
+        plan["schema_version"] != 1
+        or plan["kind"] != "ferrum2.windows-tun.host-performance-plan"
+        or plan["execution"] != "explicit-authorized-windows-host"
+        or plan["mode"] != mode
+    ):
+        raise CandidateControlError("Windows TUN host plan identity is invalid")
+    _run_id(plan["run_id"])
+    if mode not in WINDOWS_TUN_PROFILES:
+        raise CandidateControlError("Windows TUN host plan mode is invalid")
+    bundle_digest = _sha(
+        plan["performance_source_bundle_sha256"],
+        "performance_source_bundle_sha256",
+    )
+    expected_bundle_digest = hashlib.sha256(_PERFORMANCE_SOURCE_BUNDLE.read_bytes()).hexdigest()
+    if bundle_digest != expected_bundle_digest:
+        raise CandidateControlError(
+            "Windows TUN plan does not identify the reviewed performance source bundle"
+        )
+    if _commit_sha(plan["baseline_sha"], "baseline_sha") != baseline_sha:
+        raise CandidateControlError("Windows TUN plan baseline SHA changed")
+    if _commit_sha(plan["candidate_sha"], "candidate_sha") != candidate_sha:
+        raise CandidateControlError("Windows TUN plan candidate SHA changed")
+    profile = WINDOWS_TUN_PROFILES[mode]
+    for field in ("pair_count", "warmup_seconds", "active_seconds", "lifecycle_cycles"):
+        if plan[field] != profile[field]:
+            raise CandidateControlError(f"Windows TUN plan {field} changed")
+    expected_scenarios = [
+        {"name": name, "metric": metric, "unit": unit}
+        for name, metric, unit in profile["scenarios"]
+    ]
+    if plan["scenarios"] != expected_scenarios or plan["scenario_count"] != len(expected_scenarios):
+        raise CandidateControlError("Windows TUN plan scenario closure changed")
+    trials = plan["trials"]
+    if type(trials) is not list:
+        raise CandidateControlError("Windows TUN plan trials must be an array")
+    expected_trial_count = 1 if mode == "Lifecycle" else len(expected_scenarios) * profile["pair_count"] * 2
+    if plan["trial_count"] != expected_trial_count or len(trials) != expected_trial_count:
+        raise CandidateControlError("Windows TUN plan trial count is invalid")
+    if mode == "Lifecycle":
+        trial = trials[0]
+        if type(trial) is not dict:
+            raise CandidateControlError("Windows TUN lifecycle trial must be an object")
+        _exact_fields(trial, _LIFECYCLE_TRIAL_FIELDS, "Windows TUN lifecycle trial")
+        if trial != {
+            "sequence": 1,
+            "scenario": "product-lifecycle",
+            "member": "candidate",
+            "commit_sha": candidate_sha,
+            "lifecycle_cycles": 20,
+            "action": "product-start-probe-stop",
+        }:
+            raise CandidateControlError("Windows TUN lifecycle trial contract changed")
+    else:
+        sequence = 0
+        for scenario in expected_scenarios:
+            for pair in range(1, profile["pair_count"] + 1):
+                order = "baseline-candidate" if pair % 2 else "candidate-baseline"
+                members = ("baseline", "candidate") if pair % 2 else ("candidate", "baseline")
+                for member in members:
+                    sequence += 1
+                    trial = trials[sequence - 1]
+                    if type(trial) is not dict:
+                        raise CandidateControlError("Windows TUN plan trial must be an object")
+                    _exact_fields(trial, _TRIAL_FIELDS, "Windows TUN plan trial")
+                    expected_sha = baseline_sha if member == "baseline" else candidate_sha
+                    expected = {
                         "sequence": sequence,
-                        "scenario": scenario,
                         "pair": pair,
-                        "member": member,
                         "order": order,
+                        "scenario": scenario["name"],
+                        "metric": scenario["metric"],
+                        "unit": scenario["unit"],
+                        "member": member,
+                        "commit_sha": expected_sha,
+                        "warmup_seconds": profile["warmup_seconds"],
+                        "active_seconds": profile["active_seconds"],
+                        "initial_product_state": "fresh-processes-and-adapter",
                     }
-                )
-    calibrated = windows_tun_policy_is_calibrated(
-        policy, controller_bundle_sha256=controller_bundle_sha256
+                    if trial != expected:
+                        raise CandidateControlError(f"Windows TUN trial {sequence} changed")
+    _exact_safety(plan)
+    qualification = plan["qualification"]
+    if type(qualification) is not dict:
+        raise CandidateControlError("Windows TUN qualification plan must be an object")
+    _exact_fields(
+        qualification,
+        frozenset(
+            {"product_lifecycle_cycles", "long_durability_soak", "vm_start", "checkpoint_restore", "guest_staging"}
+        ),
+        "Windows TUN qualification plan",
     )
-    return {
-        "schema_version": WINDOWS_TUN_PLAN_SCHEMA_VERSION,
-        "kind": "windows_tun_performance_plan",
-        "selection": WINDOWS_TUN_SELECTION,
-        "run_kind": run_kind,
-        "pairs": WINDOWS_TUN_PAIR_COUNT,
-        "pair_schedule": WINDOWS_TUN_PAIR_SCHEDULE,
-        "recipe_sha256": recipe_sha256(controller_bundle_sha256),
-        "controller_bundle_sha256": controller_bundle_sha256,
-        "scenarios": contracts,
-        "trials": trials,
-        "diagnostic_profiles": copy.deepcopy(WINDOWS_TUN_DIAGNOSTIC_PROFILES),
-        "decision_policy": policy,
-        "calibration_complete": calibrated,
-        # A plan can enable a calibrated decision, but evidence is the only
-        # thing that can make the resulting comparison adoption-eligible.
-        "adoption_eligible": False,
-    }
-
-
-def load_windows_tun_plan(
-    path: pathlib.Path,
-    *,
-    decision_policy: dict[str, object],
-    controller_bundle_sha256: str,
-) -> dict[str, object]:
-    try:
-        plan = read_bounded_closed_json(
-            path,
-            maximum_bytes=WINDOWS_TUN_PLAN_MAX_BYTES,
-            source="Windows TUN performance plan",
-        ).value
-        if type(plan) is not dict:
-            raise CandidateControlError("Windows TUN plan must be a JSON object")
-        _exact_fields(plan, WINDOWS_TUN_PLAN_FIELDS, "Windows TUN performance plan")
-        expected = create_windows_tun_plan(
-            run_kind=plan["run_kind"],
-            decision_policy=decision_policy,
-            controller_bundle_sha256=controller_bundle_sha256,
-        )
-    except (KeyError, TypeError) as error:
-        raise CandidateControlError("Windows TUN performance plan is invalid") from error
-    if _canonical_json_bytes(plan) != _canonical_json_bytes(expected):
-        raise CandidateControlError(
-            "Windows TUN performance plan does not match the canonical recipe or policy"
-        )
+    if qualification != {
+        "product_lifecycle_cycles": profile["lifecycle_cycles"],
+        "long_durability_soak": "excluded",
+        "vm_start": False,
+        "checkpoint_restore": False,
+        "guest_staging": False,
+    }:
+        raise CandidateControlError("Windows TUN qualification isolation changed")
     return plan
 
 
-def resolve_windows_tun_diagnostic_profile(
-    plan: dict[str, object], profile: str
+def load_windows_tun_plan(
+    path: pathlib.Path, *, baseline_sha: str, candidate_sha: str, mode: str
 ) -> dict[str, object]:
-    """Resolve a stable diagnostic profile to its canonical scheduled trial."""
-
-    try:
-        profiles = plan["diagnostic_profiles"]
-        if type(profiles) is not dict or profile not in profiles:
-            raise CandidateControlError("Windows TUN diagnostic profile is unsupported")
-        selector = profiles[profile]
-        if type(selector) is not dict:
-            raise CandidateControlError("Windows TUN diagnostic profile must be an object")
-        selector_fields = {"scenario", "member", "pair", "order"}
-        _exact_fields(
-            selector,
-            selector_fields,
-            f"Windows TUN diagnostic profile {profile}",
-        )
-        trials = plan["trials"]
-        if type(trials) is not list:
-            raise CandidateControlError("Windows TUN plan trials must be an array")
-        matching = [
-            trial
-            for trial in trials
-            if type(trial) is dict
-            and all(trial.get(field) == selector[field] for field in selector_fields)
-        ]
-    except (KeyError, TypeError) as error:
-        raise CandidateControlError("Windows TUN diagnostic profile is invalid") from error
-    if len(matching) != 1:
-        raise CandidateControlError(
-            "Windows TUN diagnostic profile does not resolve to one canonical trial"
-        )
-    return matching[0]
+    document = read_bounded_closed_json(
+        path, maximum_bytes=WINDOWS_TUN_PLAN_MAX_BYTES, source="Windows TUN host plan"
+    )
+    return validate_windows_tun_plan(
+        document.value,
+        baseline_sha=baseline_sha,
+        candidate_sha=candidate_sha,
+        mode=mode,
+    )
