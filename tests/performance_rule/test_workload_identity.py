@@ -97,7 +97,7 @@ class WorkloadIdentityTests(unittest.TestCase):
                 return validate_report(raw, args[4])
 
             with mock.patch("tools.performance_rule.cli.run_once", side_effect=run), mock.patch("tools.performance_rule.cli.emit_result"):
-                with self.assertRaisesRegex(ControlError, "workload identity"):
+                with self.assertRaisesRegex(ControlError, "stage=runner_report category=invalid_evidence"):
                     control(["run", "--parent", str(executable), "--", *RUNNER_ARGUMENTS])
             self.assertEqual(calls, 12)
 

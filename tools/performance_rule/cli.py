@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
 import sys
 import time
@@ -13,13 +14,14 @@ from tools.performance_rule.evidence import (
     load_calibration,
     review_calibration_source,
 )
+from tools.performance_rule.failure import Category, Failure, Stage, classify, persist_failure
 from tools.performance_rule.pairing import (
     calibrated_limit,
     pair_execution_order,
     summarize,
 )
 from tools.performance_rule.policy import calibration_required_policy, threshold_policy
-from tools.performance_rule.output import EvidenceLimit, emit_result, encoded_size
+from tools.performance_rule.output import EvidenceLimit, OutputCleanupFailures, emit_result, encoded_size, encode_result
 from tools.performance_rule.runner_request import parse_runner_request
 from tools.performance_rule.runner_report import run_once
 from tools.performance_rule.validated_report import require_same_workload
@@ -40,11 +42,20 @@ from tools.performance_rule.schema import (
     runner_creation_flags,
     sha256_file,
     validate_pairs,
+    canonical_json_sha256,
 )
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise Failure(Stage.ARGUMENTS, Category.INVALID_INPUT)
+
+
 def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    if len(arguments) > 64 or sum(len(value) for value in arguments) > 65_536:
+        raise Failure(Stage.ARGUMENTS, Category.INVALID_INPUT)
+    parser = _Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="collect paired A/A or reviewed A/B evidence")
     run.add_argument("--parent", required=True, type=Path)
@@ -72,9 +83,26 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     review.add_argument("--reviewed-utc", required=True)
     review.add_argument("--output", required=True, type=Path)
     parsed = parser.parse_args(arguments)
+    if parsed.output is not None and parsed.output.suffix != ".json":
+        raise Failure(Stage.ARGUMENTS, Category.INVALID_INPUT)
     if parsed.command == "run" and parsed.runner_arguments[:1] == ["--"]:
         parsed.runner_arguments = parsed.runner_arguments[1:]
     return parsed
+
+
+def _emit_result(result: dict[str, Any], output: Path | None) -> None:
+    try:
+        emit_result(result, output)
+    except OutputCleanupFailures as error:
+        interruptions, _ = error.split((KeyboardInterrupt, SystemExit))
+        if interruptions is not None:
+            interruption = interruptions
+            while isinstance(interruption, BaseExceptionGroup):
+                interruption = interruption.exceptions[0]
+            raise interruption from None
+        raise classify(error, Stage.OUTPUT) from None
+    except Exception as error:
+        raise classify(error, Stage.OUTPUT) from None
 
 
 def _calibration_required_result(
@@ -132,7 +160,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             runner_arguments=args.runner_arguments,
             runner_priority=args.runner_priority,
         )
-        emit_result(result, args.output)
+        _emit_result(result, args.output)
         return result
     calibration = (
         load_calibration(args.calibration, parent_sha, args.runner_arguments, args.runner_priority)
@@ -174,12 +202,25 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
                 request.validate_report(validated.report)
                 workload = require_same_workload(workload, validated.workload_sha256)
             except EvidenceLimit:
-                emit_result(partial, args.output)
+                _emit_result(partial, args.output)
                 return partial
-            except (ControlError, OSError, subprocess.TimeoutExpired):
+            except Exception as error:
                 partial["decision_reason"] = "runner_report_failed"
-                emit_result(partial, args.output)
-                raise
+                failure = classify(error, Stage.RUNNER_REPORT)
+                failure.identity = {
+                    "parent_runner_sha256": parent_sha, "candidate_runner_sha256": candidate_sha,
+                    "runner_sha256": expected_sha, "pair": pair_index + 1,
+                    "order": order_index + 1, "role": role,
+                    "runner_arguments_sha256": canonical_json_sha256(args.runner_arguments),
+                    "partial_report_sha256": None,
+                }
+                try:
+                    _emit_result(partial, args.output)
+                    if args.output is not None:
+                        failure.identity["partial_report_sha256"] = hashlib.sha256(encode_result(partial).encode("utf-8")).hexdigest()
+                except Failure as output_failure:
+                    failure.add_secondary(output_failure)
+                raise failure from None
             expected_scenarios = validated.scenario_suites
             entry = {
                 "pair": pair_index + 1, "order": order_index + 1, "role": role,
@@ -197,7 +238,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             except EvidenceLimit:
                 # Keep every already-admitted report. The report that cannot
                 # fit is rejected, not silently dropped from a successful run.
-                emit_result(partial, args.output)
+                _emit_result(partial, args.output)
                 return partial
             partial = proposed
             pair[role] = validated.report
@@ -256,27 +297,60 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
     try:
         encoded_size(result)
     except EvidenceLimit:
-        emit_result(partial, args.output)
+        _emit_result(partial, args.output)
         return partial
-    emit_result(result, args.output)
+    _emit_result(result, args.output)
     return result
 
 
 def main(arguments: list[str] | None = None) -> int:
+    parsed = None
+    stage = Stage.ARGUMENTS
+    request_sha256 = None
     try:
         parsed = parse_arguments(arguments)
+        request_sha256 = canonical_json_sha256(list(sys.argv[1:] if arguments is None else arguments))
         if parsed.command == "review-calibration":
+            stage = Stage.CALIBRATION_REVIEW
             reviewed = review_calibration_source(
                 parsed.source_report,
                 output_path=parsed.output,
                 reviewed_by=parsed.reviewed_by,
                 reviewed_utc=parsed.reviewed_utc,
             )
-            emit_result(reviewed, parsed.output)
+            _emit_result(reviewed, parsed.output)
             return 0
+        stage = Stage.PREFLIGHT
         result = control(arguments if arguments is not None else sys.argv[1:])
-    except (ControlError, OSError, subprocess.TimeoutExpired) as error:
-        print(f"rule qualification control failed: {error}", file=sys.stderr)
+        if result["status"] == INVALID:
+            failure = Failure(Stage.OUTPUT, Category.OUTPUT_LIMIT)
+            failure.identity = {
+                "parent_runner_sha256": result["parent_runner_sha256"],
+                "candidate_runner_sha256": result["candidate_runner_sha256"],
+                "partial_report_sha256": hashlib.sha256(encode_result(result).encode("utf-8")).hexdigest() if parsed.output is not None else None,
+            }
+            raise failure
+    except BaseException as error:
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(error, BaseExceptionGroup):
+            interruptions, _ = error.split((KeyboardInterrupt, SystemExit))
+            if interruptions is not None:
+                interruption = interruptions
+                while isinstance(interruption, BaseExceptionGroup):
+                    interruption = interruption.exceptions[0]
+                raise interruption from None
+        elif not isinstance(error, Exception):
+            raise
+        failure = classify(error, stage)
+        if parsed is not None and parsed.output is not None:
+            try:
+                persist_failure(failure, parsed.output, request_sha256)
+            except Exception as evidence_error:
+                failure.add_secondary(classify(evidence_error, Stage.OUTPUT))
+        print(f"rule qualification control failed: {failure}", file=sys.stderr)
+        for secondary in failure.secondary:
+            print(f"rule qualification control failed: stage={secondary['stage']} category={secondary['category']}", file=sys.stderr)
         return 2
     if result["status"] in {CANDIDATE_WIN, WITHIN_CALIBRATED_BAND}:
         return 0
@@ -286,5 +360,5 @@ def main(arguments: list[str] | None = None) -> int:
         return 4
     if result["status"] == INVALID:
         return 2
-    print("rule qualification control failed: unknown status", file=sys.stderr)
+    print("rule qualification control failed: stage=output category=invalid_evidence", file=sys.stderr)
     return 2

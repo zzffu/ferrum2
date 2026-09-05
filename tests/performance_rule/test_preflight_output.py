@@ -66,7 +66,7 @@ class PreflightOutputTests(unittest.TestCase):
             changed = report(RUNNER_SHA256)
             changed["environment"]["cpu_model"] = "different"
             with mock.patch("tools.performance_rule.cli.sha256_file", side_effect=[RUNNER_SHA256, "b" * 64]), mock.patch("tools.performance_rule.cli.run_once", return_value=validate_report(changed, RUNNER_SHA256)) as runner, mock.patch("tools.performance_rule.cli.emit_result"):
-                with self.assertRaisesRegex(ControlError, "workload identity"):
+                with self.assertRaisesRegex(ControlError, "stage=runner_report category=invalid_evidence"):
                     control(["run", "--parent", str(parent), "--candidate", str(candidate), "--calibration", str(calibration), "--runner-priority", "high", "--", *RUNNER_ARGUMENTS])
                 self.assertEqual(runner.call_count, 1)
 

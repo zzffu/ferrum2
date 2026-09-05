@@ -46,6 +46,32 @@ half pair and cannot be reviewed as calibration. This is an encoded evidence
 limit, not a process RSS guarantee. Output files are replaced atomically only
 after the encoded document passes the bound.
 
+Failures print only closed stage/category diagnostics. They never print runner
+stderr, exception messages, invalid reports or paths. When `--output` is supplied,
+failure metadata is atomically written beside it as
+`<stem>.failure.<content-sha256>.json`; no additional file is written without
+`--output`. This separate `ferrum2.rule-qualification-failure.v1` artifact binds
+the full bounded controller request by SHA-256 and, when available, the runner
+hash, pair/order/role, runner-argument hash and exact saved partial-report hash.
+It is not calibration or a successful controller report.
+
+Failure diagnostics contain only fingerprint byte counts, SHA-256 and truncation
+flags, plus closed categories and valid integer exit/errno codes. No raw error
+content or Base64 copy is saved. Fingerprints describe the retained bounded
+prefix: capture uses the stdout/stderr bounds above; exception fingerprints use
+at most 65536 characters. A truncated fingerprint does not claim to hash the
+unread remainder. The controller accepts at most 64 arguments totaling 65536
+characters. Failure-artifact write errors preserve the primary category and add
+a closed output failure diagnostic. Ordinary help and interruption exit semantics
+are retained.
+
+The capture owner includes thread startup and child cleanup in one lifetime.
+After execution fails, a single five-second deadline bounds the post-kill wait
+and all reader joins. Kill/wait/join failures retain the primary category and
+report `cleanup_unconfirmed`. A reader that remains alive may still own an
+inherited pipe; Python cannot forcibly terminate that thread. Its capture bytes
+are not read or fingerprinted, and the run cannot return successful evidence.
+
 Ordinary verification uses compact synthetic evidence and mocked runners only:
 
 ```text

@@ -27,6 +27,7 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 | M1h / RTL-03/07/08 | runner启动前完成校准适用性检查；请求配置绑定；整次64MiB证据预算；review输出同目录 | 未批准校准、异目录输出、fd/cleanup错误先red；最终51项离线测试通过，未运行benchmark |
 | M1i / RTL-04 | generated synthetic SRS构建列引用独立构建owner的证据；共享matcher仅用于timing | Rule全target check、test compile-only、严格clippy、fmt通过；实际报告数值待显式qualification |
 | M1j / M4-06/07 | 五场景固定准入、完整尾部计量；所有fairness worker预热完成才放行；独立HostTrial与rate重算 | 最终隔离candidate126、M4 self-check、严格clippy/fmt、PS非变更合同通过；无live测量 |
+| M1k / RTL-06 | 闭合失败stage/category与指纹证据；有限child/reader清理并明确未确认状态 | 泄漏sentinel及旧无界wait/部分start先red；最终66项离线测试通过 |
 
 ## 环境与暂定验收
 

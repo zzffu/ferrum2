@@ -914,3 +914,29 @@ performance `c6e802e73baa97e49ff16c964cef17b4affe1bd874c5d6369523a277dec08c0c`�
 qualification `c5c6163efdb5397d9168c3702f2c40dc4f756ba34abb935235e9e464c9763191`。
 未执行真实workload/adapter/benchmark/profiler；新增少量计时/计数和预热同步的成本尚未测量。
 旧基线不可直接与新分母比较，两成员必须用同版harness重采。
+
+### M1k — RTL-06：闭合诊断与失败清理
+
+Rule controller以固定Stage/Category代替原异常、路径、argv和runner stderr回显；正常help
+保持，非法argv与非.json输出在启动runner前拒绝。失败时继续保留已接纳raw的v6 partial，
+有--output则同目录写content-addressed failure.v1，绑定request/runner/pair/order/role和
+已写partial hash，复用唯一atomic文件owner。额外诊断只有有界前缀bytes/SHA/truncated、
+合法exit/errno和闭合secondary，不保存原文或Base64；无output不另写文件。代价是不能从
+失败artifact恢复外部原始错误内容。前缀hash不冒充完整未读输出的hash。
+
+root复核补齐child/reader事务：Thread构造/start、执行wait与失败路径均有owner；kill后
+wait及全部reader join共用5秒清理deadline，所有wait带剩余timeout。kill/reap/join失败
+保留primary并附cleanup_unconfirmed；只读取确认结束的reader发布的immutable bytes。
+Python不能强停继承pipe的reader，未结束就明确unconfirmed，不声称reap或生产可恢复。
+自有output cleanup group在有/无primary时都保持output阶段；只识别自有marker，不递归
+转发外部异常链。KeyboardInterrupt/SystemExit保持原退出语义。
+
+旧cli内存加载的synthetic sentinel红测证明直接泄漏；旧capture owner的四个有限mock
+红测以keyword-only wait立即拒绝无参wait，不实际挂死。修后覆盖第二reader启动失败、
+kill失败、重复wait timeout、未结束join、atomic primary/cleanup、多异常组、路径错误及
+失败证据写入失败。终端和全部新产物逐byte检索明文与Base64 sentinel均无泄漏。
+最终 `python -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v` 66通过；
+root独立复跑66通过（0.984s），diff检查通过。日志 `target/remediation-audit/rtl6-*.log`、
+`target/remediation-rtl6-final-root.log`；实现/限制在同目录rtl6-implementation.md。
+生命周期新case仅fake child/thread和内存stream，不执行真实runner、产品或benchmark；
+本批未改变v6/v2校准或性能阈值，未补真实build provenance。
