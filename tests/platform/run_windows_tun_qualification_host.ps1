@@ -103,7 +103,7 @@ try {
         [Ferrum2PerfProcessGroup]::Close([uint32]$workerPid)
         [Ferrum2PerfProcessGroup]::CloseGroup()
         if ($exitCode -ne 0) {
-            throw "host qualification worker failed; stderr=$stderrPath"
+            throw "host qualification worker failed; evidence=$resolvedEvidence"
         }
     }
     if ($timedOut) {

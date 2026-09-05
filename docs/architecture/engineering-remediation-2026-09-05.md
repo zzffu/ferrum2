@@ -559,7 +559,7 @@ DWM 约 101.27%（一个逻辑核），仅为环境背景，不是性能波动�
 和已启动产品 stdout/stderr；计数是在 workload 之前采集，但文件直到成功才写，外层 catch
 也只导出 workload 日志。工具错误无法区分 warmup-readiness 与 active-completion。
 现在立即持久化两端 before metrics；失败导出闭合 phase 和所有产品日志；抽取已有
-HostProduct 的公共私有 helper，让 startup 与 active failure 共享导出规则。导出异常
+HostProduct 的私有共享 helper，让 startup 与 active failure 共享导出规则。导出异常
 不再覆盖原始 workload 错误。没有延长 timeout、过滤网络通知、扩大队列或更改工作负载。
 
 新注入测试覆盖两个阶段和导出自身失败；在不可变旧 owner 源上出现 3 项断言失败，
@@ -567,3 +567,19 @@ HostProduct 的公共私有 helper，让 startup 与 active failure 共享导出
 19 项通过。performance bundle 为 `00bcf65a7a07becce520c41e83f2653a80aa3aa7fcddb1c9f6c94a4059278dce`；
 qualification bundle 为 `2fbb37e4e0ff0aed8cf3d4fc3668869418a143dbc633309c95f1aff34237904b`。
 M4 source bundle 和全部 Rust 产品代码不变；下一轮使用新的完整证据目录，不补洞拼接。
+
+### R10 — P2：资格 probe 失败也需保存数据面状态
+
+工具提交 `6a4e000f...` 的真实资格运行在 `qualification-probe-before-notification` 失败：
+TCP connect timeout。其 Rust 产品代码与先前通过的 d6 相同，不能直接归为产品代码回归。
+外层临时 stderr 路径已清理，但文件确实复制为 evidence 的 `supervisor.stderr.log`；
+不是丢失全部 supervisor 日志。事务 `1e0a3cf5c5d7` cleanup PASS / 五类残留全零，
+86.763 秒，未产生 qualification verdict。证据
+`%TEMP%/ferrum2-current-correctness-20260905T103203Z` 保留失败，不能记 PASS。
+
+`HostQualification.ps1::Invoke-Ferrum2HostQualificationChecks` 原 smoke probe 的 finally
+直接关闭产品，未导出前后 metrics 和产品日志。现在在 probe 前保留两端 metrics，失败时
+复用私有日志导出 helper 并捕获故障 metrics，再保留原始异常并执行原有 cleanup。外层错误
+指向持久 evidence 目录，避免提示已删除的临时 stderr 路径。八项判定、deadline、网络动作
+和产品源码均不变。新的 fully injected 平台测试检查两端前后数据、完整日志和两次 stop；
+普通平台 Python suite 7 项通过，没有调用真实适配器/路由/WFP 操作。

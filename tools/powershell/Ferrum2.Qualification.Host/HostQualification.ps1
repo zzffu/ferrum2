@@ -370,6 +370,11 @@ function Invoke-Ferrum2HostQualificationChecks {
         -Network $Network -Loopback $Loopback -Sequence 2 -Topology "EndToEnd"
     try {
         $metricsBefore = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port
+        Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
+            'qualification-client-metrics-before.txt') -Text $metricsBefore
+        Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
+            'qualification-server-metrics-before.txt') `
+            -Text (Get-Ferrum2Metrics -Port $smokeRuntime.server_metrics_port)
         if ((Get-Ferrum2MetricValue $metricsBefore 'ferrum2_tun_strict_route_requested') -ne 1 -or
             (Get-Ferrum2MetricValue $metricsBefore 'ferrum2_tun_strict_route_effective') -ne 1 -or
             (Get-Ferrum2QualificationMetricLabelValue $metricsBefore `
@@ -427,6 +432,21 @@ function Invoke-Ferrum2HostQualificationChecks {
             -Arguments $probeArguments `
             -WorkingDirectory (Split-Path -Parent $Candidate.harness) `
             -LogPrefix 'qualification-probe-after-notification' -TimeoutSeconds 60)
+    } catch {
+        $failure = $_
+        Export-Ferrum2ProductFailureLogs -Context $Context -Client $smokeRuntime.client `
+            -Server $smokeRuntime.server -Sequence 2
+        foreach ($endpoint in @(
+            @{ name = 'client'; port = $smokeRuntime.client_metrics_port },
+            @{ name = 'server'; port = $smokeRuntime.server_metrics_port }
+        )) {
+            try {
+                Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
+                    "qualification-$($endpoint.name)-metrics-failure.txt") `
+                    -Text (Get-Ferrum2Metrics -Port $endpoint.port)
+            } catch { Write-Warning 'qualification failure metrics unavailable' }
+        }
+        throw $failure
     } finally {
         Stop-Ferrum2ProductTrial -Context $Context -Runtime $smokeRuntime
     }
