@@ -1,6 +1,5 @@
 use std::ffi::{OsString, c_void};
 use std::fs::File;
-use std::io::Read;
 use std::mem::{size_of, size_of_val};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -28,10 +27,10 @@ use windows_sys::Win32::System::LibraryLoader::{
 use windows_sys::Win32::System::Threading::CreateEventW;
 
 use super::super::core::loader::{
-    LoaderOperations, load_transaction, require_exports, validate_artifact,
+    LoaderOperations, load_transaction, read_pinned_artifact, require_exports, validate_artifact,
 };
 use crate::Error;
-use crate::artifact::{ABI_EXPORTS, DLL_BYTES};
+use crate::artifact::ABI_EXPORTS;
 
 pub(super) type WintunAdapter = *mut c_void;
 pub(super) type WintunSession = *mut c_void;
@@ -199,9 +198,10 @@ impl LoaderOperations for PlatformLoader {
     }
 
     fn verify_artifact(&mut self) -> Result<(), Error> {
-        let file = self.file.as_ref().ok_or(Error)?;
+        let file = self.file.as_mut().ok_or(Error)?;
         let bytes = file.metadata().map_err(|_| Error)?.len();
-        validate_artifact(bytes, cng_sha256(file)?)
+        let artifact = read_pinned_artifact(file, bytes)?;
+        validate_artifact(bytes, cng_sha256(&artifact)?)
     }
 
     fn load_system32_scoped_library(&mut self) -> Result<(), Error> {
@@ -298,8 +298,9 @@ pub(super) fn hold_directories(directory: &Path) -> Result<Vec<DirectoryHandle>,
             if handle == INVALID_HANDLE_VALUE {
                 return Err(Error);
             }
-            verify_directory_non_reparse(handle)?;
-            Ok(DirectoryHandle(handle))
+            let handle = DirectoryHandle(handle);
+            verify_directory_non_reparse(handle.0)?;
+            Ok(handle)
         })
         .collect()
 }
@@ -361,13 +362,7 @@ pub(super) fn file_attributes(handle: HANDLE) -> Result<FILE_ATTRIBUTE_TAG_INFO,
     }
 }
 
-pub(super) fn cng_sha256(file: &File) -> Result<[u8; 32], Error> {
-    let mut file = file.try_clone().map_err(|_| Error)?;
-    let mut bytes = Vec::with_capacity(DLL_BYTES as usize);
-    file.read_to_end(&mut bytes).map_err(|_| Error)?;
-    if bytes.len() != DLL_BYTES as usize {
-        return Err(Error);
-    }
+fn cng_sha256(bytes: &[u8]) -> Result<[u8; 32], Error> {
     let mut algorithm: BCRYPT_ALG_HANDLE = null_mut();
     if unsafe { BCryptOpenAlgorithmProvider(&mut algorithm, BCRYPT_SHA256_ALGORITHM, null(), 0) }
         != 0

@@ -1228,3 +1228,22 @@ strictclippy与owned格式通过。root最后失效修正后重跑TUN check/clip
 Win32故障注入。整合workspace/client compile-only及专用host资格待其他当前批次冻结后
 执行。既有cleanup_inner在失败时不clear catalog的行为尚需结合残留隔离契约审查，未在
 本批标为新确认缺陷。握手/join、health/MTU等平台余项仍未修复，没有性能无回退结论。
+
+### M3b — DLL 读取边界与验证失败的目录 handle 回收
+
+基准`21bcb96b`。live verify_artifact先读取已持有File的metadata，错误长度在body分配、
+seek/read/hash之前拒绝。生产共用的core reader随后从同一File的offset0固定读取427,552B，
+仅再读1byte核实EOF；短文件、增长文件、seek/read错误都闭合拒绝，再将完整有界slice
+交私有CNG hash。删除clone File及无界read_to_end路径；SHA-256/ABI/System32/pin与持有
+身份规则保持。CreateFileW成功后先构造既有DirectoryHandle，再进行可能失败的目录属性
+验证；失败时当前handle与已有ancestor集合一并RAII回收。
+
+4个纯reader测试验证错误metadata零IO、非零初始offset和partial read、短/长文件最多
+pin+1读取，以及seek/body/EOF异常的完整闭合Error。platform安全suite66/66、生产
+all-features check、all-targets/all-features strictclippy与owned格式全部通过；命令/
+hash清单在`target/remediation-audit/m3b-loader-bounds.md`、m3b-loader-ownedpaths.json，
+日志m3b-*.log。没有新unsafe、依赖、公开API或通用FS抽象。
+
+实际CNG、Win32目录验证失败的CloseHandle次数只有静态/编译证据；没有真实DLL篡改、
+大文件、adapter或网络操作，也没有启动性能测量。该读取上限不是OS调用的硬期限或
+整体启动RSS/延迟改善声明。整合检查及专用host资格仍待当前DNS/cache源码收口。

@@ -19,6 +19,10 @@ RAII for handles, session state, and received packets; `EndSession` must not ove
 
 DLL loading is security-sensitive. Preserve rejection of network/reparse paths, held directory/file identity, the pinned DLL size and SHA-256, System32-scoped dependency loading, and the required export set. Pin changes require reviewed provenance. Platform errors stay redacted; never retain paths, identities, Win32 messages, or network data.
 
+Reject a mismatched DLL metadata length before hashing or allocating its body. Read from the start
+of the same held file into the pinned-size buffer, then allow only one excess byte for EOF checking.
+Each successful directory open must enter its existing RAII owner before fallible validation.
+
 Adapter creation is transactional. Setup failures and cancellation must roll back owned state in reverse order, surface cleanup conflicts, and avoid deleting state no longer matching the journal. Preserve DAD readiness ordering, managed route/DNS readback, underlay snapshot validation, and notification cancellation races.
 
 Notification subscriptions belong to the adapter's pending rollback slot before underlay snapshot

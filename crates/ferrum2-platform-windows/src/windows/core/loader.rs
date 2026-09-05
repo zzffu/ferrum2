@@ -1,3 +1,5 @@
+use std::io::{Read, Seek, SeekFrom};
+
 use crate::Error;
 use crate::artifact::{ABI_EXPORTS, DLL_BYTES, DLL_SHA256};
 
@@ -33,6 +35,26 @@ pub(in crate::windows) fn validate_artifact(bytes: u64, sha256: [u8; 32]) -> Res
     }
 }
 
+/// Reads the pinned artifact from the already identity-checked file. Rejects
+/// metadata size before allocating or touching the reader, then verifies exact
+/// length independently of metadata without reading more than one excess byte.
+pub(in crate::windows) fn read_pinned_artifact(
+    reader: &mut (impl Read + Seek),
+    metadata_bytes: u64,
+) -> Result<Vec<u8>, Error> {
+    if metadata_bytes != DLL_BYTES {
+        return Err(Error);
+    }
+    reader.seek(SeekFrom::Start(0)).map_err(|_| Error)?;
+    let mut bytes = vec![0_u8; DLL_BYTES as usize];
+    reader.read_exact(&mut bytes).map_err(|_| Error)?;
+    let mut extra = [0_u8; 1];
+    if reader.read(&mut extra).map_err(|_| Error)? != 0 {
+        return Err(Error);
+    }
+    Ok(bytes)
+}
+
 pub(in crate::windows) fn require_exports(
     mut present: impl FnMut(&[u8]) -> bool,
 ) -> Result<(), Error> {
@@ -55,3 +77,6 @@ mod tests {
         assert!(validate_artifact(DLL_BYTES, [0; 32]).is_err());
     }
 }
+
+#[cfg(test)]
+mod reader_tests;
