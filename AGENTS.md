@@ -1,3 +1,32 @@
+# General Rust Guidelines
+
+Adapted from [openai/codex AGENTS.md](https://github.com/openai/codex/blob/main/AGENTS.md),
+reviewed 2026-09-05. Ferrum2-specific rules below and scoped guides govern local exceptions.
+
+## Style and APIs
+
+- Capture variables in format strings: `format!("{name}")`.
+- Simplify collapsible conditions; replace forwarding closures with equivalent method references.
+- Make call sites descriptive: prefer enums, newtypes, or named methods over opaque boolean/optional arguments.
+- When positional literals obscure intent, annotate their actual parameter names.
+- Enumerate known match variants; avoid catch-all branches that conceal missing cases.
+- Minimize public exports and keep implementation modules private.
+- Document each new trait's purpose and implementor obligations.
+- Prefer native future-returning trait methods with explicit `Send` contracts where required; avoid async-trait macros or lint suppression as substitutes.
+
+## Module Boundaries
+
+- Aim below 500 production lines per module; around 800, place additions in a cohesive separate owner.
+- Move relevant tests and documentation alongside extracted behavior.
+- Avoid trivial single-use wrappers and unrelated growth in central crates.
+
+## Tests and Verification
+
+- Compare complete objects when practical.
+- Inject environment-derived settings instead of mutating process globals.
+- Test observable behavior, not constants or implementation shape.
+- Format, lint, and test affected packages before broader applicable gates.
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization
