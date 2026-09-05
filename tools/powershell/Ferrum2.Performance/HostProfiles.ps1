@@ -11,14 +11,14 @@ function Get-Ferrum2Median {
 
 function Get-Ferrum2CpuCostRatio {
     param(
-        [Parameter(Mandatory = $true)][double]$BaselineCpu,
-        [Parameter(Mandatory = $true)][double]$CandidateCpu,
+        [Parameter(Mandatory = $true)][double]$BaselineCpuSeconds,
+        [Parameter(Mandatory = $true)][double]$CandidateCpuSeconds,
         [Parameter(Mandatory = $true)][double]$WorkRatio
     )
-    if ($BaselineCpu -eq 0) {
-        return $(if ($CandidateCpu -eq 0) { 1.0 } else { [double]::PositiveInfinity })
+    if ($BaselineCpuSeconds -eq 0) {
+        return $(if ($CandidateCpuSeconds -eq 0) { 1.0 } else { [double]::PositiveInfinity })
     }
-    return ($CandidateCpu / $BaselineCpu) / $WorkRatio
+    return ($CandidateCpuSeconds / $BaselineCpuSeconds) / $WorkRatio
 }
 function Get-Ferrum2ImprovementRatio {
     param(
@@ -75,13 +75,13 @@ function New-Ferrum2HostSummary {
             $workRatio = [double]$candidate[0].checked_units /
                 [double]$baseline[0].checked_units
             [void]$clientCpuCostRatios.Add((Get-Ferrum2CpuCostRatio `
-                -BaselineCpu ([double]$baseline[0].client_cpu_percent) `
-                -CandidateCpu ([double]$candidate[0].client_cpu_percent) `
+                -BaselineCpuSeconds ([double]$baseline[0].client_cpu_percent / 100.0 * [double]$baseline[0].cpu_sample_seconds) `
+                -CandidateCpuSeconds ([double]$candidate[0].client_cpu_percent / 100.0 * [double]$candidate[0].cpu_sample_seconds) `
                 -WorkRatio $workRatio))
             if ($serverPresent) {
                 [void]$serverCpuCostRatios.Add((Get-Ferrum2CpuCostRatio `
-                    -BaselineCpu ([double]$baseline[0].server_cpu_percent) `
-                    -CandidateCpu ([double]$candidate[0].server_cpu_percent) `
+                    -BaselineCpuSeconds ([double]$baseline[0].server_cpu_percent / 100.0 * [double]$baseline[0].cpu_sample_seconds) `
+                    -CandidateCpuSeconds ([double]$candidate[0].server_cpu_percent / 100.0 * [double]$candidate[0].cpu_sample_seconds) `
                     -WorkRatio $workRatio))
             }
             [void]$pairs.Add([pscustomobject][ordered]@{

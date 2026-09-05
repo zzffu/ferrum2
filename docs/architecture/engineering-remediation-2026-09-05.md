@@ -18,6 +18,7 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 | 批次 / 审查项 | 已落实行为 | 实际验证 |
 |---|---|---|
 | M1a / RTL-05 | 普通 workspace 排除 timed Rule qualification；强制保留独立 no-run gate | workspace policy 20、完整 m0 93 passed/5 ignored、CI Python 55；rule test compile-only、m0严格clippy、fmt通过 |
+| M1b / CT-01、HT1 | Windows CPU/work 归约计入各自真实采样窗口，PS/Python一致 | 新2项覆盖12组合，host evidence9、source capture8；完整candidate Python115、PS parser及nonmutating资格contract通过 |
 
 ## 环境与暂定验收
 

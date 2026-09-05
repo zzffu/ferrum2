@@ -678,3 +678,28 @@ Rule benchmark。之后 root AGENTS、m0 workflow 与 gate ledger 同步排除�
 日志在 `target/remediation-rule-compile-only-{red,green,m0,build,clippy,ci}.log`。
 5个ignored的provider/lifecycle/Linux IPv6条件未在本批执行，未改为通过；客户端test binary
 未执行。root指南仅修正命令与说明以遵守既有作用域规则，未放宽测试/平台/lint契约。
+
+### M1b — CT-01 / HT1：CPU/work 使用实际测量窗口
+
+Windows producer 以 `cpu_sample_seconds` 将 CPU delta 化为百分比，旧 PS/Python reducer
+却只比较 percent/work，丢失窗口因子。改为每个 trial 先恢复 CPU seconds，再按 checked
+units 做 pair ratio。保留现有2% guard、median/majority、零CPU处理及primary direction；
+未改性能阈值或原始schema。公开指南同步公式，并修正已过时的raw trial版本说明。
+
+新增 `test_windows_tun_cpu_window.py` 用完整PS `New-Ferrum2HostSummary` 和Python
+host evidence validator，覆盖ClientDirect/client、EndToEnd/client/server × 相同/增加真实成本
+× 两种实现，遍历Quick含lower-is-better场景。使用合法10/20秒窗口、candidate双倍checked
+work的合成证据，不运行工作负载。旧实现有6个PS不符、6个Python判定不符；新实现2项测试
+全部组合通过，完整summary对象一致。另有既有host evidence9、source capture8通过。
+
+root整合检查：`python -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v`
+115通过（同时覆盖下一批IO修复）；CLI/summary import通过；PS parser通过；
+`pwsh -NoProfile -File tests/platform/test_windows_tun_host_qualification.ps1`通过，nonmutating。
+该资格bundle仍为 `b105cdac...`，未把PS静态检查写作真实host资格。
+日志 `target/remediation-audit/ct01-*.log`、`target/remediation-m1-candidate-full.log`、
+`target/remediation-m1-powershell-contract.log`。
+
+仅performance bundle的HostProfiles行更新：21940 bytes，SHA-256
+`7ee17c346631df87216a5b045bb46a3972e6cefae26dfe3db70952291b7ac52e`；完整bundle为
+`33182ceee547176d35020b775a84401da55abad87e50a0b0674a1f2eac0f7776`。
+没有新性能测量；旧bundle结果不升级为当前验收。marker窗口偏差、host清理读回等其余M1问题仍待修复。

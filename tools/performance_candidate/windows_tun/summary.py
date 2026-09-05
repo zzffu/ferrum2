@@ -128,14 +128,14 @@ def _same_number(actual: object, expected: float, field: str) -> None:
 
 
 def _cpu_cost_ratio(
-    baseline_cpu: float,
-    candidate_cpu: float,
+    baseline_cpu_seconds: float,
+    candidate_cpu_seconds: float,
     *,
     work_ratio: float,
 ) -> float:
-    if baseline_cpu == 0:
-        return 1.0 if candidate_cpu == 0 else math.inf
-    return (candidate_cpu / baseline_cpu) / work_ratio
+    if baseline_cpu_seconds == 0:
+        return 1.0 if candidate_cpu_seconds == 0 else math.inf
+    return (candidate_cpu_seconds / baseline_cpu_seconds) / work_ratio
 
 
 def _paired_cpu_cost_regressed(
@@ -416,16 +416,20 @@ def _validate_paired_summary(
             ratios.append(ratio)
             client_cpu_cost_ratios.append(
                 _cpu_cost_ratio(
-                    baseline_row["client_cpu_percent"],
-                    candidate_row["client_cpu_percent"],
+                    baseline_row["client_cpu_percent"] / 100.0
+                    * baseline_row["cpu_sample_seconds"],
+                    candidate_row["client_cpu_percent"] / 100.0
+                    * candidate_row["cpu_sample_seconds"],
                     work_ratio=work_ratio,
                 )
             )
             if server_present:
                 server_cpu_cost_ratios.append(
                     _cpu_cost_ratio(
-                        baseline_row["server_cpu_percent"],
-                        candidate_row["server_cpu_percent"],
+                        baseline_row["server_cpu_percent"] / 100.0
+                        * baseline_row["cpu_sample_seconds"],
+                        candidate_row["server_cpu_percent"] / 100.0
+                        * candidate_row["cpu_sample_seconds"],
                         work_ratio=work_ratio,
                     )
                 )

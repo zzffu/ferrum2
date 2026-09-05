@@ -69,8 +69,10 @@ Every raw trial records the primary metric and direction, checked work, I/O comp
 p99 latency, client CPU and peak working set, and failure counters. `EndToEnd` also records server CPU,
 peak working set, and failure counters; those server fields are null in `ClientDirect`. Summaries
 retain every pair and report direction-normalized improvement ratios, range, outliers, checked work,
-I/O, latency, CPU, and memory. The non-target CPU guard normalizes CPU by checked work rather than by
-the primary metric, so a lower-is-better latency result cannot invert CPU-cost accounting.
+I/O, latency, CPU, and memory. The non-target CPU guard uses process CPU seconds per checked unit:
+`cpu_percent / 100 * cpu_sample_seconds / checked_units`. Each member uses its own measured window;
+the paired ratio therefore remains comparable when those windows differ. Primary latency direction
+does not change this CPU/work calculation. CPU percentages remain in summaries as observations.
 
 `Lifecycle` is separate: 20 complete product-start, TUN-probe, and product-stop cycles under the
 selected topology. It never changes a default route or disables or enables a physical adapter.
@@ -84,8 +86,8 @@ cleanup plus readback proving no owned adapter, route, process, or port remains.
 
 The host runner's `summary.json` status `PASS` means execution and evidence construction completed.
 Use the independent Python validator to check the complete evidence and derive the performance
-decision; `PASS` alone does not mean the candidate improved. Host plan, raw trial, runtime, and
-summary schemas are v2; build and cleanup schemas remain v1. The host source manifest uses its own
+decision; `PASS` alone does not mean the candidate improved. Host plan, runtime, and summary schemas
+are v2; raw trials are v3, while build and cleanup schemas remain v1. The host source manifest uses its own
 v1 manifest schema and kind `ferrum2.windows-tun-performance-source-bundle.v3`; this is independent
 of the product's schema-v2 TOML configuration.
 
