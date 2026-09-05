@@ -1,0 +1,62 @@
+[
+  {
+    "path": "tools/ci/__init__.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/change_contract.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/fuzz_contract.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/git_changes.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/interop_manifest.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/interop_provision.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/interop_run.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": "tools/ci/required_gate.py",
+    "status": "production_reviewed",
+    "notes": "Full source read; public planning, manifest validation, execution boundaries and current workflow consumers reviewed."
+  },
+  {
+    "path": ".github/workflows/m0.yml",
+    "status": "split_review",
+    "notes": "Performance jobs delegated to candidate-tooling; root reviewed other jobs and their typed controllers."
+  },
+  {
+    "path": ".github/workflows/performance-candidate.yml",
+    "status": "split_review",
+    "notes": "Performance jobs delegated to candidate-tooling; root reviewed other jobs and their typed controllers."
+  },
+  {
+    "path": ".github/workflows/lifecycle-stress.yml",
+    "status": "workflow_reviewed",
+    "notes": "Performance jobs delegated to candidate-tooling; root reviewed other jobs and their typed controllers."
+  },
+  {
+    "path": ".github/workflows/tun-fuzz-deterministic.yml",
+    "status": "workflow_reviewed",
+    "notes": "Performance jobs delegated to candidate-tooling; root reviewed other jobs and their typed controllers."
+  }
+]

@@ -1,0 +1,247 @@
+[
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/dns_resource.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "DNS resource lifecycle, bounds, stable drain and rebind; M4-09",
+    "lines": 349,
+    "sha256": "070a0fb0e5a6989db3242c01d68997c73ddfaf6255810687b13bb5fe65d1c04a"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/evidence_support.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Evidence writers, reservations and owned helper responders",
+    "lines": 382,
+    "sha256": "5f130ea1568583a97485fefe5437d0c68b7abdbe3aa00e20549d6ad2fc8d0d87"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/host_identity.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Source, executable and environment identity collection",
+    "lines": 244,
+    "sha256": "2aa751cf1c9e45bddbefa6e29a26ffa045abcd3b063a07632bea107a557d4d91"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/mod.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Composition, modes and constants; no unrelated runtime growth",
+    "lines": 88,
+    "sha256": "112588af21e953610cb794615158f0ceea76dc710180779795bd9ed99d61856c"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/process_support.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Child capture/reap, start gates, workers, deadline helpers; M4-04 and lifecycle limitations",
+    "lines": 880,
+    "sha256": "100088b9d8878a459af3f0efd55bcac3e09a9e9b87ae5078ed46426d9e709b3c"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/profile_contract.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "CLI, scenario identity, ready owner, bounded evidence definitions; M4-05",
+    "lines": 828,
+    "sha256": "27c9e01c5d5e4ab065278c3db2cda7fea3fb761712d68ecaa7b7ba68c5b0638f"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/profile_dns.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "DNS responder and load ownership, admission and correctness; M4-02/M4-08",
+    "lines": 405,
+    "sha256": "3124d944f5cf0bdaf0874e540e7470cc6130459b73cc0388345b9be99ffbebe3"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/profile_output.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Output identity, evidence and cleanup/error aggregation",
+    "lines": 216,
+    "sha256": "e4dc50afbd9912c905a4a2a5621b22642d0e9e9aa9b656028e04d93abe18a86f"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/profile_tcp.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Checked TCP work, request sampling, warm/active gate and cleanup",
+    "lines": 325,
+    "sha256": "c09b8b6c4e3789867f9291827c198fb603b1e7f00a85e11aa4b4117a5b9ea7c7"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/profile_udp.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Checked UDP work, association/control lifecycle and cleanup",
+    "lines": 342,
+    "sha256": "a222ed1c624851b667f9dbec364e6967ccd325a8d58108a6687349bf3f1abf7d"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/proxy_config.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Workload-specific generated proxy configurations and topology",
+    "lines": 266,
+    "sha256": "ae8e9ecfbb9599be9c027acde8e00a7e27846d07d96538183f5a26f5996995f1"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/resource_sampling.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Session setup and process/proc samples; M4-01/M4-09",
+    "lines": 468,
+    "sha256": "49fb8f4d5bf90424bca9aed8e9eba080f381c25d884ee9ab539ef3d60083a587"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/resource.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Resource and compatibility rejection/DNS/TCP/UDP contracts; M4-03/M4-04",
+    "lines": 799,
+    "sha256": "6fcdc5821e7c10b091884e2cc782972b05463cf25a4777858e3230677b00fb95"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/self_check.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Executable self-check behavior and mutation coverage; read only, not executed",
+    "lines": 723,
+    "sha256": "1e5edc0c3f4ac6f4dc3ea16d877839100c858196535993a8aadc8854926d8dd1"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/contract.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Scale CLI/schema bounds and fixture values",
+    "lines": 445,
+    "sha256": "a0c457602235356f831f1566dc4de35545deafe9eee18fa42ad14056a5e74317"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/execution.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Scale runtime/task coordination and observation schedule",
+    "lines": 283,
+    "sha256": "9dccfef2858e84bb66b65410ffccb05144e527b45842390581b8ad67a5fb2e66"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/flow.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Framed sequence checked work and deadline-aware I/O",
+    "lines": 334,
+    "sha256": "df976b1027ca7bd8f1ff8ea194160e9a483e60ea3717d1a446ef9dfb6f7e40ce"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/mod.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Private scale composition and exports",
+    "lines": 10,
+    "sha256": "40023489b5971cc2976d10bc7a2939c227f527b78137351075e8da78fafbf9fe"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/outcome.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Scale aggregation, resource evidence, cleanup and failure serialization",
+    "lines": 466,
+    "sha256": "fb010528abba7ba4bbd7e6f9ced7651edb4141ab893edf81ccf5f47c6f6b1d7f"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/self_check.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Scale contract and accounting mutation checks; not executed",
+    "lines": 339,
+    "sha256": "d4c28d41189e1559d8e14c3c128392b19dd5d580ade26b7bb55d38ffb3117888"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/tcp_scale/setup.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Bounded setup and receiver-retirement/reap ownership",
+    "lines": 456,
+    "sha256": "e8e23ce3240da720d95da162bd2eef397e56ddc469b821fe41632ebabf17007d"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/throughput.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Reference identity, throughput window arithmetic and result checks",
+    "lines": 448,
+    "sha256": "b53116416384ccc756e4f1dc7351f9c4d7231a0e85a0a323d023a3da938fcc01"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/contract.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Windows CLI scenario/window/support/diagnostic bounds",
+    "lines": 529,
+    "sha256": "faa37e725bad135aec8a5934794b5c373c8371502463e36c2f9325bac7378745"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/diagnostic.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Diagnostic wire identity, bounded ledgers, exact payload parser and finalize",
+    "lines": 745,
+    "sha256": "474d43048c14d492067025bb1c3ffef9609f5cdd5ef79abc7496b58f3a5d0035"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/latency.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Capped deterministic reservoir and nearest-rank quantiles",
+    "lines": 60,
+    "sha256": "833f40502a57a3ecf881569218009a262a77fb9e157ce98ef6edeaf31fbcbb74"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/mod.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Windows owner composition",
+    "lines": 12,
+    "sha256": "8b263b0461a59c348ebc788fa2bff905555dbb009864782a104c5194e599696b"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/scenarios.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Scenario dispatch, successful observation schemas and fragment accounting",
+    "lines": 488,
+    "sha256": "fa7068ed2dce06bde9b3ccaa4b4ddb2110ab4335ba1d14241ce4d0d9a807f4fd"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/self_check.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Self-check composition",
+    "lines": 15,
+    "sha256": "e91266bba1768ecd29bda36e0213c34227f7b47cb081825154ef3653811dcf81"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/self_check/cli_contract.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "CLI rejection/schema mutation behavior; not executed",
+    "lines": 363,
+    "sha256": "bb8083f12bd9d1ceaba3df4f86a35185bf75c516ba8a679d1a343b97818452f6"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/self_check/diagnostic.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Payload, ledger, finalize and session mutation behavior; not executed",
+    "lines": 514,
+    "sha256": "9333d979496b5b4517ff1d80dd3f86663501603080640b83bf7e189584c47fa1"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/self_check/workload.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Workload observation, accounting and latency mutation behavior; not executed",
+    "lines": 241,
+    "sha256": "5ab0172d1a2e861ce33483215912145de923051ffb4f06ce157f910dcc9e3fa1"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/support.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Support TCP/UDP ownership and diagnostic event capture",
+    "lines": 309,
+    "sha256": "a0babb6714c4b21866c13cf391c08ed71747d37be32ad0b0b4ed4078dcd5b2cb"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/workload_diagnostic.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Diagnostic session ownership, association rounds and outcome records",
+    "lines": 429,
+    "sha256": "24282670edf31888392e38dd02f81547f6694eee5b7a7c375a083c0ae21f6260"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/m4_support/windows_tun/workload.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "Full TCP/UDP/fairness/fragment/active marker implementation, 989 lines; M4-06/M4-07",
+    "lines": 989,
+    "sha256": "b0ee514362c04fbbde47a7f673cfd0abea5834ff1005b1eca98a2a82c64ff63e"
+  },
+  {
+    "path": "tools/ferrum2-m4-qualification/src/main.rs",
+    "status": "reviewed_static_full_source",
+    "notes": "CLI dispatch and failure exit",
+    "lines": 16,
+    "sha256": "8d3d1361d2530211bca2f3bfdefe5562586150ca9b28f5ed10e1114d08ed283a"
+  }
+]

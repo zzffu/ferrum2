@@ -1,0 +1,331 @@
+{
+  "head": "2fb0dd4a",
+  "scope": "production Rust under runtime, dns, ruleset",
+  "coverage": [
+    {
+      "path": "crates/ferrum2-runtime/src/connection_executor.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed production through join_shards before inline tests: permit-before-accept, shard dispatch, force/drain/thread joins. Cancellation of the whole executor detaches thread handles; force channel drop requests stop, but no retryable join owner."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/connector.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production: absolute resolution/dial deadline, 16 candidates, local endpoint and closed error mapping. System lookup ownership gap RD-04."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/deadline.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/lib.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/metrics.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/network.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/network_socket/generation.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production TCP/UDP wrappers, operation cancellation, synchronous resource drop, monitor spawn/drop. Unjoined monitor gap RD-06; mutex/Arc poll overhead is an unmeasured profiling candidate."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/network_socket/operations.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/network_socket/service.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/network_socket.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/owner.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/process/report.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/process/shutdown.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/process/transaction.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/process.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/relay.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/reset/admission.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/reset/report.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/reset/transition.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/reset.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production reviewed after static follow-up read of lines 581-621. Submit rejects older or conflicting snapshots; held full rebuild merges newer requests while preserving damage. Remaining driver, hook, cancellation and generation-admission paths read previously."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/sniff.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/supervisor.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp/direct.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production including admission, commit guard, fair request/response loop, receive budget and candidate sends. Result/JoinError loss RD-05. System lookup RD-04."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp/limits.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp/manager.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete production generation/slot allocation, eviction, budget sharing, shutdown owners and activity. Linear slot scan and eviction scan are profiling hypotheses only."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp/reservation.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp/session.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete production reservation/commit/rollback/ring queues. Protocol callback under poisoned mutex can double-panic in Drop: RD-07 (static only)."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp/socket.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-runtime/src/udp.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/application.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/application_adapter.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/cache.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production. DNS: bounded key count, FIFO/expiry/observer outside lock; random refresh/expired scans remain linear. RuleSet: RD-02/RD-08 metadata bounds and two-file commit."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/channel_datagram/tests.rs",
+      "status": "excluded_test_only",
+      "notes": "Dedicated inline test module; not a production module. Not separately fully reviewed."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/channel_datagram.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/endpoint.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/error.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/lib.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/policy/compiler.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/policy/evaluation.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production continuation state, candidate driver, response matching and CNAME traversal. O(answer_count squared) CNAME traversal and repeated response matching are profiling hypotheses."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/policy/mod.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/policy/model.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/policy_candidate.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/proxy/loops.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete UDP/TCP loops/framing/truncation. Existing R2 panic handling and abort/join are present. TCP accept-before-permit is deliberate immediate-close load shedding, bounded live tasks."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/proxy/mod.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production construction, paired listener owner, policy continuation/memo, cache adaptation. Snapshot captured per continuation; policy server calls each acquire query-level deadlines."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/proxy/policy_cache.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/resolver.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_owner/command_loop.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production command variants, query task lifecycle and final owner checks. Panic skips TaskSet cleanup and join errors discarded: RD-01."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_owner/mod.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production including command admission/dependency deadlines, ready and retryable off-worker thread join. Existing R2 proxy fix does not repair command-loop panic."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_owner/tests.rs",
+      "status": "excluded_test_only",
+      "notes": "Dedicated inline test module; not a production module. Not separately fully reviewed."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_provider/admission.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_provider/egress.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_provider/hickory.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_provider/mod.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_provider/tests.rs",
+      "status": "excluded_test_only",
+      "notes": "Dedicated inline test module; not a production module. Not separately fully reviewed."
+    },
+    {
+      "path": "crates/ferrum2-dns/src/runtime_provider/tracking.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete TaskSet/registrar/counters. TaskSet may be retained by task registrar; normal abort_and_join required to break ownership cycles: RD-01."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/blocking.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production and inline regression tests. Maximum two closures/handles and retryable sticky-error shutdown present; does not own tokio::fs internal work."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/cache.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production. DNS: bounded key count, FIFO/expiry/observer outside lock; random refresh/expired scans remain linear. RuleSet: RD-02/RD-08 metadata bounds and two-file commit."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/download.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/error.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/https.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete production in multiple reads: TLS identity/path/redirect/detour/deadline, connection future owned by body, explicit resolver. RD-04 system resolution gap."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/lib.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/loader.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed all production cache/fetch/copy/compile/commit paths. RD-02 body bound, RD-03 tokio fs work outside BlockingTaskOwner."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/refresh.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete production: materialized identity checks, generation publication, stop handling, observer. Registry build executes synchronously on async worker; potential scale cost, no measured regression."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/snapshot.rs",
+      "status": "reviewed_production",
+      "notes": "Reviewed complete initial materialization, no partial registry exposure, exact handoff identity. Synchronous snapshot compilation remains outside blocking task owner."
+    },
+    {
+      "path": "crates/ferrum2-ruleset/src/source.rs",
+      "status": "reviewed_production",
+      "notes": "Complete production text reviewed: responsibility/dependencies, public API and trait Send/documentation where applicable, known matches, error/redaction, bounded state and ownership paths. No additional confirmed issue identified; execution is limited to reported package tests."
+    }
+  ]
+}

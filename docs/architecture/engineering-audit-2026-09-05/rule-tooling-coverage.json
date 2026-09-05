@@ -1,0 +1,122 @@
+[
+  {
+    "path": "tools/ferrum2-rule-qualification/src/cli.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/dns_cache.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/dns_policy.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/execute.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/lib.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/main.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/match_set/benchmark.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/match_set/generated.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/match_set/srs.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/match_set/tests.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete test owner; timing workloads are present and were not executed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/measurement/allocation.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/measurement/statistics.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/measurement/timing.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/report.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/ferrum2-rule-qualification/src/route_program.rs",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/__init__.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/__main__.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/cli.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/evidence.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/json_contract.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/pairing.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/policy.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/runner_report.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  },
+  {
+    "path": "tools/performance_rule/schema.py",
+    "status": "static-reviewed",
+    "notes": "Read complete production implementation and its local contracts; no execution, benchmark or dynamic reproduction performed."
+  }
+]

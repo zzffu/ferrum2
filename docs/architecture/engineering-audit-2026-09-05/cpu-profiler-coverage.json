@@ -1,0 +1,12 @@
+[
+ {"path":"tools/profile-cpu.sh","status":"full_static_review","notes":"Full script: CLI, paths/modes, tool identity, PID checks, counter/sample stages, stderr sink and EXIT trap. No execution."},
+ {"path":"tests/m0-harness/tests/tooling_profile_cpu.rs","status":"full_static_review","notes":"Full Linux fake-tool contract read; no tests or recorder executed."},
+ {"path":"tools/ferrum2-m4-qualification/src/m4_support/profile_contract.rs","status":"targeted_contract_review","notes":"Actual local/raw argument parser, bounds, explicit binary directory and ready publication/path contracts read."},
+ {"path":"tools/ferrum2-m4-qualification/src/m4_support/profile_tcp.rs","status":"targeted_contract_review","notes":"Warmup/common active start and marker publication/cleanup sequence read."},
+ {"path":"tools/ferrum2-m4-qualification/src/m4_support/profile_output.rs","status":"targeted_contract_review","notes":"Scenario dispatch, optional raw identity and JSONL output contract read."},
+ {"path":"README.md","status":"reference_review","notes":"Performance/qualification documentation entry points checked."},
+ {"path":"docs/README.md","status":"reference_review","notes":"Performance evidence and historical CPU report links checked."},
+ {"path":"docs/performance-evidence.md","status":"reference_review","notes":"Producer/controller/policy and diagnostic-vs-performance distinction read."},
+ {"path":"docs/windows-tun-confirm-cpu-profile-report-2026-09-05.md","status":"reference_review","notes":"Historical WPR/xperf method and matched EXE/PDB evidence distinction read; not new qualification."},
+ {"path":"Cargo.toml","status":"reference_review","notes":"profiling inherits release, debug=1, strip=none; build configuration alone collects no samples."}
+]

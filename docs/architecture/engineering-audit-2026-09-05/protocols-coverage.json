@@ -1,0 +1,177 @@
+[
+  {
+    "path": "crates/ferrum2-crypto/src/clock.rs",
+    "status": "production_reviewed",
+    "notes": "Clock wall/monotonic epoch, closed error, Send applied by callers."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/lib.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/method.rs",
+    "status": "production_reviewed",
+    "notes": "All method widths, private PSK storage, salt equality/zeroize, provider and scoped key capabilities."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/random.rs",
+    "status": "production_reviewed",
+    "notes": "Full-width salts, bounded response collisions, no fallback."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/tcp/aead.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/tcp/key.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/tcp/mod.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/tcp/nonce.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/udp/aead.rs",
+    "status": "production_reviewed",
+    "notes": "PROTO-3/4; AEAD auth zeroize, exact overhead, key-bound four entry cache, packet counter commit reviewed."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/udp/mod.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-crypto/src/udp/session.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/lib.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tokio.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/error.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/handshake.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/mod.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/observe.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/replay.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/tests.rs",
+    "status": "test_source_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/wire.rs",
+    "status": "production_reviewed",
+    "notes": "PROTO-5/4; target and padding bounds, frame builders, profile widths, response salt binding, random rejection loop."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/flow/client.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/flow/io.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/flow/mod.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/tcp/flow/server.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/udp/client.rs",
+    "status": "production_reviewed",
+    "notes": "PROTO-1; current/old retention, owner binding, batch lock ordering/atomic clone commit and borrowed materialization."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/udp/mod.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/udp/replay.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/udp/server.rs",
+    "status": "production_reviewed",
+    "notes": "PROTO-1/2; server map/session lock order, remove live flag, capability index, O(N) collision predicate."
+  },
+  {
+    "path": "crates/ferrum2-shadowsocks/src/udp/wire.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-socks5/src/lib.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-sniff/src/lib.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-net/src/capability.rs",
+    "status": "production_reviewed",
+    "notes": "Native future Send resolver seams; binder cannot re-resolve."
+  },
+  {
+    "path": "crates/ferrum2-net/src/lib.rs",
+    "status": "production_reviewed",
+    "notes": "Entire source read; boundaries, public API, errors, state mutation and bounds reviewed; see report."
+  },
+  {
+    "path": "crates/ferrum2-net/src/model.rs",
+    "status": "production_reviewed",
+    "notes": "Snapshot validation, stable identities, priority models; O(N squared) cold path observation."
+  },
+  {
+    "path": "crates/ferrum2-net/src/resolver.rs",
+    "status": "production_reviewed",
+    "notes": "Priority/error mappings, 256 success cache, generation nonregression, lock boundaries."
+  }
+]

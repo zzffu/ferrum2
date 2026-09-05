@@ -1,5 +1,9 @@
 # Engineering remediation — 2026-09-05
 
+**当前阶段已调整为[先完成全量审查](engineering-audit-2026-09-05.md)，再统一架构设计、
+实现及性能无回退验收，最后进行 profiling 驱动优化。本文下列修改是已执行的候选历史，
+不是完成全量审查或架构验收的声明。**
+
 这是持续整改记录，不是生产资格声明。起点 `9bbcea22d0373ff60932f929d93d265c98c0a711`，
 开始时工作区干净。根目录和全部 51 份 scoped `AGENTS.md`、
 README、文档索引、workspace manifests、架构台账和 CI 入口为审查输入。
@@ -143,7 +147,7 @@ host trial schema 3 保留 p50/p95/p99 与最多 2,000,000 样本。延迟从发
 - 第二轮 Confirm：baseline `5b46b03e...` 是原始 9bb 产品加同一当前 harness；
   candidate `8d3ecf7e...`。五对、5 秒预热/30 秒 active，增加 256-flow fairness；46/50 后在服务端 startup.bind 失败，validator exit 2，不能作完整比较。
 
-所有已结束的 host 运行都验证五类残留为 0；“执行退出 0”与“性能策略通过”明确分开。
+所有已结束的 host 运行的 runner JSON 均报告五类残留为 0；全量审查 HT2 发现部分删除后读回缺口，不能扩大为每类独立验证。“执行退出 0”与“性能策略通过”明确分开。
 R5/R9/R10 的工具修复解决取证缺口，没有证明原始 TCP/UDP 故障已被消除。
 
 ## 已执行验证与当前资格
