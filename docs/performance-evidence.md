@@ -2,6 +2,33 @@
 
 Ferrum2 keeps measurement production, evidence validation, and adoption policy separate. A successful command is not by itself a performance claim.
 
+## DNS resource observations
+
+`m4-qualification dns-resource` schema 2 keeps process fd/task ceilings, RSS windows and
+post-load stability checks separate from final product termination/reap, harness worker joins
+and listener rebind. Post-load samples are named `direct-post-load-stable` and
+`detoured-post-load-stable`; three equal tuple intervals do not prove query resources were released.
+`process_owner_delta` is the existing OS-count ceiling, not a query-owner allowance.
+
+Each `dns_resource_phase_completion` records verified queries and `load_work` sent/verified/unfinished
+counts. A sent request that times out or fails response validation remains an error even after stop
+is requested. These counters describe the load client, not product DNS owners.
+
+The final `dns_resource_summary` reports `status=OBSERVATION_COMPLETE`, with explicit successful
+`process_bounds`, `post_load_stability`, `process_shutdown`, `harness_join` and `rebind` checks.
+It always retains `query_drain={status:UNVERIFIED,reason:query-owner-observation-unavailable}` and
+`production_recovery_qualified=false`. Exit 0 means the named observations and final cleanup
+completed and were written; any workload, bound, stability, cleanup or output failure exits 1.
+The corresponding CI success cannot serve as production query-recovery acceptance. Product-side
+query/request-task/idle-pool observations belong to the later architecture work; neither synthetic
+zeros nor observed residues establish an exemption.
+
+The DNS profile and resource clients validate the complete fixed response: flags, ID, one IN/A
+question, one matching localhost A answer, exact fixture TTL (profile 0, resource 30), and no extra
+sections, EDNS or signature. Wire compression is permitted; trailing bytes and reserved flags are
+rejected. Profile completion names its actual final process/worker cleanup rather than claiming
+unobserved in-process DNS drain. Current readers do not retain the previous `drain=PASS` contract.
+
 ## Product parent/candidate evidence
 
 The canonical controller entry point is:

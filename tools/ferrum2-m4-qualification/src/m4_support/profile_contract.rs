@@ -1,9 +1,6 @@
+use super::profile_files::validate_profile_relative;
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::thread;
 
 use ferrum2_shadowsocks::MAX_UDP_WIRE_LEN;
@@ -426,15 +423,7 @@ pub(super) fn parse_profile_args(arguments: &[OsString]) -> Result<ProfileArgs, 
             .ok_or_else(|| format!("{name} is outside its finite bound"))
     };
     let ready_file = PathBuf::from(ready_file.ok_or_else(|| "missing --ready-file".to_owned())?);
-    if ready_file.is_absolute()
-        || !ready_file.starts_with("profiles")
-        || ready_file.components().count() < 2
-        || ready_file
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err("--ready-file must be a relative child of profiles/".to_owned());
-    }
+    validate_profile_relative(&ready_file)?;
     let scenario =
         ProfileScenario::parse(scenario.ok_or_else(|| "missing --scenario".to_owned())?)?;
     let warmup_seconds = seconds(warmup_seconds, "--warmup-seconds", &PROFILE_WARMUP_SECONDS)?;
@@ -601,97 +590,6 @@ pub(super) fn parse_profile_args(arguments: &[OsString]) -> Result<ProfileArgs, 
         binary_dir,
         raw,
     })
-}
-
-pub(super) struct ReadyFile {
-    pub(super) path: Option<PathBuf>,
-}
-
-impl ReadyFile {
-    pub(super) fn publish(
-        path: &Path,
-        scenario: ProfileScenario,
-        client_pid: u32,
-        server_pid: Option<u32>,
-        warmup_seconds: u64,
-        active_seconds: u64,
-    ) -> Result<Self, String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| "profile ready file has no parent".to_owned())?;
-        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(clean_io)?;
-        write!(
-            temporary,
-            "scenario={}\nclient_pid={}\nserver_pid={}\nwarmup_seconds={}\nactive_seconds={}\n",
-            scenario.label(),
-            client_pid,
-            server_pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
-            warmup_seconds,
-            active_seconds,
-        )
-        .map_err(clean_io)?;
-        temporary.flush().map_err(clean_io)?;
-        #[cfg(unix)]
-        temporary
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(clean_io)?;
-        temporary.as_file().sync_all().map_err(clean_io)?;
-        fs::hard_link(temporary.path(), path).map_err(|_| {
-            "profile ready file already exists or could not be published".to_owned()
-        })?;
-        if let Err(error) = temporary.close() {
-            let _ = fs::remove_file(path);
-            return Err(clean_io(error));
-        }
-        Ok(Self {
-            path: Some(path.to_path_buf()),
-        })
-    }
-
-    pub(super) fn remove(mut self) -> Result<(), String> {
-        let path = self.path.take().expect("ready file owner");
-        fs::remove_file(path).map_err(clean_io)
-    }
-}
-
-impl Drop for ReadyFile {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-pub(super) fn resolve_profile_ready_file(
-    repository: &Path,
-    relative: &Path,
-) -> Result<PathBuf, String> {
-    let root = repository.join("profiles");
-    if fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err("profiles/ must not be a symlink".to_owned());
-    }
-    fs::create_dir_all(&root).map_err(clean_io)?;
-    let root = root.canonicalize().map_err(clean_io)?;
-    let requested = repository.join(relative);
-    let parent = requested
-        .parent()
-        .ok_or_else(|| "profile ready file has no parent".to_owned())?;
-    fs::create_dir_all(parent).map_err(clean_io)?;
-    let parent = parent.canonicalize().map_err(clean_io)?;
-    if !parent.starts_with(&root) {
-        return Err("profile ready file escaped profiles/".to_owned());
-    }
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(clean_io)?;
-        fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).map_err(clean_io)?;
-    }
-    Ok(parent.join(
-        requested
-            .file_name()
-            .ok_or_else(|| "profile ready file has no name".to_owned())?,
-    ))
 }
 
 pub(super) struct ProfileOutcome {

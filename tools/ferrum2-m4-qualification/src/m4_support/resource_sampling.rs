@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::dns_resource::{DNS_RESOURCE_SAMPLES, DNS_RSS_WINDOW, validate_dns_owner_bound};
+use super::dns_resource::{DNS_RESOURCE_SAMPLES, DNS_RSS_WINDOW, validate_dns_process_bound};
 use super::process_support::{
     ProcessGuard, STARTUP_TIMEOUT, active_metric, join_unit_workers, json, remaining,
     socks_connect, spawn_worker,
@@ -388,7 +388,7 @@ pub(super) fn validate_dns_samples(
         return Err("DNS sample set is incomplete".to_owned());
     }
     for sample in samples {
-        validate_dns_owner_bound(sample, idle)?;
+        validate_dns_process_bound(sample, idle)?;
     }
     validate_rss_windows(samples, DNS_RSS_WINDOW)
 }

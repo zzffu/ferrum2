@@ -8,7 +8,8 @@ use super::flow::{
 };
 use super::setup::{collect_active_samples, collect_quiescent_samples, release_phase};
 use crate::m4_support::process_support::{ProcessGuard, clean_io};
-use crate::m4_support::profile_contract::{ProfileArgs, ProfileScenario, ReadyFile};
+use crate::m4_support::profile_contract::{ProfileArgs, ProfileScenario};
+use crate::m4_support::profile_files::ReadyFile;
 use crate::m4_support::resource_sampling::PairSample;
 use std::net::{SocketAddrV4, TcpStream};
 use std::path::Path;
@@ -22,6 +23,8 @@ pub(crate) fn to_tokio_streams(streams: Vec<TcpStream>) -> Result<Vec<TokioTcpSt
     streams
         .into_iter()
         .map(|stream| {
+            stream.set_read_timeout(None).map_err(clean_io)?;
+            stream.set_write_timeout(None).map_err(clean_io)?;
             stream.set_nonblocking(true).map_err(clean_io)?;
             TokioTcpStream::from_std(stream).map_err(clean_io)
         })

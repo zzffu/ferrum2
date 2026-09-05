@@ -1,3 +1,4 @@
+use super::dns_response_contract::{DnsResponseFixture, ExpectedDnsResponse};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::A;
-use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 
 use super::dns_resource::{DNS_LOAD_WORKERS, DNS_UPSTREAM_DELAY};
 use super::process_support::{ProcessGuard, clean_io, join_worker, remaining, spawn_worker, v4};
@@ -200,7 +201,10 @@ impl DnsResponder {
                     return Err("DNS responder received an invalid query shape".to_owned());
                 }
                 let query = request.queries[0].clone();
-                if query.name() != &expected || query.query_type() != RecordType::A {
+                if query.name() != &expected
+                    || query.query_type() != RecordType::A
+                    || query.query_class() != DNSClass::IN
+                {
                     return Err("DNS responder received the wrong query".to_owned());
                 }
                 let mut response = Message::new(request.id, MessageType::Response, OpCode::Query);
@@ -256,8 +260,16 @@ impl Drop for DnsResponder {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct DnsLoadReport {
+    pub(super) sent: usize,
+    pub(super) verified: usize,
+    pub(super) unfinished: usize,
+}
+
 pub(super) struct DnsLoad {
     pub(super) stop: Arc<AtomicBool>,
+    sent: Arc<AtomicUsize>,
     pub(super) completed: Arc<AtomicUsize>,
     pub(super) workers: Vec<JoinHandle<Result<usize, String>>>,
 }
@@ -266,12 +278,14 @@ impl DnsLoad {
     pub(super) fn start(address: SocketAddrV4, name: &'static str) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicUsize::new(0));
+        let sent = Arc::new(AtomicUsize::new(0));
         let typed_name =
             Name::from_ascii(name).map_err(|_| "DNS load name is invalid".to_owned())?;
         let mut workers = Vec::with_capacity(DNS_LOAD_WORKERS);
         for worker_index in 0..DNS_LOAD_WORKERS {
             let worker_stop = Arc::clone(&stop);
             let worker_completed = Arc::clone(&completed);
+            let worker_sent = Arc::clone(&sent);
             let worker_name = typed_name.clone();
             let worker = spawn_worker(move || {
                 let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(clean_io)?;
@@ -283,6 +297,8 @@ impl DnsLoad {
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .map_err(clean_io)?;
                 let mut response_wire = [0_u8; 4096];
+                let expected =
+                    ExpectedDnsResponse::new(worker_name.clone(), DnsResponseFixture::Resource);
                 let mut count = 0_usize;
                 while !worker_stop.load(Ordering::SeqCst) {
                     let id = (u16::try_from(worker_index).expect("DNS worker index") << 11)
@@ -290,37 +306,21 @@ impl DnsLoad {
                         ^ 1;
                     let mut request = Message::new(id, MessageType::Query, OpCode::Query);
                     request.add_query(Query::query(worker_name.clone(), RecordType::A));
-                    socket
-                        .send(
-                            &request
-                                .to_vec()
-                                .map_err(|_| "DNS load could not encode a query".to_owned())?,
-                        )
-                        .map_err(clean_io)?;
-                    let length = match socket.recv(&mut response_wire) {
-                        Ok(length) => length,
-                        Err(error)
-                            if worker_stop.load(Ordering::SeqCst)
-                                && matches!(
-                                    error.kind(),
-                                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                                ) =>
-                        {
-                            break;
-                        }
-                        Err(error) => return Err(clean_io(error)),
-                    };
-                    let response = Message::from_vec(&response_wire[..length])
-                        .map_err(|_| "DNS load received malformed wire".to_owned())?;
-                    if response.metadata.id != id
-                        || response.metadata.message_type != MessageType::Response
-                        || response.answers.first().map(|record| &record.data)
-                            != Some(&RData::A(A(Ipv4Addr::LOCALHOST)))
-                    {
-                        return Err("DNS load received the wrong response".to_owned());
+                    let wire = request
+                        .to_vec()
+                        .map_err(|_| "DNS load could not encode a query".to_owned())?;
+                    if socket.send(&wire).map_err(clean_io)? != wire.len() {
+                        return Err("DNS load sent a partial datagram".to_owned());
                     }
-                    count += 1;
-                    worker_completed.fetch_add(1, Ordering::SeqCst);
+                    increment_dns_count(&worker_sent)?;
+                    // Stop prevents the next request; it cannot make failure of
+                    // an already sent request count as successful completion.
+                    let length = socket.recv(&mut response_wire).map_err(clean_io)?;
+                    expected.validate_wire(id, &response_wire[..length])?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| "DNS load query count overflow".to_owned())?;
+                    increment_dns_count(&worker_completed)?;
                     thread::sleep(Duration::from_millis(5));
                 }
                 Ok(count)
@@ -328,16 +328,25 @@ impl DnsLoad {
             match worker {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
-                    stop.store(true, Ordering::SeqCst);
-                    for worker in workers {
-                        let _ = worker.join();
-                    }
-                    return Err(error);
+                    let mut load = Self {
+                        stop,
+                        sent,
+                        completed,
+                        workers,
+                    };
+                    return Err(match load.finish() {
+                        Ok(report) => format!(
+                            "{error}; sent={} verified={} unfinished={}",
+                            report.sent, report.verified, report.unfinished
+                        ),
+                        Err(cleanup) => format!("{error}; cleanup: {cleanup}"),
+                    });
                 }
             }
         }
         Ok(Self {
             stop,
+            sent,
             completed,
             workers,
         })
@@ -350,25 +359,57 @@ impl DnsLoad {
         Ok(())
     }
 
-    pub(super) fn finish(&mut self) -> Result<usize, String> {
+    pub(super) fn finish(&mut self) -> Result<DnsLoadReport, String> {
         self.stop.store(true, Ordering::SeqCst);
         let mut total = 0_usize;
         let mut first_error = None;
         for worker in std::mem::take(&mut self.workers) {
             match join_worker(worker).and_then(|result| result) {
-                Ok(count) => total = total.saturating_add(count),
+                Ok(count) => match total.checked_add(count) {
+                    Some(sum) => total = sum,
+                    None => {
+                        first_error.get_or_insert_with(|| "DNS joined count overflow".to_owned());
+                    }
+                },
                 Err(error) => {
                     first_error.get_or_insert(error);
                 }
             }
         }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        if total != self.completed.load(Ordering::SeqCst) {
-            return Err("DNS load completion accounting mismatch".to_owned());
-        }
-        Ok(total)
+        finish_dns_load_counts(
+            self.sent.load(Ordering::SeqCst),
+            self.completed.load(Ordering::SeqCst),
+            first_error.map_or(Ok(total), Err),
+        )
+    }
+}
+
+fn increment_dns_count(counter: &AtomicUsize) -> Result<(), String> {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            count.checked_add(1)
+        })
+        .map(|_| ())
+        .map_err(|_| "DNS load accounting overflow".to_owned())
+}
+
+fn finish_dns_load_counts(
+    sent: usize,
+    verified: usize,
+    joined: Result<usize, String>,
+) -> Result<DnsLoadReport, String> {
+    let unfinished = sent
+        .checked_sub(verified)
+        .ok_or_else(|| "DNS verified count exceeds sent count".to_owned())?;
+    let counts = format!("sent={sent} verified={verified} unfinished={unfinished}");
+    match joined {
+        Err(error) => Err(format!("{error}; {counts}")),
+        Ok(total) if total == verified && unfinished == 0 => Ok(DnsLoadReport {
+            sent,
+            verified,
+            unfinished,
+        }),
+        Ok(_) => Err(format!("DNS load completion accounting mismatch; {counts}")),
     }
 }
 
@@ -378,5 +419,46 @@ impl Drop for DnsLoad {
         for worker in std::mem::take(&mut self.workers) {
             let _ = worker.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod dns_contract_tests {
+    use super::*;
+
+    #[test]
+    fn stopping_does_not_hide_failure_of_the_last_sent_query() {
+        let mut load = DnsLoad {
+            stop: Arc::new(AtomicBool::new(true)),
+            sent: Arc::new(AtomicUsize::new(2)),
+            completed: Arc::new(AtomicUsize::new(1)),
+            workers: vec![
+                spawn_worker(|| Err("injected receive timeout".to_owned())).unwrap(),
+                spawn_worker(|| Ok(1)).unwrap(),
+            ],
+        };
+        assert_eq!(
+            load.finish(),
+            Err("injected receive timeout; sent=2 verified=1 unfinished=1".to_owned())
+        );
+        assert!(load.workers.is_empty());
+    }
+
+    #[test]
+    fn sent_verified_and_joined_counts_must_agree_without_overflow() {
+        assert_eq!(
+            finish_dns_load_counts(3, 3, Ok(3)),
+            Ok(DnsLoadReport {
+                sent: 3,
+                verified: 3,
+                unfinished: 0
+            })
+        );
+        assert!(finish_dns_load_counts(3, 2, Ok(2)).is_err());
+        assert!(finish_dns_load_counts(3, 3, Ok(2)).is_err());
+        assert!(finish_dns_load_counts(2, 3, Ok(3)).is_err());
+        let counter = AtomicUsize::new(usize::MAX);
+        assert!(increment_dns_count(&counter).is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), usize::MAX);
     }
 }

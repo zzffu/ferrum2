@@ -4,15 +4,15 @@ use super::contract::{
     SCALE_SETUP_SESSION_TIMEOUT, SESSIONS, ScalePairSample,
 };
 use crate::m4_support::process_support::{
-    ProcessGuard, clean_io, join_unit_workers, join_worker, remaining, spawn_worker,
+    ProcessGuard, clean_io, join_unit_workers, join_worker, remaining, socks_connect, spawn_worker,
 };
 use crate::m4_support::resource_sampling::{
     PairSample, proc_sample, sample_pair, validate_owner_tuple,
 };
 use crate::m4_support::{DRAIN_TIMEOUT, SETUP_WORKERS};
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::io;
+use std::net::{SocketAddrV4, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
@@ -133,100 +133,6 @@ where
         .collect()
 }
 
-pub(crate) fn scale_setup_io_timeout_at(
-    now: Instant,
-    deadline: Instant,
-) -> Result<Duration, String> {
-    deadline
-        .checked_duration_since(now)
-        .filter(|duration| !duration.is_zero())
-        .map(|duration| duration.min(SCALE_SETUP_IO_SLICE))
-        .ok_or_else(|| "scale setup I/O deadline expired".to_owned())
-}
-
-pub(crate) fn scale_setup_io_timeout(deadline: Instant) -> Result<Duration, String> {
-    scale_setup_io_timeout_at(Instant::now(), deadline)
-}
-
-pub(crate) fn scale_write_all(
-    stream: &mut TcpStream,
-    bytes: &[u8],
-    deadline: Instant,
-) -> Result<(), String> {
-    let mut offset = 0_usize;
-    while offset < bytes.len() {
-        stream
-            .set_write_timeout(Some(scale_setup_io_timeout(deadline)?))
-            .map_err(clean_io)?;
-        match stream.write(&bytes[offset..]) {
-            Ok(0) => {
-                return Err(clean_io(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "scale setup socket wrote zero bytes",
-                )));
-            }
-            Ok(written) => offset += written,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(clean_io(error)),
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn scale_read_exact(
-    stream: &mut TcpStream,
-    bytes: &mut [u8],
-    deadline: Instant,
-) -> Result<(), String> {
-    let mut offset = 0_usize;
-    while offset < bytes.len() {
-        stream
-            .set_read_timeout(Some(scale_setup_io_timeout(deadline)?))
-            .map_err(clean_io)?;
-        match stream.read(&mut bytes[offset..]) {
-            Ok(0) => {
-                return Err(clean_io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "scale setup socket ended early",
-                )));
-            }
-            Ok(read) => offset += read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(clean_io(error)),
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn scale_socks_connect(
-    proxy: SocketAddrV4,
-    target: SocketAddrV4,
-    deadline: Instant,
-) -> Result<TcpStream, String> {
-    let timeout = scale_setup_io_timeout(deadline)?;
-    let mut stream =
-        TcpStream::connect_timeout(&SocketAddr::V4(proxy), timeout).map_err(clean_io)?;
-    scale_write_all(&mut stream, &[5, 1, 0], deadline)?;
-    let mut method = [0_u8; 2];
-    scale_read_exact(&mut stream, &mut method, deadline)?;
-    if method != [5, 0] {
-        return Err("scale SOCKS authentication negotiation failed".to_owned());
-    }
-    let mut request = [0_u8; 10];
-    request[..4].copy_from_slice(&[5, 1, 0, 1]);
-    request[4..8].copy_from_slice(&target.ip().octets());
-    request[8..].copy_from_slice(&target.port().to_be_bytes());
-    scale_write_all(&mut stream, &request, deadline)?;
-    let mut reply = [0_u8; 10];
-    scale_read_exact(&mut stream, &mut reply, deadline)?;
-    if reply[..4] != [5, 0, 0, 1] {
-        return Err("scale SOCKS CONNECT failed".to_owned());
-    }
-    stream.set_read_timeout(None).map_err(clean_io)?;
-    stream.set_write_timeout(None).map_err(clean_io)?;
-    Ok(stream)
-}
-
 pub(crate) fn establish_scale_sessions(
     proxy: SocketAddrV4,
     target: SocketAddrV4,
@@ -238,7 +144,7 @@ pub(crate) fn establish_scale_sessions(
         move |_index, global_deadline| {
             let session_deadline =
                 global_deadline.min(Instant::now() + SCALE_SETUP_SESSION_TIMEOUT);
-            scale_socks_connect(proxy, target, session_deadline)
+            socks_connect(proxy, target, session_deadline)
         },
     )
 }

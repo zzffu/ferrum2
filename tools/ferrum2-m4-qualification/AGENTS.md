@@ -24,12 +24,24 @@ Use locked commands:
 cargo build -p ferrum2-m4-qualification --bin m4-qualification --locked
 cargo run -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check
 cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked worker_lifetime -- --test-threads=1
+cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked bounded_probe_deadline_contract -- --test-threads=1
+cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked dns_contract_tests -- --test-threads=1
 python3 -B -m unittest discover -s tests/performance_candidate -v
 ```
 
 Run `self-check` after changes to parsing, bounds, process control, readiness files, raw evidence, or resource accounting. Add mutation cases that demonstrate malformed input is rejected rather than tests that freeze implementation text.
 The explicit `worker_lifetime` test filter runs only finite in-memory thread/channel ownership
 contracts; it does not start sockets, products, qualification modes, or timing workloads.
+The `bounded_probe_deadline_contract` filter uses finite scripted I/O, fake child operations,
+in-memory capture and temporary filesystem fixtures; it does not start sockets or products.
+The `dns_contract_tests` filter likewise uses only response objects, finite in-memory workers,
+and resource-observation contracts. The total `self-check` also exercises loopback DNS; do not
+run it when the task permits only no-network checks.
+
+DNS resource schema 2 reports `OBSERVATION_COMPLETE` after process bounds/stability and final
+shutdown/join/rebind checks succeed. Exit 0 does not qualify query-owner recovery:
+`query_drain` remains `UNVERIFIED` and `production_recovery_qualified` remains false until product
+owner observations exist. Never replace missing observations with zeros or residual-count allowances.
 
 ## Process and Evidence Safety
 

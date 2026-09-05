@@ -1,3 +1,5 @@
+mod dns_resource_evidence;
+mod dns_response_contract;
 mod tcp_scale;
 mod windows_tun;
 
@@ -78,6 +80,7 @@ mod host_identity;
 mod process_support;
 mod profile_contract;
 mod profile_dns;
+mod profile_files;
 mod profile_output;
 mod profile_tcp;
 mod profile_udp;

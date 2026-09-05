@@ -1,3 +1,4 @@
+use super::profile_files::ReadyFile;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::path::Path;
@@ -13,7 +14,7 @@ use super::process_support::{
 };
 use super::profile_contract::{
     PROFILE_UDP_MAX_BUFFERED_BYTES, PROFILE_UDP_WORKERS, ProfileArgs, ProfileOutcome,
-    ProfileUdpTopology, ReadyFile, Topology,
+    ProfileUdpTopology, Topology,
 };
 use super::profile_output::{
     ensure_profile_workers_running, wait_for_profile_phase_optional_server,

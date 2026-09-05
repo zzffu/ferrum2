@@ -10,13 +10,23 @@
     },
     {
       "path": "src/m4_support/dns_resource.rs",
-      "bytes": 13427,
-      "sha256": "070a0fb0e5a6989db3242c01d68997c73ddfaf6255810687b13bb5fe65d1c04a"
+      "bytes": 14694,
+      "sha256": "790bb805e00c45dbf038b25e23d995d0d9e2beed823e321f4ed0a1edd1ab4f4c"
+    },
+    {
+      "path": "src/m4_support/dns_resource_evidence.rs",
+      "bytes": 4279,
+      "sha256": "62a2bf84ce9e166d022a0d97468983f5b1161062b6a3aed2f5a15cf974e21070"
+    },
+    {
+      "path": "src/m4_support/dns_response_contract.rs",
+      "bytes": 6074,
+      "sha256": "bd44acf16e8fd7a9c4f256875b0635e181b1efe707e9e180af24d3d68549a5e4"
     },
     {
       "path": "src/m4_support/evidence_support.rs",
-      "bytes": 13750,
-      "sha256": "5f130ea1568583a97485fefe5437d0c68b7abdbe3aa00e20549d6ad2fc8d0d87"
+      "bytes": 16559,
+      "sha256": "66ef990f5958271c67e9376162adebd514ca851106f1301e91bcd562f00d5ac4"
     },
     {
       "path": "src/m4_support/host_identity.rs",
@@ -25,38 +35,58 @@
     },
     {
       "path": "src/m4_support/mod.rs",
-      "bytes": 3462,
-      "sha256": "112588af21e953610cb794615158f0ceea76dc710180779795bd9ed99d61856c"
+      "bytes": 3535,
+      "sha256": "f89f73b72623fb22a3b73a78a8c87174fc74c7c183e1c30a79e70a3630a91623"
+    },
+    {
+      "path": "src/m4_support/process_support/deadline_io/tests.rs",
+      "bytes": 4682,
+      "sha256": "db150ec6fb81c5514038052dcc9feb351d85a3ce42ef7e47777b0f207ffef9d6"
+    },
+    {
+      "path": "src/m4_support/process_support/deadline_io.rs",
+      "bytes": 5618,
+      "sha256": "abecbbabc0c3463a4aeed0fd9813370f795c0da5eeb0109e9962fa9a0c4b2931"
+    },
+    {
+      "path": "src/m4_support/process_support/probe.rs",
+      "bytes": 8419,
+      "sha256": "e68501aa195e1a593b0f0f3765fc7eded7d7008a954e4064eccbabba8d1a1471"
     },
     {
       "path": "src/m4_support/process_support.rs",
-      "bytes": 31446,
-      "sha256": "100088b9d8878a459af3f0efd55bcac3e09a9e9b87ae5078ed46426d9e709b3c"
+      "bytes": 29021,
+      "sha256": "7a1b66ddf92afa83503010505bc7c3de8e0a4d0cc136567f83ebbfdf4e6633eb"
     },
     {
       "path": "src/m4_support/profile_contract.rs",
-      "bytes": 31361,
-      "sha256": "27c9e01c5d5e4ab065278c3db2cda7fea3fb761712d68ecaa7b7ba68c5b0638f"
+      "bytes": 27947,
+      "sha256": "8f5002eedf039c5b04c67d4b8535f81520c30da873b6b8257e85da40868c6166"
     },
     {
       "path": "src/m4_support/profile_dns.rs",
-      "bytes": 20763,
-      "sha256": "06e4646fdd85816a0a2f8fe1581cf0accfbb5c2f56d17a03c417db6b5c3efc89"
+      "bytes": 20640,
+      "sha256": "24f4162eb8e8374fc02800ad734713ce29e41838e841057f5f411ac2f09d6149"
+    },
+    {
+      "path": "src/m4_support/profile_files.rs",
+      "bytes": 10838,
+      "sha256": "3532f5c3ea77783b2a92297c69785d63401042b139b3f6295526b32675bd7fa5"
     },
     {
       "path": "src/m4_support/profile_output.rs",
-      "bytes": 8789,
-      "sha256": "e4dc50afbd9912c905a4a2a5621b22642d0e9e9aa9b656028e04d93abe18a86f"
+      "bytes": 8815,
+      "sha256": "8883705d4ad0e5b57171064d17f5174e30faf41ffd34d385ca2f73db8df2b31f"
     },
     {
       "path": "src/m4_support/profile_tcp.rs",
-      "bytes": 13078,
-      "sha256": "c09b8b6c4e3789867f9291827c198fb603b1e7f00a85e11aa4b4117a5b9ea7c7"
+      "bytes": 13104,
+      "sha256": "71988674cce608b6ae7a40aa0fdfe7794b11ed7af61fb8a97d882d7d00b588ec"
     },
     {
       "path": "src/m4_support/profile_udp.rs",
-      "bytes": 13065,
-      "sha256": "a222ed1c624851b667f9dbec364e6967ccd325a8d58108a6687349bf3f1abf7d"
+      "bytes": 13091,
+      "sha256": "e3b1452d1ea851e91b16f4769cd3a201e2c4a20831c821359034ac1b85eb2244"
     },
     {
       "path": "src/m4_support/proxy_config.rs",
@@ -65,18 +95,18 @@
     },
     {
       "path": "src/m4_support/resource.rs",
-      "bytes": 31220,
-      "sha256": "6fcdc5821e7c10b091884e2cc782972b05463cf25a4777858e3230677b00fb95"
+      "bytes": 31578,
+      "sha256": "9fa572e0409227668fac8b20586f7af91e400daa72af59e4c5daca4797b6e73c"
     },
     {
       "path": "src/m4_support/resource_sampling.rs",
-      "bytes": 21042,
-      "sha256": "84dedd1d5a65ffeb4cafd9b5fc15f6dd8aa49c8f935b680f970221fb73075400"
+      "bytes": 21046,
+      "sha256": "f2931b2613198bbc10033e4b9996b9acf012d392f1fc7953477187b852b4657d"
     },
     {
       "path": "src/m4_support/self_check.rs",
-      "bytes": 30680,
-      "sha256": "1e5edc0c3f4ac6f4dc3ea16d877839100c858196535993a8aadc8854926d8dd1"
+      "bytes": 29023,
+      "sha256": "0b974005570c7d0f80b8446dbc10cf955eef276d5070675463c76e4ea91a85fc"
     },
     {
       "path": "src/m4_support/tcp_scale/contract.rs",
@@ -85,8 +115,8 @@
     },
     {
       "path": "src/m4_support/tcp_scale/execution.rs",
-      "bytes": 10450,
-      "sha256": "9dccfef2858e84bb66b65410ffccb05144e527b45842390581b8ad67a5fb2e66"
+      "bytes": 10613,
+      "sha256": "7005eeb3659e7516fabdc6bdb27a8ad3757c4e093ba2796243d1fa276d079bc5"
     },
     {
       "path": "src/m4_support/tcp_scale/flow.rs",
@@ -105,13 +135,13 @@
     },
     {
       "path": "src/m4_support/tcp_scale/self_check.rs",
-      "bytes": 14235,
-      "sha256": "d4c28d41189e1559d8e14c3c128392b19dd5d580ade26b7bb55d38ffb3117888"
+      "bytes": 14300,
+      "sha256": "d190f938717159deb61381eb665fc766fbf15d55dfbbdc06bddd187c5d3fdf05"
     },
     {
       "path": "src/m4_support/tcp_scale/setup.rs",
-      "bytes": 16433,
-      "sha256": "e8e23ce3240da720d95da162bd2eef397e56ddc469b821fe41632ebabf17007d"
+      "bytes": 13221,
+      "sha256": "d8b2979d7216fff9e966ea839979e40106d860fa188ba5c57c549c285db8625f"
     },
     {
       "path": "src/m4_support/throughput.rs",
@@ -149,11 +179,6 @@
       "sha256": "b3f1b274ee345b8c7cb1db0679382c0d45e3c459baec851ff955e1afa634be41"
     },
     {
-      "path": "src/m4_support/windows_tun/self_check.rs",
-      "bytes": 425,
-      "sha256": "1b90b20e6f5d4fcd6f46b3623f3da95b28b89b1d988b91daeeced1cd702bfc05"
-    },
-    {
       "path": "src/m4_support/windows_tun/self_check/cli_contract.rs",
       "bytes": 17253,
       "sha256": "bb8083f12bd9d1ceaba3df4f86a35185bf75c516ba8a679d1a343b97818452f6"
@@ -172,6 +197,11 @@
       "path": "src/m4_support/windows_tun/self_check/workload.rs",
       "bytes": 11082,
       "sha256": "98f4268f4561246726170da5088339d7619d2d90246292a6b4630f1b5e4204fd"
+    },
+    {
+      "path": "src/m4_support/windows_tun/self_check.rs",
+      "bytes": 425,
+      "sha256": "1b90b20e6f5d4fcd6f46b3623f3da95b28b89b1d988b91daeeced1cd702bfc05"
     },
     {
       "path": "src/m4_support/windows_tun/support.rs",

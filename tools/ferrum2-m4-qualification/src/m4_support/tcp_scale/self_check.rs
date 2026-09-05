@@ -8,11 +8,10 @@ use super::contract::{
     validate_frame,
 };
 use super::flow::validate_phase_accounting;
-use super::setup::{
-    bounded_parallel_setup, ensure_active_sample_before_deadline, scale_setup_io_timeout_at,
-};
+use super::setup::{bounded_parallel_setup, ensure_active_sample_before_deadline};
 use crate::m4_support::SETUP_WORKERS;
 use crate::m4_support::evidence_support::validate_evidence_line;
+use crate::m4_support::process_support::io_timeout_at;
 use crate::m4_support::process_support::{REAP_TIMEOUT, clean_io};
 use crate::m4_support::profile_contract::{
     EVIDENCE_LINE_MAX_BYTES, PROFILE_TRIAL_SCHEMA_VERSION, TCP_SCALE_EVIDENCE_LINE_MAX_BYTES,
@@ -201,17 +200,20 @@ pub(crate) async fn double_barrier_probe() -> Result<(), String> {
 
 pub(crate) fn run_scale_self_check() -> Result<(), String> {
     let timeout_clock = Instant::now();
-    if scale_setup_io_timeout_at(
+    if io_timeout_at(
         timeout_clock,
         timeout_clock + SCALE_SETUP_IO_SLICE + Duration::from_secs(1),
-    )? != SCALE_SETUP_IO_SLICE
-        || scale_setup_io_timeout_at(timeout_clock, timeout_clock + Duration::from_millis(1))?
+    )
+    .map_err(clean_io)?
+        != SCALE_SETUP_IO_SLICE
+        || io_timeout_at(timeout_clock, timeout_clock + Duration::from_millis(1))
+            .map_err(clean_io)?
             != Duration::from_millis(1)
     {
         return Err("scale setup I/O timeout did not preserve its absolute bound".to_owned());
     }
     expect_rejected("expired scale setup I/O deadline", || {
-        scale_setup_io_timeout_at(timeout_clock, timeout_clock)
+        io_timeout_at(timeout_clock, timeout_clock).map_err(clean_io)
     })?;
     let ordered = bounded_parallel_setup(
         8,

@@ -1,3 +1,4 @@
+use super::profile_files::ReadyFile;
 use std::fs;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::Path;
@@ -13,7 +14,7 @@ use super::process_support::{
 };
 use super::profile_contract::{
     PROFILE_TCP_LATENCY_SAMPLE_CAP, PROFILE_TCP_STREAM_BATCH, ProfileArgs, ProfileOutcome,
-    ProfileScenario, ReadyFile, Topology,
+    ProfileScenario, Topology,
 };
 use super::profile_output::{
     ProfileTcpWorkerResult, ensure_profile_workers_running, wait_for_profile_phase,

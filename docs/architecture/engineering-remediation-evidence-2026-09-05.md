@@ -991,3 +991,44 @@ all-features clippy `-D warnings`通过。产品client test binary未运行。
 日志 `target/remediation-cpu-{linux-tests,linux-ci-regression,output-red,m0-build,m0-tests,m0-clippy}.log`；
 完整范围/限制在target/remediation-cpu-diagnostic-report.txt。本批没有真实perf/Samply、
 benchmark、host adapter操作或性能提升证据；新增Python调度/验证成本尚未测量。
+
+### M1n — 收尾已完成的 Qualification 资源与协议边界
+
+schema rejection probe改用现有ProcessGuard，stdout/stderr各64KiB和既有redaction规则，
+两capture均join后再报错；读取错误不再当EOF。SOCKS的partial I/O从tcp_scale迁入一个私有
+deadline owner，connect/握手共享绝对期限，最后成功byte也检查截止；resource TCP/DNS
+事务同时限制write/read及响应长度。返回blocking socket保留有限timeout，仅实际Tokio
+handoff清除timeout；未改变throughput payload loop的原测量语义。
+
+ReadyFile与路径处理移至profile_files，字段私有；任何mkdir/chmod前检查relative normal
+profiles子路径与完整已有parent链，不follow symlink/reparse到外部新建目录，再逐级创建/
+readback。原ready发布、碰撞、remove/drop测试跟随owner；Unix0700/0600保持。
+Windows下8个finite脚本IO/fake child/Cursor/temp-file契约通过；不宣称实际Unix redirect
+或Windows reparse变更已执行，也不宣称抵抗同权限并发FS替换。
+
+DNS profile/resource两个客户端共享完整响应oracle：ID/flags/question/class/唯一answer/
+TTL和空额外sections匹配，允许wire compression，拒trailing/reserved bits。Hickory Record
+相等性忽略TTL，测试发现后增加明确TTL比较。DnsLoad保留sent/verified/unfinished，停止
+之后的最后request失败也不能吞掉；finish遍历全部worker并保留计数/首错。
+
+DNS resource schema2改为OBSERVATION_COMPLETE，明确process bounds/stability、最终
+shutdown/join/rebind的真实结果；query_drain始终UNVERIFIED，production_recovery_qualified
+为false。删drained阶段及虚假active=0证明，不移除真实资源上限。exit0仅表示上述观测和
+cleanup完成，不代表产品查询owner回收合格。实际产品query/inbound/pool观察留M2。
+相关文档和workflow描述/纯测试filter同步，普通suite没有新增性能或特权工作负载。
+
+收尾验证：root边界filter8/8、dns_contract_tests6/6、M4 self-check PASS（56 mutations）、
+M4/config严格all-targets/all-features clippy、fmt all、workspace policy20通过；完整
+candidate134通过（38.129s），Windows CI Python80发现中68通过/12个Linux-only skip。
+这些skip不能代替Unix filesystem用例；CPU专属Linux覆盖另见M1m。总self-check包含已有
+有限loopback/DNS行为，不称整个self-check是纯内存；新两个filter不启动socket或产品。
+日志 `target/remediation-audit/m4-final-{boundary-tests,dns-tests,self-check}.log`、
+`target/remediation-m4-{final-candidate,final-policy,final-ci,config-final-clippy,config-final-fmt}.log`，
+agent早期失败/修正见m4-03-04-validation.md、m4-05-validation.md、remediation-dns-contract/validation.txt。
+
+M4 bundle44 rows，SHA `4fc39effe4b51c3306777d1a8b1d93ed9afeb56efa12861097d4c96f12c1c9d3`。
+5个本批Rust文件只做CRLF→LF规范化；44 rows都与Git clean filter bytes一致，Python/PS
+完整source closure通过。当前hash清单与限制在target/remediation-audit/m4-final-handoff.md。
+现有ProcessGuard Drop、kill后Child.wait及capture join仍依赖OS/EOF，**没有OS强制硬期限**；
+本批只消除probe绕开已有owner，不能称全部进程生命周期已闭合。这项与其他未完成工具
+问题后置，不再串为产品架构前置条件。没有新benchmark/profile或privileged host运行。

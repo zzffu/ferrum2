@@ -1,3 +1,5 @@
+use super::dns_response_contract::{DnsResponseFixture, ExpectedDnsResponse};
+use super::profile_files::ReadyFile;
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -9,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::A;
-use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 
 use super::dns_resource::{
     DNS_LOAD_WORKERS, DNS_UPSTREAM_DELAY, prove_tcp_rebind, prove_tcp_udp_rebind, prove_udp_rebind,
@@ -20,7 +22,7 @@ use super::process_support::{
     wait_for_listener,
 };
 use super::profile_contract::{
-    PROFILE_DNS_QUERY_WIRE_BYTES, ProfileArgs, ProfileOutcome, ReadyFile, Topology,
+    PROFILE_DNS_QUERY_WIRE_BYTES, ProfileArgs, ProfileOutcome, Topology,
 };
 use super::profile_output::{
     ensure_profile_workers_running, wait_for_profile_phase_optional_server,
@@ -151,7 +153,10 @@ fn profile_dns_respond(
             return Err("profile DNS responder received an invalid query shape".to_owned());
         }
         let query = request.queries[0].clone();
-        if query.name() != &expected || query.query_type() != RecordType::A {
+        if query.name() != &expected
+            || query.query_type() != RecordType::A
+            || query.query_class() != DNSClass::IN
+        {
             return Err("profile DNS responder received the wrong query".to_owned());
         }
         let mut response = Message::new(request.id, MessageType::Response, OpCode::Query);
@@ -344,7 +349,7 @@ pub(super) fn run_profile_dns(
             "m18_profile_workload_completion status=PASS scenario={} topology=dns-direct \
              queries={queries} workers={DNS_LOAD_WORKERS} \
              upstream_workers={DNS_LOAD_WORKERS} upstream_delay_ms={} \
-             warmup_seconds={} active_seconds={} drain=PASS rebind=PASS",
+             warmup_seconds={} active_seconds={} process_shutdown=PASS harness_join=PASS rebind=PASS",
             arguments.scenario.label(),
             DNS_UPSTREAM_DELAY.as_millis(),
             arguments.warmup_seconds,
@@ -378,6 +383,7 @@ fn profile_dns_load(
     let name = Name::from_ascii(PROFILE_DNS_NAME)
         .map_err(|_| "profile DNS load name is invalid".to_owned())?;
     let mut request = Message::new(0, MessageType::Query, OpCode::Query);
+    let expected = ExpectedDnsResponse::new(name.clone(), DnsResponseFixture::Profile);
     request.add_query(Query::query(name, RecordType::A));
     let mut request_wire = request
         .to_vec()
@@ -400,15 +406,7 @@ fn profile_dns_load(
         let transfer_start = Instant::now();
         socket.send(&request_wire).map_err(clean_io)?;
         let length = socket.recv(&mut response_wire).map_err(clean_io)?;
-        let response = Message::from_vec(&response_wire[..length])
-            .map_err(|_| "profile DNS load received malformed wire".to_owned())?;
-        if response.metadata.id != id
-            || response.metadata.message_type != MessageType::Response
-            || response.answers.first().map(|record| &record.data)
-                != Some(&RData::A(A(Ipv4Addr::LOCALHOST)))
-        {
-            return Err("profile DNS load received the wrong response".to_owned());
-        }
+        expected.validate_wire(id, &response_wire[..length])?;
         let completion = Instant::now();
         if !reported_valid {
             gate.worker_validated()?;

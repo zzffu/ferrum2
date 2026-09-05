@@ -1,8 +1,14 @@
+mod deadline_io;
+mod probe;
+pub(crate) use deadline_io::io_timeout_at;
+pub(super) use deadline_io::{read_exact_until, read_to_end_until, socks_connect, write_all_until};
+pub(super) use probe::{probe_output, wait_child};
+
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -161,36 +167,6 @@ pub(super) fn parse_active_metric_response(response: &[u8]) -> Result<u64, Strin
     active
         .or_else(|| (replay_type == 1 && replay_sample).then_some(0))
         .ok_or_else(|| "active metric is absent from an unidentified exposition".to_owned())
-}
-
-pub(super) fn socks_connect(
-    proxy: SocketAddrV4,
-    target: SocketAddrV4,
-    deadline: Instant,
-) -> Result<TcpStream, String> {
-    let timeout = remaining(deadline)?;
-    let mut stream =
-        TcpStream::connect_timeout(&SocketAddr::V4(proxy), timeout).map_err(clean_io)?;
-    stream.set_read_timeout(Some(timeout)).map_err(clean_io)?;
-    stream.set_write_timeout(Some(timeout)).map_err(clean_io)?;
-    stream.write_all(&[5, 1, 0]).map_err(clean_io)?;
-    let mut method = [0_u8; 2];
-    stream.read_exact(&mut method).map_err(clean_io)?;
-    if method != [5, 0] {
-        return Err("SOCKS authentication negotiation failed".to_owned());
-    }
-    let mut request = vec![5, 1, 0, 1];
-    request.extend_from_slice(&target.ip().octets());
-    request.extend_from_slice(&target.port().to_be_bytes());
-    stream.write_all(&request).map_err(clean_io)?;
-    let mut reply = [0_u8; 10];
-    stream.read_exact(&mut reply).map_err(clean_io)?;
-    if reply[..4] != [5, 0, 0, 1] {
-        return Err("SOCKS CONNECT failed".to_owned());
-    }
-    stream.set_read_timeout(None).map_err(clean_io)?;
-    stream.set_write_timeout(None).map_err(clean_io)?;
-    Ok(stream)
 }
 
 pub(super) fn remaining(deadline: Instant) -> Result<Duration, String> {
@@ -529,6 +505,7 @@ pub(super) struct Capture {
     pub(super) bytes: Vec<u8>,
     pub(super) truncated: bool,
     pub(super) secret: bool,
+    pub(super) read_failed: bool,
 }
 
 impl ProcessGuard {
@@ -577,18 +554,8 @@ impl ProcessGuard {
     }
 
     pub(super) fn reap(&mut self) -> Result<(), String> {
-        let _ = self.child.wait().map_err(clean_io)?;
-        let stdout = join_capture(self.stdout.take().expect("stdout capture"))?;
-        let stderr = join_capture(self.stderr.take().expect("stderr capture"))?;
-        self.reaped = true;
-        ACTIVE_PROCESSES.fetch_sub(1, Ordering::SeqCst);
-        if stdout.truncated || stderr.truncated {
-            return Err(format!("{} output exceeded bound", self.label));
-        }
-        if stdout.secret || stderr.secret {
-            return Err(format!("{} emitted secret-bearing output", self.label));
-        }
-        Ok(())
+        self.finish_output(Instant::now() + REAP_TIMEOUT)
+            .map(|_| ())
     }
 }
 
@@ -616,10 +583,16 @@ pub(super) fn capture(mut reader: impl Read + Send + 'static) -> JoinHandle<Capt
         let mut scan = Vec::new();
         let mut truncated = false;
         let mut secret = false;
+        let mut read_failed = false;
         let mut chunk = [0_u8; 4096];
         loop {
             match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    read_failed = true;
+                    break;
+                }
                 Ok(read) => {
                     scan.extend_from_slice(&chunk[..read]);
                     secret |= scan
@@ -639,6 +612,7 @@ pub(super) fn capture(mut reader: impl Read + Send + 'static) -> JoinHandle<Capt
             bytes,
             truncated,
             secret,
+            read_failed,
         }
     })
 }
@@ -647,22 +621,6 @@ pub(super) fn join_capture(worker: JoinHandle<Capture>) -> Result<Capture, Strin
     worker
         .join()
         .map_err(|_| "capture worker panicked".to_owned())
-}
-
-pub(super) fn wait_child(
-    child: &mut Child,
-    deadline: Instant,
-) -> Result<(ExitStatus, bool), String> {
-    loop {
-        if let Some(status) = child.try_wait().map_err(clean_io)? {
-            return Ok((status, false));
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            return child.wait().map(|status| (status, true)).map_err(clean_io);
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 pub(super) fn probe_text<P, I, S>(
@@ -678,31 +636,15 @@ where
 {
     let mut command = Command::new(program);
     command.args(arguments);
-    let mut process = ProcessGuard::spawn(identity, &mut command)?;
-    let (status, timed_out) = wait_child(&mut process.child, Instant::now() + timeout)
-        .map_err(|_| format!("{identity} wait failed"))?;
-    let stdout = join_capture(process.stdout.take().expect("probe stdout"))
-        .map_err(|_| format!("{identity} stdout capture failed"))?;
-    let stderr = join_capture(process.stderr.take().expect("probe stderr"))
-        .map_err(|_| format!("{identity} stderr capture failed"))?;
-    process.reaped = true;
-    ACTIVE_PROCESSES.fetch_sub(1, Ordering::SeqCst);
-    if timed_out {
-        return Err(format!("{identity} timed out"));
-    }
-    if stdout.truncated || stderr.truncated {
-        return Err(format!("{identity} output exceeded bound"));
-    }
-    if stdout.secret || stderr.secret {
-        return Err(format!("{identity} emitted secret-bearing output"));
-    }
+    let output = probe_output(identity, &mut command, Instant::now() + timeout)?;
+    let status = output.status;
     if !status.success() {
         return Err(format!("{identity} exited nonzero"));
     }
-    let output =
-        String::from_utf8(stdout.bytes).map_err(|_| format!("{identity} stdout is not UTF-8"))?;
-    String::from_utf8(stderr.bytes).map_err(|_| format!("{identity} stderr is not UTF-8"))?;
-    Ok(output)
+    let stdout =
+        String::from_utf8(output.stdout).map_err(|_| format!("{identity} stdout is not UTF-8"))?;
+    String::from_utf8(output.stderr).map_err(|_| format!("{identity} stderr is not UTF-8"))?;
+    Ok(stdout)
 }
 
 pub(super) fn sha256(identity: &'static str, path: &Path) -> Result<String, String> {

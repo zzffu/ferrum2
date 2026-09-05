@@ -1,3 +1,6 @@
+use super::dns_resource_evidence::{
+    ProcessTupleStability, REQUIRED_EQUAL_INTERVALS, complete_observation, phase_completion,
+};
 use std::fs;
 use std::net::{SocketAddrV4, TcpListener, UdpSocket};
 use std::path::Path;
@@ -82,10 +85,13 @@ pub(super) fn run_dns_resource(arguments: HostedArgs) -> Result<String, String> 
     let client_hash = sha256("DNS resource client config SHA-256 probe", &client_config)?;
     let server_hash = sha256("DNS resource server config SHA-256 probe", &server_config)?;
     output.line(format!(
-        "{{\"kind\":\"dns_resource_profile\",\"max_inflight\":{DNS_MAX_INFLIGHT},\
+        "{{\"schema_version\":2,\"kind\":\"dns_resource_profile\",\"max_inflight\":{DNS_MAX_INFLIGHT},\
          \"load_workers\":{DNS_LOAD_WORKERS},\"samples_per_phase\":{DNS_RESOURCE_SAMPLES},\
          \"sample_interval_seconds\":{},\"upstream_delay_ms\":{},\
-         \"owner_delta\":{DNS_OWNER_DELTA},\
+         \"process_owner_delta\":{DNS_OWNER_DELTA},\
+         \"post_load_criterion\":\"stable-process-tuple-below-cap\",\
+         \"required_equal_intervals\":{REQUIRED_EQUAL_INTERVALS},\
+         \"query_drain_observation\":\"unavailable\",\
          \"client_config_sha256\":{},\"server_config_sha256\":{}}}",
         DNS_SAMPLE_INTERVAL.as_secs(),
         DNS_UPSTREAM_DELAY.as_millis(),
@@ -143,39 +149,37 @@ pub(super) fn run_dns_resource(arguments: HostedArgs) -> Result<String, String> 
         return Err("detoured DNS upstream observed fewer queries than the load client".to_owned());
     }
 
-    client_process.ensure_running()?;
-    server_process.ensure_running()?;
-    client_process.terminate()?;
-    server_process.terminate()?;
-    let direct_upstream_queries = direct_upstream.finish()?;
-    let detoured_upstream_queries = detoured_upstream.finish()?;
-    if direct_upstream_queries < direct_queries || detoured_upstream_queries < detoured_queries {
-        return Err("DNS upstream completion count is incomplete".to_owned());
-    }
-    prove_tcp_udp_rebind(server, "DNS resource server")?;
-    prove_tcp_rebind(proxy, "DNS resource SOCKS listener")?;
-    prove_tcp_udp_rebind(direct_dns, "direct DNS listener")?;
-    prove_tcp_udp_rebind(detoured_dns, "detoured DNS listener")?;
-    prove_tcp_rebind(client_metrics, "DNS resource client metrics")?;
-    prove_tcp_rebind(server_metrics, "DNS resource server metrics")?;
-    prove_udp_rebind(direct_upstream_address, "direct DNS upstream")?;
-    prove_udp_rebind(detoured_upstream_address, "detoured DNS upstream")?;
-    directory.close().map_err(clean_io)?;
-    output.line(format!(
-        "{{\"kind\":\"dns_resource_summary\",\"roots\":\"client,server\",\
-         \"phases\":\"idle,direct,detoured\",\"direct_queries\":{direct_queries},\
-         \"detoured_queries\":{detoured_queries},\"samples\":{},\
-         \"rss_windows\":12,\"bounds\":\"PASS\",\"drain\":\"PASS\",\
-         \"rebind\":\"PASS\"}}",
-        DNS_RESOURCE_SAMPLES * 2,
-    ))?;
+    let summary = complete_observation(direct_queries, detoured_queries, || {
+        client_process.ensure_running()?;
+        server_process.ensure_running()?;
+        client_process.terminate()?;
+        server_process.terminate()?;
+        let direct_upstream_queries = direct_upstream.finish()?;
+        let detoured_upstream_queries = detoured_upstream.finish()?;
+        if direct_upstream_queries < direct_queries || detoured_upstream_queries < detoured_queries
+        {
+            return Err("DNS upstream completion count is incomplete".to_owned());
+        }
+        prove_tcp_udp_rebind(server, "DNS resource server")?;
+        prove_tcp_rebind(proxy, "DNS resource SOCKS listener")?;
+        prove_tcp_udp_rebind(direct_dns, "direct DNS listener")?;
+        prove_tcp_udp_rebind(detoured_dns, "detoured DNS listener")?;
+        prove_tcp_rebind(client_metrics, "DNS resource client metrics")?;
+        prove_tcp_rebind(server_metrics, "DNS resource server metrics")?;
+        prove_udp_rebind(direct_upstream_address, "direct DNS upstream")?;
+        prove_udp_rebind(detoured_upstream_address, "detoured DNS upstream")?;
+        directory.close().map_err(clean_io)?;
+        assert_no_owners()?;
+        Ok(())
+    })?;
+    output.line(summary.to_string())?;
     output.finish()?;
-    assert_no_owners()?;
     Ok(format!(
-        "m12_dns_resource_completion status=PASS roots=client,server \
+        "m12_dns_resource_completion status=OBSERVATION_COMPLETE roots=client,server \
          phases=idle,direct,detoured direct_queries={direct_queries} \
          detoured_queries={detoured_queries} samples={} rss_windows=12/12 \
-         bounds=PASS drain=PASS rebind=PASS sha={} run_id={} run_attempt={}",
+         process_bounds=PASS post_load_stability=PASS process_shutdown=PASS \
+         harness_join=PASS rebind=PASS query_drain=UNVERIFIED production_recovery_qualified=false sha={} run_id={} run_attempt={}",
         DNS_RESOURCE_SAMPLES * 2,
         identity.sha,
         identity.run_id,
@@ -202,12 +206,13 @@ pub(super) fn run_dns_resource_phase(
         let next_slot = slot + DNS_SAMPLE_INTERVAL;
         wait_for_sample_slot(slot, next_slot)?;
         let sample = dns_process_sample(client, server)?;
-        validate_dns_owner_bound(&sample, &idle)
+        validate_dns_process_bound(&sample, &idle)
             .map_err(|error| format!("{phase} DNS sample {}: {error}", index + 1))?;
         output.line(dns_sample_json(phase, index + 1, sample))?;
         samples.push(sample);
     }
-    let queries = load.finish()?;
+    let load_work = load.finish()?;
+    let queries = load_work.verified;
     if queries < DNS_LOAD_WORKERS {
         return Err(format!("{phase} DNS load completed too few queries"));
     }
@@ -215,8 +220,13 @@ pub(super) fn run_dns_resource_phase(
     for verdict in &rss {
         output.line(verdict.dns_json(phase))?;
     }
-    let drained = wait_for_dns_drain(client, server, &idle)?;
-    output.line(dns_sample_json(&format!("{phase}-drained"), 0, drained))?;
+    let stable = wait_for_dns_stability(client, server, &idle)?;
+    output.line(dns_sample_json(
+        &format!("{phase}-post-load-stable"),
+        0,
+        stable,
+    ))?;
+    output.line(phase_completion(phase, &load_work).to_string())?;
     Ok(queries)
 }
 
@@ -237,50 +247,36 @@ pub(super) fn wait_for_dns_idle(
     server: &mut ProcessGuard,
 ) -> Result<PairSample, String> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
-    let mut previous = None;
-    let mut stable = 0;
+    let mut stability = ProcessTupleStability::default();
     loop {
         let sample = dns_process_sample(client, server)?;
-        let tuple = dns_owner_tuple(&sample);
-        if previous == Some(tuple) {
-            stable += 1;
-            if stable == 3 {
-                return Ok(sample);
-            }
-        } else {
-            previous = Some(tuple);
-            stable = 0;
+        let tuple = dns_process_owner_tuple(&sample);
+        if stability.observe(tuple) {
+            return Ok(sample);
         }
         thread::sleep(remaining(deadline)?.min(Duration::from_millis(100)));
     }
 }
 
-pub(super) fn wait_for_dns_drain(
+pub(super) fn wait_for_dns_stability(
     client: &mut ProcessGuard,
     server: &mut ProcessGuard,
     idle: &PairSample,
 ) -> Result<PairSample, String> {
     let deadline = Instant::now() + DRAIN_TIMEOUT;
-    let mut previous = None;
-    let mut stable = 0;
+    let mut stability = ProcessTupleStability::default();
     loop {
         let sample = dns_process_sample(client, server)?;
-        validate_dns_owner_bound(&sample, idle)?;
-        let tuple = dns_owner_tuple(&sample);
-        if previous == Some(tuple) {
-            stable += 1;
-            if stable == 3 {
-                return Ok(sample);
-            }
-        } else {
-            previous = Some(tuple);
-            stable = 0;
+        validate_dns_process_bound(&sample, idle)?;
+        let tuple = dns_process_owner_tuple(&sample);
+        if stability.observe(tuple) {
+            return Ok(sample);
         }
         thread::sleep(remaining(deadline)?.min(Duration::from_millis(100)));
     }
 }
 
-pub(super) fn dns_owner_tuple(sample: &PairSample) -> (u64, u64, u64, u64) {
+pub(super) fn dns_process_owner_tuple(sample: &PairSample) -> (u64, u64, u64, u64) {
     (
         sample.client.fds,
         sample.server.fds,
@@ -289,7 +285,7 @@ pub(super) fn dns_owner_tuple(sample: &PairSample) -> (u64, u64, u64, u64) {
     )
 }
 
-pub(super) fn validate_dns_owner_bound(
+pub(super) fn validate_dns_process_bound(
     sample: &PairSample,
     idle: &PairSample,
 ) -> Result<(), String> {
@@ -297,11 +293,10 @@ pub(super) fn validate_dns_owner_bound(
         ("client", sample.client, idle.client),
         ("server", sample.server, idle.server),
     ] {
-        if sample.active != 0
-            || sample.fds > idle.fds.saturating_add(DNS_OWNER_DELTA)
+        if sample.fds > idle.fds.saturating_add(DNS_OWNER_DELTA)
             || sample.tasks > idle.tasks.saturating_add(DNS_OWNER_DELTA)
         {
-            return Err(format!("{role} DNS owner ceiling exceeded"));
+            return Err(format!("{role} DNS process owner ceiling exceeded"));
         }
     }
     Ok(())
@@ -346,4 +341,36 @@ pub(super) fn prove_tcp_udp_rebind(address: SocketAddrV4, label: &str) -> Result
     let udp = UdpSocket::bind(address).map_err(|_| format!("{label} UDP did not rebind"))?;
     drop((tcp, udp));
     Ok(())
+}
+
+#[cfg(test)]
+mod dns_contract_tests {
+    use super::super::resource_sampling::ProcessSample;
+    use super::*;
+
+    #[test]
+    fn process_bounds_do_not_claim_query_counts() {
+        let baseline = ProcessSample {
+            active: 0,
+            fds: 5,
+            tasks: 6,
+            rss_kib: 1,
+            smaps_rss_kib: 1,
+            anonymous_kib: 1,
+            anon_huge_pages_kib: 0,
+        };
+        let idle = PairSample {
+            client: baseline,
+            server: baseline,
+        };
+        let mut observed = idle;
+        observed.client.active = 99; // Not a DNS observation; ignored by this OS-only check.
+        observed.client.fds += 1;
+        assert_eq!(validate_dns_process_bound(&observed, &idle), Ok(()));
+        observed.client.fds = baseline.fds + DNS_OWNER_DELTA + 1;
+        assert!(validate_dns_process_bound(&observed, &idle).is_err());
+        observed = idle;
+        observed.server.tasks = baseline.tasks + DNS_OWNER_DELTA + 1;
+        assert!(validate_dns_process_bound(&observed, &idle).is_err());
+    }
 }

@@ -13,7 +13,7 @@ use ferrum2_socks5::{MAX_SOCKS_UDP_DATAGRAM_BYTES, encode_udp_datagram};
 
 use super::dns_resource::{
     DNS_DIRECT_NAME, DNS_LOAD_WORKERS, DNS_OWNER_DELTA, DNS_RESOURCE_SAMPLES,
-    validate_dns_owner_bound,
+    validate_dns_process_bound,
 };
 use super::evidence_support::{DnsLoad, DnsResponder, Evidence};
 use super::host_identity::{EnvironmentIdentity, validate_environment};
@@ -24,8 +24,8 @@ use super::process_support::{
 use super::profile_contract::{
     PROFILE_SOCKS_IPV4_HEADER_BYTES, PROFILE_SS_AES_RESPONSE_OVERHEAD_BYTES,
     PROFILE_UDP_DIRECT_MAX_APPLICATION_PAYLOAD_BYTES, PROFILE_UDP_PAYLOAD_BYTES,
-    PROFILE_UDP_SS_MAX_APPLICATION_PAYLOAD_BYTES, ProfileArgs, ProfileScenario, ReadyFile,
-    parse_profile_args, profile_raw_prefix,
+    PROFILE_UDP_SS_MAX_APPLICATION_PAYLOAD_BYTES, ProfileArgs, ProfileScenario, parse_profile_args,
+    profile_raw_prefix,
 };
 use super::profile_output::run_profile_scenario;
 use super::resource::{
@@ -314,53 +314,8 @@ pub(super) fn run_self_check() -> Result<String, String> {
     expect_rejected("validated then cancelled profile load", || {
         cancelled_profile_gate.require_validated(STREAMS)
     })?;
+    super::profile_files::run_self_check()?;
     let profile_ready = tempfile::tempdir().map_err(clean_io)?;
-    let ready_path = profile_ready.path().join("ready.txt");
-    let ready = ReadyFile::publish(&ready_path, ProfileScenario::TcpBulk, 11, Some(12), 1, 10)?;
-    if fs::read_to_string(&ready_path).map_err(clean_io)?
-        != "scenario=tcp-bulk\nclient_pid=11\nserver_pid=12\nwarmup_seconds=1\nactive_seconds=10\n"
-    {
-        return Err("profile ready file fields are incomplete".to_owned());
-    }
-    expect_rejected("profile ready collision", || {
-        ReadyFile::publish(&ready_path, ProfileScenario::TcpBulk, 21, Some(22), 1, 10)
-    })?;
-    if fs::read_to_string(&ready_path).map_err(clean_io)?
-        != "scenario=tcp-bulk\nclient_pid=11\nserver_pid=12\nwarmup_seconds=1\nactive_seconds=10\n"
-    {
-        return Err("profile ready collision overwrote the sentinel".to_owned());
-    }
-    ready.remove()?;
-    if ready_path.exists() {
-        return Err("profile ready file survived explicit cleanup".to_owned());
-    }
-    let direct_ready = ReadyFile::publish(
-        &ready_path,
-        ProfileScenario::UdpDirectSmall128,
-        30,
-        None,
-        1,
-        10,
-    )?;
-    if fs::read_to_string(&ready_path).map_err(clean_io)?
-        != "scenario=udp-direct-small-128\nclient_pid=30\nserver_pid=none\nwarmup_seconds=1\nactive_seconds=10\n"
-    {
-        return Err("direct profile ready file claimed a server process".to_owned());
-    }
-    direct_ready.remove()?;
-    {
-        let _ready = ReadyFile::publish(
-            &ready_path,
-            ProfileScenario::UdpSmallHigh,
-            31,
-            Some(32),
-            1,
-            10,
-        )?;
-    }
-    if ready_path.exists() {
-        return Err("profile ready file survived unwind cleanup".to_owned());
-    }
     let raw_path = profile_ready.path().join("raw.jsonl");
     let raw_line = "{\"schema_version\":3,\"kind\":\"m18_profile_trial\",\"status\":\"PASS\"}";
     let mut raw_evidence = Evidence::create(&raw_path)?;
@@ -633,14 +588,14 @@ ferrum2_tcp_replay_entries 0\n\
     let mut overbound = baseline;
     overbound.client.tasks += DNS_OWNER_DELTA + 1;
     expect_rejected("DNS owner ceiling", || {
-        validate_dns_owner_bound(&overbound, &baseline)
+        validate_dns_process_bound(&overbound, &baseline)
     })?;
     let mut responder = DnsResponder::start(DNS_DIRECT_NAME)?;
     let mut load = DnsLoad::start(responder.address, DNS_DIRECT_NAME)?;
     load.wait_started(Instant::now() + STARTUP_TIMEOUT)?;
     let completed = load.finish()?;
     let observed = responder.finish()?;
-    if completed < DNS_LOAD_WORKERS || observed < completed {
+    if completed.verified < DNS_LOAD_WORKERS || observed < completed.verified {
         return Err("typed DNS load self-check is incomplete".to_owned());
     }
     expect_rejected("leaked owner", || validate_owner_counts(1, 0))?;

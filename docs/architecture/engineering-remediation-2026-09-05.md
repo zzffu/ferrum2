@@ -35,6 +35,7 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M1k / RTL-06 | 闭合失败stage/category与指纹证据；有限child/reader清理并明确未确认状态 | 泄漏sentinel及旧无界wait/部分start先red；最终66项离线测试通过 |
 | M1l / HT4 | 失败计数同时校验八类闭合result标签；策略归performance-only HostTrial | 初始7项5fail，最终focused8及隔离fullcandidate134通过；PS parser/bundles/资格静态合同通过 |
 | M1m / CPU工具执行边界 | 私有helper group/双pipe/期限；仅COLLECTED诊断；有界container与输出路径验证 | WSL专项24、完整CI80通过；Windows m0 93/5旧ignored、严格clippy及产品bins build通过；未真实profile |
+| M1n / M4-03/04/05/08/09 | 复用probe capture、完整SOCKS期限、输出路径先验；完整DNS响应与负载计数；取消虚假query-drain通过声明 | 边界8+DNS6、self-check、严格clippy/fmt、candidate134及policy20通过；query owner与OS强制清理仍未验证 |
 
 ## 环境与暂定验收
 

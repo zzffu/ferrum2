@@ -24,8 +24,9 @@ use super::evidence_support::{
 };
 use super::host_identity::HostedIdentity;
 use super::process_support::{
-    HoldingTarget, IO_TIMEOUT, STARTUP_TIMEOUT, TargetWorker, clean_io, json, remaining, sha256,
-    socks_connect, v4, wait_for_listener, wait_for_metrics, wait_for_sample_slot,
+    HoldingTarget, IO_TIMEOUT, PROBE_TIMEOUT, STARTUP_TIMEOUT, TargetWorker, clean_io, json,
+    probe_output, read_exact_until, read_to_end_until, remaining, sha256, socks_connect, v4,
+    wait_for_listener, wait_for_metrics, wait_for_sample_slot, write_all_until,
 };
 use super::profile_contract::{HostedArgs, PROFILE_SOCKS_IPV4_HEADER_BYTES, Topology};
 use super::proxy_config::{
@@ -322,14 +323,17 @@ pub(super) fn run_m14_schema_v1_rejection(
     )
     .map_err(clean_io)?;
     let started = Instant::now();
-    let result = Command::new(ferrum_binary("ferrum2-client")?)
-        .args([
-            OsStr::new("--config"),
-            config.as_os_str(),
-            OsStr::new("--check-config"),
-        ])
-        .output()
-        .map_err(|_| "M14 schema-v1 rejection check did not start".to_owned())?;
+    let mut command = Command::new(ferrum_binary("ferrum2-client")?);
+    command.args([
+        OsStr::new("--config"),
+        config.as_os_str(),
+        OsStr::new("--check-config"),
+    ]);
+    let result = probe_output(
+        "M14 schema-v1 rejection check",
+        &mut command,
+        started + PROBE_TIMEOUT,
+    )?;
     if result.status.code() != Some(2)
         || !result.stdout.is_empty()
         || result.stderr
@@ -410,13 +414,13 @@ pub(super) fn run_m14_tcp_measurement(
     let started = Instant::now();
     for (payload, echoes) in &payloads {
         let mut stream = socks_connect(proxy, target, Instant::now() + STARTUP_TIMEOUT)?;
-        stream
-            .set_read_timeout(Some(IO_TIMEOUT))
-            .map_err(clean_io)?;
-        stream.write_all(payload).map_err(clean_io)?;
+        let deadline = Instant::now() + IO_TIMEOUT;
+        write_all_until(&mut stream, payload, deadline).map_err(clean_io)?;
+        remaining(deadline)?;
         stream.shutdown(Shutdown::Write).map_err(clean_io)?;
         let mut echoed = Vec::with_capacity(payload.len());
-        if let Err(error) = stream.read_to_end(&mut echoed)
+        let maximum = if *echoes { payload.len() } else { 0 };
+        if let Err(error) = read_to_end_until(&mut stream, &mut echoed, maximum, deadline)
             && (!matches!(
                 error.kind(),
                 io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
@@ -424,6 +428,7 @@ pub(super) fn run_m14_tcp_measurement(
         {
             return Err(clean_io(error));
         }
+        remaining(deadline)?;
         if (*echoes && echoed != *payload) || (!*echoes && !echoed.is_empty()) {
             return Err(format!("{phase} terminal outcome mismatch"));
         }
@@ -716,18 +721,20 @@ pub(super) fn run_m14_dns_hijack_measurements(
         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53),
         Instant::now() + STARTUP_TIMEOUT,
     )?;
-    tcp.set_read_timeout(Some(IO_TIMEOUT)).map_err(clean_io)?;
-    tcp.write_all(
+    let tcp_deadline = Instant::now() + IO_TIMEOUT;
+    write_all_until(
+        &mut tcp,
         &u16::try_from(query.len())
             .map_err(|_| "M14 DNS query exceeded TCP frame".to_owned())?
             .to_be_bytes(),
+        tcp_deadline,
     )
     .map_err(clean_io)?;
-    tcp.write_all(&query).map_err(clean_io)?;
+    write_all_until(&mut tcp, &query, tcp_deadline).map_err(clean_io)?;
     let mut length = [0_u8; 2];
-    tcp.read_exact(&mut length).map_err(clean_io)?;
+    read_exact_until(&mut tcp, &mut length, tcp_deadline).map_err(clean_io)?;
     let mut response = vec![0_u8; usize::from(u16::from_be_bytes(length))];
-    tcp.read_exact(&mut response).map_err(clean_io)?;
+    read_exact_until(&mut tcp, &mut response, tcp_deadline).map_err(clean_io)?;
     m14_validate_dns_response(&response, 0x1408)?;
     let tcp_elapsed = tcp_started.elapsed();
     drop(tcp);

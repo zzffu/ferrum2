@@ -172,6 +172,8 @@ jobs:
           set -euo pipefail
           target/debug/m4-qualification self-check
           cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked worker_lifetime -- --test-threads=1
+          cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked bounded_probe_deadline_contract -- --test-threads=1
+          cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked dns_contract_tests -- --test-threads=1
       - name: Build workspace documentation
         shell: bash
         run: |
@@ -702,7 +704,7 @@ jobs:
           printf 'm4_profile status=PASS cpu_count=%s memory_kib=%s runner_temp_free_kib=%s nofile=65536 image_os=%s image_version=%s sha=%s run_id=%s run_attempt=%s\n' \
             "$cpu_count" "$memory_kib" "$runner_temp_free_kib" "$ImageOS" "$ImageVersion" \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-      - name: Run M4 throughput and resource qualification
+      - name: Run M4 throughput checks and bounded resource observations
         shell: bash
         run: |
           set -euo pipefail
@@ -772,6 +774,7 @@ jobs:
             --sha "$GITHUB_SHA" \
             --output "$work/resource.jsonl")"
           printf '%s\n' "$resource_output"
+          # Success covers process bounds/stability and final cleanup; query drain is UNVERIFIED.
           dns_resource_output="$(target/release/m4-qualification dns-resource \
             --sha "$GITHUB_SHA" \
             --output "$work/dns-resource.jsonl")"

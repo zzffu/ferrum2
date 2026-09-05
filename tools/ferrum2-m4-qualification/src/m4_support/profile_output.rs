@@ -1,3 +1,4 @@
+use super::profile_files::resolve_profile_ready_file;
 use std::ffi::OsStr;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -6,7 +7,7 @@ use super::evidence_support::Evidence;
 use super::process_support::{ProcessGuard, StartGate, json};
 use super::profile_contract::{
     EVIDENCE_LINE_MAX_BYTES, ProfileArgs, ProfileOutcome, ProfileRawIdentity, ProfileScenario,
-    TCP_SCALE_EVIDENCE_LINE_MAX_BYTES, profile_raw_prefix, resolve_profile_ready_file,
+    TCP_SCALE_EVIDENCE_LINE_MAX_BYTES, profile_raw_prefix,
 };
 use super::profile_dns::run_profile_dns;
 use super::profile_tcp::run_profile_tcp;
