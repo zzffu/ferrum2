@@ -64,7 +64,7 @@ SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 - [Windows TUN 配置](docs/config-v2-tun.md)与[旧网络模型迁移说明](docs/network-model-v2-migration.md)。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。
 - [性能证据说明](docs/performance-evidence.md)：Linux 配对测量和 Windows 主机性能流程。
-- [工程整改记录](docs/architecture/engineering-remediation-2026-09-05.md)：审查覆盖、故障复现、修复与验证缺口。
+- [工程整改记录](docs/architecture/engineering-remediation-2026-09-05.md)：审查覆盖、故障修复与验证缺口；[逐批证据](docs/architecture/engineering-remediation-evidence-2026-09-05.md)保留失败、撤回和性能数据。
 
 ## 开发与验证
 
