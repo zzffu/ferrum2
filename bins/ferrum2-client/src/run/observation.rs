@@ -111,9 +111,9 @@ fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String 
             "# HELP ferrum2_tun_handler_tasks_active Handler tasks currently owned by the TUN process root.\n",
             "# TYPE ferrum2_tun_handler_tasks_active gauge\n",
             "ferrum2_tun_handler_tasks_active{{role=\"client\"}} {}\n",
-            "# HELP ferrum2_tun_tcp_flows_active TCP flows currently owned by the TUN foundation stack.\n",
-            "# TYPE ferrum2_tun_tcp_flows_active gauge\n",
-            "ferrum2_tun_tcp_flows_active{{role=\"client\"}} {}\n",
+            "# HELP ferrum2_tun_tcp_flow_owners_active TCP flow owners retained by the client runtime.\n",
+            "# TYPE ferrum2_tun_tcp_flow_owners_active gauge\n",
+            "ferrum2_tun_tcp_flow_owners_active{{role=\"client\"}} {}\n",
             "# EOF\n",
         ),
         snapshot.active_process_roots,
@@ -677,14 +677,14 @@ mod tests {
         assert!(live.contains("ferrum2_process_roots_active{role=\"client\"} 0"));
         assert!(live.contains("ferrum2_process_roots_forced_total{role=\"client\"} 0"));
         assert!(live.contains("ferrum2_tun_handler_tasks_active{role=\"client\"} 1"));
-        assert!(live.contains("ferrum2_tun_tcp_flows_active{role=\"client\"} 1"));
+        assert!(live.contains("ferrum2_tun_tcp_flow_owners_active{role=\"client\"} 1"));
         assert_eq!(live.matches("# EOF").count(), 1);
 
         drop(handler);
         drop(flow);
         let closed = render_client_metrics(&metrics, &registry);
         assert!(closed.contains("ferrum2_tun_handler_tasks_active{role=\"client\"} 0"));
-        assert!(closed.contains("ferrum2_tun_tcp_flows_active{role=\"client\"} 0"));
+        assert!(closed.contains("ferrum2_tun_tcp_flow_owners_active{role=\"client\"} 0"));
     }
 
     #[test]

@@ -31,18 +31,18 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 
 | Package（目录） | src 文件 / 行 | 已查看的职责或路径 | 状态 / 验证入口 |
 |---|---:|---|---|
-| client（bins） | 83 / 25967 | prepare/materialize → SOCKS/TUN → egress；DNS、network、shutdown composition | 约束/调用链筛查；仅编译测试，m0 进程验证 |
+| client（bins） | 83 / 25967 | prepare/materialize → SOCKS/TUN → egress；DNS、network、shutdown composition | 约束/调用链筛查；R11 已修复；仅编译测试，m0 进程验证 |
 | server（bins） | 51 / 13491 | materialize → SS TCP/UDP → Direct；共享网络和冻结路由 | 约束/调用链筛查；package + m0 |
 | core | 4 / 1649 | target、Datagram、trait、selector/plan | 约束/接口筛查；package |
 | rule | 19 / 4672 | 编译、候选索引、scratch、registry | 约束/依赖筛查；package + config |
 | ruleset | 9 / 2326 | 下载、blocking owner、原子快照、refresh | R4 已修复验证；其余下载/刷新路径仍为定向审查 |
-| crypto | 11 / 1950 | typed keys、nonce、AEAD、entropy | 约束/接口筛查；vectors/entropy |
+| crypto | 11 / 1950 | typed keys、nonce、AEAD、entropy | typed owners/entropy/nonce/AEAD 定向审查；vectors/entropy |
 | shadowsocks | 18 / 4785 | TCP authenticate/replay/flow；UDP prepare/commit | 约束/调用链筛查；协议与 tokio adapter |
 | socks5 | 1 / 574 | no-auth command、retained control、borrowed UDP codec | 握手/codec/one-shot reply 定向审查；command/udp |
 | net | 4 / 909 | immutable selection、256-entry interface cache、binder | 快照、选择优先级、cache 与 binding 定向审查；network contracts |
 | runtime | 28 / 9634 | metrics、supervisor、affine executor、UDP owner/queues、shutdown | R1/R3/R6/R7/A2 已修复验证；其余路径仍需深入审查 |
-| config | 25 / 8923 | prepare/finish、资源计划、验证边界 | 约束/依赖筛查；config/v2 contracts |
-| dns | 26 / 7193 | proxy TCP/UDP、cache、tagged owner/admission | R2 已修复验证；cache 性能仍是假设 |
+| config | 25 / 8923 | prepare/finish、资源计划、验证边界 | bounded load/draft/finish/graph 定向审查；config/v2 contracts |
+| dns | 26 / 7193 | proxy TCP/UDP、cache、tagged owner/admission | R2 / Perf1 已修复验证；并发 cache 性能尚未覆盖 |
 | observability | 11 / 3937 | closed schema、composition renderer、手动 gauge | 约束/接口筛查；metrics/tracing contracts |
 | sniff | 1 / 267 | transport strictness、bounded parser seam | 完整 parser 实现/边界定向审查；sniff contract |
 | tun | 48 / 16981 | packet/stack/association → caller policy；live/hosted 选择 | R8 生命周期已修复验证；其余平台边界定向审查；safe lib + host qualification |
@@ -86,6 +86,7 @@ association，Windows crate 才能触及真实 adapter、route、WFP；普通测
 | R8 / P1 | TUN `OwnerThread::reap`：取消 await 后 native cleanup 尚未结束但 owner 提前返回 | 私有 `runtime/thread.rs` 保留 join 所有权，锁保持到 native join 完成；运行中/阻塞池已满两种取消测试通过；Windows/WSL safe lib 各 128 项 |
 | R9 / P2 | performance `Invoke-Ferrum2HostTrial`：失败丢失 before metrics/产品日志，无法区分等待阶段；导出失败替换原错误 | 提前保存 before，失败保存 phase 与全部产品/workload 日志；保留原始错误；同一注入测试在旧源有 3 处失败，新 104 项 controller suite 通过 |
 | R10 / P2 | qualification `Invoke-Ferrum2HostQualificationChecks`：probe 失败立即关闭产品，缺少数据面状态 | probe 前保存两端 metrics，失败保存产品日志与 failure metrics；外层指向持久 evidence 目录；7 项平台 Python tests 和真实八项资格通过 |
+| R11 / P1 | client `render_client_metrics` 重复声明基础 TUN flow family，违反 OpenMetrics 唯一性，严格采集器可拒绝 scrape | owner gauge 单独命名；旧产品 HTTP 黑盒测试失败，新两端通过；client compile-only 与严格 lint 通过 |
 | Perf1 / P2 | DNS `cache.rs::insert`：未过期状态仍每写全表 + FIFO 扫描；测量确认成本随容量显著增长 | 到可能过期时间之前跳过扫描，key 不存在时跳过 FIFO 查找；TTL/FIFO/observer 语义保留；六对测量见下 |
 
 R4 和 R8 仍不能强制中断卡住的系统文件操作或 native cleanup；它们保留和等待所有权，
@@ -139,8 +140,8 @@ host trial schema 3 保留 p50/p95/p99 与最多 2,000,000 样本。延迟从发
   撤回 timer 复用；保留 R7 单调性修复。没有将该候选数据归给撤回后的代码。
 - 首次 Confirm 仅 1/50，workload TCP 10054；事后 server 有 network reset/relay_io 各 1，
   因缺少当时 before 数据，不能确定事件先后或归因。已补齐诊断。
-- 第二轮 Confirm 正在执行：baseline `5b46b03e...` 是原始 9bb 产品加同一当前 harness；
-  candidate `8d3ecf7e...`。五对、5 秒预热/30 秒 active，增加 256-flow fairness；完成前不作结论。
+- 第二轮 Confirm：baseline `5b46b03e...` 是原始 9bb 产品加同一当前 harness；
+  candidate `8d3ecf7e...`。五对、5 秒预热/30 秒 active，增加 256-flow fairness；46/50 后在服务端 startup.bind 失败，validator exit 2，不能作完整比较。
 
 所有已结束的 host 运行都验证五类残留为 0；“执行退出 0”与“性能策略通过”明确分开。
 R5/R9/R10 的工具修复解决取证缺口，没有证明原始 TCP/UDP 故障已被消除。
@@ -172,7 +173,7 @@ R5/R9/R10 的工具修复解决取证缺口，没有证明原始 TCP/UDP 故障�
 | 项 / 优先级 | 事实、假设或环境限制 | 下一步与验收 |
 |---|---|---|
 | 长负载 TCP/UDP 故障 / P1 | Confirm TCP reset、一次资格 TCP connect timeout、早期分片缺 ACK；根因未确认 | 使用补齐的 before/failure metrics、phase、产品日志定位；禁止忽略网络事件、重传失败或补单个试次 |
-| 性能 / P1 | 已有负向信号且当前主机同代码波动超过策略门槛 | 完成当前 Confirm，保留全部五对；仍需新 bundle A/A、开放负载与长时 CPU/内存斜率；不足时使用隔离原生 runner |
+| 性能 / P1 | 已有负向信号且当前主机同代码波动超过策略门槛 | 当前 Confirm 46/50，不完整；仍需查清 bind 失败、新 bundle A/A、开放负载与长时 CPU/内存斜率；不足时使用隔离原生 runner |
 | System resolver / P1 待验证 | runtime/DNS/RuleSet/binary bootstrap 有 `lookup_host`；锁定 Tokio 的实现使用 spawn_blocking，取消 waiter 不等于取消 OS lookup | 注入阻塞底层，验证超时后的实际工作 admission/join；不能把异步超时当 native 操作上限；尚未确认生产积压规模 |
 | UDP 可观测性 / P2 | Direct owner 的终止 result 仍有被丢弃路径 | 对照 binary 的 closed reason 指标补缺口，避免重复 schema 或 peer 数据 |
 | Cache 后续 / P2 | 此次只有固定 TTL 单线程写入测量 | 大容量/并发/过期突发/随机刷新、网络 DNS 请求与尾延迟；保留正确性和成功工作量 |

@@ -593,3 +593,67 @@ TCP connect timeout。其 Rust 产品代码与先前通过的 d6 相同，不能
 证据 `C:\Users\ZZZ\AppData\Local\Temp\ferrum2-verified-correctness-20260905T104831Z`。此前 6a 的失败记录仍保留，不由这次成功覆盖。
 第二轮 Confirm 的目录为 `C:\Users\ZZZ\AppData\Local\Temp\ferrum2-remediation-confirm2-20260905T105011Z`，
 当前仍在运行，尚无最终 verdict。
+
+### Confirm 等待期间的补充路径审查
+
+以下是明确的代码边界核对，不是新的性能结论或全 crate 逐行覆盖：
+
+- `socks5/src/lib.rs` 的借用 UDP decoder 在 materialize 前验证非空 ASCII、完整端口和长度，
+  与 `core::DomainName/TargetAddr` 的实际协议契约一致；root-only 是协议允许值，不误报为
+  panic。one-shot reply 消费 owner，流锁只覆盖单次 poll；client `run/socks/tcp_command.rs`
+  的 accept_command 由 cancellation + 配置 handshake_timeout 包裹。不能把协议 crate
+  没有自行创建 timer 误报为真实调用链无超时。
+- `sniff/src/lib.rs` 全部 parser 路径：输入绝对上限、TCP DNS 长度、UDP 完整性、DNS
+  Header 最小长度预检、TLS/HTTP 仅 TCP、HTTP 单一 Host/CONNECT 和 metadata redaction。
+  该模块无 transport I/O 或任务。fragmentation/limit/ordering 行为由既有 sniff_contract
+  在完整门禁内验证；未建立 sniffer 性能基线。
+- `net/src/{model,resolver,capability}.rs`：256 个成功决策的 generation cache、旧 generation
+  不回写、系统 catalog 查询位于 cache mutex 外、family/source/stable identity 校验，以及
+  binder 不再查路由的契约。Snapshot 不包含所有目标路由细节，因此不能通过简单内容相等
+  忽略全部系统 route notifications。尚无该同步平台查询的竞争/延迟实测。
+- `crypto/src/{random,tcp/aead,tcp/nonce,udp/session,udp/aead}.rs`：entropy 重试有界、计数
+  耗尽在操作前拒绝、成功才 commit、typed owner 和错误 redaction。TCP authentication
+  失败的清理依赖已锁定 vendor `v2/tcp/mod.rs::decrypt_packet`，该实现确实 zeroizes
+  supplied packet；没有误把 wrapper 未重复 zeroize 认作泄露，也没有修改 vendor。
+  密码学 primitive 没有重新设计；已有 vector/entropy gates 不能替代独立密码分析。
+- `config/src/{load,dependency,prepared/prepare/draft,prepared/resources,prepared/finish}.rs`：
+  metadata 检查后仍 take(MAX+1) 防增长，source zeroizing、UTF-8/TOML 错误转 closed kinds；
+  不保留原 parser 诊断；draft 将每个 outbound 与 endpoint/resolver 绑定，finish 消费
+  prepared plan 并检查 materialized resources。依赖 cycle traversal 有显式 stack。
+  已核对相关 TUN/DNS 数值上限；未声称读过全部 schema 组合或测过配置编译尾延迟。
+
+
+### R11 — P1：客户端指标 family 元数据冲突
+
+`bins/ferrum2-client/src/run/observation.rs::render_client_metrics` 在共享 registry 输出后
+再次声明 `ferrum2_tun_tcp_flows_active` 的 HELP/TYPE，且帮助文本不同。实际 host metrics
+中同名 HELP/TYPE 各有两条；即使 SOCKS-only，registry 也会声明基础 TUN family。
+这违反 [OpenMetrics 1.0 的 family 唯一性与文本格式契约](https://prometheus.io/docs/specs/om/open_metrics_spec/)，
+会使严格采集器拒绝整次 scrape；此前 qualification 的自有文本读取器不检查这项格式。
+
+保留 observability registry 原有的无标签 foundation gauge，把客户端追加的 owner gauge
+改为 `ferrum2_tun_tcp_flow_owners_active{role="client"}`，明确计数是 runtime 持有的 flow
+owner。同步更新仓内调用测试，不保留冲突别名。新黑盒测试通过既有 m0 process/readiness
+门面启动两端 SOCKS/SS loopback 产品，检查实际 HTTP body 的 metadata 唯一性、两种 gauge
+和单一 EOF；回收子进程后才断言。普通测试不启用 TUN，不执行 client test binary。
+验证：旧 debug 产品的 m0 测试在两项重复 metadata 上失败；重建两端后同一测试通过。
+`cargo build -p ferrum2-client -p ferrum2-server --bins --locked`、client all-features
+`--no-run`、client/m0 all-targets/all-features clippy `-D warnings`、fmt all check 均通过。
+测试编写时先修正了 harness 的 path-module 引用及已有 spawn mutex 的使用；这两处属于
+测试自身问题，不计为产品缺陷。性能测量发生于 R11 之前的不可变 8d 提交，不归给此修复。
+
+
+### 第二轮 Confirm 的完整失败记录
+
+`5b46b03e...` → `8d3ecf7e...`，run `adffe47ea2ce`，EndToEnd/Confirm，完成 46/50。
+第 47 次是 candidate、256-flow fairness、第四对；`failure-phase.txt` 为 `product-startup`。
+服务端 stderr 为 `error[startup.bind] process: unable to prepare required endpoint`；客户端
+仅正常 TUN lifecycle 日志，尚未启动 workload。外层等待 server network_generation 超时。
+runner exit 1；独立 `windows-tun-validate-host-evidence` exit 2，拒绝缺失 trial 47。
+
+build 117.505 秒、execution 2202.645 秒、cleanup 6.142 秒、总计 2326.608 秒。
+cleanup PASS / benchmark_succeeded=false，adapter/routes/addresses/processes/ports 全 0。
+来源为前述 confirm2 evidence 目录，不补跑、拼接或将前四场景完整配对称为整轮通过。
+端口通过先 bind/close 预检，server 直到 client TUN 就绪后才启动，存在 TOCTOU 窗口；
+证据没有失败时的端点占用快照，无法确定是临时端口复用、其他进程竞争或其他 bind 原因。
+这与首次 Confirm 的 active TCP reset 是不同故障，不能混为一个已确认根因。
