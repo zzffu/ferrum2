@@ -171,6 +171,7 @@ jobs:
         run: |
           set -euo pipefail
           target/debug/m4-qualification self-check
+          cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked worker_lifetime -- --test-threads=1
       - name: Build workspace documentation
         shell: bash
         run: |

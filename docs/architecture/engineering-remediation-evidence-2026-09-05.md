@@ -749,3 +749,28 @@ root另只读校验已有cache实验12份报告，每份311场景，全部通过
 仍缺：完整calibration启动前验证（RTL-03）、CLI请求与报告配置的显式关联、闭合错误输出、
 run-wide证据预算、异目录calibration引用（RTL-06/07/08）。生产者未提供CPU model时比较的
 是None，不能声称已补采真实硬件身份；合成build证据归属RTL-04仍需后续Rust修正。
+
+### M1e — M4-01/02：资格工具部分启动失败仍完整回收线程
+
+`resource_sampling::establish_sessions` 在spawn失败时先drop结果receiver，再join，避免等待
+阻塞在已无人消费的有界结果队列上的worker；primary与cleanup错误同时保留。
+`ProfileDnsResponder` 在下一次clone/configure/spawn前已拥有所有已启动线程，任何setup错误
+通过同一个finish；finish保存首错但遍历所有join，成功仍核对完整observed计数。
+只抽取两个具体的worker setup seam，未新增通用executor或变更网络/测量路径。
+
+5个有限进程内线程/通道测试覆盖满队列取消、setup三类错误、worker错误/panic/计数溢出
+后仍等待后续线程、成功计数及不一致报告。测试内用有限deadline保证脚本工作能够结束，
+不打开socket，不调用产品或计时负载。没有旧源动态red运行，不把静态等待环写成已实测挂死。
+
+- `cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked worker_lifetime -- --test-threads=1`：5通过；root独立重复同一命令通过。
+- `cargo run -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check`：PASS，56 mutations。
+- M4 all-targets/all-features clippy `-D warnings`、fmt check及M4 bundle exact-source单测试通过。
+  首次clippy指出测试module位置，移至各文件末尾后通过；root MSVC test link输出创建lib/exp
+  的`linker_messages` warning，5项测试仍通过，未抑制lint。
+- root将同一safe filter加入M4/root指南和m0 self-check step，防`test=false`令新契约在CI中
+  没有执行；workspace policy20再验通过。普通Rule/client的compile-only规则保持。
+
+日志`target/remediation-m4-workers/{validation.txt,root-tests.log,workspace-policy.log}`。
+M4 closed bundle更新两份源码行，完整digest
+`4f0782957b29718a827c9b5f7c045ecd26b65aafa02315a26953dca6ff9242a5`。
+此源码身份下尚未运行真实host/性能测量；其他M4计量/探测边界仍待后续批次。

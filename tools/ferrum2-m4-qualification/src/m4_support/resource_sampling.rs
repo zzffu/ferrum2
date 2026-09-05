@@ -40,13 +40,8 @@ pub(super) fn establish_sessions(
     proxy: SocketAddrV4,
     target: SocketAddrV4,
 ) -> Result<Vec<TcpStream>, String> {
-    let next = Arc::new(AtomicUsize::new(0));
-    let (sender, receiver) = mpsc::sync_channel(SETUP_WORKERS);
-    let mut workers = Vec::with_capacity(SETUP_WORKERS);
-    for _ in 0..SETUP_WORKERS {
-        let worker_next = Arc::clone(&next);
-        let worker_sender = sender.clone();
-        let worker = spawn_worker(move || {
+    establish_sessions_with_workers(|worker_next, worker_sender| {
+        spawn_worker(move || {
             loop {
                 let index = worker_next.fetch_add(1, Ordering::Relaxed);
                 if index >= RESOURCE_SESSIONS {
@@ -57,15 +52,36 @@ pub(super) fn establish_sessions(
                     break;
                 }
             }
-            Ok::<(), String>(())
-        });
+            Ok(())
+        })
+    })
+}
+
+fn establish_sessions_with_workers(
+    mut spawn: impl FnMut(
+        Arc<AtomicUsize>,
+        mpsc::SyncSender<(usize, Result<TcpStream, String>)>,
+    ) -> Result<thread::JoinHandle<Result<(), String>>, String>,
+) -> Result<Vec<TcpStream>, String> {
+    let next = Arc::new(AtomicUsize::new(0));
+    let (sender, receiver) = mpsc::sync_channel(SETUP_WORKERS);
+    let mut workers = Vec::with_capacity(SETUP_WORKERS);
+    for _ in 0..SETUP_WORKERS {
+        let worker_next = Arc::clone(&next);
+        let worker_sender = sender.clone();
+        let worker = spawn(worker_next, worker_sender);
         match worker {
             Ok(worker) => workers.push(worker),
             Err(error) => {
                 next.store(RESOURCE_SESSIONS, Ordering::Relaxed);
                 drop(sender);
-                let _ = join_unit_workers(workers);
-                return Err(error);
+                // Workers may already be blocked sending results. Retire their
+                // abandoned consumer before waiting for any worker to finish.
+                drop(receiver);
+                return match join_unit_workers(workers) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                };
             }
         }
     }
@@ -85,10 +101,15 @@ pub(super) fn establish_sessions(
             }
         };
     }
-    join_unit_workers(workers)?;
+    drop(receiver);
+    let joined = join_unit_workers(workers);
     if let Some(error) = first_error {
-        return Err(error);
+        return match joined {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+        };
     }
+    joined?;
     streams
         .into_iter()
         .map(|stream| stream.ok_or_else(|| "session setup result is missing".to_owned()))
@@ -465,4 +486,78 @@ pub(super) fn validate_drain(sample: &PairSample, baseline: &PairSample) -> Resu
         return Err("drain is incomplete".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod worker_lifetime {
+    use super::*;
+
+    #[test]
+    fn spawn_failure_retires_full_result_queue_before_joining() {
+        let (full, filled) = mpsc::sync_channel(1);
+        let disconnected = Arc::new(AtomicUsize::new(0));
+        let mut attempts = 0;
+        let result = establish_sessions_with_workers(|_, sender| {
+            attempts += 1;
+            if attempts == 2 {
+                filled
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("queue filled");
+                return Err("injected spawn failure".to_owned());
+            }
+            let full = full.clone();
+            let disconnected = Arc::clone(&disconnected);
+            spawn_worker(move || {
+                for index in 0..SETUP_WORKERS {
+                    sender
+                        .try_send((index, Err("unused result".to_owned())))
+                        .expect("fill bounded queue");
+                }
+                full.send(()).expect("report full queue");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut value = (SETUP_WORKERS, Err("unused result".to_owned()));
+                loop {
+                    match sender.try_send(value) {
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            disconnected.fetch_add(1, Ordering::SeqCst);
+                            return Ok(());
+                        }
+                        Err(mpsc::TrySendError::Full(pending)) => value = pending,
+                        Ok(()) => return Err("abandoned queue was consumed".to_owned()),
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("receiver retained during join".to_owned());
+                    }
+                    thread::yield_now();
+                }
+            })
+        });
+        assert_eq!(result.err().as_deref(), Some("injected spawn failure"));
+        assert_eq!(disconnected.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn spawn_failure_retains_cleanup_error_and_joins_later_workers() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let mut attempts = 0;
+        let result = establish_sessions_with_workers(|_, _| {
+            attempts += 1;
+            match attempts {
+                1 => spawn_worker(|| Err("worker failed".to_owned())),
+                2 => {
+                    let completed = Arc::clone(&completed);
+                    spawn_worker(move || {
+                        completed.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                }
+                _ => Err("spawn failed".to_owned()),
+            }
+        });
+        assert_eq!(
+            result.err().as_deref(),
+            Some("spawn failed; cleanup: worker failed")
+        );
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+    }
 }

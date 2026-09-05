@@ -21,6 +21,7 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 | M1b / CT-01、HT1 | Windows CPU/work 归约计入各自真实采样窗口，PS/Python一致 | 新2项覆盖12组合，host evidence9、source capture8；完整candidate Python115、PS parser及nonmutating资格contract通过 |
 | M1c / CT-03/04/06 | Linux证据有界读取/枚举；同一bytes解析及哈希；写失败清临时文件 | 旧实现IO/身份/残留及枚举红测；相关64、整合candidate115通过；无性能工作负载 |
 | M1d / RTL-01/02 | 从raw重算Rule报告；跨pair/校准绑定fixture、报告配置、输入场景与环境 | 原14项矛盾未拒绝；离线37通过，旧12×311场景只读数学回验通过；未批准校准 |
+| M1e / M4-01/02 | 资源setup先释放阻塞依赖再join；DNS部分setup/finish失败完整回收 | 5个有限线程契约、self-check56 mutations、严格clippy/格式/source bundle通过；CI显式执行纯内存filter |
 
 ## 环境与暂定验收
 

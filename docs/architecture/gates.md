@@ -45,6 +45,9 @@ external repository setting; unknown values stay marked as gaps rather than bein
 - `native_contract.py` owns the unprivileged native behavior checks.
   `qualify_native.py --local-contract` runs them locally; hosted mode still requires the exact
   GitHub runner, SHA, clean checkout, and evidence identity.
+- The M4 self-check step also runs the explicit `worker_lifetime` test filter. These finite
+  in-memory ownership cases do not bind sockets or execute qualification/benchmark workloads.
+  The package's binary is not implicitly test-selected by ordinary workspace discovery.
 - Root CI and fuzz-static expose separate `required` jobs. Branch protection must require both stable
   contexts. Each workflow invokes only the typed `tools.ci.required_gate` result owner after an exact
   checkout; shell does not duplicate or weaken the required-result decision table. Because repository

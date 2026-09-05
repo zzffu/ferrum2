@@ -55,6 +55,7 @@ cargo test -p ferrum2-dns --features __interop-test-root --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo run -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check
+cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked worker_lifetime -- --test-threads=1
 cargo doc --workspace --all-features --no-deps --locked
 ```
 

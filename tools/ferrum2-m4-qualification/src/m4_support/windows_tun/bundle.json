@@ -40,8 +40,8 @@
     },
     {
       "path": "src/m4_support/profile_dns.rs",
-      "bytes": 15228,
-      "sha256": "3124d944f5cf0bdaf0874e540e7470cc6130459b73cc0388345b9be99ffbebe3"
+      "bytes": 20763,
+      "sha256": "06e4646fdd85816a0a2f8fe1581cf0accfbb5c2f56d17a03c417db6b5c3efc89"
     },
     {
       "path": "src/m4_support/profile_output.rs",
@@ -70,8 +70,8 @@
     },
     {
       "path": "src/m4_support/resource_sampling.rs",
-      "bytes": 17289,
-      "sha256": "49fb8f4d5bf90424bca9aed8e9eba080f381c25d884ee9ab539ef3d60083a587"
+      "bytes": 21042,
+      "sha256": "84dedd1d5a65ffeb4cafd9b5fc15f6dd8aa49c8f935b680f970221fb73075400"
     },
     {
       "path": "src/m4_support/self_check.rs",

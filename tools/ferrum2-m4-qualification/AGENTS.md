@@ -23,10 +23,13 @@ Use locked commands:
 ```text
 cargo build -p ferrum2-m4-qualification --bin m4-qualification --locked
 cargo run -p ferrum2-m4-qualification --bin m4-qualification --locked -- self-check
+cargo test -p ferrum2-m4-qualification --bin m4-qualification --locked worker_lifetime -- --test-threads=1
 python3 -B -m unittest discover -s tests/performance_candidate -v
 ```
 
 Run `self-check` after changes to parsing, bounds, process control, readiness files, raw evidence, or resource accounting. Add mutation cases that demonstrate malformed input is rejected rather than tests that freeze implementation text.
+The explicit `worker_lifetime` test filter runs only finite in-memory thread/channel ownership
+contracts; it does not start sockets, products, qualification modes, or timing workloads.
 
 ## Process and Evidence Safety
 

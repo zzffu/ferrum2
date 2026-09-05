@@ -43,47 +43,67 @@ impl ProfileDnsResponder {
         let address = v4(socket.local_addr().map_err(clean_io)?)?;
         let expected = Name::from_ascii(PROFILE_DNS_NAME)
             .map_err(|_| "profile DNS responder name is invalid".to_owned())?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let observed = Arc::new(AtomicUsize::new(0));
-        let mut workers = Vec::with_capacity(DNS_LOAD_WORKERS);
-        for _ in 0..DNS_LOAD_WORKERS {
+        Self::start_workers(address, |worker_stop, worker_observed| {
             let socket = socket.try_clone().map_err(clean_io)?;
             socket
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .map_err(clean_io)?;
-            let worker_stop = Arc::clone(&stop);
-            let worker_observed = Arc::clone(&observed);
             let worker_expected = expected.clone();
-            let worker = spawn_worker(move || {
+            spawn_worker(move || {
                 profile_dns_respond(socket, worker_expected, worker_stop, worker_observed)
-            });
-            match worker {
-                Ok(worker) => workers.push(worker),
+            })
+        })
+    }
+
+    fn start_workers(
+        address: SocketAddrV4,
+        mut setup: impl FnMut(
+            Arc<AtomicBool>,
+            Arc<AtomicUsize>,
+        ) -> Result<JoinHandle<Result<usize, String>>, String>,
+    ) -> Result<Self, String> {
+        // Own earlier workers before cloning/configuring/spawning the next one.
+        let mut responder = Self {
+            address,
+            stop: Arc::new(AtomicBool::new(false)),
+            observed: Arc::new(AtomicUsize::new(0)),
+            workers: Vec::with_capacity(DNS_LOAD_WORKERS),
+        };
+        for _ in 0..DNS_LOAD_WORKERS {
+            match setup(Arc::clone(&responder.stop), Arc::clone(&responder.observed)) {
+                Ok(worker) => responder.workers.push(worker),
                 Err(error) => {
-                    stop.store(true, Ordering::SeqCst);
-                    for worker in workers {
-                        let _ = worker.join();
-                    }
-                    return Err(error);
+                    return match responder.finish() {
+                        Ok(_) => Err(error),
+                        Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+                    };
                 }
             }
         }
-        Ok(Self {
-            address,
-            stop,
-            observed,
-            workers,
-        })
+        Ok(responder)
     }
 
     fn finish(&mut self) -> Result<usize, String> {
         self.stop.store(true, Ordering::SeqCst);
         let mut completed = 0_usize;
+        let mut first_error = None;
         for worker in std::mem::take(&mut self.workers) {
-            let count = join_worker(worker)??;
-            completed = completed
-                .checked_add(count)
-                .ok_or_else(|| "profile DNS response count overflow".to_owned())?;
+            let result = join_worker(worker)
+                .and_then(|result| result)
+                .and_then(|count| {
+                    completed
+                        .checked_add(count)
+                        .ok_or_else(|| "profile DNS response count overflow".to_owned())
+                });
+            match result {
+                Ok(total) => completed = total,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         if completed != self.observed.load(Ordering::SeqCst) {
             return Err("profile DNS observed count is inconsistent".to_owned());
@@ -402,4 +422,125 @@ fn profile_dns_load(
         sequence = sequence.wrapping_add(1);
     }
     Ok(counted)
+}
+
+#[cfg(test)]
+mod worker_lifetime {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn address() -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)
+    }
+
+    #[test]
+    fn partial_setup_errors_stop_and_join_owned_workers() {
+        for failure in ["clone failed", "configuration failed", "spawn failed"] {
+            let exited = Arc::new(AtomicUsize::new(0));
+            let mut attempts = 0;
+            let result = ProfileDnsResponder::start_workers(address(), |stop, _| {
+                attempts += 1;
+                if attempts == 3 {
+                    return Err(failure.to_owned());
+                }
+                let exited = Arc::clone(&exited);
+                spawn_worker(move || {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while !stop.load(Ordering::SeqCst) {
+                        if Instant::now() >= deadline {
+                            return Err("setup rollback did not stop worker".to_owned());
+                        }
+                        thread::yield_now();
+                    }
+                    exited.fetch_add(1, Ordering::SeqCst);
+                    Ok(0)
+                })
+            });
+            assert_eq!(result.err().as_deref(), Some(failure));
+            assert_eq!(exited.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn finish_errors_still_wait_for_every_later_worker() {
+        for expected in [
+            "worker failed",
+            "owned worker panicked",
+            "profile DNS response count overflow",
+        ] {
+            let mut responder = ProfileDnsResponder {
+                address: address(),
+                stop: Arc::new(AtomicBool::new(false)),
+                observed: Arc::new(AtomicUsize::new(0)),
+                workers: Vec::new(),
+            };
+            match expected {
+                "worker failed" => responder
+                    .workers
+                    .push(spawn_worker(|| Err("worker failed".to_owned())).unwrap()),
+                "owned worker panicked" => responder
+                    .workers
+                    .push(spawn_worker(|| panic!("injected worker panic")).unwrap()),
+                "profile DNS response count overflow" => {
+                    responder
+                        .workers
+                        .push(spawn_worker(|| Ok(usize::MAX)).unwrap());
+                    responder.workers.push(spawn_worker(|| Ok(1)).unwrap());
+                }
+                _ => unreachable!(),
+            }
+            let (release, released) = mpsc::sync_channel(1);
+            let (waiting, waited) = mpsc::sync_channel(1);
+            let exited = Arc::new(AtomicBool::new(false));
+            let worker_exited = Arc::clone(&exited);
+            responder.workers.push(
+                spawn_worker(move || {
+                    waiting.send(()).unwrap();
+                    released
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(|_| "worker not released".to_owned())?;
+                    worker_exited.store(true, Ordering::SeqCst);
+                    Ok(0)
+                })
+                .unwrap(),
+            );
+            waited.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (finished, result) = mpsc::sync_channel(1);
+            let owner = thread::spawn(move || {
+                let outcome = responder.finish();
+                finished.send(outcome).unwrap();
+            });
+            // This is a bounded synchronization assertion, not a timed workload.
+            let premature = result.recv_timeout(Duration::from_millis(50));
+            release.send(()).unwrap();
+            owner.join().unwrap();
+            assert_eq!(premature, Err(mpsc::RecvTimeoutError::Timeout));
+            assert_eq!(
+                result.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Err(expected.to_owned())
+            );
+            assert!(exited.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn finish_checks_complete_worker_count_against_observations() {
+        let mut responder = ProfileDnsResponder::start_workers(address(), |_, observed| {
+            spawn_worker(move || {
+                observed.fetch_add(2, Ordering::SeqCst);
+                Ok(2)
+            })
+        })
+        .unwrap();
+        assert_eq!(responder.finish(), Ok(DNS_LOAD_WORKERS * 2));
+        assert!(responder.workers.is_empty());
+
+        let mut inconsistent =
+            ProfileDnsResponder::start_workers(address(), |_, _| spawn_worker(|| Ok(1))).unwrap();
+        assert_eq!(
+            inconsistent.finish(),
+            Err("profile DNS observed count is inconsistent".to_owned())
+        );
+        assert!(inconsistent.workers.is_empty());
+    }
 }
