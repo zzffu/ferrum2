@@ -1,15 +1,15 @@
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ferrum2_core::route::EgressPlanHandle;
 use ferrum2_rule::{CompiledMatchSet, MatchSetCapabilities};
-use futures_util::FutureExt;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
+use crate::blocking::BlockingTaskOwner;
 use crate::cache::{
     CACHE_SCHEMA, COPY_BUFFER_BYTES, CacheMetadata, SerializableCapabilities, commit_cache,
     compile_file, read_cache_sync, stale_or_error,
@@ -81,86 +81,12 @@ impl fmt::Debug for LoadedRuleSet {
 
 /// Remote loader with an injected network path. It never constructs or falls
 /// back to a system HTTP client.
+/// Cache/compiler work admits at most two blocking operations per loader;
+/// concurrent callers wait for capacity, including after waiter cancellation.
 pub struct RuleSetLoader<D> {
     config: RuleSetLoaderConfig,
     downloader: D,
     blocking: BlockingTaskOwner,
-}
-
-struct BlockingTaskOwner {
-    state: Mutex<BlockingTaskState>,
-}
-
-struct BlockingTaskState {
-    accepting: bool,
-    failed: bool,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
-}
-
-impl BlockingTaskOwner {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(BlockingTaskState {
-                accepting: true,
-                failed: false,
-                tasks: Vec::new(),
-            }),
-        }
-    }
-
-    async fn run<T, F>(&self, operation: F) -> Result<T, RuleSetLoadError>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> T + Send + 'static,
-    {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !state.accepting {
-                return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Task));
-            }
-            let mut cursor = 0;
-            while cursor < state.tasks.len() {
-                if state.tasks[cursor].is_finished() {
-                    let task = state.tasks.swap_remove(cursor);
-                    if task.now_or_never().is_some_and(|result| result.is_err()) {
-                        state.failed = true;
-                    }
-                } else {
-                    cursor += 1;
-                }
-            }
-            let task = tokio::task::spawn_blocking(move || {
-                let _ = sender.send(operation());
-            });
-            state.tasks.push(task);
-        }
-        receiver
-            .await
-            .map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::Task))
-    }
-
-    async fn shutdown(&self) -> Result<(), RuleSetLoadError> {
-        let (tasks, previously_failed) = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.accepting = false;
-            (std::mem::take(&mut state.tasks), state.failed)
-        };
-        let mut failure =
-            previously_failed.then(|| RuleSetLoadError::new(RuleSetLoadErrorKind::Task));
-        for task in tasks {
-            if task.await.is_err() && failure.is_none() {
-                failure = Some(RuleSetLoadError::new(RuleSetLoadErrorKind::Task));
-            }
-        }
-        failure.map_or(Ok(()), Err)
-    }
 }
 
 impl<D> RuleSetLoader<D>
@@ -177,6 +103,8 @@ where
 
     /// Stops accepting blocking cache/compiler work and joins every operation,
     /// including work whose async refresh future was cancelled.
+    /// Cancellation leaves joins owned for a subsequent call; concurrent calls
+    /// cannot report completion before the same outstanding work has joined.
     pub async fn shutdown(&self) -> Result<(), RuleSetLoadError> {
         self.blocking.shutdown().await
     }
@@ -383,150 +311,5 @@ where
             disposition: RuleSetLoadDisposition::Downloaded,
             degraded_failure: None,
         })
-    }
-}
-
-#[cfg(test)]
-mod blocking_owner_tests {
-    use std::sync::{Arc, Barrier};
-
-    use super::BlockingTaskOwner;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelled_waiter_leaves_blocking_work_owned_until_shutdown_joins_it() {
-        let owner = Arc::new(BlockingTaskOwner::new());
-        let entered = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let waiter = tokio::spawn({
-            let owner = Arc::clone(&owner);
-            let entered = Arc::clone(&entered);
-            let release = Arc::clone(&release);
-            async move {
-                owner
-                    .run(move || {
-                        entered.wait();
-                        release.wait();
-                    })
-                    .await
-            }
-        });
-        entered.wait();
-        waiter.abort();
-        assert!(waiter.await.is_err());
-
-        let shutdown = tokio::spawn({
-            let owner = Arc::clone(&owner);
-            async move { owner.shutdown().await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!shutdown.is_finished());
-        release.wait();
-        shutdown
-            .await
-            .expect("shutdown task")
-            .expect("blocking task joined");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_joins_remaining_work_after_an_earlier_worker_panics() {
-        let owner = Arc::new(BlockingTaskOwner::new());
-        let panic_entered = Arc::new(Barrier::new(2));
-        let release_panic = Arc::new(Barrier::new(2));
-        let panicking = tokio::spawn({
-            let owner = Arc::clone(&owner);
-            let panic_entered = Arc::clone(&panic_entered);
-            let release_panic = Arc::clone(&release_panic);
-            async move {
-                owner
-                    .run(move || {
-                        panic_entered.wait();
-                        release_panic.wait();
-                        panic!("controlled blocking worker failure");
-                    })
-                    .await
-            }
-        });
-        panic_entered.wait();
-
-        let blocked_entered = Arc::new(Barrier::new(2));
-        let release_blocked = Arc::new(Barrier::new(2));
-        let blocked = tokio::spawn({
-            let owner = Arc::clone(&owner);
-            let blocked_entered = Arc::clone(&blocked_entered);
-            let release_blocked = Arc::clone(&release_blocked);
-            async move {
-                owner
-                    .run(move || {
-                        blocked_entered.wait();
-                        release_blocked.wait();
-                    })
-                    .await
-            }
-        });
-        blocked_entered.wait();
-        release_panic.wait();
-        assert!(panicking.await.expect("panicking waiter task").is_err());
-        blocked.abort();
-        assert!(blocked.await.is_err());
-
-        let mut shutdown = tokio::spawn({
-            let owner = Arc::clone(&owner);
-            async move { owner.shutdown().await }
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
-                .await
-                .is_err(),
-            "shutdown returned before the remaining blocking worker completed"
-        );
-        release_blocked.wait();
-        assert!(
-            shutdown.await.expect("shutdown task").is_err(),
-            "the first worker failure must remain observable after all workers join"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reaping_a_finished_panicked_worker_preserves_the_shutdown_failure() {
-        let owner = Arc::new(BlockingTaskOwner::new());
-        let entered = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let waiter = tokio::spawn({
-            let owner = Arc::clone(&owner);
-            let entered = Arc::clone(&entered);
-            let release = Arc::clone(&release);
-            async move {
-                owner
-                    .run(move || {
-                        entered.wait();
-                        release.wait();
-                        panic!("controlled reaped worker failure");
-                    })
-                    .await
-            }
-        });
-        entered.wait();
-        waiter.abort();
-        assert!(waiter.await.is_err());
-        release.wait();
-        loop {
-            let finished = owner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .tasks
-                .first()
-                .is_some_and(tokio::task::JoinHandle::is_finished);
-            if finished {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-
-        assert_eq!(owner.run(|| 7_u8).await.expect("later worker"), 7);
-        assert!(
-            owner.shutdown().await.is_err(),
-            "reaping a finished JoinHandle must not erase its panic"
-        );
     }
 }

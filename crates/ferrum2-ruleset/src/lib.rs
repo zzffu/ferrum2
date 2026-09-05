@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod blocking;
 mod cache;
 mod download;
 mod error;

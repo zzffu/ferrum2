@@ -116,17 +116,34 @@ removal，再释放 task/socket accounting 与 owner permit。正常完成、pan
 
 ### 后续审查项（不等于已确认故障）
 
+### R4 — P1：RuleSet shutdown 取消丢失 join 所有权（已修复）
+
+- 原位置 `ruleset/src/loader.rs::BlockingTaskOwner::shutdown`：`mem::take(tasks)` 后 await，
+  shutdown 被取消会 Drop JoinHandle 并 detach worker；重试/并发 shutdown 可提前报成功。
+  违反 scoped guide 的 blocking cache/compiler 必须 joined 契约。取消重试测试已在旧实现
+  失败：worker 尚被 gate 阻塞，第二次 shutdown 就返回。
+- `ruleset/src/blocking.rs` 现在独立拥有 admission、task handles、sticky failure 和 joins；
+  使用异步 mutex 串行 join，await 期间句柄仍留在 owner 内，取消可重试。loader 只描述
+  cache/download/compile 流程，不再同时实现阻塞工作调度。
+- 每个 loader 最多两个阻塞操作及两个 retained handles；permit 移入 blocking closure，
+  取消等待者不会提前释放容量；shutdown 关闭 admission。普通 materialization/refresh 本来
+  顺序执行，公开并发调用现在受到背压。代价为异步 admission 和至多两个操作并行。
+- package tests、loader/HTTPS tests、all-targets/all-features 严格 clippy 通过。新增取消
+  shutdown 重试和取消 waiter 后容量保持测试；旧 panic/remaining-work 测试随 owner 迁移。
+- 仍需限定：Rust 不能强制中断已经开始的 `spawn_blocking`；本改动保证保留并等待所有权，
+  不保证损坏文件系统操作的绝对完成时限。调用方仍须调用 shutdown，不能仅 Drop loader。
+
 | ID / 优先级 | 位置、事实或假设 | 下一步与验收 |
 |---|---|---|
 | A1 / P2 | runtime UDP direct/reset、observability metrics、TUN live owner 有约 800 行以上生产 owner；m4 windows_tun/workload 1021 行违反工具 1000 行要求 | 按实际职责拆分并保持 invariant/消费者；禁止纯行数搬移 |
 | P1 / P2 假设 | DNS cache 每次 insert 扫描 entries + FIFO，满缓存更新可能拉长持锁时间 | 先测不同容量、TTL/更新比例与并发；保持过期、FIFO、generation 和 telemetry 语义 |
-| L1 / P2 待审 | ruleset BlockingTaskOwner 使用 tasks Vec；单调用链串行，公开并发调用/取消的 aggregate 上界待确认 | 注入重复取消与慢 compiler，检查 outstanding task 上界及 shutdown 可重入 |
+| L1 / 已解决 | ruleset blocking admission、取消及重试 join | 见 R4；全 loader 网络下载并发仍由 composition 拥有 |
 | L2 / P2 待审 | affine executor 的 unbounded event channel 是否有结构性上界 | 核对每 shard 发事件次数、thread join 和启动失败路径；不能仅凭 unbounded 命名判定失控 |
 | O1 / P2 待审 | 部分 UDP task result 被丢弃，低基数故障定位覆盖待逐一映射 | 对照 binary observation 和现有指标，避免添加重复 schema 或泄漏 peer |
 
 ## 证据与未完成项
 
-里程碑：`5438c615` 修复 R1；`f20ade19` 修复 R2；R3 独立提交包含 lifetime owner、故障测试及本记录。
+里程碑：`5438c615` 修复 R1；`f20ade19` 修复 R2；`6fc90a96` 修复 R3；R4 独立提交包含 blocking owner、故障测试及本记录。
 R1 饱和恢复测试开发时曾误把主动强制关闭计数当作零资源快照；已改为等待最后一个请求
 自行超时回收后才停止监听，验证完整快照（包括强制关闭计数）回到基线，再跑完整 package。
 
