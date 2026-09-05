@@ -963,3 +963,31 @@ performance bundle `b6c2d5d94b941c8969ba6f576852f6c9b374bab05c99cac8ceae231c4256
 qualification `dcbcbe9686b4c4ac63679dbdbfd6fa370bb7c6c4933dc0b38ea8faaada87531f`。
 新增解析在测量前后执行，不在包转发路径；成本尚未测量，新failure guard可能使此前漏计
 的异常run拒绝，不能用旧零delta报告替代新baseline。
+
+### M1m — CPU helper 执行边界，完整采样资格后置
+
+保留唯一 `tools/profile-cpu.sh` attach入口和六参数，私有Python process/evidence/record
+owner集中所有helper的POSIX session、selectors双pipe上限、INT/KILL/reap与deadline。
+waitid(WNOWAIT)在最后group signal前保留leader身份；primary触发和cleanup状态分开，
+不可读/proc或未确认退出拒绝成功。不signal Ferrum/M4 target，不改perf权限或安装工具。
+原无界Rust fake-tool测试迁到既有tests/ci发现体系，不新建测试系统。
+
+旧无schema metadata.txt删除，改schema1 metadata.json。正常exit0仅COLLECTED/unverified，
+analysis_qualified/adoption_claim均false；失败invalid。仅观察PID/start/exe hash/ELF build ID，
+controller checkout不是binary build证明。保留缺build/workload/window/final-result及counter/
+sample/loss/symbol schema的明确原因；没有猜测Samply schema。gzip/JSON解析有32MiB压缩/
+128MiB解压上限，helper双流各64KiB，均不是硬文件配额/RSS或CPU采样质量保证。
+以后真正profiling分析仍需补M4绑定和reviewed采样格式，但不再阻塞产品架构实施。
+
+root复核补了fdopen失败原fd关闭；输出路径在mkdir/chmod前验证，以持有的Linux目录fd和
+O_NOFOLLOW逐级检查；非法路径、相对dangling link、外部redirect不能制造前置副作用。
+root内absolute output保持可用。新目录0700、文件0600；实际采样环境须支持这些权限。
+
+WSL Debian最终专项24/24、完整tests/ci80/80通过，无skip；测试仅finite fake helpers及
+注入collector。早期Windows17项有7个Linux-only skip如实保留，未用skip冒充执行。
+bash -n及scope diff检查通过。root按M0指南先locked build两产品bins，再完整
+`cargo test -p ferrum2-m0-harness --locked`：93 passed/0 failed/5原ignored；m0 all-targets/
+all-features clippy `-D warnings`通过。产品client test binary未运行。
+日志 `target/remediation-cpu-{linux-tests,linux-ci-regression,output-red,m0-build,m0-tests,m0-clippy}.log`；
+完整范围/限制在target/remediation-cpu-diagnostic-report.txt。本批没有真实perf/Samply、
+benchmark、host adapter操作或性能提升证据；新增Python调度/验证成本尚未测量。

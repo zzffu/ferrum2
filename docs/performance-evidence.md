@@ -219,6 +219,49 @@ python3 -B -m tests.performance_rule.verify_external_evidence \
 
 External artifact retrieval must use an immutable identity. Missing or changed raw evidence cannot be replaced by a summary, compact fixture, screenshot, or policy document.
 
+## Linux CPU diagnostic collection
+
+`tools/profile-cpu.sh` remains the only attach entry point, with the existing `--scenario`
+(`tcp-bulk` or `udp-small-high`), `--role`, `--pid`, `--duration`, `--frequency`, and `--output`
+arguments. It requires Linux, Python 3, perf, and exact Samply 0.13.1 already installed. It never
+starts a workload, changes profiler permissions, or signals the Ferrum/M4 target. Its private
+Python owners run perf stat and Samply sequentially, for the requested duration each.
+
+A successful diagnostic exits zero with **COLLECTED**, not PASS. The new `metadata.json`
+schema 1 (`cpu_profile_diagnostic`) replaces the old unversioned `metadata.txt`; no old reader
+or alias is retained. `perf-stat.txt`, `samply.json.gz`, `stage-status.txt`, and private helper
+stdout/stderr are retained. Successful collection always states `evidence_validity=unverified`,
+`analysis_qualified=false`, and `adoption_claim=false`, with explicit missing build, workload,
+active-window, final-workload-result, counter-schema, and sample/loss/symbol-schema reasons.
+Controller checkout identity is labelled separately from actual PID/start/executable-hash
+observations. Helper invocation timestamps are not claimed as sample-window timestamps.
+
+Each helper has an absolute command deadline and an owned process group. Both output pipes are
+drained with at most 64 KiB retained each; excess output, cancellation, timeout, or unconfirmed
+cleanup prevents successful collection. Preflight is bounded to 30 seconds, each identity/helper
+query to 5 seconds, perf to duration plus 5 seconds, and Samply to duration plus 10 seconds.
+The run's collection deadline is twice duration plus 60 seconds; forced cleanup has additional
+bounded grace waits and cannot promise immediate termination of an uninterruptible OS call.
+Groups that deliberately escape their inherited session are not supported profiler helpers.
+Cleanup confirmation requires readable Linux process-group state. An unreadable `/proc` member
+or unconfirmed exit fails closed; a restricted host is not assumed to expose the whole process
+table. Primary timeout/interruption/output-limit status is retained separately from cleanup
+confirmation, so a failed reap cannot erase the original trigger.
+
+Container checks reject empty/unsupported perf output, malformed gzip/JSON, duplicate keys,
+non-finite numbers, and byte-limit violations. Samply input is capped at 32 MiB compressed and
+128 MiB decompressed before JSON parsing. These are parsing bounds, not sample-quality claims
+or hard collector-file-size quotas. No reviewed sample/loss/symbol schema is inferred from an
+arbitrary JSON object; valid containers remain unverified. Failed containers and helper logs
+are kept in the new 0700 output directory with 0600 files for diagnosis; failed bundles report
+`evidence_validity=invalid` and a closed error category.
+
+M4 ready/build/window linkage and a reviewed collector schema must be implemented together
+before analysis-qualified capture can be introduced. Until then these diagnostics cannot prove
+workload overlap, loss-free sampling, symbol quality, or optimization acceptance. Offline tests
+are under the existing `tests/ci/test_cpu_profile*.py` discovery gate; finite fake helpers and
+synthetic containers do not count as real profiler evidence.
+
 ## Ordinary and privileged boundaries
 
 Ordinary CI may compile controllers, validate tracked fixtures, parse PowerShell, reconstruct closed

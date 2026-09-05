@@ -3,7 +3,7 @@
 **[全量生产静态审查](engineering-audit-2026-09-05.md)已完成，后续采用
 [统一架构设计](engineering-design-2026-09-05.md)按所有权分批实施；先修 Qualification
 证据契约，完成架构与性能无回退验收后才进行 CPU profiling 驱动优化。
-本文下列修改和覆盖表保留为先前阶段的候选历史，不代表当前架构已实现或验收。**
+本文后部的初期覆盖、R批次与性能记录保留为候选历史，不代表当前架构已实现或验收。**
 
 这是持续整改记录，不是生产资格声明。起点 `9bbcea22d0373ff60932f929d93d265c98c0a711`，
 开始时工作区干净。根目录和全部 51 份 scoped `AGENTS.md`、
@@ -12,8 +12,13 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 
 ## 架构设计后的实施
 
-统一设计里程碑为 `1b40da27`；以下工具修复属于 M1，尚未开始 M2–4 产品架构修改。
-产品源码仍为 `2fb0dd4a`。详细命令和 red/green 见[逐批证据](engineering-remediation-evidence-2026-09-05.md)。
+统一设计里程碑为 `1b40da27`；下表工具修复属于 M1，M2a 产品架构修改已开始。
+产品已提交基准仍为 `2fb0dd4a`。详细命令和 red/green 见[逐批证据](engineering-remediation-evidence-2026-09-05.md)。
+
+2026-09-06 用户纠正工具整改耗时后，M1停止新增范围：仅收尾已完成的独立工具批次，
+CT-05/07、完整CPU身份/采样资格及其他工具项后置。首批产品M2a已开始实现配置egress图
+准入/复杂度边界；在其提交前产品基准仍为上述源码。后续用固定baseline commit与同版
+harness测量，工具审计全部清零不再是产品架构实施的前置条件。
 
 | 批次 / 审查项 | 已落实行为 | 实际验证 |
 |---|---|---|
@@ -29,6 +34,7 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 | M1j / M4-06/07 | 五场景固定准入、完整尾部计量；所有fairness worker预热完成才放行；独立HostTrial与rate重算 | 最终隔离candidate126、M4 self-check、严格clippy/fmt、PS非变更合同通过；无live测量 |
 | M1k / RTL-06 | 闭合失败stage/category与指纹证据；有限child/reader清理并明确未确认状态 | 泄漏sentinel及旧无界wait/部分start先red；最终66项离线测试通过 |
 | M1l / HT4 | 失败计数同时校验八类闭合result标签；策略归performance-only HostTrial | 初始7项5fail，最终focused8及隔离fullcandidate134通过；PS parser/bundles/资格静态合同通过 |
+| M1m / CPU工具执行边界 | 私有helper group/双pipe/期限；仅COLLECTED诊断；有界container与输出路径验证 | WSL专项24、完整CI80通过；Windows m0 93/5旧ignored、严格clippy及产品bins build通过；未真实profile |
 
 ## 环境与暂定验收
 
