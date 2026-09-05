@@ -176,8 +176,9 @@ pub(in crate::windows) fn finish_setup_transaction(
 ) -> Result<(), CreateError> {
     match setup {
         Ok(()) => Ok(()),
-        Err(_) => {
-            let cleanup_failed = cleanup();
+        Err(error) => {
+            let outer_cleanup_failed = cleanup();
+            let cleanup_failed = (error.kind() == crate::ErrorKind::Cleanup) | outer_cleanup_failed;
             if strict_route_install_failed {
                 Err(CreateError::strict_route_install(cleanup_failed))
             } else if cleanup_failed {

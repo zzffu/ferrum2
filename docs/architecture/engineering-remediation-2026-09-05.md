@@ -38,6 +38,13 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M1n / M4-03/04/05/08/09 | 复用probe capture、完整SOCKS期限、输出路径先验；完整DNS响应与负载计数；取消虚假query-drain通过声明 | 边界8+DNS6、self-check、严格clippy/fmt、candidate134及policy20通过；query owner与OS强制清理仍未验证 |
 | M2a / FND-01/02（配置路径） | `804f0dc0`：私有准入图先执行原有规模/结构限制；typed edges 与共享摘要替代递归 capability 和首跳路径枚举 | config86；workspace673/5旧ignored；safe TUN128/platform59；DNS interop74；compile-only、全workspace lint/fmt/doc及GNU check通过。A/A与A/B均24/24、清理全零，但性能均REGRESSION；未通过无回退验收 |
 | M2b / FND-03/04（SRS解码层） | 显式限额与统一累计预算；分配前准入；逐key collector替代完整中间展开；IPv6最大inclusive end正确终止；全部decoder调用迁移 | rule39/config86/ruleset25；四pinned fixture通过；workspace681/5旧ignored；client/qualification compile-only、全workspace严格lint/fmt/doc、safe平台及GNU check通过。未测SRS性能，不属于804f0dc0 |
+| M3a / PLAT-03/04 | pending通知owner覆盖snapshot失败；内外cleanup分类粘住，TUN取消不能掩盖cleanup失败；终态保留underlay失效 | platform safe62/TUN128、live all-features check、两包严格lint/格式通过；32组合与订阅失败完整对象检查；实际Win32失败注入/host及整合门禁待后续 |
+
+继续位置（基准`07939e2d`）：M2c实现RuleSet单文件cache事务与实际worker所有权；M2d实现
+DNS parent-owned query cleanup及关闭后的资源注册拒绝；M3a通知staged rollback已完成
+受影响包验证。三个问题分别由独立owner实施，完整资格尚未通过。全workspace测试前统一
+冻结代码；每个完成问题单独review/commit。M2a性能记录已提交`709e123`，不得把后续代码
+归到804f0dc0的测量。CT-05/07及CPU完整采样资格仍后置；工具整改没有重新开放。
 
 ## 环境与暂定验收
 

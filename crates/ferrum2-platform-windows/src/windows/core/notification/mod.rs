@@ -61,12 +61,63 @@ pub(in crate::windows) fn subscribe_notification_sequence<H, C>(
             Err(error) => {
                 if cancel_notification_handles(&mut handles, &mut context, &mut cancel) {
                     leak_notification_owners(&mut handles, &mut context);
+                    return Err(Error::cleanup());
                 }
                 return Err(error);
             }
         }
     }
     Ok((handles, context.take().ok_or(Error)?))
+}
+
+/// Places subscribed notifications in the adapter's rollback slot before further
+/// fallible preparation. Failure leaves that slot owned; success transfers the
+/// notifications only after preparation has completed.
+pub(in crate::windows) fn prepare_notification_owner<N, S>(
+    pending: &mut Option<N>,
+    subscribe: impl FnOnce() -> Result<N, Error>,
+    prepare: impl FnOnce(&N) -> Result<S, Error>,
+) -> Result<(N, S), Error> {
+    if pending.is_some() {
+        return Err(Error);
+    }
+    *pending = Some(subscribe()?);
+    let prepared = prepare(pending.as_ref().expect("subscribed notification owner"))?;
+    Ok((
+        pending.take().expect("prepared notification owner"),
+        prepared,
+    ))
+}
+
+/// Both adapter-owned notification locations visible to reverse cleanup.
+pub(in crate::windows) struct NotificationStages<'a, N> {
+    pub(in crate::windows) pending: Option<&'a mut N>,
+    pub(in crate::windows) committed: Option<&'a mut N>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::windows) enum NotificationCleanup {
+    Absent,
+    Cleaned,
+    Failed,
+}
+
+/// Attempts pending and committed cancellation without short-circuiting. The
+/// operation retains failed handles/context for its normal safe retry or Drop.
+pub(in crate::windows) fn cancel_notification_stages<N>(
+    stages: NotificationStages<'_, N>,
+    mut cancel: impl FnMut(&mut N) -> bool,
+) -> NotificationCleanup {
+    let mut outcome = NotificationCleanup::Absent;
+    for owner in [stages.pending, stages.committed].into_iter().flatten() {
+        let stage_failed = cancel(owner);
+        outcome = if stage_failed || outcome == NotificationCleanup::Failed {
+            NotificationCleanup::Failed
+        } else {
+            NotificationCleanup::Cleaned
+        };
+    }
+    outcome
 }
 
 pub(in crate::windows) trait NetworkChangeWaitOperations {
@@ -128,3 +179,6 @@ mod tests {
         assert!(context.is_none());
     }
 }
+
+#[cfg(test)]
+mod staging_tests;

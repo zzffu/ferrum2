@@ -31,6 +31,7 @@ use super::super::core::network::{
     InterfaceIdentity, UnderlayPolicy, WindowsNetworkInterfaceCatalog, classify_underlay_refresh,
     refresh_underlay_with, underlay_matches_with,
 };
+use super::super::core::notification::prepare_notification_owner;
 use super::super::core::raw::{
     capture_route_row, initialize_managed_address, managed_address_matches,
 };
@@ -49,7 +50,7 @@ use super::managed::{
 };
 use super::managed_dns::{PlatformManagedIpv4Dns, PlatformManagedIpv6Dns};
 use super::network::{PlatformUnderlay, snapshot_underlay};
-use super::notification::subscribe_network_changes;
+use super::notification::{NotificationOwners, subscribe_network_changes};
 use super::strict_route::PlatformStrictRouteOperations;
 use crate::{AdapterConfig, CreateError, ManagedTunHealth, NetworkChangeOutcome};
 use crate::{Error, SendOutcome, WaitOutcome};
@@ -82,6 +83,7 @@ pub struct Adapter {
     pub(super) work: WorkSignal,
     pub(super) network_change: StopSignal,
     pub(super) network_catalog: WindowsNetworkInterfaceCatalog,
+    pub(super) pending_notifications: Option<NotificationOwners>,
     pub(super) managed: Option<ManagedState>,
     _not_send: PhantomData<Rc<()>>,
 }
@@ -122,6 +124,7 @@ impl Adapter {
             work,
             network_change,
             network_catalog,
+            pending_notifications: None,
             managed: None,
             _not_send: PhantomData,
         };
@@ -485,41 +488,50 @@ impl Adapter {
     fn prepare_managed(&mut self) -> Result<(), Error> {
         let Some((
             notifications,
-            snapshot_generation,
-            policy,
-            capture_routes,
-            ipv4_dns_address,
-            ipv6_dns_address,
-            strict_route_intent,
-        )) = prepare_managed_intent(self.config.managed_network(), |config| {
-            let notifications = subscribe_network_changes(self.network_change.clone())?;
-            let snapshot_generation = notifications.generation();
-            let policy = snapshot_underlay(
-                config,
-                notifications.generation_counter(),
-                snapshot_generation,
-            )?;
-            Ok((
-                notifications,
+            (
                 snapshot_generation,
                 policy,
-                config.capture_routes().to_vec(),
-                config.ipv4_dns_address(),
-                config.ipv6_dns_address(),
-                config.strict_route(),
-            ))
+                capture_routes,
+                routes,
+                ipv4_dns_address,
+                ipv6_dns_address,
+                strict_route_intent,
+            ),
+        )) = prepare_managed_intent(self.config.managed_network(), |config| {
+            prepare_notification_owner(
+                &mut self.pending_notifications,
+                || subscribe_network_changes(self.network_change.clone()),
+                |notifications| {
+                    let snapshot_generation = notifications.generation();
+                    let policy = snapshot_underlay(
+                        config,
+                        notifications.generation_counter(),
+                        snapshot_generation,
+                    )?;
+                    Ok((
+                        snapshot_generation,
+                        policy,
+                        config.capture_routes().to_vec(),
+                        Vec::with_capacity(config.capture_routes().len()),
+                        config.ipv4_dns_address(),
+                        config.ipv6_dns_address(),
+                        config.strict_route(),
+                    ))
+                },
+            )
         })?
         else {
             return Ok(());
         };
-        let route_capacity = capture_routes.len();
+        // All fallible preparation and allocation completed while notifications
+        // were rollback-owned. This transfer performs no further fallible work.
         self.managed = Some(ManagedState {
             notifications,
             validated_generation: snapshot_generation,
             policy,
             capture_routes,
             pending_route: None,
-            routes: Vec::with_capacity(route_capacity),
+            routes,
             ipv4_dns_address,
             ipv6_dns_address,
             dns_interface: None,

@@ -1197,3 +1197,34 @@ check、DNS interop74、全workspace strictclippy/fmt/doc、M4 self-check均通�
 四份pinned通过证明当前默认计数允许这些输入，不是每个预算维度的精确用量/RSS census。
 matcher/automaton、snapshot总量、下载/cache事务与实际工作生命周期仍需独立落实，不能
 把本批称为整个RuleSet生产可用或性能已改善。此候选保留进入后续集成，性能验收单列。
+
+M2b验证归档：`profiles/remediation-m2b-20260905T184218Z`，26 files/170,701B，manifest
+SHA-256 `df1c598527cbb9c8d0d940d956601dde31c34a8a4fe3f6ff58479438604a8a93`，含较晚的M2a
+事后环境记录。该副本不再修改。
+
+### M3a — 通知订阅 rollback owner 与不可抹除的 cleanup 失败
+
+产品基准`07939e2d`。部分订阅失败继续逆序取消全部已完成handle；任何取消失败保留仍可
+被callback引用的context，并返回Cleanup。完整订阅在snapshot_underlay前即交Adapter
+pending槽；生产与injected测试共享同一prepare/cleanup所有权操作，成功take到ManagedState
+之间没有fallible步骤。私有命名NotificationStages及闭合Absent/Cleaned/Failed归约同时
+处理pending/committed；仅在已有CleanupOperations边界映射原返回类型。
+
+finish_setup_transaction总执行outer cleanup，再粘住inner/outer失败，strict-route标志
+不擦除cleanup位。TUN创建失败先处理cleanup-integrity，随后才处理stop/deadline/retry；
+root复核补回提前return路径的underlay.invalidate，避免顺序修复跳过原停止分支的失效动作。
+没有新增公共API、unsafe许可、平台职责或host操作。
+
+32组合覆盖snapshot/commit后失败、普通/cleanup内错、通知取消/后续cleanup成败、
+strict-route标志；比较完整CreateError、逆序事件、pending/committed持有关系与context
+释放/安全保留。原订阅测试覆盖每个失败ordinal×各前序取消失败，outer cleanup仍执行。
+平台safe suite62、TUN safe128均通过；两包live all-features check、all-targets/all-features
+strictclippy与owned格式通过。root最后失效修正后重跑TUN check/clippy/fmt通过。
+确切命令、owned hashes及日志在`target/remediation-audit/m3a-platform-rollback.md`和
+`m3a-platform-ownedpaths.json`，原始日志为`m3a-*.log`。
+
+普通测试排除live backend，未调用实际Adapter::create或操作网络状态。live Adapter字段
+接入与native owner_main取消竞态只有静态/编译证据；不能把shared helper测试冒充实际
+Win32故障注入。整合workspace/client compile-only及专用host资格待其他当前批次冻结后
+执行。既有cleanup_inner在失败时不clear catalog的行为尚需结合残留隔离契约审查，未在
+本批标为新确认缺陷。握手/join、health/MTU等平台余项仍未修复，没有性能无回退结论。

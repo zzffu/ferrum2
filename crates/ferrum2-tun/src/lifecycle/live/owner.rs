@@ -130,19 +130,20 @@ pub(crate) fn owner_main(
                     if error.is_strict_route_install_failure() {
                         events.emit(TunEvent::StrictRouteFilterInstallFailed);
                     }
+                    if error.is_cleanup_failure() {
+                        let _ = underlay.invalidate();
+                        attempt.emit_rebuild_failed(&events);
+                        if let Some(ready) = ready.take() {
+                            let _ = ready.send(OwnerReady::Failed);
+                        }
+                        return OwnerExit::CleanupFailed;
+                    }
                     if control.stop.load(Ordering::Acquire)
                         || control.shutdown.load(Ordering::Acquire)
                     {
                         let _ = underlay.invalidate();
                         attempt.emit_rebuild_failed(&events);
                         return OwnerExit::Stopped;
-                    }
-                    if error.is_cleanup_failure() {
-                        attempt.emit_rebuild_failed(&events);
-                        if let Some(ready) = ready.take() {
-                            let _ = ready.send(OwnerReady::Failed);
-                        }
-                        return OwnerExit::CleanupFailed;
                     }
                     if attempt.is_starting() {
                         let now = std::time::Instant::now();

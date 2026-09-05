@@ -21,6 +21,11 @@ DLL loading is security-sensitive. Preserve rejection of network/reparse paths, 
 
 Adapter creation is transactional. Setup failures and cancellation must roll back owned state in reverse order, surface cleanup conflicts, and avoid deleting state no longer matching the journal. Preserve DAD readiness ordering, managed route/DNS readback, underlay snapshot validation, and notification cancellation races.
 
+Notification subscriptions belong to the adapter's pending rollback slot before underlay snapshot
+preparation. Transfer them to managed state only after fallible preparation completes. Cleanup
+attempts both owned stages; an inner cleanup failure remains terminal even when outer cleanup
+succeeds. Preserve callback context lifetime when notification cancellation cannot be confirmed.
+
 The managed transaction is family-neutral: IPv4 and IPv6 addresses, MTU state, DAD, capture routes,
 DNS leases, and optional strict-route WFP objects must each have exact owned-state readback plus
 ownership-safe reverse rollback. Do not scan or classify unrelated external routes. Route,

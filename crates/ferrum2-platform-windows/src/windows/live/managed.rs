@@ -24,6 +24,9 @@ use super::super::core::managed::{
     restore_managed_dns, take_last_owned_route,
 };
 use super::super::core::network::{InterfaceIdentity, UnderlayPolicy};
+use super::super::core::notification::{
+    NotificationCleanup, NotificationStages, cancel_notification_stages,
+};
 use super::super::core::raw::{managed_address_matches, route_matches};
 use super::loader::wide;
 use super::managed_dns::{PlatformManagedIpv4Dns, PlatformManagedIpv6Dns};
@@ -231,10 +234,21 @@ impl CleanupOperations for PlatformCleanup<'_> {
     }
 
     fn cancel_notifications(&mut self) -> Option<bool> {
-        self.0.managed.as_mut().map(|state| {
+        let committed = self.0.managed.as_mut().map(|state| {
             state.policy.invalidate();
-            state.notifications.cancel_all()
-        })
+            &mut state.notifications
+        });
+        match cancel_notification_stages(
+            NotificationStages {
+                pending: self.0.pending_notifications.as_mut(),
+                committed,
+            },
+            NotificationOwners::cancel_all,
+        ) {
+            NotificationCleanup::Absent => None,
+            NotificationCleanup::Cleaned => Some(false),
+            NotificationCleanup::Failed => Some(true),
+        }
     }
 
     fn close_strict_route(&mut self) -> Option<bool> {

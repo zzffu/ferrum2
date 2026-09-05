@@ -597,11 +597,11 @@ fn notification_subscription_failure_cleans_each_completed_ordinal() {
     }
 
     for failed in 0..3 {
-        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut subscribed = Vec::new();
-        let mut cancelled = Vec::new();
-        assert!(
-            subscribe_notification_sequence(
+        for failed_cancel in std::iter::once(None).chain((0..failed).map(Some)) {
+            let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut subscribed = Vec::new();
+            let mut cancelled = Vec::new();
+            let error = subscribe_notification_sequence(
                 Context(drops.clone()),
                 |ordinal| {
                     subscribed.push(ordinal);
@@ -613,37 +613,43 @@ fn notification_subscription_failure_cleans_each_completed_ordinal() {
                 },
                 |handle| {
                     cancelled.push(*handle);
-                    true
+                    failed_cancel != Some(*handle)
                 },
             )
-            .is_err()
-        );
-        assert_eq!(subscribed, (0..=failed).collect::<Vec<_>>());
-        assert_eq!(cancelled, (0..failed).rev().collect::<Vec<_>>());
-        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut cancelled = Vec::new();
-    assert!(
-        subscribe_notification_sequence(
-            Context(drops.clone()),
-            |ordinal| if ordinal == 2 {
-                Err(Error)
+            .err()
+            .expect("subscription must fail at its selected ordinal");
+            let expected_error = if failed_cancel.is_some() {
+                Error::cleanup()
             } else {
-                Ok(ordinal)
-            },
-            |handle| {
-                cancelled.push(*handle);
-                *handle != 1
-            },
-        )
-        .is_err()
-    );
-    assert_eq!(cancelled, [1, 0]);
-    assert_eq!(
-        drops.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "a failed cancellation retains the callback context"
-    );
+                Error
+            };
+            assert_eq!(error, expected_error);
+            assert_eq!(subscribed, (0..=failed).collect::<Vec<_>>());
+            assert_eq!(cancelled, (0..failed).rev().collect::<Vec<_>>());
+            assert_eq!(
+                drops.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(failed_cancel.is_none())
+            );
+            for strict_route_failed in [false, true] {
+                let mut cleanup_calls = 0;
+                let result = crate::windows::core::managed::finish_setup_transaction(
+                    Err(error),
+                    strict_route_failed,
+                    || {
+                        cleanup_calls += 1;
+                        false
+                    },
+                );
+                let expected = if strict_route_failed {
+                    crate::CreateError::strict_route_install(failed_cancel.is_some())
+                } else if failed_cancel.is_some() {
+                    crate::CreateError::cleanup()
+                } else {
+                    crate::CreateError::operation()
+                };
+                assert_eq!(result, Err(expected));
+                assert_eq!(cleanup_calls, 1);
+            }
+        }
+    }
 }

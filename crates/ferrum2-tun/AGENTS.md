@@ -23,6 +23,10 @@ Confirmed managed-state damage or immutable TUN configuration changes use the se
 path with reverse cleanup. Cleanup-integrity failures remain terminal. Wintun ring-full is an
 explicitly counted packet drop: do not retry it and do not reset or rebuild for it.
 
+An adapter-creation cleanup failure takes precedence over a simultaneous stop, shutdown or expired
+readiness deadline. Invalidate the published underlay before reporting that terminal failure;
+cancellation must not turn an unconfirmed cleanup into a successful stopped result.
+
 ## Focused Verification
 
 Run:
