@@ -26,6 +26,27 @@ workflow inputs -> controller plan -> m4 profile-workload producer
 -> bounded JSONL trials -> controller summary -> reviewed policy decision
 ```
 
+Full non-TUN aggregation requires the four canonical group directories, each containing
+`performance-plan.json`, `calibrated-summary.json`, and the complete `ab-parent` / `ab-candidate`
+JSONL trials. It rebuilds each plan and summary with the same controller, checks exact JSON
+fields and scalar types, and requires the same full binary build and environment identities
+across groups. Aggregate schema 2 binds the summary and plan file digests, the canonical raw
+evidence manifest digest, and the common identities. Summary-only inputs are not accepted.
+
+The `aggregate` command requires `--producer-result`; the workflow supplies
+`${{ needs.paired-profile.result }}` from the completed matrix job. Failure, cancellation,
+skipping, or an unknown result produces `INVALID` even if uploaded files claim success.
+The workflow stages raw evidence before cleanup, generates a summary only after workload,
+staging, and final cleanup succeed, and uploads retained evidence even on failure. An upload
+failure also prevents a successful matrix job. This terminal result is trusted workflow input,
+not a fact an arbitrary local artifact can prove.
+
+The Linux controller source identity includes its imported `tools/ci` initializer and
+`required_gate.py`. Changes invalidate previous source-bound plans and calibration; generate
+fresh A/A and A/B evidence with the same updated controller and harness. A/A remains a separate
+calibration input; the aggregate accepts only distinct parent/candidate A/B identities. Replay
+validates the reported measurements and decisions, not physical execution order or profiler data.
+
 The Windows evidence chain selects one topology per run:
 
 ```text

@@ -3,6 +3,7 @@ import pathlib
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 from tests.performance_candidate._shared_fixture import WORKFLOW_PATH
 from tools.performance_candidate import json_contract
@@ -11,6 +12,7 @@ from tools.performance_candidate.linux import catalog as linux_catalog
 from tools.performance_candidate.linux import plan as linux_plan
 from tools.performance_candidate.linux import policy as linux_policy
 from tools.performance_candidate.linux import scale as linux_scale
+from tools.performance_candidate.linux import evidence_contract
 from tools.performance_candidate.windows_tun import recipe as windows_recipe
 
 
@@ -91,6 +93,50 @@ class ClosedJsonInputTests(unittest.TestCase):
 
 
 class ScenarioPlanTests(unittest.TestCase):
+    def test_controller_identity_binds_imported_required_gate_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            package = root / "tools" / "performance_candidate"
+            package.mkdir(parents=True)
+            (package / "cli.py").write_text("controller", encoding="utf-8")
+            imported = root / "tools" / "ci"
+            imported.mkdir()
+            initializer = imported / "__init__.py"
+            gate = imported / "required_gate.py"
+            initializer.write_text("initializer", encoding="utf-8")
+            gate.write_text("gate", encoding="utf-8")
+            with mock.patch.object(evidence_contract, "_repository_root", return_value=root):
+                digest = evidence_contract.controller_source_sha256.__wrapped__()
+                gate.write_text("changed gate", encoding="utf-8")
+                changed_gate = evidence_contract.controller_source_sha256.__wrapped__()
+                initializer.write_text("changed initializer", encoding="utf-8")
+                changed_initializer = evidence_contract.controller_source_sha256.__wrapped__()
+            self.assertEqual(len({digest, changed_gate, changed_initializer}), 3)
+
+    def test_workflow_publishes_summary_after_successful_cleanup(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        paired = workflow.split("\n  aggregate-full-non-tun:\n")[0]
+        steps = dict(
+            (block.splitlines()[0], block)
+            for block in re.split(r"^      - name: ", paired, flags=re.MULTILINE)[1:]
+        )
+        names = list(steps)
+        stage = "Stage bounded raw evidence"
+        cleanup = "Reap processes and remove product worktrees"
+        summary = "Summarize paired performance evidence"
+        upload = "Upload paired raw evidence"
+        self.assertLess(names.index(stage), names.index(cleanup))
+        self.assertLess(names.index(cleanup), names.index(summary))
+        self.assertLess(names.index(summary), names.index(upload))
+        for required in ("profile", "stage", "cleanup"):
+            self.assertIn(f"steps.{required}.outcome == 'success'", steps[summary])
+        self.assertIn("always()", steps[upload])
+        self.assertIn('--parent-root "$ARTIFACT_DIR/ab-parent"', steps[summary])
+        self.assertIn('--candidate-root "$ARTIFACT_DIR/ab-candidate"', steps[summary])
+        self.assertIn('--producer-result "${{ needs.paired-profile.result }}"', workflow)
+        self.assertIn("--exclude ferrum2-rule-qualification", workflow)
+        self.assertIn("-p ferrum2-rule-qualification --no-run --locked", workflow)
+
     def plan(self, mode: str, scenario: str) -> dict[str, object]:
         return linux_plan.create_plan(
             mode=mode,

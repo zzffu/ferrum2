@@ -774,3 +774,30 @@ run-wide证据预算、异目录calibration引用（RTL-06/07/08）。生产者�
 M4 closed bundle更新两份源码行，完整digest
 `4f0782957b29718a827c9b5f7c045ecd26b65aafa02315a26953dca6ff9242a5`。
 此源码身份下尚未运行真实host/性能测量；其他M4计量/探测边界仍待后续批次。
+
+### M1f — CT-02 / CW-01：完整矩阵重建与最终工作流结果
+
+aggregate要求四个canonical group目录，各自带plan、summary及完整AB raw trials。复用
+`validate_plan`和`summarize_evidence`重建全部schema、scenario closure、数值/状态/identity，
+以canonical typed JSON比较，跨组完整build与environment必须一致。删除summary-only输入。
+aggregate schema2记录producing job结果、common identities、同读plan digest和raw manifest
+digest。新增`--producer-result`来自workflow `needs.paired-profile.result`，复用唯一typed
+`tools.ci.required_gate` owner；非success及未知值输出INVALID，不能接受先前上传的成功摘要。
+
+workflow改为stage raw → 完整cleanup → 仅profile/stage/cleanup均成功时summary → always
+upload，失败raw仍可保留。full aggregate额外看包括upload结果在内的producer job终态。
+同批补齐此workflow里另一处普通workspace Rule qualification遗漏：exclude并单独no-run，
+与M1a的root/m0规则一致。新增CI依赖源码及initializer纳入Linux controller source identity。
+
+6种原本错误接受的summary mutation先red；相关78项及plan scalar5项通过。root第一次
+共享工作树整合123项有1项失败：下一批M4新增measurement.rs尚未登记bundle，校验器正确
+拒绝半批源码。没有跳过该项。随后以`25bdc735`建独立worktree
+`target/remediation-m1-integration-20260905`，复制27个已完成CT/HT文件；逐项哈希记录在
+`target/remediation-m1-integration-files.json`，完成后与主工作树核对无变化。
+
+该独立快照full candidate123项全部通过（33.958s），包括M4完整source-bundle检查；PS
+nonmutating qualification contract通过。主工作树CI Python56项通过。
+日志`target/remediation-ct02-*.log`、`target/remediation-ct02-cw01-*.log`、
+`target/remediation-m1-{evidence-full,isolated-candidate,isolated-ps,aggregate-ci}.log`。
+这些是offline/parser/流程契约证据，未执行GitHub workflow、benchmark或host网络操作。
+完整矩阵重建增加有限raw文件读取/归约成本；阈值与A/A校准规则不变，新source identity须重新取基线。

@@ -202,7 +202,10 @@ jobs:
                 --exclude ferrum2-tun \
                 --exclude ferrum2-platform-windows \
                 --exclude ferrum2-m0-harness \
+                --exclude ferrum2-rule-qualification \
                 --locked
+              cargo +1.97.1 test \
+                -p ferrum2-rule-qualification --no-run --locked
               cargo +1.97.1 test \
                 -p ferrum2-client \
                 -p ferrum2-tun \
@@ -248,6 +251,7 @@ jobs:
             "${plan_scale_arguments[@]}" \
             --output "$PERFORMANCE_PLAN"
       - name: Run interleaved A/A calibration and A/B schedule
+        id: profile
         shell: bash
         run: |
           set -euo pipefail
@@ -373,40 +377,12 @@ jobs:
               --output "$PERFORMANCE_PLAN"
             printf 'ACTIVE_POLICY=%s\n' "$RUNTIME_POLICY" >>"$GITHUB_ENV"
           fi
-      - name: Summarize paired performance evidence
-        if: ${{ always() && !cancelled() }}
-        shell: bash
-        run: |
-          set -uo pipefail
-          summary_status=0
-          summary_scale_arguments=()
-          if [ "$SELECTION" = tcp-scale-10k ]; then
-            summary_scale_arguments=(
-              --scale-policy "$PERFORMANCE_SCALE_POLICY"
-              --repository "$CONTROLLER_DIR"
-            )
-          fi
-          python3 -B -m tools.performance_candidate summarize \
-            --plan "$PERFORMANCE_PLAN" \
-            --parent-root "$PARENT_DIR/profiles/paired" \
-            --candidate-root "$CANDIDATE_DIR/profiles/paired" \
-            --parent-sha "$PARENT_SHA" \
-            --candidate-sha "$CANDIDATE_SHA" \
-            --policy "$ACTIVE_POLICY" \
-            "${summary_scale_arguments[@]}" \
-            --output "$PERFORMANCE_SUMMARY" \
-            --markdown "$PERFORMANCE_MARKDOWN" || summary_status=$?
-          if [ -f "$PERFORMANCE_MARKDOWN" ]; then
-            cat "$PERFORMANCE_MARKDOWN" >>"$GITHUB_STEP_SUMMARY" || summary_status=1
-          else
-            summary_status=1
-          fi
-          exit "$summary_status"
       - name: Stage bounded raw evidence
+        id: stage
         if: ${{ always() }}
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           copy_evidence() {
             source=$1
             destination=$2
@@ -424,15 +400,8 @@ jobs:
             "$PARENT_DIR/profiles/calibration-right" \
             "$ARTIFACT_DIR/aa-right"
           cp "$PERFORMANCE_SCALE_POLICY" "$ARTIFACT_DIR/scale-policy.json"
-      - name: Upload paired raw evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: paired-profile-${{ inputs.mode }}-${{ matrix.selection }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/performance-artifact
-          if-no-files-found: error
-          retention-days: 30
       - name: Reap processes and remove product worktrees
+        id: cleanup
         if: ${{ always() }}
         shell: bash
         run: |
@@ -455,6 +424,43 @@ jobs:
             fi
           done
           test "$cleanup_status" -eq 0
+      - name: Summarize paired performance evidence
+        if: ${{ always() && !cancelled() && steps.profile.outcome == 'success' && steps.stage.outcome == 'success' && steps.cleanup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          summary_status=0
+          summary_scale_arguments=()
+          if [ "$SELECTION" = tcp-scale-10k ]; then
+            summary_scale_arguments=(
+              --scale-policy "$PERFORMANCE_SCALE_POLICY"
+              --repository "$CONTROLLER_DIR"
+            )
+          fi
+          python3 -B -m tools.performance_candidate summarize \
+            --plan "$PERFORMANCE_PLAN" \
+            --parent-root "$ARTIFACT_DIR/ab-parent" \
+            --candidate-root "$ARTIFACT_DIR/ab-candidate" \
+            --parent-sha "$PARENT_SHA" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --policy "$ACTIVE_POLICY" \
+            "${summary_scale_arguments[@]}" \
+            --output "$PERFORMANCE_SUMMARY" \
+            --markdown "$PERFORMANCE_MARKDOWN" || summary_status=$?
+          if [ -f "$PERFORMANCE_MARKDOWN" ]; then
+            cat "$PERFORMANCE_MARKDOWN" >>"$GITHUB_STEP_SUMMARY" || summary_status=1
+          else
+            summary_status=1
+          fi
+          exit "$summary_status"
+      - name: Upload paired raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paired-profile-${{ inputs.mode }}-${{ matrix.selection }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/performance-artifact
+          if-no-files-found: error
+          retention-days: 30
 
   aggregate-full-non-tun:
     name: aggregate full non-TUN qualification
@@ -484,6 +490,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/performance-aggregate"
           python3 -B -m tools.performance_candidate aggregate \
             --summary-root "$RUNNER_TEMP/performance-matrix" \
+            --producer-result "${{ needs.paired-profile.result }}" \
             --parent-sha "${{ inputs.parent_sha }}" \
             --candidate-sha "${{ inputs.candidate_sha }}" \
             --output "$RUNNER_TEMP/performance-aggregate/full-non-tun-summary.json" \

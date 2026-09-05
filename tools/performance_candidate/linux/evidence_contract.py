@@ -54,9 +54,14 @@ def _repository_root() -> pathlib.Path:
 def controller_source_sha256() -> str:
     root = _repository_root()
     package = root / "tools" / "performance_candidate"
-    paths = tuple(sorted(package.rglob("*.py")))
-    if not paths:
+    package_paths = tuple(sorted(package.rglob("*.py")))
+    if not package_paths:
         raise CandidateControlError("performance controller source bundle is empty")
+    paths = tuple(sorted((
+        *package_paths,
+        root / "tools" / "ci" / "__init__.py",
+        root / "tools" / "ci" / "required_gate.py",
+    )))
     return _source_bundle(root, paths)
 
 

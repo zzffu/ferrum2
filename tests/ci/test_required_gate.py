@@ -6,6 +6,24 @@ from tools.ci import required_gate
 
 
 class RequiredGateTests(unittest.TestCase):
+    def test_performance_requires_successful_producing_job(self) -> None:
+        required_gate.validate_gate(
+            required_gate.GateMode.PERFORMANCE, True,
+            required_gate.parse_results(["paired-profile=success"]),
+        )
+        for result in ("failure", "cancelled", "skipped"):
+            with self.subTest(result=result), self.assertRaises(ValueError):
+                required_gate.validate_gate(
+                    required_gate.GateMode.PERFORMANCE, True,
+                    required_gate.parse_results([f"paired-profile={result}"]),
+                )
+        for dependencies in ([], ["paired-profile=success", "extra=success"]):
+            with self.subTest(dependencies=dependencies), self.assertRaises(ValueError):
+                required_gate.validate_gate(
+                    required_gate.GateMode.PERFORMANCE, True,
+                    required_gate.parse_results(dependencies),
+                )
+
     def test_ordinary_gate_accepts_executed_and_skipped_closures(self) -> None:
         for decision, result in [(True, "success"), (False, "skipped")]:
             with self.subTest(decision=decision):

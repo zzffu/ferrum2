@@ -127,6 +127,10 @@ class DecisionPolicyTests(unittest.TestCase):
                     lambda value: value.update(schema_version=3),
                 ),
                 (
+                    "schema scalar type",
+                    lambda value: value.update(schema_version=float(linux_plan.PLAN_SCHEMA_VERSION)),
+                ),
+                (
                     "digest",
                     lambda value: value["decision_policy"].update(
                         policy_sha256="0" * 64

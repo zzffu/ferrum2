@@ -113,6 +113,7 @@ def _parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--summary-root", required=True, type=pathlib.Path)
     aggregate.add_argument("--parent-sha", required=True)
     aggregate.add_argument("--candidate-sha", required=True)
+    aggregate.add_argument("--producer-result", required=True)
     aggregate.add_argument("--output", required=True, type=pathlib.Path)
     aggregate.add_argument("--markdown", required=True, type=pathlib.Path)
     lineage = commands.add_parser(

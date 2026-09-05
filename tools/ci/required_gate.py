@@ -12,6 +12,7 @@ from typing import Sequence
 class GateMode(Enum):
     ORDINARY = "ordinary"
     FUZZ = "fuzz"
+    PERFORMANCE = "performance"
 
 
 class JobResult(Enum):
@@ -32,6 +33,7 @@ class GatePolicy:
 
 
 POLICIES = {
+    GateMode.PERFORMANCE: GatePolicy("paired-profile", ()),
     GateMode.ORDINARY: GatePolicy("changes", ("quality", "platform", "interop")),
     GateMode.FUZZ: GatePolicy(
         "impact", ("deterministic-build", "libfuzzer-build", "fuzz-campaign")

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import pathlib
 import re
 
 from tools.performance_candidate.json_contract import (
     CandidateControlError,
+    _canonical_json_bytes,
     read_bounded_closed_json,
 )
+from tools.ci.required_gate import GateMode, parse_results, validate_gate
+from tools.performance_candidate.linux.decision import summarize_evidence
+from tools.performance_candidate.linux.plan import PLAN_MAX_BYTES, validate_plan
 from tools.performance_candidate.linux.catalog import (
     FULL_NON_TUN_GROUPS,
     SUMMARY_SCHEMA_VERSION,
@@ -21,12 +27,11 @@ from tools.performance_candidate.status import (
     INCONCLUSIVE,
     INVALID,
     REGRESSION,
-    TERMINAL_STATUSES,
     WITHIN_CALIBRATED_BAND,
     qualification_exit_code,
 )
 
-AGGREGATE_SCHEMA_VERSION = 1
+AGGREGATE_SCHEMA_VERSION = 2
 AGGREGATE_KIND = "performance_candidate_full_non_tun_summary"
 SUMMARY_KIND = "performance_candidate_summary"
 SUMMARY_FILE_NAME = "calibrated-summary.json"
@@ -40,6 +45,7 @@ def _validate_summary(
     path: pathlib.Path,
     parent_sha: str,
     candidate_sha: str,
+    selection: str,
 ) -> dict[str, object]:
     if type(value) is not dict:
         raise CandidateControlError(f"aggregate input {path} must be a JSON object")
@@ -55,32 +61,13 @@ def _validate_summary(
         "candidate_win_enabled": True,
     }
     for field, expected_value in expected.items():
-        if summary.get(field) != expected_value:
+        if type(summary.get(field)) is not type(expected_value) or summary.get(field) != expected_value:
             raise CandidateControlError(
                 f"aggregate input {path} has invalid {field}"
             )
-    selection = summary.get("selection")
-    if selection not in FULL_NON_TUN_GROUPS:
+    if summary.get("selection") != selection:
         raise CandidateControlError(
             f"aggregate input {path} has an unexpected selection"
-        )
-    status = summary.get("status")
-    if status not in TERMINAL_STATUSES:
-        raise CandidateControlError(f"aggregate input {path} has an invalid status")
-    if summary.get("adoption_claim") != (status == CANDIDATE_WIN):
-        raise CandidateControlError(
-            f"aggregate input {path} has an inconsistent adoption claim"
-        )
-    scenarios = summary.get("scenarios")
-    mandatory = summary.get("mandatory_scenarios")
-    if type(scenarios) is not list or type(mandatory) is not list or not scenarios:
-        raise CandidateControlError(
-            f"aggregate input {path} has invalid scenario results"
-        )
-    scenario_names = [entry.get("scenario") for entry in scenarios if type(entry) is dict]
-    if len(scenario_names) != len(scenarios) or scenario_names != mandatory:
-        raise CandidateControlError(
-            f"aggregate input {path} has inconsistent mandatory scenarios"
         )
     return summary
 
@@ -90,9 +77,17 @@ def aggregate_summaries(
     summary_root: pathlib.Path,
     parent_sha: str,
     candidate_sha: str,
+    producer_result: str,
 ) -> dict[str, object]:
-    """Validate exactly one calibrated summary per full non-TUN group."""
+    """Rebuild each canonical group's decision after its producing job succeeds."""
 
+    try:
+        validate_gate(
+            GateMode.PERFORMANCE, True,
+            parse_results([f"paired-profile={producer_result}"]),
+        )
+    except ValueError as error:
+        raise CandidateControlError("aggregate requires a successful producing job") from error
     parent_sha = parent_sha.lower()
     candidate_sha = candidate_sha.lower()
     if (
@@ -105,13 +100,25 @@ def aggregate_summaries(
         )
     if not summary_root.is_dir() or summary_root.is_symlink():
         raise CandidateControlError("aggregate summary root is missing or unsafe")
-    paths = sorted(summary_root.rglob(SUMMARY_FILE_NAME))
-    if len(paths) != len(FULL_NON_TUN_GROUPS):
+    selections = set()
+    try:
+        with os.scandir(summary_root) as entries:
+            for entry in entries:
+                if (entry.name not in FULL_NON_TUN_GROUPS or entry.is_symlink()
+                        or not entry.is_dir(follow_symlinks=False)):
+                    raise CandidateControlError("aggregate requires exactly one canonical group directory")
+                selections.add(entry.name)
+    except OSError as error:
+        raise CandidateControlError("unable to enumerate aggregate groups") from error
+    if selections != set(FULL_NON_TUN_GROUPS):
         raise CandidateControlError(
             "aggregate requires exactly one calibrated summary per full non-TUN group"
         )
     groups: dict[str, dict[str, object]] = {}
-    for path in paths:
+    common_builds = None
+    common_environment = None
+    for selection in FULL_NON_TUN_GROUPS:
+        path = summary_root / selection / SUMMARY_FILE_NAME
         if path.is_symlink():
             raise CandidateControlError(f"aggregate input {path} must not be a symlink")
         bounded = read_bounded_closed_json(
@@ -124,12 +131,32 @@ def aggregate_summaries(
             path=path,
             parent_sha=parent_sha,
             candidate_sha=candidate_sha,
+            selection=selection,
         )
-        selection = str(summary["selection"])
-        if selection in groups:
-            raise CandidateControlError(
-                f"aggregate contains duplicate selection {selection}"
-            )
+        plan_path = path.parent / "performance-plan.json"
+        parent_root = path.parent / "ab-parent"
+        candidate_root = path.parent / "ab-candidate"
+        if any(item.is_symlink() for item in (plan_path, parent_root, candidate_root)):
+            raise CandidateControlError("aggregate group evidence must not be a symlink")
+        loaded_plan = read_bounded_closed_json(
+            plan_path, maximum_bytes=PLAN_MAX_BYTES, source="aggregate group plan",
+        )
+        plan = validate_plan(loaded_plan.value)
+        if (plan["selection"] != selection or plan["mode"] != "qualification"
+                or (plan["warmup_seconds"], plan["active_seconds"], plan["pairs"]) != (3, 30, 6)):
+            raise CandidateControlError("aggregate group plan does not match the full non-TUN recipe")
+        rebuilt = summarize_evidence(
+            plan=plan, parent_root=parent_root, candidate_root=candidate_root,
+            parent_sha=parent_sha, candidate_sha=candidate_sha,
+        )
+        if _canonical_json_bytes(summary) != _canonical_json_bytes(rebuilt):
+            raise CandidateControlError("aggregate summary does not match its canonical plan and raw evidence")
+        if common_builds is not None and common_builds != summary["build_identities"]:
+            raise CandidateControlError("aggregate full build identities differ between groups")
+        if common_environment is not None and common_environment != summary["environment_identity"]:
+            raise CandidateControlError("aggregate environment identity differs between groups")
+        common_builds = summary["build_identities"]
+        common_environment = summary["environment_identity"]
         groups[selection] = {
             "selection": selection,
             "status": summary["status"],
@@ -137,6 +164,10 @@ def aggregate_summaries(
             "decision_reason": summary["decision_reason"],
             "summary_file": path.relative_to(summary_root).as_posix(),
             "summary_sha256": bounded.sha256,
+            "plan_sha256": loaded_plan.sha256,
+            "raw_manifest_sha256": hashlib.sha256(
+                _canonical_json_bytes(rebuilt["evidence_files"])
+            ).hexdigest(),
             "scenarios": [
                 {
                     "scenario": scenario["scenario"],
@@ -149,11 +180,6 @@ def aggregate_summaries(
                 for scenario in summary["scenarios"]
             ],
         }
-    missing = sorted(set(FULL_NON_TUN_GROUPS) - set(groups))
-    if missing:
-        raise CandidateControlError(
-            f"aggregate is missing full non-TUN groups: {', '.join(missing)}"
-        )
     statuses = {entry["status"] for entry in groups.values()}
     if INVALID in statuses:
         status = INVALID
@@ -178,6 +204,9 @@ def aggregate_summaries(
         "kind": AGGREGATE_KIND,
         "parent_sha": parent_sha,
         "candidate_sha": candidate_sha,
+        "producer_result": producer_result,
+        "build_identities": common_builds,
+        "environment_identity": common_environment,
         "expected_groups": list(FULL_NON_TUN_GROUPS),
         "decision_reason": reason,
         "adoption_claim": status == CANDIDATE_WIN,
@@ -211,6 +240,7 @@ def run_aggregate_command(arguments: object) -> int:
             summary_root=arguments.summary_root,
             parent_sha=arguments.parent_sha,
             candidate_sha=arguments.candidate_sha,
+            producer_result=arguments.producer_result,
         )
     except CandidateControlError as error:
         summary = {
@@ -218,6 +248,9 @@ def run_aggregate_command(arguments: object) -> int:
             "kind": AGGREGATE_KIND,
             "parent_sha": arguments.parent_sha,
             "candidate_sha": arguments.candidate_sha,
+            "producer_result": arguments.producer_result,
+            "build_identities": {},
+            "environment_identity": {},
             "expected_groups": list(FULL_NON_TUN_GROUPS),
             "decision_reason": str(error),
             "adoption_claim": False,

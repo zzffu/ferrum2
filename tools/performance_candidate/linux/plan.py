@@ -6,7 +6,7 @@ import copy
 import json
 import pathlib
 
-from tools.performance_candidate.json_contract import CandidateControlError, read_bounded_closed_json
+from tools.performance_candidate.json_contract import CandidateControlError, _canonical_json_bytes, read_bounded_closed_json
 from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, MODES, PAIR_COUNTS, PAIR_SCHEDULE, QUALIFICATION_GROUPS, SCENARIO_CATALOG, SCENARIO_EVIDENCE, TCP_REQUEST_SCENARIOS, UDP_DIRECT_PAYLOAD_BOUNDS, UDP_SS_PAYLOAD_MATRIX, WARMUP_SECONDS
 from tools.performance_candidate.linux.evidence_contract import scenario_evidence_contract
 from tools.performance_candidate.linux.policy import MEASUREMENT_ENVIRONMENT, UNCALIBRATED_POLICY, _scenario_policy_is_applicable, validate_decision_policy
@@ -246,10 +246,19 @@ def load_plan(
     decision_policy: dict[str, object] | None = None,
     scale_safety_policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    plan = read_bounded_closed_json(
+        path, maximum_bytes=PLAN_MAX_BYTES, source="performance plan"
+    ).value
+    return validate_plan(plan, decision_policy, scale_safety_policy)
+
+
+def validate_plan(
+    plan: object,
+    decision_policy: dict[str, object] | None = None,
+    scale_safety_policy: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Rebuild a loaded plan, including exact JSON scalar types and field closure."""
     try:
-        plan = read_bounded_closed_json(
-            path, maximum_bytes=PLAN_MAX_BYTES, source="performance plan"
-        ).value
         if type(plan) is not dict:
             raise CandidateControlError("performance plan must be a JSON object")
         policy = plan["decision_policy"] if decision_policy is None else decision_policy
@@ -271,7 +280,7 @@ def load_plan(
         )
     except (KeyError, TypeError) as error:
         raise CandidateControlError("performance plan is invalid") from error
-    if plan != expected:
+    if _canonical_json_bytes(plan) != _canonical_json_bytes(expected):
         raise CandidateControlError(
             "performance plan does not match the canonical scenario set"
         )
