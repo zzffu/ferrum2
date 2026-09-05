@@ -1,3 +1,6 @@
+mod thread;
+pub(crate) use thread::OwnerThread;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -6,7 +9,7 @@ use ferrum2_runtime::{OwnerRegistry, PreparedProcessRoot, ProcessCancellation, P
 
 use crate::process::{NetworkLifecycleHandler, TcpHandler, UdpHandler};
 use crate::{
-    OwnerWake, SessionCancellation, TcpFlow, TunNetworkFullRebuildReason, TunNetworkLifecycle,
+    SessionCancellation, TcpFlow, TunNetworkFullRebuildReason, TunNetworkLifecycle,
     TunNetworkResetError, UdpCandidate,
 };
 
@@ -64,50 +67,6 @@ impl OwnerControl {
             admitting: Arc::new(AtomicBool::new(false)),
             flow_count: Arc::new(AtomicUsize::new(0)),
             association_count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-pub(crate) struct OwnerThread {
-    pub(crate) control: OwnerControl,
-    pub(crate) work: OwnerWake,
-    pub(crate) thread: Option<std::thread::JoinHandle<OwnerExit>>,
-}
-
-impl OwnerThread {
-    fn signal(&self) {
-        self.control.stop.store(true, Ordering::Release);
-        self.work.signal();
-    }
-
-    pub(crate) async fn reap(mut self) -> OwnerExit {
-        self.signal();
-        let Some(thread) = self.thread.take() else {
-            return OwnerExit::CleanupFailed;
-        };
-        match tokio::task::spawn_blocking(move || thread.join()).await {
-            Ok(Ok(exit)) => exit,
-            _ => OwnerExit::CleanupFailed,
-        }
-    }
-}
-
-impl Drop for OwnerThread {
-    fn drop(&mut self) {
-        self.signal();
-        if let Some(thread) = self.thread.take() {
-            if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-                handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-            }) {
-                tokio::task::block_in_place(move || {
-                    tokio::runtime::Handle::current().block_on(async move {
-                        let _ = tokio::task::spawn_blocking(move || thread.join()).await;
-                    });
-                });
-            } else {
-                // Outside the product's multi-thread runtime there is no Tokio worker to block.
-                let _ = thread.join();
-            }
         }
     }
 }

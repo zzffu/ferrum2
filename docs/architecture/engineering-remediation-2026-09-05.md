@@ -510,3 +510,31 @@ failure delta 全零且 cleanup PASS / 五类全零。证据 `%TEMP%/ferrum2-tim
 activity 修复与全部新测试。没有撤回 R6 的公平性与资源限制，也没有挑选通过的试次。
 p50/p95/p99 和 checked sample count 已有实际数据；这些记录仍完整保留，不能把候选
 试验的结果归给撤回后的提交。接下来验证最终 TUN join 修复和当前候选的完整资格。
+
+### R8 — P1：取消 TUN reap 时 native cleanup 脱离 owner（已修复，待 host 资格）
+
+原 `tun/src/runtime.rs::OwnerThread::reap` 取走 native JoinHandle 后直接 await
+spawn_blocking。取消 future 时，OwnerThread::Drop 已看不到句柄，root 可以在 native
+cleanup 尚未完成时返回。gated 假线程测试已在旧实现失败；这证实 owner 契约破坏，
+并不等于已经观测到真实 adapter 残留。生产 watchdog 可取消 root，因此不能只依赖 Tokio
+Runtime 最后 Drop 时可能等待其 blocking pool。
+
+新的私有 `runtime/thread.rs` 统一拥有 native owner 的 signal、async join 和 Drop。
+PendingThreadJoin 在 await 期间保留 join 状态，互斥锁一直持有到 native join 完成；
+取消方要么接手尚未开始的 join，要么等现有 worker 完成。Drop 在产品多线程 Tokio
+runtime 上先 block_in_place 让出 worker。无新外部 API、trait、依赖、unsafe 或平台调用；
+普通 Drop 和显式 reap 共享同一所有权规则。
+
+代价是每次 reaping 的一个 Arc/Mutex，以及取消后仍等待 native cleanup 的关闭延迟。
+不能强制终止卡住的 OS cleanup；本改动保证不提前丢掉所有权，不把该等待宣称为绝对
+有界的 native 操作。专用 host runner 的外部时限和 recovery 仍须独立验证。
+
+Windows safe lib 128 项、TUN all-features check / 严格 clippy 已通过。新测试覆盖
+已开始的 join 和 blocking pool 已满、join worker 尚未执行的窗口；全部使用假 native
+线程，未创建适配器或修改网络。旧正常退出、panic、启动回滚和清理失败用例保留。
+
+R8 追加门禁：WSL 同一 safe lib 128 项通过；client all-features compile-only、
+workspace all-targets/all-features 严格 clippy、workspace docs 再次通过。R7 timer
+撤回后的 runtime 125 项通过。最终 Confirm 使用 `5b46b03e`（原始 9bb 产品代码，
+只覆盖当前 M4 harness 的六个源/manifest 文件）作为基线；M4 bundle 与候选逐字节一致。
+该 detached baseline 留在 `profiles/remediation-confirm-baseline`，只用于本机验证，未推送。
