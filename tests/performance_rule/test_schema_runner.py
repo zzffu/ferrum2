@@ -5,7 +5,7 @@ from unittest import mock
 
 from tests.performance_rule._fixture import SCENARIO_SUITES, report
 from tools.performance_rule.json_contract import closed_json_bytes
-from tools.performance_rule.runner_report import require_same_scenarios, validate_report
+from tools.performance_rule.validated_report import require_same_workload, validate_report
 from tools.performance_rule.schema import (
     RUNNER_PRIORITY_HIGH,
     RUNNER_PRIORITY_NORMAL,
@@ -36,21 +36,21 @@ class SchemaAndRunnerTests(unittest.TestCase):
             self.assertNotEqual(flags, subprocess.REALTIME_PRIORITY_CLASS)
 
     def test_runner_sha_and_measurement_shape_are_validated(self):
-        self.assertEqual(validate_report(report("abc"), "abc"), SCENARIO_SUITES)
+        self.assertEqual(validate_report(report("a" * 64), "a" * 64).scenario_suites, SCENARIO_SUITES)
         with self.assertRaisesRegex(ControlError, "SHA-256"):
-            validate_report(report("wrong"), "abc")
-        malformed = report("abc")
+            validate_report(report("wrong"), "a" * 64)
+        malformed = report("a" * 64)
         malformed["measurements"][0]["samples_ns_per_op"] = [1] * 4
         with self.assertRaisesRegex(ControlError, "too few"):
-            validate_report(malformed, "abc")
-        extra = report("abc")
+            validate_report(malformed, "a" * 64)
+        extra = report("a" * 64)
         extra["measurements"][0]["invented"] = True
         with self.assertRaisesRegex(ControlError, "fields"):
-            validate_report(extra, "abc")
-        nonfinite = report("abc")
+            validate_report(extra, "a" * 64)
+        nonfinite = report("a" * 64)
         nonfinite["measurements"][0]["p50_ns_per_op"] = float("nan")
         with self.assertRaisesRegex(ControlError, "p50"):
-            validate_report(nonfinite, "abc")
+            validate_report(nonfinite, "a" * 64)
 
     def test_closed_json_rejects_duplicate_nonfinite_and_oversize_input(self):
         for payload, message in (
@@ -70,8 +70,5 @@ class SchemaAndRunnerTests(unittest.TestCase):
                     )
 
     def test_parent_and_candidate_must_have_identical_scenarios(self):
-        with self.assertRaisesRegex(ControlError, "catalog changed"):
-            require_same_scenarios(
-                {"match_set/one": "match_set"},
-                {"match_set/one": "route_program"},
-            )
+        with self.assertRaisesRegex(ControlError, "workload identity changed"):
+            require_same_workload("a" * 64, "b" * 64)

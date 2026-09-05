@@ -13,6 +13,7 @@
     "mode": "parent_candidate",
     "pairs": 6,
     "parent_runner_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "raw_pairs": [],
     "runner_arguments": [
       "--profile",
       "smoke",
@@ -21,7 +22,6 @@
       "--workspace-root",
       "."
     ],
-    "raw_pairs": [],
     "scenario_ids": [],
     "scenario_suites": {},
     "schema": "ferrum2.rule-qualification-control.v6",
@@ -40,10 +40,16 @@
     "allocation_gate_passed": true,
     "configuration": {
       "base_iterations_per_sample": 10,
-      "dns_rule_sizes": [1],
-      "includes_100k": true,
-      "match_sizes": [100],
-      "route_sizes": [1],
+      "dns_rule_sizes": [
+        1
+      ],
+      "includes_100k": false,
+      "match_sizes": [
+        100
+      ],
+      "route_sizes": [
+        1
+      ],
       "samples": 5
     },
     "correctness_passed": true,
@@ -59,13 +65,13 @@
     },
     "fixtures": [
       {
+        "bytes": 32,
         "capabilities": {
           "domain_keyword": false,
           "domain_suffix": false,
           "exact_domain": true,
           "ip_cidr": false
         },
-        "bytes": 32,
         "name": "generated-exact-100.srs",
         "provenance": "deterministic_runner_generated_canonical_srs_v2",
         "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -110,29 +116,69 @@
       "minimum_reported_batch_nanoseconds": 250000,
       "noisy_gate_ceiling_percent": 10.0,
       "note": "synthetic contract fixture",
+      "p99_parity_target_percent": 15.0,
       "paired_observation_scope": "synthetic",
       "paired_order": "synthetic",
       "parity_gate_scope": "synthetic",
-      "p99_parity_target_percent": 15.0,
       "retained_samples": true,
       "thresholds_enforced_by_runner": true,
       "warmup_batches": 5
     },
     "measurements": [
       {
+        "actual_iterations_per_sample": [
+          3200,
+          3200,
+          3200,
+          3200,
+          3200
+        ],
         "allocation_gate_applicable": true,
         "allocation_gate_passed": true,
-        "allocation_samples": [{
-          "allocations": 0,
-          "bytes_allocated": 0,
-          "bytes_deallocated": 0,
-          "deallocations": 0,
-          "iterations": 1,
-          "reallocations": 0
-        }],
+        "allocation_samples": [
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          }
+        ],
         "allocation_status": "measured",
         "allocations_per_op": 0.0,
-        "actual_iterations_per_sample": [10, 10, 10, 10, 10],
         "build_nanoseconds": 1,
         "bytes_allocated_per_op": 0.0,
         "bytes_deallocated_per_op": 0.0,
@@ -140,12 +186,14 @@
         "compiled_bytes_per_entry": 1.28,
         "compiled_entries": 100,
         "compiled_memory_bytes": 128,
-        "compiled_memory_status": "measured",
+        "compiled_memory_status": "measured_net_retained_bytes",
         "compiled_reallocations": 0,
-        "correctness": "PASS",
+        "correctness": "passed",
         "fixture": "generated-exact-100.srs",
         "id": "match_set/synthetic_srs/generated-exact-100.srs/exact/hit",
         "outcome_checksum": 1,
+        "p50_ns_per_op": 100.0,
+        "p99_ns_per_op": 100.0,
         "paired_sample_order": [
           "baseline_first",
           "candidate_first",
@@ -153,15 +201,25 @@
           "candidate_first",
           "baseline_first"
         ],
-        "p50_ns_per_op": 100.0,
-        "p99_ns_per_op": 100.0,
         "queries_per_second_from_p50": null,
         "query_candidate_visits": null,
         "reallocations_per_op": 0.0,
         "requested_min_iterations_per_sample": 10,
         "rule_program_mode": null,
-        "sample_batch_nanoseconds": [250000, 250000, 250000, 250000, 250000],
-        "samples_ns_per_op": [100.0, 100.0, 100.0, 100.0, 100.0],
+        "sample_batch_nanoseconds": [
+          320000,
+          320000,
+          320000,
+          320000,
+          320000
+        ],
+        "samples_ns_per_op": [
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
         "scale": 100,
         "scenario": "generated-exact-100/exact-hit",
         "source": "synthetic_srs",
@@ -169,19 +227,59 @@
         "timing_pair_id": "match_set/generated-exact-100/exact-hit"
       },
       {
+        "actual_iterations_per_sample": [
+          3200,
+          3200,
+          3200,
+          3200,
+          3200
+        ],
         "allocation_gate_applicable": true,
         "allocation_gate_passed": true,
-        "allocation_samples": [{
-          "allocations": 0,
-          "bytes_allocated": 0,
-          "bytes_deallocated": 0,
-          "deallocations": 0,
-          "iterations": 1,
-          "reallocations": 0
-        }],
+        "allocation_samples": [
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          },
+          {
+            "allocations": 0,
+            "bytes_allocated": 0,
+            "bytes_deallocated": 0,
+            "deallocations": 0,
+            "iterations": 1,
+            "reallocations": 0
+          }
+        ],
         "allocation_status": "measured",
         "allocations_per_op": 0.0,
-        "actual_iterations_per_sample": [10, 10, 10, 10, 10],
         "build_nanoseconds": 1,
         "bytes_allocated_per_op": 0.0,
         "bytes_deallocated_per_op": 0.0,
@@ -189,12 +287,14 @@
         "compiled_bytes_per_entry": 1.28,
         "compiled_entries": 100,
         "compiled_memory_bytes": 128,
-        "compiled_memory_status": "measured",
+        "compiled_memory_status": "measured_net_retained_bytes",
         "compiled_reallocations": 0,
-        "correctness": "PASS",
+        "correctness": "passed",
         "fixture": "generated-exact-100.srs",
         "id": "match_set/binary_srs/generated-exact-100.srs/exact/hit",
         "outcome_checksum": 1,
+        "p50_ns_per_op": 100.0,
+        "p99_ns_per_op": 100.0,
         "paired_sample_order": [
           "baseline_first",
           "candidate_first",
@@ -202,15 +302,25 @@
           "candidate_first",
           "baseline_first"
         ],
-        "p50_ns_per_op": 100.0,
-        "p99_ns_per_op": 100.0,
         "queries_per_second_from_p50": null,
         "query_candidate_visits": null,
         "reallocations_per_op": 0.0,
         "requested_min_iterations_per_sample": 10,
         "rule_program_mode": null,
-        "sample_batch_nanoseconds": [250000, 250000, 250000, 250000, 250000],
-        "samples_ns_per_op": [100.0, 100.0, 100.0, 100.0, 100.0],
+        "sample_batch_nanoseconds": [
+          320000,
+          320000,
+          320000,
+          320000,
+          320000
+        ],
+        "samples_ns_per_op": [
+          100.0,
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
         "scale": 100,
         "scenario": "generated-exact-100/exact-hit",
         "source": "binary_srs",

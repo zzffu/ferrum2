@@ -722,3 +722,30 @@ nonfinite及各场景byte cap保留。共享reader只多存一个长度，不让
 测试各在旧实现失败。最终相关64项通过；root整合full candidate115通过，包含更新后的scale
 直接caller。日志 `target/remediation-ct-io-{red,green,count-red,enumeration-red,regression}.log`
 和 `target/remediation-m1-candidate-full.log`。未更改schema、source bundle或性能policy。
+
+### M1d — RTL-01/02：Rule证据从原始观测重算并绑定工作负载
+
+将报告验证从bounded subprocess owner移入私有`validated_report.py`；一个返回对象携带
+完整报告、scenario suites和workload SHA，删除仅比较id→suite的旧入口，迁移CLI及calibration
+读取调用方。验证实际duration/operations→ns/op、nearest-rank p50/p99、DNS QPS、五个单操作
+allocation region、compiled bytes/entry、配对关系与适用parity/allocation gates。
+数学容差为普通f64计算的8 ULP，不使用性能阈值容忍矛盾数据。
+
+workload包含fixture bytes/hash、报告配置、policy、可用environment和输入scenario元数据，
+12份报告及hash-bound calibration source必须一致。无需新schema字段：现有v6/v2已保留完整
+source reports，由这些已绑定bytes重建identity。engine的`rule_program_mode`是实现输出，
+review后移出跨版本identity并删除controller的64条索引阈值硬编码；保留闭合合法值和观测。
+Rust Route场景ID仍含模式名，未来改阈值须先协调稳定输入ID，不能私下归一化现有场景。
+
+离线red为4项测试14种原本未拒绝的矛盾；mode review另有3个red subcase，均修正。
+`python -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v`最终37通过；
+20个Python模块AST解析、差异检查通过。仅修紧凑synthetic fixture内部数学/status矛盾，
+未改共享协议向量或外部release archives。日志`target/remediation-audit/rtl12-*.log`及
+`target/remediation-rtl12-root-green.log`。
+
+root另只读校验已有cache实验12份报告，每份311场景，全部通过，无新runner调用/benchmark，
+结果`target/remediation-rtl12-retained-validation.json`；这是parser/math回验，不是adoption或
+校准批准。mode排除前的共同workload digest只属于当时validator版本，不作为当前身份常量。
+仍缺：完整calibration启动前验证（RTL-03）、CLI请求与报告配置的显式关联、闭合错误输出、
+run-wide证据预算、异目录calibration引用（RTL-06/07/08）。生产者未提供CPU model时比较的
+是None，不能声称已补采真实硬件身份；合成build证据归属RTL-04仍需后续Rust修正。

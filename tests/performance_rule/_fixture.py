@@ -14,9 +14,10 @@ from tools.performance_rule.schema import (
 
 
 IDENTIFIERS = (
-    "dns_policy/one",
-    "match_set/one",
-    "route_program/one",
+    "dns_policy/cache/1/cache_hit",
+    "match_set/ordinary_inline/100/exact/hit",
+    "match_set/synthetic_ruleset/100/exact/hit",
+    "route_program/mixed/1/small_linear/last",
 )
 SCENARIO_SUITES = {
     identifier: identifier.split("/", 1)[0] for identifier in IDENTIFIERS
@@ -83,31 +84,31 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
             {
                 "id": identifier,
                 "suite": identifier.split("/", 1)[0],
-                "source": "synthetic",
-                "scenario": identifier,
-                "scale": 1,
+                "source": identifier.split("/")[1],
+                "scenario": "exact/hit" if identifier.startswith("match_set/") else identifier,
+                "scale": 100 if identifier.startswith("match_set/") else 1,
                 "fixture": None,
-                "rule_program_mode": None,
+                "rule_program_mode": "small_linear" if identifier.startswith("route_program/") else None,
                 "query_candidate_visits": None,
                 "p50_ns_per_op": value,
-                "p99_ns_per_op": value + 2,
-                "queries_per_second_from_p50": None,
+                "p99_ns_per_op": value,
+                "queries_per_second_from_p50": 1_000_000_000 / value if identifier.startswith("dns_policy/") else None,
                 "build_nanoseconds": 1,
                 "compiled_allocations": 0,
                 "compiled_reallocations": 0,
-                "compiled_entries": 1,
+                "compiled_entries": 100 if identifier.startswith("match_set/") else 1,
                 "samples_ns_per_op": [value] * 5,
                 "requested_min_iterations_per_sample": 10,
-                "actual_iterations_per_sample": [10] * 5,
-                "sample_batch_nanoseconds": [250_000] * 5,
-                "timing_pair_id": None,
-                "paired_sample_order": None,
+                "actual_iterations_per_sample": [320_000] * 5,
+                "sample_batch_nanoseconds": [320_000 * value] * 5,
+                "timing_pair_id": "match_set/100/exact/hit" if identifier.startswith("match_set/") else None,
+                "paired_sample_order": ["baseline_first", "candidate_first", "baseline_first", "candidate_first", "baseline_first"] if identifier.startswith("match_set/") else None,
                 "allocations_per_op": 0.0,
                 "reallocations_per_op": 0.0,
                 "bytes_allocated_per_op": 0.0,
                 "bytes_deallocated_per_op": 0.0,
                 "compiled_memory_bytes": 128,
-                "compiled_bytes_per_entry": 128.0,
+                "compiled_bytes_per_entry": 1.28 if identifier.startswith("match_set/") else 128.0,
                 "allocation_samples": [
                     {
                         "iterations": 1,
@@ -119,16 +120,23 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
                     }
                 ]
                 * 5,
-                "allocation_gate_applicable": True,
-                "allocation_gate_passed": True,
+                "allocation_gate_applicable": not identifier.startswith("dns_policy/"),
+                "allocation_gate_passed": None if identifier.startswith("dns_policy/") else True,
                 "allocation_status": "measured",
-                "compiled_memory_status": "measured",
-                "correctness": "PASS",
+                "compiled_memory_status": "measured_net_retained_bytes",
+                "correctness": "passed",
                 "outcome_checksum": 1,
             }
             for identifier in identifiers
         ],
-        "parity_observations": [],
+        "parity_observations": [{
+            "suite": "match_set", "scenario": "exact/hit", "scale": 100,
+            "baseline_id": "match_set/ordinary_inline/100/exact/hit",
+            "candidate_id": "match_set/synthetic_ruleset/100/exact/hit",
+            "median_delta_percent": 0.0, "p99_delta_percent": 0.0,
+            "median_limit_percent": 5.0, "p99_limit_percent": 15.0,
+            "performance_gate_applicable": True, "decision": "passed",
+        }] if "match_set/ordinary_inline/100/exact/hit" in identifiers else [],
         "scenario_count": len(identifiers),
     }
 

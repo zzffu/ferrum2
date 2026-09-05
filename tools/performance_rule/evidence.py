@@ -9,7 +9,7 @@ from typing import Any
 from tools.performance_rule.json_contract import closed_json_bytes, exact_fields
 from tools.performance_rule.pairing import calibrated_limit, summarize
 from tools.performance_rule.policy import threshold_policy
-from tools.performance_rule.runner_report import require_same_scenarios, validate_report
+from tools.performance_rule.validated_report import require_same_workload, validate_report
 from tools.performance_rule.schema import (
     CALIBRATION_REQUIRED,
     CALIBRATION_SCHEMA,
@@ -42,7 +42,7 @@ def read_json_report(path: Path, label: str) -> tuple[Path, dict[str, Any], str]
 
 def validate_control_raw_evidence(
     report: Any, expected_mode: str
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+) -> tuple[dict[str, str], list[dict[str, Any]], str]:
     validate_control_document(report)
     if report.get("mode") != expected_mode:
         raise ControlError("controller report mode or current schema is invalid")
@@ -102,19 +102,22 @@ def validate_control_raw_evidence(
     if not isinstance(raw_pairs, list) or len(raw_pairs) != pair_count:
         raise ControlError("controller raw pair count is invalid")
     scenario_suites: dict[str, str] | None = None
+    workload: str | None = None
     for pair in raw_pairs:
         if not isinstance(pair, dict) or set(pair) != {"parent", "candidate"}:
             raise ControlError("controller report contains a malformed raw pair")
         for role in ("parent", "candidate"):
             expected_sha = parent_sha256 if role == "parent" else candidate_sha256
             observed = validate_report(pair[role], expected_sha)
-            scenario_suites = require_same_scenarios(scenario_suites, observed)
+            workload = require_same_workload(workload, observed.workload_sha256)
+            scenario_suites = observed.scenario_suites
     assert scenario_suites is not None
     if sorted(scenario_suites) != scenario_list:
         raise ControlError("controller scenario ids do not match retained raw reports")
     if report.get("scenario_suites") != scenario_suites:
         raise ControlError("current scenario suite catalog is missing or inconsistent")
-    return scenario_suites, raw_pairs
+    assert workload is not None
+    return scenario_suites, raw_pairs, workload
 
 
 CONTROL_FIELDS = frozenset(
@@ -178,6 +181,7 @@ def load_calibration(
     scenario_suites: dict[str, str],
     runner_arguments: list[str],
     runner_priority: str,
+    workload_sha256: str,
 ) -> tuple[dict[str, Any], float, str]:
     calibration_path, calibration, calibration_sha256 = read_json_report(
         path, "reviewed A/A calibration"
@@ -217,7 +221,8 @@ def load_calibration(
         or source_sha256 != calibration.get("source_report_sha256")
     ):
         raise ControlError("reviewed calibration source identity changed")
-    source_suites, raw_pairs = validate_control_raw_evidence(source_report, "aa")
+    source_suites, raw_pairs, source_workload = validate_control_raw_evidence(source_report, "aa")
+    require_same_workload(source_workload, workload_sha256)
     comparisons = summarize(source_suites, raw_pairs, True, 10.0)
     effective_limit = calibrated_limit(comparisons)
     expected_source_policy = threshold_policy(
@@ -253,7 +258,7 @@ def review_calibration_source(
     source_resolved, source_report, source_sha256 = read_json_report(
         source_path, "A/A calibration candidate"
     )
-    scenario_suites, raw_pairs = validate_control_raw_evidence(source_report, "aa")
+    scenario_suites, raw_pairs, _ = validate_control_raw_evidence(source_report, "aa")
     comparisons = summarize(scenario_suites, raw_pairs, True, 10.0)
     effective_limit = calibrated_limit(comparisons)
     expected_policy = threshold_policy(

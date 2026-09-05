@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tests.performance_rule.archive_verifier import validate_archived_controller
 from tools.performance_rule.evidence import validate_control_document
-from tools.performance_rule.runner_report import validate_report
+from tools.performance_rule.validated_report import validate_report
 
 
 ROOT = Path(__file__).resolve().parents[2]

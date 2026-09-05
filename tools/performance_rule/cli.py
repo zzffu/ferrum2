@@ -23,7 +23,8 @@ from tools.performance_rule.pairing import (
     summarize,
 )
 from tools.performance_rule.policy import calibration_required_policy, threshold_policy
-from tools.performance_rule.runner_report import require_same_scenarios, run_once
+from tools.performance_rule.runner_report import run_once
+from tools.performance_rule.validated_report import require_same_workload
 from tools.performance_rule.schema import (
     CALIBRATION_REQUIRED,
     CALIBRATION_SCHEMA,
@@ -167,6 +168,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
 
     creation_flags = runner_creation_flags(args.runner_priority)
     expected_scenarios: dict[str, str] | None = None
+    workload: str | None = None
     pairs: list[dict[str, Any]] = []
     execution_trace: list[dict[str, Any]] = []
     for pair_index in range(args.pairs):
@@ -175,7 +177,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             pair_execution_order(pair_index, parent, candidate)
         ):
             expected_sha = parent_sha if role == "parent" else candidate_sha
-            report, scenarios = run_once(
+            validated = run_once(
                 role,
                 executable,
                 args.runner_arguments,
@@ -183,8 +185,9 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
                 expected_sha,
                 creation_flags,
             )
-            expected_scenarios = require_same_scenarios(expected_scenarios, scenarios)
-            pair[role] = report
+            workload = require_same_workload(workload, validated.workload_sha256)
+            expected_scenarios = validated.scenario_suites
+            pair[role] = validated.report
             execution_trace.append(
                 {
                     "pair": pair_index + 1,
@@ -194,7 +197,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
                 }
             )
         pairs.append(pair)
-    assert expected_scenarios is not None
+    assert expected_scenarios is not None and workload is not None
 
     if same_binary:
         comparisons = summarize(expected_scenarios, pairs, True, 10.0)
@@ -210,6 +213,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             expected_scenarios,
             args.runner_arguments,
             args.runner_priority,
+            workload,
         )
         comparisons = summarize(
             expected_scenarios, pairs, False, effective_limit

@@ -18,6 +18,15 @@ Run commands from the repository root. Use `python` on Windows; the multiline ex
 example below uses POSIX `\` continuation, so put it on one line or use PowerShell backticks there.
 These ordinary tests validate evidence and mocked controller behavior without executing benchmarks.
 
+## Current raw-report validation
+
+The controller reconstructs latency, allocation and applicable parity gates from raw samples.
+Fixture content, reported configuration, measurement policy, available environment fields and input
+scenario metadata must match across every pair and the calibration source. Engine-selected program
+mode remains an observation; a different internal selection does not itself change the input
+workload. Missing producer CPU-model metadata still limits host comparability. Revalidating retained
+observations does not approve a calibration or collect new performance evidence.
+
 ## External release evidence
 
 `release-*.json` remains ignored by Git and must live in an approved immutable artifact store. A clean checkout intentionally does not contain or download these files. After an operator explicitly materializes all seven files into one evidence directory, verify the complete-file identities before reading or using them:

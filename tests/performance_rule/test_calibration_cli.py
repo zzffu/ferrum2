@@ -13,6 +13,7 @@ from tests.performance_rule._fixture import (
 )
 from tools.performance_rule.cli import control
 from tools.performance_rule.evidence import load_calibration
+from tools.performance_rule.validated_report import validate_report
 from tools.performance_rule.schema import (
     CALIBRATION_REQUIRED,
     CALIBRATION_SCHEMA,
@@ -53,6 +54,7 @@ class CalibrationAndCliTests(unittest.TestCase):
                 SCENARIO_SUITES,
                 RUNNER_ARGUMENTS,
                 RUNNER_PRIORITY_HIGH,
+                validate_report(aa_source_report()["raw_pairs"][0]["parent"], RUNNER_SHA256).workload_sha256,
             )
             self.assertEqual(limit, 5.0)
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
