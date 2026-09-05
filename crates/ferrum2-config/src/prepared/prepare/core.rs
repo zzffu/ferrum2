@@ -131,15 +131,12 @@ pub(super) fn prepare_client_inner(raw: RawClientRoot) -> Result<PreparedClientV
     let outbound_tags = draft.outbound_tags();
     let selectors = draft.raw.selectors.as_deref().unwrap_or(&[]);
     let chains = draft.raw.chains.as_deref().unwrap_or(&[]);
-    let egress_domain_capabilities =
-        prepare_egress_capabilities(&outbound_tags, selectors, chains)?;
+    let egress_domain_capabilities = prepare_egress_capabilities(&draft.egress);
     let rule_set_loader = prepare_rule_set_loader(draft.raw.rule_set_loader.as_ref())?;
     validate_deferred_dns_detours(
         draft.raw.dns.as_ref(),
         &draft.dns.endpoints,
-        &outbound_tags,
-        selectors,
-        chains,
+        &draft.egress,
         &egress_domain_capabilities,
     )?;
     let raw_rule_sets = draft
@@ -157,9 +154,7 @@ pub(super) fn prepare_client_inner(raw: RawClientRoot) -> Result<PreparedClientV
     let rule_sets = prepare_rule_sets(
         raw_rule_sets,
         dns_servers,
-        &outbound_tags,
-        selectors,
-        chains,
+        &draft.egress,
         &egress_domain_capabilities,
     )?;
     let route_rule_sets = prepare_route_rule_sets(draft.raw.route.as_ref(), &rule_sets)?;
@@ -221,14 +216,12 @@ pub(super) fn prepare_server_inner(raw: RawServerRoot) -> Result<PreparedServerV
     let mut draft = ServerPreparationDraft::new(raw)?;
     let outbound_tags = draft.outbound_tags();
     let selectors = draft.raw.selectors.as_deref().unwrap_or(&[]);
-    let egress_domain_capabilities = prepare_egress_capabilities(&outbound_tags, selectors, &[])?;
+    let egress_domain_capabilities = prepare_egress_capabilities(&draft.egress);
     let rule_set_loader = prepare_rule_set_loader(draft.raw.rule_set_loader.as_ref())?;
     validate_deferred_dns_detours(
         draft.raw.dns.as_ref(),
         &draft.dns.endpoints,
-        &outbound_tags,
-        selectors,
-        &[],
+        &draft.egress,
         &egress_domain_capabilities,
     )?;
     let raw_rule_sets = draft
@@ -246,9 +239,7 @@ pub(super) fn prepare_server_inner(raw: RawServerRoot) -> Result<PreparedServerV
     let rule_sets = prepare_rule_sets(
         raw_rule_sets,
         dns_servers,
-        &outbound_tags,
-        selectors,
-        &[],
+        &draft.egress,
         &egress_domain_capabilities,
     )?;
     let route_rule_sets = prepare_route_rule_sets(draft.raw.route.as_ref(), &rule_sets)?;

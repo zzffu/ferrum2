@@ -13,7 +13,11 @@ orchestrates those phases into the public prepared plans. Bind each raw outbound
 endpoint and Direct resolver inside `ClientPreparationDraft` or `ServerPreparationDraft`; derive
 that resolver exactly once. Dependency construction consumes one `DependencyGraphInput` and
 returns one `DependencyGraphPlan`; validation returns named graph results rather than parallel
-slices or positional tuples.
+slices or positional tuples. Private `validation/egress_graph` admits role-specific counts, tags,
+members and concrete chain hops before DNS/endpoint draft construction. Its typed edges and
+dependency-first first-hop/domain summaries are the shared interpretation for preparation and
+validation; do not reintroduce root-to-leaf path expansion or recursive raw-tag interpretation.
+The public core/rule compiler still validates its independently supplied inputs.
 
 ## Verification
 

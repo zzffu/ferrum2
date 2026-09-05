@@ -1032,3 +1032,50 @@ M4 bundle44 rows，SHA `4fc39effe4b51c3306777d1a8b1d93ed9afeb56efa12861097d4c96f
 现有ProcessGuard Drop、kill后Child.wait及capture join仍依赖OS/EOF，**没有OS强制硬期限**；
 本批只消除probe绕开已有owner，不能称全部进程生命周期已闭合。这项与其他未完成工具
 问题后置，不再串为产品架构前置条件。没有新benchmark/profile或privileged host运行。
+
+### M2a — 配置图先准入，再共享派生结果
+
+固定修改前基准 `cba03a4488935a4d40cfd22f8cd658c74f4365cf`。本批仅改变 config
+准备/验证及对应契约、文档；没有修改运行时 relay、core/rule 公开编译器或性能工具。
+FND-01 的共享路径重复展开为已确认静态复杂度问题；FND-02 的结构限额晚于递归派生
+为已确认顺序问题，栈耗尽没有动态复现。本批没有重试先前被拦截的动态压力组。
+
+`validation/egress_graph` 成为私有准入 owner：原有各 cohort 64、selector members 64、
+chain 2–8 hop 限制先于 DNS/endpoint drafts；optional TUN 只计入 inbound 身份。
+名称只解析为现有 PreparedEgressRef；具体 chain 不允许 Direct、selector 或重复 hop。
+闭合 VisitState 的迭代 DFS 先检查环，再按依赖顺序计算 domain capability 和 u64 首跳集合。
+删除旧 capability evaluator、重复字符串 resolve 和 client 首跳路径枚举；调用者只消费
+typed 边与摘要。343 行的新模块含 341 行生产区（含空行/注释），测试随 owner 放置。
+
+准入 egress 图 V≤192，selector/chain 边 E≤4,608；HashMap/HashSet 解析预期 O(V+E)，
+摘要计算 O(V+E)，typed 拓扑 O(V+E)，摘要/遍历状态 O(V)。根集合的首跳消费为 bitset
+union 与升序 outbound 扫描。保留代价是一次临时 typed 拓扑及最终 config/core 独立校验；
+core 公开接口仍有线性 tag 查找，resolver/RuleSet 依赖图仍有排序/去重成本，**不是整个
+prepare 都为线性**。下游 core 的 cycle/reachability 有完成/到达标记，不枚举共享路径；
+运行时 selector 只走当前选中路径。没有新增 crate 依赖、公开 schema 或兼容 fallback。
+
+六个新增测试使用小 diamond、两节点环、64th bit、65 member/cohort 和非法 chain；验证
+摘要、闭合脱敏错误与结构拒绝先于非法 endpoint，不构造深递归或资源耗尽工作负载。
+旧契约首次运行暴露错误优先级变化：缺 outbounds、缺 DNS servers、身份碰撞以及同时
+含非法 hops 的伪 cycle fixture。保留输入、更新适用字段与完整错误；真正 selector cycle
+仍检查闭合索引路径。缺 hops 却报 Chains 的实现错误被修为 ChainsHops，没有迁就错误改断言。
+
+受影响包最终 `cargo test -p ferrum2-config --locked`：86 passed、0 failed、0 ignored；
+config/M4 all-targets/all-features clippy `--locked -- -D warnings` 与 fmt all 通过。
+初始失败及最终日志：`target/remediation-audit/m2a-{config-initial,prepare-initial,
+config-root-tests,config-next,config-final-tests,graph-unit}.log`；scope/downstream 复核记录
+在 `target/remediation-audit/m2a-config-implementation.md`。
+
+下游 Windows MSVC 门禁：先 locked build workspace bins（16.62s），再普通 workspace
+673 passed/0 failed/5 原有 ignored；5项分别是权威20-cycle资格、三个Linux IPv6进程契约、
+Windows会归一化127/8的wildcard契约。没有运行 client 或 Rule qualification test binary。
+随后 example build、client all-features no-run、Rule no-run、安全 TUN128/platform59、
+platform all-feature check、GNU target check、DNS interop74、全workspace严格clippy、fmt、
+doc均通过。`target/remediation-audit/m2a-gates.json`保留每条确切命令、exit和日志。
+GNU check只是Windows上的cross-target编译，不是原生Linux运行或链接资格。
+
+M4 self-check PASS56；有限 worker/io/DNS filter分别5/8/6通过；非变更PowerShell资格合同
+通过。日志均为`target/remediation-audit/m2a-<gate>.log`。MSVC build/test有链接器正常创建
+lib/exp的linker_messages warning；strict clippy未放宽且通过。Python工具源本批未变，沿用
+M1逐批离线验证，不把它们重新称为M2测试。host Quick A/A PlanOnly通过，当前shell已提升；
+实际host运行与同条件性能对比待执行，尚未宣称无性能回退、吞吐提升或生产就绪。

@@ -7,12 +7,10 @@ use ferrum2_rule::{
 };
 
 use crate::error::{ConfigError, ConfigField};
-use crate::model::{ClientOutboundConfig, OutboundDialOptions, RouteNetworkConfig};
-use crate::prepared::ClientOutboundDraft;
-use crate::raw::{RawChain, RawClientInbound, RawRoute, RawSelector};
+use crate::model::{OutboundDialOptions, RouteNetworkConfig};
+use crate::raw::{RawRoute, RawSelector};
 
 use super::MAX_INTERFACE_NAME_UTF16_UNITS;
-use super::common::{validate_count, validate_tag};
 
 pub(super) fn validate_route_network(
     raw: Option<&RawRoute>,
@@ -71,64 +69,6 @@ pub(super) fn validate_outbound_dial_options(
             })
             .transpose()?,
     })
-}
-
-pub(super) fn validate_chains<'a>(
-    chains: Option<&'a [RawChain]>,
-    inbounds: &[RawClientInbound],
-    outbounds: &[ClientOutboundDraft],
-    validated_outbounds: &[ClientOutboundConfig],
-    selectors: Option<&[RawSelector]>,
-) -> Result<Vec<TaggedPlan<'a>>, ConfigError> {
-    let Some(chains) = chains else {
-        return Ok(Vec::new());
-    };
-    validate_count(chains.len(), ConfigField::Chains)?;
-    let mut plans = Vec::with_capacity(chains.len());
-    for (index, chain) in chains.iter().enumerate() {
-        let tag = chain
-            .tag
-            .as_deref()
-            .ok_or_else(|| ConfigError::semantic(ConfigField::Chains))?;
-        let chain_hops = chain
-            .hops
-            .as_deref()
-            .ok_or_else(|| ConfigError::semantic(ConfigField::Chains))?;
-        validate_tag(tag, ConfigField::ChainsTag)?;
-        if inbounds.iter().any(|inbound| inbound.tag == tag)
-            || outbounds.iter().any(|outbound| outbound.tag == tag)
-            || chains[..index]
-                .iter()
-                .any(|other| other.tag.as_deref() == Some(tag))
-            || selectors
-                .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == tag))
-        {
-            return Err(ConfigError::semantic(ConfigField::ChainsTag));
-        }
-        if !(2..=8).contains(&chain_hops.len()) {
-            return Err(ConfigError::semantic(ConfigField::ChainsHops));
-        }
-        let mut hops = Vec::with_capacity(chain_hops.len());
-        for (hop, outbound_tag) in chain_hops.iter().enumerate() {
-            validate_tag(outbound_tag, ConfigField::ChainsHops)?;
-            if chain_hops[..hop].contains(outbound_tag) {
-                return Err(ConfigError::semantic(ConfigField::ChainsHops));
-            }
-            let outbound = outbounds
-                .iter()
-                .position(|outbound| outbound.tag == *outbound_tag)
-                .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?;
-            if matches!(
-                validated_outbounds[outbound],
-                ClientOutboundConfig::Direct { .. }
-            ) {
-                return Err(ConfigError::semantic(ConfigField::ChainsHops));
-            }
-            hops.push(outbound);
-        }
-        plans.push(TaggedPlan::new(tag, hops));
-    }
-    Ok(plans)
 }
 
 pub(super) fn compile_graph_roots(

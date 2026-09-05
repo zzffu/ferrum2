@@ -5,6 +5,7 @@ const MAX_INTERFACE_NAME_UTF16_UNITS: usize = 256;
 
 mod client;
 mod common;
+mod egress_graph;
 mod graph;
 mod server;
 mod tun;
@@ -12,5 +13,6 @@ mod tun;
 pub(super) use client::validate_client_prepared;
 pub(super) use common::validate_direct_domain_resolver;
 pub(super) use common::validate_tag;
+pub(crate) use egress_graph::AdmittedEgressGraph;
 pub(super) use server::validate_server_prepared;
 pub(super) use tun::{finish_client_tun_targets, validate_finished_client_endpoints};

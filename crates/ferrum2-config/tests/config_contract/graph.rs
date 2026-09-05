@@ -208,14 +208,14 @@ fn selector_graph_rejects_bounds_members_defaults_cycles_and_inert_nodes_redacte
     let partial = "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"manual\"\n[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\"]\ndefault = \"o0\"\n".to_owned();
     #[rustfmt::skip]
     let cases = [
-        ("partial tagged selector", partial, ConfigField::SelectorsOutbounds, ConfigRole::Client),
+        ("partial tagged selector", partial, ConfigField::Outbounds, ConfigRole::Client),
         ("empty selectors", empty, ConfigField::Selectors, ConfigRole::Client),
         ("65 selectors", graph(&selector_65).replacen("outbound = \"manual\"", "outbound = \"s0\"", 1), ConfigField::Selectors, ConfigRole::Client),
         ("empty members", graph("[[selectors]]\ntag = \"manual\"\noutbounds = []\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
         ("65 members", graph(&format!("[[selectors]]\ntag = \"manual\"\noutbounds = [{members_65}]\ndefault = \"m0\"")), ConfigField::SelectorsOutbounds, ConfigRole::Client),
-        ("invalid selector tag", graph("[[selectors]]\ntag = \"bad/tag\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::InboundsOutbound, ConfigRole::Client),
+        ("invalid selector tag", graph("[[selectors]]\ntag = \"bad/tag\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::SelectorsTag, ConfigRole::Client),
         ("duplicate selector tag", graph(&format!("{valid}\n{valid}")), ConfigField::SelectorsTag, ConfigRole::Client),
-        ("global selector collision", graph("[[selectors]]\ntag = \"i0\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::InboundsOutbound, ConfigRole::Client),
+        ("global selector collision", graph("[[selectors]]\ntag = \"i0\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\""), ConfigField::SelectorsTag, ConfigRole::Client),
         ("duplicate member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o0\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
         ("dangling member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"missing\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
         ("case mismatched member", graph("[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"O1\"]\ndefault = \"o0\""), ConfigField::SelectorsOutbounds, ConfigRole::Client),
@@ -306,7 +306,7 @@ fn chains_reject_all_bounds_namespaces_references_and_inert_nodes_redacted() {
     let cases = [
         ("empty collection", tagged_client(1, 1).replacen("schema_version = 2", "schema_version = 2\nchains = []", 1), ConfigField::Chains, ConfigRole::Client),
         ("chains missing inbounds", "schema_version = 2\n[[outbounds]]\ntag = \"o0\"\ntype = \"direct\"\n[[outbounds]]\ntag = \"o1\"\ntype = \"direct\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n".to_owned(), ConfigField::Inbounds, ConfigRole::Client),
-        ("chains missing outbounds", "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"c\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n".to_owned(), ConfigField::ChainsHops, ConfigRole::Client),
+        ("chains missing outbounds", "schema_version = 2\n[[inbounds]]\ntag = \"i0\"\nlisten = \"127.0.0.1:10000\"\noutbound = \"c\"\n[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n".to_owned(), ConfigField::Outbounds, ConfigRole::Client),
         ("65 chains", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c0\"", 1).replacen("# graph-anchor", &format!("{many}# graph-anchor"), 1), ConfigField::Chains, ConfigRole::Client),
         ("missing tag", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("# graph-anchor", "[[chains]]\nhops = [\"o0\", \"o1\"]\n# graph-anchor", 1), ConfigField::Chains, ConfigRole::Client),
         ("missing hops", tagged_client(1, 2).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("# graph-anchor", "[[chains]]\ntag = \"c\"\n# graph-anchor", 1), ConfigField::ChainsHops, ConfigRole::Client),
@@ -323,7 +323,7 @@ fn chains_reject_all_bounds_namespaces_references_and_inert_nodes_redacted() {
         ("inbound collision", chain("i0", "\"o0\", \"o1\""), ConfigField::ChainsTag, ConfigRole::Client),
         ("outbound collision", chain("o1", "\"o0\", \"o1\""), ConfigField::ChainsTag, ConfigRole::Client),
         ("duplicate chain", chain("c", "\"o0\", \"o1\"").replacen("# graph-anchor", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n# graph-anchor", 1), ConfigField::ChainsTag, ConfigRole::Client),
-        ("selector collision", chain("manual", "\"o0\", \"o1\"").replacen("# graph-anchor", "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n# graph-anchor", 1), ConfigField::ChainsTag, ConfigRole::Client),
+        ("selector collision", chain("manual", "\"o0\", \"o1\"").replacen("# graph-anchor", "[[selectors]]\ntag = \"manual\"\noutbounds = [\"o0\", \"o1\"]\ndefault = \"o0\"\n# graph-anchor", 1), ConfigField::SelectorsTag, ConfigRole::Client),
         ("unreachable chain", tagged_client(1, 2).replacen("# graph-anchor", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n# graph-anchor", 1), ConfigField::ChainsTag, ConfigRole::Client),
         ("unreachable concrete", tagged_client(1, 3).replacen("outbound = \"o0\"", "outbound = \"c\"", 1).replacen("# graph-anchor", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n# graph-anchor", 1), ConfigField::OutboundsTag, ConfigRole::Client),
         ("server chain", tagged_server(1, 1).replacen("[shadowsocks]", "[[chains]]\ntag = \"c\"\nhops = [\"o0\", \"o1\"]\n[shadowsocks]", 1), ConfigField::Chains, ConfigRole::Server),

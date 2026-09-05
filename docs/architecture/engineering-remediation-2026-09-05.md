@@ -12,12 +12,12 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 
 ## 架构设计后的实施
 
-统一设计里程碑为 `1b40da27`；下表工具修复属于 M1，M2a 产品架构修改已开始。
-产品已提交基准仍为 `2fb0dd4a`。详细命令和 red/green 见[逐批证据](engineering-remediation-evidence-2026-09-05.md)。
+统一设计里程碑为 `1b40da27`；下表工具修复属于 M1，M2a 产品架构已实现配置图准入。
+M2a 修改前固定基准为 `cba03a44`（产品源码与 `2fb0dd4a` 相同）。详细命令和 red/green 见[逐批证据](engineering-remediation-evidence-2026-09-05.md)。
 
 2026-09-06 用户纠正工具整改耗时后，M1停止新增范围：仅收尾已完成的独立工具批次，
-CT-05/07、完整CPU身份/采样资格及其他工具项后置。首批产品M2a已开始实现配置egress图
-准入/复杂度边界；在其提交前产品基准仍为上述源码。后续用固定baseline commit与同版
+CT-05/07、完整CPU身份/采样资格及其他工具项后置。首批产品M2a落实配置egress图
+准入/复杂度边界；性能验收单列，不能由单元测试替代。后续用固定baseline commit与同版
 harness测量，工具审计全部清零不再是产品架构实施的前置条件。
 
 | 批次 / 审查项 | 已落实行为 | 实际验证 |
@@ -36,6 +36,7 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M1l / HT4 | 失败计数同时校验八类闭合result标签；策略归performance-only HostTrial | 初始7项5fail，最终focused8及隔离fullcandidate134通过；PS parser/bundles/资格静态合同通过 |
 | M1m / CPU工具执行边界 | 私有helper group/双pipe/期限；仅COLLECTED诊断；有界container与输出路径验证 | WSL专项24、完整CI80通过；Windows m0 93/5旧ignored、严格clippy及产品bins build通过；未真实profile |
 | M1n / M4-03/04/05/08/09 | 复用probe capture、完整SOCKS期限、输出路径先验；完整DNS响应与负载计数；取消虚假query-drain通过声明 | 边界8+DNS6、self-check、严格clippy/fmt、candidate134及policy20通过；query owner与OS强制清理仍未验证 |
+| M2a / FND-01/02（配置路径） | 私有准入图在派生前执行原有规模/结构限制；一次解析 typed edges，共享子图只归约一次；删除递归 capability 和首跳路径枚举 | config 86；workspace 673/5旧ignored；safe TUN128/platform59；DNS interop74；compile-only、全workspace lint/fmt/doc及GNU target check通过。性能对比待执行 |
 
 ## 环境与暂定验收
 

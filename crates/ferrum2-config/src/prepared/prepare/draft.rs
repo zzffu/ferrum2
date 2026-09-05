@@ -3,7 +3,7 @@ use std::ops::Deref;
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{DirectDomainResolver, DnsStrategy};
 use crate::raw::{RawClientOutbound, RawClientRoot, RawServerOutbound, RawServerRoot};
-use crate::validation::validate_direct_domain_resolver;
+use crate::validation::{AdmittedEgressGraph, validate_direct_domain_resolver};
 
 use super::super::model::DialEndpoint;
 use super::dns::{EndpointValidation, PreparedDnsDraft, parse_endpoint, prepare_dns};
@@ -36,6 +36,7 @@ impl Deref for ServerOutboundDraft {
 }
 
 pub(crate) struct ClientPreparationDraft {
+    pub(crate) egress: AdmittedEgressGraph,
     pub(crate) raw: RawClientRoot,
     pub(crate) dns: PreparedDnsDraft,
     pub(crate) outbounds: Option<Vec<ClientOutboundDraft>>,
@@ -43,6 +44,7 @@ pub(crate) struct ClientPreparationDraft {
 
 impl ClientPreparationDraft {
     pub(crate) fn new(mut raw: RawClientRoot) -> Result<Self, ConfigError> {
+        let egress = AdmittedEgressGraph::client(&raw)?;
         let dns = prepare_dns(raw.dns.as_ref())?;
         let outbounds = raw
             .outbounds
@@ -57,6 +59,7 @@ impl ClientPreparationDraft {
             })
             .transpose()?;
         Ok(Self {
+            egress,
             raw,
             dns,
             outbounds,
@@ -104,6 +107,7 @@ impl ClientPreparationDraft {
 }
 
 pub(crate) struct ServerPreparationDraft {
+    pub(crate) egress: AdmittedEgressGraph,
     pub(crate) raw: RawServerRoot,
     pub(crate) dns: PreparedDnsDraft,
     pub(crate) outbounds: Option<Vec<ServerOutboundDraft>>,
@@ -111,6 +115,7 @@ pub(crate) struct ServerPreparationDraft {
 
 impl ServerPreparationDraft {
     pub(crate) fn new(mut raw: RawServerRoot) -> Result<Self, ConfigError> {
+        let egress = AdmittedEgressGraph::server(&raw)?;
         let dns = prepare_dns(raw.dns.as_ref())?;
         let outbounds = raw
             .outbounds
@@ -125,6 +130,7 @@ impl ServerPreparationDraft {
             })
             .transpose()?;
         Ok(Self {
+            egress,
             raw,
             dns,
             outbounds,

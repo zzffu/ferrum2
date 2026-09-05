@@ -7,6 +7,7 @@ use crate::model::{
 use crate::prepared::{PreparedDnsDraft, ServerOutboundDraft, ServerPreparationDraft};
 use crate::raw::{RawSelector, RawServerInbound};
 
+use super::AdmittedEgressGraph;
 use super::common::{
     DnsRole, DnsValidationContext, GraphValidation, dns_detour_tags, parse_endpoint, parse_method,
     parse_psk, validate_count, validate_dns, validate_logging, validate_metrics, validate_replay,
@@ -30,6 +31,7 @@ pub(crate) fn validate_server_prepared(
 ) -> Result<PreparedServerValidation, ConfigError> {
     let global_tags = draft.global_tags();
     let ServerPreparationDraft {
+        egress,
         raw,
         dns: prepared_dns,
         outbounds: prepared_outbounds,
@@ -75,6 +77,7 @@ pub(crate) fn validate_server_prepared(
         selector,
         mut roots,
     } = validate_server_graph(ServerGraphInput {
+        egress: &egress,
         tagged_inbounds: raw.inbounds,
         tagged_outbounds: prepared_outbounds,
         selectors: raw.selectors,
@@ -144,6 +147,7 @@ pub(crate) fn validate_server_prepared(
 }
 
 pub(super) struct ServerGraphInput<'a> {
+    egress: &'a AdmittedEgressGraph,
     tagged_inbounds: Option<Vec<RawServerInbound>>,
     tagged_outbounds: Option<Vec<ServerOutboundDraft>>,
     selectors: Option<Vec<RawSelector>>,
@@ -161,6 +165,7 @@ pub(super) fn validate_server_graph(
     input: ServerGraphInput<'_>,
 ) -> Result<ValidatedServerGraph, ConfigError> {
     let ServerGraphInput {
+        egress,
         tagged_inbounds,
         tagged_outbounds,
         selectors,
@@ -207,28 +212,20 @@ pub(super) fn validate_server_graph(
         }
     }
 
-    for (index, tag) in route_roots.iter().copied().enumerate() {
-        if !outbounds.iter().any(|outbound| outbound.tag == tag)
-            && !selectors
-                .as_deref()
-                .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == tag))
-        {
-            return Err(ConfigError::semantic(if !explicit_route {
+    for (index, tag) in route_roots.iter().enumerate() {
+        egress.resolve(
+            tag,
+            if !explicit_route {
                 ConfigField::InboundsOutbound
             } else if index == 0 {
                 ConfigField::RouteFinal
             } else {
                 ConfigField::RouteRulesOutbound
-            }));
-        }
+            },
+        )?;
     }
-    if detour_tags.iter().any(|tag| {
-        !outbounds.iter().any(|outbound| outbound.tag == **tag)
-            && !selectors
-                .as_deref()
-                .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == **tag))
-    }) {
-        return Err(ConfigError::semantic(ConfigField::DnsServersDetour));
+    for tag in detour_tags {
+        egress.resolve(tag, ConfigField::DnsServersDetour)?;
     }
     let graph_roots = route_roots
         .iter()

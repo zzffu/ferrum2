@@ -1,7 +1,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 
-use ferrum2_rule::{EgressPlanHandle, SelectorControl};
+use ferrum2_rule::{EgressPlanHandle, SelectorControl, TaggedPlan};
 
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{
@@ -10,14 +10,13 @@ use crate::model::{
 use crate::prepared::{ClientOutboundDraft, ClientPreparationDraft, PreparedDnsDraft};
 use crate::raw::{RawChain, RawClientInbound, RawSelector};
 
+use super::AdmittedEgressGraph;
 use super::common::{
     DnsRole, DnsValidationContext, GraphValidation, dns_detour_tags, parse_endpoint, parse_method,
     parse_psk, parse_socket, validate_count, validate_dns, validate_logging, validate_metrics,
     validate_runtime, validate_tag, validate_udp,
 };
-use super::graph::{
-    compile_graph_roots, validate_chains, validate_outbound_dial_options, validate_route_network,
-};
+use super::graph::{compile_graph_roots, validate_outbound_dial_options, validate_route_network};
 use super::tun::validate_tun;
 use super::v2;
 
@@ -39,6 +38,7 @@ pub(crate) fn validate_client_prepared(
 ) -> Result<PreparedClientValidation, ConfigError> {
     let global_tags = draft.global_tags();
     let ClientPreparationDraft {
+        egress,
         mut raw,
         dns: prepared_dns,
         outbounds: prepared_outbounds,
@@ -92,6 +92,7 @@ pub(crate) fn validate_client_prepared(
         mut direct_detours,
         outbound_endpoints,
     } = validate_client_graph(ClientGraphInput {
+        egress: &egress,
         tagged_inbounds: raw.inbounds,
         tagged_outbounds: prepared_outbounds,
         chains: raw.chains,
@@ -182,6 +183,7 @@ pub(crate) fn validate_client_prepared(
 }
 
 pub(super) struct ClientGraphInput<'a> {
+    egress: &'a AdmittedEgressGraph,
     tagged_inbounds: Option<Vec<RawClientInbound>>,
     tagged_outbounds: Option<Vec<ClientOutboundDraft>>,
     chains: Option<Vec<RawChain>>,
@@ -203,6 +205,7 @@ pub(super) fn validate_client_graph(
     input: ClientGraphInput<'_>,
 ) -> Result<ValidatedClientGraph, ConfigError> {
     let ClientGraphInput {
+        egress,
         tagged_inbounds,
         tagged_outbounds,
         chains,
@@ -317,54 +320,44 @@ pub(super) fn validate_client_graph(
         }
     }
 
-    let plans = validate_chains(
-        chains.as_deref(),
-        &inbounds,
-        &outbounds,
-        &validated_outbounds,
-        selectors.as_deref(),
-    )?;
-    for (index, tag) in route_roots.iter().copied().enumerate() {
-        if !outbounds.iter().any(|outbound| outbound.tag == tag)
-            && !chains
-                .as_deref()
-                .is_some_and(|chains| chains.iter().any(|chain| chain.tag.as_deref() == Some(tag)))
-            && !selectors
-                .as_deref()
-                .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == tag))
-        {
-            return Err(ConfigError::semantic(if !explicit_route {
-                ConfigField::InboundsOutbound
-            } else if index == 0 {
-                ConfigField::RouteFinal
-            } else {
-                ConfigField::RouteRulesOutbound
-            }));
-        }
-    }
-    if detour_tags.iter().any(|tag| {
-        !outbounds.iter().any(|outbound| outbound.tag == **tag)
-            && !chains.as_deref().is_some_and(|chains| {
-                chains
-                    .iter()
-                    .any(|chain| chain.tag.as_deref() == Some(*tag))
-            })
-            && !selectors
-                .as_deref()
-                .is_some_and(|selectors| selectors.iter().any(|selector| selector.tag == **tag))
-    }) {
-        return Err(ConfigError::semantic(ConfigField::DnsServersDetour));
-    }
+    let plans = chains
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .zip(egress.chain_hops())
+        .map(|(chain, hops)| {
+            TaggedPlan::new(
+                chain.tag.as_deref().expect("admitted chain tag"),
+                hops.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let route_egress = route_roots
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| {
+            egress.resolve(
+                tag,
+                if !explicit_route {
+                    ConfigField::InboundsOutbound
+                } else if index == 0 {
+                    ConfigField::RouteFinal
+                } else {
+                    ConfigField::RouteRulesOutbound
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let detour_egress = detour_tags
+        .iter()
+        .map(|tag| egress.resolve(tag, ConfigField::DnsServersDetour))
+        .collect::<Result<Vec<_>, _>>()?;
     let graph_roots = route_roots
         .iter()
         .copied()
         .chain(detour_tags.iter().copied())
         .collect::<Vec<_>>();
     let extra_roots = graph_roots.as_slice();
-    let ordinary_roots = route_roots
-        .iter()
-        .map(|tag| (*tag).to_owned())
-        .collect::<Vec<_>>();
     let (selector, detours) = compile_graph_roots(
         &inbounds
             .iter()
@@ -384,58 +377,28 @@ pub(super) fn validate_client_graph(
         .take(socks_inbound_count)
         .map(|listen| ClientInboundConfig { listen })
         .collect::<Vec<_>>();
-    let first_hops = |root: &str| {
-        let mut pending = vec![root];
-        let mut first = Vec::new();
-        while let Some(tag) = pending.pop() {
-            if let Some(index) = outbounds.iter().position(|outbound| outbound.tag == tag) {
-                first.push(index);
-            } else if let Some(chain) = chains
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .find(|chain| chain.tag.as_deref() == Some(tag))
-            {
-                first.push(
-                    outbounds
-                        .iter()
-                        .position(|outbound| {
-                            Some(&outbound.tag) == chain.hops.as_ref().and_then(|hops| hops.first())
-                        })
-                        .expect("validated chain first hop"),
-                );
-            } else if let Some(selector) = selectors
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .find(|selector| selector.tag == tag)
-            {
-                pending.extend(selector.outbounds.iter().map(String::as_str));
-            }
-        }
-        first.sort_unstable();
-        first.dedup();
-        first
-    };
-    let direct_detours = detour_tags
+    let direct_outbounds =
+        validated_outbounds
+            .iter()
+            .enumerate()
+            .fold(0_u64, |mask, (index, outbound)| {
+                if matches!(outbound, ClientOutboundConfig::Direct { .. }) {
+                    mask | (1_u64 << index)
+                } else {
+                    mask
+                }
+            });
+    let direct_detours = detour_egress
         .iter()
-        .map(|tag| {
-            first_hops(tag).iter().any(|index| {
-                matches!(
-                    validated_outbounds[*index],
-                    ClientOutboundConfig::Direct { .. }
-                )
-            })
-        })
+        .map(|root| egress.first_hops(*root) & direct_outbounds != 0)
         .collect();
-    let mut physical_first_hops = ordinary_roots
+    let physical = route_egress
         .iter()
-        .map(String::as_str)
-        .chain(detour_tags.iter().copied())
-        .flat_map(first_hops)
-        .collect::<Vec<_>>();
-    physical_first_hops.sort_unstable();
-    physical_first_hops.dedup();
+        .chain(&detour_egress)
+        .fold(0_u64, |mask, root| mask | egress.first_hops(*root));
+    let physical_first_hops = (0..outbounds.len())
+        .filter(|index| physical & (1_u64 << index) != 0)
+        .collect();
     let outbound_endpoints = outbounds
         .into_iter()
         .map(|outbound| outbound.endpoint)

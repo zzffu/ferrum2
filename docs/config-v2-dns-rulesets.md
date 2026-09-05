@@ -29,6 +29,14 @@ ferrum2-server --config PATH
 - A normal start completes the same materialization before it prepares any
   listener.
 
+Preparation checks the declared graph size and structure before classifying DNS
+and outbound endpoints. Inbound, outbound, selector and chain cohorts each have
+a limit of 64; a client TUN counts toward its inbound limit. Each selector has
+1–64 unique immediate members and a default among them. Client chains contain
+2–8 distinct concrete Shadowsocks outbounds; the server does not accept chains.
+Shared selector subgraphs are valid, but cycles are rejected. When an input has
+several defects, a structural error can therefore precede an endpoint error.
+
 The configuration layer finishes with a closed, runtime-neutral DNS policy
 blueprint: numeric server/query-type identities, shared compiled match sets,
 RuleSet IDs, and the exact `RuleEngineRegistry` are retained without Hickory or

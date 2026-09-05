@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{ConfigError, ConfigField};
-use crate::raw::{RawChain, RawDns, RawRoute, RawRuleSet, RawRuleSetLoader, RawSelector};
-use crate::validation::validate_tag;
+use crate::raw::{RawDns, RawRoute, RawRuleSet, RawRuleSetLoader};
+use crate::validation::{AdmittedEgressGraph, validate_tag};
 
 use super::super::model::{
     PreparedDnsEndpoint, PreparedDnsEndpointMode, PreparedEgressCapabilities, PreparedEgressRef,
@@ -17,7 +17,6 @@ use super::super::{
 };
 use super::dns::{parse_resolver, valid_domain};
 use super::dns_policy::resolve_rule_set_refs;
-use super::graph::egress_node;
 
 pub(super) fn prepare_rule_set_loader(
     raw: Option<&RawRuleSetLoader>,
@@ -54,9 +53,7 @@ pub(super) fn prepare_rule_set_loader(
 pub(super) fn prepare_rule_sets(
     raw_rule_sets: &[RawRuleSet],
     dns_servers: &[crate::raw::RawDnsServer],
-    outbound_tags: &[&str],
-    selectors: &[RawSelector],
-    chains: &[RawChain],
+    egress: &AdmittedEgressGraph,
     capabilities: &PreparedEgressCapabilities,
 ) -> Result<Vec<PreparedRuleSet>, ConfigError> {
     let mut prepared = Vec::new();
@@ -96,15 +93,7 @@ pub(super) fn prepare_rule_sets(
         let download_detour = raw
             .download_detour
             .as_deref()
-            .map(|tag| {
-                resolve_egress(
-                    tag,
-                    outbound_tags,
-                    selectors,
-                    chains,
-                    ConfigField::RouteRuleSetDownloadDetour,
-                )
-            })
+            .map(|tag| egress.resolve(tag, ConfigField::RouteRuleSetDownloadDetour))
             .transpose()?;
         let download_mode = match raw.download_resolver.as_deref() {
             Some(resolver) => PreparedRuleSetDownloadMode::ClientResolved {
@@ -187,192 +176,26 @@ pub(super) fn validate_https_srs_url(url: &str, infer_format: bool) -> Result<()
     Ok(())
 }
 
-pub(super) fn resolve_egress(
-    tag: &str,
-    outbound_tags: &[&str],
-    selectors: &[RawSelector],
-    chains: &[RawChain],
-    field: ConfigField,
-) -> Result<PreparedEgressRef, ConfigError> {
-    validate_tag(tag, field)?;
-    if let Some(index) = outbound_tags.iter().position(|candidate| *candidate == tag) {
-        return Ok(PreparedEgressRef::Outbound(index));
-    }
-    if let Some(index) = selectors.iter().position(|candidate| candidate.tag == tag) {
-        return Ok(PreparedEgressRef::Selector(index));
-    }
-    if let Some(index) = chains
-        .iter()
-        .position(|candidate| candidate.tag.as_deref() == Some(tag))
-    {
-        return Ok(PreparedEgressRef::Chain(index));
-    }
-    Err(ConfigError::semantic(field))
-}
-
 pub(super) fn prepare_egress_capabilities(
-    outbound_tags: &[&str],
-    selectors: &[RawSelector],
-    chains: &[RawChain],
-) -> Result<PreparedEgressCapabilities, ConfigError> {
-    let mut evaluator = EgressCapabilityEvaluator::new(outbound_tags, selectors, chains);
-    for index in 0..selectors.len() {
-        evaluator.evaluate(PreparedEgressRef::Selector(index))?;
-        debug_assert!(evaluator.stack.is_empty());
+    egress: &AdmittedEgressGraph,
+) -> PreparedEgressCapabilities {
+    PreparedEgressCapabilities {
+        outbounds: (0..egress.outbound_count())
+            .map(|index| egress.accepts_domain(PreparedEgressRef::Outbound(index)))
+            .collect(),
+        selectors: (0..egress.selector_members().len())
+            .map(|index| egress.accepts_domain(PreparedEgressRef::Selector(index)))
+            .collect(),
+        chains: (0..egress.chain_hops().len())
+            .map(|index| egress.accepts_domain(PreparedEgressRef::Chain(index)))
+            .collect(),
     }
-    for index in 0..chains.len() {
-        evaluator.evaluate(PreparedEgressRef::Chain(index))?;
-        debug_assert!(evaluator.stack.is_empty());
-    }
-    Ok(evaluator.capabilities)
-}
-
-struct EgressCapabilityEvaluator<'a> {
-    outbound_tags: &'a [&'a str],
-    selectors: &'a [RawSelector],
-    chains: &'a [RawChain],
-    capabilities: PreparedEgressCapabilities,
-    selector_state: Vec<u8>,
-    chain_state: Vec<u8>,
-    stack: Vec<PreparedEgressRef>,
-}
-
-impl<'a> EgressCapabilityEvaluator<'a> {
-    fn new(
-        outbound_tags: &'a [&'a str],
-        selectors: &'a [RawSelector],
-        chains: &'a [RawChain],
-    ) -> Self {
-        Self {
-            outbound_tags,
-            selectors,
-            chains,
-            capabilities: PreparedEgressCapabilities {
-                outbounds: vec![true; outbound_tags.len()],
-                selectors: vec![false; selectors.len()],
-                chains: vec![false; chains.len()],
-            },
-            selector_state: vec![0_u8; selectors.len()],
-            chain_state: vec![0_u8; chains.len()],
-            stack: Vec::new(),
-        }
-    }
-
-    fn evaluate(&mut self, egress: PreparedEgressRef) -> Result<bool, ConfigError> {
-        match egress {
-            PreparedEgressRef::Outbound(index) => self
-                .capabilities
-                .outbounds
-                .get(index)
-                .copied()
-                .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization)),
-            PreparedEgressRef::Selector(index) => {
-                match self.selector_state.get(index).copied() {
-                    Some(2) => return Ok(self.capabilities.selectors[index]),
-                    Some(1) => {
-                        return Err(capability_cycle_error(&self.stack, egress)?);
-                    }
-                    Some(0) => {}
-                    _ => {
-                        return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
-                    }
-                }
-                self.selector_state[index] = 1;
-                self.stack
-                    .try_reserve(1)
-                    .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-                self.stack.push(egress);
-                let member_count = self.selectors[index].outbounds.len();
-                if member_count == 0 {
-                    return Err(ConfigError::semantic(ConfigField::SelectorsOutbounds));
-                }
-                let mut accepts_domain_target = true;
-                for member_index in 0..member_count {
-                    let member = resolve_egress(
-                        &self.selectors[index].outbounds[member_index],
-                        self.outbound_tags,
-                        self.selectors,
-                        self.chains,
-                        ConfigField::SelectorsOutbounds,
-                    )?;
-                    accepts_domain_target &= self.evaluate(member)?;
-                }
-                if self.stack.pop() != Some(egress) {
-                    return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
-                }
-                self.capabilities.selectors[index] = accepts_domain_target;
-                self.selector_state[index] = 2;
-                Ok(accepts_domain_target)
-            }
-            PreparedEgressRef::Chain(index) => {
-                match self.chain_state.get(index).copied() {
-                    Some(2) => return Ok(self.capabilities.chains[index]),
-                    Some(1) => {
-                        return Err(capability_cycle_error(&self.stack, egress)?);
-                    }
-                    Some(0) => {}
-                    _ => {
-                        return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
-                    }
-                }
-                self.chain_state[index] = 1;
-                self.stack
-                    .try_reserve(1)
-                    .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-                self.stack.push(egress);
-                let terminal = self.chains[index]
-                    .hops
-                    .as_deref()
-                    .and_then(<[String]>::last)
-                    .ok_or_else(|| ConfigError::semantic(ConfigField::ChainsHops))?;
-                let terminal = resolve_egress(
-                    terminal,
-                    self.outbound_tags,
-                    self.selectors,
-                    self.chains,
-                    ConfigField::ChainsHops,
-                )?;
-                let accepts_domain_target = self.evaluate(terminal)?;
-                if self.stack.pop() != Some(egress) {
-                    return Err(ConfigError::semantic(ConfigField::ResourceMaterialization));
-                }
-                self.capabilities.chains[index] = accepts_domain_target;
-                self.chain_state[index] = 2;
-                Ok(accepts_domain_target)
-            }
-        }
-    }
-}
-
-pub(super) fn capability_cycle_error(
-    stack: &[PreparedEgressRef],
-    repeated: PreparedEgressRef,
-) -> Result<ConfigError, ConfigError> {
-    let start = stack
-        .iter()
-        .position(|candidate| *candidate == repeated)
-        .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-    let cycle_len = stack
-        .len()
-        .checked_sub(start)
-        .and_then(|length| length.checked_add(1))
-        .ok_or_else(|| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-    let mut path = Vec::new();
-    path.try_reserve_exact(cycle_len)
-        .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-    for egress in &stack[start..] {
-        path.push(egress_node(*egress)?);
-    }
-    path.push(egress_node(repeated)?);
-    Ok(ConfigError::dependency_cycle(path))
 }
 
 pub(super) fn validate_deferred_dns_detours(
     dns: Option<&RawDns>,
     endpoints: &[PreparedDnsEndpoint],
-    outbound_tags: &[&str],
-    selectors: &[RawSelector],
-    chains: &[RawChain],
+    egress: &AdmittedEgressGraph,
     capabilities: &PreparedEgressCapabilities,
 ) -> Result<(), ConfigError> {
     let servers = dns.and_then(|dns| dns.servers.as_deref()).unwrap_or(&[]);
@@ -384,14 +207,11 @@ pub(super) fn validate_deferred_dns_detours(
         if endpoint.mode() != PreparedDnsEndpointMode::DeferredToDetour {
             continue;
         }
-        let detour = resolve_egress(
+        let detour = egress.resolve(
             server
                 .detour
                 .as_deref()
                 .ok_or_else(|| ConfigError::semantic(ConfigField::DnsServersDetour))?,
-            outbound_tags,
-            selectors,
-            chains,
             ConfigField::DnsServersDetour,
         )?;
         if capabilities.get(detour) != Some(true) {

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use crate::dependency::{DependencyGraph, DependencyGraphError, DependencyNode, DependencySource};
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{DirectDomainResolver, ResolverRef};
-use crate::raw::{RawChain, RawDns, RawRoute, RawSelector, ScalarOrList};
+use crate::raw::{RawDns, RawRoute, ScalarOrList};
 
 use super::super::model::{
     DialEndpoint, PreparedDependencyNode, PreparedDnsEndpoint, PreparedEgressRef, PreparedRuleSet,
@@ -12,10 +12,9 @@ use super::super::model::{
 use super::super::{PLACEHOLDER_DOMAIN, PLACEHOLDER_ENDPOINT};
 use super::dns_policy::dns_matcher_present;
 use super::draft::{ClientPreparationDraft, ServerPreparationDraft};
-use super::rule_egress::resolve_egress;
+use crate::validation::AdmittedEgressGraph;
 
 pub(super) struct DependencyOutboundInput<'a> {
-    tag: &'a str,
     endpoint: Option<&'a DialEndpoint>,
     direct_domain_resolver: Option<DirectDomainResolver>,
 }
@@ -24,8 +23,7 @@ pub(super) struct DependencyGraphInput<'a> {
     dns: Option<&'a RawDns>,
     dns_endpoints: &'a [PreparedDnsEndpoint],
     outbounds: Vec<DependencyOutboundInput<'a>>,
-    selectors: &'a [RawSelector],
-    chains: &'a [RawChain],
+    egress: &'a AdmittedEgressGraph,
     rule_sets: &'a [PreparedRuleSet],
 }
 
@@ -41,13 +39,11 @@ impl<'a> DependencyGraphInput<'a> {
                 .outbounds()
                 .iter()
                 .map(|outbound| DependencyOutboundInput {
-                    tag: &outbound.tag,
                     endpoint: outbound.endpoint.as_ref(),
                     direct_domain_resolver: outbound.direct_domain_resolver,
                 })
                 .collect(),
-            selectors: draft.raw.selectors.as_deref().unwrap_or(&[]),
-            chains: draft.raw.chains.as_deref().unwrap_or(&[]),
+            egress: &draft.egress,
             rule_sets,
         }
     }
@@ -63,13 +59,11 @@ impl<'a> DependencyGraphInput<'a> {
                 .outbounds()
                 .iter()
                 .map(|outbound| DependencyOutboundInput {
-                    tag: &outbound.tag,
                     endpoint: None,
                     direct_domain_resolver: Some(outbound.direct_domain_resolver),
                 })
                 .collect(),
-            selectors: draft.raw.selectors.as_deref().unwrap_or(&[]),
-            chains: &[],
+            egress: &draft.egress,
             rule_sets,
         }
     }
@@ -97,14 +91,9 @@ pub(super) fn build_dependency_plan(
         dns,
         dns_endpoints,
         outbounds,
-        selectors,
-        chains,
+        egress,
         rule_sets,
     } = input;
-    let outbound_tags = outbounds
-        .iter()
-        .map(|outbound| outbound.tag)
-        .collect::<Vec<_>>();
     let mut graph = DependencyGraph::new();
     let mut dependency_dns_servers = Vec::new();
     graph
@@ -120,12 +109,12 @@ pub(super) fn build_dependency_plan(
             .try_add_node(outbound_node(index)?)
             .map_err(map_dependency_error)?;
     }
-    for index in 0..selectors.len() {
+    for index in 0..egress.selector_members().len() {
         graph
             .try_add_node(selector_node(index)?)
             .map_err(map_dependency_error)?;
     }
-    for index in 0..chains.len() {
+    for index in 0..egress.chain_hops().len() {
         graph
             .try_add_node(chain_node(index)?)
             .map_err(map_dependency_error)?;
@@ -158,13 +147,7 @@ pub(super) fn build_dependency_plan(
             .get(index)
             .and_then(|server| server.detour.as_deref())
         {
-            let detour = resolve_egress(
-                detour,
-                &outbound_tags,
-                selectors,
-                chains,
-                ConfigField::DnsServersDetour,
-            )?;
+            let detour = egress.resolve(detour, ConfigField::DnsServersDetour)?;
             graph
                 .try_add_edge(
                     from,
@@ -206,41 +189,22 @@ pub(super) fn build_dependency_plan(
             )
             .map_err(map_dependency_error)?;
     }
-    for (index, selector) in selectors.iter().enumerate() {
-        let mut members = Vec::new();
-        members
-            .try_reserve_exact(selector.outbounds.len())
-            .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-        for member in &selector.outbounds {
-            members.push(egress_node(resolve_egress(
-                member,
-                &outbound_tags,
-                selectors,
-                chains,
-                ConfigField::SelectorsOutbounds,
-            )?)?);
-        }
+    for (index, members) in egress.selector_members().iter().enumerate() {
+        let members = members
+            .iter()
+            .copied()
+            .map(egress_node)
+            .collect::<Result<Vec<_>, _>>()?;
         graph
             .try_add_selector_members(checked_u64(index)?, members)
             .map_err(map_dependency_error)?;
     }
-    for (index, chain) in chains.iter().enumerate() {
-        let Some(hops) = chain.hops.as_deref() else {
-            continue;
-        };
-        let mut targets = Vec::new();
-        targets
-            .try_reserve_exact(hops.len())
-            .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
-        for hop in hops {
-            targets.push(egress_node(resolve_egress(
-                hop,
-                &outbound_tags,
-                selectors,
-                chains,
-                ConfigField::ChainsHops,
-            )?)?);
-        }
+    for (index, hops) in egress.chain_hops().iter().enumerate() {
+        let targets = hops
+            .iter()
+            .copied()
+            .map(outbound_node)
+            .collect::<Result<Vec<_>, _>>()?;
         graph
             .try_add_chain_hops(checked_u64(index)?, targets)
             .map_err(map_dependency_error)?;

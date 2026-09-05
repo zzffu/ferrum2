@@ -359,7 +359,7 @@ final = "outer"
 }
 
 #[test]
-fn selector_chain_cycle_reports_the_complete_closed_path() {
+fn invalid_chain_hops_are_rejected_before_dependency_derivation() {
     let source = r#"
 schema_version = 2
 
@@ -384,15 +384,18 @@ default = "loop-chain"
 final = "loop-selector"
 "#;
     let file = TempConfig::new(source);
-    let error = prepare_client(&file.0).expect_err("selector/chain cycle");
+    let error = prepare_client(&file.0).expect_err("Direct and selector chain hops");
 
-    assert_eq!(error.code(), "config.dependency_cycle");
+    assert_eq!(
+        (error.kind(), error.field()),
+        (ConfigErrorKind::Semantic, ConfigField::ChainsHops)
+    );
+    assert_eq!(error.code(), "config.semantic");
     assert_eq!(
         error.to_string(),
         concat!(
-            "error[config.dependency_cycle] config.dependency_cycle: ",
-            "the configuration dependency graph contains a cycle: ",
-            "selector[0] -> chain[0] -> selector[0]"
+            "error[config.semantic] chains.hops: ",
+            "configuration value is invalid"
         )
     );
 }
