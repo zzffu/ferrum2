@@ -1079,3 +1079,74 @@ M4 self-check PASS56；有限 worker/io/DNS filter分别5/8/6通过；非变更P
 lib/exp的linker_messages warning；strict clippy未放宽且通过。Python工具源本批未变，沿用
 M1逐批离线验证，不把它们重新称为M2测试。host Quick A/A PlanOnly通过，当前shell已提升；
 实际host运行与同条件性能对比待执行，尚未宣称无性能回退、吞吐提升或生产就绪。
+
+#### M2a 固定提交性能测量（完整，但未通过无回退验收）
+
+产品候选提交 `804f0dc04e8af354d727deff89f727bec3b23a9e`；controller 同提交，Windows
+EndToEnd Quick，release/locked/offline/x86_64-pc-windows-msvc；public runner 显式传入
+`-AcknowledgeHostNetworkMutation`，执行前确认 shell 已提升。每轮4场景×3交错pair×2成员，
+每trial 2s预热/10s active；288s为标称负载窗，实际还包含CPU采样、启动与停止，不能称总耗时。
+测量期间没有其他cargo/test/benchmark；后续SRS源码工作不在本次产品提交中。
+
+A/A 两成员均 `cba03a4488935a4d40cfd22f8cd658c74f4365cf`，RunId `34f185756c1b`，
+外部证据 `C:\Users\ZZZ\AppData\Local\Temp\ferrum2-m2a-aa-20260905T174744Z`。
+24/24 trial完成，产品失败计数delta全部0；独立readback清理adapter/route/address/process/
+port全部0。build119.457s、execution609.944s、cleanup4.266s，总734.438s。
+runner exit0/执行PASS；Python独立校验 exit3、**REGRESSION**，三组CPU/work等护栏未过。
+这两个状态含义不同，执行完成不能冒充采用通过。
+
+| A/A场景 | 配对收益中位数 | 全部pair范围 | 独立判定 |
+|---|---:|---:|---|
+| TCP单流吞吐 | -0.486% | -27.944%..+1.656% | regression |
+| TCP 1KiB p99（反向成本比） | -0.498% | -3.471%..+1.958% | regression |
+| UDP packet rate | -0.313% | -0.744%..+1.730% | regression |
+| fragment reassembly rate | -0.307% | -0.761%..+0.697% | within-noise-band |
+
+相同源码的TCP单对差异近28%，本轮噪声不能忽略；未删除被标记outlier的pair，未放宽2%
+政策。A/B使用同版harness比较基准与804f0dc0；没有配置准备专用timing场景，此Quick只能
+观察所测数据面，不能证明配置派生CPU/分配或开放负载尾延迟。日志与启动身份在
+`target/remediation-audit/m2a-{aa,ab}-{run.json,host.log}`，A/A独立结论在aa-validation.log。
+
+A/B RunId `9f4f3eb5041c`，证据目录
+`C:\Users\ZZZ\AppData\Local\Temp\ferrum2-m2a-ab-20260905T180113Z`。
+24/24完成、两产品所有failure delta为0、五类资源readback全零；build115.760s、
+execution612.099s、cleanup2.205s，总730.507s。runner exit0/执行PASS，独立validator
+exit3/**REGRESSION**。吞吐和延迟的主指标都在原2%中位护栏内，但CPU/work护栏未过：
+TCP单流server配对成本中位+3.103%，TCP请求server+4.110%，UDP client/server
++3.849%/+5.745%。这些是现有计量边界内的观测，未补齐CPU窗口起止对齐的资格证明。
+
+下表单位MB/s为十进制、µs为微秒；每个成员3次观测，中括号保留全部范围。收益对p99采用
+baseline/candidate反向成本比；配对收益中位数不等于两列各自中位数的比值。
+
+| A/B场景 | baseline 中位数 [范围] | candidate 中位数 [范围] | 配对收益中位数 [范围] |
+|---|---|---|---|
+| TCP单流，64KiB/次 | 137.951 [136.253,141.145] MB/s | 139.406 [139.161,139.995] MB/s | +1.055% [-0.815,+2.134] |
+| TCP请求，1KiB，p99 | 157.3 [157.2,158.2] µs | 159.4 [156.5,159.4] µs | -0.753% [-1.380,+0.511] |
+| UDP，1200B，batch1 | 7752 [7647,7769] packets/s | 7792 [7715,7829] packets/s | +0.772% [-0.477,+1.896] |
+| UDP分片，1440B，batch4 | 31.488 [31.300,31.601] MB/s | 31.632 [31.364,31.829] MB/s | +0.456% [-0.752,+1.690] |
+
+TCP请求p50/p95中位为115.8/126.4→115.3/126.0µs，UDP为124.2/154.5→123.8/154.0µs，
+UDP p99为191.1→189.7µs；所有每次分位数及范围留在raw和m2a-observation-summary.json。
+TCP请求3次实际完成量合计148,595→114,052，不能用接近的p99掩盖完成工作减少；未丢弃
+请求/错误或删改时间窗来提高结果。该闭环负载不提供开放到达队列的p99/过载错误率，
+Quick也没有256-flow公平性；批量TCP/fragment未提供逐请求p99，不能推算。
+
+各场景client/server CPU百分比中位（100%=一个核心）：TCP96.01/55.51→93.08/57.84；
+请求28.94/19.60→27.96/20.19；UDP46.48/41.65→49.17/44.66；fragment84.92/79.47→82.09/76.62。
+client peak working set中位TCP153,747,456→153,845,760B；请求154,066,944→153,755,648B；
+UDP212,348,928→211,251,200B；fragment153,653,248→153,583,616B。server各值也保留raw及
+归约JSON。这里的CPU与内存是整个进程观测，不能归因给配置准备模块。
+
+两轮harness源码bundle均`4fc39effe4b51c3306777d1a8b1d93ed9afeb56efa12861097d4c96f12c1c9d3`，
+performance bundle均`b6c2d5d94b941c8969ba6f576852f6c9b374bab05c99cac8ceae231c4256d165`。
+builds.json逐成员记录commit、client/server/harness/DLL哈希。事后只读环境复核仍为Win11
+26200、Ryzen7700 8c/16t、49,373,096KiB，rustc1.97.1 commit8bab26f4f68e0e26f0bb7960be334d5b520ea452、
+LLVM22.1.6、Cargo1.97.1、pwsh7.6.4；RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS均未设置。
+`m2a-environment.json`是事后身份记录，不能替代采样期间的系统时间序列；未采集真实CPU堆栈。
+
+只读归约不构成第二套资格框架。完整两轮raw+相关门禁归档为
+`profiles/remediation-m2a-20260905T181728Z`，337 files/2,361,640B，manifest SHA-256
+`2dd84f902a390ec84ef53361c095a109e8ad0f1194ee7ea4464595df306c4fe0`；归档不再修改，
+较晚的事后环境记录单独保留。候选功能修复继续保留为可审查提交，**性能验收保持未通过**；
+A/A本身不稳定，现有证据不足以将上述变化归因给代码或宣称无回退。继续产品架构整改，
+不进入性能优化，不通过再修工具、删outlier或提高门槛来制造采用结论。
