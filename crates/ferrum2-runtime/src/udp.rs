@@ -3,10 +3,10 @@ mod limits;
 mod manager;
 mod reservation;
 mod session;
+mod socket;
 
 pub use direct::{
-    DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSessionAdmission, DirectUdpSocket,
-    DirectUdpSocketFactory, SystemDirectUdpSocket, SystemDirectUdpSocketFactory, SystemUdpResolver,
+    DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSessionAdmission, SystemUdpResolver,
 };
 use limits::UDP_CANDIDATE_HINT_ENTRIES;
 pub use limits::{
@@ -19,3 +19,7 @@ pub use limits::{
 pub use manager::UdpSessionManager;
 pub use reservation::{AccountedDatagram, UdpBufferBudget, UdpBufferReservation};
 pub use session::{PendingUdpDatagram, PendingUdpSession};
+
+pub use socket::{
+    DirectUdpSocket, DirectUdpSocketFactory, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
+};

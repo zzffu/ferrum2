@@ -114,8 +114,6 @@ removal，再释放 task/socket accounting 与 owner permit。正常完成、pan
 `-D warnings` 通过。新增 panic 后 removal event / admission 恢复、未 poll 任务取消时
 共享 runtime 继续工作，两项测试比较完整 OwnerSnapshot；现有 reset/queue/drain 测试保留。
 
-### 后续审查项（不等于已确认故障）
-
 ### R4 — P1：RuleSet shutdown 取消丢失 join 所有权（已修复）
 
 - 原位置 `ruleset/src/loader.rs::BlockingTaskOwner::shutdown`：`mem::take(tasks)` 后 await，
@@ -133,9 +131,20 @@ removal，再释放 task/socket accounting 与 owner permit。正常完成、pan
 - 仍需限定：Rust 不能强制中断已经开始的 `spawn_blocking`；本改动保证保留并等待所有权，
   不保证损坏文件系统操作的绝对完成时限。调用方仍须调用 shutdown，不能仅 Drop loader。
 
+### A2 — P2：Direct UDP 的 socket 与会话 owner 分离（已完成）
+
+`runtime/src/udp/direct.rs` 同时拥有双栈 socket 创建/IPv4-mapped 地址归一化和 session
+admission/relay/lifetime，超过约 800 行生产 owner 的导航阈值。将 socket trait、factory、
+具体系统实现及归一化移至私有 `udp/socket.rs`，让该 owner 封装平台 socket 细节；direct
+只消费协议中立 socket 契约。保留 curated re-export，不保留旧模块转发 shim，也不增加
+公共接口或动态分发。代价是一个内部模块；原有 runtime 完整行为测试和严格 clippy 通过。
+这是职责分离，不是性能优化；余下大模块仍按 A1 跟进。
+
+### 后续审查项（不等于已确认故障）
+
 | ID / 优先级 | 位置、事实或假设 | 下一步与验收 |
 |---|---|---|
-| A1 / P2 | runtime UDP direct/reset、observability metrics、TUN live owner 有约 800 行以上生产 owner；m4 windows_tun/workload 1021 行违反工具 1000 行要求 | 按实际职责拆分并保持 invariant/消费者；禁止纯行数搬移 |
+| A1 / P2 | runtime reset、observability metrics、TUN live owner 有约 800 行以上生产 owner；m4 windows_tun/workload 1021 行违反工具 1000 行要求 | 按实际职责拆分并保持 invariant/消费者；禁止纯行数搬移；UDP direct 已按 A2 处理 |
 | P1 / P2 假设 | DNS cache 每次 insert 扫描 entries + FIFO，满缓存更新可能拉长持锁时间 | 先测不同容量、TTL/更新比例与并发；保持过期、FIFO、generation 和 telemetry 语义 |
 | L1 / 已解决 | ruleset blocking admission、取消及重试 join | 见 R4；全 loader 网络下载并发仍由 composition 拥有 |
 | L2 / P2 待审 | affine executor 的 unbounded event channel 是否有结构性上界 | 核对每 shard 发事件次数、thread join 和启动失败路径；不能仅凭 unbounded 命名判定失控 |
@@ -143,7 +152,8 @@ removal，再释放 task/socket accounting 与 owner permit。正常完成、pan
 
 ## 证据与未完成项
 
-里程碑：`5438c615` 修复 R1；`f20ade19` 修复 R2；`6fc90a96` 修复 R3；R4 独立提交包含 blocking owner、故障测试及本记录。
+里程碑：`5438c615` 修复 R1；`f20ade19` 修复 R2；`6fc90a96` 修复 R3；`5d3e791c`
+修复 R4；A2 独立提交包含 UDP socket 职责分离及本记录。
 R1 饱和恢复测试开发时曾误把主动强制关闭计数当作零资源快照；已改为等待最后一个请求
 自行超时回收后才停止监听，验证完整快照（包括强制关闭计数）回到基线，再跑完整 package。
 
