@@ -105,11 +105,22 @@ pub(super) async fn tcp_loop(
     mut cancel: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let mut children = JoinSet::new();
-    loop {
+    let result = loop {
         let (stream, _) = tokio::select! {
-            result = listener.accept() => result?,
-            _ = children.join_next(), if !children.is_empty() => continue,
-            _ = cancelled(&mut cancel) => break,
+            biased;
+            _ = cancelled(&mut cancel) => break Ok(()),
+            completed = children.join_next(), if !children.is_empty() => {
+                match completed {
+                    Some(Ok(())) => continue,
+                    Some(Err(_)) | None => {
+                        break Err(io::Error::other("DNS TCP request task stopped"));
+                    }
+                }
+            }
+            result = listener.accept() => match result {
+                Ok(accepted) => accepted,
+                Err(error) => break Err(error),
+            },
         };
         let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
             drop(stream);
@@ -120,10 +131,10 @@ pub(super) async fn tcp_loop(
             let _permit = permit;
             tcp_connection(stream, inbound, proxy, idle_timeout).await;
         });
-    }
+    };
     children.abort_all();
     while children.join_next().await.is_some() {}
-    Ok(())
+    result
 }
 
 pub(super) async fn cancelled(cancel: &mut watch::Receiver<bool>) {

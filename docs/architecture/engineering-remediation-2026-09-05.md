@@ -83,7 +83,7 @@ association，Windows crate 才能触及真实 adapter、route、WFP；普通测
   饱和后恢复 admission、完整 OwnerSnapshot 回基线测试。删除相关只比较常量的断言。
 - 代价：读头耗时会消耗同一请求预算；极慢的合法 scrape 会断开，客户端可重试。
 
-### R2 — P1：DNS TCP 子任务失败被吞掉（修复验证中）
+### R2 — P1：DNS TCP 子任务失败被吞掉（已修复）
 
 - 位置：`crates/ferrum2-dns/src/proxy/loops.rs::tcp_loop`；违反所有任务 joined/reported
   及 required listener failure 契约。
@@ -93,7 +93,8 @@ association，Windows crate 才能触及真实 adapter、route、WFP；普通测
 - 修改：检查 JoinError，以封闭错误报告；取消和完成回收优先于新 accept；所有退出分支
   汇合到 abort-and-join。保持已有达到连接容量时拒绝新流的语义。
 - 验证：新增公共 listener 故障测试检查 sibling owner 释放、resolver shutdown 和 TCP/UDP
-  重绑；interop-root package gate 待本批最终记录。
+  重绑；`cargo test -p ferrum2-dns --features __interop-test-root --locked` 和 package
+  all-targets/all-features clippy `-D warnings` 均通过。
 - 代价：内部 panic 将触发已有进程级故障处理；普通错误请求仍只结束自身连接。
 
 ### R3 — P1 候选：Direct UDP 异常退出可能遗漏会话清理
@@ -113,6 +114,10 @@ association，Windows crate 才能触及真实 adapter、route、WFP；普通测
 | O1 / P2 待审 | 部分 UDP task result 被丢弃，低基数故障定位覆盖待逐一映射 | 对照 binary observation 和现有指标，避免添加重复 schema 或泄漏 peer |
 
 ## 证据与未完成项
+
+里程碑：`5438c615` 修复 R1；R2 独立提交包含 DNS loop、故障测试及本记录更新。
+R1 饱和恢复测试开发时曾误把主动强制关闭计数当作零资源快照；已改为等待最后一个请求
+自行超时回收后才停止监听，验证完整快照（包括强制关闭计数）回到基线，再跑完整 package。
 
 修改前：`cargo fmt --all -- --check`、workspace all-targets/all-features clippy `-D warnings`、
 runtime 完整 package 测试均通过。说明已有静态门禁没有证明本次故障边界正确。
