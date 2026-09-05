@@ -11,8 +11,12 @@ This directory separates ordinary controller/schema tests from large release evi
 Ordinary tests require only tracked files:
 
 ```text
-python3 -B -m unittest discover -s tests/performance_rule -v
+python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
 ```
+
+Run commands from the repository root. Use `python` on Windows; the multiline external-verifier
+example below uses POSIX `\` continuation, so put it on one line or use PowerShell backticks there.
+These ordinary tests validate evidence and mocked controller behavior without executing benchmarks.
 
 ## External release evidence
 

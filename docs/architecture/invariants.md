@@ -20,9 +20,11 @@ means the contract is known but its automated proof is incomplete.
 | Production lines containing the `unsafe` keyword | 209 |
 | `#[allow(unsafe_code)]` declarations | 1 |
 
-Counts above are navigation data, not mechanical acceptance thresholds. They were measured from the
-committed tree (`git show HEAD:<path>`), so concurrent uncommitted refactors do not contaminate the
-baseline.
+Counts above describe the recorded R0 commit, not the current checkout, and are navigation data
+rather than mechanical acceptance thresholds. Reproduce baseline measurements with
+`git show 88d169686a3f87037d968f92f9c143e1e33c1169:<path>`; use the current committed tree when
+recording a new snapshot. In particular, the current Windows crate has two reviewed unsafe
+allowance boundaries, as recorded by WIN-01 below.
 
 The current `cargo metadata --locked --no-deps` member set and direct internal normal/dev dependency
 declarations reduce to the following graph (a dash means no internal Ferrum2 dependency):
@@ -48,14 +50,20 @@ of runtime/config/platform back-edges, and observability free of all Ferrum2 dep
 
 ### Reviewed size exceptions
 
-`crates/ferrum2-tun/src/reassembly.rs` is the only production Rust file above 1,000 physical lines.
-It remains an explicit protocol-owner exception because fragment interval accounting, overlap
-rejection, expiry, and completed-packet reconstruction form one bounded state machine. The packet
+`crates/ferrum2-tun/src/reassembly.rs` remains an explicit protocol-owner exception because fragment
+interval accounting, overlap rejection, expiry, and completed-packet reconstruction form one bounded
+state machine. The packet
 owner is already split: `packet.rs` owns target-neutral parsing and validation,
 `packet/control.rs` owns local ICMP/control generation, and `packet/{test_support,tests}.rs` own
 packet-only fixtures and cases. The reviewed packet corpus and fuzz seeds exercise the coupled
 invariants. Any further reassembly growth, duplicated parser, second reassembly owner, or independent
 policy branch ends the exception and requires an owner-preserving split.
+
+This is not a claim that every other source file is currently below 1,000 physical lines. As of
+the 2026-09-05 documentation audit, `crates/ferrum2-runtime/src/connection_executor.rs` also exceeds
+that count when its inline tests are included, and
+`tools/ferrum2-m4-qualification/src/m4_support/windows_tun/workload.rs` exceeds the tooling guide's
+production-file limit. The latter remains a maintainability gap, not an additional reviewed exception.
 
 ## Configuration and lifecycle
 
@@ -107,4 +115,4 @@ policy branch ends the exception and requires an owner-preserving split.
 | VENDOR-01 | crypto + policy | Normal refactors do not edit vendor; intentional changes replay archive/diff and update both locks | FERRUM_PATCH + workspace policy | No automated archive download in ordinary gate | ordinary policy + explicit qualification | baseline |
 | CI-01/02 | root workflows | Root Actions use immutable SHAs, read-only permissions, exact clean checkout; named gates feed explicit main and fuzz `required` jobs through the sole typed `tools.ci.required_gate` result owner; the fuzz workflow always emits its required context and runs its one-hour pure in-memory campaign when reviewed owner paths change | root workflows + workspace policy mutation tests | Branch-protection must require both contexts; external settings readback pending | hosted CI | pending external |
 | PLAT-01/02 | platform scripts | Privileged correctness uses one fixed host plan with no suites or profiles; one exact candidate build, explicit elevation acknowledgement, run-owned RFC 2544 `/32` resources, real Wintun TCP/UDP, live WFP identity retention, forced process-tree recovery, 900-second bound, and zero residue | host qualification runbook; closed source bundle; plan/build/runtime/worker/cleanup/final schema-v1 evidence | Live evidence is intentionally unavailable in ordinary R0 | ordinary static + explicit host live | 2026-09-04 host |
-| PERF-01..04 | performance host runner/controller | Performance and qualification have separate public execution paths; the closed performance bundle contains no qualification source; real Wintun runs require elevation, explicit acknowledgement, dedicated narrow routes, per-RunId ownership/recovery, raw paired metrics, and zero-residue cleanup; Quick/Confirm exclude lifecycle soak and Lifecycle caps ordinary reset feedback at 100 | host performance source manifest, PlanOnly/static contracts, recovery/cleanup smoke, raw Quick/Confirm/Lifecycle evidence | Durable external retention and reviewed host calibration remain required | ordinary static + explicit host live | pending live |
+| PERF-01..04 | performance host runner/controller | Performance and qualification have separate public execution paths; the closed performance bundle contains no qualification source; real Wintun runs require elevation, explicit acknowledgement, dedicated narrow routes, per-RunId ownership/recovery, raw paired metrics, and zero-residue cleanup; each run selects ClientDirect or EndToEnd; Quick/Confirm use 24/50 trials and Lifecycle uses 20 complete start/probe/stop cycles | host source manifest, PlanOnly/static contracts, recovery/cleanup evidence, and [2026-09-05 Confirm/CPU report](../windows-tun-confirm-cpu-profile-report-2026-09-05.md) | Historical Confirm evidence is A/A at the recorded commits, not a current candidate speedup or Lifecycle qualification; durable retention and reviewed host calibration remain required | ordinary static + explicit host live | 2026-09-05 historical Confirm A/A |

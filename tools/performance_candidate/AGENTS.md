@@ -15,7 +15,7 @@ Keep evidence parsing fail-closed and bounded. Preserve exact JSON fields, schem
 baseline/candidate and build identities, metric units, correctness results, cleanup results, pair
 order, source digests, and applicability unless a dedicated schema change updates every producer and
 consumer atomically. Policy decides retention and regression; observation producers must not invent
-thresholds. Windows Quick uses at least three interleaved pairs and Confirm at least five; the
+thresholds. Windows Quick uses exactly three interleaved pairs and Confirm exactly five; the
 selected profile and scenario recipes are evidence identity. The non-target CPU guard compares
 client and server CPU per unit of reported work, so additional CPU that is fully explained by higher
 throughput is not mislabeled as a regression.
@@ -36,7 +36,7 @@ entrypoint-only hash.
 Use static checks before running any performance workflow:
 
 ```text
-python -B -m compileall -q tools/performance_candidate
+python -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
 python -B -c "import tools.performance_candidate.cli; import tools.performance_candidate.windows_tun.summary"
 ```
 
@@ -47,4 +47,5 @@ cleanup. The separate host correctness runner and its verdict are not a performa
 
 Tests mirror production owners: shared and Linux plan/policy/summary/scale behavior have separate
 modules; Windows host plan, trial, recovery/cleanup, and summary behavior use narrow fixture helpers.
-Do not keep guest schemas, topology identities, or compatibility readers.
+Keep only the current `ClientDirect` and `EndToEnd` host topology identities; do not retain guest
+schemas, retired topologies, or compatibility readers.

@@ -2,6 +2,8 @@
 
 Ferrum2's managed Windows TUN supports IPv4-only, IPv6-only, and dual-stack sessions. The two
 interface-address fields are optional individually, but at least one must be present.
+The managed adapter backend supports Windows x86_64 only. On other targets, the client rejects a
+TUN configuration even with `--check-config`; portable SOCKS5 configurations remain available.
 
 Privileged Windows acceptance runs through the bounded, explicitly authorized host procedure in the
 [`Windows TUN correctness qualification runbook`](windows-tun-qualification.md).
@@ -71,11 +73,9 @@ reservations, so an exhausted shared budget does not reject them with `buffer_li
 change its `reserved_bytes`. This is not an unbounded queue contract. TUN association count,
 packet queues, payload length, session capacity, timeouts, and generation checks still apply.
 
-The first ordinary datagram from a local UDP source is routed exactly once. A successful terminal,
-outbound/chain, interface policy, and route generation are frozen for that source association. All
-later targets reuse the same multi-target Direct socket or proxy packet connection and never invoke
-the router again. For example, the rule below affects a socket only when `198.51.100.10:3478` is
-that socket's first ordinary target:
+For example, the rule below affects a socket only when `198.51.100.10:3478` is
+that socket's first ordinary target. This is a routing excerpt; the `proxy` outbound also needs its
+method and PSK in a complete configuration:
 
 ```toml
 [[outbounds]]

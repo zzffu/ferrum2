@@ -1,0 +1,18 @@
+schema_version = 2
+
+# Local demonstration only. This public synthetic key is not a deployment secret.
+# Keep the method and replacement key identical to client-v2-socks5.toml.
+[[inbounds]]
+tag = "proxy-in"
+listen = "127.0.0.1:8388"
+outbound = "direct-out"
+
+[[outbounds]]
+tag = "direct-out"
+
+[shadowsocks]
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+
+[udp]
+enabled = true

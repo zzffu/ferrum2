@@ -37,7 +37,9 @@ external repository setting; unknown values stay marked as gaps rather than bein
   declares both `ferrum2-tun` and `ferrum2-platform-windows` with `default-features = false`; product
   binaries opt into `live-backend` explicitly. Workspace policy proves this Cargo feature topology
   structurally, while the Windows gate separately reads the hosted test executables' PE imports and
-  rejects the reviewed privileged-network import denylist. No source-token scanner is part of R0.
+  rejects the reviewed privileged-network import denylist. Hosted TUN safety is established by the
+  feature graph and PE import proof, not a source-token scanner. The separate R0 unsafe-boundary
+  policy still tokenizes Rust sources to enforce the two reviewed Windows allowances.
 - `native_contract.py` owns the unprivileged native behavior checks.
   `qualify_native.py --local-contract` runs them locally; hosted mode still requires the exact
   GitHub runner, SHA, clean checkout, and evidence identity.

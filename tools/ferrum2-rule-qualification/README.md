@@ -5,6 +5,12 @@ runner for the shared rule engine and DNS policy state machine. It emits one
 JSON document to stdout. `--output <file.json>` writes the same bytes to a
 caller-selected file.
 
+Commands below that use `\` continuation are for a POSIX shell. On Windows use `python`,
+append `.exe` to runner paths, and use PowerShell backtick continuation or put the command on
+one line. Run measurement profiles only as explicit performance qualification. For ordinary
+development use the compile-only Rust gates in [AGENTS.md](AGENTS.md) and the offline controller
+tests at the end of this guide.
+
 The default smoke profile is intentionally short:
 
 ```text
@@ -85,7 +91,7 @@ fails the process. DNS end-to-end rows include query construction and report
 their measured allocations without pretending that construction is matcher
 work.
 
-The runner enforces the stable-local gates from plan section 5.7 on
+The runner enforces its same-process parity gates on
 `CompiledMatchSet` rows: ordinary/RuleSet median difference must be at most 5%,
 p99 difference must be at most 15%, and every applicable matcher operation
 must allocate zero times. Route and DNS program rows retain paired observations
@@ -123,8 +129,8 @@ Collect a current A/A calibration candidate:
 
 ```text
 python3 -B -m tools.performance_rule run \
-  --parent target/performance-rule-parent/ferrum2-rule-qualification.exe \
-  --pairs 6 --runner-priority high \
+  --parent /path/to/parent/ferrum2-rule-qualification \
+  --pairs 6 --runner-priority normal \
   --output tests/performance_rule/release-aa-v6.json \
   -- --profile smoke --samples 501 --workspace-root .
 ```
@@ -145,10 +151,15 @@ python3 -B -m tools.performance_rule run \
   --parent /path/to/parent/ferrum2-rule-qualification \
   --candidate /path/to/candidate/ferrum2-rule-qualification \
   --calibration tests/performance_rule/reviewed-aa-v2.json \
-  --pairs 6 --runner-priority high \
+  --pairs 6 --runner-priority normal \
   --output tests/performance_rule/release-ab-v6.json \
   -- --profile smoke --samples 501 --workspace-root .
 ```
+
+The parent/candidate paths must point to separately built, retained runner binaries; the controller
+does not build them. `--runner-priority normal` works on both Unix and Windows.
+`--runner-priority high` is Windows-only and must be used consistently for A/A, reviewed calibration,
+and A/B when selected; execution priority is part of calibration identity.
 
 Without a reviewed current-schema calibration, A/B stops before runner execution.
 The MatchSet median limit remains bounded by 10%; route/DNS and cross-process p99
@@ -158,5 +169,5 @@ a separate runner invocation and must not be mixed with smoke calibration.
 Run ordinary controller and compact evidence-contract tests with:
 
 ```text
-python3 -B -m unittest discover -s tests/performance_rule -v
+python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
 ```

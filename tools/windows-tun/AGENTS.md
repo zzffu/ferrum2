@@ -15,7 +15,9 @@ The performance host runner hides per-run adapter names, ports, temporary paths,
 process IDs, ledgers, cleanup, and recovery behind its small public interface. It must not call the
 correctness runner or consume a correctness verdict.
 
-Plan-only, recovery, parsing, and static verification may run without privilege. A real performance
+Plan-only, parsing, and static verification may run without privilege. Recovery may inspect an
+empty or completed ledger without elevation, but removing live network resources requires an
+already elevated shell. A real performance
 run requires an already elevated shell and the literal `-AcknowledgeHostNetworkMutation` switch; the
 runner must never auto-elevate. It may mutate only uniquely identified per-run Wintun resources,
 dedicated RFC 2544 benchmark addresses, and the narrowest benchmark routes inside a try/finally

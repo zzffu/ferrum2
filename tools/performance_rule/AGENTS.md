@@ -20,7 +20,12 @@ fixtures and archived evidence cannot approve a calibration.
 ## Verification
 
 Keep production and test owners below 1,000 lines. Use AST parsing, imports, and
-static unittest discovery for structural verification; do not execute the runner,
-performance unittests, benchmarks, or A/A/A/B collection during ordinary
-refactoring. Verify externally materialized release evidence only through the
-test-owned content-addressed manifest tool.
+the offline controller tests for ordinary verification:
+
+```text
+python -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
+```
+
+These tests validate synthetic evidence and mocked runner behavior; they must not execute
+benchmarks or A/A/A/B collection. Verify externally materialized release evidence only through
+the test-owned content-addressed manifest tool. Use `python3` for these commands on Unix.

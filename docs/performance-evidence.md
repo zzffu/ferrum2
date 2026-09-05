@@ -10,7 +10,14 @@ The canonical controller entry point is:
 python3 -B -m tools.performance_candidate <command> ...
 ```
 
-`tools/performance_candidate/cli.py` is the composition root. Named shared modules own strict JSON, identity, atomic output, and paired statistics; the `linux/` and `windows_tun/` subpackages own their plans, trials, policies, summaries, and diagnostics. Scale lineage/trials/decisions and Windows UDP schema/value/ledger/capture/source checks have separate owners. The small `tools/performance_candidate/windows_tun/network_model.py` composition root dispatches to identity, route-once, and lifecycle modules. `network_model_bundle.json` binds every model source by byte length and SHA-256, and its complete-file digest is staged and recorded as the controller identity. Production code must not be loaded from `tests/`.
+Use `python` instead of `python3` on Windows.
+
+`tools/performance_candidate/cli.py` is the composition root. Named shared modules own strict JSON,
+identity, atomic output, and paired statistics. The `linux/` package owns Linux plans, trials,
+calibration, scale lineage, and decisions. The `windows_tun/` package separates recipe, plan,
+policy, trial, and summary contracts into their corresponding modules. `summary.py` validates
+build, runtime, cleanup, paired-profile, and lifecycle evidence. Host execution and recovery belong
+to the PowerShell owners below. Production code must not be loaded from `tests/`.
 
 The Linux evidence chain is:
 
@@ -75,7 +82,58 @@ egress excludes it; `EndToEnd` additionally proves the client/server underlay ex
 mutation is recorded incrementally in a per-RunId recovery ledger. Success requires identity-safe
 cleanup plus readback proving no owned adapter, route, process, or port remains.
 
-Closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`, `REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`. Only the first two are accepted. Invalid evidence exits 2, regression exits 3, and inconclusive or calibration-required results exit 4.
+The host runner's `summary.json` status `PASS` means execution and evidence construction completed.
+Use the independent Python validator to check the complete evidence and derive the performance
+decision; `PASS` alone does not mean the candidate improved. Host plan, raw trial, runtime, and
+summary schemas are v2; build and cleanup schemas remain v1. The host source manifest uses its own
+v1 manifest schema and kind `ferrum2.windows-tun-performance-source-bundle.v3`; this is independent
+of the product's schema-v2 TOML configuration.
+
+The controller's closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`,
+`REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`. Only the first two are accepted.
+Invalid evidence exits 2, regression exits 3, and inconclusive or calibration-required results exit 4.
+Windows paired scenario decisions use `candidate-win`, `within-noise-band`, and `regression`; the
+validator reduces them to the uppercase controller status. A same-commit A/A result characterizes
+measurement noise and cannot establish a code-change speedup.
+
+### Windows host commands
+
+Run these from the repository root using PowerShell 7.4 or later. Inspect an unprivileged,
+nonmutating A/A plan first:
+
+```powershell
+$candidate = (git rev-parse HEAD).Trim()
+$baseline = $candidate
+pwsh -NoProfile -File tools/windows-tun/performance/run_windows_tun_performance_host.ps1 `
+  -PlanOnly -Mode Quick -Topology ClientDirect `
+  -BaselineSha $baseline -CandidateSha $candidate
+```
+
+For A/B, set `$baseline` to the full 40-character commit of a reviewed baseline with the same
+workload, recipe, and evidence contract. For a real run, use an already elevated shell, the reviewed
+Wintun archive described in the [host qualification prerequisites](windows-tun-qualification.md#safety-boundary),
+and a new evidence directory outside the repository:
+
+```powershell
+$evidence = Join-Path $env:TEMP ("ferrum2-host-performance-" + [guid]::NewGuid().ToString("N"))
+pwsh -NoProfile -File tools/windows-tun/performance/run_windows_tun_performance_host.ps1 `
+  -Mode Quick -Topology ClientDirect `
+  -BaselineSha $baseline -CandidateSha $candidate -EvidenceDirectory $evidence `
+  -AcknowledgeHostNetworkMutation
+```
+
+Validate the exported evidence with the same mode, topology, and commits:
+
+```powershell
+python -B -m tools.performance_candidate windows-tun-validate-host-evidence `
+  --evidence-root $evidence --baseline-sha $baseline --candidate-sha $candidate `
+  --mode Quick --topology ClientDirect --policy tools/windows_tun_performance_policy.json
+```
+
+Use `Confirm` or `EndToEnd` consistently in both commands when selecting those profiles/topologies.
+After interruption, use the same public runner with `-RecoveryOnly`; removing live network residue
+requires elevation. The [2026-09-05 Confirm and CPU report](windows-tun-confirm-cpu-profile-report-2026-09-05.md)
+records historical A/A runs and their interpretation limits, not current-checkout qualification.
 
 ## Rule qualification evidence
 

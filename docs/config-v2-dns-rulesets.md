@@ -38,9 +38,10 @@ any listener is prepared. This keeps `ferrum2-config` and `ferrum2-dns` as
 independent dependants of `ferrum2-rule` and prevents a configuration-to-DNS or
 DNS-to-configuration dependency edge.
 
-V1 continues to reject the new fields. In V2, an unconfigured Direct now has
-the explicit, stable system-resolver behavior described below instead of
-implicitly following the presence of `[dns]`.
+Only `schema_version = 2` is accepted. Version 1, a missing version, and unknown
+versions fail validation; there is no legacy runtime or automatic conversion.
+An unconfigured Direct has the explicit, stable system-resolver behavior
+described below, independent of the presence of `[dns]`.
 
 ## Domain resolution and detours
 

@@ -15,8 +15,9 @@ tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
 udp_filtering = "endpoint_independent"
 auto_route = true
-# Strict route defaults to false. When both auto_route and strict_route are true,
-# Windows installs the unsupported-family and traditional DNS-port WFP guards.
+# Strict route defaults to false. With auto_route, strict_route, and auto_dns
+# enabled, Windows installs the traditional DNS-port WFP guard. The additional
+# unsupported-family guard applies only to single-stack TUN, not this dual-stack example.
 strict_route = false
 route_address = ["0.0.0.0/0", "::/0"]
 route_exclude_address = [

@@ -4,8 +4,8 @@
 
 在已显式授权 `-AcknowledgeHostNetworkMutation` 的 Windows 11 宿主机上，`EndToEnd` 与 `ClientDirect` 两套 `Confirm` 均完成 50 个真实 Wintun trial，并通过独立 evidence validator：
 
-- `EndToEnd`：`PASS`，run ID `bcdb3ea3a818`。
-- `ClientDirect`：`PASS`，run ID `88c5cf126531`。
+- `EndToEnd`：runner summary 为 `PASS`，独立 validator 为 `CANDIDATE_WIN`，run ID `bcdb3ea3a818`。
+- `ClientDirect`：runner summary 为 `PASS`，独立 validator 为 `WITHIN_CALIBRATED_BAND`，run ID `88c5cf126531`。
 - 两次 cleanup 均为 `PASS`，残留 adapter、route、address、process、port 全部为 `0`。
 - 两个 Confirm 都是同提交 A/A 运行，用来确认当前实现的绝对性能、稳定性、拓扑差异及主机噪声；它们不能证明某项代码修改带来了性能提升。
 
@@ -86,7 +86,7 @@ A/A 的含义：
 - SHA：`0e62b1e9a95610d9aee84ba7fd18ceb47e148d2a`
 - Run ID：`bcdb3ea3a818`
 - Runner summary：`PASS`
-- Independent validator：`PASS`
+- Independent validator：`CANDIDATE_WIN`（接受状态；同提交 A/A 不代表代码优化收益）
 - Execution：2304.01 s；含 build/cleanup 总耗时 2420.90 s。
 
 | 场景 | 当前值 | 附加延迟 | Client CPU | Server CPU | Client WS | Server WS | Failure delta |
@@ -112,7 +112,7 @@ A/A paired decision：
 - SHA：`21a9f624a00e1a8b655dd73ccbf532405cad307e`
 - Run ID：`88c5cf126531`
 - Runner summary：`PASS`
-- Independent validator：`PASS`
+- Independent validator：`WITHIN_CALIBRATED_BAND`（接受状态）
 - Execution：2342.53 s；含 build/cleanup 总耗时 2460.52 s。
 
 | 场景 | 当前值 | 附加延迟 | Client CPU | Server CPU | Client WS | Server WS | Failure delta |
@@ -285,21 +285,24 @@ WPR CPU verbose 明显改变 workload 时间和调度；profile Quick 的独立�
 
 ## 验证记录
 
-Confirm evidence 使用以下独立入口重新验证，两个命令均返回接受状态：
+Confirm evidence 使用以下独立入口重新验证，两个命令均返回接受状态。2026-09-05 文档核对时
+再次只读验证了原始 evidence：分别返回 `CANDIDATE_WIN` 和 `WITHIN_CALIBRATED_BAND`，
+退出码均为 0。这里的 validator 状态与 runner summary 的 `PASS` 是不同字段。
+以下命令使用 PowerShell 续行语法，从仓库根目录运行：
 
-```text
-python -B -m tools.performance_candidate windows-tun-validate-host-evidence \
-  --evidence-root C:/project/ferrum2-evidence/confirm-endtoend-0e62b1e9 \
-  --baseline-sha 0e62b1e9a95610d9aee84ba7fd18ceb47e148d2a \
-  --candidate-sha 0e62b1e9a95610d9aee84ba7fd18ceb47e148d2a \
-  --mode Confirm --topology EndToEnd \
+```powershell
+python -B -m tools.performance_candidate windows-tun-validate-host-evidence `
+  --evidence-root C:/project/ferrum2-evidence/confirm-endtoend-0e62b1e9 `
+  --baseline-sha 0e62b1e9a95610d9aee84ba7fd18ceb47e148d2a `
+  --candidate-sha 0e62b1e9a95610d9aee84ba7fd18ceb47e148d2a `
+  --mode Confirm --topology EndToEnd `
   --policy tools/windows_tun_performance_policy.json
 
-python -B -m tools.performance_candidate windows-tun-validate-host-evidence \
-  --evidence-root C:/project/ferrum2-evidence/confirm-clientdirect-21a9f624 \
-  --baseline-sha 21a9f624a00e1a8b655dd73ccbf532405cad307e \
-  --candidate-sha 21a9f624a00e1a8b655dd73ccbf532405cad307e \
-  --mode Confirm --topology ClientDirect \
+python -B -m tools.performance_candidate windows-tun-validate-host-evidence `
+  --evidence-root C:/project/ferrum2-evidence/confirm-clientdirect-21a9f624 `
+  --baseline-sha 21a9f624a00e1a8b655dd73ccbf532405cad307e `
+  --candidate-sha 21a9f624a00e1a8b655dd73ccbf532405cad307e `
+  --mode Confirm --topology ClientDirect `
   --policy tools/windows_tun_performance_policy.json
 ```
 

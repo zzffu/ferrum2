@@ -6,6 +6,10 @@ Ferrum2 is a Rust 2024 workspace pinned to Rust 1.97.1. Binaries live in `bins/f
 
 ## Build, Test, and Development Commands
 
+Start with `README.md` for the local SOCKS5 example and `docs/README.md` for configuration,
+architecture, and qualification documentation. Update those entry points when adding or moving a
+public guide or example; verify documented commands against their owning CLI and workflow.
+
 Use locked dependencies for reproducible results:
 
 ```text
@@ -30,10 +34,20 @@ Run the ordinary Python controller tests with `python3` on Unix and `python` on 
 python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
 python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
 python3 -B -m unittest discover -s tests/ci -p 'test_*.py' -v
+python3 -B -m unittest discover -s tests/platform -p 'test_qualify_native.py' -v
 
 python -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
 python -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
 python -B -m unittest discover -s tests/ci -p 'test_*.py' -v
+python -B -m unittest discover -s tests/platform -p 'test_qualify_native.py' -v
+```
+
+The Linux-target check requires that Rust target and its native cross-compilation prerequisites;
+it is not a prerequisite for a Windows-only documentation or application change. On Windows, the
+nonmutating qualification script contract can also be checked with:
+
+```text
+pwsh -NoProfile -File tests/platform/test_windows_tun_host_qualification.ps1
 ```
 
 After building target-specific release binaries, run the unprivileged native contract locally with
@@ -58,7 +72,7 @@ pure in-memory fuzz targets run only in their bounded Linux CI workflow.
 `tests/platform/qualify_native.py --local-contract` may execute its unprivileged loopback binary
 contract locally; omitting `--local-contract` retains hosted-CI identity and evidence checks.
 
-Use `cargo run -p ferrum2-client -- --help` (or `ferrum2-server`) for CLI help. Iterate with targeted tests, then run the full relevant gate.
+Use `cargo run -p ferrum2-client --locked -- --help` (or `ferrum2-server`) for CLI help. Iterate with targeted tests, then run the full relevant gate.
 
 ## Coding Style & Naming Conventions
 
