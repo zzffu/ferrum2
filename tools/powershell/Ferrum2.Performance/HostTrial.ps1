@@ -1,5 +1,90 @@
 Set-StrictMode -Version Latest
 
+function Get-Ferrum2FailureCounterTotal {
+    param([string]$Metrics)
+    # These dimensions are the observability emitter's closed public result families.
+    $policies = @{
+        ferrum2_network_reset_total = @{
+            labels = @{ reason = @('network_change', 'retry'); result = @('started', 'succeeded', 'failed') }
+            failures = @('failed')
+        }
+        ferrum2_network_full_rebuild_total = @{
+            labels = @{
+                reason = @('adapter_damage', 'session_damage', 'address_damage', 'route_damage',
+                    'dns_damage', 'strict_route_damage', 'ownership_ledger_damage')
+                result = @('started', 'succeeded', 'failed')
+            }
+            failures = @('failed')
+        }
+        ferrum2_ruleset_load_total = @{
+            labels = @{ result = @('success', 'failure', 'unchanged') }; failures = @('failure')
+        }
+        ferrum2_ruleset_refresh_total = @{
+            labels = @{ result = @('success', 'failure', 'unchanged') }; failures = @('failure')
+        }
+        ferrum2_dns_resolve_total = @{
+            labels = @{
+                resolver = @('system', 'configured')
+                purpose = @('application', 'fixed_endpoint', 'ruleset_download')
+                result = @('success', 'failure')
+            }
+            failures = @('failure')
+        }
+        ferrum2_tun_strict_route_filter_install_total = @{
+            labels = @{ result = @('success', 'failure') }; failures = @('failure')
+        }
+        ferrum2_outbound_interface_resolution_total = @{
+            labels = @{
+                source = @('outbound_explicit', 'auto_detected', 'route_default', 'system_best_route')
+                result = @('success', 'failure')
+            }
+            failures = @('failure')
+        }
+        ferrum2_tun_udp_association_route_total = @{
+            labels = @{ result = @('success', 'rejected', 'failure', 'stale_generation') }
+            failures = @('rejected', 'failure', 'stale_generation')
+        }
+    }
+    [double]$sum = 0
+    foreach ($line in ($Metrics -split "`n")) {
+        if ($line.StartsWith('#') -or [string]::IsNullOrWhiteSpace($line)) { continue }
+        # Preserve the declared exclusions for out-of-workload Windows probing packets.
+        if ($line -cmatch '^ferrum2_tun_packets_rejected_total\{reason="(?:family_disabled|invalid_destination)"\}\s+') {
+            continue
+        }
+        if ($line -cnotmatch '^([A-Za-z_:][A-Za-z0-9_:]*)') { continue }
+        $name = $Matches[1]
+        $hasResultPolicy = $name -cin @($policies.Keys)
+        if ($line -cnotmatch '^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{([^}]*)\})?\s+([0-9]+(?:\.[0-9]+)?)\s*$') {
+            if ($hasResultPolicy) { throw 'closed failure metric sample is malformed' }
+            continue
+        }
+        $labelText = $Matches[2]
+        $value = [double]::Parse($Matches[3], [Globalization.CultureInfo]::InvariantCulture)
+        if (-not [double]::IsFinite($value)) { throw 'failure metric value is not finite' }
+        $counted = $name -cmatch '(drop|error|reject|failure|failed)'
+        if ($hasResultPolicy) {
+            $policy = $policies[$name]
+            $labels = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+            foreach ($label in ($labelText -split ',')) {
+                if ($label -cnotmatch '^([a-z_][a-z0-9_]*)="([a-z_][a-z0-9_]*)"$') {
+                    throw 'closed failure metric labels are malformed'
+                }
+                $key = $Matches[1]; $encoded = $Matches[2]
+                if ($key -cnotin @($policy.labels.Keys) -or
+                    $encoded -cnotin $policy.labels[$key] -or -not $labels.TryAdd($key, $encoded)) {
+                    throw 'closed failure metric label identity is invalid'
+                }
+            }
+            if ($labels.Count -ne $policy.labels.Count) { throw 'closed failure metric labels are incomplete' }
+            $counted = $counted -or $labels['result'] -cin $policy.failures
+        }
+        # One inclusion decision per sample, even if both classifiers select it.
+        if ($counted) { $sum += $value }
+    }
+    return $sum
+}
+
 function Get-Ferrum2MeasurementInteger {
     param([object]$Value, [string]$Name, [switch]$AllowZero)
     if ($Value -isnot [int] -and $Value -isnot [long] -and

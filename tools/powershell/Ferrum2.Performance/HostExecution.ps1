@@ -393,26 +393,6 @@ function Get-Ferrum2MetricValue {
 }
 
 
-function Get-Ferrum2FailureCounterTotal {
-    param([string]$Metrics)
-    [double]$sum = 0
-    foreach ($line in ($Metrics -split "`n")) {
-        if ($line.StartsWith("#")) { continue }
-        # Windows emits adapter-local IPv6 and address-probing packets outside the benchmark route.
-        if ($line -match '^ferrum2_tun_packets_rejected_total\{reason="(?:family_disabled|invalid_destination)"\}\s+') {
-            continue
-        }
-        if ($line -match '^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{[^}]*\})?\s+([0-9]+(?:\.[0-9]+)?)\s*$') {
-            $value = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
-            $name = $Matches[1]
-            if ($name -cmatch '(drop|error|reject|failure|failed)') {
-                $sum += $value
-            }
-        }
-    }
-    return $sum
-}
-
 function Write-Ferrum2TrialConfigs {
     param(
         [Parameter(Mandatory = $true)][object]$Context,

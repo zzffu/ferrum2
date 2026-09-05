@@ -95,6 +95,16 @@ I/O, latency, CPU, and memory. The non-target CPU guard uses process CPU seconds
 the paired ratio therefore remains comparable when those windows differ. Primary latency direction
 does not change this CPU/work calculation. CPU percentages remain in summaries as observations.
 
+The performance trial's zero-failure-delta guard retains failure/drop/error/reject family-name
+matching and also checks the emitter's closed result labels: failed network reset/full rebuild,
+failed RuleSet load/refresh, DNS resolution, strict-route filter installation and outbound interface
+resolution, plus rejected/failed/stale-generation UDP association route work. Started/succeeded
+lifecycle observations and association-reset cleanup counts are not failures. Known result families
+with missing, duplicate or unknown labels are invalid evidence. Each sample is added at most once;
+distinct families can describe the same root cause, so the sum is failure observations, not an
+independent incident count or error rate. The existing `family_disabled` and `invalid_destination`
+TUN packet-rejection exemptions remain unchanged.
+
 `Lifecycle` is separate: 20 complete product-start, TUN-probe, and product-stop cycles under the
 selected topology. It never changes a default route or disables or enables a physical adapter.
 

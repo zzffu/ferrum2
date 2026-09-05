@@ -940,3 +940,26 @@ root独立复跑66通过（0.984s），diff检查通过。日志 `target/remedia
 `target/remediation-rtl6-final-root.log`；实现/限制在同目录rtl6-implementation.md。
 生命周期新case仅fake child/thread和内存stream，不执行真实runner、产品或benchmark；
 本批未改变v6/v2校准或性能阈值，未补真实build provenance。
+
+### M1l — HT4：保留所有失败标签观察
+
+`Get-Ferrum2FailureCounterTotal` 迁入performance-only HostTrial，HTTP metrics获取仍为shared
+原语。保留原name matcher和两项已声明TUN reason豁免，同时闭合校验reset、full rebuild、
+RuleSet load/refresh、DNS resolve、strict-route install、outbound-interface resolve、UDP
+association route八类result family的完整keys/合法值；缺失、重复或未知label拒绝证据。
+每sample最多计一次，started/succeeded和association正常reset回收不计失败；UDP route的
+stale_generation按未成功工作保守计入。不同family仍可能记录同一根因，不称独立事故数
+或错误率，也不新增吞掉drop的环境豁免。
+
+初始focused7 tests有5项red；新增future failure-name case证明未收窄原matcher，最终8绿。
+主树fullcandidate134有1项失败：并行M4 profile_files未登记完整source bundle。随后以
+当时HEAD archive构造 `target/remediation-audit/ht4-head-snapshot`，仅覆盖两PS、两bundle和
+新test，完整134通过（34.622s）。五个文件与当前源码逐字节hash核对一致，archive保留。
+PS parser、module exports、两完整source closures、nonmutating资格contract和diff检查通过。
+证据 `target/remediation-audit/ht4-{metrics-red,metrics-green,candidate-full,isolated-candidate-full,powershell-parser,qualification-static}.log`，
+范围/逐family来源在ht4-metric-contract.md。未执行产品、live host或benchmark。
+
+performance bundle `b6c2d5d94b941c8969ba6f576852f6c9b374bab05c99cac8ceae231c4256d165`；
+qualification `dcbcbe9686b4c4ac63679dbdbfd6fa370bb7c6c4933dc0b38ea8faaada87531f`。
+新增解析在测量前后执行，不在包转发路径；成本尚未测量，新failure guard可能使此前漏计
+的异常run拒绝，不能用旧零delta报告替代新baseline。
