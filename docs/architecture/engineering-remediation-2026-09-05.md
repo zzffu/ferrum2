@@ -1,8 +1,9 @@
 # Engineering remediation — 2026-09-05
 
-**当前阶段已调整为[先完成全量审查](engineering-audit-2026-09-05.md)，再统一架构设计、
-实现及性能无回退验收，最后进行 profiling 驱动优化。本文下列修改是已执行的候选历史，
-不是完成全量审查或架构验收的声明。**
+**[全量生产静态审查](engineering-audit-2026-09-05.md)已完成，后续采用
+[统一架构设计](engineering-design-2026-09-05.md)按所有权分批实施；先修 Qualification
+证据契约，完成架构与性能无回退验收后才进行 CPU profiling 驱动优化。
+本文下列修改和覆盖表保留为先前阶段的候选历史，不代表当前架构已实现或验收。**
 
 这是持续整改记录，不是生产资格声明。起点 `9bbcea22d0373ff60932f929d93d265c98c0a711`，
 开始时工作区干净。根目录和全部 51 份 scoped `AGENTS.md`、
@@ -26,7 +27,10 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
   为 `36a737fe8808a844ca6bb1b6d3b90406a7107e8c117d52fff042f21bf55daaee`。
   这是本机留存索引，不是新的测量器或验收策略。不提交 target、profiles 或测试凭据。
 
-## Workspace 覆盖清单
+## 先前阶段 Workspace 覆盖清单
+
+当前19个package的生产静态审查状态及逐文件哈希见[全量审查](engineering-audit-2026-09-05.md)。
+本节保留最初阶段的覆盖粒度，便于解释下列历史测试证据。
 
 每项适用根指南及该目录 `AGENTS.md`；测试和工具还继承 `tests/AGENTS.md` 或
 `tools/AGENTS.md` 及更近的 scoped 指南。下表区分静态筛查、具体路径审查和执行验证；

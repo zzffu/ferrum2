@@ -65,6 +65,7 @@ SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。
 - [性能证据说明](docs/performance-evidence.md)：Linux 配对测量和 Windows 主机性能流程。
 - [全量工程审查](docs/architecture/engineering-audit-2026-09-05.md)：当前按 crate 审查进度及后续架构/性能阶段。
+- [整改架构设计](docs/architecture/engineering-design-2026-09-05.md)：全量审查后的所有权、接口、取舍与实施验收顺序。
 - [工程整改记录](docs/architecture/engineering-remediation-2026-09-05.md)：审查覆盖、故障修复与验证缺口；[逐批证据](docs/architecture/engineering-remediation-evidence-2026-09-05.md)保留失败、撤回和性能数据。
 
 ## 开发与验证
