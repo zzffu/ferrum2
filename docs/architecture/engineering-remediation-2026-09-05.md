@@ -140,6 +140,28 @@ admission/relay/lifetime，超过约 800 行生产 owner 的导航阈值。将 s
 公共接口或动态分发。代价是一个内部模块；原有 runtime 完整行为测试和严格 clippy 通过。
 这是职责分离，不是性能优化；余下大模块仍按 A1 跟进。
 
+### R5 — P2：主机测量启动失败丢失取证日志（已修复）
+
+第一轮真实 Quick/EndToEnd A/B 在第 17 次（baseline，UDP 场景第 3 对）启动时等待服务端
+`ferrum2_network_generation` 超时，只有 16/24 次完整记录，不能作为有效性能比较。
+事务 `3daa2d9ce9f4` 清理 PASS、五类残留全零，`benchmark_succeeded=false`；失败运行保留在
+`%TEMP%/ferrum2-remediation-performance-20260905T071858Z`，不可与重跑拼接。
+
+原 `HostExecution.ps1::Start-Ferrum2ProductTrial` 抛错前未返回 runtime，外层 catch 无法导出
+product logs，外层事务随后删除临时树。已经观察到 trial 017 目录没有日志；因此目前无法
+判断原始就绪超时的根因，不能宣称是候选回归或已修复的启动错误。
+
+新增私有 `HostProduct.ps1` 统一拥有产品启动、关闭和启动失败诊断；所有已启动产品在失败
+退出前导出 stdout/stderr，导出失败保留原始错误并发出封闭 warning。网络变更和最终回收仍
+属于原事务。`HostExecution.ps1` 从 1032 行降至 921 行，新 owner 134 行；不是创建第二个
+runner。两个 PowerShell module、两个闭合 source bundle、qualification 源检查、performance
+入口和 Python recipe 同步更新，没有旧路径 shim。
+
+注入测试覆盖 client/server 两个失败点及诊断导出自身失败，比较完整导出文件内容，不启动
+真实进程或网络。新的源 bundle 需要全新测量；旧 A/A 校准不能自动适用。
+101 项 performance controller、55 项 CI controller、PowerShell source/plan 静态合同和
+19 项 workspace policy 均通过。
+
 ### 后续审查项（不等于已确认故障）
 
 | ID / 优先级 | 位置、事实或假设 | 下一步与验收 |

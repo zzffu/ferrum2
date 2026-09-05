@@ -9,6 +9,7 @@ function Read-Ferrum2HostQualificationSourceBundle {
         "tests/platform/invoke_windows_tun_qualification_host_worker.ps1"
         "tests/platform/run_windows_tun_qualification_host.ps1"
         "tools/powershell/Ferrum2.Performance/HostExecution.ps1"
+        "tools/powershell/Ferrum2.Performance/HostProduct.ps1"
         "tools/powershell/Ferrum2.Performance/HostOwnership.ps1"
         "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs"
         "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psd1"

@@ -13,6 +13,7 @@ Add-Type -Path $notificationOwnerPath -ErrorAction Stop
 foreach ($owner in @(
     (Join-Path $performanceRoot "HostOwnership.ps1"),
     (Join-Path $performanceRoot "HostExecution.ps1"),
+    (Join-Path $performanceRoot "HostProduct.ps1"),
     (Join-Path $PSScriptRoot "SourceBundle.ps1"),
     (Join-Path $PSScriptRoot "HostQualification.ps1")
 )) {
