@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use ferrum2_rule::srs::decode_srs;
+use ferrum2_rule::srs::{SrsDecodeLimits, decode_srs};
 
 use crate::match_set::benchmark::{MatchProbe, MatcherKind, match_probe_cases, probe_matches};
 use crate::match_set::generated::{build_generated_match_set, compile_generated_match_set};
@@ -56,7 +56,8 @@ fn generated_binary_srs_matrix_is_deterministic_and_strictly_decoded() {
         assert_eq!(first, second);
         assert_eq!(&first[..4], b"SRS\x02");
 
-        let decoded = decode_srs(Cursor::new(&first)).expect("strictly decode generated SRS");
+        let decoded = decode_srs(Cursor::new(&first), SrsDecodeLimits::default())
+            .expect("strictly decode generated SRS");
         assert_eq!(decoded.version(), SYNTHETIC_SRS_VERSION);
         assert_eq!(decoded.statistics(), generated_srs_statistics(kind, scale));
         let binary = decoded.compile().expect("compile decoded SRS");

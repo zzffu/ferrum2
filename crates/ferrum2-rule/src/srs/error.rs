@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
+use super::SrsLimitKind;
 use crate::RuleCompileError;
 
 /// Matcher carried by a valid SRS structure that Ferrum2 intentionally rejects.
@@ -72,6 +73,8 @@ pub enum SrsErrorKind {
     NonCanonicalVarint,
     IntegerOverflow,
     Allocation,
+    InvalidLimits,
+    LimitExceeded,
     InvalidRuleType,
     InvalidLogicalMode,
     LogicalDepth,
@@ -99,6 +102,8 @@ impl SrsErrorKind {
             Self::NonCanonicalVarint => "ruleset.format.varint",
             Self::IntegerOverflow => "ruleset.format.overflow",
             Self::Allocation => "rule.allocation",
+            Self::InvalidLimits => "ruleset.format.limits",
+            Self::LimitExceeded => "ruleset.format.limit_exceeded",
             Self::InvalidRuleType => "ruleset.format.rule_type",
             Self::InvalidLogicalMode => "ruleset.format.logical_mode",
             Self::LogicalDepth => "ruleset.format.logical_depth",
@@ -125,6 +130,7 @@ pub struct SrsError {
     rule_index: Option<u64>,
     item: Option<u8>,
     unsupported: Option<UnsupportedSrsMatcher>,
+    limit: Option<SrsLimitKind>,
 }
 
 impl SrsError {
@@ -135,12 +141,24 @@ impl SrsError {
             rule_index: None,
             item: None,
             unsupported: None,
+            limit: None,
         }
     }
 
     pub(crate) const fn with_version(mut self, version: u8) -> Self {
         self.version = Some(version);
         self
+    }
+
+    pub(crate) const fn limit(kind: SrsLimitKind) -> Self {
+        let mut error = Self::new(SrsErrorKind::LimitExceeded);
+        error.limit = Some(kind);
+        error
+    }
+
+    /// Returns the closed resource dimension for a decoder limit rejection.
+    pub const fn limit_kind(&self) -> Option<SrsLimitKind> {
+        self.limit
     }
 
     pub(crate) const fn at_rule(mut self, rule_index: u64) -> Self {
@@ -166,6 +184,7 @@ impl SrsError {
             rule_index: Some(rule_index),
             item: None,
             unsupported: Some(matcher),
+            limit: None,
         }
     }
 
@@ -209,7 +228,9 @@ impl fmt::Display for SrsError {
         if let Some(rule_index) = self.rule_index {
             write!(formatter, " rule[{rule_index}]")?;
         }
-        if let Some(matcher) = self.unsupported {
+        if let Some(limit) = self.limit {
+            write!(formatter, ": decoder limit `{}` exceeded", limit.as_str())
+        } else if let Some(matcher) = self.unsupported {
             write!(formatter, ": unsupported matcher `{}`", matcher.as_str())
         } else if let Some(item) = self.item {
             write!(formatter, ": invalid item {item}")

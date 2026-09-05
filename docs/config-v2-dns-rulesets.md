@@ -110,6 +110,15 @@ truncated zlib streams, regex, logical rules, inversion, and other unsupported
 matchers before publishing a snapshot. Inline fields, synthetic sets, and SRS
 sets all compile through the same `MatchSetBuilder` and `CompiledMatchSet`.
 
+Binary SRS decoding has independent per-file admission limits: 64 MiB encoded,
+128 MiB decoded, 100,000 attempted rules, 1,000,000 entries before deduplication,
+8,000,000 cumulative collection elements and 8,000,000 succinct nodes. Recovered
+domain/keyword bytes are limited to 64 MiB; keywords have a 255-byte individual
+limit and a 2 MiB total limit. Repeated values consume these allowances before
+deduplication. Exceeding a limit rejects the file; initial load fails, while a
+failed refresh retains its previous generation. These limits are fixed product
+policy rather than TOML settings, and do not specify a total process-memory limit.
+
 Values inside one RuleSet are ORed. Multiple names in one `rule_set = [...]`
 field are also ORed, while different fields in the same rule remain ANDed.
 RuleSets stay as stable snapshot references and are never expanded into tens of

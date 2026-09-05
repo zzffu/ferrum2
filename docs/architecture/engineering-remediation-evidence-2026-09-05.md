@@ -1150,3 +1150,50 @@ LLVM22.1.6、Cargo1.97.1、pwsh7.6.4；RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS均未�
 较晚的事后环境记录单独保留。候选功能修复继续保留为可审查提交，**性能验收保持未通过**；
 A/A本身不稳定，现有证据不足以将上述变化归因给代码或宣称无回退。继续产品架构整改，
 不进入性能优化，不通过再修工具、删outlier或提高门槛来制造采用结论。
+
+### M2b — SRS 解码的输入、展开与工作准入
+
+本批产品基准 `804f0dc0`，独立于其已完成的Quick测量。`ferrum2-rule::srs`公开入口改为
+`decode_srs(reader, limits)`，旧无限签名删除；ruleset/cache两处、config真实fixture以及
+Rule qualification三处调用同步传入显式默认策略。没有改Windows/M4/Python工具行为或bundle。
+工具中的变更仅是被修改产品接口的必要调用迁移。普通qualification测试仍只编译。
+
+私有`limits`集中闭合维度、穷尽默认值和只能收紧的构造；`decode/context`统一累计预算。
+encoded/decoded分别在source buffering下、zlib上且payload buffering下设64/128MiB边界，
+各自最多一次独立1-byte EOF probe；超量标记先于IO/Compression映射，真实truncated/IO、
+strict stream end、trailing payload/file、unsupported分类保持。声明长度及最小wire需求
+先准入，数据实际读到后才增量保留；未知声明不能先触发整块reserve/resize。unsupported
+字符串在固定8KiB scratch中验证UTF-8后丢弃。
+
+每文件100k规则尝试、1m发射entry、8m累计collection与8m succinct nodes相互独立；重复项
+在dedup前收费。domain wire depth258、logical100；展开64MiB、keyword每条255B/总2MiB。
+原暂定1MiB因现有100k Keyword需1,188,890B而在实现前改为2MiB，未删fixture或设无限例外。
+512Mi work units按请求字节、声明元素、rule/entry及bitmap/rank/遍历/展开收费；失败读可
+保守消耗请求量，最终sort和compile不逐比较收费，所以不是整个API的CPU或时间硬上限。
+
+LOUDS保留已验证compact arrays与有界frame/current key，逐key交collector，删除
+`Vec<Vec<u8>>`完整重建集合；node/bitmap均前进、最终visited闭合，复制前累计entry/bytes。
+IPv6 block覆盖inclusive end后立即成功，避免先加后继在u128::MAX误报overflow，/0不做
+shift128。调用者不再各自选择解码预算或解释尺寸声明；代价是读取/解析计数检查与有限
+额外状态。保留fallible reserve，未扩大unsafe、依赖或lint例外。
+
+验证由实现owner与独立静态review交叉进行。8个新增普通用例使用小fixture和低限额，涵盖
+cap/EOF、CountingRead实际读量cap或cap+1、duplicate entry/bytes、规则/work、unsupported
+UTF8、tiny LOUDS和IPv6 /128、/127、/0。初次唯一失败是新测试成功分支漏SRS framing，
+修正测试构造后通过；没有伪称旧生产代码动态复现失败，也未重试被拦的压力组。
+
+实际执行：rule39/config86/ruleset25通过，四份pinned SRS完成decode/compile；qualification
+no-run及all-targets/all-features check、四包strictclippy/格式通过。root重新locked build
+workspace bins（14.74s），完整普通workspace **681 passed/0 failed/5原ignored**；client
+all-features compile-only，safe TUN128/platform59、platform all-features、GNU cross-target
+check、DNS interop74、全workspace strictclippy/fmt/doc、M4 self-check均通过。普通测试没有
+新增adapter、route/DNS/WFP/interface操作。与M2a相同的Linux/hosted资格缺口仍然存在。
+每条命令、退出码、日志在`target/remediation-audit/m2b-gates.json`；owner首次/最终日志为
+`m2b-{rule-initial,rule-green,integration,qualification-compile,final-rule,final-clippy,final-fmt}.log`。
+完整scope、计费定义和限制在`m2b-srs-implementation.md`，静态fixture基准在
+`m2-srs-fixture-census.md`。Root普通M4 filters/PS/Python在M2a/M1通过，源未变，不重算新覆盖。
+
+未运行timed 100k matrix或SRS前后性能对比；100k keyword限额依据仍是确定的静态字节计算。
+四份pinned通过证明当前默认计数允许这些输入，不是每个预算维度的精确用量/RSS census。
+matcher/automaton、snapshot总量、下载/cache事务与实际工作生命周期仍需独立落实，不能
+把本批称为整个RuleSet生产可用或性能已改善。此候选保留进入后续集成，性能验收单列。

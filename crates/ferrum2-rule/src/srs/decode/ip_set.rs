@@ -3,20 +3,17 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
+use super::context::DecodeContext;
 use super::primitives::{read_be_u64, read_byte, read_exact, read_uvarint};
 use crate::srs::{SrsError, SrsErrorKind};
 
-pub(super) fn read_ip_set<R: Read>(reader: &mut R) -> Result<Vec<IpNet>, SrsError> {
+pub(super) fn read_ip_set<R: Read>(reader: &mut DecodeContext<R>) -> Result<Vec<IpNet>, SrsError> {
     if read_byte(reader)? != 1 {
         return Err(SrsError::new(SrsErrorKind::InvalidIpSet));
     }
     let range_count = read_be_u64(reader)?;
-    let capacity =
-        usize::try_from(range_count).map_err(|_| SrsError::new(SrsErrorKind::IntegerOverflow))?;
+    let range_count = reader.collection(range_count, 10)?;
     let mut networks = Vec::new();
-    networks
-        .try_reserve(capacity)
-        .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
     let mut previous: Option<IpNumber> = None;
     for _ in 0..range_count {
         let from = read_ip_number(reader)?;
@@ -27,7 +24,7 @@ pub(super) fn read_ip_set<R: Read>(reader: &mut R) -> Result<Vec<IpNet>, SrsErro
         if previous.is_some_and(|end| end.family() > from.family() || end >= from) {
             return Err(SrsError::new(SrsErrorKind::InvalidIpSet));
         }
-        decompose_ip_range(from, to, &mut networks)?;
+        decompose_ip_range(from, to, &mut networks, reader)?;
         previous = Some(to);
     }
     Ok(networks)
@@ -48,7 +45,7 @@ impl IpNumber {
     }
 }
 
-fn read_ip_number<R: Read>(reader: &mut R) -> Result<IpNumber, SrsError> {
+fn read_ip_number<R: Read>(reader: &mut DecodeContext<R>) -> Result<IpNumber, SrsError> {
     match read_uvarint(reader)? {
         4 => {
             let mut bytes = [0_u8; 4];
@@ -64,10 +61,11 @@ fn read_ip_number<R: Read>(reader: &mut R) -> Result<IpNumber, SrsError> {
     }
 }
 
-fn decompose_ip_range(
+fn decompose_ip_range<R>(
     from: IpNumber,
     to: IpNumber,
     networks: &mut Vec<IpNet>,
+    context: &mut DecodeContext<R>,
 ) -> Result<(), SrsError> {
     match (from, to) {
         (IpNumber::V4(mut current), IpNumber::V4(end)) => loop {
@@ -75,6 +73,7 @@ fn decompose_ip_range(
             let remaining = u64::from(end) - u64::from(current) + 1;
             let size = 63 - remaining.leading_zeros();
             let host_bits = alignment.min(size) as u8;
+            context.entry(0)?;
             networks
                 .try_reserve(1)
                 .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
@@ -101,6 +100,7 @@ fn decompose_ip_range(
                 127 - remaining.leading_zeros()
             };
             let host_bits = alignment.min(size) as u8;
+            context.entry(0)?;
             networks
                 .try_reserve(1)
                 .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
@@ -109,6 +109,10 @@ fn decompose_ip_range(
                 .map_err(|_| SrsError::new(SrsErrorKind::InvalidIpSet))?;
             networks.push(IpNet::V6(network));
             if host_bits == 128 {
+                break;
+            }
+            let last = current | ((1_u128 << host_bits) - 1);
+            if last == end {
                 break;
             }
             let next = current

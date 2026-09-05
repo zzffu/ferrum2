@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ferrum2_core::CanonicalDomain;
-use ferrum2_rule::srs::{SrsStatistics, decode_srs};
+use ferrum2_rule::srs::{SrsDecodeLimits, SrsStatistics, decode_srs};
 use ferrum2_rule::{MatchSetCapabilities, RuleEngineSnapshotBuilder};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -50,12 +50,13 @@ pub(crate) fn run_generated_binary_srs(
 
             let binary_region = allocation_region();
             let binary_started = Instant::now();
-            let decoded = decode_srs(Cursor::new(&bytes)).map_err(|error| {
-                QualificationError::new(format!(
-                    "generated SRS {}/{scale} decode failed: {error}",
-                    kind.name()
-                ))
-            })?;
+            let decoded =
+                decode_srs(Cursor::new(&bytes), SrsDecodeLimits::default()).map_err(|error| {
+                    QualificationError::new(format!(
+                        "generated SRS {}/{scale} decode failed: {error}",
+                        kind.name()
+                    ))
+                })?;
             let version = decoded.version();
             let statistics = decoded.statistics();
             let capabilities = decoded.capabilities();
@@ -585,9 +586,10 @@ pub(crate) fn run_real_srs(
         let digest = sha256_bytes(&bytes);
         let binary_region = allocation_region();
         let binary_started = Instant::now();
-        let decoded = decode_srs(Cursor::new(&bytes)).map_err(|error| {
-            QualificationError::new(format!("SRS fixture {name} decode failed: {error}"))
-        })?;
+        let decoded =
+            decode_srs(Cursor::new(&bytes), SrsDecodeLimits::default()).map_err(|error| {
+                QualificationError::new(format!("SRS fixture {name} decode failed: {error}"))
+            })?;
         let version = decoded.version();
         let statistics = decoded.statistics();
         let capabilities = decoded.capabilities();

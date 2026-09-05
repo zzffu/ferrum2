@@ -6,7 +6,7 @@ use ferrum2_config::{
     RouteAction, finish_client_v2, prepare_client,
 };
 use ferrum2_core::TargetAddr;
-use ferrum2_rule::srs::decode_srs;
+use ferrum2_rule::srs::{SrsDecodeLimits, decode_srs};
 use ferrum2_rule::{
     DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, Network, RouteMetadata,
     RouteProgramAction, RuleEngineRegistry, RuleEngineSnapshotBuilder,
@@ -24,7 +24,7 @@ fn resources() -> ClientV2Resources {
         .into_iter()
         .zip([ADS_SRS, AI_SRS, CN_SRS, CNIP_SRS])
     {
-        let compiled = decode_srs(bytes)
+        let compiled = decode_srs(bytes, SrsDecodeLimits::default())
             .expect("decode pinned SRS")
             .compile()
             .expect("compile pinned SRS");

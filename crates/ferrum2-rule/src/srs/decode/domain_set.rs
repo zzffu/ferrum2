@@ -1,7 +1,8 @@
 use std::io::Read;
 
+use super::context::DecodeContext;
 use super::primitives::{read_byte, read_byte_vec, read_u64_words};
-use crate::srs::{SrsError, SrsErrorKind};
+use crate::srs::{SrsError, SrsErrorKind, SrsLimitKind};
 
 const DOMAIN_PREFIX_LABEL: char = '\r';
 const DOMAIN_ROOT_LABEL: char = '\n';
@@ -22,19 +23,14 @@ pub(super) struct DomainEntries {
     pub(super) suffix: Vec<String>,
 }
 
-pub(super) fn read_domain_set<R: Read>(reader: &mut R) -> Result<DomainEntries, SrsError> {
-    let keys = read_succinct_set(reader)?;
+pub(super) fn read_domain_set<R: Read>(
+    reader: &mut DecodeContext<R>,
+) -> Result<DomainEntries, SrsError> {
     let mut exact = Vec::new();
     let mut suffix = Vec::new();
-    exact
-        .try_reserve(keys.len())
-        .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-    suffix
-        .try_reserve(keys.len())
-        .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-    for key in keys {
+    visit_succinct_set(reader, |key| {
         let reversed =
-            std::str::from_utf8(&key).map_err(|_| SrsError::new(SrsErrorKind::InvalidUtf8))?;
+            std::str::from_utf8(key).map_err(|_| SrsError::new(SrsErrorKind::InvalidUtf8))?;
         let mut value = String::new();
         value
             .try_reserve_exact(reversed.len())
@@ -43,23 +39,39 @@ pub(super) fn read_domain_set<R: Read>(reader: &mut R) -> Result<DomainEntries, 
         match value.chars().next() {
             Some(DOMAIN_ROOT_LABEL) => {
                 value.remove(0);
-                suffix.push(normalize_domain(value)?);
+                push_domain(&mut suffix, normalize_domain(value)?)?;
             }
             Some(DOMAIN_PREFIX_LABEL) => {
                 value.remove(0);
                 if value.starts_with('.') {
                     value.remove(0);
                 }
-                suffix.push(normalize_domain(value)?);
+                push_domain(&mut suffix, normalize_domain(value)?)?;
             }
-            Some(_) => exact.push(normalize_domain(value)?),
+            Some(_) => push_domain(&mut exact, normalize_domain(value)?)?,
             None => return Err(SrsError::new(SrsErrorKind::InvalidDomainSet)),
         }
-    }
+        Ok(())
+    })?;
     Ok(DomainEntries { exact, suffix })
 }
 
-pub(super) fn read_succinct_set<R: Read>(reader: &mut R) -> Result<Vec<Vec<u8>>, SrsError> {
+fn push_domain(values: &mut Vec<String>, value: String) -> Result<(), SrsError> {
+    values
+        .try_reserve(1)
+        .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
+    values.push(value);
+    Ok(())
+}
+
+pub(super) fn skip_succinct_set<R: Read>(reader: &mut DecodeContext<R>) -> Result<(), SrsError> {
+    visit_succinct_set(reader, |_| Ok(()))
+}
+
+fn visit_succinct_set<R: Read>(
+    reader: &mut DecodeContext<R>,
+    mut emit: impl FnMut(&[u8]) -> Result<(), SrsError>,
+) -> Result<(), SrsError> {
     if read_byte(reader)? != 0 {
         return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
     }
@@ -105,6 +117,8 @@ pub(super) fn read_succinct_set<R: Read>(reader: &mut R) -> Result<Vec<Vec<u8>>,
         return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
     }
 
+    reader.charge(SrsLimitKind::DomainNodes, ones as u64)?;
+    reader.work(used_bits as u64)?;
     let mut selects = Vec::new();
     selects
         .try_reserve_exact(ones)
@@ -117,6 +131,7 @@ pub(super) fn read_succinct_set<R: Read>(reader: &mut R) -> Result<Vec<Vec<u8>>,
     if selects.len() != ones || bit(&leaves, 0) {
         return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
     }
+    reader.work(bitmap.len() as u64)?;
     let ranks = word_ranks(&bitmap)?;
 
     #[derive(Clone, Copy)]
@@ -126,18 +141,15 @@ pub(super) fn read_succinct_set<R: Read>(reader: &mut R) -> Result<Vec<Vec<u8>>,
     }
     let mut frames = Vec::new();
     frames
-        .try_reserve_exact(256)
+        .try_reserve_exact(1)
         .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
     frames.push(Frame { node: 0, bitmap: 0 });
     let mut current = Vec::new();
-    current
-        .try_reserve_exact(256)
-        .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-    let mut keys = Vec::new();
-    keys.try_reserve_exact(ones.min(labels.len()))
-        .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
+    let mut visited = 1_usize;
+    let mut emitted = 0_usize;
 
     while let Some(frame) = frames.last_mut() {
+        reader.work(1)?;
         if frame.bitmap > last_one {
             return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
         }
@@ -161,26 +173,32 @@ pub(super) fn read_succinct_set<R: Read>(reader: &mut R) -> Result<Vec<Vec<u8>>,
         let label = *labels
             .get(label_index)
             .ok_or_else(|| SrsError::new(SrsErrorKind::InvalidDomainSet))?;
+        reader.depth(SrsLimitKind::DomainDepth, current.len() + 1)?;
         current
             .try_reserve(1)
             .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
         current.push(label);
         let next_node = count_zeros(&bitmap, &ranks, frame.bitmap + 1)?;
-        if next_node == 0 || next_node >= ones {
+        if next_node <= frame.node || next_node >= ones {
             return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
         }
         let next_bitmap = selects
             .get(next_node - 1)
             .and_then(|position| position.checked_add(1))
             .ok_or_else(|| SrsError::new(SrsErrorKind::InvalidDomainSet))?;
+        if next_bitmap <= frame.bitmap || next_bitmap > last_one {
+            return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
+        }
+        visited = visited
+            .checked_add(1)
+            .ok_or_else(|| SrsError::new(SrsErrorKind::IntegerOverflow))?;
+        if visited > ones {
+            return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
+        }
         if bit(&leaves, next_node) {
-            let mut key = Vec::new();
-            key.try_reserve_exact(current.len())
-                .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-            key.extend_from_slice(&current);
-            keys.try_reserve(1)
-                .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-            keys.push(key);
+            reader.entry(current.len())?;
+            emit(&current)?;
+            emitted += 1;
         }
         frames
             .try_reserve(1)
@@ -190,10 +208,10 @@ pub(super) fn read_succinct_set<R: Read>(reader: &mut R) -> Result<Vec<Vec<u8>>,
             bitmap: next_bitmap,
         });
     }
-    if keys.is_empty() {
+    if emitted == 0 || visited != ones {
         return Err(SrsError::new(SrsErrorKind::InvalidDomainSet));
     }
-    Ok(keys)
+    Ok(())
 }
 
 fn word_ranks(words: &[u64]) -> Result<Vec<usize>, SrsError> {

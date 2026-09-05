@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ferrum2_rule::srs::decode_srs;
+use ferrum2_rule::srs::{SrsDecodeLimits, decode_srs};
 use ferrum2_rule::{CompiledMatchSet, MatchSetCapabilities};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -56,7 +56,7 @@ pub(crate) struct CompiledFile {
 pub(crate) fn compile_file(path: &Path) -> Result<CompiledFile, RuleSetLoadError> {
     let file =
         File::open(path).map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::CacheRead))?;
-    let decoded = decode_srs(file)
+    let decoded = decode_srs(file, SrsDecodeLimits::default())
         .map_err(|error| RuleSetLoadError::new(RuleSetLoadErrorKind::Decode(error.kind())))?;
     let capabilities = decoded.capabilities();
     let srs_version = decoded.version();
@@ -116,7 +116,7 @@ pub(crate) fn read_cache_sync(
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::CacheRead))?;
-    let decoded = decode_srs(file)
+    let decoded = decode_srs(file, SrsDecodeLimits::default())
         .map_err(|error| RuleSetLoadError::new(RuleSetLoadErrorKind::Decode(error.kind())))?;
     let capabilities = decoded.capabilities();
     let srs_version = decoded.version();

@@ -3,14 +3,15 @@ use std::io::Read;
 
 use ipnet::IpNet;
 
-use super::domain_set::{read_domain_set, read_succinct_set};
+use super::context::DecodeContext;
+use super::domain_set::{read_domain_set, skip_succinct_set};
 use super::ip_set::read_ip_set;
 use super::primitives::{
-    read_bool, read_byte, read_interface_address_map, read_prefix_slice, read_string_slice,
-    read_u8_slice, read_u16_slice, read_uvarint,
+    read_bool, read_byte, read_interface_address_map, read_keywords, read_prefix_slice,
+    read_u8_slice, read_u16_slice, read_uvarint, skip_string_slice,
 };
 use super::{DecodedSrsRuleSet, SrsStatistics};
-use crate::srs::{SrsError, SrsErrorKind, UnsupportedSrsMatcher};
+use crate::srs::{SrsError, SrsErrorKind, SrsLimitKind, UnsupportedSrsMatcher};
 
 const MAX_LOGICAL_DEPTH: usize = 100;
 
@@ -61,34 +62,18 @@ impl Parser {
         }
     }
 
-    pub(super) fn reserve_rules(&mut self, count: usize) -> Result<(), SrsError> {
-        // A valid file may have no supported entries in many rules. Reserving a
-        // small rule-correlated baseline keeps ordinary multi-rule files cheap
-        // without treating rule count as an entry count or a configured limit.
-        let baseline = count.min(1024);
-        self.exact_domains
-            .try_reserve(baseline)
-            .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-        self.domain_suffixes
-            .try_reserve(baseline)
-            .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-        self.domain_keywords
-            .try_reserve(baseline)
-            .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
-        self.ip_cidrs
-            .try_reserve(baseline)
-            .map_err(|_| SrsError::new(SrsErrorKind::Allocation))
-    }
-
     pub(super) fn read_rule<R: Read>(
         &mut self,
-        reader: &mut R,
+        reader: &mut DecodeContext<R>,
         rule_index: u64,
         depth: usize,
     ) -> Result<(), SrsError> {
         if depth > MAX_LOGICAL_DEPTH {
             return Err(SrsError::new(SrsErrorKind::LogicalDepth));
         }
+        reader.depth(SrsLimitKind::LogicalDepth, depth)?;
+        reader.charge(SrsLimitKind::Rules, 1)?;
+        reader.work(1)?;
         match read_byte(reader)? {
             0 => self.read_default_rule(reader, rule_index),
             1 => self.read_logical_rule(reader, rule_index, depth),
@@ -98,7 +83,7 @@ impl Parser {
 
     fn read_logical_rule<R: Read>(
         &mut self,
-        reader: &mut R,
+        reader: &mut DecodeContext<R>,
         rule_index: u64,
         depth: usize,
     ) -> Result<(), SrsError> {
@@ -108,6 +93,8 @@ impl Parser {
             _ => return Err(SrsError::new(SrsErrorKind::InvalidLogicalMode)),
         }
         let count = read_uvarint(reader)?;
+        reader.rule_count(count)?;
+        let count = reader.collection(count, 3)?;
         for _ in 0..count {
             self.read_rule(reader, rule_index, depth + 1)?;
         }
@@ -120,7 +107,7 @@ impl Parser {
 
     fn read_default_rule<R: Read>(
         &mut self,
-        reader: &mut R,
+        reader: &mut DecodeContext<R>,
         rule_index: u64,
     ) -> Result<(), SrsError> {
         let mut seen = 0_u32;
@@ -148,7 +135,7 @@ impl Parser {
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::QueryType);
                 }
                 ITEM_NETWORK => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::Network);
                 }
                 ITEM_DOMAIN => {
@@ -157,7 +144,7 @@ impl Parser {
                     append(&mut self.domain_suffixes, domains.suffix)?;
                 }
                 ITEM_DOMAIN_KEYWORD => {
-                    let keywords = read_string_slice(reader)?;
+                    let keywords = read_keywords(reader)?;
                     self.domain_keywords
                         .try_reserve(keywords.len())
                         .map_err(|_| SrsError::new(SrsErrorKind::Allocation))?;
@@ -166,7 +153,7 @@ impl Parser {
                     }
                 }
                 ITEM_DOMAIN_REGEX => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::DomainRegex);
                 }
                 ITEM_SOURCE_IP_CIDR => {
@@ -179,7 +166,7 @@ impl Parser {
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::SourcePort);
                 }
                 ITEM_SOURCE_PORT_RANGE => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::SourcePortRange);
                 }
                 ITEM_PORT => {
@@ -187,35 +174,35 @@ impl Parser {
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::Port);
                 }
                 ITEM_PORT_RANGE => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::PortRange);
                 }
                 ITEM_PROCESS_NAME => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::ProcessName);
                 }
                 ITEM_PROCESS_PATH => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::ProcessPath);
                 }
                 ITEM_PACKAGE_NAME => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::PackageName);
                 }
                 ITEM_WIFI_SSID => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::WifiSsid);
                 }
                 ITEM_WIFI_BSSID => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::WifiBssid);
                 }
                 ITEM_ADGUARD_DOMAIN => {
-                    read_succinct_set(reader)?;
+                    skip_succinct_set(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::AdGuardDomain);
                 }
                 ITEM_PROCESS_PATH_REGEX => {
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::ProcessPathRegex);
                 }
                 ITEM_NETWORK_TYPE => {
@@ -260,7 +247,7 @@ impl Parser {
                 ITEM_PACKAGE_NAME_REGEX => {
                     // Added in SRS v5, which is deliberately outside the
                     // repository-pinned sing-box 1.13 format range.
-                    read_string_slice(reader)?;
+                    skip_string_slice(reader)?;
                     self.mark_unsupported(rule_index, UnsupportedSrsMatcher::PackageNameRegex);
                     return Err(SrsError::new(SrsErrorKind::InvalidItem).at_item(item));
                 }

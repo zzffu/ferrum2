@@ -37,7 +37,7 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M1m / CPU工具执行边界 | 私有helper group/双pipe/期限；仅COLLECTED诊断；有界container与输出路径验证 | WSL专项24、完整CI80通过；Windows m0 93/5旧ignored、严格clippy及产品bins build通过；未真实profile |
 | M1n / M4-03/04/05/08/09 | 复用probe capture、完整SOCKS期限、输出路径先验；完整DNS响应与负载计数；取消虚假query-drain通过声明 | 边界8+DNS6、self-check、严格clippy/fmt、candidate134及policy20通过；query owner与OS强制清理仍未验证 |
 | M2a / FND-01/02（配置路径） | `804f0dc0`：私有准入图先执行原有规模/结构限制；typed edges 与共享摘要替代递归 capability 和首跳路径枚举 | config86；workspace673/5旧ignored；safe TUN128/platform59；DNS interop74；compile-only、全workspace lint/fmt/doc及GNU check通过。A/A与A/B均24/24、清理全零，但性能均REGRESSION；未通过无回退验收 |
-| M2b / FND-03/04（SRS解码层） | 源码实现中；先按静态fixture census修正暂定keyword总额为2MiB，保留现有100k场景 | 尚未构建或测试；与M2a固定提交性能测量隔离，不属于804f0dc0 |
+| M2b / FND-03/04（SRS解码层） | 显式限额与统一累计预算；分配前准入；逐key collector替代完整中间展开；IPv6最大inclusive end正确终止；全部decoder调用迁移 | rule39/config86/ruleset25；四pinned fixture通过；workspace681/5旧ignored；client/qualification compile-only、全workspace严格lint/fmt/doc、safe平台及GNU check通过。未测SRS性能，不属于804f0dc0 |
 
 ## 环境与暂定验收
 

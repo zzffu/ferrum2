@@ -1,19 +1,25 @@
+mod context;
 mod domain_set;
 mod framing;
 mod ip_set;
 mod parser;
 mod primitives;
 
+#[cfg(test)]
+mod bounds_tests;
+
 use std::io::{BufRead, BufReader, Read};
 
 use ipnet::IpNet;
 
 use super::error::{SrsError, SrsErrorKind};
+use super::{SrsDecodeLimits, SrsLimitKind};
 use crate::{CompiledMatchSet, MatchSetBuilder, MatchSetCapabilities};
 
+use context::{BoundedReader, DecodeContext};
 use framing::StrictZlibDecoder;
 use parser::Parser;
-use primitives::{map_payload_io, map_source_io, read_byte, read_exact, read_uvarint};
+use primitives::{map_payload_io, map_source_io, read_uvarint};
 
 #[cfg(test)]
 use crate::srs::UnsupportedSrsMatcher;
@@ -98,26 +104,49 @@ impl std::fmt::Debug for DecodedSrsRuleSet {
 }
 
 /// Strictly reads SRS versions emitted by the repository-pinned sing-box 1.13.x.
-pub fn decode_srs<R: Read>(reader: R) -> Result<DecodedSrsRuleSet, SrsError> {
-    let mut source = BufReader::new(reader);
+/// Applies the explicit per-file decoder limits before allocation/expansion.
+/// One independent EOF probe is permitted at each exact encoded/decoded bound.
+pub fn decode_srs<R: Read>(
+    reader: R,
+    limits: SrsDecodeLimits,
+) -> Result<DecodedSrsRuleSet, SrsError> {
+    let mut source = BufReader::new(BoundedReader::new(
+        reader,
+        limits,
+        SrsLimitKind::EncodedBytes,
+    ));
     let mut magic = [0_u8; 3];
-    read_exact(&mut source, &mut magic)?;
+    source.read_exact(&mut magic).map_err(map_source_io)?;
     if magic != MAGIC {
         return Err(SrsError::new(SrsErrorKind::InvalidMagic));
     }
-    let version = read_byte(&mut source)?;
+    let mut version_byte = [0];
+    source
+        .read_exact(&mut version_byte)
+        .map_err(map_source_io)?;
+    let version = version_byte[0];
     if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
         return Err(SrsError::new(SrsErrorKind::UnsupportedVersion).with_version(version));
     }
 
     let decoder = StrictZlibDecoder::new(source);
-    let mut payload = BufReader::new(decoder);
+    let mut payload = DecodeContext::new(
+        BufReader::new(BoundedReader::new(
+            decoder,
+            limits,
+            SrsLimitKind::DecodedBytes,
+        )),
+        limits,
+    );
     let rule_count = read_uvarint(&mut payload).map_err(|error| error.with_version(version))?;
-    let rule_capacity = usize::try_from(rule_count)
-        .map_err(|_| SrsError::new(SrsErrorKind::IntegerOverflow).with_version(version))?;
+    payload
+        .rule_count(rule_count)
+        .map_err(|error| error.with_version(version))?;
+    payload
+        .collection(rule_count, 3)
+        .map_err(|error| error.with_version(version))?;
 
     let mut parser = Parser::new(version);
-    parser.reserve_rules(rule_capacity)?;
     for rule_index in 0..rule_count {
         parser
             .read_rule(&mut payload, rule_index, 0)
@@ -125,14 +154,14 @@ pub fn decode_srs<R: Read>(reader: R) -> Result<DecodedSrsRuleSet, SrsError> {
     }
 
     let mut extra = [0_u8; 1];
-    match payload.read(&mut extra) {
+    match payload.reader.read(&mut extra) {
         Ok(0) => {}
         Ok(_) => {
             return Err(SrsError::new(SrsErrorKind::TrailingPayload).with_version(version));
         }
         Err(error) => return Err(map_payload_io(error).with_version(version)),
     }
-    let decoder = payload.into_inner();
+    let decoder = payload.reader.into_inner().into_inner();
     let mut source = decoder.into_inner();
     if !source.fill_buf().map_err(map_source_io)?.is_empty() {
         return Err(SrsError::new(SrsErrorKind::TrailingFileData).with_version(version));
@@ -190,8 +219,11 @@ mod tests {
 
     #[test]
     fn supported_keyword_compiles_through_the_shared_match_set() {
-        let decoded = decode_srs(one_string_rule(ITEM_DOMAIN_KEYWORD, "OpenAI", false).as_slice())
-            .expect("decode keyword");
+        let decoded = decode_srs(
+            one_string_rule(ITEM_DOMAIN_KEYWORD, "OpenAI", false).as_slice(),
+            SrsDecodeLimits::default(),
+        )
+        .expect("decode keyword");
         assert_eq!(decoded.version(), 2);
         assert_eq!(decoded.statistics().domain_keywords, 1);
         let compiled = decoded.compile().expect("compile keyword");
@@ -206,7 +238,8 @@ mod tests {
         append_string_rule(&mut payload, ITEM_DOMAIN_KEYWORD, "first-token", false);
         append_string_rule(&mut payload, ITEM_DOMAIN_KEYWORD, "second-token", false);
 
-        let decoded = decode_srs(srs(&payload, 2).as_slice()).expect("decode two defaults");
+        let decoded = decode_srs(srs(&payload, 2).as_slice(), SrsDecodeLimits::default())
+            .expect("decode two defaults");
         assert_eq!(decoded.statistics().rules, 2);
         assert_eq!(decoded.statistics().domain_keywords, 2);
         let compiled = decoded.compile().expect("compile merged defaults");
@@ -218,7 +251,8 @@ mod tests {
     fn unknown_item_fails_with_a_closed_malformed_item_error() {
         let unknown = 0x7f;
         let encoded = srs(&[1, 0, unknown], 2);
-        let error = decode_srs(encoded.as_slice()).expect_err("unknown item accepted");
+        let error = decode_srs(encoded.as_slice(), SrsDecodeLimits::default())
+            .expect_err("unknown item accepted");
         assert_eq!(error.kind(), SrsErrorKind::InvalidItem);
         assert_eq!(error.rule_index(), Some(0));
         assert_eq!(error.item(), Some(unknown));
@@ -227,23 +261,29 @@ mod tests {
 
     #[test]
     fn unsupported_structures_are_fully_classified() {
-        let regex =
-            decode_srs(one_string_rule(ITEM_DOMAIN_REGEX, ".*", false).as_slice()).unwrap_err();
+        let regex = decode_srs(
+            one_string_rule(ITEM_DOMAIN_REGEX, ".*", false).as_slice(),
+            SrsDecodeLimits::default(),
+        )
+        .unwrap_err();
         assert_eq!(regex.kind(), SrsErrorKind::UnsupportedMatcher);
         assert_eq!(
             regex.unsupported_matcher(),
             Some(UnsupportedSrsMatcher::DomainRegex)
         );
 
-        let invert =
-            decode_srs(one_string_rule(ITEM_DOMAIN_KEYWORD, "x", true).as_slice()).unwrap_err();
+        let invert = decode_srs(
+            one_string_rule(ITEM_DOMAIN_KEYWORD, "x", true).as_slice(),
+            SrsDecodeLimits::default(),
+        )
+        .unwrap_err();
         assert_eq!(
             invert.unsupported_matcher(),
             Some(UnsupportedSrsMatcher::Invert)
         );
 
         let logical = srs(&[1, 1, 0, 0, 0], 2);
-        let logical = decode_srs(logical.as_slice()).unwrap_err();
+        let logical = decode_srs(logical.as_slice(), SrsDecodeLimits::default()).unwrap_err();
         assert_eq!(
             logical.unsupported_matcher(),
             Some(UnsupportedSrsMatcher::LogicalRule)
@@ -253,17 +293,23 @@ mod tests {
     #[test]
     fn malformed_headers_versions_varints_and_tails_fail_closed() {
         assert_eq!(
-            decode_srs(&b"bad"[..]).unwrap_err().kind(),
+            decode_srs(&b"bad"[..], SrsDecodeLimits::default())
+                .unwrap_err()
+                .kind(),
             SrsErrorKind::InvalidMagic
         );
         assert_eq!(
-            decode_srs(&b"SRS\x05"[..]).unwrap_err().kind(),
+            decode_srs(&b"SRS\x05"[..], SrsDecodeLimits::default())
+                .unwrap_err()
+                .kind(),
             SrsErrorKind::UnsupportedVersion
         );
 
         let noncanonical = srs(&[0x81, 0x00], 2);
         assert_eq!(
-            decode_srs(noncanonical.as_slice()).unwrap_err().kind(),
+            decode_srs(noncanonical.as_slice(), SrsDecodeLimits::default())
+                .unwrap_err()
+                .kind(),
             SrsErrorKind::NonCanonicalVarint
         );
 
@@ -272,21 +318,27 @@ mod tests {
         payload.extend([0, ITEM_DOMAIN_KEYWORD, 1, 1, b'x', ITEM_FINAL, 0, 7]);
         let trailing_payload = srs(&payload, 2);
         assert_eq!(
-            decode_srs(trailing_payload.as_slice()).unwrap_err().kind(),
+            decode_srs(trailing_payload.as_slice(), SrsDecodeLimits::default())
+                .unwrap_err()
+                .kind(),
             SrsErrorKind::TrailingPayload
         );
 
         let mut trailing_file = one_string_rule(ITEM_DOMAIN_KEYWORD, "x", false);
         trailing_file.push(7);
         assert_eq!(
-            decode_srs(trailing_file.as_slice()).unwrap_err().kind(),
+            decode_srs(trailing_file.as_slice(), SrsDecodeLimits::default())
+                .unwrap_err()
+                .kind(),
             SrsErrorKind::TrailingFileData
         );
 
         let mut truncated = one_string_rule(ITEM_DOMAIN_KEYWORD, "x", false);
         truncated.truncate(truncated.len() - 2);
         assert!(matches!(
-            decode_srs(truncated.as_slice()).unwrap_err().kind(),
+            decode_srs(truncated.as_slice(), SrsDecodeLimits::default())
+                .unwrap_err()
+                .kind(),
             SrsErrorKind::Truncated | SrsErrorKind::Compression
         ));
     }
@@ -325,7 +377,8 @@ mod tests {
         ];
         let mut compiled = Vec::new();
         for (fixture, exact, suffix, keyword, cidr) in cases {
-            let decoded = decode_srs(*fixture).expect("decode pinned fixture");
+            let decoded =
+                decode_srs(*fixture, SrsDecodeLimits::default()).expect("decode pinned fixture");
             let stats = decoded.statistics();
             assert_eq!(decoded.version(), 2);
             assert_eq!(stats.rules, 1);
