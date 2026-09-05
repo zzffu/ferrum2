@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
+import os
 import pathlib
 import sys
 from decimal import Decimal
@@ -194,14 +194,28 @@ def summarize_evidence(
                 f"{member} evidence directory is missing",
                 missing_scenarios=list(planned),
             )
-        files = sorted(root.glob("*.jsonl"))
+        expected_files = len(planned) * plan["pairs"]
+        files = []
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if pathlib.PurePath(entry.name).match("*.jsonl"):
+                        files.append(root / entry.name)
+                        if len(files) > expected_files:
+                            raise CandidateControlError(
+                                f"{member} evidence directory has too many JSONL files"
+                            )
+        except OSError as error:
+            raise CandidateControlError(f"unable to enumerate {member} evidence") from error
+        files.sort()
         if not files:
             raise CandidateControlError(
                 f"{member} evidence directory has no JSONL files",
                 missing_scenarios=list(planned),
             )
         for path in files:
-            row = _read_trial(path)
+            evidence = _read_trial(path)
+            row = evidence.value
             scenario, pair, row_member = _validate_trial(
                 row,
                 source_member=member,
@@ -254,7 +268,7 @@ def summarize_evidence(
                 {
                     "member": member,
                     "file": path.name,
-                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "sha256": evidence.sha256,
                 }
             )
     expected = {

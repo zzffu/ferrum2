@@ -703,3 +703,22 @@ root整合检查：`python -B -m unittest discover -s tests/performance_candidat
 `7ee17c346631df87216a5b045bb46a3972e6cefae26dfe3db70952291b7ac52e`；完整bundle为
 `33182ceee547176d35020b775a84401da55abad87e50a0b0674a1f2eac0f7776`。
 没有新性能测量；旧bundle结果不升级为当前验收。marker窗口偏差、host清理读回等其余M1问题仍待修复。
+
+### M1c — CT-03/04/06：读取、身份和输出的文件所有权
+
+Linux `_read_trial` 复用共享 bounded closed JSON reader，一次读出解析值、原始bytes的
+SHA-256和内容字节数；summary不再重新打开文件计算digest。单行、UTF-8、重复键、
+nonfinite及各场景byte cap保留。共享reader只多存一个长度，不让所有调用者保留raw buffer。
+即使stat后文件增长，read最多达到outer cap+probe；普通行仍按原16KiB限界。
+
+发现 `islice(Path.glob(...))` 仍会由本机Python3.11 pathlib先构建全部目录项，review后改为
+`with os.scandir`逐项处理，按host原有大小写匹配保留至计划文件数+1即拒绝并关闭迭代器。
+匹配列表内存有界；不声称含大量非证据文件的目录扫描具有固定墙钟时限。
+输出临时路径在创建后、write前登记，write/flush/fsync/replace失败都保留原目的文件并清临时文件。
+
+新增 `test_linux_evidence_io.py` 与 `test_output.py`：紧凑输入/注入I/O，覆盖增长文件、
+同读哈希（validation后文件被更换）、准确行与byte边界、首个超额提前关闭枚举器、平台
+大小写、输出各阶段失败与成功。初始5项有5 failures/1个新接口error；额外数量及惰性枚举
+测试各在旧实现失败。最终相关64项通过；root整合full candidate115通过，包含更新后的scale
+直接caller。日志 `target/remediation-ct-io-{red,green,count-red,enumeration-red,regression}.log`
+和 `target/remediation-m1-candidate-full.log`。未更改schema、source bundle或性能policy。

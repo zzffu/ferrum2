@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 
 from tools.performance_candidate.identity import COMMIT_SHA
-from tools.performance_candidate.json_contract import CandidateControlError, SHA256, _optional_u64, _require_pattern, _required_string, _required_u64, _strict_json
+from tools.performance_candidate.json_contract import BoundedClosedJson, CandidateControlError, SHA256, _optional_u64, _require_pattern, _required_string, _required_u64, read_bounded_closed_json
 from tools.performance_candidate.linux.scale import SCALE_SCENARIO, SCALE_TRIAL_MAX_BYTES
 from tools.performance_candidate.linux.scale_trial import _validate_scale_evidence
 from tools.performance_candidate.linux.evidence_contract import PROFILE_TRIAL_SCHEMA_VERSION
@@ -59,28 +59,12 @@ PROFILE_FIELDS = frozenset(
 )
 
 
-def _read_trial(path: pathlib.Path) -> dict[str, object]:
-    try:
-        raw = path.read_bytes()
-    except (OSError, UnicodeError) as error:
-        raise CandidateControlError(
-            f"unable to read evidence file {path.name}"
-        ) from error
-    if len(raw) > SCALE_TRIAL_MAX_BYTES + 1:
-        raise CandidateControlError(
-            f"evidence file {path.name} exceeds the scale byte bound"
-        )
-    try:
-        lines = raw.decode("utf-8").splitlines()
-    except UnicodeError as error:
-        raise CandidateControlError(
-            f"evidence file {path.name} is not UTF-8"
-        ) from error
-    if len(lines) != 1 or not lines[0]:
-        raise CandidateControlError(
-            f"evidence file {path.name} must contain exactly one JSON row"
-        )
-    row = _strict_json(lines[0], source=f"evidence file {path.name}")
+def _read_trial(path: pathlib.Path) -> BoundedClosedJson:
+    evidence = read_bounded_closed_json(
+        path, maximum_bytes=SCALE_TRIAL_MAX_BYTES + 1,
+        source=f"evidence file {path.name}", layout="single_row",
+    )
+    row = evidence.value
     if type(row) is not dict:
         raise CandidateControlError(f"evidence file {path.name} must contain an object")
     if set(row) != PROFILE_FIELDS:
@@ -89,17 +73,16 @@ def _read_trial(path: pathlib.Path) -> dict[str, object]:
         raise CandidateControlError(
             f"evidence schema mismatch in {path.name}: missing={missing}, unexpected={unexpected}"
         )
-    line_bytes = len(lines[0].encode("utf-8"))
     limit = (
         SCALE_TRIAL_MAX_BYTES
         if row.get("scenario") == SCALE_SCENARIO
         else REGULAR_TRIAL_MAX_BYTES
     )
-    if line_bytes > limit:
+    if evidence.content_bytes > limit:
         raise CandidateControlError(
             f"evidence file {path.name} exceeds its scenario byte bound"
         )
-    return row
+    return evidence
 
 
 def _validate_trial(

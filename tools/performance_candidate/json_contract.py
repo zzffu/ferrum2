@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 
 
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -32,6 +33,7 @@ class CandidateControlError(ValueError):
 class BoundedClosedJson:
     value: object
     sha256: str
+    content_bytes: int
 
 
 def _reject_json_constant(value: str) -> object:
@@ -77,7 +79,8 @@ def _strict_json(text: str, *, source: str) -> object:
 
 
 def read_bounded_closed_json(
-    path: pathlib.Path, *, maximum_bytes: int, source: str
+    path: pathlib.Path, *, maximum_bytes: int, source: str,
+    layout: Literal["document", "single_row"] = "document",
 ) -> BoundedClosedJson:
     if type(maximum_bytes) is not int or maximum_bytes <= 0:
         raise CandidateControlError(f"{source} has an invalid byte bound")
@@ -98,9 +101,19 @@ def read_bounded_closed_json(
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise CandidateControlError(f"{source} must be strict UTF-8") from error
+    content_bytes = len(raw)
+    if layout == "single_row":
+        lines = text.splitlines()
+        if len(lines) != 1 or not lines[0]:
+            raise CandidateControlError(f"{source} must contain exactly one JSON row")
+        text = lines[0]
+        content_bytes = len(text.encode("utf-8"))
+    elif layout != "document":
+        raise CandidateControlError(f"{source} has an invalid JSON layout")
     return BoundedClosedJson(
         value=_strict_json(text, source=source),
         sha256=hashlib.sha256(raw).hexdigest(),
+        content_bytes=content_bytes,
     )
 
 

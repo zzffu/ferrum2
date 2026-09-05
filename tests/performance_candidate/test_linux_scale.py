@@ -446,7 +446,7 @@ class ScaleControlTests(unittest.TestCase):
             self.assertLessEqual(len(compact.encode()), linux_scale.SCALE_TRIAL_MAX_BYTES)
             self.assertGreater(len(compact.encode()), linux_trial.REGULAR_TRIAL_MAX_BYTES)
             path.write_text(compact + "\n", encoding="utf-8")
-            self.assertEqual(linux_trial._read_trial(path)["scenario"], linux_scale.SCALE_SCENARIO)
+            self.assertEqual(linux_trial._read_trial(path).value["scenario"], linux_scale.SCALE_SCENARIO)
             path.write_bytes(b" " * (linux_scale.SCALE_TRIAL_MAX_BYTES + 2))
             with self.assertRaisesRegex(json_contract.CandidateControlError, "byte bound"):
                 linux_trial._read_trial(path)

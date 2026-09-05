@@ -19,10 +19,10 @@ def _atomic_text(path: pathlib.Path, text: str) -> None:
             dir=path.parent,
             delete=False,
         ) as temporary:
+            temporary_name = temporary.name
             temporary.write(text)
             temporary.flush()
             os.fsync(temporary.fileno())
-            temporary_name = temporary.name
         os.replace(temporary_name, path)
         temporary_name = None
     finally:
