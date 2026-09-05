@@ -164,6 +164,27 @@ runner。两个 PowerShell module、两个闭合 source bundle、qualification �
 101 项 performance controller、55 项 CI controller、PowerShell source/plan 静态合同和
 19 项 workspace policy 均通过。
 
+### R6 — P1：持续补入的 Direct UDP 请求饿死应答（续行整改）
+
+位置 `runtime/src/udp/direct.rs::run_direct_session`。原代码用 `while pop(request)` 排空请求
+后才轮询应答；4 条队列上限不能约束持续补入情况下的一轮发送量。注入 socket 让每次发送
+都补入一个请求且应答始终 ready，旧实现直到 64 次发送后才处理应答，回归测试明确失败。
+这确认了调度饥饿，但尚不能据此认定它就是前述真实分片故障或 TCP 负向信号的根因。
+
+改为每发送一条请求就轮询一次应答，保留已接纳请求的有限排空，并显式消耗 Tokio cooperative
+budget，让一直 ready 的适配器也给控制任务执行机会。发送有进展时继续非阻塞轮询队列，
+不依赖 Notify 为每条报文保存通知；不改 queue depth、字节预算、协议 commit 或重传规则。
+代价是每条请求更多一次调度/状态检查，真实吞吐和延迟需同条件复测。
+
+新增四项行为测试：就绪应答不被持续补入请求饿死；合并通知仍排空无应答的请求批次；
+一直 ready 的 I/O 允许另一任务取消；首次 poll 前关闭仍发送全部已接纳请求并回收全部 owner。
+开发中最后一项检测到草稿只排空一条请求的回归，已修正，未将该草稿提交或用于性能测量。
+Windows/WSL runtime 各 123 项、server 56 项、四个跨进程 UDP target 共 17 项通过（4 项按
+平台约束 ignored），client all-features compile-only、workspace 严格 clippy、格式、文档
+构建通过。首次 m0 命令误写了两个不存在的 target 名称，未执行测试；已使用实际
+`udp_local_e2e`、`socks_udp_local_e2e`、`socks_udp_routing_e2e`、`socks_udp_lifecycle_e2e`
+完整重跑。真实 host 测量和此前 TCP 退化信号继续定位，尚未给本批性能结论。
+
 ### 后续审查项（不等于已确认故障）
 
 | ID / 优先级 | 位置、事实或假设 | 下一步与验收 |

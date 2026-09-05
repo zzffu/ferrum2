@@ -522,7 +522,11 @@ where
     let notify = manager.notify(handle)?;
     let mut candidate_hints = UdpAssociationCandidateHints::default();
     loop {
-        while let Some(request) = manager.pop(handle, UdpDirection::ToTarget)? {
+        // A bounded queue is not a bounded drain when producers keep refilling
+        // it. Alternate one request with a response opportunity, and account
+        // for fully-ready adapters in Tokio's cooperative scheduling budget.
+        tokio::task::consume_budget().await;
+        let sent_request = if let Some(request) = manager.pop(handle, UdpDirection::ToTarget)? {
             send_direct(
                 &socket,
                 &*resolver,
@@ -532,34 +536,31 @@ where
                 initial_candidates.take(),
             )
             .await?;
-        }
+            true
+        } else {
+            false
+        };
         if *cancellation.borrow() {
+            if sent_request {
+                continue;
+            }
             return Err(UdpRuntimeError::Cancelled);
         }
         let idle_deadline = manager.idle_deadline(handle)?;
         tokio::select! {
             biased;
             changed = cancellation.changed() => {
-                let _ = changed;
-                while let Some(request) = manager.pop(handle, UdpDirection::ToTarget)? {
-                    send_direct(
-                        &socket,
-                        &*resolver,
-                        &mut candidate_hints,
-                        request.datagram(),
-                        connect_timeout,
-                        initial_candidates.take(),
-                    )
-                    .await?;
+                if changed.is_err() {
+                    return Err(UdpRuntimeError::Cancelled);
                 }
-                return Err(UdpRuntimeError::Cancelled);
+                // Closed admission makes the remaining queue finite. Reuse the
+                // cooperative request path until every admitted packet drains.
             }
             () = tokio::time::sleep_until(idle_deadline) => {
                 if Instant::now() >= manager.idle_deadline(handle)? {
                     return Err(UdpRuntimeError::Idle);
                 }
             }
-            () = notify.notified() => {}
             response = receive_target(
                 &socket,
                 manager.buffer_budget(),
@@ -577,6 +578,10 @@ where
                     .map_err(|_| UdpRuntimeError::Receive)?;
                 manager.commit_activity(handle, Instant::now())?;
             }
+            // Notifications coalesce. Poll for another queued request after
+            // progress instead of requiring one notification per datagram.
+            () = std::future::ready(()), if sent_request => {}
+            () = notify.notified() => {}
         }
     }
 }
