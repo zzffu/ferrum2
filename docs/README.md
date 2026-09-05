@@ -30,6 +30,7 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 |---|---|
 | [Repository guidelines](../AGENTS.md) | Build/test commands, compatibility policy, and contribution rules; scoped guides refine ownership |
 | [Invariant ledger](architecture/invariants.md) | Owner boundaries, behavioral contracts, evidence, and remaining gaps |
+| [2026-09-05 engineering remediation](architecture/engineering-remediation-2026-09-05.md) | Review coverage, reproduced reliability defects, milestone fixes, validation, and remaining evidence gaps |
 | [Gate ledger](architecture/gates.md) | Current workflows, triggers, commands, privilege boundaries, and required contexts |
 | [Fixture and evidence ledger](architecture/fixtures-and-evidence.md) | Reviewed inputs, vendor patches, hashes, and retention requirements |
 | [Refactor consumer ledger](architecture/refactor-consumers.md) | Identities and consumers that must change atomically during moves or renames |

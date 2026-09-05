@@ -58,7 +58,6 @@ async fn rejects_other_methods_and_oversized_headers() {
 
 #[tokio::test(start_paused = true)]
 async fn incomplete_header_times_out_after_two_seconds() {
-    assert_eq!(METRICS_HEADER_TIMEOUT, Duration::from_secs(2));
     let (mut client, mut server) = tokio::io::duplex(4096);
     let request_owner = tokio::spawn(async move {
         serve_metrics_connection(&mut server, &|| "unused".to_owned()).await
@@ -69,7 +68,7 @@ async fn incomplete_header_times_out_after_two_seconds() {
         .expect("write partial header");
     tokio::task::yield_now().await;
 
-    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::advance(METRICS_HEADER_TIMEOUT).await;
 
     request_owner
         .await
@@ -81,6 +80,76 @@ async fn incomplete_header_times_out_after_two_seconds() {
         .await
         .expect("read timeout response");
     assert!(response.starts_with("HTTP/1.1 408 Request Timeout\r\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn nonreading_peers_cannot_hold_success_or_error_responses_open() {
+    for request in [
+        b"GET /metrics HTTP/1.1\r\n\r\n".as_slice(),
+        b"POST /metrics HTTP/1.1\r\n\r\n".as_slice(),
+        b"GET /metrics HTTP/1.1\r\n".as_slice(),
+    ] {
+        let (mut client, mut server) = tokio::io::duplex(32);
+        client
+            .write_all(request)
+            .await
+            .expect("write bounded request");
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve_metrics_connection(&mut server, &|| "metric 1\n".to_owned()),
+        )
+        .await
+        .expect("endpoint must enforce its own deadline")
+        .expect_err("nonreading peer must time out");
+        assert_eq!(result.kind(), io::ErrorKind::TimedOut);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_shutdown_cannot_hold_a_completed_response_open() {
+    struct StalledShutdown(tokio::io::DuplexStream);
+
+    impl AsyncRead for StalledShutdown {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(context, buffer)
+        }
+    }
+
+    impl AsyncWrite for StalledShutdown {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(context, buffer)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(context)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    let (mut client, server) = tokio::io::duplex(4096);
+    client
+        .write_all(b"GET /metrics HTTP/1.1\r\n\r\n")
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        serve_metrics_connection(&mut StalledShutdown(server), &|| "metric 1\n".to_owned()),
+    )
+    .await
+    .expect("shutdown must share the request deadline")
+    .expect_err("stalled shutdown must time out");
+    assert_eq!(result.kind(), io::ErrorKind::TimedOut);
 }
 
 struct PendingIo;
@@ -122,19 +191,19 @@ impl AcceptListener for MetricsListener {
     type Stream = PendingIo;
 
     async fn accept(&self) -> io::Result<Self::Stream> {
-        self.accepts.fetch_add(1, Ordering::SeqCst);
-        Ok(self
-            .streams
-            .lock()
-            .expect("stream lock")
-            .pop_front()
-            .expect("test provides enough streams"))
+        let stream = self.streams.lock().expect("stream lock").pop_front();
+        match stream {
+            Some(stream) => {
+                self.accepts.fetch_add(1, Ordering::SeqCst);
+                Ok(stream)
+            }
+            None => std::future::pending().await,
+        }
     }
 }
 
 #[tokio::test]
 async fn endpoint_stops_accepting_at_sixteen_owned_requests() {
-    assert_eq!(METRICS_CONNECTION_LIMIT, 16);
     let accepts = Arc::new(AtomicUsize::new(0));
     let listener = MetricsListener {
         streams: Mutex::new(
@@ -167,4 +236,43 @@ async fn endpoint_stops_accepting_at_sixteen_owned_requests() {
         .expect("bounded endpoint shutdown");
     assert_eq!(registry.snapshot().connection_tasks, 0);
     assert_eq!(registry.snapshot().owned_permits, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn saturated_endpoint_reclaims_timed_out_requests_and_resumes_admission() {
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let listener = MetricsListener {
+        streams: Mutex::new(
+            (0..METRICS_CONNECTION_LIMIT + 1)
+                .map(|_| PendingIo)
+                .collect(),
+        ),
+        accepts: Arc::clone(&accepts),
+    };
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let endpoint = MetricsEndpoint::new(listener, || "unused".to_owned(), registry.clone());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run = tokio::spawn(endpoint.run_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while accepts.load(Ordering::SeqCst) <= METRICS_CONNECTION_LIMIT {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("saturated endpoint must admit the next request after timeout");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while registry.snapshot().connection_tasks != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("last admitted request must release its owner without forced shutdown");
+    shutdown_tx.send(()).expect("request shutdown");
+    run.await
+        .expect("endpoint task")
+        .expect("endpoint shutdown");
+    assert_eq!(registry.snapshot(), baseline);
 }

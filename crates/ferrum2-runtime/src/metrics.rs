@@ -13,6 +13,9 @@ pub const METRICS_CONNECTION_LIMIT: usize = 16;
 pub const METRICS_HEADER_BYTES: usize = 1024;
 /// Deadline for receiving a complete metrics request header.
 pub const METRICS_HEADER_TIMEOUT: Duration = Duration::from_secs(2);
+// Includes header reception, all status/body writes, and stream shutdown. A
+// nonreading peer must release its admission permit without process shutdown.
+const REQUEST_TIMEOUT_BOUND: Duration = Duration::from_secs(4);
 
 const BAD_REQUEST: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -100,67 +103,73 @@ where
     }
 }
 
-/// Serves one fixed-bound HTTP metrics request and closes the stream.
+/// Serves one HTTP metrics request with a four-second I/O deadline, including
+/// error responses and shutdown. The renderer must be bounded and nonblocking;
+/// synchronous renderer work cannot be preempted by the async deadline.
 pub async fn serve_metrics_connection<S, R>(stream: &mut S, renderer: &R) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     R: Fn() -> String + ?Sized,
 {
-    let mut header = [0_u8; METRICS_HEADER_BYTES];
-    let header_length = match tokio::time::timeout(
-        METRICS_HEADER_TIMEOUT,
-        read_header(stream, &mut header),
-    )
-    .await
-    {
-        Err(_) => {
-            stream.write_all(REQUEST_TIMEOUT).await?;
+    tokio::time::timeout(REQUEST_TIMEOUT_BOUND, async {
+        let mut header = [0_u8; METRICS_HEADER_BYTES];
+        let header_length = match tokio::time::timeout(
+            METRICS_HEADER_TIMEOUT,
+            read_header(stream, &mut header),
+        )
+        .await
+        {
+            Err(_) => {
+                stream.write_all(REQUEST_TIMEOUT).await?;
+                return stream.shutdown().await;
+            }
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok(HeaderRead::Closed)) => {
+                stream.write_all(BAD_REQUEST).await?;
+                return stream.shutdown().await;
+            }
+            Ok(Ok(HeaderRead::TooLarge)) => {
+                stream.write_all(HEADER_TOO_LARGE).await?;
+                return stream.shutdown().await;
+            }
+            Ok(Ok(HeaderRead::Complete(length))) => length,
+        };
+
+        let first_line_end = header[..header_length]
+            .windows(2)
+            .position(|window| window == b"\r\n");
+        let Some(first_line_end) = first_line_end else {
+            stream.write_all(BAD_REQUEST).await?;
             return stream.shutdown().await;
-        }
-        Ok(Err(error)) => return Err(error),
-        Ok(Ok(HeaderRead::Closed)) => {
+        };
+        let mut parts = header[..first_line_end].split(|byte| *byte == b' ');
+        let method = parts.next();
+        let path = parts.next();
+        let version = parts.next();
+        if parts.next().is_some() || version != Some(b"HTTP/1.1".as_slice()) {
             stream.write_all(BAD_REQUEST).await?;
             return stream.shutdown().await;
         }
-        Ok(Ok(HeaderRead::TooLarge)) => {
-            stream.write_all(HEADER_TOO_LARGE).await?;
+        if method != Some(b"GET".as_slice()) {
+            stream.write_all(METHOD_NOT_ALLOWED).await?;
             return stream.shutdown().await;
         }
-        Ok(Ok(HeaderRead::Complete(length))) => length,
-    };
+        if path != Some(b"/metrics".as_slice()) {
+            stream.write_all(NOT_FOUND).await?;
+            return stream.shutdown().await;
+        }
 
-    let first_line_end = header[..header_length]
-        .windows(2)
-        .position(|window| window == b"\r\n");
-    let Some(first_line_end) = first_line_end else {
-        stream.write_all(BAD_REQUEST).await?;
-        return stream.shutdown().await;
-    };
-    let mut parts = header[..first_line_end].split(|byte| *byte == b' ');
-    let method = parts.next();
-    let path = parts.next();
-    let version = parts.next();
-    if parts.next().is_some() || version != Some(b"HTTP/1.1".as_slice()) {
-        stream.write_all(BAD_REQUEST).await?;
-        return stream.shutdown().await;
-    }
-    if method != Some(b"GET".as_slice()) {
-        stream.write_all(METHOD_NOT_ALLOWED).await?;
-        return stream.shutdown().await;
-    }
-    if path != Some(b"/metrics".as_slice()) {
-        stream.write_all(NOT_FOUND).await?;
-        return stream.shutdown().await;
-    }
-
-    let body = renderer();
-    let response_header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(response_header.as_bytes()).await?;
-    stream.write_all(body.as_bytes()).await?;
-    stream.shutdown().await
+        let body = renderer();
+        let response_header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response_header.as_bytes()).await?;
+        stream.write_all(body.as_bytes()).await?;
+        stream.shutdown().await
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "metrics request timed out"))?
 }
 
 enum HeaderRead {

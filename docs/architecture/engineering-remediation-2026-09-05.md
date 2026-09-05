@@ -1,0 +1,127 @@
+# Engineering remediation — 2026-09-05
+
+这是持续整改记录，不是生产资格声明。起点 `9bbcea22d0373ff60932f929d93d265c98c0a711`，
+开始时工作区干净。根目录和全部 51 份 scoped `AGENTS.md`、
+README、文档索引、workspace manifests、架构台账和 CI 入口为审查输入。
+以本地规则为准；不迁入 Codex 专属流程。不修改 vendor、fixture、网络权限或 lint 强度。
+
+## 环境与暂定验收
+
+- Windows 11 Pro `10.0.26200`，AMD Ryzen 7 7700，8 核 / 16 逻辑处理器，
+  49,373,096 KiB 可见内存；Rust/Cargo 1.97.1，MSVC x86_64，锁定依赖。
+- WSL2 Debian：Linux `6.18.33.2-microsoft-standard-WSL2`，Rust 1.97.1 GNU x86_64，
+  23,567 MiB 内存。WSL 不能代替真实 Windows 驱动资格或原生 Linux 性能环境。
+- 用户尚未提供生产负载和 SLO。暂定工程验收：故障测试先在旧代码失败；修复后通过，
+  所有相关 owner、permit、queue 和 buffer 回到测试基线；正常协议和关闭行为不退化；
+  受影响包格式、严格 lint、测试及相关 workspace 门禁通过。
+- 性能验收复用现有测量器与 reviewed policy；必须保留成功工作量、错误、清理、CPU、
+  内存及适用延迟分位数。同条件交错重复 A/B，保留范围；没有覆盖的分位数不得推算。
+  闭环测量不代表过载排队延迟，微基准不代表端到端生产收益。
+- 原始日志暂存在 Git 忽略的 `target/remediation-*.log`；每批在本文记录命令与结果。
+  不将 target、profiles 或测试凭据提交。
+
+## Workspace 覆盖清单
+
+每项适用根指南及该目录 `AGENTS.md`；测试和工具还继承 `tests/AGENTS.md` 或
+`tools/AGENTS.md` 及更近的 scoped 指南。下表区分静态筛查、具体路径审查和执行验证；
+“筛查”不代表逐行审查所有实现。文件数 / 行数为起点附近 `src/**/*.rs` 物理计数，含测试，
+只用于导航，不按行数机械拆分。
+
+| Package（目录） | src 文件 / 行 | 已查看的职责或路径 | 状态 / 验证入口 |
+|---|---:|---|---|
+| client（bins） | 83 / 25967 | prepare/materialize → SOCKS/TUN → egress；DNS、network、shutdown composition | 约束/调用链筛查；仅编译测试，m0 进程验证 |
+| server（bins） | 51 / 13491 | materialize → SS TCP/UDP → Direct；共享网络和冻结路由 | 约束/调用链筛查；package + m0 |
+| core | 4 / 1649 | target、Datagram、trait、selector/plan | 约束/接口筛查；package |
+| rule | 19 / 4672 | 编译、候选索引、scratch、registry | 约束/依赖筛查；package + config |
+| ruleset | 9 / 2326 | 下载、blocking owner、原子快照、refresh | 生命周期路径审查中；loader/https |
+| crypto | 11 / 1950 | typed keys、nonce、AEAD、entropy | 约束/接口筛查；vectors/entropy |
+| shadowsocks | 18 / 4785 | TCP authenticate/replay/flow；UDP prepare/commit | 约束/调用链筛查；协议与 tokio adapter |
+| socks5 | 1 / 574 | no-auth command、retained control、borrowed UDP codec | 约束/接口筛查；command/udp |
+| net | 4 / 909 | immutable selection、256-entry interface cache、binder | 约束/接口筛查；network contracts |
+| runtime | 28 / 9634 | metrics、supervisor、affine executor、UDP owner/queues、shutdown | 重点审查/整改中；完整 package |
+| config | 25 / 8923 | prepare/finish、资源计划、验证边界 | 约束/依赖筛查；config/v2 contracts |
+| dns | 26 / 7193 | proxy TCP/UDP、cache、tagged owner/admission | 重点审查/整改中；interop-root 完整 package |
+| observability | 11 / 3937 | closed schema、composition renderer、手动 gauge | 约束/接口筛查；metrics/tracing contracts |
+| sniff | 1 / 267 | transport strictness、bounded parser seam | 约束/接口筛查；sniff contract |
+| tun | 48 / 16981 | packet/stack/association → caller policy；live/hosted 选择 | 约束/平台边界筛查；hosted-safe lib + all-features check |
+| platform-windows | 35 / 10528 | injected core/live FFI、managed transaction | 约束/平台边界筛查；hosted-safe lib + all-features check |
+| m0-harness（tests） | 18 / 5836 | 黑盒进程、workspace policy、lifecycle | 约束/门禁筛查；先 build bins 再 package |
+| m4-qualification（tools） | 34 / 13763 | profile contract、TCP/UDP/DNS、host identity | 测量能力审查；self-check |
+| rule-qualification（tools） | 14 / 3760 | 单一 allocation owner、timing/报告 | 约束/测量入口筛查；compile-only，显式测量另列 |
+
+关键非 Cargo 项：`tests/{ci,platform,performance_candidate,performance_rule}` 对应四组
+Python unittest；`tools/{ci,performance_candidate,performance_rule}` 是对应控制器；
+PowerShell correctness/performance runner 分离，需静态 contract、源清单重建及显式 host
+qualification。共享 fixtures 保持原样。CI 包括 `m0.yml`（quality/platform/qualification）、
+`lifecycle-stress.yml`、`tun-fuzz-deterministic.yml`、`performance-candidate.yml`；provider identity、
+fuzz sanitizer 和原生 musl 的执行证据必须单列，不能由本地 Windows 测试替代。
+
+## 真实所有权与数据路径
+
+配置先 prepare，再由 binary materialize DNS、RuleSet 和固定端点，再激活 process roots；
+失败逆序回滚。core/net 提供协议中立契约；runtime 只依赖 core/net，不能吸收 DNS 或遥测 schema。
+SOCKS command 和 SS authenticated flow 把已验证目标交给路由和 connector，TCP relay 保留
+half-close / 固定缓冲 / 背压；UDP 先 reserve runtime 容量，再 commit 协议身份及一次性路由。
+DNS listener 的 JoinSet 拥有请求任务，TaggedResolver 的独立 owner 拥有 upstream 和 shutdown；
+RuleSet refresh 在完整编译成功后发布 generation。TUN 负责 packet/stack 和 generation-bound
+association，Windows crate 才能触及真实 adapter、route、WFP；普通测试关闭 live-backend。
+
+## 发现与批次
+
+### R1 — P1：metrics 慢读端永久占用 admission（已修复）
+
+- 位置：`crates/ferrum2-runtime/src/metrics.rs::serve_metrics_connection`；违反 runtime
+  bounded metrics / resource ownership 契约。
+- 触发：客户端完成请求后不读取响应，或 transport shutdown 始终 Pending；读头超时的
+  408 写出同样可能挂起。16 个请求即可占满 endpoint，阻断后续监控采集。
+- 已确认：旧实现两项 paused-time 故障测试失败，超过测试的 5 秒外部保护时间仍不结束。
+  不是吞吐假设，也不依赖真实网卡。
+- 修改：保留原 2 秒 header deadline，为所有状态、body 和 shutdown 增加总计 4 秒的
+  request I/O deadline，返回红化 TimedOut 错误。同步 renderer 必须 bounded/nonblocking；
+  Tokio timeout 不能抢占同步回调，此限制已写入公开契约。
+- 验证：`cargo test -p ferrum2-runtime --locked` 通过；新增 response/shutdown 停滞和
+  饱和后恢复 admission、完整 OwnerSnapshot 回基线测试。删除相关只比较常量的断言。
+- 代价：读头耗时会消耗同一请求预算；极慢的合法 scrape 会断开，客户端可重试。
+
+### R2 — P1：DNS TCP 子任务失败被吞掉（修复验证中）
+
+- 位置：`crates/ferrum2-dns/src/proxy/loops.rs::tcp_loop`；违反所有任务 joined/reported
+  及 required listener failure 契约。
+- 触发与影响：请求 handler/observer panic，join 结果被忽略，故障不能传播到进程 root；
+  accept 错误使用 `?` 返回，绕过显式 abort-and-join。
+- 已确认：注入 observer panic 的 loopback 测试在旧实现超过 2 秒仍不报告失败。
+- 修改：检查 JoinError，以封闭错误报告；取消和完成回收优先于新 accept；所有退出分支
+  汇合到 abort-and-join。保持已有达到连接容量时拒绝新流的语义。
+- 验证：新增公共 listener 故障测试检查 sibling owner 释放、resolver shutdown 和 TCP/UDP
+  重绑；interop-root package gate 待本批最终记录。
+- 代价：内部 panic 将触发已有进程级故障处理；普通错误请求仍只结束自身连接。
+
+### R3 — P1 候选：Direct UDP 异常退出可能遗漏会话清理
+
+`runtime/src/udp/direct.rs::commit_session_with_resolver_arc` 在任务末尾调用 remove；panic
+会跳过该语句。正在通过注入 handler panic 验证队列/会话是否滞留；未验证前不声称泄漏已复现。
+若成立，应让现有 lifetime owner 在 Drop 时清理 generation-bound session，再释放容量。
+
+### 后续审查项（不等于已确认故障）
+
+| ID / 优先级 | 位置、事实或假设 | 下一步与验收 |
+|---|---|---|
+| A1 / P2 | runtime UDP direct/reset、observability metrics、TUN live owner 有约 800 行以上生产 owner；m4 windows_tun/workload 1021 行违反工具 1000 行要求 | 按实际职责拆分并保持 invariant/消费者；禁止纯行数搬移 |
+| P1 / P2 假设 | DNS cache 每次 insert 扫描 entries + FIFO，满缓存更新可能拉长持锁时间 | 先测不同容量、TTL/更新比例与并发；保持过期、FIFO、generation 和 telemetry 语义 |
+| L1 / P2 待审 | ruleset BlockingTaskOwner 使用 tasks Vec；单调用链串行，公开并发调用/取消的 aggregate 上界待确认 | 注入重复取消与慢 compiler，检查 outstanding task 上界及 shutdown 可重入 |
+| L2 / P2 待审 | affine executor 的 unbounded event channel 是否有结构性上界 | 核对每 shard 发事件次数、thread join 和启动失败路径；不能仅凭 unbounded 命名判定失控 |
+| O1 / P2 待审 | 部分 UDP task result 被丢弃，低基数故障定位覆盖待逐一映射 | 对照 binary observation 和现有指标，避免添加重复 schema 或泄漏 peer |
+
+## 证据与未完成项
+
+修改前：`cargo fmt --all -- --check`、workspace all-targets/all-features clippy `-D warnings`、
+runtime 完整 package 测试均通过。说明已有静态门禁没有证明本次故障边界正确。
+新增 R1 两项测试和 R2 一项测试在旧实现失败；日志保留于 `target/remediation-*-red.log`。
+
+性能：尚无本次 A/B 数据，不能宣称吞吐或尾延迟改善。现有 Windows Confirm/CPU 文档是
+历史 A/A；Linux profile producer 的正式 raw evidence 限定 ubuntu-24.04，不能伪造 WSL 的
+环境身份。当前 host 已提升权限，用户已授权专用 runner 的 acknowledgement；执行前仍须
+确认 exact committed candidate、源 bundle、Wintun 和 transaction 前提。
+
+仍未逐行覆盖所有 crate；表中“筛查”项的完整生产审查仍欠缺。最终必须补充每项实际执行
+门禁、失败、未运行原因、测量工作负载及生产 SLO/耐久性/跨平台证据缺口。
