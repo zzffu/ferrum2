@@ -365,7 +365,7 @@ impl UdpSessionManager {
         if !entry.committed {
             return Err(UdpRuntimeError::Cancelled);
         }
-        entry.last_activity = now;
+        entry.last_activity = entry.last_activity.max(now);
         Ok(())
     }
 

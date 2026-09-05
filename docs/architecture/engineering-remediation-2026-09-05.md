@@ -464,3 +464,30 @@ PowerShell 非变更合同通过。M4 bundle `4febaee81d3e04463d622a8613181bc22b
 performance bundle `64231e1089363cea93d85fa78004f3b835cbdb99fabcb55d7f52c9bfcbde6e4f`；
 qualification bundle `09b155f17e074f726686ff11e9099ac3e4050245f938c5ab19476e6e32204b52`。
 这些是新测量身份，先前 24 次 A/A 和 A/B 没有被改成新 schema，也不自动变成新工具的资格。
+
+### R7 — P2：乱序提交缩短 UDP idle deadline；复用会话 timer
+
+`runtime/src/udp/{session,manager}.rs` 原先把捕获的 `now` 直接覆盖 last_activity；并发调用
+先采样时间后竞争锁时，较早时间可能后提交。queued/immediate 公共 seam 的反序提交测试
+在旧实现失败，deadline 被缩短 20 秒。三条 accepted activity 更新路径现在保持单调最大值，
+不改协议 replay 提交时机或更新失败时的行为。
+
+在这一不变量上，`run_direct_session` 保留一个已注册 idle timer，只在它到期时重新检查
+会话 deadline 并 reset；此前每轮 I/O 都查询共享状态、构造/注册/丢弃 timer。R6 的一请求/
+一次应答机会、cooperative budget、队列上限及关闭排空保持。资源代价为每会话持有原本就在
+等待中的同一个 timer；省去逐报文管理 timer 的收益仍需同配方实测，尚未声称吞吐改善。
+
+新增测试覆盖乱序 queued/immediate 提交、timer 注册后的 activity 延长与精确到期、最终
+完整 owner 基线。旧 response-handler 后刷新/失败不刷新、持续补入公平性和首次 poll 前
+关闭测试全部保留。Windows runtime 125 项、WSL runtime + DNS 199 项、runtime 严格 clippy
+通过；完整 workspace、client compile-only 与新的 host 资格继续执行。
+
+TUN `OwnerThread::reap` 在 await 前转移 native join 句柄的取消窗口仍是待验证审查项：
+`process/shutdown.rs::abort_and_reap_remaining` 能在 watchdog 下取消该 future。尚未把静态
+窗口当作已复现真实 adapter 残留；后续应通过不创建适配器的 gated native thread 验证。
+
+R7 之后的完整 Windows 门禁已完成：workspace（按根命令排除 client/TUN/platform）
+675 passed / 0 failed / 5 ignored；client all-features 仅编译；workspace bins build、
+all-targets/all-features clippy `-D warnings`、workspace docs 全部通过。TUN safe lib
+126 项、platform-windows safe lib 59 项及两个包 all-features check 通过。MSVC linker
+仍只有生成 import lib 的 informational stdout warning，没有放宽 lint 或跳过失败测试。

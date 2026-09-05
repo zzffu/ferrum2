@@ -167,6 +167,7 @@ impl PendingUdpSession {
     }
 
     /// Serializes generation recheck, protocol commit, activity, and enqueue.
+    /// Activity never moves backwards when callers commit out of capture order.
     pub fn commit_with<E, C>(
         mut self,
         datagram_reservation: PendingUdpDatagram,
@@ -304,7 +305,7 @@ impl PendingUdpDatagram {
             debug_assert!(entry.pending[index] > 0);
             entry.pending[index] -= 1;
             entry.committed = true;
-            entry.last_activity = now;
+            entry.last_activity = entry.last_activity.max(now);
             entry.queues[index].push_back(QueuedDatagram {
                 datagram: accounted,
                 _guard: manager.registry.track_udp_queue_entry(),
@@ -355,7 +356,7 @@ impl PendingUdpDatagram {
             debug_assert!(entry.pending[index] > 0);
             entry.pending[index] -= 1;
             entry.committed = true;
-            entry.last_activity = now;
+            entry.last_activity = entry.last_activity.max(now);
         }
         self.pending = false;
         Ok(accounted)
