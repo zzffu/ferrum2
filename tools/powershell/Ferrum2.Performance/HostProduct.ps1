@@ -87,22 +87,32 @@ function Start-Ferrum2ProductTrial {
         }
     } catch {
         $failure = $_
-        # Startup has not returned a runtime owner yet. Export logs here before
-        # the outer transaction removes its run-owned process and file state.
-        foreach ($entry in @(
-            @{ name = "client"; process = $client },
-            @{ name = "server"; process = $server }
-        )) {
-            if ($null -ne $entry.process) {
-                try {
-                    [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-                        -Process $entry.process -LogPrefix "trial-$Sequence-$($entry.name)")
-                } catch {
-                    Write-Warning "product startup diagnostic export failed"
-                }
+        Export-Ferrum2ProductFailureLogs -Context $Context -Client $client `
+            -Server $server -Sequence $Sequence
+        throw $failure
+    }
+}
+
+# Both startup and later workload failures must export logs before transaction cleanup.
+function Export-Ferrum2ProductFailureLogs {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [AllowNull()][object]$Client,
+        [AllowNull()][object]$Server,
+        [Parameter(Mandatory = $true)][int]$Sequence
+    )
+    foreach ($entry in @(
+        @{ name = "client"; process = $Client },
+        @{ name = "server"; process = $Server }
+    )) {
+        if ($null -ne $entry.process) {
+            try {
+                [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+                    -Process $entry.process -LogPrefix "trial-$Sequence-$($entry.name)")
+            } catch {
+                Write-Warning "product diagnostic export failed"
             }
         }
-        throw $failure
     }
 }
 

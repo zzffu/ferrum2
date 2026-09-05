@@ -721,6 +721,7 @@ function Invoke-Ferrum2HostTrial {
     $runtime = $null
     $workloadProcess = $null
     $succeeded = $false
+    $failurePhase = "product-startup"
     try {
         $runtime = Start-Ferrum2ProductTrial -Context $Context -Member $Member -Network $Network `
             -Loopback $Loopback -Sequence $Trial.sequence -Topology $Trial.topology
@@ -729,6 +730,13 @@ function Invoke-Ferrum2HostTrial {
         $serverMetricsBefore = if ($serverPresent) {
             Get-Ferrum2Metrics -Port $runtime.server_metrics_port
         } else { $null }
+        Write-NewUtf8File -Path (Join-Path $trialRoot "client-metrics-before.txt") `
+            -Text $metricsBefore
+        if ($serverPresent) {
+            Write-NewUtf8File -Path (Join-Path $trialRoot "server-metrics-before.txt") `
+                -Text $serverMetricsBefore
+        }
+        $failurePhase = "workload-startup"
         $output = Join-Path $trialRoot "workload.json"
         $activeReadyMarker = [IO.Path]::ChangeExtension($output, "active-ready")
         $activeCompleteMarker = [IO.Path]::ChangeExtension($output, "active-complete")
@@ -742,6 +750,7 @@ function Invoke-Ferrum2HostTrial {
             -WorkingDirectory (Split-Path -Parent $Harness) -LogPrefix $workloadLogPrefix `
             -Purpose $workloadLogPrefix
         try {
+            $failurePhase = "warmup-readiness"
             Wait-Ferrum2Text -Path $activeReadyMarker -Pattern '^ready\r?\n?$' `
                 -TimeoutSeconds ([int]$Trial.warmup_seconds + 30)
             $clientCpuBefore = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
@@ -750,6 +759,7 @@ function Invoke-Ferrum2HostTrial {
             } else { $null }
             $cpuSampleStopwatch = [Diagnostics.Stopwatch]::StartNew()
             Remove-Item -LiteralPath $activeReadyMarker -Force -ErrorAction Stop
+            $failurePhase = "active-completion"
             Wait-Ferrum2Text -Path $activeCompleteMarker -Pattern '^complete\r?\n?$' `
                 -TimeoutSeconds ([int]$Trial.active_seconds + 60)
             $clientCpuAfter = Get-Ferrum2ProcessCpuMilliseconds -ProcessId $runtime.client.pid
@@ -766,23 +776,22 @@ function Invoke-Ferrum2HostTrial {
         } catch {
             $markerFailure = $_
             Stop-Ferrum2OwnedProcess -Context $Context -ProcessId $workloadProcess.pid
-            [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-                -Process $workloadProcess -LogPrefix $workloadLogPrefix)
+            try {
+                [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+                    -Process $workloadProcess -LogPrefix $workloadLogPrefix)
+            } catch { Write-Warning "workload diagnostic export failed" }
             throw $markerFailure
         }
+        $failurePhase = "workload-result"
         [void](Complete-Ferrum2OwnedCommand -Context $Context -Process $workloadProcess `
             -LogPrefix $workloadLogPrefix -TimeoutSeconds 60)
         $metricsAfter = Get-Ferrum2Metrics -Port $runtime.client_metrics_port
         $serverMetricsAfter = if ($serverPresent) {
             Get-Ferrum2Metrics -Port $runtime.server_metrics_port
         } else { $null }
-        Write-NewUtf8File -Path (Join-Path $trialRoot "client-metrics-before.txt") `
-            -Text $metricsBefore
         Write-NewUtf8File -Path (Join-Path $trialRoot "client-metrics-after.txt") `
             -Text $metricsAfter
         if ($serverPresent) {
-            Write-NewUtf8File -Path (Join-Path $trialRoot "server-metrics-before.txt") `
-                -Text $serverMetricsBefore
             Write-NewUtf8File -Path (Join-Path $trialRoot "server-metrics-after.txt") `
                 -Text $serverMetricsAfter
         }
@@ -892,10 +901,17 @@ function Invoke-Ferrum2HostTrial {
     } catch {
         $failure = $_
         if ($null -ne $workloadProcess) {
-            [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
-                -Process $workloadProcess -LogPrefix $workloadLogPrefix)
+            try {
+                [void](Export-Ferrum2OwnedCommandFailureLogs -Context $Context `
+                    -Process $workloadProcess -LogPrefix $workloadLogPrefix)
+            } catch { Write-Warning "workload diagnostic export failed" }
         }
+        try {
+            Write-NewUtf8File -Path (Join-Path $trialRoot "failure-phase.txt") -Text "$failurePhase`n"
+        } catch { Write-Warning "trial phase diagnostic export failed" }
         if ($null -ne $runtime) {
+            Export-Ferrum2ProductFailureLogs -Context $Context -Client $runtime.client `
+                -Server $runtime.server -Sequence ([int]$Trial.sequence)
             $endpoints = [Collections.Generic.List[object]]::new()
             [void]$endpoints.Add([pscustomobject]@{
                 name = "client"; port = $runtime.client_metrics_port

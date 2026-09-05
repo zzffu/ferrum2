@@ -538,3 +538,32 @@ workspace all-targets/all-features 严格 clippy、workspace docs 再次通过�
 撤回后的 runtime 125 项通过。最终 Confirm 使用 `5b46b03e`（原始 9bb 产品代码，
 只覆盖当前 M4 harness 的六个源/manifest 文件）作为基线；M4 bundle 与候选逐字节一致。
 该 detached baseline 留在 `profiles/remediation-confirm-baseline`，只用于本机验证，未推送。
+
+### 首次 Confirm 失败与 R9 取证整改
+
+最终 Rust 候选 `d6c6fab81f39bdaac75f44a8fcabed93012721d1` 的真实 host 八项资格为 QUALIFIED，
+来源 `%TEMP%/ferrum2-final-correctness-20260905T100230Z`，五类残留全零。
+随后 baseline `5b46b03e053efc41c4023ed39853489c112e15af` 对 d6 的 Confirm/EndToEnd 在
+trial 2 失败，仅 1/50 完整记录；不能作为比较。事务 `009b952f3519`，cleanup PASS、
+benchmark_succeeded=false、五类残留全零。所有资料保留于
+`%TEMP%/ferrum2-remediation-confirm-20260905T100513Z`。
+
+workload stderr 是 TCP read 的 Windows 10054 reset。服务端累计每方向 2,938,503,168 字节，
+relay_io=1、network_generation=2、network_reset started/succeeded 各 1；客户端 TUN
+session_active=1、restart reset=0、foundation/reassembly/ring-full drop=0。不能依据
+事后计数判定 network reset 与 RST 的因果/先后。泛用 readiness 超时同时用于 active-complete，
+不能把错误文本直接称为预热失败；先前 commentary 的阶段判断已纠正。启动前 3 秒采样
+DWM 约 101.27%（一个逻辑核），仅为环境背景，不是性能波动的归因证据。
+
+**R9 / P2，HostExecution.ps1::Invoke-Ferrum2HostTrial**：确认失败时丢失 metrics-before
+和已启动产品 stdout/stderr；计数是在 workload 之前采集，但文件直到成功才写，外层 catch
+也只导出 workload 日志。工具错误无法区分 warmup-readiness 与 active-completion。
+现在立即持久化两端 before metrics；失败导出闭合 phase 和所有产品日志；抽取已有
+HostProduct 的公共私有 helper，让 startup 与 active failure 共享导出规则。导出异常
+不再覆盖原始 workload 错误。没有延长 timeout、过滤网络通知、扩大队列或更改工作负载。
+
+新注入测试覆盖两个阶段和导出自身失败；在不可变旧 owner 源上出现 3 项断言失败，
+修复后通过。完整 performance controller 104 项、PowerShell 静态合同、workspace policy
+19 项通过。performance bundle 为 `00bcf65a7a07becce520c41e83f2653a80aa3aa7fcddb1c9f6c94a4059278dce`；
+qualification bundle 为 `2fbb37e4e0ff0aed8cf3d4fc3668869418a143dbc633309c95f1aff34237904b`。
+M4 source bundle 和全部 Rust 产品代码不变；下一轮使用新的完整证据目录，不补洞拼接。
