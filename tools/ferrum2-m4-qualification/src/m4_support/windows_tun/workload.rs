@@ -9,6 +9,7 @@ use super::diagnostic::{
     TCP_SINGLE_PAYLOAD, UDP_BATCH, UDP_LATENCY_SAMPLE_CAP, UDP_MINIMUM_DATAGRAMS,
     UDP_PACKET_TIMEOUT, UDP_PAYLOAD, UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
 };
+use super::latency::{latency_percentiles, record_latency_sample};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -80,45 +81,6 @@ pub(crate) fn elapsed_rate(units: u64, elapsed: Duration, name: &str) -> Result<
         / nanos;
     u64::try_from(rate.max(1)).map_err(|_| format!("{name} rate overflow"))
 }
-pub(crate) fn percentile_99(mut values: Vec<u64>, name: &str) -> Result<u64, String> {
-    if values.is_empty() {
-        return Err(format!("{name} has no latency samples"));
-    }
-    values.sort_unstable();
-    let rank = values
-        .len()
-        .checked_mul(99)
-        .ok_or_else(|| format!("{name} percentile rank overflow"))?
-        .div_ceil(100);
-    Ok(values[rank.saturating_sub(1)])
-}
-pub(crate) fn record_latency_sample(
-    samples: &mut Vec<u64>,
-    observed: u64,
-    latency: u64,
-    capacity: usize,
-) -> Result<(), String> {
-    if capacity == 0 {
-        return Err("latency sample capacity is zero".to_owned());
-    }
-    if samples.len() < capacity {
-        samples.push(latency);
-        return Ok(());
-    }
-    let range = observed
-        .checked_add(1)
-        .ok_or_else(|| "latency observation count overflow".to_owned())?;
-    let mut mixed = observed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    mixed ^= mixed >> 31;
-    let replacement = mixed % range;
-    if replacement < capacity as u64 {
-        samples[replacement as usize] = latency;
-    }
-    Ok(())
-}
-
 pub(crate) fn wait_for_active_release(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
     let Some(marker) = markers.map(|markers| &markers.ready) else {
         return Ok(());
@@ -268,13 +230,16 @@ pub(crate) fn tcp_request_latency(
             .ok_or_else(|| "TCP request transaction count overflow".to_owned())?;
     }
     signal_active_complete(active_markers)?;
-    let p99_nanoseconds = percentile_99(latencies, "TCP request")?;
+    let latency = latency_percentiles(latencies, "TCP request")?;
     let io_completions = transactions
         .checked_mul(2)
         .ok_or_else(|| "TCP request I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
-            "p99_nanoseconds": p99_nanoseconds,
+            "p50_nanoseconds": latency.p50,
+            "p95_nanoseconds": latency.p95,
+            "p99_nanoseconds": latency.p99,
+            "latency_samples": latency.samples,
             "io_completions": io_completions
         },
         "checked_units": transactions,
@@ -940,14 +905,17 @@ pub(crate) fn udp_packets(
     }
     let elapsed = start.elapsed();
     signal_active_complete(active_markers)?;
-    let p99_nanoseconds = percentile_99(latencies, "UDP packet")?;
+    let latency = latency_percentiles(latencies, "UDP packet")?;
     let io_completions = datagrams
         .checked_mul(2)
         .ok_or_else(|| "UDP I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
             "packet_rate": elapsed_rate(datagrams, elapsed, "UDP packet rate")?,
-            "p99_nanoseconds": p99_nanoseconds,
+            "p50_nanoseconds": latency.p50,
+            "p95_nanoseconds": latency.p95,
+            "p99_nanoseconds": latency.p99,
+            "latency_samples": latency.samples,
             "io_completions": io_completions
         },
         "counters": {

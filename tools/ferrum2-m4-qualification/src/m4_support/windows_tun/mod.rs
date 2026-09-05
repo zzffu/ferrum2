@@ -1,5 +1,6 @@
 mod contract;
 mod diagnostic;
+mod latency;
 mod scenarios;
 mod self_check;
 mod support;

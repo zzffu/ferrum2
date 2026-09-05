@@ -135,6 +135,16 @@ After interruption, use the same public runner with `-RecoveryOnly`; removing li
 requires elevation. The [2026-09-05 Confirm and CPU report](windows-tun-confirm-cpu-profile-report-2026-09-05.md)
 records historical A/A runs and their interpretation limits, not current-checkout qualification.
 
+Windows workload schema 4 and host trial schema 3 retain TCP/UDP p50, p95, and p99
+nanoseconds plus `latency_samples` in `workload_measurements`. All three quantiles use
+nearest rank over the same bounded, deterministic reservoir (maximum 2,000,000 samples).
+The controller binds the sample count to successful checked transactions/datagrams and rejects
+missing or unordered quantiles. Timing remains request-send through verified echo completion,
+including receive recovery; connection setup and warmup are outside that interval. These closed-loop
+observations do not establish open-load queueing SLOs. The p99 adoption policy is unchanged;
+p50/p95 are retained observations. Historical schema 2 trial evidence must be read with its own
+recorded controller revision. Current readers have no compatibility path.
+
 ## Rule qualification evidence
 
 `ferrum2-rule-qualification` emits bounded runner reports. The only Rule controller entry point is `python -B -m tools.performance_rule`; schema, runner-report validation, pairing, policy, evidence, and CLI have separate package owners. Current v6 A/A output is always `CALIBRATION_REQUIRED` until a separately reviewed, source-hash-bound calibration v2 artifact is created. Ordinary tests use the small synthetic fixture under `tests/performance_rule/fixtures`; it proves schema and binding behavior but is never benchmark evidence. Historical v2/v3/v4 readers exist only in the explicit test-owned archive verifier.

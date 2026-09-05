@@ -1,3 +1,4 @@
+use super::super::latency::{LatencyPercentiles, latency_percentiles, record_latency_sample};
 use std::time::Duration;
 
 use super::super::contract::Scenario;
@@ -13,17 +14,30 @@ use super::super::diagnostic::{
 use super::super::workload::{
     elapsed_rate, fragment_ack, fragment_ack_for_request, fragment_ack_sequence,
     fragment_batch_failure, fragment_request, fragment_request_sequence, fragment_retry_budget,
-    percentile_99, record_latency_sample, sequenced_payload,
+    sequenced_payload,
 };
 
 pub(super) fn check_basics() -> Result<Vec<u8>, String> {
     if elapsed_rate(10, Duration::from_secs(2), "self-check")? != 5 {
         return Err("Windows TUN integer rate calculation is invalid".to_owned());
     }
-    if percentile_99(vec![1, 2, 3, 4], "self-check")? != 4
-        || percentile_99(Vec::new(), "self-check").is_ok()
+    if latency_percentiles((1..=100).rev().collect(), "self-check")?
+        != (LatencyPercentiles {
+            p50: 50,
+            p95: 95,
+            p99: 99,
+            samples: 100,
+        })
+        || latency_percentiles(vec![1, 1000, 2], "self-check")?
+            != (LatencyPercentiles {
+                p50: 2,
+                p95: 1000,
+                p99: 1000,
+                samples: 3,
+            })
+        || latency_percentiles(Vec::new(), "self-check").is_ok()
     {
-        return Err("Windows TUN p99 calculation is invalid".to_owned());
+        return Err("Windows TUN latency percentiles are invalid".to_owned());
     }
     let mut latency_samples = Vec::with_capacity(2);
     for (observed, latency) in [10_u64, 20, 30, 40].into_iter().enumerate() {

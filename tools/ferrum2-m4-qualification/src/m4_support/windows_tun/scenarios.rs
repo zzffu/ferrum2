@@ -316,7 +316,7 @@ pub(crate) fn write_observation(
     observation: Value,
 ) -> Result<(), String> {
     let document = json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "windows_tun_workload",
         "scenario": scenario.label(),
         "window": window.map(|window| json!({

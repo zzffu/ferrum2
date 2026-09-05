@@ -200,7 +200,13 @@ def workload_measurements(planned: dict[str, object], value: int) -> dict[str, i
             "io_completions": 1000,
         }
     if scenario == "tcp-request-1k-p99":
-        return {"p99_nanoseconds": value, "io_completions": 1000}
+        return {
+            "p50_nanoseconds": value // 2,
+            "p95_nanoseconds": value * 9 // 10,
+            "p99_nanoseconds": value,
+            "latency_samples": 1000,
+            "io_completions": 1000,
+        }
     if scenario == "tcp-256-flow-fairness":
         return {
             "fairness": value,
@@ -210,7 +216,10 @@ def workload_measurements(planned: dict[str, object], value: int) -> dict[str, i
     if scenario == "udp-packets-per-second":
         return {
             "packet_rate": value,
+            "p50_nanoseconds": 20_000,
+            "p95_nanoseconds": 40_000,
             "p99_nanoseconds": 50_000,
+            "latency_samples": 1000,
             "io_completions": 1000,
         }
     if scenario == "fragment-reassembly-throughput":
@@ -223,7 +232,7 @@ def trial_for(planned: dict[str, object], value: int) -> dict[str, object]:
     server_present = planned["topology"] == "EndToEnd"
     baseline = planned["member"] == "baseline"
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "ferrum2.windows-tun.host-performance-trial",
         "run_id": RUN_ID,
         "performance_source_bundle_sha256": DIGEST,
@@ -610,6 +619,38 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(CandidateControlError, "loopback exclusion"):
                 validate_windows_tun_trial(recursive, **identity)
 
+    def test_latency_percentiles_and_samples_are_bound_to_checked_work(self) -> None:
+        for scenario in ("tcp-request-1k-p99", "udp-packets-per-second"):
+            planned = next(
+                row for row in plan_for("Quick", "EndToEnd")["trials"]
+                if row["scenario"] == scenario
+            )
+            trial = trial_for(planned, 100_000)
+            identity = {
+                "planned_trial": planned,
+                "run_id": RUN_ID,
+                "performance_source_bundle_sha256": DIGEST,
+            }
+            validate_windows_tun_trial(trial, **identity)
+            for field, value in (
+                ("p50_nanoseconds", 200_000),
+                ("p95_nanoseconds", 200_000),
+                ("latency_samples", 999),
+            ):
+                with self.subTest(scenario=scenario, field=field):
+                    invalid = copy.deepcopy(trial)
+                    invalid["workload_measurements"][field] = value
+                    with self.assertRaises(CandidateControlError):
+                        validate_windows_tun_trial(invalid, **identity)
+            incomplete = copy.deepcopy(trial)
+            del incomplete["workload_measurements"]["p95_nanoseconds"]
+            with self.assertRaisesRegex(CandidateControlError, "measurement closure"):
+                validate_windows_tun_trial(incomplete, **identity)
+            retired = copy.deepcopy(trial)
+            retired["schema_version"] = 2
+            with self.assertRaisesRegex(CandidateControlError, "identity"):
+                validate_windows_tun_trial(retired, **identity)
+
     def test_paired_evidence_validates_direct_and_end_to_end_metrics(self) -> None:
         for topology in ("ClientDirect", "EndToEnd"):
             with self.subTest(topology=topology), tempfile.TemporaryDirectory() as temporary:
@@ -662,6 +703,8 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
             for trial in trials:
                 if trial["member"] == "candidate":
                     trial["checked_units"] = 2000
+                    if "latency_samples" in trial["workload_measurements"]:
+                        trial["workload_measurements"]["latency_samples"] = 2000
                     trial["client_cpu_percent"] = 30.0
                     write_json(
                         root / "trials" / f"{trial['sequence']:03d}" / "trial.json",

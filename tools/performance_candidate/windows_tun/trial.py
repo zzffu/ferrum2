@@ -161,6 +161,15 @@ def _validate_workload_measurements(trial: dict[str, object]) -> None:
         raise CandidateControlError("Windows TUN primary metric does not match workload evidence")
     if trial["io_completions"] != measurements["io_completions"]:
         raise CandidateControlError("Windows TUN I/O completion count does not match workload evidence")
+    if "p99_nanoseconds" in measurements:
+        if not (
+            measurements["p50_nanoseconds"]
+            <= measurements["p95_nanoseconds"]
+            <= measurements["p99_nanoseconds"]
+        ):
+            raise CandidateControlError("Windows TUN latency percentiles are unordered")
+        if measurements["latency_samples"] != min(trial["checked_units"], 2_000_000):
+            raise CandidateControlError("Windows TUN latency sample count does not match checked work")
     expected_p99 = measurements.get("p99_nanoseconds")
     if trial["p99_nanoseconds"] != expected_p99:
         raise CandidateControlError("Windows TUN p99 latency does not match workload evidence")
@@ -178,7 +187,7 @@ def validate_windows_tun_trial(
     trial = value
     _exact_fields(trial, _TRIAL_FIELDS, "Windows TUN host trial")
     if (
-        trial["schema_version"] != 2
+        trial["schema_version"] != 3
         or trial["kind"] != "ferrum2.windows-tun.host-performance-trial"
         or type(trial["run_id"]) is not str
         or re.fullmatch(r"[0-9a-f]{12}", trial["run_id"]) is None

@@ -424,3 +424,43 @@ DNS authoritative gate 74 项、严格 clippy 通过；release 候选 pilot 同�
 correctness/allocation/parity 均通过。1000 条 FIFO 写入 p50 为 160.46 ns/op，refresh
 137.02 ns/op；两侧每次写入仍为 2 allocations，读命中没有相同比例变化。
 先记录本批实现与 pilot；同条件重复和全部相关门禁继续执行，未给整个 DNS 服务生产资格。
+
+### Cache 六对重复结果
+
+基线 `3ad88718c7f3f6b22f89b1a8d201b8a7c272cfaa`、候选
+`bd9f9fcb19d72796841eb88741f2104fc673a35c`，各自干净的独立 checkout 与固定 release
+可执行文件。完整命令仍为 Rust producer `--profile qualification --samples 31
+--iterations-per-sample 256 --workspace-root <对应快照> --output <每次独立 JSON>`；六对
+AB/BA 交错，12/12 exit 0，全部 311 场景保留并通过现有 runner-report validator。
+计时使用现有 5 批预热、自校准至至少 100 µs 的样本窗口；每次 31 样本，实际迭代数、
+完整样本、分配和 fixture hash 在 raw JSON。没有把不同操作数的自校准批次误写成固定 QPS。
+无并行编译、测试或其他 Codex benchmark；主机仍有未控制的其他用户进程。
+
+| 单线程缓存容量/操作 | baseline p50 ns/op，中位数 [范围] | candidate，同单位 | 配对成本 B/C 中位数 [范围] |
+|---|---|---|---|
+| 1 / FIFO insert | 192.63 [191.72,193.54] | 161.79 [157.95,168.34] | 1.187 [1.144,1.223] |
+| 100 / FIFO insert | 3469.74 [3455.26,3516.22] | 168.98 [163.84,175.82] | 20.662 [19.653,21.170] |
+| 1000 / FIFO insert | 32020 [31660,32240] | 159.77 [157.77,162.40] | 200.117 [197.844,202.193] |
+| 1000 / refresh | 29590 [29320,29820] | 139.99 [137.29,144.68] | 211.731 [204.312,216.181] |
+
+1000 条读命中为 61.29 → 60.88 ns/op，未显示同级收益。写入每操作仍为 2 allocations，
+没有靠减少输入检查、容量或工作量制造结果。完整 `cache-observations.json` 保留全部
+12 个 cache 场景的 p50/p95/p99 批次观测与范围；这些分位数是批量 ns/op 的分布，不能充当
+网络请求尾延迟。整个 311 场景进程的 CPU 时间 B 33.84–34.13 秒、C 33.83–34.13 秒，峰值
+工作集 B 27.88–29.98 MiB、C 27.97–29.79 MiB；该整体 CPU 数字不归因于 cache 子场景。
+原始资料及采集参数在 `target/remediation-cache/`。没有把本批观察包装为独立 reviewed
+Rule controller calibration/adoption verdict；没有运行新的对外测量入口。
+
+### p50/p95 测量契约补齐
+
+Windows workload schema 4 / host trial schema 3 增加 TCP/UDP p50、p95 和 reservoir 样本数，
+三种分位数来自同一批样本、同一 nearest-rank 算法，保留原 2,000,000 上限与成功工作量。
+新的私有 `latency.rs` 统一采样与统计，`workload.rs` 从 1021 降至 989 行，解决 A1 中工具的
+硬性体积偏差；没有移走无关业务或新增公共 API。控制器拒绝旧版本、缺失字段、分位数
+乱序和样本计数不符；p99 策略、重试和负载配方不变，旧证据按对应提交读取。
+
+102 项 Python performance controller、M4 严格 clippy、self-check 56 mutations、
+PowerShell 非变更合同通过。M4 bundle `4febaee81d3e04463d622a8613181bc22b23b36dace7ab0a4c6223b8bedf6681`；
+performance bundle `64231e1089363cea93d85fa78004f3b835cbdb99fabcb55d7f52c9bfcbde6e4f`；
+qualification bundle `09b155f17e074f726686ff11e9099ac3e4050245f938c5ab19476e6e32204b52`。
+这些是新测量身份，先前 24 次 A/A 和 A/B 没有被改成新 schema，也不自动变成新工具的资格。

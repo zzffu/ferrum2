@@ -792,7 +792,7 @@ function Invoke-Ferrum2HostTrial {
         }
         $workload = Get-Content -LiteralPath $output -Raw -Encoding UTF8 |
             ConvertFrom-Json -Depth 20
-        if ($workload.schema_version -ne 3 -or $workload.status -cne "PASS" -or
+        if ($workload.schema_version -ne 4 -or $workload.status -cne "PASS" -or
             [string]$workload.scenario -cne [string]$Trial.scenario) {
             throw "workload observation identity is invalid"
         }
@@ -809,6 +809,15 @@ function Invoke-Ferrum2HostTrial {
         } else { $null }
         if ($null -ne $p99Nanoseconds -and $p99Nanoseconds -eq 0) {
             throw "workload p99 latency is invalid"
+        }
+        if ($null -ne $p99Nanoseconds) {
+            [uint64]$p50 = $measurements.p50_nanoseconds
+            [uint64]$p95 = $measurements.p95_nanoseconds
+            [uint64]$samples = $measurements.latency_samples
+            if ($p50 -eq 0 -or $p50 -gt $p95 -or $p95 -gt $p99Nanoseconds -or
+                $samples -ne [Math]::Min([uint64]$workload.observation.checked_units, 2000000UL)) {
+                throw "workload latency percentiles or sample count are invalid"
+            }
         }
         $workloadChecks = @($workload.observation.checks.PSObject.Properties)
         if ($workloadChecks.Count -eq 0 -or
@@ -842,7 +851,7 @@ function Invoke-Ferrum2HostTrial {
             throw "trial CPU or failure-counter evidence is invalid"
         }
         $observation = [pscustomobject][ordered]@{
-            schema_version = 2
+            schema_version = 3
             kind = "ferrum2.windows-tun.host-performance-trial"
             run_id = $Context.run_id
             performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256

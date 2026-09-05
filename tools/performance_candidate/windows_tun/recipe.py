@@ -83,12 +83,16 @@ WINDOWS_TUN_WORKLOAD_MEASUREMENTS = MappingProxyType(
         "tcp-single-flow": frozenset(
             {"throughput", "cpu_payload_bytes", "io_completions"}
         ),
-        "tcp-request-1k-p99": frozenset({"p99_nanoseconds", "io_completions"}),
+        "tcp-request-1k-p99": frozenset(
+            {"p50_nanoseconds", "p95_nanoseconds", "p99_nanoseconds",
+             "latency_samples", "io_completions"}
+        ),
         "tcp-256-flow-fairness": frozenset(
             {"fairness", "aggregate_throughput", "io_completions"}
         ),
         "udp-packets-per-second": frozenset(
-            {"packet_rate", "p99_nanoseconds", "io_completions"}
+            {"packet_rate", "p50_nanoseconds", "p95_nanoseconds", "p99_nanoseconds",
+             "latency_samples", "io_completions"}
         ),
         "fragment-reassembly-throughput": frozenset(
             {"reassembly_rate", "io_completions"}
