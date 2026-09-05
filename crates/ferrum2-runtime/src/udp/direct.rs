@@ -220,6 +220,8 @@ struct DirectUdpSessionRoot<S> {
 }
 
 struct DirectOwnerLifetime {
+    manager: UdpSessionManager,
+    session: UdpSessionHandle,
     task_guard: Option<OwnerGuard>,
     socket_guard: Option<OwnerGuard>,
     owner_slot: Option<OwnedSemaphorePermit>,
@@ -227,6 +229,9 @@ struct DirectOwnerLifetime {
 
 impl Drop for DirectOwnerLifetime {
     fn drop(&mut self) {
+        // Retire the exact generation even if the task is aborted or a caller's
+        // handler panics. Publish removal before making owner capacity reusable.
+        self.manager.remove(self.session);
         drop(self.socket_guard.take());
         drop(self.task_guard.take());
         drop(self.owner_slot.take());
@@ -509,6 +514,8 @@ where
         let registry = self.registry.clone();
         let task_guard = self.registry.track_udp_task();
         let owner_lifetime = DirectOwnerLifetime {
+            manager: manager.clone(),
+            session: handle,
             task_guard: Some(task_guard),
             socket_guard: Some(socket_guard),
             owner_slot: Some(owner_slot),
@@ -516,7 +523,7 @@ where
         self.tasks.spawn(async move {
             let _owner_lifetime = owner_lifetime;
             let _ = run_direct_session(
-                manager.clone(),
+                manager,
                 resolver,
                 handler,
                 DirectUdpSessionRoot {
@@ -528,7 +535,6 @@ where
                 registry,
             )
             .await;
-            manager.remove(handle);
         });
         Ok(handle)
     }

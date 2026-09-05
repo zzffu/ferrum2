@@ -27,6 +27,87 @@ mod udp_support;
 use udp_support::*;
 
 #[tokio::test(start_paused = true)]
+async fn panicking_response_handler_retires_session_and_restores_admission() {
+    struct PanickingHandler;
+
+    impl DirectUdpPacketHandler for PanickingHandler {
+        type Error = ();
+
+        async fn handle_target_response(
+            &self,
+            _session: UdpSessionHandle,
+            _response: AccountedDatagram,
+        ) -> Result<(), Self::Error> {
+            panic!("injected response handler failure");
+        }
+    }
+
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    socket
+        .responses
+        .lock()
+        .unwrap()
+        .push_back((b"reply".to_vec(), SocketAddr::from(([127, 0, 0, 1], 9000))));
+    let mut runtime = DirectUdpRuntime::with_adapters(
+        limits(1),
+        Duration::from_secs(10),
+        empty_resolver(),
+        scripted_factory(socket),
+        PanickingHandler,
+        registry.clone(),
+    );
+    let mut removals = runtime.sessions().subscribe_removals();
+    let admission = runtime
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .unwrap();
+    let handle = runtime
+        .commit_session(admission, ip_datagram(b"request"), Instant::now())
+        .unwrap();
+    wait_for_zero_udp_owners(&registry).await;
+    assert_eq!(removals.try_recv(), Ok(handle));
+    assert_eq!(registry.snapshot(), baseline);
+
+    let next = runtime
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .expect("panic must not strand the only session slot");
+    drop(next);
+    assert_eq!(runtime.shutdown(Duration::ZERO).await, 0);
+    assert_eq!(registry.snapshot(), baseline);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_one_runtime_retires_unpolled_session_without_stopping_shared_capacity() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let manager = UdpSessionManager::new(limits(1), registry.clone());
+    let (socket, _) = socket_fixture(Duration::ZERO, []);
+    let mut dropped = shared_runtime(manager.clone(), &registry, socket.clone());
+    let mut survivor = shared_runtime(manager, &registry, socket);
+    let admission = dropped
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .unwrap();
+    dropped
+        .commit_session(admission, ip_datagram(b"request"), Instant::now())
+        .unwrap();
+    // No yield: abort before the spawned task has ever been polled.
+    drop(dropped);
+    wait_for_zero_udp_owners(&registry).await;
+    assert_eq!(registry.snapshot(), baseline);
+    let admission = survivor
+        .reserve_session(Instant::now(), 7, (), selection_destination())
+        .await
+        .expect("another runtime sharing capacity must remain usable");
+    drop(admission);
+    assert_eq!(survivor.shutdown(Duration::ZERO).await, 0);
+    assert_eq!(registry.snapshot(), baseline);
+}
+
+#[tokio::test(start_paused = true)]
 async fn graceful_shutdown_drains_admitted_queue_before_reaping() {
     let registry = OwnerRegistry::new();
     let (socket, sends) = socket_fixture(Duration::ZERO, []);

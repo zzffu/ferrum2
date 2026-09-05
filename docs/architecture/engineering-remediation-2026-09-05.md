@@ -97,11 +97,22 @@ association，Windows crate 才能触及真实 adapter、route、WFP；普通测
   all-targets/all-features clippy `-D warnings` 均通过。
 - 代价：内部 panic 将触发已有进程级故障处理；普通错误请求仍只结束自身连接。
 
-### R3 — P1 候选：Direct UDP 异常退出可能遗漏会话清理
+### R3 — P1：Direct UDP 异常退出遗漏会话清理（已修复）
 
 `runtime/src/udp/direct.rs::commit_session_with_resolver_arc` 在任务末尾调用 remove；panic
-会跳过该语句。正在通过注入 handler panic 验证队列/会话是否滞留；未验证前不声称泄漏已复现。
-若成立，应让现有 lifetime owner 在 Drop 时清理 generation-bound session，再释放容量。
+会跳过该语句，违反 exact ownership 和 generation removal 契约。注入 handler panic 后，
+旧实现的 UDP owner 无法回到基线，已复现。共享 manager 下，一个 runtime 在任务首次
+poll 前被 Drop，也不能依赖“最后一个 runtime 退出”的全局清理。影响是 session/queue
+容量滞留，旧 handle 仍显得存活，可用容量无法及时恢复。
+
+修复把 generation-bound session 放进已有 `DirectOwnerLifetime`；Drop 先 remove/publish
+removal，再释放 task/socket accounting 与 owner permit。正常完成、panic、abort 共用同一
+清理路径，无新公开接口、依赖或堆分配；每个 owner 多保留 manager handle 和 session ID。
+现有 manager 的 generation 检查防止旧 owner 删除复用后的 slot。
+
+验证：`cargo test -p ferrum2-runtime --locked` 及该包 all-targets/all-features clippy
+`-D warnings` 通过。新增 panic 后 removal event / admission 恢复、未 poll 任务取消时
+共享 runtime 继续工作，两项测试比较完整 OwnerSnapshot；现有 reset/queue/drain 测试保留。
 
 ### 后续审查项（不等于已确认故障）
 
@@ -115,7 +126,7 @@ association，Windows crate 才能触及真实 adapter、route、WFP；普通测
 
 ## 证据与未完成项
 
-里程碑：`5438c615` 修复 R1；R2 独立提交包含 DNS loop、故障测试及本记录更新。
+里程碑：`5438c615` 修复 R1；`f20ade19` 修复 R2；R3 独立提交包含 lifetime owner、故障测试及本记录。
 R1 饱和恢复测试开发时曾误把主动强制关闭计数当作零资源快照；已改为等待最后一个请求
 自行超时回收后才停止监听，验证完整快照（包括强制关闭计数）回到基线，再跑完整 package。
 
