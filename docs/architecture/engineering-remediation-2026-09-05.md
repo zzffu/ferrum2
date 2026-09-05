@@ -40,7 +40,7 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 | shadowsocks | 18 / 4785 | TCP authenticate/replay/flow；UDP prepare/commit | 约束/调用链筛查；协议与 tokio adapter |
 | socks5 | 1 / 574 | no-auth command、retained control、borrowed UDP codec | 约束/接口筛查；command/udp |
 | net | 4 / 909 | immutable selection、256-entry interface cache、binder | 约束/接口筛查；network contracts |
-| runtime | 28 / 9634 | metrics、supervisor、affine executor、UDP owner/queues、shutdown | R1/R3/A2 已修复验证；其余路径仍需深入审查 |
+| runtime | 28 / 9634 | metrics、supervisor、affine executor、UDP owner/queues、shutdown | R1/R3/R6/A2 已修复验证；其余路径仍需深入审查 |
 | config | 25 / 8923 | prepare/finish、资源计划、验证边界 | 约束/依赖筛查；config/v2 contracts |
 | dns | 26 / 7193 | proxy TCP/UDP、cache、tagged owner/admission | R2 已修复验证；cache 性能仍是假设 |
 | observability | 11 / 3937 | closed schema、composition renderer、手动 gauge | 约束/接口筛查；metrics/tracing contracts |
@@ -164,7 +164,7 @@ runner。两个 PowerShell module、两个闭合 source bundle、qualification �
 101 项 performance controller、55 项 CI controller、PowerShell source/plan 静态合同和
 19 项 workspace policy 均通过。
 
-### R6 — P1：持续补入的 Direct UDP 请求饿死应答（续行整改）
+### R6 — P1：持续补入的 Direct UDP 请求饿死应答（已修复）
 
 位置 `runtime/src/udp/direct.rs::run_direct_session`。原代码用 `while pop(request)` 排空请求
 后才轮询应答；4 条队列上限不能约束持续补入情况下的一轮发送量。注入 socket 让每次发送
@@ -204,7 +204,7 @@ Windows/WSL runtime 各 123 项、server 56 项、四个跨进程 UDP target 共
 runtime 完整 package 测试均通过。说明已有静态门禁没有证明本次故障边界正确。
 新增 R1 两项测试和 R2 一项测试在旧实现失败；日志保留于 `target/remediation-*-red.log`。
 
-### 最终已执行门禁
+### 首阶段已执行门禁
 
 Rust 完整门禁绑定 `0f897381`；后续 `25edd40a` 仅改变 host 工具、对应 Python 测试和文档，
 未改变 Rust 产品代码。后续工具门禁及真实 host 运行绑定 `25edd40a`。以下命令均从仓库根
@@ -341,3 +341,71 @@ TCP 吞吐存在退化信号，具体因果尚未证实，不能以“只是噪�
    客户端测试始终 compile-only；fuzz 按仓库约束只通过对应有界 Linux CI workflow。
 6. 尚缺真实生产负载、连接分布、DNS/RuleSet 大小及 SLO。当前结论仅限本文 Windows/WSL 配置、
    注入故障及所列工作负载；**整个项目尚未达到经证据确认的生产可用状态**。
+
+## 续行证据：R6 与测量完整性
+
+`4e0fbd752ac14694bde0dd452e65257336c13c39` 为 R6 独立里程碑。该版本真实 Windows TUN
+正确性资格为 QUALIFIED：八项 PASS，105.45419 秒，事务 `ae17b476df78` 五类残留全零。
+证据目录 `%TEMP%/ferrum2-fairness-correctness-20260905T083540Z`。
+
+同一提交两侧的 Quick / EndToEnd A/A，使用与前两轮相同的 performance bundle `142262e4...`、
+预热 2 秒 / active 10 秒 / 三对 AB/BA/AB，共 **24/24 完整试次**。事务 `ee73bf8b8d12`，
+执行 600.386 秒，总计 717.793 秒，产品 failure counter 增量为 0，清理 PASS / 五类全零。
+证据目录 `%TEMP%/ferrum2-fairness-aa-20260905T083927Z`，独立 validator 返回结构有效的
+**REGRESSION** 决策；runner 退出 0 只表示执行和清理完成，不能当作性能门禁通过。
+
+| 同代码 A/A 场景 | 配对改善倍率，中位数 [最小, 最大] | 现有策略结果 |
+|---|---|---|
+| TCP 单流 | 0.9772 [0.9655, 1.0330] | regression |
+| TCP 1 KiB p99 | 1.0079 [0.9993, 1.0280] | regression（还有 CPU/work guard） |
+| UDP packet rate | 0.9804 [0.9010, 1.1043] | regression |
+| 分片吞吐 | 0.9817 [0.9411, 0.9858] | within-noise-band |
+
+同代码 UDP 倍率范围约 -9.9% 到 +10.4%，当前主机不能可靠区分 2% 量级的变化。
+没有放宽策略，也没有据此消除此前真实 A/B 的负向信号。A/A 的完整成功只说明本轮未重现
+启动/分片故障，不证明 R6 已消除其根因。继续原始 `9bbcea22...` 与 `4e0fbd75...` 的完整 A/B。
+
+### Cache 写入测量准备
+
+现有 rule qualification 只测 cache hit/miss，不能验证 insert 全表扫描假设。新增私有
+`dns_cache` owner，承接已有缓存读场景并加入满容量 FIFO 写入与刷新；维持同一 CLI、
+JSON schema、单一计时/分配 owner、所有旧场景和门禁。新场景仍使用既有 1 / 100 / 1000
+规模，预建查询 identity、固定单调时间、60 秒 TTL，计时包含 lock/维护/淘汰；错误粘滞记录，
+计时外核对完整答案、容量与 FIFO 淘汰。分配统计仍位于计时外。
+
+当前只是测量器和 TTL/FIFO 行为测试准备，尚未修改 cache 生产算法，不能先声称性能瓶颈
+或改善。读/写所有场景均需同条件前后测量；批量 ns/op 的 p99 不是逐请求尾延迟。
+
+### R6 完整 A/B：功能完成，性能门禁仍拒绝
+
+原始 `9bbcea22d0373ff60932f929d93d265c98c0a711` 对 `4e0fbd75...` 的 Quick / EndToEnd
+已完成 24/24，事务 `4250fa981c44`，总计 724.181 秒、active 执行链 608.448 秒。
+同样的 bundle / 工作负载 / 顺序；所有 trial 产品 failure counter 增量为 0，清理 PASS、
+五类残留全零。原始证据 `%TEMP%/ferrum2-fairness-ab-20260905T085310Z`。
+独立 validator 实际退出 **3 / REGRESSION**。四场景都未满足完整策略，不能把部分主指标
+的正向差值当作通过。A/A 的 validator 同样为退出 3；当前策略保持不变。
+
+| 场景 | baseline 中位数 [范围] | candidate 中位数 [范围] | 配对改善倍率 [范围] |
+|---|---|---|---|
+| TCP 单流 MB/s | 132.620 [129.869, 136.960] | 137.734 [129.112, 138.122] | 1.0056 [0.9736, 1.0636] |
+| TCP 1 KiB p99 µs | 139.6 [139.1, 143.4] | 139.3 [136.3, 140.1] | 1.0205 [1.0022, 1.0236] |
+| UDP packet/s | 9116 [8912, 10152] | 9574 [9439, 9690] | 1.0502 [0.9545, 1.0591] |
+| 分片 MB/s | 42.011 [41.982, 43.683] | 39.954 [39.804, 40.666] | 0.9510 [0.9112, 0.9686] |
+
+CPU 中位数 client/server：TCP 单流 72.13/46.38 → 67.07/45.58%；TCP 延迟
+25.84/20.00 → 34.15/27.14%；UDP 45.63/41.28 → 46.69/43.26%；分片
+78.28/78.69 → 80.26/76.37%。成功工作量、逐 trial working-set 与 CPU 窗口保留于原始数据；
+CPU guard 按工作量归一化，不能直接比较这些百分比宣称效率改善。
+
+分片三对均下降，是需要定位的持续负向信号；此前不完整 A/B 和本轮都保留。R6 修复了
+已复现的饥饿契约，代价尚未被性能验收接受；继续调整同一调度问题，而非删除回归测试、
+加大队列、提高重传预算或挑选成功场景。此前启动失败/丢 ACK 本轮未重现，仍未确认根因。
+
+Cache 测量准备已验证：新增三项 TTL/FIFO 测试在原生产实现全部通过；rule 工具
+all-targets/all-features check、compile-only test、DNS + 工具严格 clippy、19 项 Python
+controller 测试通过。显式执行 release `--profile qualification --samples 31
+--iterations-per-sample 256`，311 个场景的 correctness/allocation/parity 门禁均通过。
+该 pilot 的缓存 FIFO 写入 p50 批量成本：1 / 100 / 1000 条为 193.51 / 3505.41 /
+31680.00 ns/op；refresh 为 164.77 / 3192.50 / 29440.00 ns/op，读命中约 62–68 ns/op。
+这是全表维护成本随容量增长的测量证据，仍不是网络 DNS 吞吐或逐请求 p99。
+原始文件 `target/remediation-cache-baseline-pilot.json`，重复前后比较继续执行。

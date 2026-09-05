@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod dns_cache;
 mod dns_policy;
 mod execute;
 mod match_set {
