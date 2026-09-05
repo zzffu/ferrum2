@@ -657,3 +657,24 @@ cleanup PASS / benchmark_succeeded=false，adapter/routes/addresses/processes/po
 端口通过先 bind/close 预检，server 直到 client TUN 就绪后才启动，存在 TOCTOU 窗口；
 证据没有失败时的端点占用快照，无法确定是临时端口复用、其他进程竞争或其他 bind 原因。
 这与首次 Confirm 的 active TCP reset 是不同故障，不能混为一个已确认根因。
+
+### M1a — RTL-05：普通门禁不执行 Rule qualification 计时工作负载
+
+基于统一设计 `1b40da27`。先将既有结构化 workflow contract 补全 scoped compile-only
+要求，旧工作流在 `hosted_execution_mutations_fail_closed` 返回明确错误，exit 101；没有执行
+Rule benchmark。之后 root AGENTS、m0 workflow 与 gate ledger 同步排除该包并加独立
+`cargo test -p ferrum2-rule-qualification --no-run --locked`。新增六种工作流 mutation，
+覆盖误纳入 workspace、直接执行、遗漏、条件跳过、压制失败及 shell wrapper。
+
+实际 Windows/MSVC/Rust1.97.1 检查：
+
+- `cargo test -p ferrum2-m0-harness --test workspace_policy --locked`：20通过。
+- `cargo test -p ferrum2-m0-harness --locked`：93通过、0失败、5个已有ignored；不含真实TUN。
+- `cargo test -p ferrum2-rule-qualification --no-run --locked`：两个test executable编译通过，未执行。
+- `cargo clippy -p ferrum2-m0-harness --all-targets --all-features --locked -- -D warnings`、
+  `cargo fmt --all -- --check`通过。
+- `python -B -m unittest discover -s tests/ci -p 'test_*.py' -v`：55通过；输出中的拒绝诊断属于预期negative cases。
+
+日志在 `target/remediation-rule-compile-only-{red,green,m0,build,clippy,ci}.log`。
+5个ignored的provider/lifecycle/Linux IPv6条件未在本批执行，未改为通过；客户端test binary
+未执行。root指南仅修正命令与说明以遵守既有作用域规则，未放宽测试/平台/lint契约。

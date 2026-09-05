@@ -854,7 +854,38 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             "hosted cargo-test surface is not closed: generic={generic_resolvers}, total={other_hosted_selectors}"
         ));
     }
-    let exact_workspace_test = "cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked";
+    let qualification_command = "cargo test -p ferrum2-rule-qualification --no-run --locked";
+    let qualification_steps: Vec<_> = linux
+        .steps
+        .iter()
+        .filter(|step| {
+            step.properties.get("name").map(String::as_str)
+                == Some("Compile Rule qualification tests")
+        })
+        .collect();
+    if qualification_steps.len() != 1
+        || qualification_steps[0]
+            .properties
+            .get("shell")
+            .map(String::as_str)
+            != Some("bash")
+        || qualification_steps[0].properties.contains_key("if")
+        || qualification_steps[0]
+            .properties
+            .contains_key("continue-on-error")
+        || !qualification_steps[0].environment.is_empty()
+        || !qualification_steps[0].inputs.is_empty()
+        || qualification_steps[0].run_lines != ["set -euo pipefail", qualification_command]
+        || all_statements
+            .iter()
+            .filter(|statement| selects_package(statement, "ferrum2-rule-qualification"))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            != [qualification_command]
+    {
+        return Err("Rule qualification tests must only compile in the ordinary gate".to_owned());
+    }
+    let exact_workspace_test = "cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --exclude ferrum2-rule-qualification --locked";
     let workspace_tests: Vec<_> = all_statements
         .iter()
         .filter(|statement| command_words(statement).contains(&"--workspace"))

@@ -146,8 +146,14 @@ jobs:
           set -euo pipefail
           # The client remains compile-only because its test root is process/platform
           # coupled. TUN and Windows-platform libraries have a separately enforced
-          # hosted-safe unit-test contract below.
-          cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked
+          # hosted-safe unit-test contract below. Rule qualification tests contain
+          # timed workloads and have their own compile-only gate.
+          cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --exclude ferrum2-rule-qualification --locked
+      - name: Compile Rule qualification tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p ferrum2-rule-qualification --no-run --locked
       - name: Run portable TUN and Windows platform unit tests
         shell: bash
         run: |

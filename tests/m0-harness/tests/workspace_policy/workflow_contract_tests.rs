@@ -202,6 +202,62 @@ fn hosted_execution_mutations_fail_closed() {
 }
 
 #[test]
+fn qualification_workloads_cannot_enter_ordinary_test_execution() {
+    let main = fs::read_to_string(workspace_root().join(".github/workflows/m0.yml"))
+        .expect("main workflow source");
+    validate_hosted_library_execution(&main).expect("current ordinary test contract");
+
+    let command = "cargo test -p ferrum2-rule-qualification --no-run --locked";
+    for (label, mutated) in [
+        (
+            "included in workspace execution",
+            mutate_first(&main, " --exclude ferrum2-rule-qualification", ""),
+        ),
+        (
+            "direct timed test execution",
+            mutate_first(
+                &main,
+                command,
+                "cargo test -p ferrum2-rule-qualification --locked",
+            ),
+        ),
+        (
+            "missing compile step",
+            mutate_first(&main, &format!("          {command}\n"), ""),
+        ),
+        (
+            "conditional compile step",
+            mutate_first(
+                &main,
+                "      - name: Compile Rule qualification tests\n        shell: bash",
+                "      - name: Compile Rule qualification tests\n        if: false\n        shell: bash",
+            ),
+        ),
+        (
+            "failure suppression",
+            mutate_first(
+                &main,
+                "      - name: Compile Rule qualification tests\n        shell: bash",
+                "      - name: Compile Rule qualification tests\n        continue-on-error: true\n        shell: bash",
+            ),
+        ),
+        (
+            "wrapped compile command",
+            mutate_first(
+                &main,
+                &format!("          {command}\n"),
+                &format!("          if false; then\n            {command}\n          fi\n"),
+            ),
+        ),
+    ] {
+        assert!(
+            validate_hosted_library_execution(&mutated).is_err(),
+            "ordinary qualification contract accepted {label}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_execution_mutations_fail_closed() {
     let fuzz =
         fs::read_to_string(workspace_root().join(".github/workflows/tun-fuzz-deterministic.yml"))

@@ -6,7 +6,7 @@ external repository setting; unknown values stay marked as gaps rather than bein
 
 | ID | Current workflow / job / step | Trigger and status | Command or contract | Timeout / privilege | Provider, evidence and cleanup | Target / migration status |
 |---|---|---|---|---|---|---|
-| G-QUALITY | `m0.yml:quality` named steps | PR, master/integration push; the offline `tools.ci.change_contract` controller skips only a non-empty Markdown-only diff; empty, unavailable, manual, or unknown comparisons fail closed to run; included by `m3 / required` | architecture policy, build/example, fmt, clippy, safe workspace tests, client no-run, hosted-safe TUN and Windows-platform `--lib --no-default-features --features fuzzing` execution, DNS interop-root, M4 self-check, docs | 60m; ordinary Linux | Exact Rust 1.97.1 plus Ubuntu image/toolchain evidence; no raw artifact | retained as one job to reuse checkout/toolchain/build state |
+| G-QUALITY | `m0.yml:quality` named steps | PR, master/integration push; the offline `tools.ci.change_contract` controller skips only a non-empty Markdown-only diff; empty, unavailable, manual, or unknown comparisons fail closed to run; included by `m3 / required` | architecture policy, build/example, fmt, clippy, safe workspace tests, client and Rule qualification no-run, hosted-safe TUN and Windows-platform `--lib --no-default-features --features fuzzing` execution, DNS interop-root, M4 self-check, docs | 60m; ordinary Linux | Exact Rust 1.97.1 plus Ubuntu image/toolchain evidence; no raw artifact | retained as one job to reuse checkout/toolchain/build state |
 | G-PY-CANDIDATE | `m0.yml:quality:Test candidate controller` | same | `python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v` | ordinary Linux | Owner-split hermetic unittest discovery; no ignored raw evidence | current named step |
 | G-PY-RULE | `m0.yml:quality:Test Rule ordinary controller` | same | `python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v`; runner v1, current control v6 and reviewed-calibration v2 contracts | ordinary Linux | Owner-split hermetic controller tests only; historical v2-v4 are archive-verifier inputs | current named step |
 | G-PY-PLATFORM | `m0.yml:quality:Test native qualification controller contract` | same | role-specific invalid-config diagnostics and local-mode evidence isolation | ordinary Linux | stdlib unit tests; no product binary execution | current named step |
@@ -30,8 +30,10 @@ external repository setting; unknown values stay marked as gaps rather than bein
 
 ## R0 readback rules
 
-- The root workspace invocation excludes `ferrum2-client`, `ferrum2-tun`, and the Windows platform
-  crate to avoid duplicate execution. It then compiles the client tests with `--no-run` and executes
+- The root workspace invocation excludes `ferrum2-client`, `ferrum2-tun`, the Windows platform
+  crate, and `ferrum2-rule-qualification`. It compiles client and Rule qualification tests with
+  `--no-run`; the Rule package contains timed workloads reserved for explicit qualification.
+  The workflow contract requires that compile-only step and rejects ordinary execution. It executes
   both hosted-safe library suites with `--lib --no-default-features --features fuzzing`. The positive
   `live-backend` feature remains enabled in default and all-feature production builds. The workspace
   declares both `ferrum2-tun` and `ferrum2-platform-windows` with `default-features = false`; product

@@ -44,8 +44,9 @@ Use locked dependencies for reproducible results:
 ```text
 cargo build --workspace --bins --locked
 cargo build -p ferrum2-shadowsocks --example udp_protocol_client --locked
-cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --locked
+cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --exclude ferrum2-rule-qualification --locked
 cargo test -p ferrum2-client --all-features --no-run --locked
+cargo test -p ferrum2-rule-qualification --no-run --locked
 cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
 cargo test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
 cargo check -p ferrum2-tun -p ferrum2-platform-windows --all-features --locked
@@ -86,7 +87,9 @@ the matching profile and target, for example on Windows:
 python -X utf8 tests/platform/qualify_native.py --local-contract --profile windows-msvc --target x86_64-pc-windows-msvc --client target/x86_64-pc-windows-msvc/release/ferrum2-client.exe --server target/x86_64-pc-windows-msvc/release/ferrum2-server.exe
 ```
 
-The client test binary is compile-only on ordinary hosts. The hosted `ferrum2-tun` and
+The client test binary is compile-only on ordinary hosts. The `ferrum2-rule-qualification` test
+binaries are also compile-only in ordinary gates because they contain timed qualification workloads;
+execute those workloads only through their explicit qualification entry point. The hosted `ferrum2-tun` and
 `ferrum2-platform-windows` library suites are safe by contract: they use target-neutral logic,
 unsupported-target stubs, or injected Windows operations and run in ordinary Linux and hosted Windows
 CI. Ordinary tests must never create a real adapter or mutate route, DNS, WFP, or interface state.

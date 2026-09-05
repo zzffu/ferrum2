@@ -10,6 +10,15 @@
 README、文档索引、workspace manifests、架构台账和 CI 入口为审查输入。
 以本地规则为准；不迁入 Codex 专属流程。不修改 vendor、fixture、网络权限或 lint 强度。
 
+## 架构设计后的实施
+
+统一设计里程碑为 `1b40da27`；以下工具修复属于 M1，尚未开始 M2–4 产品架构修改。
+产品源码仍为 `2fb0dd4a`。详细命令和 red/green 见[逐批证据](engineering-remediation-evidence-2026-09-05.md)。
+
+| 批次 / 审查项 | 已落实行为 | 实际验证 |
+|---|---|---|
+| M1a / RTL-05 | 普通 workspace 排除 timed Rule qualification；强制保留独立 no-run gate | workspace policy 20、完整 m0 93 passed/5 ignored、CI Python 55；rule test compile-only、m0严格clippy、fmt通过 |
+
 ## 环境与暂定验收
 
 - Windows 11 Pro `10.0.26200`，AMD Ryzen 7 7700，8 核 / 16 逻辑处理器，
