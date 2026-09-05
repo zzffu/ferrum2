@@ -11,12 +11,14 @@ function Read-Ferrum2HostQualificationSourceBundle {
         "tools/powershell/Ferrum2.Performance/HostExecution.ps1"
         "tools/powershell/Ferrum2.Performance/HostProduct.ps1"
         "tools/powershell/Ferrum2.Performance/HostOwnership.ps1"
+        "tools/powershell/Ferrum2.Performance/HostCleanup.ps1"
         "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs"
         "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psd1"
         "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psm1"
         "tools/powershell/Ferrum2.Qualification.Host/HostQualification.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/QualificationRouteNotification.cs"
         "tools/powershell/Ferrum2.Qualification.Host/SourceBundle.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/SupervisorEvidence.ps1"
     ) | Sort-Object
     $manifestItem = Get-Item -LiteralPath $ManifestPath -Force -ErrorAction Stop
     if ($manifestItem.PSIsContainer -or $manifestItem.Length -le 0 -or

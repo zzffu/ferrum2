@@ -204,6 +204,7 @@ function Write-AtomicJsonFile {
 
 function Write-Ferrum2HostPerformanceLedger {
     param([Parameter(Mandatory = $true)][object]$Context)
+    Update-Ferrum2ExpectedResources -Ledger $Context.ledger
     $Context.ledger.updated_utc = [DateTime]::UtcNow.ToString("O")
     Write-AtomicJsonFile -Path $Context.ledger_path -Document $Context.ledger
 }
@@ -223,6 +224,8 @@ function New-Ferrum2HostPerformanceContext {
     $runRoot = $null
     $runId = $null
     try {
+        # Capture before this context can launch a product or create an adapter.
+        $adapterBaseline = @(Get-Ferrum2HostAdapterBaseline)
         if (Test-Path -LiteralPath $evidence) {
             throw "host performance evidence directory baseline must be absent"
         }
@@ -238,7 +241,7 @@ function New-Ferrum2HostPerformanceContext {
         New-Item -ItemType Directory -Path $runRoot -ErrorAction Stop | Out-Null
         $runRootCreated = $true
         $ledger = [pscustomobject][ordered]@{
-            schema_version = 1
+            schema_version = 2
             kind = "ferrum2.windows-tun.host-performance-recovery"
             run_id = $runId
             state = "initializing"
@@ -256,6 +259,10 @@ function New-Ferrum2HostPerformanceContext {
                 addresses = @()
                 routes = @()
                 ports = @()
+            }
+            expected_resources = [pscustomobject][ordered]@{
+                processes = @(); adapters = @(); addresses = @(); routes = @(); ports = @()
+                adapter_baseline_guids = $adapterBaseline
             }
             recovery = [pscustomobject][ordered]@{
                 attempts = 0
@@ -319,11 +326,21 @@ function Get-Ferrum2HostPerformanceLedgers {
         }
         $document = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop |
             ConvertFrom-Json -Depth 20 -ErrorAction Stop
-        if ($document.schema_version -ne 1 -or
+        if ($document.schema_version -ne 2 -or
             [string]$document.kind -cne "ferrum2.windows-tun.host-performance-recovery" -or
             [string]$document.run_id -cne $row.Name -or
             [string]$document.run_id -cnotmatch '^[0-9a-f]{12}$') {
             throw "host performance recovery ledger identity is invalid: $path"
+        }
+        if ($null -eq $document.expected_resources.adapter_baseline_guids -or
+            @($document.expected_resources.adapter_baseline_guids).Count -gt 4096) {
+            throw "host performance recovery adapter baseline is invalid: $path"
+        }
+        foreach ($encoded in $document.expected_resources.adapter_baseline_guids) {
+            $identity = [Guid]::Empty
+            if (-not [Guid]::TryParse([string]$encoded, [ref]$identity) -or $identity -eq [Guid]::Empty) {
+                throw "host performance recovery adapter baseline identity is invalid: $path"
+            }
         }
         [void]$ledgers.Add([pscustomobject]@{ path = $path; document = $document })
     }
@@ -589,11 +606,13 @@ function Remove-Ferrum2LedgerResources {
         [Parameter(Mandatory = $true)][object]$Ledger,
         [Parameter(Mandatory = $true)][string]$LedgerPath
     )
+    Update-Ferrum2ExpectedResources -Ledger $Ledger
+    Write-AtomicJsonFile -Path $LedgerPath -Document $Ledger
     foreach ($row in @($Ledger.resources.processes)) {
         $process = Assert-Ferrum2ProcessIdentity -Row $row
         if ($null -ne $process) {
             Stop-Process -Id ([int]$row.pid) -Force -ErrorAction Stop
-            $process.WaitForExit(5000)
+            [void]$process.WaitForExit(5000)
             if (-not $process.HasExited) { throw "owned process did not exit: $($row.pid)" }
         }
     }
@@ -668,23 +687,7 @@ function Remove-Ferrum2LedgerResources {
             if ($LASTEXITCODE -ne 0) { throw "exact owned adapter removal failed" }
         }
     }
-    foreach ($row in @($Ledger.resources.ports)) {
-        if ([string]$row.protocol -ceq "tcp") {
-            $listeners = @(Get-NetTCPConnection -State Listen `
-                -LocalAddress ([string]$row.address) -LocalPort ([uint16]$row.port) `
-                -ErrorAction SilentlyContinue)
-            if ($listeners.Count -ne 0) { throw "owned TCP port remains in use: $($row.port)" }
-        } else {
-            $listeners = @(Get-NetUDPEndpoint -LocalAddress ([string]$row.address) `
-                -LocalPort ([uint16]$row.port) -ErrorAction SilentlyContinue)
-            if ($listeners.Count -ne 0) { throw "owned UDP port remains in use: $($row.port)" }
-        }
-    }
-    if ($null -ne $adapterRow -and
-        @(Get-NetAdapter -IncludeHidden -Name ([string]$adapterRow.name) `
-            -ErrorAction SilentlyContinue).Count -ne 0) {
-        throw "owned adapter remains after cleanup"
-    }
+    $readback = Get-Ferrum2HostCleanupReadback -Ledger $Ledger
     $Ledger.resources.processes = @()
     $Ledger.resources.routes = @()
     $Ledger.resources.addresses = @()
@@ -694,6 +697,7 @@ function Remove-Ferrum2LedgerResources {
     $Ledger.recovery.attempts = [int]$Ledger.recovery.attempts + 1
     $Ledger.recovery.last_error = $null
     Write-AtomicJsonFile -Path $LedgerPath -Document $Ledger
+    return $readback
 }
 
 function Invoke-Ferrum2HostPerformanceRecovery {
@@ -709,7 +713,7 @@ function Invoke-Ferrum2HostPerformanceRecovery {
     $recovered = 0
     foreach ($entry in $ledgers) {
         try {
-            Remove-Ferrum2LedgerResources -Ledger $entry.document -LedgerPath $entry.path
+            [void](Remove-Ferrum2LedgerResources -Ledger $entry.document -LedgerPath $entry.path)
             Remove-Ferrum2HostPerformanceRunRoot `
                 -RunRoot (Split-Path -Parent $entry.path) `
                 -RunId ([string]$entry.document.run_id)
@@ -736,7 +740,7 @@ function Complete-Ferrum2HostPerformanceCleanup {
     try {
         [Ferrum2PerfProcessGroup]::CloseGroup()
         Start-Sleep -Milliseconds 300
-        Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
+        $readback = Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
         $Context.ledger.state = "cleaned"
         $Context.ledger.recovery.last_error = $null
         Write-Ferrum2HostPerformanceLedger -Context $Context
@@ -755,11 +759,11 @@ function Complete-Ferrum2HostPerformanceCleanup {
         performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
         status = "PASS"
         benchmark_succeeded = $Succeeded
-        adapter_remaining = 0
-        routes_remaining = 0
-        addresses_remaining = 0
-        processes_remaining = 0
-        ports_remaining = 0
+        adapter_remaining = $readback.adapter_remaining
+        routes_remaining = $readback.routes_remaining
+        addresses_remaining = $readback.addresses_remaining
+        processes_remaining = $readback.processes_remaining
+        ports_remaining = $readback.ports_remaining
         completed_utc = [DateTime]::UtcNow.ToString("O")
     }
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "cleanup.json") `

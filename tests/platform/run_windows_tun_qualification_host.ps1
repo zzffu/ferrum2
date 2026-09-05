@@ -39,6 +39,7 @@ $moduleRoot = Join-Path $repositoryRoot 'tools\powershell\Ferrum2.Qualification.
 $sourceBundle = Read-Ferrum2HostQualificationSourceBundle `
     -RepositoryRoot $repositoryRoot `
     -ManifestPath (Join-Path $moduleRoot 'bundle.json')
+. (Join-Path $moduleRoot 'SupervisorEvidence.ps1')
 
 if ($PlanOnly -or $RecoveryOnly) {
     Import-Module -Name (Join-Path $moduleRoot 'Ferrum2.Qualification.Host.psd1') `
@@ -90,6 +91,12 @@ $workerArguments = @(
 ) -join ' '
 $workerPid = $null
 $timedOut = $false
+$outcome = [ordered]@{
+    phase = 'worker-start'; worker_exit_code = $null; recovery_exit_code = $null
+    worker_timed_out = $false; recovery_timed_out = $false
+    primary_error = $null; cleanup_error = $null
+    cleanup_phase = 'pending'; cleanup_failures = @()
+}
 try {
     $workerPid = [Ferrum2PerfProcessGroup]::Start(
         $pwsh, $workerArguments, $repositoryRoot, $stdoutPath, $stderrPath
@@ -97,9 +104,11 @@ try {
     if (-not [Ferrum2PerfProcessGroup]::Wait(
             [uint32]$workerPid, [uint32]($workerTimeoutSeconds * 1000))) {
         $timedOut = $true
+        $outcome.worker_timed_out = $true
         [Ferrum2PerfProcessGroup]::CloseGroup()
     } else {
         $exitCode = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$workerPid)
+        $outcome.worker_exit_code = $exitCode
         [Ferrum2PerfProcessGroup]::Close([uint32]$workerPid)
         [Ferrum2PerfProcessGroup]::CloseGroup()
         if ($exitCode -ne 0) {
@@ -107,6 +116,7 @@ try {
         }
     }
     if ($timedOut) {
+        $outcome.phase = 'recovery'
         $recoveryStdout = Join-Path $supervisorRoot 'recovery.stdout.log'
         $recoveryStderr = Join-Path $supervisorRoot 'recovery.stderr.log'
         $recoveryArguments = @(
@@ -118,18 +128,21 @@ try {
             $pwsh, $recoveryArguments, $repositoryRoot, $recoveryStdout, $recoveryStderr
         )
         if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$recoveryPid, 45000)) {
+            $outcome.recovery_timed_out = $true
             [Ferrum2PerfProcessGroup]::CloseGroup()
             throw 'host qualification timed out and bounded recovery also timed out'
         }
         $recoveryExit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$recoveryPid)
+        $outcome.recovery_exit_code = $recoveryExit
         [Ferrum2PerfProcessGroup]::Close([uint32]$recoveryPid)
         [Ferrum2PerfProcessGroup]::CloseGroup()
         if ($recoveryExit -ne 0) {
-            throw "host qualification timed out and recovery failed; stderr=$recoveryStderr"
+            throw "host qualification timed out and recovery failed; evidence=$resolvedEvidence; recovery log=recovery.stderr.log"
         }
         throw "host qualification exceeded the $workerTimeoutSeconds-second worker limit"
     }
 
+    $outcome.phase = 'verdict'
     $workerResultPath = Join-Path $resolvedEvidence 'qualification-worker.json'
     $cleanupPath = Join-Path $resolvedEvidence 'qualification-cleanup.json'
     if (-not (Test-Path -LiteralPath $workerResultPath -PathType Leaf) -or
@@ -152,7 +165,6 @@ try {
     )
     $actualChecks = @($workerResult.checks)
     $actualCheckNames = @($actualChecks | ForEach-Object { [string]$_.name })
-    $supervisorTimer.Stop()
     if ($workerResult.status -cne 'PASS' -or $workerResult.qualification -ne $true -or
         $workerResult.candidate_sha -cne $CandidateSha -or
         $workerResult.qualification_source_bundle_sha256 -cne $sourceBundle.sha256 -or
@@ -178,28 +190,36 @@ try {
         strict_route_wfp = $workerResult.strict_route_wfp
         cleanup = $cleanup
     }
-    $resultPath = Join-Path $resolvedEvidence 'qualification.json'
-    [IO.File]::WriteAllText(
-        $resultPath,
-        (($result | ConvertTo-Json -Depth 20) + "`n"),
-        [Text.UTF8Encoding]::new($false)
-    )
-    $result | ConvertTo-Json -Depth 20
+    $outcome.phase = 'verdict-ready'
+} catch {
+    $outcome.primary_error = [string]$_.Exception.Message
+    throw
 } finally {
-    [Ferrum2PerfProcessGroup]::CloseGroup()
-    if (Test-Path -LiteralPath $supervisorRoot -PathType Container) {
-        if (Test-Path -LiteralPath $resolvedEvidence -PathType Container) {
-            foreach ($entry in @(
-                @{ Source = $stdoutPath; Name = 'supervisor.stdout.log' },
-                @{ Source = $stderrPath; Name = 'supervisor.stderr.log' }
-            )) {
-                if (Test-Path -LiteralPath $entry.Source -PathType Leaf) {
-                    Copy-Item -LiteralPath $entry.Source `
-                        -Destination (Join-Path $resolvedEvidence $entry.Name) -Force `
-                        -ErrorAction SilentlyContinue
-                }
-            }
-        }
-        Remove-Item -LiteralPath $supervisorRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $closeFailure = $null
+    try { [Ferrum2PerfProcessGroup]::CloseGroup() } catch {
+        $closeFailure = $_
+        $outcome.cleanup_phase = 'close-process-group'
+        $outcome.cleanup_error = [string]$_.Exception.Message
+        $outcome.cleanup_failures = @($outcome.cleanup_failures) + @(
+            [pscustomobject]@{ phase = $outcome.cleanup_phase; error = $outcome.cleanup_error })
+    }
+    try {
+        Complete-Ferrum2QualificationSupervisorEvidence -SupervisorRoot $supervisorRoot `
+            -EvidenceDirectory $resolvedEvidence -Outcome $outcome
+    } catch {
+        if ($null -eq $closeFailure) { $closeFailure = $_ }
+    }
+    if ($null -ne $closeFailure) {
+        if ($null -eq $outcome.primary_error) { throw $closeFailure }
+        Write-Warning "supervisor cleanup failed in $($outcome.cleanup_phase); see supervisor-outcome.json"
     }
 }
+$supervisorTimer.Stop()
+if ($supervisorTimer.Elapsed.TotalSeconds -ge $maximumElapsedSeconds) {
+    throw 'host qualification exceeded its total deadline including supervisor cleanup'
+}
+$result.supervisor_elapsed_seconds = $supervisorTimer.Elapsed.TotalSeconds
+$resultPath = Join-Path $resolvedEvidence 'qualification.json'
+[IO.File]::WriteAllText($resultPath, (($result | ConvertTo-Json -Depth 20) + "`n"),
+    [Text.UTF8Encoding]::new($false))
+$result | ConvertTo-Json -Depth 20

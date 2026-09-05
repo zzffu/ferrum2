@@ -801,3 +801,35 @@ nonmutating qualification contract通过。主工作树CI Python56项通过。
 `target/remediation-m1-{evidence-full,isolated-candidate,isolated-ps,aggregate-ci}.log`。
 这些是offline/parser/流程契约证据，未执行GitHub workflow、benchmark或host网络操作。
 完整矩阵重建增加有限raw文件读取/归约成本；阈值与A/A校准规则不变，新source identity须重新取基线。
+
+### M1g — HT2/HT3：清理证明及 supervisor 最终证据
+
+共享私有 `HostCleanup.ps1` 保留历史 expected identities，独立枚举五类资源并归约残留；
+读取失败、PID身份替换、GUID或名称仍占用均不能输出零。recovery schema 2 在产品启动前
+记录最多4096个唯一有效adapter GUID；未完成创建计划只有在最终无新GUID且名称无冲突时
+才能收尾，避免创建前取消永久卡住。未知新GUID只阻止成功，绝不授权删除。已有created
+身份仍用GUID和名称检查。baseline是有界保留数据，不宣称Windows cmdlet枚举本身有硬内存上限。
+
+`SupervisorEvidence.ps1` 统一四份worker/recovery日志和phase/primary/cleanup/timeout/exit
+数据的保留。最终发布移到close、导出、临时目录删除之后，900秒涵盖这些步骤。删除前验证
+TEMP直属目录、严格随机名称、非reparse目录、证据目录不在其下；失败保留证据与原错误。
+正确性与性能仅共享身份/回收原语，不共享runner或verdict。
+
+普通验证只执行注入inventory和实际supervisor AST的finally/tail，替换process group与删除
+操作；覆盖历史账本退休、读取失败、各类残留、GUID改名/替换、创建前取消、未知新GUID、
+close/export/remove失败与超时，均不运行worker try或任何真实host查询/变更。
+最终隔离快照full candidate 123项通过（30.940s），主树PS nonmutating资格contract通过；
+PS parser、两source bundle重建及diff检查通过。日志 `target/remediation-ht23-final-candidate.log`、
+`target/remediation-ht23-root-static.log` 和 `target/remediation-audit/ht*-*.log`。
+一次root同步使用了错误工作目录，复制失败后的旧快照测试不作为最终证据；修正绝对路径
+更新27文件manifest后完整重跑，未跳过失败。manifest仍在 `target/remediation-m1-integration-files.json`。
+
+本批performance bundle `ce0b52d0ca851f0ffd698fa4c0c1d81dcb0b729771cbe9d6915775f988172c23`；
+qualification bundle `dc6349c9a6cd6d40c6f933f5fa710b05c361ec01173b40473cbea4595bb58d95`。
+增加一次启动前adapter枚举及最终五类状态读取的成本，尚无live测量；实际cmdlet空枚举、
+真实回收、900秒完成仍需专用host runner验证，旧五零报告不升级为新readback证据。
+
+自动审批另拒绝过一次包含静态文件重写的Python shell命令，工具仅给出 `blocked by policy`，
+未指出具体内容。没有重试该命令；改用专用apply_patch完成静态编辑，不执行文本里的host
+命令。完整范围见 `target/remediation-audit/ht2-ht3-execution-notes.md`；这与先前两组动态
+审查agent turn被内容审查阻止是不同事件，后两组仍未执行或绕行。

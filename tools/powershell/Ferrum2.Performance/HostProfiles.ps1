@@ -402,7 +402,7 @@ function Invoke-Ferrum2HostSafetyCheck {
     Write-Ferrum2HostPerformanceLedger -Context $Context
     $plannedAddressRefused = $false
     try {
-        Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
+        [void](Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path)
     } catch {
         if ([string]$_.Exception.Message -cne
             "planned address presence is ambiguous; refusing removal") {
@@ -418,7 +418,7 @@ function Invoke-Ferrum2HostSafetyCheck {
     }
     $addressRows[0].state = "created"
     Write-Ferrum2HostPerformanceLedger -Context $Context
-    Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path
+    [void](Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path)
     [void]$checks.Add([pscustomobject]@{
         name = "planned-address-ambiguity-fails-closed"
         status = "PASS"

@@ -66,6 +66,7 @@ function Read-Ferrum2PerformanceSourceBundle {
         "tools/powershell/Ferrum2.Performance/Ferrum2.Performance.psm1",
         "tools/powershell/Ferrum2.Performance/HostPlan.ps1",
         "tools/powershell/Ferrum2.Performance/HostOwnership.ps1",
+        "tools/powershell/Ferrum2.Performance/HostCleanup.ps1",
         "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
         "tools/powershell/Ferrum2.Performance/HostProduct.ps1",
         "tools/powershell/Ferrum2.Performance/HostProfiles.ps1",

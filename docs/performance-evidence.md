@@ -103,7 +103,12 @@ Every real run requires an already elevated shell and the literal
 benchmark routes. Both topologies must prove benchmark traffic enters the owned TUN and support
 egress excludes it; `EndToEnd` additionally proves the client/server underlay excludes it. Each
 mutation is recorded incrementally in a per-RunId recovery ledger. Success requires identity-safe
-cleanup plus readback proving no owned adapter, route, process, or port remains.
+cleanup plus independent readback proving no owned adapter, route, address, process, or port remains.
+Recovery ledger schema 2 keeps historical expected identities after actionable records are retired.
+It captures a bounded adapter GUID baseline before startup; an unfinished creation plan requires no
+new GUID and no expected-name conflict at final readback. Created adapters remain tracked by GUID
+and name. Failed enumeration or ambiguous identity rejects cleanup success and never authorizes
+removal of unrelated resources.
 
 The host runner's `summary.json` status `PASS` means execution and evidence construction completed.
 Use the independent Python validator to check the complete evidence and derive the performance

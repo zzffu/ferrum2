@@ -41,6 +41,13 @@ exist. Keep it outside the repository. The persistent recovery ledger is under
 `%PROGRAMDATA%\Ferrum2HostPerformance-v2\<RunId>\recovery.json`; recovery removes only identities
 whose ownership the ledger proves.
 
+Recovery ledger schema 2 retains expected resource identities even after their actionable records
+are retired. Before product startup it records at most 4096 distinct adapter GUIDs. Final cleanup
+independently enumerates adapters, routes, addresses, processes, and listening ports; read failures
+cannot establish zero residue. A created adapter is tracked by GUID as well as name. An unfinished
+creation plan can close only when its name is absent and every observed adapter GUID was in the
+baseline. An unknown new GUID or reused process identity fails closed without authorizing removal.
+
 ## Inspect the fixed plan
 
 `-PlanOnly` is unprivileged and nonmutating:
@@ -96,7 +103,13 @@ qualification writes:
 - `qualification-worker.json`: per-check, route, and WFP witnesses;
 - `qualification-cleanup.json`: bounded cleanup counts;
 - `qualification.json`: final supervisor verdict;
+- `supervisor-outcome.json`: worker/recovery exit and timeout observations, primary error, and
+  phase-specific cleanup failures;
 - bounded worker/supervisor logs and lower-level transaction evidence.
+
+The supervisor retains worker and recovery logs before deleting its owned temporary directory.
+Export, process-group close, or directory cleanup failure prevents publication of `qualification.json`;
+the total deadline includes this finalization. Failed export retains the temporary evidence tree.
 
 Accept the run only if `qualification.json` has `status = QUALIFIED`, `qualification = true`, the
 requested candidate and source-bundle identities, all eight `PASS` checks, cleanup counts of zero, and
