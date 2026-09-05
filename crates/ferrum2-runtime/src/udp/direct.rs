@@ -521,10 +521,6 @@ where
     let mut cancellation = manager.cancellation(handle)?;
     let notify = manager.notify(handle)?;
     let mut candidate_hints = UdpAssociationCandidateHints::default();
-    // Activity only extends this deadline. Recheck when the existing timer
-    // fires instead of registering a timer and locking session state per I/O.
-    let idle = tokio::time::sleep_until(manager.idle_deadline(handle)?);
-    tokio::pin!(idle);
     loop {
         // A bounded queue is not a bounded drain when producers keep refilling
         // it. Alternate one request with a response opportunity, and account
@@ -550,6 +546,7 @@ where
             }
             return Err(UdpRuntimeError::Cancelled);
         }
+        let idle_deadline = manager.idle_deadline(handle)?;
         tokio::select! {
             biased;
             changed = cancellation.changed() => {
@@ -559,12 +556,10 @@ where
                 // Closed admission makes the remaining queue finite. Reuse the
                 // cooperative request path until every admitted packet drains.
             }
-            () = &mut idle => {
-                let deadline = manager.idle_deadline(handle)?;
-                if Instant::now() >= deadline {
+            () = tokio::time::sleep_until(idle_deadline) => {
+                if Instant::now() >= manager.idle_deadline(handle)? {
                     return Err(UdpRuntimeError::Idle);
                 }
-                idle.as_mut().reset(deadline);
             }
             response = receive_target(
                 &socket,

@@ -491,3 +491,22 @@ R7 之后的完整 Windows 门禁已完成：workspace（按根命令排除 clie
 all-targets/all-features clippy `-D warnings`、workspace docs 全部通过。TUN safe lib
 126 项、platform-windows safe lib 59 项及两个包 all-features check 通过。MSVC linker
 仍只有生成 import lib 的 informational stdout warning，没有放宽 lint 或跳过失败测试。
+
+### R7 timer 尝试的验收与撤回
+
+`7e8ad6414e0a177f0d6f3b821ce86ad3a36561a6` 真实 TUN 八项资格再次 QUALIFIED，事务
+`c3c9f3418631` 五类残留全零，证据 `%TEMP%/ferrum2-timer-correctness-20260905T093714Z`。
+随后以 `3158694617c9d8ca29f4050f0911e02808299c41` 为基线、`7e8ad641...` 为候选进行
+同一新版 harness 的 Quick/EndToEnd 三对比较，24/24 完成，事务 `b0cc0c079929` 产品
+failure delta 全零且 cleanup PASS / 五类全零。证据 `%TEMP%/ferrum2-timer-ab-20260905T094207Z`，
+独立 validator 退出 **3 / REGRESSION**。
+
+配对改善倍率中位数 [范围]：TCP throughput 0.9301 [0.8624,1.0061]；TCP p99
+1.0294 [1.0000,1.1689]；UDP packet rate 0.9770 [0.9107,1.0365]；分片 throughput
+0.9883 [0.9577,1.0523]。无 confirmed timer 性能收益。TCP 路径未修改也出现较大负向差值，
+不能据此指认 timer 为 TCP 根因；也不能用这个理由忽略 gate 失败。
+
+因此撤回持久 idle timer 的性能尝试，恢复逐轮 timer 行为，保留已复现的 monotonic
+activity 修复与全部新测试。没有撤回 R6 的公平性与资源限制，也没有挑选通过的试次。
+p50/p95/p99 和 checked sample count 已有实际数据；这些记录仍完整保留，不能把候选
+试验的结果归给撤回后的提交。接下来验证最终 TUN join 修复和当前候选的完整资格。
