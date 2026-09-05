@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from tools.performance_rule.json_contract import closed_json_bytes, exact_fields
+from tools.performance_rule.output import EVIDENCE_MAX_BYTES
+from tools.performance_rule.runner_request import parse_runner_request
 from tools.performance_rule.pairing import calibrated_limit, summarize
 from tools.performance_rule.policy import threshold_policy
 from tools.performance_rule.validated_report import require_same_workload, validate_report
@@ -18,12 +21,8 @@ from tools.performance_rule.schema import (
     RUNNER_PRIORITY_NORMAL,
     ControlError,
     is_sha256,
-    sha256_file,
     validate_pairs,
 )
-
-
-EVIDENCE_MAX_BYTES = 64 * 1024 * 1024
 
 
 def read_json_report(path: Path, label: str) -> tuple[Path, dict[str, Any], str]:
@@ -61,6 +60,7 @@ def validate_control_raw_evidence(
         not isinstance(value, str) for value in runner_arguments
     ):
         raise ControlError("controller report runner arguments are invalid")
+    request = parse_runner_request(runner_arguments)
     scenario_list = report.get("scenario_ids")
     if (
         not isinstance(scenario_list, list)
@@ -109,6 +109,7 @@ def validate_control_raw_evidence(
         for role in ("parent", "candidate"):
             expected_sha = parent_sha256 if role == "parent" else candidate_sha256
             observed = validate_report(pair[role], expected_sha)
+            request.validate_report(observed.report)
             workload = require_same_workload(workload, observed.workload_sha256)
             scenario_suites = observed.scenario_suites
     assert scenario_suites is not None
@@ -175,14 +176,21 @@ def validate_control_document(report: Any) -> dict[str, Any]:
     return report
 
 
+@dataclass(frozen=True)
+class ReviewedCalibration:
+    path: Path
+    sha256: str
+    effective_limit: float
+    scenario_suites: dict[str, str]
+    workload_sha256: str
+
+
 def load_calibration(
     path: Path,
     parent_sha256: str,
-    scenario_suites: dict[str, str],
     runner_arguments: list[str],
     runner_priority: str,
-    workload_sha256: str,
-) -> tuple[dict[str, Any], float, str]:
+) -> ReviewedCalibration:
     calibration_path, calibration, calibration_sha256 = read_json_report(
         path, "reviewed A/A calibration"
     )
@@ -222,7 +230,6 @@ def load_calibration(
     ):
         raise ControlError("reviewed calibration source identity changed")
     source_suites, raw_pairs, source_workload = validate_control_raw_evidence(source_report, "aa")
-    require_same_workload(source_workload, workload_sha256)
     comparisons = summarize(source_suites, raw_pairs, True, 10.0)
     effective_limit = calibrated_limit(comparisons)
     expected_source_policy = threshold_policy(
@@ -238,8 +245,9 @@ def load_calibration(
         calibration.get("runner_sha256") != parent_sha256
         or calibration.get("runner_sha256") != source_report["parent_runner_sha256"]
         or calibration.get("runner_arguments") != runner_arguments
-        or calibration.get("scenario_suites") != scenario_suites
+        or calibration.get("runner_arguments") != source_report["runner_arguments"]
         or calibration.get("scenario_suites") != source_suites
+        or calibration.get("execution_policy") != source_report["execution_policy"]
         or calibration.get("execution_policy")
         != {
             "pair_order": "alternating_parent_candidate",
@@ -249,15 +257,19 @@ def load_calibration(
         or calibration.get("effective_median_limit_percent") != effective_limit
     ):
         raise ControlError("reviewed calibration does not apply to this run")
-    return calibration, float(effective_limit), calibration_sha256
+    return ReviewedCalibration(calibration_path, calibration_sha256, float(effective_limit), source_suites, source_workload)
 
 
 def review_calibration_source(
-    source_path: Path, *, reviewed_by: str, reviewed_utc: str
+    source_path: Path, *, output_path: Path, reviewed_by: str, reviewed_utc: str
 ) -> dict[str, Any]:
     source_resolved, source_report, source_sha256 = read_json_report(
         source_path, "A/A calibration candidate"
     )
+    if output_path.resolve().parent != source_resolved.parent:
+        raise ControlError("reviewed calibration output must share its source directory")
+    if output_path.resolve() == source_resolved:
+        raise ControlError("reviewed calibration must not overwrite its source")
     scenario_suites, raw_pairs, _ = validate_control_raw_evidence(source_report, "aa")
     comparisons = summarize(scenario_suites, raw_pairs, True, 10.0)
     effective_limit = calibrated_limit(comparisons)

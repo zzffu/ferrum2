@@ -24,6 +24,7 @@ README、文档索引、workspace manifests、架构台账和 CI 入口为审查
 | M1e / M4-01/02 | 资源setup先释放阻塞依赖再join；DNS部分setup/finish失败完整回收 | 5个有限线程契约、self-check56 mutations、严格clippy/格式/source bundle通过；CI显式执行纯内存filter |
 | M1f / CT-02、CW-01 | 全矩阵从canonical plan+raw重建；最终cleanup后summary并绑定生产job结果 | 原6种错误接受red；相关78+typed5；独立worktree整合candidate123、CI56、PS静态contract通过 |
 | M1g / HT2/HT3 | 清理独立readback与历史身份；supervisor完成回收/证据导出后才发布QUALIFIED | 注入资源与finalization故障测试；最终隔离candidate123通过，PS静态contract通过；未执行真实host |
+| M1h / RTL-03/07/08 | runner启动前完成校准适用性检查；请求配置绑定；整次64MiB证据预算；review输出同目录 | 未批准校准、异目录输出、fd/cleanup错误先red；最终51项离线测试通过，未运行benchmark |
 
 ## 环境与暂定验收
 

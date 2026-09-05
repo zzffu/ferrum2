@@ -8,10 +8,11 @@ import time
 from pathlib import Path
 
 from tools.performance_rule.json_contract import closed_json_bytes
+from tools.performance_rule.output import EVIDENCE_MAX_BYTES, EvidenceLimit
 from tools.performance_rule.schema import ControlError
 from tools.performance_rule.validated_report import ValidatedReport, validate_report
 
-RUNNER_STDOUT_MAX_BYTES = 64 * 1024 * 1024
+RUNNER_STDOUT_MAX_BYTES = EVIDENCE_MAX_BYTES
 RUNNER_STDERR_MAX_BYTES = 64 * 1024
 RUNNER_CAPTURE_DRAIN_TIMEOUT_SECONDS = 5
 
@@ -53,7 +54,7 @@ def _run_bounded(
     )
     assert process.stdout is not None and process.stderr is not None
     captured: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
-    failures: list[str] = []
+    failures: list[ControlError] = []
 
     def drain(name: str, maximum_bytes: int) -> None:
         stream = process.stdout if name == "stdout" else process.stderr
@@ -62,12 +63,12 @@ def _run_bounded(
             while block := stream.read(64 * 1024):
                 target = captured[name]
                 if len(target) + len(block) > maximum_bytes:
-                    failures.append(f"runner {name} exceeds the {maximum_bytes}-byte bound")
+                    failures.append(EvidenceLimit(f"runner {name} exceeds the {maximum_bytes}-byte bound"))
                     process.kill()
                     return
                 target.extend(block)
         except OSError as error:
-            failures.append(f"unable to capture runner {name}: {error}")
+            failures.append(ControlError(f"unable to capture runner {name}: {error}"))
             process.kill()
         finally:
             stream.close()
@@ -103,7 +104,7 @@ def _run_bounded(
         raise subprocess.TimeoutExpired(command, timeout_seconds)
     join_readers()
     if failures:
-        raise ControlError(failures[0])
+        raise failures[0]
     try:
         stdout = bytes(captured["stdout"]).decode("utf-8")
         stderr = bytes(captured["stderr"]).decode("utf-8")

@@ -48,16 +48,14 @@ class CalibrationAndCliTests(unittest.TestCase):
                     "effective_median_limit_percent": 5.0,
                 },
             )
-            _, limit, digest = load_calibration(
+            checked = load_calibration(
                 calibration,
                 RUNNER_SHA256,
-                SCENARIO_SUITES,
                 RUNNER_ARGUMENTS,
                 RUNNER_PRIORITY_HIGH,
-                validate_report(aa_source_report()["raw_pairs"][0]["parent"], RUNNER_SHA256).workload_sha256,
             )
-            self.assertEqual(limit, 5.0)
-            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertEqual(checked.effective_limit, 5.0)
+            self.assertRegex(checked.sha256, r"^[0-9a-f]{64}$")
 
     def test_ab_without_reviewed_calibration_stops_before_runner_execution(self):
         with tempfile.TemporaryDirectory() as directory:

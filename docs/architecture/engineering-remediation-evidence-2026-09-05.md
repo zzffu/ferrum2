@@ -833,3 +833,30 @@ qualification bundle `dc6349c9a6cd6d40c6f933f5fa710b05c361ec01173b40473cbea4595b
 未指出具体内容。没有重试该命令；改用专用apply_patch完成静态编辑，不执行文本里的host
 命令。完整范围见 `target/remediation-audit/ht2-ht3-execution-notes.md`；这与先前两组动态
 审查agent turn被内容审查阻止是不同事件，后两组仍未执行或绕行。
+
+### M1h — RTL-03/07/08：先验证校准，统一证据预算
+
+`ReviewedCalibration` 在任何A/B runner启动前完成hash-bound source、raw数学、派生策略、
+runner身份、完整argv、execution policy和scenario catalog验证，并给每份新报告提供同一
+workload identity。私有 `RunnerRequest` 对应当前Rust CLI的六种测量参数、两个profile及
+完整报告configuration；拒绝重复、未知/缩写参数和越界数值。紧凑fixture原先写501 samples
+却报告5，现同步请求5 samples/10 base iterations/真实Smoke Route scales，不削弱validator。
+
+私有 `output.py` 统一reader/capture/emitter的64MiB编码预算。每份报告连同外层metadata、
+trace和catalog先计费再保留；超限输出INVALID并保留此前已接纳raw，完整summary额外超限
+也保留全部raw。半pair只能是失败证据，不能review成calibration。该预算不是RSS保证，
+多次精确编码检查增加有限controller CPU成本。review输出必须与source同resolved目录、
+不能覆盖source；不隐式复制、不保留旧接口。
+
+输出先精确量算再原子替换。root复核另发现继承的fdopen失败泄漏：现在raw fd包装成功后
+转交stream，包装失败仍关闭；write/flush/fsync/close失败不替换原目标。primary与cleanup
+分别保留，temp清理失败不掩盖原错误。普通注入测试先在旧实现复现Windows unlink遮蔽
+fdopen错误、cleanup遮蔽replace错误；修后fstat证明fd关闭、目标bytes不变、临时文件无残留。
+
+`python -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v` 最终51通过，
+root独立复跑51通过（0.931s）；AST/import/diff检查通过。日志
+`target/remediation-audit/rtl378-{red,green,output-red,output-green}.log`、
+`target/remediation-rtl378-final-root.log`。新controller README已链接两个文档入口。
+所有runner均mock，未运行Rust test binary、benchmark、A/A/A/B或批准校准。
+RTL-04独立SRS build evidence与RTL-06闭合诊断仍是后续项，运行时git/rustc不等于build
+provenance的审查观察也未被本批解决。schema v6/calibration v2保持，修正既有契约执行。

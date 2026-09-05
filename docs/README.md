@@ -21,6 +21,7 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 | [Windows TUN correctness](windows-tun-qualification.md) | Fixed eight-check host plan, 900-second bound, source identity, recovery, and final verdict |
 | [Performance evidence](performance-evidence.md) | Controller ownership, host performance planning/validation, paired evidence, and retention |
 | [Rule qualification runner](../tools/ferrum2-rule-qualification/README.md) | Explicit measurement commands, schemas, and reviewed A/A calibration |
+| [Rule performance controller](../tools/performance_rule/README.md) | Calibration preflight, requested workload identity, evidence budget, and atomic output |
 | [Rule evidence tests](../tests/performance_rule/README.md) | Offline synthetic contracts and content-addressed external archive verification |
 | [2026-09-05 Windows TUN Confirm and CPU report](windows-tun-confirm-cpu-profile-report-2026-09-05.md) | Historical A/A measurements and CPU attribution; not proof of a code-change speedup |
 

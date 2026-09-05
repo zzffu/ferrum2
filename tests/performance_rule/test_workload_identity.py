@@ -72,14 +72,15 @@ class WorkloadIdentityTests(unittest.TestCase):
             source = Path(directory) / "source.json"
             write_json(source, aa_source_report())
             calibration = Path(directory) / "calibration.json"
-            write_json(calibration, review_calibration_source(source, reviewed_by="synthetic-test", reviewed_utc="2026-09-05T00:00:00Z"))
+            write_json(calibration, review_calibration_source(source, output_path=calibration, reviewed_by="synthetic-test", reviewed_utc="2026-09-05T00:00:00Z"))
             current = report(RUNNER_SHA256)
             identity = validate_report(current, RUNNER_SHA256).workload_sha256
-            load_calibration(calibration, RUNNER_SHA256, SCENARIO_SUITES, RUNNER_ARGUMENTS, RUNNER_PRIORITY_HIGH, identity)
+            checked = load_calibration(calibration, RUNNER_SHA256, RUNNER_ARGUMENTS, RUNNER_PRIORITY_HIGH)
+            require_same_workload(checked.workload_sha256, identity)
             current["environment"]["logical_cpus"] = 2
             changed = validate_report(current, RUNNER_SHA256).workload_sha256
             with self.assertRaisesRegex(ControlError, "workload identity"):
-                load_calibration(calibration, RUNNER_SHA256, SCENARIO_SUITES, RUNNER_ARGUMENTS, RUNNER_PRIORITY_HIGH, changed)
+                require_same_workload(checked.workload_sha256, changed)
 
     def test_live_controller_rejects_changed_workload_with_mocked_runner_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,7 +98,7 @@ class WorkloadIdentityTests(unittest.TestCase):
 
             with mock.patch("tools.performance_rule.cli.run_once", side_effect=run), mock.patch("tools.performance_rule.cli.emit_result"):
                 with self.assertRaisesRegex(ControlError, "workload identity"):
-                    control(["run", "--parent", str(executable)])
+                    control(["run", "--parent", str(executable), "--", *RUNNER_ARGUMENTS])
             self.assertEqual(calls, 12)
 
 

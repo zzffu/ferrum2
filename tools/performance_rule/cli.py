@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from tools.performance_rule.evidence import (
     load_calibration,
-    read_json_report,
     review_calibration_source,
 )
 from tools.performance_rule.pairing import (
@@ -23,6 +19,8 @@ from tools.performance_rule.pairing import (
     summarize,
 )
 from tools.performance_rule.policy import calibration_required_policy, threshold_policy
+from tools.performance_rule.output import EvidenceLimit, emit_result, encoded_size
+from tools.performance_rule.runner_request import parse_runner_request
 from tools.performance_rule.runner_report import run_once
 from tools.performance_rule.validated_report import require_same_workload
 from tools.performance_rule.schema import (
@@ -79,30 +77,6 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     return parsed
 
 
-def emit_result(result: dict[str, Any], output: Path | None) -> None:
-    encoded = json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
-    if output is not None:
-        if output.suffix != ".json":
-            raise ControlError("--output must have a .json extension")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        handle, temporary_name = tempfile.mkstemp(
-            prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
-        )
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as temporary:
-                temporary.write(encoded)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_name, output)
-        except BaseException:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-            raise
-    sys.stdout.write(encoded)
-
-
 def _calibration_required_result(
     *,
     pairs: int,
@@ -142,6 +116,7 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
     validate_pairs(args.pairs)
     if not 1 <= args.timeout_seconds <= 3_600:
         raise ControlError("--timeout-seconds must be in 1..=3600")
+    request = parse_runner_request(args.runner_arguments)
     parent = args.parent.resolve(strict=True)
     candidate = (args.candidate or args.parent).resolve(strict=True)
     if not parent.is_file() or not candidate.is_file():
@@ -159,16 +134,26 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
         )
         emit_result(result, args.output)
         return result
-    if not same_binary:
-        _, calibration_document, _ = read_json_report(
-            args.calibration, "reviewed A/A calibration"
-        )
-        if calibration_document.get("schema") != CALIBRATION_SCHEMA:
-            raise ControlError("only the current reviewed calibration schema is accepted")
-
+    calibration = (
+        load_calibration(args.calibration, parent_sha, args.runner_arguments, args.runner_priority)
+        if not same_binary else None
+    )
     creation_flags = runner_creation_flags(args.runner_priority)
-    expected_scenarios: dict[str, str] | None = None
-    workload: str | None = None
+    expected_scenarios = calibration.scenario_suites if calibration else None
+    workload = calibration.workload_sha256 if calibration else None
+    partial = _calibration_required_result(
+        pairs=args.pairs, parent_sha=parent_sha, candidate_sha=candidate_sha,
+        runner_arguments=args.runner_arguments, runner_priority=args.runner_priority,
+    )
+    partial.update(mode="aa" if same_binary else "parent_candidate", status=INVALID,
+                   decision_reason="evidence_budget_exceeded")
+    partial["threshold_policy"] = {
+        "version": THRESHOLD_POLICY_VERSION, "status": INVALID, "reviewed": False,
+        "enforced": False, "gate_passed": False, "decision": "invalid",
+    }
+    # Check fixed overhead before launching work; later charges include the
+    # exact nesting, scenario catalog and execution trace, not just raw bytes.
+    encoded_size(partial)
     pairs: list[dict[str, Any]] = []
     execution_trace: list[dict[str, Any]] = []
     for pair_index in range(args.pairs):
@@ -177,25 +162,46 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             pair_execution_order(pair_index, parent, candidate)
         ):
             expected_sha = parent_sha if role == "parent" else candidate_sha
-            validated = run_once(
-                role,
-                executable,
-                args.runner_arguments,
-                args.timeout_seconds,
-                expected_sha,
-                creation_flags,
-            )
-            workload = require_same_workload(workload, validated.workload_sha256)
+            try:
+                validated = run_once(
+                    role,
+                    executable,
+                    args.runner_arguments,
+                    args.timeout_seconds,
+                    expected_sha,
+                    creation_flags,
+                )
+                request.validate_report(validated.report)
+                workload = require_same_workload(workload, validated.workload_sha256)
+            except EvidenceLimit:
+                emit_result(partial, args.output)
+                return partial
+            except (ControlError, OSError, subprocess.TimeoutExpired):
+                partial["decision_reason"] = "runner_report_failed"
+                emit_result(partial, args.output)
+                raise
             expected_scenarios = validated.scenario_suites
-            pair[role] = validated.report
-            execution_trace.append(
-                {
-                    "pair": pair_index + 1,
-                    "order": order_index + 1,
-                    "role": role,
-                    "runner_sha256": expected_sha,
-                }
+            entry = {
+                "pair": pair_index + 1, "order": order_index + 1, "role": role,
+                "runner_sha256": expected_sha,
+            }
+            proposed = dict(partial)
+            proposed.update(
+                scenario_ids=sorted(expected_scenarios),
+                scenario_suites=dict(sorted(expected_scenarios.items())),
+                raw_pairs=[*pairs, {**pair, role: validated.report}],
+                execution_trace=[*execution_trace, entry],
             )
+            try:
+                encoded_size(proposed)
+            except EvidenceLimit:
+                # Keep every already-admitted report. The report that cannot
+                # fit is rejected, not silently dropped from a successful run.
+                emit_result(partial, args.output)
+                return partial
+            partial = proposed
+            pair[role] = validated.report
+            execution_trace.append(entry)
         pairs.append(pair)
     assert expected_scenarios is not None and workload is not None
 
@@ -206,19 +212,13 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
         calibration_sha256 = None
         reviewed = False
     else:
-        calibration_path = args.calibration.resolve(strict=True)
-        _, effective_limit, calibration_sha256 = load_calibration(
-            calibration_path,
-            parent_sha,
-            expected_scenarios,
-            args.runner_arguments,
-            args.runner_priority,
-            workload,
-        )
+        assert calibration is not None
+        effective_limit = calibration.effective_limit
+        calibration_sha256 = calibration.sha256
         comparisons = summarize(
             expected_scenarios, pairs, False, effective_limit
         )
-        calibration_source = str(calibration_path)
+        calibration_source = str(calibration.path)
         reviewed = True
     policy = threshold_policy(
         comparisons,
@@ -253,6 +253,11 @@ def control(arguments: list[str] | None = None) -> dict[str, Any]:
             else "reviewed match_set median gate evaluated"
         ),
     }
+    try:
+        encoded_size(result)
+    except EvidenceLimit:
+        emit_result(partial, args.output)
+        return partial
     emit_result(result, args.output)
     return result
 
@@ -263,6 +268,7 @@ def main(arguments: list[str] | None = None) -> int:
         if parsed.command == "review-calibration":
             reviewed = review_calibration_source(
                 parsed.source_report,
+                output_path=parsed.output,
                 reviewed_by=parsed.reviewed_by,
                 reviewed_utc=parsed.reviewed_utc,
             )

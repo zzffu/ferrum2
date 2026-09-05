@@ -23,7 +23,7 @@ SCENARIO_SUITES = {
     identifier: identifier.split("/", 1)[0] for identifier in IDENTIFIERS
 }
 RUNNER_SHA256 = "a" * 64
-RUNNER_ARGUMENTS = ["--profile", "smoke", "--samples", "501"]
+RUNNER_ARGUMENTS = ["--profile", "smoke", "--samples", "5", "--iterations-per-sample", "10"]
 
 
 def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
@@ -51,7 +51,7 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
         "runner": {"sha256": sha256, "bytes": 1},
         "configuration": {
             "match_sizes": [100],
-            "route_sizes": [1],
+            "route_sizes": [1, 32, 64],
             "dns_rule_sizes": [1],
             "samples": 5,
             "base_iterations_per_sample": 10,
