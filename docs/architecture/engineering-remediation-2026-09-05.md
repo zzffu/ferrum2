@@ -409,3 +409,18 @@ controller 测试通过。显式执行 release `--profile qualification --sample
 31680.00 ns/op；refresh 为 164.77 / 3192.50 / 29440.00 ns/op，读命中约 62–68 ns/op。
 这是全表维护成本随容量增长的测量证据，仍不是网络 DNS 吞吐或逐请求 p99。
 原始文件 `target/remediation-cache-baseline-pilot.json`，重复前后比较继续执行。
+
+### P1（性能假设）验证与 cache 优化
+
+`dns/src/cache.rs::DnsCacheState` 新增一个可能过期时间的下界；到期前省去 entries/FIFO
+全量扫描，到期后在原过期删除过程中重算。删除不存在的 key 直接返回。删除/淘汰最早条目
+可能留下偏早下界，最多产生一次额外扫描，不会延长 TTL。保留过期优先于 FIFO、刷新移动到
+队尾、lookup 不刷新顺序、零 TTL 删除、qtype/generation 隔离、observer 在锁外调用。
+无公共 API/依赖变化，无新每次操作分配；每个 cache 多一个 Option<Instant>。
+任意中间 key 刷新/单 key 过期删除仍有 FIFO 线性成本，过期扫描仍为 O(n)，不声称所有写入
+变成常数时间。工作负载当前是单线程非过期稳态，并未证明并发尾延迟或 TTL 突发成本。
+
+DNS authoritative gate 74 项、严格 clippy 通过；release 候选 pilot 同参数 311 场景的
+correctness/allocation/parity 均通过。1000 条 FIFO 写入 p50 为 160.46 ns/op，refresh
+137.02 ns/op；两侧每次写入仍为 2 allocations，读命中没有相同比例变化。
+先记录本批实现与 pilot；同条件重复和全部相关门禁继续执行，未给整个 DNS 服务生产资格。

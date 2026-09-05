@@ -216,12 +216,17 @@ struct DnsCacheState {
     capacity: usize,
     entries: HashMap<DnsCacheKey, DnsCacheEntry>,
     insertion_order: VecDeque<DnsCacheKey>,
+    // No live entry expires before this instant. Removal may leave an earlier
+    // bound, causing one harmless extra scan when that deadline is reached.
+    expiry_lower_bound: Option<Instant>,
     observer: Option<Arc<dyn DnsCacheObserver>>,
 }
 
 impl DnsCacheState {
     fn remove(&mut self, key: &DnsCacheKey) {
-        self.entries.remove(key);
+        if self.entries.remove(key).is_none() {
+            return;
+        }
         if let Some(index) = self
             .insertion_order
             .iter()
@@ -232,9 +237,22 @@ impl DnsCacheState {
     }
 
     fn purge_expired(&mut self, now: Instant) {
-        self.entries.retain(|_, entry| entry.expires_at > now);
+        if self.expiry_lower_bound.is_none_or(|expiry| expiry > now) {
+            return;
+        }
+        let mut next_expiry: Option<Instant> = None;
+        self.entries.retain(|_, entry| {
+            if entry.expires_at <= now {
+                return false;
+            }
+            next_expiry = Some(
+                next_expiry.map_or(entry.expires_at, |previous| previous.min(entry.expires_at)),
+            );
+            true
+        });
         let entries = &self.entries;
         self.insertion_order.retain(|key| entries.contains_key(key));
+        self.expiry_lower_bound = next_expiry;
     }
 
     fn evict_until_available(&mut self) {
@@ -291,6 +309,7 @@ impl DnsCache {
                 capacity,
                 entries,
                 insertion_order,
+                expiry_lower_bound: None,
                 observer: None,
             })),
         })
@@ -389,6 +408,11 @@ impl DnsCache {
             return Ok(());
         }
         state.evict_until_available();
+        state.expiry_lower_bound = Some(
+            state
+                .expiry_lower_bound
+                .map_or(expires_at, |previous| previous.min(expires_at)),
+        );
         state.insertion_order.push_back(key.clone());
         state
             .entries
