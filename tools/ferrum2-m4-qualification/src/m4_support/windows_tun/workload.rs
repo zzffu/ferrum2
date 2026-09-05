@@ -10,12 +10,15 @@ use super::diagnostic::{
     UDP_PACKET_TIMEOUT, UDP_PAYLOAD, UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
 };
 use super::latency::{latency_percentiles, record_latency_sample};
+use super::measurement::{
+    ActiveWorkWindow, MeasuredWork, elapsed_nanoseconds, elapsed_rate, fairness_measurements,
+};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -70,17 +73,6 @@ pub(crate) fn tcp_round_trip(
     Ok(())
 }
 
-pub(crate) fn elapsed_rate(units: u64, elapsed: Duration, name: &str) -> Result<u64, String> {
-    let nanos = elapsed.as_nanos();
-    if units == 0 || nanos == 0 {
-        return Err(format!("{name} has no measured work"));
-    }
-    let rate = u128::from(units)
-        .checked_mul(1_000_000_000)
-        .ok_or_else(|| format!("{name} rate numerator overflow"))?
-        / nanos;
-    u64::try_from(rate.max(1)).map_err(|_| format!("{name} rate overflow"))
-}
 pub(crate) fn wait_for_active_release(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
     let Some(marker) = markers.map(|markers| &markers.ready) else {
         return Ok(());
@@ -161,19 +153,18 @@ pub(crate) fn tcp_single(
     }
     wait_for_active_release(active_markers)?;
     let start = Instant::now();
-    let deadline = start + active;
-    let mut checked_bytes = 0_u64;
-    while Instant::now() < deadline {
+    let mut window = ActiveWorkWindow::new(active);
+    loop {
+        let started = start.elapsed();
+        if !window.admits(started) {
+            break;
+        }
         tcp_round_trip(&mut stream, &payload, &mut reply)?;
-        checked_bytes = checked_bytes
-            .checked_add(payload.len() as u64)
-            .ok_or_else(|| "TCP single-flow byte count overflow".to_owned())?;
+        window.complete(started, start.elapsed(), payload.len() as u64)?;
     }
-    let elapsed = start.elapsed();
     signal_active_complete(active_markers)?;
-    if checked_bytes < TCP_SINGLE_MINIMUM_BYTES {
-        return Err("TCP single-flow correctness coverage is below 64 MiB".to_owned());
-    }
+    let measured = window.finish(TCP_SINGLE_MINIMUM_BYTES, "TCP single-flow")?;
+    let checked_bytes = measured.checked_units;
     let cpu_payload_bytes = warmup_bytes
         .checked_add(checked_bytes)
         .ok_or_else(|| "TCP single-flow total byte count overflow".to_owned())?;
@@ -183,7 +174,9 @@ pub(crate) fn tcp_single(
         .ok_or_else(|| "TCP single-flow I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
-            "throughput": elapsed_rate(checked_bytes, elapsed, "TCP throughput")?,
+            "throughput": elapsed_rate(checked_bytes, measured.elapsed, "TCP throughput")?,
+            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
+            "tail_checked_units": measured.tail_checked_units,
             "cpu_payload_bytes": cpu_payload_bytes,
             "io_completions": io_completions
         },
@@ -213,11 +206,21 @@ pub(crate) fn tcp_request_latency(
     let mut latencies = Vec::with_capacity(TCP_REQUEST_LATENCY_SAMPLE_CAP);
     let mut transactions = 0_u64;
     wait_for_active_release(active_markers)?;
-    let deadline = Instant::now() + active;
-    while Instant::now() < deadline || transactions < TCP_REQUEST_MINIMUM_TRANSACTIONS {
+    let start = Instant::now();
+    let mut window = ActiveWorkWindow::new(active);
+    loop {
         let started = Instant::now();
+        if !window.admits(started.duration_since(start)) {
+            break;
+        }
         tcp_round_trip(&mut stream, &payload, &mut reply)?;
-        let latency = u64::try_from(started.elapsed().as_nanos())
+        let completed = Instant::now();
+        window.complete(
+            started.duration_since(start),
+            completed.duration_since(start),
+            1,
+        )?;
+        let latency = u64::try_from(completed.duration_since(started).as_nanos())
             .map_err(|_| "TCP request latency overflow".to_owned())?;
         record_latency_sample(
             &mut latencies,
@@ -230,6 +233,7 @@ pub(crate) fn tcp_request_latency(
             .ok_or_else(|| "TCP request transaction count overflow".to_owned())?;
     }
     signal_active_complete(active_markers)?;
+    let measured = window.finish(TCP_REQUEST_MINIMUM_TRANSACTIONS, "TCP request")?;
     let latency = latency_percentiles(latencies, "TCP request")?;
     let io_completions = transactions
         .checked_mul(2)
@@ -240,6 +244,8 @@ pub(crate) fn tcp_request_latency(
             "p95_nanoseconds": latency.p95,
             "p99_nanoseconds": latency.p99,
             "latency_samples": latency.samples,
+            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
+            "tail_checked_units": measured.tail_checked_units,
             "io_completions": io_completions
         },
         "checked_units": transactions,
@@ -259,8 +265,9 @@ pub(crate) fn tcp_fairness(
     active_markers: Option<&ActiveWindowMarkers>,
 ) -> Result<Value, String> {
     let start = Arc::new(OnceLock::new());
-    let active_start = Arc::new(OnceLock::new());
+    let active_start = Arc::new(OnceLock::<Instant>::new());
     let cancel = Arc::new(AtomicBool::new(false));
+    let (warmup_ready, warmup_completed) = mpsc::sync_channel(TCP_FAIRNESS_FLOWS);
     let mut streams = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
     for flow in 0..TCP_FAIRNESS_FLOWS {
         let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
@@ -277,9 +284,10 @@ pub(crate) fn tcp_fairness(
         let worker_start = Arc::clone(&start);
         let worker_active_start = Arc::clone(&active_start);
         let worker_cancel = Arc::clone(&cancel);
+        let worker_ready = warmup_ready.clone();
         let worker = thread::Builder::new()
             .name(format!("tun-fairness-{flow:03}"))
-            .spawn(move || -> Result<u64, String> {
+            .spawn(move || -> Result<MeasuredWork, String> {
                 let payload = checked_payload(TCP_FAIRNESS_PAYLOAD, flow as u64);
                 let mut reply = vec![0; payload.len()];
                 let common_start = loop {
@@ -292,9 +300,21 @@ pub(crate) fn tcp_fairness(
                     thread::sleep(Duration::from_millis(1));
                 };
                 let warmup_deadline = common_start + warmup;
-                while Instant::now() < warmup_deadline {
-                    tcp_round_trip(&mut stream, &payload, &mut reply)?;
-                }
+                let warmed = (|| {
+                    while Instant::now() < warmup_deadline {
+                        if worker_cancel.load(Ordering::Acquire) {
+                            return Err("fairness warmup was cancelled".to_owned());
+                        }
+                        tcp_round_trip(&mut stream, &payload, &mut reply)?;
+                    }
+                    Ok(())
+                })();
+                let reported = worker_ready.send(warmed.clone());
+                // A failed worker must not leave the coordinator waiting on
+                // senders retained by successful workers awaiting active_start.
+                drop(worker_ready);
+                warmed?;
+                reported.map_err(|_| "fairness warmup coordinator ended".to_owned())?;
                 let active_start = loop {
                     if let Some(start) = worker_active_start.get() {
                         break *start;
@@ -304,15 +324,16 @@ pub(crate) fn tcp_fairness(
                     }
                     thread::sleep(Duration::from_millis(1));
                 };
-                let deadline = active_start + active;
-                let mut bytes = 0_u64;
-                while Instant::now() < deadline {
+                let mut window = ActiveWorkWindow::new(active);
+                loop {
+                    let started = active_start.elapsed();
+                    if !window.admits(started) {
+                        break;
+                    }
                     tcp_round_trip(&mut stream, &payload, &mut reply)?;
-                    bytes = bytes
-                        .checked_add(payload.len() as u64)
-                        .ok_or_else(|| "fairness byte count overflow".to_owned())?;
+                    window.complete(started, active_start.elapsed(), payload.len() as u64)?;
                 }
-                Ok(bytes)
+                window.finish(1, "fairness flow")
             });
         match worker {
             Ok(worker) => workers.push(worker),
@@ -325,14 +346,13 @@ pub(crate) fn tcp_fairness(
             }
         }
     }
+    drop(warmup_ready);
     let common_start = Instant::now() + Duration::from_millis(100);
     start
         .set(common_start)
         .map_err(|_| "fairness start was already set".to_owned())?;
-    if let Some(delay) = (common_start + warmup).checked_duration_since(Instant::now()) {
-        thread::sleep(delay);
-    }
-    let mut active_release = wait_for_active_release(active_markers);
+    let mut active_release = wait_for_fairness_warmup(warmup_completed)
+        .and_then(|()| wait_for_active_release(active_markers));
     if active_release.is_ok() && active_start.set(Instant::now()).is_err() {
         active_release = Err("fairness active start was already set".to_owned());
     }
@@ -352,59 +372,28 @@ pub(crate) fn tcp_fairness(
             }
         }
     }
-    active_release?;
+    if let Err(error) = active_release {
+        return Err(match first_failure {
+            Some(worker_error) => format!("{error}; worker: {worker_error}"),
+            None => error,
+        });
+    }
     signal_active_complete(active_markers)?;
     if let Some(error) = first_failure {
         return Err(error);
     }
-    if values.contains(&0) {
-        return Err("fairness workload starved at least one flow".to_owned());
+    fairness_measurements(&values)
+}
+
+pub(super) fn wait_for_fairness_warmup(
+    completed: mpsc::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    for _ in 0..TCP_FAIRNESS_FLOWS {
+        completed
+            .recv()
+            .map_err(|_| "fairness workers ended before warmup completed".to_owned())??;
     }
-    let sum = values.iter().try_fold(0_u128, |sum, value| {
-        sum.checked_add(u128::from(*value))
-            .ok_or_else(|| "fairness sum overflow".to_owned())
-    })?;
-    let checked_bytes =
-        u64::try_from(sum).map_err(|_| "fairness checked byte count overflow".to_owned())?;
-    if checked_bytes % (TCP_FAIRNESS_PAYLOAD as u64) != 0 {
-        return Err("fairness transaction accounting is not payload aligned".to_owned());
-    }
-    let transactions = checked_bytes / (TCP_FAIRNESS_PAYLOAD as u64);
-    let io_completions = transactions
-        .checked_mul(2)
-        .ok_or_else(|| "fairness I/O completion count overflow".to_owned())?;
-    let squares = values.iter().try_fold(0_u128, |sum, value| {
-        let value = u128::from(*value);
-        sum.checked_add(
-            value
-                .checked_mul(value)
-                .ok_or_else(|| "fairness square overflow".to_owned())?,
-        )
-        .ok_or_else(|| "fairness square sum overflow".to_owned())
-    })?;
-    let numerator = sum
-        .checked_mul(sum)
-        .and_then(|value| value.checked_mul(1_000_000_000))
-        .ok_or_else(|| "fairness numerator overflow".to_owned())?;
-    let denominator = (TCP_FAIRNESS_FLOWS as u128)
-        .checked_mul(squares)
-        .ok_or_else(|| "fairness denominator overflow".to_owned())?;
-    let jain_ppb =
-        u64::try_from(numerator / denominator).map_err(|_| "fairness index overflow".to_owned())?;
-    Ok(json!({
-        "measurements": {
-            "fairness": jain_ppb,
-            "aggregate_throughput": elapsed_rate(checked_bytes, active, "fairness throughput")?,
-            "io_completions": io_completions
-        },
-        "checked_units": checked_bytes,
-        "checks": {
-            "all_256_flows_ready": true,
-            "all_256_flows_nonzero": true,
-            "payload_exact": true,
-            "no_gso": true
-        }
-    }))
+    Ok(())
 }
 
 pub(crate) fn connected_udp(address: SocketAddr) -> Result<UdpSocket, String> {
@@ -882,12 +871,21 @@ pub(crate) fn udp_packets(
     let mut receive_retries = 0_u64;
     wait_for_active_release(active_markers)?;
     let start = Instant::now();
-    let deadline = start + active;
-    while Instant::now() < deadline || datagrams < UDP_MINIMUM_DATAGRAMS {
+    let mut window = ActiveWorkWindow::new(active);
+    loop {
         let started = Instant::now();
+        if !window.admits(started.duration_since(start)) {
+            break;
+        }
         let (next_sequence, retries) =
             udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
-        let latency = u64::try_from(started.elapsed().as_nanos())
+        let completed = Instant::now();
+        window.complete(
+            started.duration_since(start),
+            completed.duration_since(start),
+            UDP_BATCH as u64,
+        )?;
+        let latency = u64::try_from(completed.duration_since(started).as_nanos())
             .map_err(|_| "UDP packet latency overflow".to_owned())?;
         record_latency_sample(
             &mut latencies,
@@ -903,19 +901,21 @@ pub(crate) fn udp_packets(
             .checked_add(UDP_BATCH as u64)
             .ok_or_else(|| "UDP datagram count overflow".to_owned())?;
     }
-    let elapsed = start.elapsed();
     signal_active_complete(active_markers)?;
+    let measured = window.finish(UDP_MINIMUM_DATAGRAMS, "UDP packet")?;
     let latency = latency_percentiles(latencies, "UDP packet")?;
     let io_completions = datagrams
         .checked_mul(2)
         .ok_or_else(|| "UDP I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
-            "packet_rate": elapsed_rate(datagrams, elapsed, "UDP packet rate")?,
+            "packet_rate": elapsed_rate(datagrams, measured.elapsed, "UDP packet rate")?,
             "p50_nanoseconds": latency.p50,
             "p95_nanoseconds": latency.p95,
             "p99_nanoseconds": latency.p99,
             "latency_samples": latency.samples,
+            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
+            "tail_checked_units": measured.tail_checked_units,
             "io_completions": io_completions
         },
         "counters": {

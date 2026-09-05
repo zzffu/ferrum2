@@ -74,8 +74,8 @@ def _finite_positive(value: object, field: str, *, allow_zero: bool = False) -> 
 
 
 def _positive_int(value: object, field: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise CandidateControlError(f"{field} must be a positive integer")
+    if type(value) is not int or not 0 < value <= 2**64 - 1:
+        raise CandidateControlError(f"{field} must be a positive uint64 integer")
     return value
 
 
@@ -155,7 +155,11 @@ def _validate_workload_measurements(trial: dict[str, object]) -> None:
     if expected is None or type(measurements) is not dict or frozenset(measurements) != expected:
         raise CandidateControlError("Windows TUN workload measurement closure is invalid")
     for name, value in measurements.items():
-        _positive_int(value, f"workload_measurements.{name}")
+        if name == "tail_checked_units":
+            if type(value) is not int or not 0 <= value <= 2**64 - 1:
+                raise CandidateControlError("tail_checked_units must be a uint64 integer")
+        else:
+            _positive_int(value, f"workload_measurements.{name}")
     primary = measurements[str(trial["metric"])]
     if not math.isclose(float(trial["value"]), float(primary), rel_tol=0.0, abs_tol=0.0):
         raise CandidateControlError("Windows TUN primary metric does not match workload evidence")
@@ -173,6 +177,61 @@ def _validate_workload_measurements(trial: dict[str, object]) -> None:
     expected_p99 = measurements.get("p99_nanoseconds")
     if trial["p99_nanoseconds"] != expected_p99:
         raise CandidateControlError("Windows TUN p99 latency does not match workload evidence")
+    _validate_workload_accounting(trial)
+
+
+def _validate_workload_accounting(trial: dict[str, object]) -> None:
+    scenario = str(trial["scenario"])
+    measurements = trial["workload_measurements"]
+    checked = trial["checked_units"]
+    minimum, alignment = {
+        "tcp-single-flow": (64 * 1024 * 1024, 65536),
+        "tcp-request-1k-p99": (1024, 1),
+        "tcp-256-flow-fairness": (256 * 16384, 16384),
+        "udp-packets-per-second": (4096, 1),
+        "fragment-reassembly-throughput": (4096, 4),
+    }[scenario]
+    if checked < minimum or checked % alignment:
+        raise CandidateControlError("Windows TUN checked work violates workload coverage or alignment")
+    if scenario == "fragment-reassembly-throughput":
+        if measurements["io_completions"] < checked * 2 or measurements["io_completions"] % 2:
+            raise CandidateControlError("fragment I/O completions omit checked work")
+    elif measurements["io_completions"] != checked // alignment * 2:
+        raise CandidateControlError("Windows TUN I/O completions contradict checked work")
+    if scenario == "tcp-single-flow":
+        if measurements["cpu_payload_bytes"] < checked or measurements["cpu_payload_bytes"] % alignment:
+            raise CandidateControlError("TCP total payload does not cover checked work")
+    elapsed = measurements["active_elapsed_nanoseconds"]
+    nominal = _positive_int(trial["active_seconds"], "active_seconds") * 1_000_000_000
+    tail = measurements["tail_checked_units"]
+    tail_limit = {
+        "tcp-single-flow": 65536,
+        "tcp-request-1k-p99": 1,
+        "tcp-256-flow-fairness": 256 * 16384,
+        "udp-packets-per-second": 1,
+        "fragment-reassembly-throughput": 4,
+    }[scenario]
+    if (
+        elapsed < nominal
+        or tail > min(checked, tail_limit)
+        or tail % alignment
+        or (tail == 0) != (elapsed == nominal)
+        or float(trial["cpu_sample_seconds"]) * 1_000_000_000 < elapsed
+    ):
+        raise CandidateControlError("Windows TUN active window or tail accounting is inconsistent")
+    rate_contract = {
+        "tcp-single-flow": ("throughput", 1),
+        "udp-packets-per-second": ("packet_rate", 1),
+        "tcp-256-flow-fairness": ("aggregate_throughput", 1),
+        "fragment-reassembly-throughput": ("reassembly_rate", 1440),
+    }.get(scenario)
+    if rate_contract is not None:
+        field, payload = rate_contract
+        units = checked * payload
+        if units > 2**64 - 1 or measurements[field] != max(1, units * 1_000_000_000 // elapsed):
+            raise CandidateControlError("Windows TUN rate contradicts checked work and actual elapsed time")
+    if scenario == "tcp-256-flow-fairness" and not 1_000_000_000 // 256 <= measurements["fairness"] <= 1_000_000_000:
+        raise CandidateControlError("Windows TUN fairness is outside its Jain index range")
 
 
 def validate_windows_tun_trial(
@@ -187,7 +246,8 @@ def validate_windows_tun_trial(
     trial = value
     _exact_fields(trial, _TRIAL_FIELDS, "Windows TUN host trial")
     if (
-        trial["schema_version"] != 3
+        type(trial["schema_version"]) is not int
+        or trial["schema_version"] != 4
         or trial["kind"] != "ferrum2.windows-tun.host-performance-trial"
         or type(trial["run_id"]) is not str
         or re.fullmatch(r"[0-9a-f]{12}", trial["run_id"]) is None

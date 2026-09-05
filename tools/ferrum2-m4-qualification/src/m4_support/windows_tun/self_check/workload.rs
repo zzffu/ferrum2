@@ -1,4 +1,5 @@
 use super::super::latency::{LatencyPercentiles, latency_percentiles, record_latency_sample};
+use super::super::measurement::elapsed_rate;
 use std::time::Duration;
 
 use super::super::contract::Scenario;
@@ -12,9 +13,8 @@ use super::super::diagnostic::{
     UDP_LATENCY_SAMPLE_CAP, UDP_PACKET_TIMEOUT, UDP_RECEIVE_ATTEMPTS,
 };
 use super::super::workload::{
-    elapsed_rate, fragment_ack, fragment_ack_for_request, fragment_ack_sequence,
-    fragment_batch_failure, fragment_request, fragment_request_sequence, fragment_retry_budget,
-    sequenced_payload,
+    fragment_ack, fragment_ack_for_request, fragment_ack_sequence, fragment_batch_failure,
+    fragment_request, fragment_request_sequence, fragment_retry_budget, sequenced_payload,
 };
 
 pub(super) fn check_basics() -> Result<Vec<u8>, String> {

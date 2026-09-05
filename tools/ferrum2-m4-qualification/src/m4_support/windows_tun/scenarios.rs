@@ -3,15 +3,17 @@ use super::contract::{
     parse_udp_diagnostic_finalize, parse_workload,
 };
 use super::diagnostic::{
-    FRAGMENT_ACTIVE, FRAGMENT_MINIMUM_DATAGRAMS, FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER,
-    FRAGMENT_WARMUP, FragmentPhase, FragmentWorkloadAccounting, IO_TIMEOUT, RING_BURST_ATTEMPTS,
-    ROUTE_DATAGRAMS_PER_TARGET, ROUTE_PAYLOAD, ROUTE_SOURCE_SLOTS, ROUTE_TARGET_SLOTS,
-    TCP_FAIRNESS_ACTIVE, TCP_FAIRNESS_WARMUP, TCP_REQUEST_ACTIVE, TCP_REQUEST_WARMUP,
-    TCP_SINGLE_ACTIVE, TCP_SINGLE_WARMUP, UDP_ACTIVE, UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_PAYLOAD,
-    UDP_WARMUP, UdpDiagnosticFinalizeArgs, udp_diagnostic_finalize_marker,
+    FRAGMENT_ACTIVE, FRAGMENT_BATCH, FRAGMENT_MINIMUM_DATAGRAMS, FRAGMENT_PAYLOAD,
+    FRAGMENT_REPLY_BUFFER, FRAGMENT_WARMUP, FragmentPhase, FragmentWorkloadAccounting, IO_TIMEOUT,
+    RING_BURST_ATTEMPTS, ROUTE_DATAGRAMS_PER_TARGET, ROUTE_PAYLOAD, ROUTE_SOURCE_SLOTS,
+    ROUTE_TARGET_SLOTS, TCP_FAIRNESS_ACTIVE, TCP_FAIRNESS_WARMUP, TCP_REQUEST_ACTIVE,
+    TCP_REQUEST_WARMUP, TCP_SINGLE_ACTIVE, TCP_SINGLE_WARMUP, UDP_ACTIVE,
+    UDP_DIAGNOSTIC_PAYLOAD_LEN, UDP_PAYLOAD, UDP_WARMUP, UdpDiagnosticFinalizeArgs,
+    udp_diagnostic_finalize_marker,
 };
+use super::measurement::{ActiveWorkWindow, elapsed_nanoseconds, elapsed_rate};
 use super::workload::{
-    checked_payload, configure_tcp, connected_udp, elapsed_rate, fragment_batch_round_trip,
+    checked_payload, configure_tcp, connected_udp, fragment_batch_round_trip,
     fragment_retry_budget, fragment_workload_batch_round_trip, sequenced_payload,
     signal_active_complete, tcp_fairness, tcp_request_latency, tcp_round_trip, tcp_single,
     udp_packets, udp_round_trip, unconnected_udp, wait_for_active_release,
@@ -222,10 +224,12 @@ pub(crate) fn fragments(
     }
     wait_for_active_release(active_markers)?;
     let start = Instant::now();
-    let deadline = start + active;
-    while Instant::now() < deadline
-        || accounting.active_unique_datagrams < FRAGMENT_MINIMUM_DATAGRAMS
-    {
+    let mut window = ActiveWorkWindow::new(active);
+    loop {
+        let started = start.elapsed();
+        if !window.admits(started) {
+            break;
+        }
         sequence = fragment_workload_batch_round_trip(
             &socket,
             FragmentPhase::Active,
@@ -233,9 +237,10 @@ pub(crate) fn fragments(
             &mut reply,
             &mut accounting,
         )?;
+        window.complete(started, start.elapsed(), FRAGMENT_BATCH as u64)?;
     }
-    let elapsed = start.elapsed();
     signal_active_complete(active_markers)?;
+    let measured = window.finish(FRAGMENT_MINIMUM_DATAGRAMS, "fragment reassembly")?;
     let bytes = accounting
         .active_unique_datagrams
         .checked_mul(FRAGMENT_PAYLOAD as u64)
@@ -246,7 +251,8 @@ pub(crate) fn fragments(
     let expected_request_attempts = total_unique_datagrams
         .checked_add(accounting.retransmissions)
         .ok_or_else(|| "fragment request accounting overflow".to_owned())?;
-    if sequence != total_unique_datagrams
+    if measured.checked_units != accounting.active_unique_datagrams
+        || sequence != total_unique_datagrams
         || total_request_attempts != expected_request_attempts
         || accounting.retransmissions > retry_budget
         || accounting.ack_window_expirations != accounting.retransmissions
@@ -260,7 +266,9 @@ pub(crate) fn fragments(
         .ok_or_else(|| "fragment I/O completion count overflow".to_owned())?;
     Ok(json!({
         "measurements": {
-            "reassembly_rate": elapsed_rate(bytes, elapsed, "fragment reassembly")?,
+            "reassembly_rate": elapsed_rate(bytes, measured.elapsed, "fragment reassembly")?,
+            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
+            "tail_checked_units": measured.tail_checked_units,
             "io_completions": io_completions
         },
         "checked_units": accounting.active_unique_datagrams,
@@ -316,7 +324,7 @@ pub(crate) fn write_observation(
     observation: Value,
 ) -> Result<(), String> {
     let document = json!({
-        "schema_version": 4,
+        "schema_version": 5,
         "kind": "windows_tun_workload",
         "scenario": scenario.label(),
         "window": window.map(|window| json!({

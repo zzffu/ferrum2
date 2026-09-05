@@ -877,3 +877,40 @@ Rule test binary或benchmark，未添加冻结代码形状的测试。命令/exi
 `target/remediation-audit/rtl04-validation.md`；原输出在agent工具记录，没有伪称独立log文件。
 这是静态归属修正与编译验证，后续显式qualification仍须检查实际输出；没有性能改善结论。
 运行时repository/rustc与真实build provenance不一致的独立观察保持未解决。
+
+### M1j — M4-06/07：准入窗口、完整尾部与数值证据
+
+Windows五个性能场景用私有ActiveWorkWindow停止截止后的新准入，完整验证最后已准入的
+transaction/batch并保留计数、延迟和完成耗时；最低64MiB/1024请求/4096 datagrams/256非零
+flow要求保持，缺样失败，不延长准入凑数。fairness全部worker完成最后预热回复、报告并
+释放sender后才发布统一active start；失败关闭consumer/cancel并join全部worker。原有额外
+轮询只是tool协调实现，本批没有把它误记为产品热点或性能优化。
+
+raw workload schema5 / host trial4同批迁移；新增actual elapsed和tail checked units，计量
+单位随各场景为bytes、transaction或unique datagrams。PS/Python校验uint64、原minimum、
+payload/batch/I/O、tail上限及窗口关系，并从checked/elapsed重算所有可推导throughput/rate。
+首次review补齐原遗漏的tcp-single-flow；warmup总bytes仅作总量、不进入active分子。
+CPU时长>=actual elapsed只是必要一致性条件，不证明端点完全对齐；顺序读client/server
+及marker观察的采集偏差仍明确记录。没有原始latency reservoir/per-flow计数，摘要无法
+独立重建quantiles/Jain，不把该限制隐藏成已验真。
+
+performance-only `HostTrial.ps1` 拥有trial执行和数值验证，原共享HostExecution仅保留执行
+原语；qualification不导入HostTrial或性能策略。正负向fixtures同步真实数学，CPU/work
+比较因果保持，未调threshold。bundle和recipe完整刷新，不支持旧schema兼容读取。
+
+独立worktree `target/remediation-profile-files-20260905` 实际用于本批window快照，基于
+`014c7e18`，22文件清单/hash在 `target/remediation-m4-window/{owned-paths.txt,snapshot.json}`。
+它不含下一批主树deadline I/O半成品、HT4 red测试或CPU工具实现；文档只保留window段。
+第一次fullcandidate126有3个故障场景失败：旧trial测试漏加载新HostTrial；补齐加载，原
+断言未改，最终126全过（40.903s）。自定义target-dir令self-check现有路径契约拒绝，改回
+默认隔离target后PASS（56 mutations及新增内存窗口/预热checks），没有放宽路径规则。
+主树曾因并行deadline模块未完成编译失败，也不作本批通过证据。隔离strict M4 all-targets/
+all-features clippy `-D warnings`、fmt all、PS nonmutating资格contract通过。
+
+日志 `target/remediation-m4-window/root-isolated-{candidate,candidate-final,self-check,self-check-final,clippy,fmt,ps}.log`；
+agent针对性检查见同目录validation.txt。MSVC链接创建lib/exp提示仍存在，无lint抑制。
+本批M4 bundle `e07950bedd00f0ce3bb416da8df21aa44ad39e38609fcbe7d92f604530717d55`；
+performance `c6e802e73baa97e49ff16c964cef17b4affe1bd874c5d6369523a277dec08c0c`；
+qualification `c5c6163efdb5397d9168c3702f2c40dc4f756ba34abb935235e9e464c9763191`。
+未执行真实workload/adapter/benchmark/profiler；新增少量计时/计数和预热同步的成本尚未测量。
+旧基线不可直接与新分母比较，两成员必须用同版harness重采。

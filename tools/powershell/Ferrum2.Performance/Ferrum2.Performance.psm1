@@ -10,6 +10,7 @@ foreach ($owner in @(
     "HostCleanup.ps1",
     "HostExecution.ps1",
     "HostProduct.ps1",
+    "HostTrial.ps1",
     "HostProfiles.ps1",
     "HostPerformance.ps1"
 )) {

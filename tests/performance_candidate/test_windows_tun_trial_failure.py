@@ -34,6 +34,7 @@ $ErrorActionPreference = 'Stop'
 $WarningPreference = 'SilentlyContinue'
 . (Join-Path $Owners 'HostExecution.ps1')
 . (Join-Path $Owners 'HostProduct.ps1')
+. (Join-Path $Owners 'HostTrial.ps1')
 function Fixture-Process($Role, $Id) {
     return @{ pid = $Id; stdout = (Join-Path $FixtureRoot "$Role.stdout"); stderr = (Join-Path $FixtureRoot "$Role.stderr") }
 }

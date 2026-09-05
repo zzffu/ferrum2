@@ -113,7 +113,7 @@ removal of unrelated resources.
 The host runner's `summary.json` status `PASS` means execution and evidence construction completed.
 Use the independent Python validator to check the complete evidence and derive the performance
 decision; `PASS` alone does not mean the candidate improved. Host plan, runtime, and summary schemas
-are v2; raw trials are v3, while build and cleanup schemas remain v1. The host source manifest uses its own
+are v2; raw trials are v4, while build and cleanup schemas remain v1. The host source manifest uses its own
 v1 manifest schema and kind `ferrum2.windows-tun-performance-source-bundle.v3`; this is independent
 of the product's schema-v2 TOML configuration.
 
@@ -163,7 +163,7 @@ After interruption, use the same public runner with `-RecoveryOnly`; removing li
 requires elevation. The [2026-09-05 Confirm and CPU report](windows-tun-confirm-cpu-profile-report-2026-09-05.md)
 records historical A/A runs and their interpretation limits, not current-checkout qualification.
 
-Windows workload schema 4 and host trial schema 3 retain TCP/UDP p50, p95, and p99
+Windows workload schema 5 and host trial schema 4 retain TCP/UDP p50, p95, and p99
 nanoseconds plus `latency_samples` in `workload_measurements`. All three quantiles use
 nearest rank over the same bounded, deterministic reservoir (maximum 2,000,000 samples).
 The controller binds the sample count to successful checked transactions/datagrams and rejects
@@ -172,6 +172,29 @@ including receive recovery; connection setup and warmup are outside that interva
 observations do not establish open-load queueing SLOs. The p99 adoption policy is unchanged;
 p50/p95 are retained observations. Historical schema 2 trial evidence must be read with its own
 recorded controller revision. Current readers have no compatibility path.
+
+TCP single-flow, request, fairness, UDP packet and fragment scenarios stop admitting transactions or batches
+at the configured active deadline. Already admitted work finishes with complete payload/ACK
+validation; its latency and checked work remain included. The original minimum coverage is checked
+afterward, and insufficient coverage fails instead of extending admission. Fairness waits for every
+flow to finish warmup before the common active release. `active_elapsed_nanoseconds` covers the
+common active start through the later of the admission deadline and last verified completion;
+`tail_checked_units` counts work completed strictly after that deadline, in the same units as
+`checked_units` (single-flow/fairness bytes, TCP request transactions, UDP/fragment unique datagrams). Fragment tails
+retain the complete admitted batch and all existing retransmission accounting.
+
+Both host and Python readers check integer counts, coverage, payload alignment, bounded final work,
+and the elapsed/tail relationship. They recompute single-flow byte throughput, UDP packet rate, fragment byte rate and fairness
+aggregate byte throughput from checked work and that elapsed interval. CPU sampling remains an
+independent window including marker/coordination overhead; its duration is not replaced by workload
+elapsed time. A shorter CPU duration is rejected as a necessary consistency condition, not proof of
+aligned endpoints. The host reads CPU counters before releasing the ready marker and after observing
+the completion marker, but trial fields do not retain corresponding interval endpoints. Client and
+server counters are read sequentially while sharing a reported duration, so collection skew remains.
+Summaries alone cannot reconstruct TCP quantiles or Jain fairness without original
+latency samples or per-flow counts. Single-flow `cpu_payload_bytes` retains warmup plus active work
+as a total only; warmup bytes never enter the active throughput numerator. New comparisons require
+both members to use the same revised harness and bundles.
 
 ## Rule qualification evidence
 

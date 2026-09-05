@@ -191,48 +191,74 @@ def route_proofs(planned: dict[str, object]) -> list[dict[str, object]]:
     return proofs
 
 
-def workload_measurements(planned: dict[str, object], value: int) -> dict[str, int]:
+def workload_measurements(planned: dict[str, object], value: int) -> tuple[dict[str, int], int]:
     scenario = planned["scenario"]
+    active = int(planned["active_seconds"])
     if scenario == "tcp-single-flow":
+        checked = max(64 * 1024 * 1024, (value * active + 65535) // 65536 * 65536)
+        elapsed = checked * 1_000_000_000 // value
         return {
             "throughput": value,
-            "cpu_payload_bytes": value * int(planned["active_seconds"]),
-            "io_completions": 1000,
-        }
+            "cpu_payload_bytes": checked + 65536,
+            "io_completions": checked // 65536 * 2,
+            "active_elapsed_nanoseconds": elapsed,
+            "tail_checked_units": 65536 if elapsed > active * 1_000_000_000 else 0,
+        }, checked
+    elapsed = active * 1_000_000_000
+    tail = 0
     if scenario == "tcp-request-1k-p99":
-        return {
-            "p50_nanoseconds": value // 2,
-            "p95_nanoseconds": value * 9 // 10,
-            "p99_nanoseconds": value,
-            "latency_samples": 1000,
-            "io_completions": 1000,
+        checked = 4096
+        measurements = {
+            "p50_nanoseconds": value // 2, "p95_nanoseconds": value * 9 // 10,
+            "p99_nanoseconds": value, "latency_samples": checked,
+            "io_completions": checked * 2,
         }
-    if scenario == "tcp-256-flow-fairness":
-        return {
-            "fairness": value,
-            "aggregate_throughput": value * 10,
-            "io_completions": 1000,
+    elif scenario == "tcp-256-flow-fairness":
+        checked = 256 * 16384 * 100
+        measurements = {
+            "fairness": value, "aggregate_throughput": checked // active,
+            "io_completions": checked // 16384 * 2,
         }
-    if scenario == "udp-packets-per-second":
-        return {
-            "packet_rate": value,
-            "p50_nanoseconds": 20_000,
-            "p95_nanoseconds": 40_000,
-            "p99_nanoseconds": 50_000,
-            "latency_samples": 1000,
-            "io_completions": 1000,
+    elif scenario == "udp-packets-per-second":
+        checked = value * active
+        measurements = {
+            "packet_rate": value, "p50_nanoseconds": 20_000,
+            "p95_nanoseconds": 40_000, "p99_nanoseconds": 50_000,
+            "latency_samples": min(checked, 2_000_000), "io_completions": checked * 2,
         }
-    if scenario == "fragment-reassembly-throughput":
-        return {"reassembly_rate": value, "io_completions": 1000}
-    raise AssertionError(f"unhandled test scenario: {scenario}")
+    elif scenario == "fragment-reassembly-throughput":
+        checked = max(4096, (value * active + 5759) // 5760 * 4)
+        elapsed = checked * 1440 * 1_000_000_000 // value
+        tail = 4 if elapsed > active * 1_000_000_000 else 0
+        measurements = {"reassembly_rate": value, "io_completions": checked * 2}
+    else:
+        raise AssertionError(f"unhandled test scenario: {scenario}")
+    measurements.update(active_elapsed_nanoseconds=elapsed, tail_checked_units=tail)
+    return measurements, checked
+
+
+def scale_trial_work(trial: dict[str, object], factor: int) -> None:
+    """Keep the synthetic observation consistent when varying CPU/work."""
+    trial["checked_units"] *= factor
+    measurements = trial["workload_measurements"]
+    measurements["io_completions"] *= factor
+    trial["io_completions"] = measurements["io_completions"]
+    if "latency_samples" in measurements:
+        measurements["latency_samples"] = min(trial["checked_units"], 2_000_000)
+    if trial["scenario"] == "tcp-single-flow":
+        measurements["cpu_payload_bytes"] *= factor
+    for field, payload in (("throughput", 1), ("packet_rate", 1), ("aggregate_throughput", 1), ("reassembly_rate", 1440)):
+        if field in measurements:
+            measurements[field] = max(1, trial["checked_units"] * payload * 1_000_000_000 // measurements["active_elapsed_nanoseconds"])
+    trial["value"] = float(measurements[trial["metric"]])
 
 
 def trial_for(planned: dict[str, object], value: int) -> dict[str, object]:
-    measurements = workload_measurements(planned, value)
+    measurements, checked = workload_measurements(planned, value)
     server_present = planned["topology"] == "EndToEnd"
     baseline = planned["member"] == "baseline"
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "ferrum2.windows-tun.host-performance-trial",
         "run_id": RUN_ID,
         "performance_source_bundle_sha256": DIGEST,
@@ -261,7 +287,7 @@ def trial_for(planned: dict[str, object], value: int) -> dict[str, object]:
         ),
         "client_failure_counter_delta": 0.0,
         "server_failure_counter_delta": 0.0 if server_present else None,
-        "checked_units": 1000,
+        "checked_units": checked,
         "loopback_interface_index": LOOPBACK_INDEX,
         "loopback_interface_alias": LOOPBACK_ALIAS,
         "route_proofs": route_proofs(planned),
@@ -346,7 +372,7 @@ def write_trials(root: Path, plan: dict[str, object]) -> list[dict[str, object]]
     pair_ratios = (1.03, 1.04, 0.99)
     rows = []
     for planned in plan["trials"]:
-        baseline_value = 100_000
+        baseline_value = {"tcp-single-flow": 10_000_000, "fragment-reassembly-throughput": 10_000_000, "tcp-256-flow-fairness": 900_000_000}.get(planned["scenario"], 100_000)
         ratio = pair_ratios[int(planned["pair"]) - 1]
         candidate_value = (
             round(baseline_value * ratio)
@@ -593,7 +619,7 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
     def test_trials_close_server_presence_routes_and_workload_measurements(self) -> None:
         for topology, proof_count in (("ClientDirect", 3), ("EndToEnd", 4)):
             planned = plan_for("Quick", topology)["trials"][0]
-            trial = trial_for(planned, 100_000)
+            trial = trial_for(planned, 10_000_000)
             identity = {
                 "planned_trial": planned,
                 "run_id": RUN_ID,
@@ -702,9 +728,7 @@ class WindowsTunHostEvidenceTests(unittest.TestCase):
             trials = write_trials(root, plan)
             for trial in trials:
                 if trial["member"] == "candidate":
-                    trial["checked_units"] = 2000
-                    if "latency_samples" in trial["workload_measurements"]:
-                        trial["workload_measurements"]["latency_samples"] = 2000
+                    scale_trial_work(trial, 2)
                     trial["client_cpu_percent"] = 30.0
                     write_json(
                         root / "trials" / f"{trial['sequence']:03d}" / "trial.json",

@@ -13,6 +13,7 @@ WINDOWS_TUN_PERFORMANCE_SOURCE_PATHS = (
     "tools/powershell/Ferrum2.Performance/Ferrum2.Performance.psm1",
     "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
     "tools/powershell/Ferrum2.Performance/HostProduct.ps1",
+    "tools/powershell/Ferrum2.Performance/HostTrial.ps1",
     "tools/powershell/Ferrum2.Performance/HostOwnership.ps1",
     "tools/powershell/Ferrum2.Performance/HostCleanup.ps1",
     "tools/powershell/Ferrum2.Performance/HostPerformance.ps1",
@@ -82,21 +83,21 @@ WINDOWS_TUN_PROFILES = MappingProxyType(
 WINDOWS_TUN_WORKLOAD_MEASUREMENTS = MappingProxyType(
     {
         "tcp-single-flow": frozenset(
-            {"throughput", "cpu_payload_bytes", "io_completions"}
+            {"throughput", "cpu_payload_bytes", "io_completions", "active_elapsed_nanoseconds", "tail_checked_units"}
         ),
         "tcp-request-1k-p99": frozenset(
             {"p50_nanoseconds", "p95_nanoseconds", "p99_nanoseconds",
-             "latency_samples", "io_completions"}
+             "latency_samples", "io_completions", "active_elapsed_nanoseconds", "tail_checked_units"}
         ),
         "tcp-256-flow-fairness": frozenset(
-            {"fairness", "aggregate_throughput", "io_completions"}
+            {"fairness", "aggregate_throughput", "io_completions", "active_elapsed_nanoseconds", "tail_checked_units"}
         ),
         "udp-packets-per-second": frozenset(
             {"packet_rate", "p50_nanoseconds", "p95_nanoseconds", "p99_nanoseconds",
-             "latency_samples", "io_completions"}
+             "latency_samples", "io_completions", "active_elapsed_nanoseconds", "tail_checked_units"}
         ),
         "fragment-reassembly-throughput": frozenset(
-            {"reassembly_rate", "io_completions"}
+            {"reassembly_rate", "io_completions", "active_elapsed_nanoseconds", "tail_checked_units"}
         ),
     }
 )

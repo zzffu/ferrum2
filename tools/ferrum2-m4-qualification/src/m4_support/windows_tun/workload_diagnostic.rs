@@ -4,7 +4,8 @@ use super::diagnostic::{
     UDP_DIAGNOSTIC_SCOPE, UDP_WORKLOAD_DIAGNOSTIC_CLOSURE, UDP_WORKLOAD_LEDGER_SCHEMA,
     UdpAssociationSourceArgs, UdpDiagnosticPayload, UdpDiagnosticPhase, UdpWorkloadDiagnosticArgs,
 };
-use super::workload::{association_round, connected_udp_association, elapsed_rate};
+use super::measurement::elapsed_rate;
+use super::workload::{association_round, connected_udp_association};
 use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};

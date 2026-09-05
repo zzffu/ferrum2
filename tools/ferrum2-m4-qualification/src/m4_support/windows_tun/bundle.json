@@ -134,19 +134,24 @@
       "sha256": "833f40502a57a3ecf881569218009a262a77fb9e157ce98ef6edeaf31fbcbb74"
     },
     {
+      "path": "src/m4_support/windows_tun/measurement.rs",
+      "bytes": 6704,
+      "sha256": "a4f9f6cad8a68f0a416ad5472c6b5794e69f5f086cd26efb9b712426f22c2759"
+    },
+    {
       "path": "src/m4_support/windows_tun/mod.rs",
-      "bytes": 289,
-      "sha256": "8b263b0461a59c348ebc788fa2bff905555dbb009864782a104c5194e599696b"
+      "bytes": 306,
+      "sha256": "76de694be3e498581755bf1f4b6c05a79f1397f4bb76bf5490735c4cf8fedd22"
     },
     {
       "path": "src/m4_support/windows_tun/scenarios.rs",
-      "bytes": 19438,
-      "sha256": "fa7068ed2dce06bde9b3ccaa4b4ddb2110ab4335ba1d14241ce4d0d9a807f4fd"
+      "bytes": 19891,
+      "sha256": "b3f1b274ee345b8c7cb1db0679382c0d45e3c459baec851ff955e1afa634be41"
     },
     {
       "path": "src/m4_support/windows_tun/self_check.rs",
-      "bytes": 381,
-      "sha256": "e91266bba1768ecd29bda36e0213c34227f7b47cb081825154ef3653811dcf81"
+      "bytes": 425,
+      "sha256": "1b90b20e6f5d4fcd6f46b3623f3da95b28b89b1d988b91daeeced1cd702bfc05"
     },
     {
       "path": "src/m4_support/windows_tun/self_check/cli_contract.rs",
@@ -159,9 +164,14 @@
       "sha256": "9333d979496b5b4517ff1d80dd3f86663501603080640b83bf7e189584c47fa1"
     },
     {
+      "path": "src/m4_support/windows_tun/self_check/measurement.rs",
+      "bytes": 7826,
+      "sha256": "94f860d141db1e2de842058016d80b9a1cb960ea4f27b4f367720603408e4cad"
+    },
+    {
       "path": "src/m4_support/windows_tun/self_check/workload.rs",
-      "bytes": 11055,
-      "sha256": "5ab0172d1a2e861ce33483215912145de923051ffb4f06ce157f910dcc9e3fa1"
+      "bytes": 11082,
+      "sha256": "98f4268f4561246726170da5088339d7619d2d90246292a6b4630f1b5e4204fd"
     },
     {
       "path": "src/m4_support/windows_tun/support.rs",
@@ -170,13 +180,13 @@
     },
     {
       "path": "src/m4_support/windows_tun/workload.rs",
-      "bytes": 38396,
-      "sha256": "b0ee514362c04fbbde47a7f673cfd0abea5834ff1005b1eca98a2a82c64ff63e"
+      "bytes": 38374,
+      "sha256": "6eaa06f88f4da3ee1fc6d18e2ca350122327fade0885814bbb2c884e50e808e8"
     },
     {
       "path": "src/m4_support/windows_tun/workload_diagnostic.rs",
-      "bytes": 16409,
-      "sha256": "24282670edf31888392e38dd02f81547f6694eee5b7a7c375a083c0ae21f6260"
+      "bytes": 16433,
+      "sha256": "29d8ded29f3e6aa090ed0e481801c6c81fd46e18c3580ab05a94bed0445cf7cc"
     },
     {
       "path": "src/main.rs",

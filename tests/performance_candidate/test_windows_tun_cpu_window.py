@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from test_windows_tun_host_evidence import (
-    BASELINE, CANDIDATE, POLICY, ROOT, plan_for, summary_for,
+    BASELINE, CANDIDATE, POLICY, ROOT, plan_for, scale_trial_work, summary_for,
     validate_windows_tun_host_evidence, write_common, write_json, write_trials,
 )
 
@@ -26,24 +26,28 @@ class WindowsTunCpuWindowTests(unittest.TestCase):
                     plan = plan_for("Quick", topology)
                     write_common(root, "Quick", topology, plan)
                     trials = write_trials(root, plan)
+                    baseline_work = {(row["scenario"], row["pair"]): row["checked_units"] for row in trials if row["member"] == "baseline"}
                     for trial in trials:
                         candidate = trial["member"] == "candidate"
                         # Both windows satisfy the actual active-time evidence contract.
                         window = (20.0 if candidate else 10.0) if increased_cost else (
                             10.0 if candidate else 20.0
                         )
+                        elapsed = trial["workload_measurements"].get(
+                            "active_elapsed_nanoseconds", trial["active_seconds"] * 1_000_000_000
+                        ) / 1_000_000_000
+                        window = max(window, elapsed + 0.01)
                         trial["cpu_sample_seconds"] = window
-                        # Candidate does twice the checked work. Equal cost is 2 / 1000
-                        # versus 4 / 2000 CPU seconds/work; regression is 6 / 2000.
+                        # Preserve each scenario's actual work and adjust CPU seconds
+                        # by its work ratio; the regression case adds 50% CPU/work.
                         if candidate:
-                            trial["checked_units"] = 2000
-                            if "latency_samples" in trial["workload_measurements"]:
-                                trial["workload_measurements"]["latency_samples"] = 2000
+                            scale_trial_work(trial, 2)
                         for role in ("client", "server"):
                             if trial[f"{role}_cpu_percent"] is not None:
-                                seconds = 4.0 if candidate else 2.0
+                                work_ratio = trial["checked_units"] / baseline_work[(trial["scenario"], trial["pair"])]
+                                seconds = 2.0 * work_ratio
                                 if candidate and increased_cost and role == guarded_role:
-                                    seconds = 6.0
+                                    seconds *= 1.5
                                 trial[f"{role}_cpu_percent"] = seconds / window * 100.0
                         write_json(root / "trials" / f"{trial['sequence']:03d}" / "trial.json", trial)
                     expected = summary_for(plan, trials)
