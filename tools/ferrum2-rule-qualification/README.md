@@ -54,6 +54,18 @@ against a synthetic snapshot reference to that exact decoded
 `CompiledMatchSet`, covering `ads`, `ai`, `cn`, and `cnip` without memory-layout
 noise.
 
+For generated binary SRS rows, `synthetic_srs` fields `build_nanoseconds`,
+`compiled_allocations`, `compiled_reallocations`, `compiled_memory_bytes`, and
+`compiled_bytes_per_entry` describe the independently constructed synthetic
+snapshot used for correctness checks. `compiled_entries` is its validated entry
+count. Its latency and per-operation allocation samples use the
+shared decoded matcher through a separate timing snapshot. The timing snapshot's
+construction is not substituted for the independent synthetic build evidence.
+The corresponding `binary_srs` build fields describe binary decoding and
+compilation. This corrects attribution within the existing report schema.
+Real repository SRS fixtures have no independent generated source: their
+`synthetic_srs` build fields describe binary decoding plus the snapshot wrapper.
+
 Route measurements cover ordinary-only, RuleSet-only, and mixed constraints;
 first, middle, last, and miss lookups; and the actual `SmallLinear` or
 `Indexed` mode selected by the compiler. At every smoke and qualification

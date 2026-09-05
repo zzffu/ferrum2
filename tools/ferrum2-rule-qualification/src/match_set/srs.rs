@@ -67,9 +67,8 @@ pub(crate) fn run_generated_binary_srs(
             })?);
             let binary_build = finish_build(binary_started, &binary_region)?;
 
-            let (synthetic_reference, _) =
-                build_synthetic_srs_match_set(kind, scale, &fixture_name)?;
-            let reference_set = synthetic_reference.compiled();
+            let synthetic_reference = build_synthetic_srs_match_set(kind, scale, &fixture_name)?;
+            let reference_set = synthetic_reference.owner.compiled();
             let expected_statistics = generated_srs_statistics(kind, scale);
             if version != SYNTHETIC_SRS_VERSION
                 || statistics != expected_statistics
@@ -85,9 +84,9 @@ pub(crate) fn run_generated_binary_srs(
             // Time the two source wrappers against the exact same compiled
             // object. The independently compiled synthetic reference above
             // proves data/decoder equivalence without letting allocator layout
-            // masquerade as a matcher-backend performance difference.
-            let synthetic_region = allocation_region();
-            let synthetic_started = Instant::now();
+            // masquerade as a matcher-backend performance difference. Keep its
+            // owner and build evidence together through every reported probe;
+            // this timing wrapper does not supply the synthetic build fields.
             let mut snapshot = RuleEngineSnapshotBuilder::new(1);
             let synthetic_match_set = snapshot
                 .add_shared_match_set(Arc::clone(&binary_set))
@@ -103,7 +102,7 @@ pub(crate) fn run_generated_binary_srs(
                         "generated synthetic SRS registration failed: {error}"
                     ))
                 })?;
-            let synthetic_owner = CompiledSetOwner::Snapshot {
+            let timing_owner = CompiledSetOwner::Snapshot {
                 snapshot: snapshot.build().map_err(|error| {
                     QualificationError::new(format!(
                         "generated synthetic SRS snapshot failed: {error}"
@@ -111,9 +110,7 @@ pub(crate) fn run_generated_binary_srs(
                 })?,
                 match_set: synthetic_match_set,
             };
-            let synthetic_build =
-                binary_build.combined(finish_build(synthetic_started, &synthetic_region)?);
-            let synthetic_set = synthetic_owner.compiled();
+            let synthetic_set = timing_owner.compiled();
             if !std::ptr::eq(synthetic_set, binary_set.as_ref()) {
                 return Err(QualificationError::new(
                     "generated SRS timing sources do not share one compiled matcher",
@@ -150,7 +147,7 @@ pub(crate) fn run_generated_binary_srs(
                     Some(fixture_name.clone()),
                     None,
                     base_iterations,
-                    synthetic_build,
+                    synthetic_reference.build,
                     Some(scale),
                     synthetic_result,
                 ));
@@ -183,11 +180,18 @@ pub(crate) fn run_generated_binary_srs(
     Ok(evidence)
 }
 
-pub(crate) fn build_synthetic_srs_match_set(
+/// Retains the independently built snapshot whose construction is reported.
+/// Shared-object timing owns a separate snapshot and never replaces this evidence.
+struct SyntheticSrsReference {
+    owner: CompiledSetOwner,
+    build: BuildEvidence,
+}
+
+fn build_synthetic_srs_match_set(
     kind: MatcherKind,
     scale: usize,
     tag: &str,
-) -> Result<(CompiledSetOwner, BuildEvidence)> {
+) -> Result<SyntheticSrsReference> {
     let region = allocation_region();
     let started = Instant::now();
     let compiled = Arc::new(compile_generated_match_set(kind, scale)?);
@@ -205,7 +209,7 @@ pub(crate) fn build_synthetic_srs_match_set(
         match_set,
     };
     let build = finish_build(started, &region)?;
-    Ok((owner, build))
+    Ok(SyntheticSrsReference { owner, build })
 }
 
 pub(crate) fn generated_srs_statistics(kind: MatcherKind, scale: usize) -> SrsStatistics {

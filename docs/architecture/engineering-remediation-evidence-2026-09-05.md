@@ -860,3 +860,20 @@ root独立复跑51通过（0.931s）；AST/import/diff检查通过。日志
 所有runner均mock，未运行Rust test binary、benchmark、A/A/A/B或批准校准。
 RTL-04独立SRS build evidence与RTL-06闭合诊断仍是后续项，运行时git/rustc不等于build
 provenance的审查观察也未被本批解决。schema v6/calibration v2保持，修正既有契约执行。
+
+### M1i — RTL-04：synthetic SRS 构建证据归属
+
+`match_set/srs.rs` 的私有 `SyntheticSrsReference` 将独立构造的snapshot owner与BuildEvidence
+同存；generated `synthetic_srs` 行用它的build时间、分配、重分配和内存字段，不再丢弃后
+用binary decode + timing wrapper冒名替换。独立构造的正确性对照贯穿全部probe；性能计时
+仍由另一个timing owner共享binary compiled matcher，并保留ptr::eq检查以控制layout噪声。
+唯一调用方同步，helper公开范围缩小。真实仓内SRS无独立generated输入，保留并明确它的
+decode+wrapper构建语义；README逐列说明。未改schema、Python或历史归档数值。
+
+Windows Rust1.97.1下 `cargo check -p ferrum2-rule-qualification --all-targets --all-features --locked`、
+`cargo test -p ferrum2-rule-qualification --no-run --locked`、该包all-targets/all-features
+clippy `-D warnings` 及fmt check均通过。初次fmt一处换行不符，修正后通过；未运行任何
+Rule test binary或benchmark，未添加冻结代码形状的测试。命令/exit/toolchain详见
+`target/remediation-audit/rtl04-validation.md`；原输出在agent工具记录，没有伪称独立log文件。
+这是静态归属修正与编译验证，后续显式qualification仍须检查实际输出；没有性能改善结论。
+运行时repository/rustc与真实build provenance不一致的独立观察保持未解决。
