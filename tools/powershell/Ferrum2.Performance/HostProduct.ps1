@@ -9,7 +9,8 @@ function Start-Ferrum2ProductTrial {
         [Parameter(Mandatory = $true)][int]$Sequence,
         [Parameter(Mandatory = $true)]
         [ValidateSet("ClientDirect", "EndToEnd")]
-        [string]$Topology
+        [string]$Topology,
+        [AllowNull()][Net.IPEndPoint]$ResetProbeEndpoint = $null
     )
     $adapterName = "$($Network.adapter_name_prefix)-$('{0:D3}' -f $Sequence)"
     Set-Ferrum2OwnedAdapterPlan -Context $Context -AdapterName $adapterName
@@ -36,9 +37,14 @@ function Start-Ferrum2ProductTrial {
         }
         Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
             -Port $clientMetrics -Purpose "client-metrics"
+        $configOptions = @{}
+        if ($null -ne $ResetProbeEndpoint) {
+            $configOptions.ResetProbeEndpoint = $ResetProbeEndpoint
+        }
         $configs = Write-Ferrum2TrialConfigs -Context $Context -Network $Network -Loopback $Loopback `
             -AdapterName $adapterName -Topology $Topology -ServerPort $serverPort `
-            -ClientMetricsPort $clientMetrics -ServerMetricsPort $serverMetrics -Sequence $Sequence
+            -ClientMetricsPort $clientMetrics -ServerMetricsPort $serverMetrics -Sequence $Sequence `
+            @configOptions
         Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.client `
             -Config $configs.client -LogPrefix "trial-$Sequence-client-config-check"
         Close-Ferrum2PortReservation -Reservation $ports.client_metrics

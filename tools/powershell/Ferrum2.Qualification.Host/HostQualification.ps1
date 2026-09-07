@@ -17,7 +17,8 @@ function Write-Ferrum2TrialConfigs {
         [Parameter(Mandatory = $true)][uint16]$ServerPort,
         [Parameter(Mandatory = $true)][uint16]$ClientMetricsPort,
         [Parameter(Mandatory = $true)][uint16]$ServerMetricsPort,
-        [Parameter(Mandatory = $true)][int]$Sequence
+        [Parameter(Mandatory = $true)][int]$Sequence,
+        [AllowNull()][Net.IPEndPoint]$ResetProbeEndpoint = $null
     )
     $configs = & $script:BaseWriteFerrum2TrialConfigs `
         -Context $Context -Network $Network -Loopback $Loopback `
@@ -35,6 +36,29 @@ function Write-Ferrum2TrialConfigs {
         "auto_route = true`r`nstrict_route = true",
         1
     )
+    if ($null -ne $ResetProbeEndpoint) {
+        if ([regex]::Matches($text, '(?m)^final = "proxy"\r?$').Count -ne 1) {
+            throw 'qualification reset config has no unique proxy route'
+        }
+        $text = [regex]::Replace(
+            $text, '(?m)^final = "proxy"\r?$', 'final = "qualification-route"', 1
+        )
+        # The selector keeps both first hops in the underlay snapshot, but always uses the
+        # existing proxy. The reset endpoint receives no qualification traffic.
+        $text += @"
+
+[[outbounds]]
+tag = "qualification-reset-probe"
+type = "shadowsocks"
+server = "$ResetProbeEndpoint"
+method = "2022-blake3-aes-128-gcm"
+psk = "AAECAwQFBgcICQoLDA0ODw=="
+[[selectors]]
+tag = "qualification-route"
+outbounds = ["proxy", "qualification-reset-probe"]
+default = "proxy"
+"@
+    }
     [IO.File]::WriteAllText([string]$configs.client, $text, [Text.UTF8Encoding]::new($false))
     return $configs
 }
@@ -178,6 +202,72 @@ function Get-Ferrum2QualificationMetricLabelValue {
 }
 
 
+function Initialize-Ferrum2QualificationResetRoute {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][object]$Network
+    )
+    $octets = [Net.IPAddress]::Parse($Network.support_address).GetAddressBytes()
+    if ($octets.Length -ne 4 -or $octets[0] -ne 198 -or
+        $octets[1] -notin @(18, 19) -or $octets[3] -ge 254) {
+        throw 'qualification reset probe is outside its run-owned RFC2544 range'
+    }
+    $address = "$($octets[0]).$($octets[1]).$($octets[2]).$($octets[3] + 1)"
+    $prefix = "$address/32"
+    if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix `
+            -ErrorAction SilentlyContinue).Count -ne 0 -or
+        @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address `
+            -ErrorAction SilentlyContinue).Count -ne 0) {
+        throw 'qualification reset probe route/address baseline must be absent'
+    }
+    $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop |
+        Where-Object { [string]$_.Status -ceq 'Up' } | Sort-Object ifIndex)
+    if ($adapters.Count -gt 4096) {
+        throw 'qualification physical interface inventory exceeds its bound'
+    }
+    $selected = $null
+    foreach ($adapter in $adapters) {
+        try {
+            $rows = @(Find-NetRoute -RemoteIPAddress $address `
+                -InterfaceIndex ([uint32]$adapter.ifIndex) -ErrorAction Stop)
+        } catch {
+            continue
+        }
+        $routes = @($rows | Where-Object {
+            $_.CimClass.CimClassName -ceq 'MSFT_NetRoute'
+        })
+        if ($routes.Count -eq 1 -and
+            [uint32]$routes[0].InterfaceIndex -eq [uint32]$adapter.ifIndex -and
+            [string]$routes[0].NextHop -cne '0.0.0.0') {
+            $selected = $routes[0]
+            break
+        }
+    }
+    if ($null -eq $selected) {
+        throw 'qualification reset needs a readable active hardware IPv4 gateway route'
+    }
+    # These two exact /32 entries affect only the unused probe address. Adapter settings,
+    # existing routes, DNS and WLAN state are never changed; no probe socket is opened.
+    [void](Add-Ferrum2OwnedRoute -Context $Context `
+        -InterfaceIndex ([uint32]$selected.InterfaceIndex) -DestinationPrefix $prefix `
+        -NextHop ([string]$selected.NextHop) -RouteMetric 4094 `
+        -Kind 'qualification-reset-baseline')
+    $proof = Get-Ferrum2RouteProof -RemoteAddress $address `
+        -ExpectedInterfaceIndex ([uint32]$selected.InterfaceIndex) `
+        -Purpose 'qualification-reset-baseline'
+    if ($proof.destination_prefix -cne $prefix -or
+        $proof.next_hop -cne [string]$selected.NextHop) {
+        throw 'qualification reset baseline did not select its exact owned route'
+    }
+    return [pscustomobject]@{
+        address = $address
+        prefix = $prefix
+        endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($address), 9)
+        interface_index = [uint32]$selected.InterfaceIndex
+        before = $proof
+    }
+}
+
 function Invoke-Ferrum2HostQualificationChecks {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
@@ -218,8 +308,10 @@ function Invoke-Ferrum2HostQualificationChecks {
         name = 'wintun-create-and-delete'; status = 'PASS'
     })
 
+    $resetRoute = Initialize-Ferrum2QualificationResetRoute -Context $Context -Network $Network
     $smokeRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 2 -Topology "EndToEnd"
+        -Network $Network -Loopback $Loopback -Sequence 2 -Topology "EndToEnd" `
+        -ResetProbeEndpoint $resetRoute.endpoint
     try {
         $metricsBefore = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port
         Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
@@ -248,18 +340,13 @@ function Invoke-Ferrum2HostQualificationChecks {
             -WorkingDirectory (Split-Path -Parent $Candidate.harness) `
             -LogPrefix 'qualification-probe-before-network-reset' -TimeoutSeconds 60)
         $routeProofs = @($smokeRuntime.route_proofs)
-        $octets = $Network.support_address.Split('.')
-        $notificationAddress = "$($octets[0]).$($octets[1]).$($octets[2]).$([int]$octets[3] + 1)"
-        if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "$notificationAddress/32" `
-                -ErrorAction SilentlyContinue).Count -ne 0) {
-            throw 'host qualification notification route baseline is not absent'
-        }
+        $notificationAddress = $resetRoute.address
         $routeNotification = [Ferrum2QualificationRouteNotification]::new()
         try {
             [void](Add-Ferrum2OwnedRoute -Context $Context `
-                -InterfaceIndex $Loopback.interface_index `
-                -DestinationPrefix "$notificationAddress/32" -RouteMetric 4094 `
-                -Kind 'qualification-notification')
+                -InterfaceIndex $resetRoute.interface_index `
+                -DestinationPrefix $resetRoute.prefix -RouteMetric 4093 `
+                -Kind 'qualification-reset-change')
             if (-not $routeNotification.Wait(10000)) {
                 throw 'host qualification did not observe the run-owned route notification'
             }
@@ -269,6 +356,13 @@ function Invoke-Ferrum2HostQualificationChecks {
         $metricsAfter = Wait-Ferrum2Metric -Process $smokeRuntime.client `
             -Port $smokeRuntime.client_metrics_port -Name 'ferrum2_tun_session_generation' `
             -Minimum ($generationBefore + 1) -TimeoutSeconds 30
+        $resetRouteAfter = Get-Ferrum2RouteProof -RemoteAddress $notificationAddress `
+            -ExpectedInterfaceIndex $resetRoute.interface_index `
+            -Purpose 'qualification-reset-change'
+        if ($resetRouteAfter.destination_prefix -cne $resetRoute.prefix -or
+            $resetRouteAfter.next_hop -cne '0.0.0.0') {
+            throw 'qualification reset did not select its second exact owned route'
+        }
         $generationAfter = Get-Ferrum2MetricValue $metricsAfter `
             'ferrum2_tun_session_generation'
         if ((Get-Ferrum2MetricValue $metricsAfter `
@@ -290,6 +384,8 @@ function Invoke-Ferrum2HostQualificationChecks {
             source = 'NotifyRouteChange2'
             observed = $true
             destination_prefix = "$notificationAddress/32"
+            route_before = $resetRoute.before
+            route_after = $resetRouteAfter
             session_generation_before = [uint64]$generationBefore
             session_generation_after = [uint64]$generationAfter
         }

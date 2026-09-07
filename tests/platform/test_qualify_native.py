@@ -169,6 +169,9 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $Owners 'Ferrum2.Qualification.Host/HostQualification.ps1')
 function Add-Ferrum2OwnedAddress { }
 function Start-Ferrum2Support { return @{ tcp_port = 41002; udp_port = 41003 } }
+function Initialize-Ferrum2QualificationResetRoute {
+    return @{ endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse('198.19.0.2'), 9) }
+}
 function Fixture-Process($Role) {
     return @{ stdout = (Join-Path $FixtureRoot "$Role.stdout"); stderr = (Join-Path $FixtureRoot "$Role.stderr") }
 }

@@ -52,6 +52,13 @@ must not broaden the filter, disable Base Filtering Engine or firewall enforceme
 persistent exception. It must not change a default route, system DNS, physical adapter, WLAN state,
 sing-box process, or unrelated resource.
 
+The reset stimulus adds two ledger-owned `/32` rows for an otherwise unused RFC 2544 address:
+first through an existing hardware interface's current gateway, then a lower-metric on-link row
+on that same interface. Existing routes and interface settings are not modified. A selector keeps
+the probe endpoint in the underlay snapshot while retaining the normal proxy as its selected exit;
+no workload traffic uses the probe endpoint. An unrelated loopback route notification alone does
+not constitute the required semantic reset.
+
 The evidence directory must be an absolute or relative path whose final directory does not already
 exist. Keep it outside the repository. The persistent recovery ledger is under
 `%PROGRAMDATA%\Ferrum2HostPerformance-v2\<RunId>\recovery.json`; recovery removes only identities

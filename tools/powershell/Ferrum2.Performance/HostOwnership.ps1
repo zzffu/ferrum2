@@ -444,12 +444,13 @@ function Add-Ferrum2OwnedRoute {
         [Parameter(Mandatory = $true)][uint32]$InterfaceIndex,
         [Parameter(Mandatory = $true)][string]$DestinationPrefix,
         [Parameter(Mandatory = $true)][uint16]$RouteMetric,
-        [string]$Kind = "runner"
+        [string]$Kind = "runner",
+        [string]$NextHop = "0.0.0.0"
     )
     $row = [pscustomobject][ordered]@{
         destination_prefix = $DestinationPrefix
         interface_index = $InterfaceIndex
-        next_hop = "0.0.0.0"
+        next_hop = $NextHop
         route_metric = $RouteMetric
         policy_store = "ActiveStore"
         kind = $Kind
@@ -458,7 +459,7 @@ function Add-Ferrum2OwnedRoute {
     $Context.ledger.resources.routes = @($Context.ledger.resources.routes) + @($row)
     Write-Ferrum2HostPerformanceLedger -Context $Context
     New-NetRoute -AddressFamily IPv4 -InterfaceIndex $InterfaceIndex `
-        -DestinationPrefix $DestinationPrefix -NextHop "0.0.0.0" `
+        -DestinationPrefix $DestinationPrefix -NextHop $NextHop `
         -RouteMetric $RouteMetric -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
     $row.state = "created"
     Write-Ferrum2HostPerformanceLedger -Context $Context
