@@ -13,7 +13,7 @@ pub(in crate::run) use network::ClientDnsResetAction;
 #[cfg(any(windows, test))]
 pub(in crate::run) use network::io_error_from_network_service;
 #[cfg(test)]
-pub(in crate::run) use network::system_application_resolver;
+pub(in crate::run) use network::test_application_resolver;
 #[cfg(all(windows, not(test)))]
 pub(in crate::run) use network::{ClientNetworkSocketService, NetworkServiceConnector};
 pub(super) use udp::{

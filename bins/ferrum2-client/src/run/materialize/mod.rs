@@ -50,10 +50,11 @@ struct MaterializedClientResources {
     cache: Option<DnsCache>,
 }
 
-/// Production schema-v2 materializer. The context is single-use because a
-/// successful materialization transfers its resolver and refresh ownership to
-/// exactly one client process root.
+/// Single-use schema-v2 materializer. Temporary tagged resolvers are joined before
+/// return; the caller retains the shared system owner across materialization and
+/// the eventual process. Only a refresh construction plan crosses this handoff.
 pub(super) struct ClientV2Materializer {
+    system: ferrum2_dns::SystemResolver,
     metrics: Arc<Metrics>,
     downloader: Option<Arc<dyn RuleSetDownloader>>,
     #[cfg(all(windows, not(test)))]
@@ -62,12 +63,14 @@ pub(super) struct ClientV2Materializer {
 
 impl ClientV2Materializer {
     pub(super) fn new(
+        system: ferrum2_dns::SystemResolver,
         metrics: Arc<Metrics>,
         #[cfg(all(windows, not(test)))] network_socket_service: Arc<
             super::egress::ClientNetworkSocketService,
         >,
     ) -> Self {
         Self {
+            system,
             metrics,
             downloader: None,
             #[cfg(all(windows, not(test)))]
@@ -76,8 +79,13 @@ impl ClientV2Materializer {
     }
 
     #[cfg(test)]
-    fn with_downloader(metrics: Arc<Metrics>, downloader: Arc<dyn RuleSetDownloader>) -> Self {
+    fn with_downloader(
+        system: ferrum2_dns::SystemResolver,
+        metrics: Arc<Metrics>,
+        downloader: Arc<dyn RuleSetDownloader>,
+    ) -> Self {
         Self {
+            system,
             metrics,
             downloader: Some(downloader),
         }
@@ -89,7 +97,7 @@ impl ClientV2Materializer {
     ) -> Result<MaterializedClientResources, RunError> {
         record_target_resolution_modes(prepared, &self.metrics);
 
-        let blueprint = Arc::new(BootstrapBlueprint::new(prepared)?);
+        let blueprint = Arc::new(BootstrapBlueprint::new(prepared, self.system.clone())?);
         let (plan, targets) = fixed_endpoint_plan(prepared)?;
         let cache = materialization_cache(prepared, &self.metrics)?;
         let backend = BootstrapEndpointBackend::new(

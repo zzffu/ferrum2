@@ -50,10 +50,11 @@ struct MaterializedServerResources {
     cache: Option<DnsCache>,
 }
 
-/// Single-use schema-v2 materialization context. Initial resolver owners are
-/// joined before the finished config becomes visible. Only a pure refresh
-/// construction plan is retained until it is transferred to the supervisor.
+/// Single-use schema-v2 materialization context. Initial tagged resolver owners
+/// are joined before the finished config becomes visible. The caller retains the
+/// shared system owner; only a refresh construction plan transfers to the supervisor.
 pub(super) struct ServerV2Materializer {
+    system: ferrum2_dns::SystemResolver,
     metrics: Arc<Metrics>,
     network_sockets: Arc<ServerNetworkSocketService>,
     downloader: Option<Arc<dyn RuleSetDownloader>>,
@@ -61,19 +62,21 @@ pub(super) struct ServerV2Materializer {
 
 impl ServerV2Materializer {
     #[cfg(test)]
-    pub(super) fn new(metrics: Arc<Metrics>) -> Self {
+    pub(super) fn new(system: ferrum2_dns::SystemResolver, metrics: Arc<Metrics>) -> Self {
         let registry = ferrum2_runtime::OwnerRegistry::new();
         let network_sockets =
             super::tcp::prepare_server_network_socket_service(&registry, &metrics)
                 .expect("test materialization network socket service");
-        Self::with_network_sockets(metrics, network_sockets)
+        Self::with_network_sockets(system, metrics, network_sockets)
     }
 
     pub(super) fn with_network_sockets(
+        system: ferrum2_dns::SystemResolver,
         metrics: Arc<Metrics>,
         network_sockets: Arc<ServerNetworkSocketService>,
     ) -> Self {
         Self {
+            system,
             metrics,
             network_sockets,
             downloader: None,
@@ -81,12 +84,17 @@ impl ServerV2Materializer {
     }
 
     #[cfg(test)]
-    fn with_downloader(metrics: Arc<Metrics>, downloader: Arc<dyn RuleSetDownloader>) -> Self {
+    fn with_downloader(
+        system: ferrum2_dns::SystemResolver,
+        metrics: Arc<Metrics>,
+        downloader: Arc<dyn RuleSetDownloader>,
+    ) -> Self {
         let registry = ferrum2_runtime::OwnerRegistry::new();
         let network_sockets =
             super::tcp::prepare_server_network_socket_service(&registry, &metrics)
                 .expect("test materialization network socket service");
         Self {
+            system,
             metrics,
             network_sockets,
             downloader: Some(downloader),
@@ -101,6 +109,7 @@ impl ServerV2Materializer {
 
         let blueprint = Arc::new(BootstrapBlueprint::new(
             prepared,
+            self.system.clone(),
             Arc::clone(&self.metrics),
             Arc::clone(&self.network_sockets),
         )?);

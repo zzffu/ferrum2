@@ -12,7 +12,7 @@ use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_core::{CanonicalDomain, TargetAddr};
 use ferrum2_dns::{
     DnsAddressRecords, DnsCache, DnsCacheAnswer, DnsCacheKey, DnsCacheQtype, DnsStrategy,
-    FixedEndpointLookup, ResolverGeneration, TaggedResolver,
+    FixedEndpointLookup, ResolverGeneration, SystemResolutionError, SystemResolver, TaggedResolver,
 };
 use futures_util::{Stream, TryStreamExt};
 use http_body_util::{BodyExt, Empty};
@@ -115,8 +115,15 @@ pub trait RuleSetDialer: Send + Sync {
 
 /// Explicit system bootstrap implementation. Tagged resolver requests fail
 /// closed and must be handled by a DNS-aware binary adapter.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemRuleSetHostResolver;
+#[derive(Clone, Debug)]
+pub struct SystemRuleSetHostResolver(SystemResolver);
+
+impl SystemRuleSetHostResolver {
+    /// Binds bootstrap lookups to the process-owned native resolver.
+    pub const fn new(system: SystemResolver) -> Self {
+        Self(system)
+    }
+}
 
 impl RuleSetHostResolver for SystemRuleSetHostResolver {
     fn resolve(
@@ -133,11 +140,11 @@ impl RuleSetHostResolver for SystemRuleSetHostResolver {
                     RuleSetDownloadErrorKind::Resolution,
                 ));
             }
-            let resolved = tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)))
+            let candidates = self
+                .0
+                .resolve(&host, port, deadline)
                 .await
-                .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout))?
-                .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Resolution))?;
-            let candidates: Vec<_> = resolved.take(MAX_RESOLVED_CANDIDATES).collect();
+                .map_err(system_resolution_error)?;
             if candidates.is_empty() {
                 Err(RuleSetDownloadError::new(
                     RuleSetDownloadErrorKind::Resolution,
@@ -156,6 +163,7 @@ impl RuleSetHostResolver for SystemRuleSetHostResolver {
 /// [`SystemRuleSetHostResolver`].
 #[derive(Clone)]
 pub struct ExplicitRuleSetHostResolver {
+    system: SystemResolver,
     tagged: Option<Arc<TaggedResolver>>,
     strategy: DnsStrategy,
     cache: Option<(DnsCache, ResolverGeneration)>,
@@ -163,8 +171,13 @@ pub struct ExplicitRuleSetHostResolver {
 }
 
 impl ExplicitRuleSetHostResolver {
-    pub const fn new(tagged: Option<Arc<TaggedResolver>>, strategy: DnsStrategy) -> Self {
+    pub const fn new(
+        system: SystemResolver,
+        tagged: Option<Arc<TaggedResolver>>,
+        strategy: DnsStrategy,
+    ) -> Self {
         Self {
+            system,
             tagged,
             strategy,
             cache: None,
@@ -204,9 +217,6 @@ impl RuleSetHostResolver for ExplicitRuleSetHostResolver {
         port: u16,
         deadline: Instant,
     ) -> impl Future<Output = Result<Vec<SocketAddr>, RuleSetDownloadError>> + Send {
-        let tagged = self.tagged.as_ref().map(Arc::clone);
-        let strategy = self.strategy;
-        let cache = self.cache.clone();
         let observer = self.observer.as_ref().map(Arc::clone);
         let host = host.clone();
         async move {
@@ -214,9 +224,9 @@ impl RuleSetHostResolver for ExplicitRuleSetHostResolver {
                 RuleSetDownloadResolver::System => RuleSetHostResolverKind::System,
                 RuleSetDownloadResolver::DnsServer(_) => RuleSetHostResolverKind::Configured,
             };
-            let result =
-                resolve_explicit_host(tagged, strategy, cache, resolver, host, port, deadline)
-                    .await;
+            let result = self
+                .resolve_explicit_host(resolver, host, port, deadline)
+                .await;
             if let Some(observer) = observer {
                 observer.record(
                     kind,
@@ -232,115 +242,126 @@ impl RuleSetHostResolver for ExplicitRuleSetHostResolver {
     }
 }
 
-async fn resolve_explicit_host(
-    tagged: Option<Arc<TaggedResolver>>,
-    strategy: DnsStrategy,
-    cache: Option<(DnsCache, ResolverGeneration)>,
-    resolver: RuleSetDownloadResolver,
-    host: CanonicalDomain,
-    port: u16,
-    deadline: Instant,
-) -> Result<Vec<SocketAddr>, RuleSetDownloadError> {
-    let port = NonZeroU16::new(port).ok_or_else(resolution_error)?;
-    let addresses = match resolver {
-        RuleSetDownloadResolver::System => {
-            let resolved = tokio::time::timeout_at(
-                deadline,
-                tokio::net::lookup_host((host.as_str(), port.get())),
-            )
-            .await
-            .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout))?
-            .map_err(|_| resolution_error())?;
-            resolved.map(|address| address.ip()).collect::<Vec<_>>()
-        }
-        RuleSetDownloadResolver::DnsServer(server) => {
-            let tagged = tagged.ok_or_else(resolution_error)?;
-            let qtypes: &[DnsCacheQtype] = match strategy {
-                DnsStrategy::Ipv4Only => &[DnsCacheQtype::A],
-                DnsStrategy::Ipv6Only => &[DnsCacheQtype::Aaaa],
-                DnsStrategy::PreferIpv4 | DnsStrategy::PreferIpv6 => {
-                    &[DnsCacheQtype::A, DnsCacheQtype::Aaaa]
-                }
-            };
-            let mut addresses = Vec::new();
-            for &qtype in qtypes {
-                let key = cache.as_ref().map(|(_, generation)| {
-                    DnsCacheKey::new(server, host.clone(), qtype, *generation)
-                });
-                let cached = match (&cache, &key) {
-                    (Some((cache, _)), Some(key)) => cache
-                        .get(key, std::time::Instant::now())
-                        .map_err(|_| resolution_error())?,
-                    _ => None,
+impl ExplicitRuleSetHostResolver {
+    async fn resolve_explicit_host(
+        &self,
+        resolver: RuleSetDownloadResolver,
+        host: CanonicalDomain,
+        port: u16,
+        deadline: Instant,
+    ) -> Result<Vec<SocketAddr>, RuleSetDownloadError> {
+        let tagged = self.tagged.clone();
+        let strategy = self.strategy;
+        let cache = self.cache.clone();
+        let port = NonZeroU16::new(port).ok_or_else(resolution_error)?;
+        let addresses = match resolver {
+            RuleSetDownloadResolver::System => self
+                .system
+                .resolve_addresses(host.as_str(), deadline)
+                .await
+                .map_err(system_resolution_error)?,
+            RuleSetDownloadResolver::DnsServer(server) => {
+                let tagged = tagged.ok_or_else(resolution_error)?;
+                let qtypes: &[DnsCacheQtype] = match strategy {
+                    DnsStrategy::Ipv4Only => &[DnsCacheQtype::A],
+                    DnsStrategy::Ipv6Only => &[DnsCacheQtype::Aaaa],
+                    DnsStrategy::PreferIpv4 | DnsStrategy::PreferIpv6 => {
+                        &[DnsCacheQtype::A, DnsCacheQtype::Aaaa]
+                    }
                 };
-                let answer = match cached {
-                    Some(answer) => answer,
-                    None => {
-                        let lookup = tokio::time::timeout_at(
-                            deadline,
-                            tagged.lookup_fixed_endpoint(
-                                server.get() as usize,
-                                host.clone(),
-                                qtype,
-                            ),
-                        )
-                        .await
-                        .map_err(|_| RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout))?
-                        .map_err(|_| resolution_error())?;
-                        let now = std::time::Instant::now();
-                        match lookup {
-                            FixedEndpointLookup::Positive { records, ttl } => {
-                                if let (Some((cache, _)), Some(key)) = (&cache, key) {
-                                    cache
-                                        .insert_positive(key, records.clone(), ttl, now)
-                                        .map_err(|_| resolution_error())?;
+                let mut addresses = Vec::new();
+                for &qtype in qtypes {
+                    let key = cache.as_ref().map(|(_, generation)| {
+                        DnsCacheKey::new(server, host.clone(), qtype, *generation)
+                    });
+                    let cached = match (&cache, &key) {
+                        (Some((cache, _)), Some(key)) => cache
+                            .get(key, std::time::Instant::now())
+                            .map_err(|_| resolution_error())?,
+                        _ => None,
+                    };
+                    let answer = match cached {
+                        Some(answer) => answer,
+                        None => {
+                            let lookup = tokio::time::timeout_at(
+                                deadline,
+                                tagged.lookup_fixed_endpoint(
+                                    server.get() as usize,
+                                    host.clone(),
+                                    qtype,
+                                ),
+                            )
+                            .await
+                            .map_err(|_| {
+                                RuleSetDownloadError::new(RuleSetDownloadErrorKind::Timeout)
+                            })?
+                            .map_err(|_| resolution_error())?;
+                            let now = std::time::Instant::now();
+                            match lookup {
+                                FixedEndpointLookup::Positive { records, ttl } => {
+                                    if let (Some((cache, _)), Some(key)) = (&cache, key) {
+                                        cache
+                                            .insert_positive(key, records.clone(), ttl, now)
+                                            .map_err(|_| resolution_error())?;
+                                    }
+                                    DnsCacheAnswer::Positive(records)
                                 }
-                                DnsCacheAnswer::Positive(records)
+                                FixedEndpointLookup::Negative { ttl } => {
+                                    if let (Some((cache, _)), Some(key)) = (&cache, key) {
+                                        cache
+                                            .insert_negative(key, ttl, now)
+                                            .map_err(|_| resolution_error())?;
+                                    }
+                                    DnsCacheAnswer::Negative
+                                }
                             }
-                            FixedEndpointLookup::Negative { ttl } => {
-                                if let (Some((cache, _)), Some(key)) = (&cache, key) {
-                                    cache
-                                        .insert_negative(key, ttl, now)
-                                        .map_err(|_| resolution_error())?;
-                                }
-                                DnsCacheAnswer::Negative
+                        }
+                    };
+                    if let DnsCacheAnswer::Positive(records) = answer {
+                        match records {
+                            DnsAddressRecords::A(records) => {
+                                addresses.extend(records.iter().copied().map(std::net::IpAddr::V4));
+                            }
+                            DnsAddressRecords::Aaaa(records) => {
+                                addresses.extend(records.iter().copied().map(std::net::IpAddr::V6));
                             }
                         }
                     }
-                };
-                if let DnsCacheAnswer::Positive(records) = answer {
-                    match records {
-                        DnsAddressRecords::A(records) => {
-                            addresses.extend(records.iter().copied().map(std::net::IpAddr::V4));
-                        }
-                        DnsAddressRecords::Aaaa(records) => {
-                            addresses.extend(records.iter().copied().map(std::net::IpAddr::V6));
-                        }
-                    }
                 }
+                addresses
             }
-            addresses
+        };
+        let mut ipv4 = Vec::new();
+        let mut ipv6 = Vec::new();
+        for address in addresses {
+            match address {
+                std::net::IpAddr::V4(address) if !ipv4.contains(&address) => ipv4.push(address),
+                std::net::IpAddr::V6(address) if !ipv6.contains(&address) => ipv6.push(address),
+                _ => {}
+            }
+            if ipv4.len() + ipv6.len() == MAX_RESOLVED_CANDIDATES {
+                break;
+            }
         }
-    };
-    let mut ipv4 = Vec::new();
-    let mut ipv6 = Vec::new();
-    for address in addresses {
-        match address {
-            std::net::IpAddr::V4(address) if !ipv4.contains(&address) => ipv4.push(address),
-            std::net::IpAddr::V6(address) if !ipv6.contains(&address) => ipv6.push(address),
-            _ => {}
-        }
-        if ipv4.len() + ipv6.len() == MAX_RESOLVED_CANDIDATES {
-            break;
+        let mut candidates = strategy.socket_candidates(port, &ipv4, &ipv6);
+        candidates.truncate(MAX_RESOLVED_CANDIDATES);
+        if candidates.is_empty() {
+            Err(resolution_error())
+        } else {
+            Ok(candidates)
         }
     }
-    let mut candidates = strategy.socket_candidates(port, &ipv4, &ipv6);
-    candidates.truncate(MAX_RESOLVED_CANDIDATES);
-    if candidates.is_empty() {
-        Err(resolution_error())
-    } else {
-        Ok(candidates)
-    }
+}
+
+const fn system_resolution_error(error: SystemResolutionError) -> RuleSetDownloadError {
+    RuleSetDownloadError::new(match error {
+        SystemResolutionError::Timeout => RuleSetDownloadErrorKind::Timeout,
+        SystemResolutionError::InvalidLimits
+        | SystemResolutionError::Busy
+        | SystemResolutionError::Shutdown
+        | SystemResolutionError::Resolution
+        | SystemResolutionError::WorkerFailed => RuleSetDownloadErrorKind::Resolution,
+    })
 }
 
 const fn resolution_error() -> RuleSetDownloadError {

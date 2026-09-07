@@ -267,11 +267,6 @@ impl ApplicationResolver {
         }
     }
 
-    /// Creates the production operating-system resolver mode.
-    pub fn system_default() -> Self {
-        Self::system(Arc::new(SystemApplicationResolveBackend))
-    }
-
     /// Installs one identity-free observer shared by every clone.
     pub fn with_observer(mut self, observer: Arc<dyn ApplicationResolveObserver>) -> Self {
         self.observer = Some(observer);
@@ -312,57 +307,6 @@ impl fmt::Debug for ApplicationResolver {
             .field("mode", &self.mode)
             .field("backend", &"[redacted]")
             .finish()
-    }
-}
-
-/// Production Tokio operating-system resolver backend.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemApplicationResolveBackend;
-
-impl ApplicationResolveBackend for SystemApplicationResolveBackend {
-    fn resolve<'a>(
-        &'a self,
-        request: ApplicationResolveRequest<'a>,
-    ) -> ApplicationResolveFuture<'a> {
-        Box::pin(async move {
-            let resolved =
-                tokio::net::lookup_host((request.domain().as_str(), request.port().get()))
-                    .await
-                    .map_err(|_| DnsError::Transport)?;
-            let mut ipv4 = Vec::with_capacity(MAX_APPLICATION_RESOLVED_CANDIDATES);
-            let mut ipv6 = Vec::with_capacity(MAX_APPLICATION_RESOLVED_CANDIDATES);
-            for candidate in resolved {
-                match candidate.ip() {
-                    std::net::IpAddr::V4(address)
-                        if ipv4.len() < MAX_APPLICATION_RESOLVED_CANDIDATES
-                            && !ipv4.contains(&address) =>
-                    {
-                        ipv4.push(address);
-                    }
-                    std::net::IpAddr::V6(address)
-                        if ipv6.len() < MAX_APPLICATION_RESOLVED_CANDIDATES
-                            && !ipv6.contains(&address) =>
-                    {
-                        ipv6.push(address);
-                    }
-                    _ => {}
-                }
-                if ipv4.len() == MAX_APPLICATION_RESOLVED_CANDIDATES
-                    && ipv6.len() == MAX_APPLICATION_RESOLVED_CANDIDATES
-                {
-                    break;
-                }
-            }
-            let mut candidates = request
-                .strategy()
-                .socket_candidates(request.port(), &ipv4, &ipv6);
-            candidates.truncate(MAX_APPLICATION_RESOLVED_CANDIDATES);
-            if candidates.is_empty() {
-                Err(DnsError::NoData)
-            } else {
-                Ok(candidates)
-            }
-        })
     }
 }
 

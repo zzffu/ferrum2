@@ -451,7 +451,10 @@ async fn m16_direct_pre_socket_and_m16_redaction_classify_without_side_effects()
             dial_options: Default::default(),
         }])
         .expect("packet direct outbound"),
-        TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+        TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+            crate::run::egress::test_application_resolver(),
+            Duration::from_secs(1),
+        )),
         ferrum2_crypto::SystemClock::new(),
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),

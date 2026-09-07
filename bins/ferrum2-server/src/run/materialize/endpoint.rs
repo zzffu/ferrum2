@@ -36,6 +36,7 @@ struct BootstrapDnsServer {
 }
 
 pub(super) struct BootstrapBlueprint {
+    pub(super) system: ferrum2_dns::SystemResolver,
     dns_servers: Vec<BootstrapDnsServer>,
     timeout: Duration,
     max_inflight: std::num::NonZeroU16,
@@ -48,6 +49,7 @@ pub(super) struct BootstrapBlueprint {
 impl BootstrapBlueprint {
     pub(super) fn new(
         prepared: &PreparedServerV2,
+        system: ferrum2_dns::SystemResolver,
         metrics: Arc<Metrics>,
         network_sockets: Arc<ServerNetworkSocketService>,
     ) -> Result<Self, RunError> {
@@ -96,6 +98,7 @@ impl BootstrapBlueprint {
             Arc::clone(&metrics),
         ));
         Ok(Self {
+            system,
             dns_servers,
             timeout: prepared.dns_timeout().unwrap_or(Duration::from_secs(5)),
             max_inflight: prepared
@@ -178,6 +181,7 @@ impl BootstrapBlueprint {
             .copied()
             .map(|mode| {
                 crate::run::dns_egress::ServerDnsResolver::for_direct_observed(
+                    self.system.clone(),
                     mode,
                     Arc::clone(&tagged),
                     Arc::clone(&self.metrics),
@@ -297,11 +301,8 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
         Box::pin(async move {
             self.metrics
                 .dns_explicit_system_resolve(DnsResolvePurpose::FixedEndpoint);
-            let result =
-                tokio::time::timeout(self.blueprint.timeout, resolve_system_family(request))
-                    .await
-                    .map_err(|_| DnsError::Timeout)
-                    .and_then(std::convert::identity);
+            let deadline = tokio::time::Instant::now() + self.blueprint.timeout;
+            let result = resolve_system_family(&self.blueprint.system, request, deadline).await;
             self.metrics.dns_resolve(
                 DnsResolverKind::System,
                 DnsResolvePurpose::FixedEndpoint,
@@ -389,15 +390,18 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
 }
 
 async fn resolve_system_family(
+    system: &ferrum2_dns::SystemResolver,
     request: FixedEndpointResolveRequest<'_>,
+    deadline: tokio::time::Instant,
 ) -> Result<FixedEndpointLookup, DnsError> {
-    let resolved = tokio::net::lookup_host((request.domain().as_str().to_owned(), 0))
+    let resolved = system
+        .resolve_addresses(request.domain().as_str(), deadline)
         .await
-        .map_err(|_| DnsError::Runtime)?;
+        .map_err(DnsError::from)?;
     match request.qtype() {
         DnsCacheQtype::A => {
             let mut addresses = Vec::new();
-            for address in resolved.filter_map(|address| match address.ip() {
+            for address in resolved.into_iter().filter_map(|address| match address {
                 IpAddr::V4(address) => Some(address),
                 IpAddr::V6(_) => None,
             }) {
@@ -419,7 +423,7 @@ async fn resolve_system_family(
         }
         DnsCacheQtype::Aaaa => {
             let mut addresses = Vec::new();
-            for address in resolved.filter_map(|address| match address.ip() {
+            for address in resolved.into_iter().filter_map(|address| match address {
                 IpAddr::V4(_) => None,
                 IpAddr::V6(address) => Some(address),
             }) {

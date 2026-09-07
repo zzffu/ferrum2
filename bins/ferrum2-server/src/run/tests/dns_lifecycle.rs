@@ -18,7 +18,11 @@ use crate::run::test_support::*;
 use super::support::*;
 
 pub(super) struct ProtocolClientConnector {
-    pub(super) inner: TcpConnector,
+    pub(super) inner: TcpConnector<
+        ferrum2_runtime::SystemSocketInspector,
+        ferrum2_runtime::SystemTcpDialer,
+        crate::run::dns_egress::ServerDnsResolver,
+    >,
 }
 
 impl Connector for ProtocolClientConnector {
@@ -130,7 +134,10 @@ async fn operational_dns_outlives_tcp_quiesce_drain() {
 
     let keys = aes_keys();
     let connector = ProtocolClientConnector {
-        inner: TcpConnector::new(Duration::from_secs(5)),
+        inner: TcpConnector::new(
+            crate::run::dns_egress::ServerDnsResolver::new(None),
+            Duration::from_secs(5),
+        ),
     };
     let server_target = TargetAddr::ipv4(listen).expect("drain server target");
     let application_target =

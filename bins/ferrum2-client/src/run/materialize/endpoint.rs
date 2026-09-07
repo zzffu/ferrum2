@@ -56,6 +56,7 @@ pub(super) struct BootstrapDnsServer {
 }
 
 pub(super) struct BootstrapBlueprint {
+    pub(super) system: ferrum2_dns::SystemResolver,
     outbounds: Vec<BootstrapOutbound>,
     route_network: RouteNetworkOptions,
     dns_servers: Vec<BootstrapDnsServer>,
@@ -71,7 +72,10 @@ pub(super) struct BootstrapEngine {
 }
 
 impl BootstrapBlueprint {
-    pub(super) fn new(prepared: &PreparedClientV2) -> Result<Self, RunError> {
+    pub(super) fn new(
+        prepared: &PreparedClientV2,
+        system: ferrum2_dns::SystemResolver,
+    ) -> Result<Self, RunError> {
         let mut outbounds = Vec::new();
         outbounds
             .try_reserve_exact(prepared.outbound_count())
@@ -124,6 +128,7 @@ impl BootstrapBlueprint {
                 dns_strategy(runtime.strategy())
             });
         Ok(Self {
+            system,
             outbounds,
             route_network: runtime_route_network(prepared.route_network()),
             dns_servers,
@@ -180,7 +185,7 @@ impl BootstrapBlueprint {
         let outbounds = self.build_outbounds(addresses)?;
         let tagged = Arc::new(std::sync::OnceLock::new());
         let application_resolver = ApplicationResolverAdapter::new(
-            Arc::new(ApplicationResolver::system_default()),
+            Arc::new(ApplicationResolver::system(Arc::new(self.system.clone()))),
             0,
             DnsStrategy::PreferIpv4,
         );
@@ -193,7 +198,7 @@ impl BootstrapBlueprint {
                 } => {
                     let (resolver, strategy) = match *domain_resolver {
                         DirectDomainResolver::System => (
-                            ApplicationResolver::system_default(),
+                            ApplicationResolver::system(Arc::new(self.system.clone())),
                             DnsStrategy::PreferIpv4,
                         ),
                         DirectDomainResolver::DnsServer { server, strategy } => (
@@ -419,11 +424,8 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
         Box::pin(async move {
             self.metrics
                 .dns_explicit_system_resolve(DnsResolvePurpose::FixedEndpoint);
-            let result =
-                tokio::time::timeout(self.blueprint.dns_timeout, resolve_system_family(request))
-                    .await
-                    .map_err(|_| DnsError::Timeout)
-                    .and_then(std::convert::identity);
+            let deadline = tokio::time::Instant::now() + self.blueprint.dns_timeout;
+            let result = resolve_system_family(&self.blueprint.system, request, deadline).await;
             self.metrics.dns_resolve(
                 DnsResolverKind::System,
                 DnsResolvePurpose::FixedEndpoint,
@@ -526,15 +528,18 @@ impl FixedEndpointResolveBackend for BootstrapEndpointBackend {
 }
 
 pub(super) async fn resolve_system_family(
+    system: &ferrum2_dns::SystemResolver,
     request: FixedEndpointResolveRequest<'_>,
+    deadline: tokio::time::Instant,
 ) -> Result<FixedEndpointLookup, DnsError> {
-    let resolved = tokio::net::lookup_host((request.domain().as_str().to_owned(), 0))
+    let resolved = system
+        .resolve_addresses(request.domain().as_str(), deadline)
         .await
-        .map_err(|_| DnsError::Runtime)?;
+        .map_err(DnsError::from)?;
     match request.qtype() {
         DnsCacheQtype::A => {
             let mut addresses = Vec::new();
-            for address in resolved.filter_map(|address| match address.ip() {
+            for address in resolved.into_iter().filter_map(|address| match address {
                 IpAddr::V4(address) => Some(address),
                 IpAddr::V6(_) => None,
             }) {
@@ -556,7 +561,7 @@ pub(super) async fn resolve_system_family(
         }
         DnsCacheQtype::Aaaa => {
             let mut addresses = Vec::new();
-            for address in resolved.filter_map(|address| match address.ip() {
+            for address in resolved.into_iter().filter_map(|address| match address {
                 IpAddr::V4(_) => None,
                 IpAddr::V6(address) => Some(address),
             }) {

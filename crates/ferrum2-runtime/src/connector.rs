@@ -46,21 +46,6 @@ impl TcpDialer for SystemTcpDialer {
     }
 }
 
-/// Production system resolver.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemTcpResolver;
-
-impl TcpResolver for SystemTcpResolver {
-    type Candidates = Vec<SocketAddr>;
-
-    async fn resolve(&self, host: &str, port: u16) -> io::Result<Self::Candidates> {
-        Ok(tokio::net::lookup_host((host, port))
-            .await?
-            .take(MAX_RESOLVED_CANDIDATES)
-            .collect())
-    }
-}
-
 /// Maximum ordered candidates consumed from one domain resolution.
 pub const MAX_RESOLVED_CANDIDATES: usize = 16;
 
@@ -151,44 +136,32 @@ impl AsyncWrite for RuntimeTcpStream {
 
 /// Direct TCP connector with bounded system resolution and one absolute deadline.
 #[derive(Debug)]
-pub struct TcpConnector<I = SystemSocketInspector, D = SystemTcpDialer, R = SystemTcpResolver> {
+pub struct TcpConnector<I, D, R> {
     inspector: I,
     dialer: D,
     resolver: R,
     connect_timeout: std::time::Duration,
 }
 
-impl TcpConnector<SystemSocketInspector, SystemTcpDialer, SystemTcpResolver> {
+impl<R> TcpConnector<SystemSocketInspector, SystemTcpDialer, R> {
     /// Creates a production connector.
-    pub fn new(connect_timeout: std::time::Duration) -> Self {
+    pub fn new(resolver: R, connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector: SystemSocketInspector,
             dialer: SystemTcpDialer,
-            resolver: SystemTcpResolver,
+            resolver,
             connect_timeout,
         }
     }
 }
 
-impl<I> TcpConnector<I, SystemTcpDialer, SystemTcpResolver> {
+impl<I, R> TcpConnector<I, SystemTcpDialer, R> {
     /// Creates a connector with an injected post-connect socket inspector.
-    pub fn with_inspector(inspector: I, connect_timeout: std::time::Duration) -> Self {
+    pub fn with_inspector(inspector: I, resolver: R, connect_timeout: std::time::Duration) -> Self {
         Self {
             inspector,
             dialer: SystemTcpDialer,
-            resolver: SystemTcpResolver,
-            connect_timeout,
-        }
-    }
-}
-
-impl<I, D> TcpConnector<I, D, SystemTcpResolver> {
-    /// Creates a connector with injected dial and endpoint-inspection adapters.
-    pub fn with_adapters(inspector: I, dialer: D, connect_timeout: std::time::Duration) -> Self {
-        Self {
-            inspector,
-            dialer,
-            resolver: SystemTcpResolver,
+            resolver,
             connect_timeout,
         }
     }

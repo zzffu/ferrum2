@@ -17,7 +17,7 @@ mod udp;
 pub use connection_executor::{AffineAcceptListener, AffineConnectionExecutor};
 pub use connector::{
     DirectOutbound, MAX_RESOLVED_CANDIDATES, RuntimeTcpStream, SocketInspector,
-    SystemSocketInspector, SystemTcpDialer, SystemTcpResolver, TcpConnector, TcpDialer,
+    SystemSocketInspector, SystemTcpDialer, TcpConnector, TcpDialer,
 };
 pub use deadline::{DeadlineError, with_deadline};
 pub use metrics::{
@@ -66,7 +66,7 @@ pub use udp::{
     DirectUdpSocket, DirectUdpSocketFactory, MAX_UDP_IDLE_TIMEOUT, MAX_UDP_MAX_BUFFERED_BYTES,
     MAX_UDP_MAX_SESSIONS, MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES,
     MIN_UDP_IDLE_TIMEOUT, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_MAX_SESSIONS, PendingUdpDatagram,
-    PendingUdpSession, SystemDirectUdpSocket, SystemDirectUdpSocketFactory, SystemUdpResolver,
+    PendingUdpSession, SystemDirectUdpSocket, SystemDirectUdpSocketFactory,
     UDP_SESSION_QUEUE_DEPTH, UdpBufferBudget, UdpBufferReservation, UdpCommitError, UdpDirection,
     UdpLimitError, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle, UdpSessionManager,
 };

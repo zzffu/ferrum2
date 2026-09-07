@@ -102,7 +102,7 @@ final = "resolver"
             TokioConnector::new(TcpConnector::with_resolution_adapters(
                 ferrum2_runtime::SystemSocketInspector,
                 ferrum2_runtime::SystemTcpDialer,
-                crate::run::egress::system_application_resolver(),
+                crate::run::egress::test_application_resolver(),
                 runtime.connect_timeout,
             )),
             SystemClock::new(),
@@ -202,7 +202,7 @@ final = "resolver"
             TokioConnector::new(TcpConnector::with_resolution_adapters(
                 ferrum2_runtime::SystemSocketInspector,
                 ferrum2_runtime::SystemTcpDialer,
-                crate::run::egress::system_application_resolver(),
+                crate::run::egress::test_application_resolver(),
                 context.runtime.connect_timeout,
             )),
             SystemClock::new(),

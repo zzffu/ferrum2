@@ -11,6 +11,12 @@ fn fixed_endpoints_share_the_final_empty_or_ruleset_registry_generation() {
 
 #[tokio::test]
 async fn minimal_v2_materializes_without_network_or_background_owner() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let address = reserve_address();
     let file = TestConfig::new(|_| {
         format!(
@@ -31,8 +37,11 @@ final = "direct"
     });
     let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare minimal config");
     let downloader = Arc::new(RecordingDownloader::failure());
-    let materializer =
-        ClientV2Materializer::with_downloader(Arc::new(Metrics::new()), downloader.clone());
+    let materializer = ClientV2Materializer::with_downloader(
+        system.clone(),
+        Arc::new(Metrics::new()),
+        downloader.clone(),
+    );
 
     let materialized = materializer
         .materialize(prepared)
@@ -43,10 +52,21 @@ final = "direct"
         .validate_only()
         .expect("validation-only cleanup");
     assert!(config.route.rule_registry().is_none());
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }
 
 #[tokio::test]
 async fn numeric_bootstrap_materializes_domain_dns_upstream_in_dependency_order() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let listen = reserve_address();
     let dns_listen = reserve_address();
     let resolved_upstream = reserve_address();
@@ -142,7 +162,7 @@ final = "resolved"
     assert!(bootstrap_position < resolved_position);
 
     let metrics = Arc::new(Metrics::new());
-    let materializer = ClientV2Materializer::new(Arc::clone(&metrics));
+    let materializer = ClientV2Materializer::new(system.clone(), Arc::clone(&metrics));
     let materialized = materializer
         .materialize(prepared)
         .await
@@ -194,10 +214,21 @@ final = "resolved"
     drop(rebound);
     let _ = stop.send(());
     worker.await.expect("bootstrap DNS worker");
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }
 
 #[tokio::test]
 async fn production_ruleset_transport_uses_tagged_dns_and_reaps_failed_tls_path() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let listen = reserve_address();
     let dns_listen = reserve_address();
     let bootstrap = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -334,7 +365,7 @@ final = "bootstrap"
         .expect("RuleSet dependency node");
     assert!(resolver_position < rule_set_position);
     let metrics = Arc::new(Metrics::new());
-    let materializer = ClientV2Materializer::new(Arc::clone(&metrics));
+    let materializer = ClientV2Materializer::new(system.clone(), Arc::clone(&metrics));
     let error = match materializer.materialize(prepared).await {
         Ok(_) => panic!("controlled TLS endpoint unexpectedly materialized"),
         Err(error) => error,
@@ -377,10 +408,21 @@ final = "bootstrap"
         .await
         .expect("test DNS endpoint fully reaped");
     drop(rebound);
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }
 
 #[tokio::test]
 async fn fixed_endpoint_and_tcp_udp_application_share_generation_zero_cache() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let listen = reserve_address();
     let dns_listen = reserve_address();
     let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -476,7 +518,7 @@ final = "local"
         ferrum2_config::prepare_client(&file.path).expect("prepare fixed endpoint cache");
     assert!(prepared.rule_sets().is_empty());
     let metrics = Arc::new(Metrics::new());
-    let materializer = ClientV2Materializer::new(Arc::clone(&metrics));
+    let materializer = ClientV2Materializer::new(system.clone(), Arc::clone(&metrics));
     let materialized = materializer
         .materialize(prepared)
         .await
@@ -572,4 +614,9 @@ final = "local"
     owner.shutdown().await.expect("application DNS shutdown");
     let _ = stop.send(());
     worker.await.expect("tagged DNS worker");
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }

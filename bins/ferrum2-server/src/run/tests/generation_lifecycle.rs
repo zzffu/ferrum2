@@ -97,7 +97,10 @@ async fn lifecycle_composition_contract_production_registry_witnesses_live_then_
         tokio::spawn(async move { target_listener.accept().await.expect("target accept").0 });
     let keys = aes_keys();
     let connector = ProtocolClientConnector {
-        inner: TcpConnector::new(Duration::from_secs(5)),
+        inner: TcpConnector::new(
+            crate::run::dns_egress::ServerDnsResolver::new(None),
+            Duration::from_secs(5),
+        ),
     };
     let server_target = TargetAddr::ipv4(listen).expect("server target");
     let application_target = TargetAddr::ipv4(target_address).expect("application target");

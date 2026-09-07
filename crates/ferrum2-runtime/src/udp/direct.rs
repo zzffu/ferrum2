@@ -26,21 +26,6 @@ use super::{
     UdpSessionManager,
 };
 
-/// Production system UDP resolver.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemUdpResolver;
-
-impl UdpResolver for SystemUdpResolver {
-    type Candidates = Vec<SocketAddr>;
-
-    async fn resolve(&self, host: &str, port: u16) -> io::Result<Self::Candidates> {
-        Ok(tokio::net::lookup_host((host, port))
-            .await?
-            .take(MAX_UDP_RESOLVED_CANDIDATES)
-            .collect())
-    }
-}
-
 /// Protocol-neutral callback for one bounded target response.
 pub trait DirectUdpPacketHandler: Send + Sync + 'static {
     /// Closed handler error; its value is never formatted by the runtime.
@@ -113,21 +98,24 @@ where
     _runtime_owner: UdpRuntimeOwner,
 }
 
-impl<H> DirectUdpRuntime<SystemUdpResolver, SystemDirectUdpSocketFactory, H>
+impl<R, H> DirectUdpRuntime<R, SystemDirectUdpSocketFactory, H>
 where
+    R: UdpResolver,
+    <R::Candidates as IntoIterator>::IntoIter: Send,
     H: DirectUdpPacketHandler,
 {
     /// Creates a production direct UDP runtime without opening a socket or task.
     pub fn new(
         limits: UdpRuntimeLimits,
         connect_timeout: Duration,
+        resolver: R,
         handler: H,
         registry: OwnerRegistry,
     ) -> Self {
         Self::with_shared_adapters(
             UdpSessionManager::new(limits, registry.clone()),
             connect_timeout,
-            SystemUdpResolver,
+            resolver,
             SystemDirectUdpSocketFactory,
             handler,
             registry,
@@ -138,13 +126,14 @@ where
     pub fn with_shared_capacity(
         manager: UdpSessionManager,
         connect_timeout: Duration,
+        resolver: R,
         handler: H,
         registry: OwnerRegistry,
     ) -> Self {
         Self::with_shared_adapters(
             manager,
             connect_timeout,
-            SystemUdpResolver,
+            resolver,
             SystemDirectUdpSocketFactory,
             handler,
             registry,

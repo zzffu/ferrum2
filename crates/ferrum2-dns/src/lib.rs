@@ -14,13 +14,13 @@ mod proxy;
 mod resolver;
 mod runtime_owner;
 mod runtime_provider;
+mod system_resolution;
 
 pub use application::{
     ApplicationResolveBackend, ApplicationResolveContext, ApplicationResolveFuture,
     ApplicationResolveObserver, ApplicationResolveOutcome, ApplicationResolveRequest,
     ApplicationResolver, ApplicationResolverMode, DnsStrategy, DnsStrategyParseError,
-    MAX_APPLICATION_RESOLVED_CANDIDATES, SystemApplicationResolveBackend,
-    TaggedServerApplicationResolveBackend,
+    MAX_APPLICATION_RESOLVED_CANDIDATES, TaggedServerApplicationResolveBackend,
 };
 pub use application_adapter::ApplicationResolverAdapter;
 pub use cache::{
@@ -49,4 +49,9 @@ pub use runtime_owner::{RuntimeStats, ShutdownReport, TaggedResolver, TaggedReso
 pub use runtime_provider::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsDatagramIo, DnsEgress, DnsEgressResourceKind,
     DnsEgressTaskKind, DnsIoFuture, DnsResourceGuard, DnsTaskRegistrar, DnsTcpIo, SystemDnsEgress,
+};
+
+pub use system_resolution::{
+    SystemResolution, SystemResolutionError, SystemResolutionReport, SystemResolver,
+    SystemResolverOwner,
 };

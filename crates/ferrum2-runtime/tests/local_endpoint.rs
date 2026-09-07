@@ -145,7 +145,7 @@ async fn tcp_connector_returns_the_actual_ipv4_local_endpoint() {
         SocketAddr::V6(_) => panic!("IPv4 bind returned IPv6"),
     };
     let target = TargetAddr::ipv4(address).expect("IPv4 target");
-    let connector = TcpConnector::new(DEFAULT_CONNECT_TIMEOUT);
+    let connector = TcpConnector::new(NumericOnlyResolver, DEFAULT_CONNECT_TIMEOUT);
 
     let (opened, accepted) = tokio::join!(
         connector.connect(&target),
@@ -180,11 +180,12 @@ impl TcpDialer for PendingDialer {
 #[tokio::test(start_paused = true)]
 async fn tcp_connector_timeout_uses_the_injected_dialer_deadline() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let connector = TcpConnector::with_adapters(
+    let connector = TcpConnector::with_resolution_adapters(
         SystemSocketInspector,
         PendingDialer {
             calls: Arc::clone(&calls),
         },
+        NumericOnlyResolver,
         DEFAULT_CONNECT_TIMEOUT,
     );
     let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9)).expect("IPv4 target");
@@ -215,7 +216,8 @@ async fn connect_with_scripted_inspector(
     let target = TargetAddr::ipv4(address).expect("IPv4 target");
     let inspector = ScriptedInspector::returning(result);
     let calls = Arc::clone(&inspector.calls);
-    let connector = TcpConnector::with_inspector(inspector, DEFAULT_CONNECT_TIMEOUT);
+    let connector =
+        TcpConnector::with_inspector(inspector, NumericOnlyResolver, DEFAULT_CONNECT_TIMEOUT);
 
     let (opened, accepted) = tokio::join!(connector.connect(&target), listener.accept());
     drop(accepted.expect("accept connection").0);
@@ -350,4 +352,12 @@ async fn domain_candidate_bound_and_last_concrete_failure_are_deterministic() {
         &*seen.lock().expect("seen lock"),
         &candidates[..MAX_RESOLVED_CANDIDATES]
     );
+}
+
+struct NumericOnlyResolver;
+impl ferrum2_net::TcpResolver for NumericOnlyResolver {
+    type Candidates = Vec<SocketAddr>;
+    async fn resolve(&self, _host: &str, _port: u16) -> io::Result<Self::Candidates> {
+        panic!("numeric target must bypass resolution")
+    }
 }

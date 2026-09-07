@@ -309,7 +309,10 @@ default = "direct"
     assert_eq!(direct.hops(), &[0]);
     let engine = ClientEgressEngine::new(
         outbounds,
-        TokioConnector::new(TcpConnector::new(Duration::from_secs(1))),
+        TokioConnector::new(TcpConnector::new(
+            crate::run::egress::test_application_resolver(),
+            Duration::from_secs(1),
+        )),
         SystemClock::new(),
         SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),

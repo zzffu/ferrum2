@@ -103,12 +103,13 @@ pub(super) fn run_error_for_dns_policy_compile(error: DnsPolicyCompileError) -> 
 }
 
 pub(super) fn client_direct_resolvers(
+    system: ferrum2_dns::SystemResolver,
     outbounds: &[ClientOutboundConfig],
     tagged: Arc<std::sync::OnceLock<std::sync::Weak<TaggedResolver>>>,
     metrics: &Arc<Metrics>,
 ) -> Arc<[Option<ApplicationResolverAdapter>]> {
     let system = Arc::new(observed_application_resolver(
-        ApplicationResolver::system_default(),
+        ApplicationResolver::system(Arc::new(system.clone())),
         metrics,
     ));
     outbounds

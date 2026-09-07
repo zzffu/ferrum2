@@ -234,29 +234,50 @@ pub(super) struct ServerDnsResolver {
 impl ServerDnsResolver {
     #[cfg(test)]
     pub(super) fn new(state: Option<Arc<ServerDnsState>>) -> Self {
-        Self::new_inner(state, None)
+        Self::new_inner(
+            Arc::new(crate::run::test_support::TestApplicationBackend),
+            state,
+            None,
+        )
     }
 
+    #[cfg(test)]
     pub(super) fn new_observed(state: Option<Arc<ServerDnsState>>, metrics: Arc<Metrics>) -> Self {
-        Self::new_inner(state, Some(metrics))
+        Self::new_inner(
+            Arc::new(crate::run::test_support::TestApplicationBackend),
+            state,
+            Some(metrics),
+        )
     }
 
+    #[cfg(test)]
     pub(super) fn for_direct(
         mode: DirectDomainResolver,
         tagged: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
     ) -> Self {
-        Self::for_direct_inner(mode, tagged, None)
+        Self::for_direct_inner(
+            Arc::new(crate::run::test_support::TestApplicationBackend),
+            mode,
+            tagged,
+            None,
+        )
     }
 
     pub(super) fn for_direct_observed(
+        system: ferrum2_dns::SystemResolver,
         mode: DirectDomainResolver,
         tagged: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
         metrics: Arc<Metrics>,
     ) -> Self {
-        Self::for_direct_inner(mode, tagged, Some(metrics))
+        Self::for_direct_inner(Arc::new(system), mode, tagged, Some(metrics))
     }
 
-    fn new_inner(state: Option<Arc<ServerDnsState>>, metrics: Option<Arc<Metrics>>) -> Self {
+    #[cfg(test)]
+    fn new_inner(
+        system: Arc<dyn ferrum2_dns::ApplicationResolveBackend>,
+        state: Option<Arc<ServerDnsState>>,
+        metrics: Option<Arc<Metrics>>,
+    ) -> Self {
         let strategy = state
             .as_ref()
             .map_or(DnsStrategy::PreferIpv4, |state| state.strategy());
@@ -266,7 +287,7 @@ impl ServerDnsResolver {
                     state,
                 }))
             }
-            None => ApplicationResolver::system_default(),
+            None => ApplicationResolver::system(system),
         };
         if let Some(metrics) = metrics {
             resolver = observed_application_resolver(resolver, metrics);
@@ -277,15 +298,15 @@ impl ServerDnsResolver {
     }
 
     fn for_direct_inner(
+        system: Arc<dyn ferrum2_dns::ApplicationResolveBackend>,
         mode: DirectDomainResolver,
         tagged: Arc<OnceLock<std::sync::Weak<TaggedResolver>>>,
         metrics: Option<Arc<Metrics>>,
     ) -> Self {
         let (mut resolver, strategy) = match mode {
-            DirectDomainResolver::System => (
-                ApplicationResolver::system_default(),
-                DnsStrategy::PreferIpv4,
-            ),
+            DirectDomainResolver::System => {
+                (ApplicationResolver::system(system), DnsStrategy::PreferIpv4)
+            }
             DirectDomainResolver::DnsServer { server, strategy } => (
                 ApplicationResolver::configured(Arc::new(
                     TaggedServerApplicationResolveBackend::new(tagged, server),

@@ -180,8 +180,11 @@ impl ProductionRuleSetTransport {
         } else {
             TaggedTransport::Absent
         };
-        let mut resolver =
-            ExplicitRuleSetHostResolver::new(tagged.resolver(), self.blueprint.dns_strategy());
+        let mut resolver = ExplicitRuleSetHostResolver::new(
+            self.blueprint.system.clone(),
+            tagged.resolver(),
+            self.blueprint.dns_strategy(),
+        );
         if let Some(cache) = self.cache {
             resolver = resolver.with_cache(cache, ResolverGeneration::new(generation));
         }

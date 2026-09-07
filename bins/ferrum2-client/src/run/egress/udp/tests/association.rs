@@ -18,7 +18,10 @@ async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_ga
             ferrum2_net::DialOptions::default(),
         )]
         .into(),
-        TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+        TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+            crate::run::egress::test_application_resolver(),
+            Duration::from_secs(1),
+        )),
         ferrum2_crypto::SystemClock::new(),
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
@@ -151,7 +154,10 @@ async fn one_proxy_tun_udp_association_serves_multiple_targets_without_global_bu
     .expect("proxy outbound");
     let engine = ClientEgressEngine::new(
         outbounds,
-        TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+        TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+            crate::run::egress::test_application_resolver(),
+            Duration::from_secs(1),
+        )),
         ferrum2_crypto::SystemClock::new(),
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
@@ -291,7 +297,10 @@ async fn ordinary_udp_fixed_request_and_response_buffers_remain_globally_metered
             ferrum2_net::DialOptions::default(),
         )]
         .into(),
-        TokioConnector::new(ferrum2_runtime::TcpConnector::new(Duration::from_secs(1))),
+        TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+            crate::run::egress::test_application_resolver(),
+            Duration::from_secs(1),
+        )),
         ferrum2_crypto::SystemClock::new(),
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
@@ -396,6 +405,7 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         )]
         .into(),
         TokioConnector::new(ferrum2_runtime::TcpConnector::new(
+            crate::run::egress::test_application_resolver(),
             std::time::Duration::from_secs(1),
         )),
         ferrum2_crypto::SystemClock::new(),

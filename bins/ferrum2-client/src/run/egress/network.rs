@@ -575,9 +575,11 @@ pub(in crate::run) type DefaultClientConnector = TokioConnector<
 >;
 
 #[cfg(test)]
-pub(in crate::run) fn system_application_resolver() -> ApplicationResolverAdapter {
+pub(in crate::run) fn test_application_resolver() -> ApplicationResolverAdapter {
     ApplicationResolverAdapter::new(
-        Arc::new(ApplicationResolver::system_default()),
+        Arc::new(ApplicationResolver::system(Arc::new(
+            crate::run::test_support::TestApplicationBackend,
+        ))),
         0,
         DnsStrategy::PreferIpv4,
     )

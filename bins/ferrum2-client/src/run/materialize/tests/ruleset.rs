@@ -2,6 +2,12 @@ use super::*;
 
 #[tokio::test]
 async fn initial_ruleset_failure_returns_before_listener_bind() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let address = reserve_address();
     let file = TestConfig::new(|cache| {
         format!(
@@ -37,8 +43,11 @@ max_redirects = 0
     });
     let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare remote config");
     let downloader = Arc::new(RecordingDownloader::failure());
-    let materializer =
-        ClientV2Materializer::with_downloader(Arc::new(Metrics::new()), downloader.clone());
+    let materializer = ClientV2Materializer::with_downloader(
+        system.clone(),
+        Arc::new(Metrics::new()),
+        downloader.clone(),
+    );
 
     assert!(matches!(
         materializer.materialize(prepared).await,
@@ -47,10 +56,21 @@ max_redirects = 0
     assert_eq!(downloader.seen().len(), 1);
     let rebound = TcpListener::bind(address).expect("materialization never bound inbound");
     drop(rebound);
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }
 
 #[tokio::test]
 async fn refresh_uses_live_detour_snapshot_and_is_explicitly_cleaned() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let address = reserve_address();
     let file = TestConfig::new(|cache| {
         format!(
@@ -97,8 +117,11 @@ max_redirects = 0
     });
     let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare refresh config");
     let downloader = Arc::new(RecordingDownloader::success());
-    let materializer =
-        ClientV2Materializer::with_downloader(Arc::new(Metrics::new()), downloader.clone());
+    let materializer = ClientV2Materializer::with_downloader(
+        system.clone(),
+        Arc::new(Metrics::new()),
+        downloader.clone(),
+    );
     let materialized = materializer
         .materialize(prepared)
         .await
@@ -145,10 +168,21 @@ max_redirects = 0
     root.cleanup().await.expect("refresh owner cleanup");
     root.cleanup().await.expect("idempotent cleaned root");
     assert!(root.is_cleaned());
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }
 
 #[tokio::test]
 async fn four_real_srs_load_finish_into_one_materialized_route_and_dns_snapshot() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+
     let address = reserve_address();
     let file = TestConfig::new(|cache| {
         format!(
@@ -261,8 +295,11 @@ max_redirects = 0
     });
     let prepared = ferrum2_config::prepare_client(&file.path).expect("prepare four real RuleSets");
     let downloader = Arc::new(RecordingDownloader::fixture_set());
-    let materializer =
-        ClientV2Materializer::with_downloader(Arc::new(Metrics::new()), downloader.clone());
+    let materializer = ClientV2Materializer::with_downloader(
+        system.clone(),
+        Arc::new(Metrics::new()),
+        downloader.clone(),
+    );
     let materialized = materializer
         .materialize(prepared)
         .await
@@ -410,6 +447,11 @@ max_redirects = 0
         DnsPolicyStep::Final { server, .. } if server.get() == 1
     ));
     materialized.validate_only().expect("four-RuleSet cleanup");
+
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
 }
 
 #[test]

@@ -245,3 +245,22 @@ pub(in crate::run) async fn wait_until_bound(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+/// Deterministic loopback fixture; never submits OS work or owns background tasks.
+pub(in crate::run) struct TestApplicationBackend;
+impl ferrum2_dns::ApplicationResolveBackend for TestApplicationBackend {
+    fn resolve<'a>(
+        &'a self,
+        request: ferrum2_dns::ApplicationResolveRequest<'a>,
+    ) -> ferrum2_dns::ApplicationResolveFuture<'a> {
+        Box::pin(async move {
+            if request.domain().as_str() != "localhost" {
+                return Err(ferrum2_dns::DnsError::NoData);
+            }
+            Ok(vec![std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                request.port().get(),
+            )])
+        })
+    }
+}

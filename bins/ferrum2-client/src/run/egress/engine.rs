@@ -17,7 +17,7 @@ use super::context::{ClientOutboundContext, ClientRequestOrigin, SelectedEgress}
 #[cfg(all(windows, not(test)))]
 use super::network::ClientNetworkSocketService;
 #[cfg(test)]
-use super::network::system_application_resolver;
+use super::network::test_application_resolver;
 use super::network::{
     ClientDnsResetAction, ClientEgressNetworkResetState, ClientNetworkResetHub,
     ClientNetworkResetTargetRegistration, ClientPhysicalConnector, DefaultClientConnector,
@@ -69,7 +69,7 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
             random,
             phase_deadlines,
             udp,
-            system_application_resolver(),
+            test_application_resolver(),
             #[cfg(test)]
             udp_id_random,
         )

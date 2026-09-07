@@ -326,7 +326,8 @@ async fn deferred_redirects_never_resolve_and_keep_domain_identity_and_detour_sn
 
 #[tokio::test]
 async fn system_only_resolver_rejects_tagged_requests_without_lookup() {
-    let error = ferrum2_ruleset::SystemRuleSetHostResolver
+    let (system, mut owner) = system_resolver();
+    let error = ferrum2_ruleset::SystemRuleSetHostResolver::new(system)
         .resolve(
             RuleSetDownloadResolver::DnsServer(DnsServerId::new(1)),
             &CanonicalDomain::new("resolver.test").expect("domain"),
@@ -336,15 +337,21 @@ async fn system_only_resolver_rejects_tagged_requests_without_lookup() {
         .await
         .expect_err("tagged lookup must fail closed");
     assert_eq!(error.kind(), RuleSetDownloadErrorKind::Resolution);
+    assert_eq!(
+        owner.shutdown().await,
+        Ok(ferrum2_dns::SystemResolutionReport::default())
+    );
 }
 
 #[tokio::test]
 async fn explicit_resolver_never_turns_missing_tagged_state_into_system_lookup() {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&observations);
-    let resolver = ExplicitRuleSetHostResolver::new(None, DnsStrategy::PreferIpv4).with_observer(
-        Arc::new(move |resolver, outcome| lock(&observed).push((resolver, outcome))),
-    );
+    let (system, mut owner) = system_resolver();
+    let resolver = ExplicitRuleSetHostResolver::new(system, None, DnsStrategy::PreferIpv4)
+        .with_observer(Arc::new(move |resolver, outcome| {
+            lock(&observed).push((resolver, outcome))
+        }));
     let error = resolver
         .resolve(
             RuleSetDownloadResolver::DnsServer(DnsServerId::new(7)),
@@ -362,15 +369,21 @@ async fn explicit_resolver_never_turns_missing_tagged_state_into_system_lookup()
             RuleSetHostResolveOutcome::Failure,
         )]
     );
+    assert_eq!(
+        owner.shutdown().await,
+        Ok(ferrum2_dns::SystemResolutionReport::default())
+    );
 }
 
 #[tokio::test]
 async fn explicit_system_lookup_reports_one_identity_free_success() {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&observations);
-    let resolver = ExplicitRuleSetHostResolver::new(None, DnsStrategy::PreferIpv4).with_observer(
-        Arc::new(move |resolver, outcome| lock(&observed).push((resolver, outcome))),
-    );
+    let (system, mut owner) = system_resolver();
+    let resolver = ExplicitRuleSetHostResolver::new(system, None, DnsStrategy::PreferIpv4)
+        .with_observer(Arc::new(move |resolver, outcome| {
+            lock(&observed).push((resolver, outcome))
+        }));
     let candidates = resolver
         .resolve(
             RuleSetDownloadResolver::System,
@@ -387,6 +400,10 @@ async fn explicit_system_lookup_reports_one_identity_free_success() {
             RuleSetHostResolverKind::System,
             RuleSetHostResolveOutcome::Success,
         )]
+    );
+    assert_eq!(
+        owner.shutdown().await,
+        Ok(ferrum2_dns::SystemResolutionReport::default())
     );
 }
 
@@ -417,4 +434,15 @@ async fn system_dialer_rejects_domain_targets_without_implicit_resolution() {
         .await
         .expect_err("system dialer must not resolve a deferred target");
     assert_eq!(error.kind(), RuleSetDownloadErrorKind::Connect);
+}
+
+fn system_resolver() -> (
+    ferrum2_dns::SystemResolver,
+    ferrum2_dns::SystemResolverOwner,
+) {
+    ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(1).unwrap(),
+        Duration::from_secs(1),
+    )
+    .unwrap()
 }
