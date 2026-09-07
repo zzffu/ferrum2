@@ -19,6 +19,7 @@ fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
     let server_metrics = unused_loopback();
     let (route_target, route_echo) = start_echo();
     let (malformed_target, malformed_echo) = start_echo();
+    let (timeout_target, timeout_echo) = start_echo();
     let rejected =
         bind_loopback_listener(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("rejected target");
     rejected
@@ -114,8 +115,35 @@ fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
     );
     drop((routed, denied, malformed));
 
+    let (mut timed_out, reply) = socks_connect(client_address, timeout_target);
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    timed_out.write_all(b"GET").expect("partial HTTP prefix");
+    wait_for_metrics_sample(
+        server_metrics,
+        "ferrum2_sniff_total{role=\"server\",transport=\"tcp\",stage=\"sniff\",outcome=\"timeout\",protocol=\"none\"} 1",
+    );
+    timed_out
+        .write_all(b" after-timeout")
+        .expect("post-timeout traffic");
+    timed_out
+        .shutdown(Shutdown::Write)
+        .expect("post-timeout half close");
+    let mut echoed = Vec::new();
+    timed_out
+        .read_to_end(&mut echoed)
+        .expect("timeout prefix replay");
+    assert_eq!(echoed, b"GET after-timeout");
+    assert_eq!(
+        timeout_echo.join().expect("timeout target"),
+        b"GET after-timeout"
+    );
+    drop(timed_out);
+
     let client_body = wait_for_metrics_sample(client_metrics, CLIENT_ZERO);
     let server_body = wait_for_metrics_sample(server_metrics, SERVER_ZERO);
+    let observed = String::from_utf8_lossy(&server_body);
+    assert!(observed.contains("ferrum2_sniff_total{role=\"server\",transport=\"tcp\",stage=\"sniff\",outcome=\"matched\",protocol=\"http\"} 2"));
+    assert!(!observed.contains("ferrum2_sniff_total{role=\"server\",transport=\"udp\""));
     for sentinel in ["route.test", "reject.test", "malformed.test", SYNTHETIC_PSK] {
         for body in [&client_body, &server_body] {
             assert!(
@@ -148,6 +176,7 @@ fn m14_server_tcp_sniff_routes_rejects_and_replays_prefix() {
         server_metrics,
         route_target,
         malformed_target,
+        timeout_target,
         rejected_target,
     ] {
         drop(bind_loopback_listener(address).expect("M14 server TCP exact rebind"));

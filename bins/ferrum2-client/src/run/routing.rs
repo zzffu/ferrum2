@@ -18,7 +18,7 @@ use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress, Protoc
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use super::context::ClientRouting;
-use super::observation::record_sniff;
+use super::observation::{SniffAttempt, record_sniff};
 
 pub(super) enum ClientTerminalRoute {
     Route(EgressPlanSnapshot),
@@ -143,7 +143,21 @@ impl ClientRouting {
                             false,
                         )
                     };
-                    record_sniff(metrics, progress.clone(), limited);
+                    let transport = match network {
+                        Network::Tcp => ferrum2_observability::Transport::Tcp,
+                        Network::Udp => ferrum2_observability::Transport::Udp,
+                    };
+                    record_sniff(
+                        metrics,
+                        if limited {
+                            SniffAttempt::Limit(transport)
+                        } else {
+                            SniffAttempt::Parsed {
+                                transport,
+                                progress: progress.clone(),
+                            }
+                        },
+                    );
                     (protocol, domain) = route_metadata(progress);
                 }
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
@@ -237,14 +251,13 @@ impl ClientRouting {
                         | SniffPrefixOutcome::Limit
                         | SniffPrefixOutcome::Unavailable => SniffProgress::NoMatch,
                         SniffPrefixOutcome::Cancelled | SniffPrefixOutcome::ReadError => {
-                            record_sniff(metrics, SniffProgress::NoMatch, false);
+                            record_sniff(metrics, SniffAttempt::TcpUnavailable);
                             return Ok(None);
                         }
                     };
                     record_sniff(
                         metrics,
-                        progress.clone(),
-                        outcome == SniffPrefixOutcome::Limit,
+                        SniffAttempt::tcp_collection(progress.clone(), outcome),
                     );
                     (protocol, domain) = route_metadata(progress);
                     prefix = TcpRoutePrefix::Collected(collected);

@@ -55,6 +55,8 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M4c2 / C3 | 单一TUN UDP dispatch在每个datagram先检查exact synthetic DNS，再使用冻结ordinary terminal；删除重复reader/handoff loops，DNS proxy只在association启动获取 | client allfeatures compile-only、strictlint/格式通过；新增3个决策行为case仅编译，未执行client test binary。route分支每association一个Box，未测性能；真实TUN dispatch仍待专用资格 |
 
+| M4e / C5 | sniff使用具名attempt区分transport、parser及collector终态；client TCP不再错误记为UDP/unknown；两端私有sniff observation owner删除nullable/bool入口 | server指标行为测试、m0 server TCP匹配/超时及完整prefix replay通过；client compile-only，两bin及m0严格lint/fmt通过。尝试SOCKS client TCP sniff fixture被现有配置正确拒绝，删除无效新fixture；client TCP sniff仅支持TUN，未放宽配置或执行client测试 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 剩余主要实施是D6普通network reset的publish→hooks→cancel→retire顺序与同代重试，

@@ -3,11 +3,10 @@ use ferrum2_core::TargetAddr;
 use ferrum2_core::route::Network;
 use ferrum2_observability::{Metrics, Transport as ObservationTransport};
 use ferrum2_rule::{RouteMetadata, RouteProgramAction, RuleCompileError, RuleEvaluationScratch};
-use ferrum2_runtime::SniffPrefixOutcome;
 use ferrum2_sniff::{Progress as SniffProgress, Transport as SniffTransport};
 use tokio::time::Instant;
 
-use crate::run::observation::record_sniff;
+use crate::run::observation::{SniffAttempt, record_sniff};
 use crate::run::routing::{
     RouteProgramObservation, ServerRouting, ServerTerminalRoute, route_metadata, sniff_order,
 };
@@ -38,8 +37,8 @@ pub(super) fn select_udp_route(
             RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                 sniffed = true;
                 let order = sniff_order(sniffers, Network::Udp);
-                let (progress, collector) = if payload.len() > program.sniff.max_bytes {
-                    (SniffProgress::NoMatch, Some(SniffPrefixOutcome::Limit))
+                let (progress, limited) = if payload.len() > program.sniff.max_bytes {
+                    (SniffProgress::NoMatch, true)
                 } else {
                     (
                         ferrum2_sniff::sniff(
@@ -49,14 +48,19 @@ pub(super) fn select_udp_route(
                             target.port().get(),
                             &order,
                         ),
-                        None,
+                        false,
                     )
                 };
                 record_sniff(
                     metrics,
-                    ObservationTransport::Udp,
-                    progress.clone(),
-                    collector,
+                    if limited {
+                        SniffAttempt::Limit(ObservationTransport::Udp)
+                    } else {
+                        SniffAttempt::Parsed {
+                            transport: ObservationTransport::Udp,
+                            progress: progress.clone(),
+                        }
+                    },
                 );
                 (protocol, domain) = route_metadata(progress);
             }

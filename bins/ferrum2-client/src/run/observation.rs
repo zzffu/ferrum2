@@ -9,8 +9,7 @@ use ferrum2_dns::{
 };
 use ferrum2_observability::{
     Direction, Event, Inbound, LogLevel, Metrics, Outcome, Reason, Role, RuleMatchResult,
-    RuleMatchType, RuleProgram, RuleProgramMode, RuleSource, SniffOutcome, SniffProtocol, Stage,
-    TraceRecord, Transport, emit,
+    RuleMatchType, RuleProgram, RuleProgramMode, RuleSource, Stage, TraceRecord, emit,
 };
 use ferrum2_runtime::{
     MetricsEndpoint, MetricsEndpointError, OwnerRegistry, PreparedProcessRoot, ProcessCancellation,
@@ -19,7 +18,6 @@ use ferrum2_runtime::{
 use ferrum2_shadowsocks::{
     DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason, ShadowsocksError, UdpPacketError,
 };
-use ferrum2_sniff::{Metadata as SniffMetadata, Progress as SniffProgress};
 use tokio::net::TcpListener;
 
 use super::RunError;
@@ -32,28 +30,8 @@ pub(super) fn record_forced_udp_sessions(context: &ClientContext) {
     }
 }
 
-pub(super) fn record_sniff(metrics: &Metrics, progress: SniffProgress, limited: bool) {
-    let (outcome, protocol) = if limited {
-        (SniffOutcome::Limit, SniffProtocol::None)
-    } else {
-        match progress {
-            SniffProgress::Matched(SniffMetadata::Dns { .. }) => {
-                (SniffOutcome::Matched, SniffProtocol::Dns)
-            }
-            SniffProgress::Matched(SniffMetadata::Tls { .. }) => {
-                (SniffOutcome::Matched, SniffProtocol::Tls)
-            }
-            SniffProgress::Matched(SniffMetadata::Http { .. }) => {
-                (SniffOutcome::Matched, SniffProtocol::Http)
-            }
-            SniffProgress::NoMatch | SniffProgress::NeedMore => {
-                (SniffOutcome::Unknown, SniffProtocol::None)
-            }
-            SniffProgress::Invalid => (SniffOutcome::Invalid, SniffProtocol::None),
-        }
-    };
-    metrics.sniff(Role::Client, Transport::Udp, outcome, protocol);
-}
+mod sniff;
+pub(super) use sniff::{SniffAttempt, record_sniff};
 
 pub(super) struct ClientMetricsRoot {
     pub(super) listener: Option<TcpListener>,

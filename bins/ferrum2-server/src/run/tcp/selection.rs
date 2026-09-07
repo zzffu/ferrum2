@@ -11,7 +11,7 @@ use ferrum2_shadowsocks::PlainDuplex;
 use ferrum2_sniff::{Progress as SniffProgress, Transport};
 
 use super::outbound::ServerContext;
-use crate::run::observation::record_sniff;
+use crate::run::observation::{SniffAttempt, record_sniff};
 use crate::run::routing::{
     RouteProgramObservation, ServerTerminalRoute, route_metadata, sniff_order,
 };
@@ -151,9 +151,7 @@ where
                         SniffPrefixOutcome::Cancelled | SniffPrefixOutcome::ReadError => {
                             record_sniff(
                                 &context.metrics,
-                                ObservationTransport::Tcp,
-                                progress,
-                                Some(outcome),
+                                SniffAttempt::tcp_collection(progress, outcome),
                             );
                             let _ = stream.mark_abortive_plain();
                             return Err(match outcome {
@@ -168,9 +166,13 @@ where
                 }
                 record_sniff(
                     &context.metrics,
-                    ObservationTransport::Tcp,
-                    progress.clone(),
-                    collector,
+                    match collector {
+                        Some(outcome) => SniffAttempt::tcp_collection(progress.clone(), outcome),
+                        None => SniffAttempt::Parsed {
+                            transport: ObservationTransport::Tcp,
+                            progress: progress.clone(),
+                        },
+                    },
                 );
                 (protocol, domain) = route_metadata(progress);
             }
