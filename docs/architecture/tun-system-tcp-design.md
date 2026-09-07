@@ -14,9 +14,10 @@
 - 分阶段提交；不保留 smoltcp TCP fallback，也不新增 stack 选择配置。
 - 不引入 gVisor、Go 运行时、新 WFP 透明代理入口或本轮 UDP 性能优化。
 
-**实施前决策项：Windows 入站防火墙策略及真实宿主机验证授权。**
-当前资格合同禁止修改防火墙规则；不能把同意更换 TCP 实现解释成允许扩大宿主机网络修改范围。
-在该决策解决前，不提交依赖未授权防火墙修改的产品实现。
+**决策已确认：方案 B，产品管理最小临时入站放行。**
+用户同时明确授权通过受管 runner 执行 `-AcknowledgeHostNetworkMutation`，
+替代此前仅无特权验证的限制。授权不包含默认路由、宿主机 DNS、物理接口或无关状态变更。
+实施必须同步更新资格与零残留合同；新增放行只覆盖受管 TUN 的内部 TCP listener 路径。
 
 ## 当前实现与替换边界
 
@@ -173,11 +174,12 @@ listener 创建、第二地址族绑定或任务启动失败必须回滚已经�
 会给当前可执行文件添加所有 profile 的入站 TCP allow 规则。
 Ferrum2 不照搬这种应用级宽泛放行，也不关闭防火墙、不修改默认 action。
 
-当前 [Windows TUN 资格合同](../windows-tun-qualification.md#safety-boundary)
-禁止修改 firewall rule。现有 strict_route 也不能被当作已经具备 listener 入站放行能力。
+[Windows TUN 资格合同](../windows-tun-qualification.md#safety-boundary)将随实施更新，
+只增加受管 TCP listener 所需的临时入站放行授权，不允许任意持久防火墙规则。
+现有 strict_route 不能被当作已具备 listener 入站放行能力；
 listener 绑定成功不证明 Wintun 注入的连接能够通过实际入站过滤。
 
-实施前需要确定以下两种产品策略之一：
+已比较以下两种策略，用户选择第二种：
 
 1. **不自动修改防火墙。** 使用宿主机现有策略；部署者自行提供所需的最小放行。
    受策略阻止时明确报告连接失败，不降级回 smoltcp，不自动放开应用。
@@ -186,10 +188,14 @@ listener 绑定成功不证明 Wintun 注入的连接能够通过实际入站过
    受管 TUN 接口、本地 listener 地址／端口及合成 peer；生命周期内创建、验证、撤销。
    需要先验证 Windows 实际提供的条件表达与策略优先级，再选择平台实现；
    不假设加一条普通 WFP permit 就能覆盖所有系统／第三方 block。
-   必须同步扩展资格／恢复合同和零残留读回，获得明确授权后才能真实执行。
+   同步扩展资格／恢复合同和零残留读回；用户已明确授权实现与受管宿主机执行。
 
 两种策略都不允许物理接口／公网 listener 暴露，不允许以跳过 BFE／防火墙检查掩盖失败。
-当前文件不预先批准第二种策略。
+平台实现优先使用独立、进程拥有的动态 WFP session：精确条件与实际分配的 sublayer
+weight 必须读回，进程终止自动释放，正常退出显式关闭。针对该精确路径的 hard permit
+不能绕过更高优先级阻断、callout veto 或其他层策略；受策略阻止必须报告真实失败，
+不得扩大匹配范围或关闭防火墙。详见
+[Windows WFP action arbitration](https://learn.microsoft.com/en-us/windows/win32/fwp/filter-arbitration)。
 
 ## 模块所有权与 clean cutover
 
@@ -198,7 +204,7 @@ listener 绑定成功不证明 Wintun 注入的连接能够通过实际入站过
 | `ferrum2-tun` 私有 TCP 转换模块 | tuple 改写、双向映射、准入、关闭及隔离、原始目标恢复 |
 | `ferrum2-tun::tcp` | 系统 TcpFlow、generation fence、真实 socket 生命周期 |
 | `ferrum2-tun` native lifecycle | listener epoch 创建／回滚／join、现有公平调度和 adapter 生命周期 |
-| `ferrum2-platform-windows` | 必需的 Windows socket／接口能力；若获授权，受管防火墙资源及读回 |
+| `ferrum2-platform-windows` | Windows socket／接口能力、已授权的最小动态入站放行及完整读回 |
 | `ferrum2-config` 与 client composition | peer 可推导性准入、删除旧缓冲字段、传递新已准入配置 |
 | 现有 tests/platform 与 qualification 工具 | 真实 TCP、UDP 不回退、网络重置、崩溃恢复、零残留证据 |
 
@@ -213,7 +219,7 @@ UDP 相关行为测试保留，调用方仅做公共构造和时钟类型迁移�
 ### 阶段一：本设计和决策记录
 
 提交架构、需求／非目标、风险、调用方迁移范围、验证顺序；不改产品运行行为。
-防火墙策略和宿主机验证授权决定后再进入实施。
+防火墙策略 B 和受管宿主机验证授权已确定；后续提交开始产品实施与安全合同迁移。
 
 ### 阶段二：原子产品切换
 
