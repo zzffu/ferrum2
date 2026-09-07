@@ -19,6 +19,7 @@ function Read-Ferrum2HostQualificationSourceBundle {
         "tools/powershell/Ferrum2.Qualification.Host/QualificationRouteNotification.cs"
         "tools/powershell/Ferrum2.Qualification.Host/SourceBundle.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/SupervisorEvidence.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/WfpEvidence.ps1"
     ) | Sort-Object
     $manifestItem = Get-Item -LiteralPath $ManifestPath -Force -ErrorAction Stop
     if ($manifestItem.PSIsContainer -or $manifestItem.Length -le 0 -or

@@ -8,9 +8,9 @@ counts, guest stages, or alternate runners.
 The real run builds one exact candidate and executes the fixed eight-check plan. Its outer deadline
 is 900 seconds, worker deadline is 840 seconds, and build deadline is 600 seconds. It requires an
 already elevated PowerShell process and `-AcknowledgeHostNetworkMutation`, never auto-elevates, and
-may touch only ledger-owned Wintun, RFC 2544 `/32` route/address, process, port, and dynamic
-strict-route WFP identities. Default routes, host DNS, physical adapters, WLAN, firewall rules,
-sing-box, and unrelated resources are outside the transaction.
+may touch only ledger-owned Wintun, RFC 2544 `/32` route/address, process, port, and the product's
+dynamic strict-route and exact TCP-ingress WFP identities. Default routes, host DNS, physical
+adapters, WLAN, persistent firewall rules, sing-box, and unrelated resources are outside the transaction.
 
 `native_contract.py` owns loopback-only binary behavior; `qualify_native.py` is its thin local/hosted
 entrypoint. Hosted evidence mode binds the exact GitHub SHA, runner identity, clean checkout, and

@@ -538,7 +538,6 @@ route_address = ["$($Network.support_address)/32"]
 ring_capacity = 67108864
 ready_timeout_ms = 30000
 max_tcp_flows = 4096
-tcp_buffer_bytes = 32768
 max_udp_mappings = 8192
 udp_filtering = "endpoint_independent"
 $clientOutbound

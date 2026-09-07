@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -11,6 +12,54 @@ public sealed class Ferrum2QualificationRouteNotification : IDisposable
     private readonly RouteChangeCallback callback;
     private int disposed;
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FwpByteBlob
+    {
+        public uint size;
+        public IntPtr data;
+    }
+
+    [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint FwpmGetAppIdFromFileName0(
+        [MarshalAs(UnmanagedType.LPWStr)] string fileName,
+        out IntPtr appId);
+
+    [DllImport("fwpuclnt.dll", ExactSpelling = true)]
+    private static extern void FwpmFreeMemory0(ref IntPtr memory);
+
+    public static byte[] ApplicationId(string executablePath)
+    {
+        if (String.IsNullOrWhiteSpace(executablePath))
+        {
+            throw new ArgumentException(
+                "Executable path is required",
+                nameof(executablePath));
+        }
+        string fullPath = Path.GetFullPath(executablePath);
+        uint status = FwpmGetAppIdFromFileName0(fullPath, out IntPtr appId);
+        if (status != 0 || appId == IntPtr.Zero)
+        {
+            throw new Win32Exception(
+                unchecked((int)status),
+                "FwpmGetAppIdFromFileName0 failed");
+        }
+        try
+        {
+            FwpByteBlob blob = Marshal.PtrToStructure<FwpByteBlob>(appId);
+            if (blob.size == 0 || blob.size > 65536 || blob.data == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "FwpmGetAppIdFromFileName0 returned an invalid application ID");
+            }
+            byte[] result = new byte[checked((int)blob.size)];
+            Marshal.Copy(blob.data, result, 0, result.Length);
+            return result;
+        }
+        finally
+        {
+            FwpmFreeMemory0(ref appId);
+        }
+    }
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate void RouteChangeCallback(
         IntPtr callerContext,
@@ -27,6 +76,27 @@ public sealed class Ferrum2QualificationRouteNotification : IDisposable
 
     [DllImport("iphlpapi.dll", ExactSpelling = true)]
     private static extern uint CancelMibChangeNotify2(IntPtr notificationHandle);
+
+    [DllImport("iphlpapi.dll", ExactSpelling = true)]
+    private static extern uint ConvertInterfaceIndexToLuid(
+        uint interfaceIndex,
+        out ulong interfaceLuid);
+
+    public static ulong InterfaceLuid(uint interfaceIndex)
+    {
+        if (interfaceIndex == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(interfaceIndex));
+        }
+        uint status = ConvertInterfaceIndexToLuid(interfaceIndex, out ulong luid);
+        if (status != 0 || luid == 0)
+        {
+            throw new Win32Exception(
+                unchecked((int)status),
+                "ConvertInterfaceIndexToLuid failed");
+        }
+        return luid;
+    }
 
     public Ferrum2QualificationRouteNotification()
     {

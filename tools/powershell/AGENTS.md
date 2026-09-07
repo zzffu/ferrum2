@@ -38,6 +38,6 @@ deeper seam would be worse.
 Ordinary hosts may execute nonmutating `-PlanOnly` and identity-safe `-RecoveryOnly` operations. Real
 host qualification or performance requires the corresponding dedicated runner, an already elevated
 shell, and explicit acknowledgement. A runner may touch only its ledger-owned Wintun adapter, exact
-RFC 2544 routes and addresses, processes, ports, files, and any product-owned dynamic WFP session
-declared by its plan. It must not change default routes, DNS, physical adapters, WLAN, firewall
-rules, sing-box, or unrelated state.
+RFC 2544 routes and addresses, processes, ports, files, and declared product-owned dynamic
+strict-route or exact TCP-ingress WFP sessions. It must not change default routes, DNS, physical
+adapters, WLAN, persistent Windows Firewall rules, sing-box, or unrelated state.

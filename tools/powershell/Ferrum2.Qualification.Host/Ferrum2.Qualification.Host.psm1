@@ -16,6 +16,7 @@ foreach ($owner in @(
     (Join-Path $performanceRoot "HostExecution.ps1"),
     (Join-Path $performanceRoot "HostProduct.ps1"),
     (Join-Path $PSScriptRoot "SourceBundle.ps1"),
+    (Join-Path $PSScriptRoot "WfpEvidence.ps1"),
     (Join-Path $PSScriptRoot "HostQualification.ps1")
 )) {
     . $owner

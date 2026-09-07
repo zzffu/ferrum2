@@ -178,7 +178,7 @@ function Start-Ferrum2ProductTrial {
 $script:stops = 0
 function Stop-Ferrum2ProductTrial { $script:stops += 1 }
 function Assert-Ferrum2QualificationWfpAbsent { }
-function Get-Ferrum2QualificationWfpWitness { return @{} }
+function Get-Ferrum2QualificationLiveWfpWitness { return @{ strict_route = @{}; tcp_ingress = @{} } }
 $script:metricsCalls = 0
 function Get-Ferrum2Metrics($Port) {
     $script:metricsCalls += 1
@@ -193,7 +193,10 @@ function Invoke-Ferrum2OwnedCommand { throw 'injected TCP probe failure' }
 $failure = $null
 try {
     Invoke-Ferrum2HostQualificationChecks -Context @{ evidence_directory = $FixtureRoot } `
-        -Candidate @{ harness = (Join-Path $FixtureRoot 'harness.exe') } `
+        -Candidate @{
+            harness = (Join-Path $FixtureRoot 'harness.exe')
+            client = (Join-Path $FixtureRoot 'ferrum2-client.exe')
+        } `
         -Network @{ support_address = '198.19.0.1'; support_prefix_length = 32 } -Loopback @{} | Out-Null
 } catch { $failure = $_.Exception.Message }
 @{ failure = $failure; stops = $script:stops } | ConvertTo-Json -Compress

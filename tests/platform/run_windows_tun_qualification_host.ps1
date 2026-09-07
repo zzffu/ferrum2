@@ -156,15 +156,84 @@ try {
     $expectedChecks = @(
         'single-candidate-build',
         'wintun-create-and-delete',
-        'tcp-and-udp-through-owned-tun',
+        'system-tcp-and-udp-through-owned-tun',
         'narrow-route-isolation',
-        'strict-route-wfp-live-readback',
-        'network-notification-retains-wfp-identity',
+        'exact-tcp-ingress-wfp-live-readback',
+        'network-reset-retains-strict-route-and-replaces-tcp-ingress-epoch',
         'forced-process-tree-recovery',
         'zero-residue-cleanup'
     )
     $actualChecks = @($workerResult.checks)
     $actualCheckNames = @($actualChecks | ForEach-Object { [string]$_.name })
+    $tcpIngress = $workerResult.tcp_ingress_wfp
+    $ingressSnapshots = @(
+        $tcpIngress.normal_start,
+        $tcpIngress.before_network_reset,
+        $tcpIngress.after_network_reset,
+        $tcpIngress.before_forced_close
+    )
+    $expectedConditionShape = @(
+        'FWPM_CONDITION_ALE_APP_ID:FWP_BYTE_BLOB_TYPE:FWP_MATCH_EQUAL',
+        'FWPM_CONDITION_IP_LOCAL_ADDRESS:FWP_UINT32:FWP_MATCH_EQUAL',
+        'FWPM_CONDITION_IP_LOCAL_INTERFACE:FWP_UINT64:FWP_MATCH_EQUAL',
+        'FWPM_CONDITION_IP_LOCAL_PORT:FWP_UINT16:FWP_MATCH_EQUAL',
+        'FWPM_CONDITION_IP_PROTOCOL:FWP_UINT8:FWP_MATCH_EQUAL',
+        'FWPM_CONDITION_IP_REMOTE_ADDRESS:FWP_UINT32:FWP_MATCH_EQUAL'
+    ) -join '|'
+    $ingressEvidenceValid = (
+        @($ingressSnapshots | Where-Object {
+            (@($_.session_flags) -join '|') -cne 'FWPM_SESSION_FLAG_DYNAMIC' -or
+            $_.session_key -cne '41b9d0c7-65ac-49a7-8d97-bf8ad5abbe01' -or
+            $_.sublayer_key -cne '5e741969-f578-43bd-a1e2-a420c49a7f01' -or
+            [string]$_.sublayer_weight -cnotmatch '^[1-9][0-9]{0,4}$' -or
+            $_.process_id -ne $_.listener.process_id -or
+            $_.filter.name -cne 'Ferrum2 TCP ingress IPv4' -or
+            [string]$_.filter.key -cnotmatch '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' -or
+            [string]$_.filter.id -cnotmatch '^[1-9][0-9]*$' -or
+            $_.filter.layer -cne 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4' -or
+            $_.filter.action -cne 'FWP_ACTION_PERMIT' -or
+            $_.filter.flags -cnotcontains 'FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT' -or
+            @($_.filter.flags | Where-Object {
+                $_ -cnotin @(
+                    'FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT',
+                    'FWPM_FILTER_FLAG_INDEXED'
+                )
+            }).Count -ne 0 -or
+            $_.filter.requested_weight.type -cne 'FWP_UINT8' -or
+            $_.filter.requested_weight.value -cne '15' -or
+            $_.filter.effective_weight.type -cne 'FWP_UINT64' -or
+            [string]$_.filter.effective_weight.value -cnotmatch '^[1-9][0-9]*$' -or
+            $null -ne $_.filter.provider_key -or
+            $null -ne $_.filter.provider_context_key -or
+            $_.filter.provider_data_size -ne 0 -or
+            $null -ne $_.filter.reserved -or $_.filter.raw_context -ne 0 -or
+            (@($_.filter.conditions | ForEach-Object {
+                "$($_.field_key):$($_.type):$($_.match_type)"
+            } | Sort-Object) -join '|') -cne $expectedConditionShape -or
+            $_.listener.address_family -cne 'IPv4' -or
+            $_.listener.local_address -in @('0.0.0.0', '::') -or
+            $_.listener.local_port -eq 0 -or
+            $_.listener.wildcard_listener_count -ne 0
+        }).Count -eq 0 -and
+        $tcpIngress.reset_epoch.old_filter_absent_after_reset -eq $true -and
+        $tcpIngress.reset_epoch.old_filter_key -cne $tcpIngress.reset_epoch.new_filter_key -and
+        $tcpIngress.reset_epoch.old_filter_id -cne $tcpIngress.reset_epoch.new_filter_id -and
+        $tcpIngress.reset_epoch.old_local_port -ne $tcpIngress.reset_epoch.new_local_port -and
+        @($tcpIngress.absence).Count -eq 4 -and
+        @($tcpIngress.absence | Where-Object {
+            $_.strict_route_objects -ne 0 -or $_.tcp_ingress_objects -ne 0
+        }).Count -eq 0
+    )
+    $strictRoute = $workerResult.strict_route_wfp
+    $resetEvidenceValid = (
+        $strictRoute.notification.observed -eq $true -and
+        $strictRoute.notification.session_generation_after -gt
+            $strictRoute.notification.session_generation_before -and
+        $strictRoute.before_network_reset.sublayer_weight -ceq
+            $strictRoute.after_network_reset.sublayer_weight -and
+        (@($strictRoute.before_network_reset.filters.id) -join '|') -ceq
+            (@($strictRoute.after_network_reset.filters.id) -join '|')
+    )
     if ($workerResult.status -cne 'PASS' -or $workerResult.qualification -ne $true -or
         $workerResult.candidate_sha -cne $CandidateSha -or
         $workerResult.qualification_source_bundle_sha256 -cne $sourceBundle.sha256 -or
@@ -173,6 +242,9 @@ try {
         $cleanup.status -cne 'PASS' -or $cleanup.adapter_remaining -ne 0 -or
         $cleanup.routes_remaining -ne 0 -or $cleanup.addresses_remaining -ne 0 -or
         $cleanup.processes_remaining -ne 0 -or $cleanup.ports_remaining -ne 0 -or
+        $cleanup.strict_route_wfp_remaining -ne 0 -or
+        $cleanup.tcp_ingress_wfp_remaining -ne 0 -or
+        -not $ingressEvidenceValid -or -not $resetEvidenceValid -or
         $supervisorTimer.Elapsed.TotalSeconds -ge $maximumElapsedSeconds) {
         throw 'host qualification verdict or bounded cleanup is invalid'
     }
@@ -188,6 +260,7 @@ try {
         checks = @($workerResult.checks)
         route_proofs = @($workerResult.route_proofs)
         strict_route_wfp = $workerResult.strict_route_wfp
+        tcp_ingress_wfp = $workerResult.tcp_ingress_wfp
         cleanup = $cleanup
     }
     $outcome.phase = 'verdict-ready'

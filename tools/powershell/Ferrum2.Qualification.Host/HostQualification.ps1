@@ -3,22 +3,6 @@ Set-StrictMode -Version Latest
 $script:QualificationMaximumElapsedSeconds = 900
 $script:QualificationWorkerTimeoutSeconds = 840
 $script:QualificationBuildTimeoutSeconds = 600
-$script:QualificationSessionKey = '{8ea35b4e-6629-4e26-9776-95c5bf9c6b01}'
-$script:QualificationSublayerKey = '{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}'
-$script:QualificationFilterKeys = @(
-    '{a158b31d-7a59-40bc-9339-38b5e8701001}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701002}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701003}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701004}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701006}'
-)
-$script:QualificationFilterNames = @(
-    'Ferrum2 app permit IPv4',
-    'Ferrum2 app permit IPv6',
-    'Ferrum2 TUN permit IPv4',
-    'Ferrum2 TUN permit IPv6',
-    'Ferrum2 family block IPv6'
-)
 $script:BaseWriteFerrum2TrialConfigs = ${function:Write-Ferrum2TrialConfigs}
 
 function Write-Ferrum2TrialConfigs {
@@ -72,10 +56,10 @@ function Get-Ferrum2HostQualificationPlan {
         checks = @(
             'single-candidate-build',
             'wintun-create-and-delete',
-            'tcp-and-udp-through-owned-tun',
+            'system-tcp-and-udp-through-owned-tun',
             'narrow-route-isolation',
-            'strict-route-wfp-live-readback',
-            'network-notification-retains-wfp-identity',
+            'exact-tcp-ingress-wfp-live-readback',
+            'network-reset-retains-strict-route-and-replaces-tcp-ingress-epoch',
             'forced-process-tree-recovery',
             'zero-residue-cleanup'
         )
@@ -83,17 +67,22 @@ function Get-Ferrum2HostQualificationPlan {
             requires_elevation = $true
             requires_explicit_acknowledgement = $true
             automatic_elevation = $false
-            address_family = 'RFC2544 198.18.0.0/15'
+            live_address_family = 'IPv4 only (RFC2544 198.18.0.0/15)'
             route_scope = 'run-owned /32 only'
+            tcp_ingress_scope = 'exact app, TCP, TUN LUID, local address/port, and remote peer'
+            wfp_lifetime = 'process-owned dynamic sessions only'
+            tcp_ingress_installation = 'automatic after listener bind and before admission'
             mutations = @(
                 'one run-owned Wintun adapter at a time',
                 'run-owned RFC2544 loopback support address',
                 'run-owned narrow routes',
-                'process-owned dynamic strict-route WFP session'
+                'process-owned dynamic strict-route WFP session',
+                'process-owned dynamic exact TCP ingress WFP session'
             )
             forbidden_mutations = @(
                 'default route', 'system DNS', 'physical adapters', 'WLAN',
-                'firewall rules', 'sing-box', 'unrelated resources'
+                'persistent Windows Firewall rules', 'unrelated WFP sessions',
+                'sing-box', 'unrelated resources'
             )
             recovery = '%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json'
         }
@@ -188,156 +177,6 @@ function Get-Ferrum2QualificationMetricLabelValue {
     return $sum
 }
 
-function ConvertFrom-Ferrum2QualificationWfpStateXml {
-    param([Parameter(Mandatory = $true)][string]$Text)
-
-    $declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-    if (-not $Text.StartsWith($declaration, [StringComparison]::Ordinal)) {
-        throw 'host qualification WFP snapshot declaration is invalid'
-    }
-    $document = [Xml.XmlDocument]::new()
-    try {
-        $document.LoadXml(
-            "<ferrum2WfpState>$($Text.Substring($declaration.Length))</ferrum2WfpState>"
-        )
-    } catch {
-        throw "host qualification WFP snapshot XML is invalid: $($_.Exception.Message)"
-    }
-    $rootNames = @($document.DocumentElement.ChildNodes | Where-Object {
-        $_.NodeType -eq [Xml.XmlNodeType]::Element
-    } | ForEach-Object { $_.LocalName })
-    if (($rootNames -join '|') -cne 'wfpstate|firewallState') {
-        throw 'host qualification WFP snapshot root set is invalid'
-    }
-    return $document
-}
-
-function Invoke-Ferrum2QualificationWfpState {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][string]$Label
-    )
-    $path = Join-Path $Context.run_root "wfp-$Label.xml"
-    if (Test-Path -LiteralPath $path) {
-        throw 'host qualification WFP snapshot baseline must be absent'
-    }
-    $netsh = Join-Path ([Environment]::SystemDirectory) 'netsh.exe'
-    try {
-        [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $netsh `
-            -Arguments "wfp show state file=`"$path`"" `
-            -WorkingDirectory $Context.run_root -LogPrefix "wfp-$Label" -TimeoutSeconds 45)
-        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-        if ($item.PSIsContainer -or $item.Length -le 0 -or $item.Length -gt 64MB) {
-            throw 'host qualification WFP snapshot size is invalid'
-        }
-        $text = Get-Content -LiteralPath $path -Raw -Encoding utf8 -ErrorAction Stop
-        return ConvertFrom-Ferrum2QualificationWfpStateXml -Text $text
-    } finally {
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Get-Ferrum2QualificationWfpWitness {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$Runtime,
-        [Parameter(Mandatory = $true)][string]$Label
-    )
-    [xml]$document = Invoke-Ferrum2QualificationWfpState -Context $Context -Label $Label
-    $sublayerKey = $script:QualificationSublayerKey.ToLowerInvariant()
-    $sessionKey = $script:QualificationSessionKey.ToLowerInvariant()
-    $filters = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
-        $key = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
-        $id = $_.SelectSingleNode("./*[local-name()='filterId']")
-        $null -ne $key -and $null -ne $id -and
-            $key.InnerText.ToLowerInvariant() -ceq $sublayerKey
-    })
-    if ($filters.Count -ne $script:QualificationFilterKeys.Count) {
-        throw 'host qualification strict-route WFP filter count is not exact'
-    }
-    $filterRows = [Collections.Generic.List[object]]::new()
-    foreach ($expectedName in $script:QualificationFilterNames) {
-        $matches = @($filters | Where-Object {
-            $name = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
-            $null -ne $name -and $name.InnerText -ceq $expectedName
-        })
-        if ($matches.Count -ne 1) {
-            throw "host qualification WFP filter identity changed: $expectedName"
-        }
-        $key = $matches[0].SelectSingleNode("./*[local-name()='filterKey']")
-        $id = $matches[0].SelectSingleNode("./*[local-name()='filterId']")
-        if ($null -eq $key -or
-            $key.InnerText.ToLowerInvariant() -cnotin $script:QualificationFilterKeys -or
-            $null -eq $id -or [string]$id.InnerText -cnotmatch '^[1-9][0-9]*$') {
-            throw "host qualification WFP filter readback is invalid: $expectedName"
-        }
-        $filterRows.Add([pscustomobject][ordered]@{
-            name = $expectedName
-            key = $key.InnerText.Trim('{}').ToLowerInvariant()
-            id = [string]$id.InnerText
-        })
-    }
-    $sublayers = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
-        $key = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
-        $id = $_.SelectSingleNode("./*[local-name()='filterId']")
-        $name = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
-        $null -ne $key -and $null -eq $id -and
-            $key.InnerText.ToLowerInvariant() -ceq $sublayerKey -and
-            $null -ne $name -and $name.InnerText -ceq 'Ferrum2 strict route'
-    })
-    if ($sublayers.Count -ne 1) {
-        throw 'host qualification strict-route WFP sublayer identity is not exact'
-    }
-    $weightNode = $sublayers[0].SelectSingleNode("./*[local-name()='weight']")
-    if ($null -eq $weightNode -or [string]::IsNullOrWhiteSpace($weightNode.InnerText)) {
-        throw 'host qualification strict-route WFP sublayer weight is unavailable'
-    }
-    $sessions = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
-        $key = $_.SelectSingleNode("./*[local-name()='sessionKey']")
-        $name = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
-        $null -ne $key -and $key.InnerText.ToLowerInvariant() -ceq $sessionKey -and
-            $null -ne $name -and $name.InnerText -ceq 'Ferrum2 strict route dynamic session'
-    })
-    if ($sessions.Count -ne 1) {
-        throw 'host qualification strict-route WFP session identity is not exact'
-    }
-    $processNode = $sessions[0].SelectSingleNode("./*[local-name()='processId']")
-    if ($null -eq $processNode -or [uint32]$processNode.InnerText -ne [uint32]$Runtime.client.pid) {
-        throw 'host qualification strict-route WFP owner process is not exact'
-    }
-    return [pscustomobject][ordered]@{
-        session_key = $script:QualificationSessionKey.Trim('{}')
-        sublayer_key = $script:QualificationSublayerKey.Trim('{}')
-        sublayer_weight = [string]$weightNode.InnerText
-        process_id = [uint32]$Runtime.client.pid
-        filters = @($filterRows)
-    }
-}
-
-function Assert-Ferrum2QualificationWfpAbsent {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][string]$Label
-    )
-    [xml]$document = Invoke-Ferrum2QualificationWfpState -Context $Context -Label $Label
-    $keys = @(
-        $script:QualificationSessionKey,
-        $script:QualificationSublayerKey
-    ) + @($script:QualificationFilterKeys)
-    $normalized = @($keys | ForEach-Object { $_.ToLowerInvariant() })
-    $matches = @($document.SelectNodes("//*[local-name()='item']") | Where-Object {
-        $item = $_
-        @('sessionKey', 'subLayerKey', 'filterKey') | Where-Object {
-            $node = $item.SelectSingleNode("./*[local-name()='$_']")
-            $null -ne $node -and $node.InnerText.ToLowerInvariant() -cin $normalized
-        }
-    })
-    if ($matches.Count -ne 0) {
-        throw 'host qualification strict-route WFP objects remain after process exit'
-    }
-}
 
 function Invoke-Ferrum2HostQualificationChecks {
     param(
@@ -356,12 +195,25 @@ function Invoke-Ferrum2HostQualificationChecks {
     $routeProofs = $null
     $wfpBefore = $null
     $wfpAfter = $null
+    $resetEpoch = $null
     $notificationWitness = $null
+    $wfpAbsence = [Collections.Generic.List[object]]::new()
+    [void]$wfpAbsence.Add(
+        (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'baseline')
+    )
 
     $createRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
         -Network $Network -Loopback $Loopback -Sequence 1 -Topology "EndToEnd"
-    Stop-Ferrum2ProductTrial -Context $Context -Runtime $createRuntime
-    Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'create-cleanup'
+    try {
+        $createWfp = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
+            -Runtime $createRuntime -Network $Network -ExecutablePath $Candidate.client `
+            -Label 'create-live'
+    } finally {
+        Stop-Ferrum2ProductTrial -Context $Context -Runtime $createRuntime
+    }
+    [void]$wfpAbsence.Add(
+        (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'create-cleanup')
+    )
     $checks.Add([pscustomobject][ordered]@{
         name = 'wintun-create-and-delete'; status = 'PASS'
     })
@@ -375,22 +227,26 @@ function Invoke-Ferrum2HostQualificationChecks {
         Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
             'qualification-server-metrics-before.txt') `
             -Text (Get-Ferrum2Metrics -Port $smokeRuntime.server_metrics_port)
+        $generationBefore = Get-Ferrum2MetricValue $metricsBefore `
+            'ferrum2_tun_session_generation'
         if ((Get-Ferrum2MetricValue $metricsBefore 'ferrum2_tun_strict_route_requested') -ne 1 -or
             (Get-Ferrum2MetricValue $metricsBefore 'ferrum2_tun_strict_route_effective') -ne 1 -or
+            $generationBefore -lt 1 -or
             (Get-Ferrum2QualificationMetricLabelValue $metricsBefore `
                 'ferrum2_tun_strict_route_filter_install_total' 'result' 'success') -lt 1 -or
             (Get-Ferrum2QualificationMetricLabelValue $metricsBefore `
                 'ferrum2_tun_strict_route_filter_install_total' 'result' 'failure' -AllowAbsent) -ne 0) {
-            throw 'host qualification strict-route metrics are invalid'
+            throw 'host qualification strict-route or session-generation metrics are invalid'
         }
-        $wfpBefore = Get-Ferrum2QualificationWfpWitness -Context $Context `
-            -Runtime $smokeRuntime -Label 'before-notification'
+        $wfpBefore = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
+            -Runtime $smokeRuntime -Network $Network -ExecutablePath $Candidate.client `
+            -Label 'before-network-reset'
         $probeArguments = "windows-tun-probe --target-ip $($Network.support_address) " +
             "--tcp-port $($support.tcp_port) --udp-port $($support.udp_port)"
         [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Candidate.harness `
             -Arguments $probeArguments `
             -WorkingDirectory (Split-Path -Parent $Candidate.harness) `
-            -LogPrefix 'qualification-probe-before-notification' -TimeoutSeconds 60)
+            -LogPrefix 'qualification-probe-before-network-reset' -TimeoutSeconds 60)
         $routeProofs = @($smokeRuntime.route_proofs)
         $octets = $Network.support_address.Split('.')
         $notificationAddress = "$($octets[0]).$($octets[1]).$($octets[2]).$([int]$octets[3] + 1)"
@@ -410,28 +266,37 @@ function Invoke-Ferrum2HostQualificationChecks {
         } finally {
             $routeNotification.Dispose()
         }
-        Start-Sleep -Seconds 1
-        $metricsAfter = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port
+        $metricsAfter = Wait-Ferrum2Metric -Process $smokeRuntime.client `
+            -Port $smokeRuntime.client_metrics_port -Name 'ferrum2_tun_session_generation' `
+            -Minimum ($generationBefore + 1) -TimeoutSeconds 30
+        $generationAfter = Get-Ferrum2MetricValue $metricsAfter `
+            'ferrum2_tun_session_generation'
         if ((Get-Ferrum2MetricValue $metricsAfter `
                 'ferrum2_tun_strict_route_effective') -ne 1) {
-            throw 'host qualification network notification did not preserve strict-route state'
+            throw 'host qualification network reset did not preserve strict-route state'
         }
+        $wfpAfter = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
+            -Runtime $smokeRuntime -Network $Network -ExecutablePath $Candidate.client `
+            -Label 'after-network-reset'
+        if ($wfpAfter.strict_route.sublayer_weight -cne
+                $wfpBefore.strict_route.sublayer_weight -or
+            (@($wfpAfter.strict_route.filters.id) -join '|') -cne
+                (@($wfpBefore.strict_route.filters.id) -join '|')) {
+            throw 'host qualification network reset replaced strict-route WFP identity'
+        }
+        $resetEpoch = Compare-Ferrum2QualificationTcpIngressEpoch `
+            -Before $wfpBefore.tcp_ingress -After $wfpAfter.tcp_ingress
         $notificationWitness = [pscustomobject][ordered]@{
             source = 'NotifyRouteChange2'
             observed = $true
             destination_prefix = "$notificationAddress/32"
-            debounce_wait_milliseconds = 1000
-        }
-        $wfpAfter = Get-Ferrum2QualificationWfpWitness -Context $Context `
-            -Runtime $smokeRuntime -Label 'after-notification'
-        if ($wfpAfter.sublayer_weight -cne $wfpBefore.sublayer_weight -or
-            (@($wfpAfter.filters.id) -join '|') -cne (@($wfpBefore.filters.id) -join '|')) {
-            throw 'host qualification network notification replaced strict-route WFP identity'
+            session_generation_before = [uint64]$generationBefore
+            session_generation_after = [uint64]$generationAfter
         }
         [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Candidate.harness `
             -Arguments $probeArguments `
             -WorkingDirectory (Split-Path -Parent $Candidate.harness) `
-            -LogPrefix 'qualification-probe-after-notification' -TimeoutSeconds 60)
+            -LogPrefix 'qualification-probe-after-network-reset' -TimeoutSeconds 60)
     } catch {
         $failure = $_
         Export-Ferrum2ProductFailureLogs -Context $Context -Client $smokeRuntime.client `
@@ -450,20 +315,23 @@ function Invoke-Ferrum2HostQualificationChecks {
     } finally {
         Stop-Ferrum2ProductTrial -Context $Context -Runtime $smokeRuntime
     }
-    Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'smoke-cleanup'
+    [void]$wfpAbsence.Add(
+        (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'smoke-cleanup')
+    )
     foreach ($name in @(
-        'tcp-and-udp-through-owned-tun',
+        'system-tcp-and-udp-through-owned-tun',
         'narrow-route-isolation',
-        'strict-route-wfp-live-readback',
-        'network-notification-retains-wfp-identity'
+        'exact-tcp-ingress-wfp-live-readback',
+        'network-reset-retains-strict-route-and-replaces-tcp-ingress-epoch'
     )) {
         $checks.Add([pscustomobject][ordered]@{ name = $name; status = 'PASS' })
     }
 
     $faultRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
         -Network $Network -Loopback $Loopback -Sequence 3 -Topology "EndToEnd"
-    [void](Get-Ferrum2QualificationWfpWitness -Context $Context `
-        -Runtime $faultRuntime -Label 'before-forced-close')
+    $faultWfp = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
+        -Runtime $faultRuntime -Network $Network -ExecutablePath $Candidate.client `
+        -Label 'before-forced-close'
     [Ferrum2PerfProcessGroup]::CloseGroup()
     Start-Sleep -Milliseconds 500
     $addressRows = @($Context.ledger.resources.addresses)
@@ -489,7 +357,9 @@ function Invoke-Ferrum2HostQualificationChecks {
     $addressRows[0].state = 'created'
     Write-Ferrum2HostPerformanceLedger -Context $Context
     [void](Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path)
-    Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'forced-close-cleanup'
+    [void]$wfpAbsence.Add(
+        (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'forced-close-cleanup')
+    )
     $checks.Add([pscustomobject][ordered]@{
         name = 'forced-process-tree-recovery'; status = 'PASS'
     })
@@ -513,9 +383,16 @@ function Invoke-Ferrum2HostQualificationChecks {
         route_proofs = $routeProofs
         strict_route_wfp = [pscustomobject][ordered]@{
             notification = $notificationWitness
-            before_notification = $wfpBefore
-            after_notification = $wfpAfter
-            cleanup = 'absent'
+            before_network_reset = $wfpBefore.strict_route
+            after_network_reset = $wfpAfter.strict_route
+        }
+        tcp_ingress_wfp = [pscustomobject][ordered]@{
+            normal_start = $createWfp.tcp_ingress
+            before_network_reset = $wfpBefore.tcp_ingress
+            after_network_reset = $wfpAfter.tcp_ingress
+            reset_epoch = $resetEpoch
+            before_forced_close = $faultWfp.tcp_ingress
+            absence = $wfpAbsence.ToArray()
         }
         status = 'PASS'
     }
@@ -613,6 +490,29 @@ function Invoke-Ferrum2HostQualification {
                 $cleanupTimer = [Diagnostics.Stopwatch]::StartNew()
                 $cleanup = Complete-Ferrum2HostPerformanceCleanup -Context $context `
                     -Succeeded $succeeded
+                $inspectionRoot = Join-Path $context.evidence_directory `
+                    'final-cleanup-inspection'
+                if (Test-Path -LiteralPath $inspectionRoot) {
+                    throw 'host qualification final inspection baseline must be absent'
+                }
+                New-Item -ItemType Directory -Path $inspectionRoot `
+                    -ErrorAction Stop | Out-Null
+                $inspectionContext = [pscustomobject]@{
+                    run_id = $context.run_id
+                    run_root = $inspectionRoot
+                    ledger_path = Join-Path $inspectionRoot 'recovery.json'
+                    repository_root = $context.repository_root
+                    evidence_directory = $context.evidence_directory
+                    performance_source_bundle_sha256 =
+                        $context.performance_source_bundle_sha256
+                    ledger = $context.ledger
+                }
+                try {
+                    $finalWfp = Assert-Ferrum2QualificationWfpAbsent `
+                        -Context $inspectionContext -Label 'final-cleanup'
+                } finally {
+                    [Ferrum2PerfProcessGroup]::CloseGroup()
+                }
                 $cleanupTimer.Stop()
                 $qualificationCleanup = [pscustomobject][ordered]@{
                     schema_version = 1
@@ -625,6 +525,8 @@ function Invoke-Ferrum2HostQualification {
                     addresses_remaining = [int]$cleanup.addresses_remaining
                     processes_remaining = [int]$cleanup.processes_remaining
                     ports_remaining = [int]$cleanup.ports_remaining
+                    strict_route_wfp_remaining = [int]$finalWfp.strict_route_objects
+                    tcp_ingress_wfp_remaining = [int]$finalWfp.tcp_ingress_objects
                     elapsed_seconds = $cleanupTimer.Elapsed.TotalSeconds
                 }
                 Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory `
@@ -670,6 +572,7 @@ function Invoke-Ferrum2HostQualification {
         checks = @($checks.checks)
         route_proofs = @($checks.route_proofs)
         strict_route_wfp = $checks.strict_route_wfp
+        tcp_ingress_wfp = $checks.tcp_ingress_wfp
     }
     Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory `
         'qualification-worker.json') -Document $workerResult

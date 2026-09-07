@@ -36,6 +36,209 @@ $parsedRootNames = @($parsedState.DocumentElement.ChildNodes | Where-Object {
 Assert-True ($parsedState.DocumentElement.LocalName -ceq 'ferrum2WfpState' -and
     ($parsedRootNames -join '|') -ceq 'wfpstate|firewallState') `
     'netsh multi-root WFP state parsing changed'
+$parsedBomState = & $loadedModule {
+    param([string]$Text)
+    ConvertFrom-Ferrum2QualificationWfpStateXml -Text (([string][char]0xfeff) + $Text)
+} $multiRootState
+Assert-True ($parsedBomState.DocumentElement.LocalName -ceq 'ferrum2WfpState' -and
+    @($parsedBomState.DocumentElement.ChildNodes | Where-Object {
+        $_.NodeType -eq [Xml.XmlNodeType]::Element
+    }).Count -eq 2) 'UTF-8 BOM WFP fragment parsing changed'
+
+$tcpIngressOffline = & $loadedModule {
+    function New-ConditionXml(
+        [string]$Field,
+        [string]$Type,
+        [string]$Element,
+        [string]$Value
+    ) {
+        return "<item><fieldKey>$Field</fieldKey><matchType>FWP_MATCH_EQUAL</matchType>" +
+            "<conditionValue><type>$Type</type><$Element>$Value</$Element>" +
+            '</conditionValue></item>'
+    }
+    $applicationPath = Join-Path ([IO.Path]::GetTempPath()) (
+        "ferrum2-wfp-fixture-$([Guid]::NewGuid().ToString('N')).exe"
+    )
+    try {
+        [IO.File]::WriteAllBytes($applicationPath, [byte[]]@(0))
+        $applicationBytes =
+            [Ferrum2QualificationRouteNotification]::ApplicationId($applicationPath)
+        $applicationIdentity = [Text.Encoding]::Unicode.GetString($applicationBytes)
+        $appBlob = [Convert]::ToHexString($applicationBytes)
+        $appBlobXml = "<size>$($appBlob.Length / 2)</size><data>$appBlob</data>"
+        $wrongApplicationIdentity =
+            $applicationIdentity.TrimEnd([char]0) + '.mismatch' + [char]0
+        $wrongAppBlob = [Convert]::ToHexString(
+            [Text.Encoding]::Unicode.GetBytes($wrongApplicationIdentity)
+        )
+        $wrongVolumeIdentity = [regex]::Replace(
+            $applicationIdentity,
+            '^\\device\\[^\\]+',
+            '\device\ferrum2-wrong-volume',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        if ($wrongVolumeIdentity -ceq $applicationIdentity) {
+            throw 'fixture application ID did not contain an NT volume identity'
+        }
+        $wrongVolumeBlob = [Convert]::ToHexString(
+            [Text.Encoding]::Unicode.GetBytes($wrongVolumeIdentity)
+        )
+    $strictRows = [Collections.Generic.List[string]]::new()
+    $names = @(
+        'Ferrum2 app permit IPv4',
+        'Ferrum2 app permit IPv6',
+        'Ferrum2 TUN permit IPv4',
+        'Ferrum2 TUN permit IPv6',
+        'Ferrum2 family block IPv6'
+    )
+    $keys = @(
+        '{a158b31d-7a59-40bc-9339-38b5e8701001}',
+        '{a158b31d-7a59-40bc-9339-38b5e8701002}',
+        '{a158b31d-7a59-40bc-9339-38b5e8701003}',
+        '{a158b31d-7a59-40bc-9339-38b5e8701004}',
+        '{a158b31d-7a59-40bc-9339-38b5e8701006}'
+    )
+    foreach ($index in 0..4) {
+        $condition = switch ($index) {
+            0 {
+                New-ConditionXml 'FWPM_CONDITION_ALE_APP_ID' 'FWP_BYTE_BLOB_TYPE' `
+                    'byteBlob' $appBlobXml
+            }
+            2 {
+                New-ConditionXml 'FWPM_CONDITION_IP_LOCAL_INTERFACE' 'FWP_UINT64' `
+                    'uint64' '42'
+            }
+            default { '' }
+        }
+        $strictRows.Add(
+            "<item><filterKey>$($keys[$index])</filterKey>" +
+            "<displayData><name>$($names[$index])</name></displayData>" +
+            "<subLayerKey>{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}</subLayerKey>" +
+            "<filterId>$($index + 100)</filterId><filterCondition>$condition</filterCondition></item>"
+        )
+    }
+    $ingressConditions = @(
+        (New-ConditionXml 'FWPM_CONDITION_ALE_APP_ID' 'FWP_BYTE_BLOB_TYPE' `
+            'byteBlob' $appBlobXml),
+        (New-ConditionXml 'FWPM_CONDITION_IP_LOCAL_INTERFACE' 'FWP_UINT64' 'uint64' '42'),
+        (New-ConditionXml 'FWPM_CONDITION_IP_PROTOCOL' 'FWP_UINT8' 'uint8' '6'),
+        (New-ConditionXml 'FWPM_CONDITION_IP_LOCAL_ADDRESS' 'FWP_UINT32' `
+            'uint32' '198.18.1.2'),
+        (New-ConditionXml 'FWPM_CONDITION_IP_LOCAL_PORT' 'FWP_UINT16' 'uint16' '45000'),
+        (New-ConditionXml 'FWPM_CONDITION_IP_REMOTE_ADDRESS' 'FWP_UINT32' `
+            'uint32' '198.18.1.1')
+    ) -join ''
+    $text = '<ferrum2WfpState><items>' + ($strictRows -join '') +
+        '<item><displayData><name>Ferrum2 strict route</name></displayData>' +
+        '<subLayerKey>{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}</subLayerKey>' +
+        '<weight>32767</weight></item>' +
+        '<item><displayData><name>Ferrum2 strict route dynamic session</name></displayData>' +
+        '<sessionKey>{8ea35b4e-6629-4e26-9776-95c5bf9c6b01}</sessionKey>' +
+        '<processId>321</processId><flags numItems="1"><item>FWPM_SESSION_FLAG_DYNAMIC</item></flags></item>' +
+        '<item><displayData><name>Ferrum2 TCP ingress</name></displayData>' +
+        '<subLayerKey>{5e741969-f578-43bd-a1e2-a420c49a7f01}</subLayerKey>' +
+        '<weight>32766</weight></item>' +
+        '<item><displayData><name>Ferrum2 TCP ingress dynamic session</name></displayData>' +
+        '<sessionKey>{41b9d0c7-65ac-49a7-8d97-bf8ad5abbe01}</sessionKey>' +
+        '<processId>321</processId><flags numItems="1"><item>FWPM_SESSION_FLAG_DYNAMIC</item></flags></item>' +
+        '<item><filterKey>{a158b31d-7a59-40bc-9339-38b5e8701010}</filterKey>' +
+        '<displayData><name>Ferrum2 TCP ingress IPv4</name></displayData>' +
+        '<layerKey>FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4</layerKey>' +
+        '<subLayerKey>{5e741969-f578-43bd-a1e2-a420c49a7f01}</subLayerKey>' +
+        '<weight><type>FWP_UINT8</type><uint8>15</uint8></weight>' +
+        '<effectiveWeight><type>FWP_UINT64</type><uint64>983040</uint64></effectiveWeight>' +
+        '<filterId>200</filterId><providerKey/><providerData/>' +
+        '<flags numItems="2"><item>FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT</item>' +
+        '<item>FWPM_FILTER_FLAG_INDEXED</item></flags>' +
+        '<action><type>FWP_ACTION_PERMIT</type><filterType/></action>' +
+        '<reserved/><rawContext>0</rawContext>' +
+        "<filterCondition numItems=`"6`">$ingressConditions</filterCondition></item></items></ferrum2WfpState>"
+    $runtime = [pscustomobject]@{ client = [pscustomobject]@{ pid = 321 } }
+    $network = [pscustomobject]@{ tun_address = '198.18.1.2'; tun_prefix_length = 30 }
+    $listener = [pscustomobject]@{
+        address_family = 'IPv4'; local_address = '198.18.1.2'; local_port = 45000
+        process_id = 321; wildcard_listener_count = 0
+    }
+    [xml]$document = $text
+    $strict = Get-Ferrum2QualificationStrictRouteWfpWitness `
+        -Document $document -Runtime $runtime
+    $ingress = Get-Ferrum2QualificationTcpIngressWfpWitness `
+        -Document $document -Runtime $runtime -Network $network `
+        -StrictRoute $strict -Listener $listener -ExecutablePath $applicationPath
+    $after = $ingress | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    $after.filter.key = 'a158b31d-7a59-40bc-9339-38b5e8701011'
+    $after.filter.id = '201'
+    $after.listener.local_port = 45001
+    $epoch = Compare-Ferrum2QualificationTcpIngressEpoch -Before $ingress -After $after
+    $unchangedRejected = $false
+    try {
+        [void](Compare-Ferrum2QualificationTcpIngressEpoch -Before $ingress -After $ingress)
+    } catch { $unchangedRejected = $true }
+    function Test-IngressXmlRejected([string]$Candidate) {
+        try {
+            [xml]$candidateDocument = $Candidate
+            $candidateStrict = Get-Ferrum2QualificationStrictRouteWfpWitness `
+                -Document $candidateDocument -Runtime $runtime
+            [void](Get-Ferrum2QualificationTcpIngressWfpWitness `
+                -Document $candidateDocument -Runtime $runtime -Network $network `
+                -StrictRoute $candidateStrict -Listener $listener `
+                -ExecutablePath $applicationPath)
+            return $false
+        } catch { return $true }
+    }
+    [xml]$empty = '<ferrum2WfpState><items/></ferrum2WfpState>'
+    $absent = Assert-Ferrum2QualificationWfpDocumentAbsent -Document $empty -Label 'offline'
+    $residueRejected = $false
+    try {
+        [void](Assert-Ferrum2QualificationWfpDocumentAbsent -Document $document -Label 'offline')
+    } catch { $residueRejected = $true }
+    return [pscustomobject]@{
+        action = $ingress.filter.action
+        layer = $ingress.filter.layer
+        conditions = @($ingress.filter.conditions).Count
+        old_absent = $epoch.old_filter_absent_after_reset
+        unchanged_rejected = $unchangedRejected
+        missing_hard_permit_rejected = Test-IngressXmlRejected (
+            $text.Replace('FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT',
+                'FWPM_FILTER_FLAG_PERMIT_IF_CALLOUT_UNREGISTERED')
+        )
+        wrong_peer_rejected = Test-IngressXmlRejected (
+            $text.Replace('<uint32>198.18.1.1</uint32>', '<uint32>198.18.1.9</uint32>')
+        )
+        widened_filter_rejected = Test-IngressXmlRejected (
+            [regex]::Replace(
+                $text,
+                '<item><fieldKey>FWPM_CONDITION_IP_REMOTE_ADDRESS</fieldKey>.*?</item>',
+                ''
+            )
+        )
+        application_mismatch_rejected = Test-IngressXmlRejected (
+            $text.Replace($appBlob, $wrongAppBlob)
+        )
+        wrong_volume_rejected = Test-IngressXmlRejected (
+            $text.Replace($appBlob, $wrongVolumeBlob)
+        )
+        absence = $absent.tcp_ingress_objects
+        residue_rejected = $residueRejected
+    }
+    } finally {
+        Remove-Item -LiteralPath $applicationPath -Force -ErrorAction SilentlyContinue
+    }
+}
+Assert-True (
+    $tcpIngressOffline.action -ceq 'FWP_ACTION_PERMIT' -and
+    $tcpIngressOffline.layer -ceq 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4' -and
+    $tcpIngressOffline.conditions -eq 6 -and
+    $tcpIngressOffline.old_absent -eq $true -and
+    $tcpIngressOffline.unchanged_rejected -eq $true -and
+    $tcpIngressOffline.missing_hard_permit_rejected -eq $true -and
+    $tcpIngressOffline.wrong_peer_rejected -eq $true -and
+    $tcpIngressOffline.widened_filter_rejected -eq $true -and
+    $tcpIngressOffline.application_mismatch_rejected -eq $true -and
+    $tcpIngressOffline.wrong_volume_rejected -eq $true -and
+    $tcpIngressOffline.absence -eq 0 -and
+    $tcpIngressOffline.residue_rejected -eq $true
+) 'TCP ingress WFP identity, isolation, epoch, or rollback contract changed'
 
 
 $candidateSha = (& git -C $repositoryRoot rev-parse HEAD).Trim()
@@ -52,11 +255,27 @@ Assert-True ($plan.kind -ceq 'ferrum2.windows-tun.host-qualification-plan' -and
     [int]$plan.maximum_elapsed_seconds -eq 900 -and
     [int]$plan.worker_timeout_seconds -eq 840 -and
     [int]$plan.build_timeout_seconds -eq 600 -and
-    @($plan.checks).Count -eq 8 -and
+    (@($plan.checks) -join '|') -ceq (
+        'single-candidate-build|wintun-create-and-delete|' +
+        'system-tcp-and-udp-through-owned-tun|narrow-route-isolation|' +
+        'exact-tcp-ingress-wfp-live-readback|' +
+        'network-reset-retains-strict-route-and-replaces-tcp-ingress-epoch|' +
+        'forced-process-tree-recovery|zero-residue-cleanup'
+    ) -and
     $plan.safety.requires_elevation -eq $true -and
     $plan.safety.requires_explicit_acknowledgement -eq $true -and
     $plan.safety.automatic_elevation -eq $false -and
-    $plan.safety.route_scope -ceq 'run-owned /32 only') `
+    $plan.safety.live_address_family -ceq 'IPv4 only (RFC2544 198.18.0.0/15)' -and
+    $plan.safety.route_scope -ceq 'run-owned /32 only' -and
+    $plan.safety.tcp_ingress_scope -ceq
+        'exact app, TCP, TUN LUID, local address/port, and remote peer' -and
+    $plan.safety.wfp_lifetime -ceq 'process-owned dynamic sessions only' -and
+    $plan.safety.tcp_ingress_installation -ceq
+        'automatic after listener bind and before admission' -and
+    @($plan.safety.mutations) -contains
+        'process-owned dynamic exact TCP ingress WFP session' -and
+    @($plan.safety.forbidden_mutations) -contains 'persistent Windows Firewall rules' -and
+    @($plan.safety.forbidden_mutations) -contains 'unrelated WFP sessions') `
     'host qualification plan contract changed'
 
 $missingAckEvidence = Join-Path ([IO.Path]::GetTempPath()) (

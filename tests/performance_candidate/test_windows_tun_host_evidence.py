@@ -111,20 +111,27 @@ def plan_for(mode: str, topology: str = "EndToEnd") -> dict[str, object]:
             "requires_elevation": True,
             "requires_explicit_acknowledgement": True,
             "automatic_elevation": False,
-            "address_family": "RFC2544 198.18.0.0/15",
+            "live_address_family": "IPv4 only (RFC2544 198.18.0.0/15)",
             "route_scope": "run-owned /32 only",
+            "tcp_ingress_scope": (
+                "exact app, TCP, TUN LUID, local address/port, and remote peer"
+            ),
+            "tcp_ingress_installation": (
+                "automatic after listener bind and before admission"
+            ),
             "mutations": [
                 "one run-owned Wintun adapter",
                 "run-owned RFC2544 loopback support address",
                 "run-owned narrow routes",
+                "process-owned dynamic exact TCP ingress WFP session",
             ],
             "forbidden_mutations": [
                 "default route",
                 "system DNS",
                 "physical adapters",
                 "WLAN",
-                "firewall",
-                "WFP",
+                "persistent Windows Firewall rules",
+                "unrelated WFP sessions",
                 "sing-box",
             ],
             "cleanup": "exact RunId ledger identities in try/finally",

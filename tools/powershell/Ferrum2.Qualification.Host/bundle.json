@@ -10,8 +10,8 @@
     },
     {
       "path": "tests/platform/run_windows_tun_qualification_host.ps1",
-      "bytes": 10106,
-      "sha256": "c4dea94b74f10349105fc2648fee86fc669d73224c54ea80fe5d41b5264ca03c"
+      "bytes": 14238,
+      "sha256": "575467cca1a2b5cef7da1e2731c27816023d43288d653ba7c741845aef30f50e"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostCleanup.ps1",
@@ -20,8 +20,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostExecution.ps1",
-      "bytes": 33963,
-      "sha256": "5e28c17b7f2a25a0566e2d8331955958738e117eaf6017dadaf964a390711cc7"
+      "bytes": 33937,
+      "sha256": "cd92e057cc0ed92d05dbbfb06052e3516d62d79662f379e4bf0e0ab25d12b501"
     },
     {
       "path": "tools/powershell/Ferrum2.Performance/HostOwnership.ps1",
@@ -45,28 +45,33 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psm1",
-      "bytes": 1128,
-      "sha256": "8c2a2e125e9a2fac2edf2d8d8f53cc133383e5c48deb6818099eb0f2768b6c55"
+      "bytes": 1177,
+      "sha256": "4396ee3aa6ea61e462ea359a4ee14a954a1736a5d4a638f76e2a3144f99c8bf6"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostQualification.ps1",
-      "bytes": 32097,
-      "sha256": "ccb90f72499585c5b00200752287f8a818e797235416decd503c791e7fac4491"
+      "bytes": 27999,
+      "sha256": "c3704e1632c4219e2e7548875251c4f645389c9338430781c254a3f0de7081dd"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/QualificationRouteNotification.cs",
-      "bytes": 2867,
-      "sha256": "d93e18cae098d20e51d29540efc0bf1e51cc732410699eefa404b2028aff91b1"
+      "bytes": 5243,
+      "sha256": "976ec7064215084d0fd6249d5ca75bc88497609b2f0e068ee416642f6a5bdb10"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/SourceBundle.ps1",
-      "bytes": 3980,
-      "sha256": "f45c1e4fde4aab9878e3219e249e1dcf8bee5da88066d90a5882adcc8140fe1e"
+      "bytes": 4050,
+      "sha256": "d54192a3102e3ca607bcc037b7cac8b581b39df4eaa1680c7322d8af85161122"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/SupervisorEvidence.ps1",
       "bytes": 5763,
       "sha256": "fbec737a972134490702688feeaebec9482874830624680df633dad3a0e92007"
+    },
+    {
+      "path": "tools/powershell/Ferrum2.Qualification.Host/WfpEvidence.ps1",
+      "bytes": 29376,
+      "sha256": "7b694ba0b9bd818ce2081cf36ba748e89f3d3ffbba7688003320060dad11c14d"
     }
   ]
 }

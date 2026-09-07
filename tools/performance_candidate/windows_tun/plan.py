@@ -97,8 +97,10 @@ def _exact_safety(plan: dict[str, object]) -> None:
                 "requires_elevation",
                 "requires_explicit_acknowledgement",
                 "automatic_elevation",
-                "address_family",
+                "live_address_family",
                 "route_scope",
+                "tcp_ingress_scope",
+                "tcp_ingress_installation",
                 "mutations",
                 "forbidden_mutations",
                 "cleanup",
@@ -111,14 +113,20 @@ def _exact_safety(plan: dict[str, object]) -> None:
         safety["requires_elevation"] is not True
         or safety["requires_explicit_acknowledgement"] is not True
         or safety["automatic_elevation"] is not False
-        or safety["address_family"] != "RFC2544 198.18.0.0/15"
+        or safety["live_address_family"]
+        != "IPv4 only (RFC2544 198.18.0.0/15)"
         or safety["route_scope"] != "run-owned /32 only"
+        or safety["tcp_ingress_scope"]
+        != "exact app, TCP, TUN LUID, local address/port, and remote peer"
+        or safety["tcp_ingress_installation"]
+        != "automatic after listener bind and before admission"
     ):
         raise CandidateControlError("Windows TUN plan weakened the host authorization contract")
     if safety["mutations"] != [
         "one run-owned Wintun adapter",
         "run-owned RFC2544 loopback support address",
         "run-owned narrow routes",
+        "process-owned dynamic exact TCP ingress WFP session",
     ]:
         raise CandidateControlError("Windows TUN plan mutation closure changed")
     if safety["forbidden_mutations"] != [
@@ -126,8 +134,8 @@ def _exact_safety(plan: dict[str, object]) -> None:
         "system DNS",
         "physical adapters",
         "WLAN",
-        "firewall",
-        "WFP",
+        "persistent Windows Firewall rules",
+        "unrelated WFP sessions",
         "sing-box",
     ]:
         raise CandidateControlError("Windows TUN plan forbidden mutation closure changed")

@@ -159,10 +159,20 @@ function New-Ferrum2HostPerformancePlan {
             requires_elevation = $true
             requires_explicit_acknowledgement = $true
             automatic_elevation = $false
-            address_family = "RFC2544 198.18.0.0/15"
+            live_address_family = "IPv4 only (RFC2544 198.18.0.0/15)"
             route_scope = "run-owned /32 only"
-            mutations = @("one run-owned Wintun adapter", "run-owned RFC2544 loopback support address", "run-owned narrow routes")
-            forbidden_mutations = @("default route", "system DNS", "physical adapters", "WLAN", "firewall", "WFP", "sing-box")
+            tcp_ingress_scope = "exact app, TCP, TUN LUID, local address/port, and remote peer"
+            tcp_ingress_installation = "automatic after listener bind and before admission"
+            mutations = @(
+                "one run-owned Wintun adapter",
+                "run-owned RFC2544 loopback support address",
+                "run-owned narrow routes",
+                "process-owned dynamic exact TCP ingress WFP session"
+            )
+            forbidden_mutations = @(
+                "default route", "system DNS", "physical adapters", "WLAN",
+                "persistent Windows Firewall rules", "unrelated WFP sessions", "sing-box"
+            )
             cleanup = "exact RunId ledger identities in try/finally"
             recovery = "%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json"
         }
