@@ -30,6 +30,7 @@ def binary_spec(role: str) -> contract.BinarySpec:
 
 def startup_bind_stderr(root: tuple[str, int]) -> bytes:
     counters = {name: 0 for name in contract.OWNER_COUNTER_FIELDS}
+    counters.update(network_socket_monitors=0, network_snapshot_captures=0)
     report = {
         "actual_grace_deadline_elapsed_ns": None,
         "actual_grace_deadline_source": None,
@@ -53,7 +54,7 @@ def startup_bind_stderr(root: tuple[str, int]) -> bytes:
         "termination_cause": "PreparationFailed",
     }
     document = json.dumps(report, separators=(",", ":")).encode()
-    return document + b"\n" + contract.STARTUP_BIND_STDERR
+    return document + b"\n" + contract.CLIENT_STARTUP_BIND_STDERR
 
 
 class InvalidConfigContractTests(unittest.TestCase):
@@ -109,6 +110,45 @@ class NativeClientRootContractTests(unittest.TestCase):
             contract.assert_startup_bind_stderr(
                 spec, startup_bind_stderr(("socks", -1)), "socks", 1_000_000_000
             )
+
+
+class NativeOwnerAndServerDiagnosticTests(unittest.TestCase):
+    def test_native_work_cannot_remain_after_startup_rollback(self) -> None:
+        for field in ("network_socket_monitors", "network_snapshot_captures"):
+            with self.subTest(field=field):
+                report_line, diagnostic = startup_bind_stderr(("socks", 2)).splitlines()
+                report = json.loads(report_line)
+                report["owner_stopped"][field] = 1
+                report["owner_delta"][field] = 1
+                stderr = json.dumps(report).encode() + b"\n" + diagnostic + b"\n"
+                with self.assertRaisesRegex(
+                    contract.QualificationError, "startup-bind-report-owner-leak"
+                ):
+                    contract.assert_startup_bind_stderr(
+                        binary_spec("client"), stderr, "socks", 1_000_000_000
+                    )
+
+    def test_server_bind_diagnostic_requires_exact_endpoint_and_complete_cleanup(self) -> None:
+        for root in ("tcp_inbound[0]", "tcp_inbound[1]", "metrics"):
+            with self.subTest(root=root):
+                stderr = (
+                    f"error[startup.bind] process: root={root} phase=prepare "
+                    "cause=startup.bind acquisition=bind io_kind=address_in_use cleanup=complete\n"
+                ).encode()
+                contract.assert_startup_bind_stderr(
+                    binary_spec("server"), stderr, root, 1_000_000_000
+                )
+                for changed in (
+                    stderr.replace(root.encode(), b"dns"),
+                    stderr.replace(b"cleanup=complete", b"cleanup=failed"),
+                    stderr.replace(b"io_kind=address_in_use", b"io_kind=other"),
+                ):
+                    with self.assertRaisesRegex(
+                        contract.QualificationError, "startup-bind-stderr"
+                    ):
+                        contract.assert_startup_bind_stderr(
+                            binary_spec("server"), changed, root, 1_000_000_000
+                        )
 
 
 @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")

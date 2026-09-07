@@ -27,7 +27,7 @@ CLIENT_INVALID_STDERR = (
 SERVER_INVALID_STDERR = (
     b"error[config.semantic] shadowsocks.psk: configuration value is invalid\n"
 )
-STARTUP_BIND_STDERR = (
+CLIENT_STARTUP_BIND_STDERR = (
     b"error[startup.bind] process: unable to prepare required endpoint\n"
 )
 STARTUP_BIND_REPORT_FIELDS = frozenset(
@@ -78,6 +78,8 @@ OWNER_COUNTER_FIELDS = frozenset(
         "network_reset_hooks",
         "network_runtime_owners",
         "network_reset_drivers",
+        "network_socket_monitors",
+        "network_snapshot_captures",
     }
 )
 ACTIVE_OWNER_COUNTER_FIELDS = frozenset(
@@ -102,6 +104,8 @@ ACTIVE_OWNER_COUNTER_FIELDS = frozenset(
         "network_reset_hooks",
         "network_runtime_owners",
         "network_reset_drivers",
+        "network_socket_monitors",
+        "network_snapshot_captures",
     }
 )
 
@@ -248,21 +252,25 @@ def assert_client_startup_bind_report(
 def assert_startup_bind_stderr(
     spec: BinarySpec,
     stderr: bytes,
-    expected_client_root: str,
+    expected_root: str,
     expected_shutdown_grace_ns: int,
 ) -> None:
     if spec.role == "server":
-        require(stderr == STARTUP_BIND_STDERR, "startup-bind-stderr")
+        expected = (
+            f"error[startup.bind] process: root={expected_root} phase=prepare "
+            "cause=startup.bind acquisition=bind io_kind=address_in_use cleanup=complete\n"
+        ).encode()
+        require(stderr == expected, "startup-bind-stderr")
         return
     lines = stderr.splitlines(keepends=True)
     require(
         len(lines) == 2
         and lines[0].endswith(b"\n")
-        and lines[1] == STARTUP_BIND_STDERR,
+        and lines[1] == CLIENT_STARTUP_BIND_STDERR,
         "client-startup-bind-stderr",
     )
     assert_client_startup_bind_report(
-        lines[0][:-1], expected_client_root, expected_shutdown_grace_ns
+        lines[0][:-1], expected_root, expected_shutdown_grace_ns
     )
 
 
@@ -621,7 +629,11 @@ def assert_startup_rollback(spec: BinarySpec, directory: Path) -> None:
             and result.stdout == b"",
             "occupied-listen-startup-rollback",
         )
-        assert_startup_bind_stderr(spec, result.stderr, "socks", 1_000_000_000)
+        assert_startup_bind_stderr(
+            spec, result.stderr,
+            "socks" if spec.role == "client" else "tcp_inbound[0]",
+            1_000_000_000,
+        )
         probes.append(tcp_listener(metrics))
         if spec.role == "server":
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -688,7 +700,11 @@ def assert_tagged_startup_rollback_once(spec: BinarySpec, directory: Path) -> No
             and result.stdout == b"",
             "tagged-second-listener-rollback",
         )
-        assert_startup_bind_stderr(spec, result.stderr, "socks", 30_000_000_000)
+        assert_startup_bind_stderr(
+            spec, result.stderr,
+            "socks" if spec.role == "client" else "tcp_inbound[1]",
+            30_000_000_000,
+        )
         assert_no_connections(server_traps)
         assert_tagged_rebindable(spec, (listens[0],))
     finally:

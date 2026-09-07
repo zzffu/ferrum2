@@ -75,13 +75,14 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M4h / net具名状态 | 接口观测构造显式Operational/Unavailable与Connected/Disconnected；RouteNetworkOptions显式AutomaticInterfaceSelection；两个binary配置桥、平台采集及所有仓内调用同步迁移，无bool构造别名 | net/runtime完整包、platform safe69、五包strictlint及client compile-only通过；原priority/family/cache/availability行为测试保留，无纯常量测试。源迁移脚本第一次遇到Windows默认GBK读取错误，改显式UTF-8后完成；无功能或性能变化声明 |
 | M4i / C7 | 两端completed interface observation统一记录指标与Debug诊断；cache显式Hit/Miss/Unobserved；轻量reset仅终态发出实际published generation，删除未观测关联数字参数；TUN packet事件不读取generation锁 | observability26、server60、client compile-only、三包strictlint/fmt通过，m0 TCP/UDP10通过/1旧ignore；真实Windows loopback4场景覆盖默认Info抑制、两端成功及各自接口选择失败，8个子进程全reap，拒绝路径未到目标。该probe使用强制退出，不是优雅关闭证据；reset注入日志仅契约/compile覆盖，默认与Debug性能尚未测量 |
+| M7 / 最终普通门禁与native caller | 产品源码15ff7e87冻结；平台native契约同步新增monitor/capture owner计数和C6服务端端点诊断，保持精确字段、零active owner、精确回滚/位置检查 | 22项根门禁全通过：workspace768/5旧ignore、TUN138/platform69、compile-only、GNU check、DNS interop、strictlint/fmt/doc/M4有限filters；Python134/66/80/7及PS通过。WSL两端check、server/net/obs99通过。native首次因旧owner字段失败，新增红测后同步caller，Python9及真实Windows release local-contract重跑PASS；原失败保留 |
 
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门禁17项全部通过（含doc及3个M4有限filter）。
 
 所选架构实施批次已完成，最后的C7网络诊断接线已通过受影响包验证。
-下一步冻结源码运行最终整合门禁、native contract及架构前后性能验收。D6实际Windows资格已通过（见上表），不代替最终源码的性能验收；当前尚不能声称性能无回退。
+最终普通门禁与native contract已通过，下一步执行最终源码的host correctness及架构前后性能验收。D6实际Windows资格已通过（见上表），不代替最终源码的性能验收；当前尚不能声称性能无回退。
 后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
 归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。
 

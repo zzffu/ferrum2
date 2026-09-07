@@ -1331,3 +1331,30 @@ manifest SHA-256: `937e11f40e9717b5f437d02666bb3ca20973284694b51d510e1be9c96cecd
 The dedicated acknowledged runner returned QUALIFIED, all eight checks passed, 102.6889579s
 supervisor duration, independent final adapter/routes/addresses/processes/ports counts all zero.
 This earlier source qualification does not prove the final candidate's performance.
+
+
+### M7 — final ordinary gates and native contract caller migration
+
+Product source frozen at `15ff7e87e59c9d4f4047cd180886a33064650ce7`: all22 root gate
+commands exited0, exact commands/durations in `target/remediation-audit/m7-final-gates.json`,
+logs `m7-final-gate-{1..22}.log`. Workspace768 passed/5 existing ignores; TUN safe138,
+platform safe69; Windows compile-only constraints retained; full strict clippy/fmt/docs, GNU
+TUN target check, DNS interop and three finite M4 filters passed. Python candidate134/rule66/
+CI80/platform7 and PowerShell nonmutating contract passed. Negative controller fixture output
+contains expected FAIL/CALIBRATION_REQUIRED text; the owning unittest suites themselves passed.
+WSL Debian: both production binaries all-features check and server/net/observability99 tests
+passed with locked offline dependencies and the separate GNU target directory (`m7-final-wsl.log`).
+
+Native target-specific release build passed (23.48s), but the actual local contract first failed
+`startup-bind-report-owner-fields`: Python had not migrated the client report's new
+network_socket_monitors/network_snapshot_captures fields. Review also found the stale server
+flat bind diagnostic expectation. This was an omitted in-repository caller migration, not grounds
+to remove exact field validation. Updated both total and active field sets, checked server endpoint
+role/index, prepare/bind/address_in_use and complete cleanup exactly, including the second tagged
+inbound. Renamed the client-only diagnostic constant instead of retaining a compatibility alias.
+New tests reject nonzero native work and wrong endpoint/IO/cleanup context. Red Python9 suite had
+2 failures/4 errors before the migration; green9 and actual Windows native local-contract passed.
+Logs `m7-native-contract.log` (original failure), `m7-native-contract-red.log`,
+`m7-native-contract-python-green.log`, `m7-native-contract-green.log`; no failed test was skipped.
+Only Python platform caller/test and evidence documentation changed after the frozen Rust gates;
+product source is identical. No Qualification tool cleanup scope was reopened.
