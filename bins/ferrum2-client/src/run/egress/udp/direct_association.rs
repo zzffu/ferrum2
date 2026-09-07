@@ -54,13 +54,17 @@ impl DirectAssociation {
             )),
         }
     }
-    pub(super) fn encode(&mut self, datagram: &Datagram) -> Result<usize, UdpPacketError> {
+    pub(super) fn encode(
+        &mut self,
+        target: &TargetAddr,
+        payload: &[u8],
+    ) -> Result<usize, UdpPacketError> {
         let DirectBufferState::Available(wire) = &mut self.buffer else {
             return Err(UdpPacketError::StateUnavailable);
         };
         wire.clear();
-        wire.extend_from_slice(datagram.payload());
-        self.request_target = Some(datagram.target().clone());
+        wire.extend_from_slice(payload);
+        self.request_target = Some(target.clone());
         Ok(wire.len())
     }
     pub(super) async fn send(&mut self, wire_len: usize) -> io::Result<usize> {

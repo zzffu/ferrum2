@@ -14,8 +14,7 @@ use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_core::{Datagram, TargetAddr, TargetHostRef};
 use ferrum2_crypto::{Clock, SecureRandom, UdpSessionId};
 use ferrum2_runtime::{
-    AccountedDatagram, MAX_UDP_WIRE_DATAGRAM_BYTES, PendingUdpDatagram, UdpRuntimeError,
-    UdpSessionManager,
+    AccountedDatagram, MAX_UDP_WIRE_DATAGRAM_BYTES, UdpRuntimeError, UdpSessionManager,
 };
 use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpPacketDirection, UdpPacketError};
 use std::collections::HashSet;
@@ -66,15 +65,16 @@ impl ClientUdpAssociation {
     pub(in crate::run) fn idle_expired(&self, observed: Instant) -> bool {
         Instant::now() >= self.idle_deadline().unwrap_or(observed)
     }
-    pub(in crate::run) fn encode_request<C, T: Clock, R: SecureRandom>(
+    fn encode_request<C, T: Clock, R: SecureRandom>(
         &mut self,
         engine: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
-        datagram: &Datagram,
+        target: &TargetAddr,
+        payload: &[u8],
     ) -> Result<usize, UdpPacketError> {
         match &mut self.path {
-            UdpPath::Direct(direct) => direct.encode(datagram),
-            UdpPath::Proxy(proxy) => proxy.encode_request(engine, outbounds, datagram),
+            UdpPath::Direct(direct) => direct.encode(target, payload),
+            UdpPath::Proxy(proxy) => proxy.encode_request(engine, outbounds, target, payload),
         }
     }
     pub(in crate::run) fn accept_response<C, T: Clock, R>(
@@ -89,20 +89,6 @@ impl ClientUdpAssociation {
                 proxy.accept_response(engine, outbounds, wire_len, &self.lease)
             }
         }
-    }
-    pub(in crate::run) fn reserve_application_datagram(
-        &self,
-        allocated_capacity: usize,
-    ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-        self.lease.reserve_request(allocated_capacity)
-    }
-    pub(in crate::run) fn commit_application_datagram(
-        &mut self,
-        reservation: PendingUdpDatagram,
-        datagram: Datagram,
-        now: Instant,
-    ) -> Result<AccountedDatagram, UdpRuntimeError> {
-        self.lease.commit(reservation, datagram, now)
     }
     fn plan(&self) -> Option<&EgressPlanSnapshot> {
         match &self.path {
@@ -126,6 +112,18 @@ impl ClientUdpAssociation {
             ),
         }
     }
+    fn request_payload_limit(
+        &self,
+        outbounds: &[ClientOutboundContext],
+        target: &TargetAddr,
+    ) -> usize {
+        let encoded_target_len = match target.host() {
+            TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
+            TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
+            TargetHostRef::Domain(name) => 3 + name.len(),
+        };
+        self.payload_limit(outbounds, UdpPacketDirection::Request, encoded_target_len)
+    }
     pub(in crate::run) fn prepare_application_request<C, T: Clock, R: SecureRandom>(
         &mut self,
         engine: &ClientEgressEngine<C, T, R>,
@@ -134,13 +132,22 @@ impl ClientUdpAssociation {
         payload: &[u8],
         now: Instant,
     ) -> Result<usize, UdpPlanResponseError> {
-        self.prepare_owned_application_request(
-            engine,
-            outbounds,
-            target,
-            BytesMut::from(payload),
-            now,
-        )
+        if payload.len() > self.request_payload_limit(outbounds, &target) {
+            return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
+        }
+        let reservation = self
+            .lease
+            .reserve_request(payload.len())
+            .map_err(UdpPlanResponseError::Runtime)?;
+        // Encode before accepted-state/activity commit. A rejected packet never refreshes
+        // the session; an encoding failure consumes its nonce lineage without rollback.
+        let wire_len = self
+            .encode_request(engine, outbounds, &target, payload)
+            .map_err(UdpPlanResponseError::Packet)?;
+        self.lease
+            .commit_activity(reservation, now)
+            .map_err(UdpPlanResponseError::Runtime)?;
+        Ok(wire_len)
     }
     pub(in crate::run) fn prepare_owned_application_request<C, T: Clock, R: SecureRandom>(
         &mut self,
@@ -150,18 +157,12 @@ impl ClientUdpAssociation {
         payload: BytesMut,
         now: Instant,
     ) -> Result<usize, UdpPlanResponseError> {
-        let encoded_target_len = match target.host() {
-            TargetHostRef::Ip(std::net::IpAddr::V4(_)) => 7,
-            TargetHostRef::Ip(std::net::IpAddr::V6(_)) => 19,
-            TargetHostRef::Domain(name) => 3 + name.len(),
-        };
-        if payload.len()
-            > self.payload_limit(outbounds, UdpPacketDirection::Request, encoded_target_len)
-        {
+        if payload.len() > self.request_payload_limit(outbounds, &target) {
             return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
         }
         let reservation = self
-            .reserve_application_datagram(payload.capacity())
+            .lease
+            .reserve_request(payload.capacity())
             .map_err(UdpPlanResponseError::Runtime)?;
         let payload_len = payload.len();
         let datagram = Datagram::new(target, payload, payload_len)
@@ -169,9 +170,10 @@ impl ClientUdpAssociation {
         // Encode before accepted-state/activity commit. A rejected packet never refreshes
         // the session; an encoding failure consumes its nonce lineage without rollback.
         let wire_len = self
-            .encode_request(engine, outbounds, &datagram)
+            .encode_request(engine, outbounds, datagram.target(), datagram.payload())
             .map_err(UdpPlanResponseError::Packet)?;
-        self.commit_application_datagram(reservation, datagram, now)
+        self.lease
+            .commit(reservation, datagram, now)
             .map_err(UdpPlanResponseError::Runtime)?;
         Ok(wire_len)
     }

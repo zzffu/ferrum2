@@ -92,6 +92,24 @@ impl UdpAssociationLease {
             }
         }
     }
+    pub(super) fn commit_activity(
+        &mut self,
+        reservation: PendingUdpDatagram,
+        now: Instant,
+    ) -> Result<(), UdpRuntimeError> {
+        if matches!(self.session, SessionLease::Active(_)) {
+            return reservation.commit_activity(now);
+        }
+        match std::mem::replace(&mut self.session, SessionLease::Closed) {
+            SessionLease::Pending(session) => {
+                let handle = session.commit_activity(reservation, now)?;
+                self.session = SessionLease::Active(handle);
+                Ok(())
+            }
+            SessionLease::Closed => Err(UdpRuntimeError::Cancelled),
+            SessionLease::Active(_) => unreachable!("active lease handled before transition"),
+        }
+    }
     pub(super) fn commit(
         &mut self,
         reservation: PendingUdpDatagram,

@@ -5,8 +5,8 @@ use super::socket::ClientProxyUdpSocket;
 use crate::run::egress::context::ClientOutboundContext;
 use crate::run::egress::engine::ClientEgressEngine;
 use bytes::BytesMut;
+use ferrum2_core::TargetAddr;
 use ferrum2_core::route::EgressPlanSnapshot;
-use ferrum2_core::{Datagram, TargetAddr};
 use ferrum2_crypto::{Clock, SecureRandom, UdpSessionId};
 use ferrum2_runtime::AccountedDatagram;
 use ferrum2_shadowsocks::{UdpClientSession, UdpPacketError, UdpPacketScratch};
@@ -85,7 +85,8 @@ impl ProxyAssociation {
         &mut self,
         egress: &ClientEgressEngine<C, T, R>,
         outbounds: &[ClientOutboundContext],
-        datagram: &Datagram,
+        request_target: &TargetAddr,
+        payload: &[u8],
     ) -> Result<usize, UdpPacketError>
     where
         T: Clock,
@@ -111,7 +112,7 @@ impl ProxyAssociation {
         for layer in (0..hops.len()).rev() {
             let intermediate;
             let target = if layer + 1 == hops.len() {
-                datagram.target()
+                request_target
             } else {
                 intermediate = TargetAddr::ip(
                     outbounds
@@ -129,7 +130,7 @@ impl ProxyAssociation {
                     &egress.clock,
                     &egress.random,
                     target,
-                    datagram.payload(),
+                    payload,
                     upstream_wire,
                     scratch,
                 )?

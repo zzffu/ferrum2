@@ -471,7 +471,7 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         .prepare_application_request(
             &engine,
             &engine.outbounds,
-            target,
+            target.clone(),
             b"raw-udp",
             Instant::now(),
         )
@@ -489,6 +489,26 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
         .receive_response_wire()
         .await
         .expect("direct receive");
+    let activity_before_rejected_encode = association.idle_deadline().expect("idle deadline");
+    assert!(matches!(
+        association.prepare_application_request(
+            &engine,
+            &engine.outbounds,
+            target,
+            b"rejected-while-response-is-borrowed",
+            activity_before_rejected_encode + ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT,
+        ),
+        Err(UdpPlanResponseError::Packet(
+            UdpPacketError::StateUnavailable
+        ))
+    ));
+    assert_eq!(
+        association
+            .idle_deadline()
+            .expect("unchanged idle deadline"),
+        activity_before_rejected_encode
+    );
+    assert_eq!(registry.snapshot(), provisional);
     let response = association
         .prepare_application_response(&engine, &engine.outbounds, response_len)
         .unwrap_or_else(|_| panic!("direct response"));

@@ -108,6 +108,26 @@ impl PendingUdpSession {
             false,
         )
     }
+    /// Activates this generation after a borrowed first datagram was encoded.
+    ///
+    /// This atomically rechecks the generation, commits accepted activity, and
+    /// consumes the reserved queue slot and byte capacity without retaining an
+    /// owned datagram. Protocol nonce lineage consumed before this call is not
+    /// rolled back if the generation recheck fails.
+    pub fn commit_activity(
+        mut self,
+        datagram_reservation: PendingUdpDatagram,
+        now: Instant,
+    ) -> Result<UdpSessionHandle, UdpRuntimeError> {
+        if datagram_reservation.handle != self.handle
+            || datagram_reservation.manager.as_ptr() != Arc::as_ptr(&self.manager)
+        {
+            return Err(UdpRuntimeError::Cancelled);
+        }
+        datagram_reservation.commit_activity_inner(now, true)?;
+        self.committed = true;
+        Ok(self.handle)
+    }
 
     /// Activates this generation and enqueues its first post-validation datagram.
     pub fn commit(
@@ -252,6 +272,15 @@ impl PendingUdpDatagram {
     {
         self.commit_inner_with(datagram, now, false, protocol_commit)
     }
+    /// Commits accepted activity after a borrowed datagram was encoded.
+    ///
+    /// This atomically rechecks the generation and consumes the reserved queue
+    /// slot and byte capacity without retaining an owned datagram. A failed
+    /// recheck releases provisional resources without refreshing activity;
+    /// protocol nonce lineage consumed before this call is not rolled back.
+    pub fn commit_activity(self, now: Instant) -> Result<(), UdpRuntimeError> {
+        self.commit_activity_inner(now, false)
+    }
 
     /// Commits accepted activity and returns this datagram directly to the
     /// sole same-task consumer without queue ownership or notification work.
@@ -283,6 +312,23 @@ impl PendingUdpDatagram {
         self.commit_immediate_inner_with(datagram, now, false, protocol_commit)
     }
 
+    fn commit_activity_inner(
+        mut self,
+        now: Instant,
+        activate_session: bool,
+    ) -> Result<(), UdpRuntimeError> {
+        let reservation = self.reservation.take().ok_or(UdpRuntimeError::Cancelled)?;
+        match self.commit_immediate_value_inner_with(reservation, now, activate_session, || {
+            Ok::<(), Infallible>(())
+        }) {
+            Ok(reservation) => {
+                drop(reservation);
+                Ok(())
+            }
+            Err(UdpCommitError::Runtime(error)) => Err(error),
+            Err(UdpCommitError::Protocol(never)) => match never {},
+        }
+    }
     fn commit_inner_with<E, C>(
         mut self,
         datagram: Datagram,
@@ -358,10 +404,7 @@ impl PendingUdpDatagram {
     where
         C: FnOnce() -> Result<(), E>,
     {
-        let manager = self
-            .manager
-            .upgrade()
-            .ok_or(UdpCommitError::Runtime(UdpRuntimeError::Cancelled))?;
+
         let reservation = self
             .reservation
             .take()
@@ -369,6 +412,23 @@ impl PendingUdpDatagram {
         let accounted = reservation
             .attach(datagram)
             .map_err(UdpCommitError::Runtime)?;
+        self.commit_immediate_value_inner_with(accounted, now, activate_session, protocol_commit)
+    }
+
+    fn commit_immediate_value_inner_with<E, C, T>(
+        mut self,
+        value: T,
+        now: Instant,
+        activate_session: bool,
+        protocol_commit: C,
+    ) -> Result<T, UdpCommitError<E>>
+    where
+        C: FnOnce() -> Result<(), E>,
+    {
+        let manager = self
+            .manager
+            .upgrade()
+            .ok_or(UdpCommitError::Runtime(UdpRuntimeError::Cancelled))?;
         {
             let mut state = lock_state(&manager);
             if state.shutting_down {
@@ -404,7 +464,7 @@ impl PendingUdpDatagram {
             entry.last_activity = entry.last_activity.max(now);
         }
         self.pending = false;
-        Ok(accounted)
+        Ok(value)
     }
 }
 

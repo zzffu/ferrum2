@@ -308,6 +308,118 @@ mod tests {
         assert_eq!(budget.reserved_bytes(), 0);
     }
 
+    #[test]
+    fn activity_commit_releases_exact_capacity_and_queue_ownership() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(2, MIN_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT)
+                .expect("test limits"),
+            registry.clone(),
+        );
+        let budget = manager.buffer_budget();
+        let started = Instant::now();
+        let first_activity = started + Duration::from_secs(1);
+        let session = manager
+            .reserve_session(started)
+            .expect("provisional session");
+        let first = session
+            .reserve_datagram(UdpDirection::ToTarget, 8)
+            .expect("metered first activity");
+        assert_eq!(budget.reserved_bytes(), 8);
+        let handle = session
+            .commit_activity(first, first_activity)
+            .expect("activate from borrowed activity");
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(
+            manager.idle_deadline(handle).expect("first deadline"),
+            first_activity + MIN_UDP_IDLE_TIMEOUT
+        );
+
+        let mut pending = (0..UDP_SESSION_QUEUE_DEPTH)
+            .map(|_| {
+                manager
+                    .reserve_datagram(handle, UdpDirection::ToTarget, 1)
+                    .expect("metered pending activity")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH);
+        assert_eq!(
+            manager
+                .reserve_unmetered_datagram(handle, UdpDirection::ToTarget, 7)
+                .expect_err("activity admission retains queue depth"),
+            UdpRuntimeError::QueueFull
+        );
+
+        let second_activity = first_activity + Duration::from_secs(1);
+        pending
+            .pop()
+            .expect("reserved activity")
+            .commit_activity(second_activity)
+            .expect("commit metered activity");
+        assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH - 1);
+        let unmetered = manager
+            .reserve_unmetered_datagram(handle, UdpDirection::ToTarget, 7)
+            .expect("released queue slot");
+        assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH - 1);
+        let final_activity = second_activity + Duration::from_secs(1);
+        unmetered
+            .commit_activity(final_activity)
+            .expect("commit unmetered activity");
+        assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH - 1);
+        drop(pending);
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert!(
+            manager
+                .pop(handle, UdpDirection::ToTarget)
+                .expect("live queue")
+                .is_none()
+        );
+        assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+        assert_eq!(
+            manager.idle_deadline(handle).expect("final deadline"),
+            final_activity + MIN_UDP_IDLE_TIMEOUT
+        );
+        assert!(manager.remove(handle));
+        assert_eq!(registry.snapshot(), baseline);
+    }
+
+    #[test]
+    fn activity_commit_rejects_a_fenced_generation_and_rolls_back() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
+        let started = Instant::now();
+        let session = manager
+            .reserve_session(started)
+            .expect("provisional session");
+        let first = session
+            .reserve_datagram(UdpDirection::ToTarget, 8)
+            .expect("first activity");
+        let handle = session
+            .commit_activity(first, started)
+            .expect("activate session");
+        let pending = manager
+            .reserve_datagram(handle, UdpDirection::ToTarget, 13)
+            .expect("pending activity");
+        assert_eq!(manager.buffer_budget().reserved_bytes(), 13);
+
+        manager
+            .fence_network_generation(1)
+            .expect("fence current cohort");
+        assert_eq!(
+            pending.commit_activity(started + Duration::from_secs(1)),
+            Err(UdpRuntimeError::Cancelled)
+        );
+        assert_eq!(manager.buffer_budget().reserved_bytes(), 0);
+        assert!(!manager.cleanup_failed());
+        assert_eq!(manager.retire_network_generation(1), Ok(1));
+        manager
+            .reopen_network_generation(1)
+            .expect("complete network reset");
+        assert_eq!(registry.snapshot(), baseline);
+    }
+
     #[tokio::test]
     async fn budget_wait_is_cancel_safe_and_release_cannot_be_lost() {
         let registry = OwnerRegistry::new();
