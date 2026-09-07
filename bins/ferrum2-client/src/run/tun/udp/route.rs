@@ -152,3 +152,151 @@ pub(super) async fn wait_for_optional_udp_route_generation_change(
         None => std::future::pending().await,
     }
 }
+
+pub(super) struct RouteEgress {
+    pub(super) egress: crate::run::egress::ClientUdpAssociation,
+    pub(super) cancelled: tokio::sync::watch::Receiver<bool>,
+    request_payload_bound: usize,
+}
+
+impl RouteEgress {
+    pub(super) async fn prepare(
+        services: &super::association::DispatchServices,
+        generation: &mut super::association::OrdinaryGeneration,
+        first_target: &TargetAddr,
+        snapshot: ferrum2_core::route::EgressPlanSnapshot,
+        request_payload_bound: usize,
+    ) -> Option<Self> {
+        if !services.current(Some(generation)) {
+            return None;
+        }
+        let mut forced = services.cancellation.clone();
+        let mut egress = tokio::select! {
+            biased;
+            () = forced.forced() => return None,
+            () = services.session_cancellation.cancelled() => return None,
+            () = &mut generation.changed => return None,
+            prepared = services.context.egress.prepare_udp_for_ingress(
+                crate::run::egress::ClientRequestOrigin::Tun, services.inbound,
+                Some(snapshot), Some(first_target),
+            ) => prepared.ok()?,
+        };
+        if !services.current(Some(generation)) {
+            return None;
+        }
+        egress.activate(&services.context.egress).ok()?;
+        let cancelled = egress.cancellation().ok()?;
+        services.current(Some(generation)).then_some(Self {
+            egress,
+            cancelled,
+            request_payload_bound,
+        })
+    }
+
+    pub(super) async fn send(
+        &mut self,
+        datagram: ferrum2_tun::UdpDatagram,
+        services: &super::association::DispatchServices,
+        generation: &mut super::association::OrdinaryGeneration,
+        peer_policy: &ferrum2_tun::UdpPeerPolicyHandle,
+    ) -> bool {
+        use super::association::{
+            commit_peer_after_success, reserve_tun_udp_peer, target_payload_within_bound,
+        };
+        use crate::run::egress::UdpPlanResponseError;
+        use ferrum2_observability::{Direction, Outcome, Role};
+        let target = datagram.target();
+        let Ok(application_target) = TargetAddr::ip(target) else {
+            return true;
+        };
+        if !target_payload_within_bound(datagram.payload().len(), self.request_payload_bound) {
+            return true;
+        }
+        let Some(peer) = reserve_tun_udp_peer(peer_policy, target.ip()) else {
+            return true;
+        };
+        let payload_len = datagram.payload().len();
+        let wire_len = match self.egress.prepare_application_request(
+            &services.context.egress,
+            &services.routing.outbounds,
+            application_target,
+            datagram.payload(),
+            tokio::time::Instant::now(),
+        ) {
+            Ok(length) => length,
+            Err(UdpPlanResponseError::Packet(_) | UdpPlanResponseError::Runtime(_)) => return true,
+        };
+        drop(datagram);
+        let mut forced = services.cancellation.clone();
+        let sent = tokio::select! {
+            biased;
+            () = forced.forced() => return false,
+            () = services.session_cancellation.cancelled() => return false,
+            () = &mut generation.changed => return false,
+            changed = self.cancelled.changed() => { let _ = changed; return false; }
+            result = self.egress.send_encoded_request(wire_len) => result,
+        };
+        if !services.current(Some(generation)) {
+            return false;
+        }
+        if !commit_peer_after_success(sent, wire_len, || peer.commit()) {
+            return false;
+        }
+        services.context.metrics.udp_datagram(
+            Role::Client,
+            Direction::ClientToTarget,
+            Outcome::Accepted,
+        );
+        services.context.metrics.add_udp_bytes(
+            Role::Client,
+            Direction::ClientToTarget,
+            payload_len as u64,
+        );
+        true
+    }
+
+    pub(super) fn accept_response(
+        &mut self,
+        wire_len: usize,
+        services: &super::association::DispatchServices,
+        generation: &super::association::OrdinaryGeneration,
+        response_sink: &ferrum2_tun::UdpResponseSink,
+    ) -> bool {
+        use ferrum2_observability::{Direction, Outcome, Role};
+        if !services.current(Some(generation)) {
+            return false;
+        }
+        let Ok(response) = self.egress.prepare_application_response(
+            &services.context.egress,
+            &services.routing.outbounds,
+            wire_len,
+        ) else {
+            return true;
+        };
+        let Some(source) = response.datagram().target().as_socket_addr() else {
+            return true;
+        };
+        let payload = response.datagram().payload();
+        if !services.current(Some(generation)) {
+            return false;
+        }
+        let outcome = response_sink.send(source, payload);
+        if !services.current(Some(generation)) {
+            return false;
+        }
+        if super::association::record_tun_udp_response_outcome(outcome) {
+            services.context.metrics.udp_datagram(
+                Role::Client,
+                Direction::TargetToClient,
+                Outcome::Accepted,
+            );
+            services.context.metrics.add_udp_bytes(
+                Role::Client,
+                Direction::TargetToClient,
+                payload.len() as u64,
+            );
+        }
+        self.egress.recycle_application_response(response);
+        true
+    }
+}

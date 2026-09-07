@@ -53,11 +53,15 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M3f / RD-06及M4b / Direct owner | network monitor/capture及Direct UDP采用parent-retained实际join；native change-wait保留Idle/Waiting/Closed；共享最终cleanup先join再snapshot；socket先drop才释放容量，含拒绝提交；UDP终态由server消费，mutex内contain协议panic并精确retire | runtime全包154、network专项、Direct最终16、serverUDP17及两包strictlint通过；两端strictlint/check、client no-run、server58及native-wait2通过。review修正monitor准入全表扫描为ready-ID消费，修正提交失败析构顺序；root全cohort门禁待统一执行，无perf/真实host声明 |
 | M4c1 / C2及SOCKS接纳 | Direct/Proxy完整path owner、Prepared/Active lease与具名accounting；资源先drop才释放permit；首包budget/encode/commit后才pin，拒绝丢provisional route；无DNS答案不pin；pending发送观察control EOF，DNS成功后采用更新idle deadline | client strictlint/compile-only/fmt通过；真实m0相关12通过/3旧platform ignores，含预算拒绝换源、无答案不冻结、30s解析deadline内controlEOF于0.56s回收。review发现并修正后两条lifecycle缺口。MSVC实际type-size：association448B、Direct376/Proxy344，保留inline；无性能对比 |
 
-继续位置（基准`07939e2d`）：M2c实现RuleSet单文件cache事务与实际worker所有权；M2d实现
-DNS parent-owned query cleanup及关闭后的资源注册拒绝；M3a通知staged rollback已完成
-受影响包验证。三个问题分别由独立owner实施，完整资格尚未通过。全workspace测试前统一
-冻结代码；每个完成问题单独review/commit。M2a性能记录已提交`709e123`，不得把后续代码
-归到804f0dc0的测量。CT-05/07及CPU完整采样资格仍后置；工具整改没有重新开放。
+| M4c2 / C3 | 单一TUN UDP dispatch在每个datagram先检查exact synthetic DNS，再使用冻结ordinary terminal；删除重复reader/handoff loops，DNS proxy只在association启动获取 | client allfeatures compile-only、strictlint/格式通过；新增3个决策行为case仅编译，未执行client test binary。route分支每association一个Box，未测性能；真实TUN dispatch仍待专用资格 |
+
+继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
+工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
+剩余主要实施是D6普通network reset的publish→hooks→cancel→retire顺序与同代重试，
+server startup诊断、未使用DNS proxy移除、network诊断接口和TCP代数耗尽槽退休。
+TUN dispatch与sniff批次完成后先冻结运行整合门禁；实际Windows资格和架构前后性能验收
+仍未完成。后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
+归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。
 
 ## 环境与暂定验收
 
