@@ -89,6 +89,7 @@ where
                 &self.protocol,
                 capability,
                 self.clock.as_ref(),
+                &ferrum2_crypto::SystemRandom,
                 response.datagram(),
             ) {
                 Ok(Some(encoded)) => break encoded,

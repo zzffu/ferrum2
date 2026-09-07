@@ -103,21 +103,17 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
         3 * MAX_UDP_WIRE_DATAGRAM_BYTES,
-        "two in-flight owned wires plus the shared codec scratch are charged"
+        "two in-flight wires plus one reusable scratch buffer are charged"
     );
     send_gate.add_permits(2);
     assert!(first_task.await.expect("first response task").is_ok());
     assert!(second_task.await.expect("second response task").is_ok());
+    let burst_reserved = handler.codec.budget.reserved_bytes();
     assert_eq!(
         registry.snapshot().udp_buffered_bytes,
-        2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
-        "the concurrency wire is released after the burst"
+        burst_reserved,
+        "every retained or leased response buffer remains charged"
     );
-    let idle_wire = {
-        let codec = handler.codec.state.lock().expect("response codec");
-        assert_eq!(codec.available_wires.len(), 1);
-        codec.available_wires[0].wire.as_ptr()
-    };
 
     {
         let sent = sent.lock().expect("concurrent sends");
@@ -158,14 +154,10 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
             .await
             .is_ok()
     );
-    let codec = handler.codec.state.lock().expect("response codec");
-    assert_eq!(codec.available_wires.len(), 1);
-    assert_eq!(codec.available_wires[0].wire.as_ptr(), idle_wire);
-    drop(codec);
     assert_eq!(
-        registry.snapshot().udp_buffered_bytes,
-        2 * MAX_UDP_WIRE_DATAGRAM_BYTES,
-        "steady-state serial responses reuse the same accounted wire"
+        handler.codec.budget.reserved_bytes(),
+        burst_reserved,
+        "steady-state serial responses reuse the retained buffers"
     );
 
     manager.cancel_all();
@@ -174,6 +166,202 @@ async fn response_codec_does_not_serialize_concurrent_sends() {
     assert_eq!(active(registry.snapshot()), baseline);
 }
 
+#[test]
+fn response_codec_encodes_different_sessions_concurrently() {
+    use std::sync::Condvar;
+    use std::time::Instant;
+
+    use ferrum2_crypto::{Clock, ClockError, MonotonicInstant};
+
+    struct EncodeGate {
+        entered: usize,
+        released: bool,
+    }
+
+    struct BlockingClock {
+        gate: Arc<(Mutex<EncodeGate>, Condvar)>,
+    }
+
+    impl Clock for BlockingClock {
+        fn unix_seconds(&self) -> Result<u64, ClockError> {
+            let (lock, changed) = &*self.gate;
+            let mut gate = lock.lock().expect("encode gate");
+            gate.entered += 1;
+            changed.notify_all();
+            while !gate.released {
+                gate = changed.wait(gate).expect("encode gate");
+            }
+            Ok(1_700_000_000)
+        }
+
+        fn monotonic_now(&self) -> MonotonicInstant {
+            MonotonicInstant::ZERO
+        }
+    }
+
+    let keys = aes_keys();
+    let protocol = Arc::new(UdpServer::new(&keys).expect("server protocol"));
+    let system_clock = SystemClock::new();
+    let registry = OwnerRegistry::new();
+    let baseline = active(registry.snapshot());
+    let manager = UdpSessionManager::new(
+        UdpRuntimeLimits::new(2, 1024 * 1024, Duration::from_secs(60)).expect("response limits"),
+        registry.clone(),
+    );
+    let mappings = UdpMappings::new(2);
+    let mut first_client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("first client");
+    let mut second_client =
+        UdpClientSession::new(&keys, &SystemRandom, |_| false).expect("second client");
+    let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53));
+    let mut request_scratch = UdpPacketScratch::new();
+    let (first_capability, _) = commit_lifecycle_generation(
+        &mut first_client,
+        &protocol,
+        &manager,
+        &mappings,
+        &system_clock,
+        target,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_011)),
+        b"first request",
+        MonotonicInstant::ZERO,
+        &mut request_scratch,
+    );
+    let (second_capability, _) = commit_lifecycle_generation(
+        &mut second_client,
+        &protocol,
+        &manager,
+        &mappings,
+        &system_clock,
+        target,
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 40_012)),
+        b"second request",
+        MonotonicInstant::ZERO,
+        &mut request_scratch,
+    );
+    let response = Arc::new(
+        Datagram::new(
+            TargetAddr::ip(target).expect("response target"),
+            b"response".as_slice().into(),
+            b"response".len(),
+        )
+        .expect("response datagram"),
+    );
+    let pool =
+        Arc::new(ResponseCodecPool::new(manager.buffer_budget()).expect("response codec pool"));
+    let gate = Arc::new((
+        Mutex::new(EncodeGate {
+            entered: 0,
+            released: false,
+        }),
+        Condvar::new(),
+    ));
+    let clock = Arc::new(BlockingClock {
+        gate: Arc::clone(&gate),
+    });
+
+    let first = std::thread::spawn({
+        let pool = Arc::clone(&pool);
+        let protocol = Arc::clone(&protocol);
+        let response = Arc::clone(&response);
+        let clock = Arc::clone(&clock);
+        move || {
+            pool.try_encode(
+                protocol.as_ref(),
+                first_capability,
+                clock.as_ref(),
+                &SystemRandom,
+                response.as_ref(),
+            )
+        }
+    });
+    let second = std::thread::spawn({
+        let pool = Arc::clone(&pool);
+        let protocol = Arc::clone(&protocol);
+        let response = Arc::clone(&response);
+        let clock = Arc::clone(&clock);
+        move || {
+            pool.try_encode(
+                protocol.as_ref(),
+                second_capability,
+                clock.as_ref(),
+                &SystemRandom,
+                response.as_ref(),
+            )
+        }
+    });
+
+    let (lock, changed) = &*gate;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut state = lock.lock().expect("encode gate");
+    while state.entered != 2 {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let (next, _) = changed
+            .wait_timeout(state, deadline - now)
+            .expect("encode gate");
+        state = next;
+    }
+    let encoded_concurrently = state.entered == 2;
+    state.released = true;
+    changed.notify_all();
+    drop(state);
+
+    let first = match first.join().expect("first encoder joins") {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => panic!("first response resources are available"),
+        Err(_) => panic!("first response encoding succeeds"),
+    };
+    let second = match second.join().expect("second encoder joins") {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => panic!("second response resources are available"),
+        Err(_) => panic!("second response encoding succeeds"),
+    };
+    assert!(
+        encoded_concurrently,
+        "different sessions reach response encoding at the same time"
+    );
+    assert_eq!(
+        registry.snapshot().udp_buffered_bytes,
+        pool.budget.reserved_bytes(),
+        "concurrent scratch and wire resources remain fully charged"
+    );
+    drop(first);
+    drop(second);
+
+    assert!(
+        protocol
+            .remove_session(
+                first_capability,
+                MonotonicInstant::from_duration(Duration::from_secs(60)),
+            )
+            .expect("retire first protocol session")
+    );
+    let reserved_before_error = pool.budget.reserved_bytes();
+    assert!(
+        pool.try_encode(
+            protocol.as_ref(),
+            first_capability,
+            &system_clock,
+            &SystemRandom,
+            response.as_ref(),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        pool.budget.reserved_bytes(),
+        reserved_before_error,
+        "protocol failures return both leased resources"
+    );
+
+    manager.cancel_all();
+    drop(clock);
+    drop(pool);
+    drop(manager);
+    assert_eq!(active(registry.snapshot()), baseline);
+}
 #[tokio::test]
 async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
     let keys = aes_keys();
@@ -216,7 +404,13 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
         .prepare_request(&clock, &wire, &mut scratch)
         .expect("prepare response datagram");
 
-    let first_encoded = match codec.try_encode(&protocol, capability, &clock, pending.datagram()) {
+    let first_encoded = match codec.try_encode(
+        &protocol,
+        capability,
+        &clock,
+        &SystemRandom,
+        pending.datagram(),
+    ) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => panic!("initial response wire is reserved"),
         Err(_) => panic!("initial response encoding succeeds"),
@@ -230,7 +424,13 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
     }
     assert_eq!(budget.reserved_bytes(), byte_limit);
     assert!(matches!(
-        codec.try_encode(&protocol, capability, &clock, pending.datagram()),
+        codec.try_encode(
+            &protocol,
+            capability,
+            &clock,
+            &SystemRandom,
+            pending.datagram()
+        ),
         Ok(None)
     ));
 
@@ -244,7 +444,13 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
     tokio::time::timeout(Duration::from_secs(1), returned)
         .await
         .expect("budget release notification");
-    let second_encoded = match codec.try_encode(&protocol, capability, &clock, pending.datagram()) {
+    let second_encoded = match codec.try_encode(
+        &protocol,
+        capability,
+        &clock,
+        &SystemRandom,
+        pending.datagram(),
+    ) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => panic!("released capacity funds a concurrent response wire"),
         Err(_) => panic!("concurrent response encoding succeeds"),
@@ -258,10 +464,11 @@ async fn response_codec_budget_wakeup_grows_before_leased_wire_returns() {
     drop(second_encoded);
     drop(first_encoded);
     drop(pressure);
-    assert_eq!(budget.reserved_bytes(), 2 * MAX_UDP_WIRE_DATAGRAM_BYTES);
-    let state = codec.state.lock().expect("response codec");
-    assert_eq!(state.available_wires.len(), 1);
-    drop(state);
+    assert_eq!(
+        registry.snapshot().udp_buffered_bytes,
+        budget.reserved_bytes(),
+        "returned response resources remain fully charged"
+    );
     manager.cancel_all();
     drop(codec);
     drop(manager);
