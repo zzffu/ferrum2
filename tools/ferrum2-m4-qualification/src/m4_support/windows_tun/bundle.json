@@ -105,8 +105,8 @@
     },
     {
       "path": "src/m4_support/self_check.rs",
-      "bytes": 29023,
-      "sha256": "0b974005570c7d0f80b8446dbc10cf955eef276d5070675463c76e4ea91a85fc"
+      "bytes": 29090,
+      "sha256": "e9746cab7d26ccb1a31cb95381844dcd997f5affbf310c217f32f3fe572b1642"
     },
     {
       "path": "src/m4_support/tcp_scale/contract.rs",

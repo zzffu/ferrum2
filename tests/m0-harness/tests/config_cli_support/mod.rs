@@ -40,7 +40,7 @@ pub(super) const CLIENT_SHUTDOWN_REPORT_FIELDS: [&str; 17] = [
     "shutdown_grace_ns",
     "termination_cause",
 ];
-pub(super) const OWNER_COUNTER_FIELDS: [&str; 25] = [
+pub(super) const OWNER_COUNTER_FIELDS: [&str; 27] = [
     "active_supervisor_children",
     "active_tun_handler_tasks",
     "active_tun_tcp_flows",
@@ -69,7 +69,7 @@ pub(super) const OWNER_COUNTER_FIELDS: [&str; 25] = [
     "udp_sockets",
     "udp_tasks",
 ];
-pub(super) const ACTIVE_OWNER_COUNTER_FIELDS: [&str; 20] = [
+pub(super) const ACTIVE_OWNER_COUNTER_FIELDS: [&str; 22] = [
     "active_supervisor_children",
     "active_tun_handler_tasks",
     "active_tun_tcp_flows",
