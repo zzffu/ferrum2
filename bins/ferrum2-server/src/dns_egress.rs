@@ -32,7 +32,7 @@ use tokio::time::Instant as TokioInstant;
 use super::network::{ServerNetworkSocketService, ServerPhysicalTcpStream};
 #[cfg(any(windows, test))]
 use super::network::{
-    interface_resolution_result, interface_resolution_source, record_interface_resolution_success,
+    interface_resolution_result, record_interface_resolution, record_interface_resolution_success,
 };
 
 const MAX_DNS_UDP_DATAGRAM_BYTES: usize = 65_535;
@@ -257,9 +257,11 @@ impl ServerPhysicalSocketContext {
                 }
                 Err(error) => {
                     if let Some(source) = error.attempted_source() {
-                        self.metrics.outbound_interface_resolution(
-                            interface_resolution_source(source),
+                        record_interface_resolution(
+                            &self.metrics,
+                            source,
                             interface_resolution_result(&error),
+                            ferrum2_observability::InterfaceResolutionCache::Unobserved,
                         );
                     }
                     Err(closed_physical_socket_error())
@@ -302,9 +304,11 @@ impl ServerPhysicalSocketContext {
                 }
                 Err(error) => {
                     if let Some(source) = error.attempted_source() {
-                        self.metrics.outbound_interface_resolution(
-                            interface_resolution_source(source),
+                        record_interface_resolution(
+                            &self.metrics,
+                            source,
                             interface_resolution_result(&error),
+                            ferrum2_observability::InterfaceResolutionCache::Unobserved,
                         );
                     }
                     Err(closed_physical_socket_error())

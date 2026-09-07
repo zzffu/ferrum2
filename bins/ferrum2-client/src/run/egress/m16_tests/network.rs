@@ -370,11 +370,13 @@ fn generation_bound_socket_errors_and_interface_metrics_keep_closed_categories()
         &metrics,
         InterfaceSelectionSource::OutboundExplicit,
         InterfaceResolutionResult::Success,
+        ferrum2_observability::InterfaceResolutionCache::Unobserved,
     );
     record_interface_resolution(
         &metrics,
         InterfaceSelectionSource::SystemBestRoute,
         InterfaceResolutionResult::Failure,
+        ferrum2_observability::InterfaceResolutionCache::Unobserved,
     );
     let encoded = metrics.encode_text().unwrap();
     assert!(encoded.contains(

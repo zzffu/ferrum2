@@ -4,6 +4,24 @@ use std::fmt;
 
 use tracing::Level;
 
+/// Cache provenance actually available at an interface-resolution observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceResolutionCache {
+    Hit,
+    Miss,
+    Unobserved,
+}
+
+impl fmt::Display for InterfaceResolutionCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Unobserved => "unobserved",
+        })
+    }
+}
+
 /// Closed severity levels accepted by the tracing boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogLevel {

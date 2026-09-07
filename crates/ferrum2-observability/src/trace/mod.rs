@@ -8,8 +8,8 @@ pub use emit::{
     emit_network_reset_diagnostic, emit_strict_route_diagnostic, emit_tun_diagnostic,
 };
 pub use schema::{
-    Event, InterfaceResolutionResult, InterfaceResolutionSource, LogLevel,
-    NetworkFullRebuildReason, NetworkLifecycleOperation, NetworkLifecycleResult,
+    Event, InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource,
+    LogLevel, NetworkFullRebuildReason, NetworkLifecycleOperation, NetworkLifecycleResult,
     NetworkResetReason, Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage,
     StrictRouteDiagnosticStatus, StrictRouteFilterInstallResult, TraceRecord, Transport,
     TunDiagnosticReason, TunIpFamily, TunPacketRejectReason, TunUdpAssociationRouteResult,

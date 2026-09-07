@@ -3,10 +3,10 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use ferrum2_observability::{
-    Event, InterfaceResolutionResult, InterfaceResolutionSource, LogLevel, Metrics,
-    NetworkFullRebuildReason, NetworkLifecycleResult, NetworkResetReason, Outcome, Reason, Role,
-    SniffOutcome, SniffProtocol, Stage, StrictRouteDiagnosticStatus, TraceRecord, Transport,
-    TunDiagnosticReason, TunIpFamily, emit_interface_resolution_diagnostic,
+    Event, InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource,
+    LogLevel, Metrics, NetworkFullRebuildReason, NetworkLifecycleResult, NetworkResetReason,
+    Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage, StrictRouteDiagnosticStatus,
+    TraceRecord, Transport, TunDiagnosticReason, TunIpFamily, emit_interface_resolution_diagnostic,
     emit_network_full_rebuild_diagnostic, emit_network_reset_diagnostic,
     emit_strict_route_diagnostic, emit_tun_diagnostic, json_subscriber,
 };
@@ -329,8 +329,6 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
             NetworkResetReason::NetworkChange,
             NetworkLifecycleResult::Failed,
             9,
-            11,
-            13,
         );
         emit_network_full_rebuild_diagnostic(
             Role::Client,
@@ -348,7 +346,7 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
             Role::Client,
             InterfaceResolutionSource::SystemBestRoute,
             InterfaceResolutionResult::Failure,
-            true,
+            InterfaceResolutionCache::Unobserved,
         );
     });
 
@@ -359,7 +357,7 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
         .collect::<Vec<_>>();
     assert_eq!(values.len(), 4);
 
-    for value in &values[..2] {
+    for (index, value) in values[..2].iter().enumerate() {
         assert_eq!(
             value
                 .as_object()
@@ -367,27 +365,40 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                "event",
-                "generation",
-                "level",
-                "operation",
-                "reason",
-                "result",
-                "role",
-                "stage",
-                "tcp_associations",
-                "timestamp",
-                "udp_associations",
-            ])
+            if index == 0 {
+                BTreeSet::from([
+                    "event",
+                    "generation",
+                    "level",
+                    "operation",
+                    "reason",
+                    "result",
+                    "role",
+                    "stage",
+                    "timestamp",
+                ])
+            } else {
+                BTreeSet::from([
+                    "event",
+                    "generation",
+                    "level",
+                    "operation",
+                    "reason",
+                    "result",
+                    "role",
+                    "stage",
+                    "tcp_associations",
+                    "timestamp",
+                    "udp_associations",
+                ])
+            }
         );
     }
     assert_eq!(values[0]["operation"], "reset_network");
     assert_eq!(values[0]["reason"], "network_change");
     assert_eq!(values[0]["result"], "failed");
     assert_eq!(values[0]["generation"], 9);
-    assert_eq!(values[0]["tcp_associations"], 11);
-    assert_eq!(values[0]["udp_associations"], 13);
+    assert_eq!(values[0]["level"], "DEBUG");
     assert_eq!(values[1]["operation"], "full_rebuild");
     assert_eq!(values[1]["reason"], "strict_route_damage");
     assert_eq!(values[1]["result"], "started");
@@ -422,7 +433,7 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
-            "cache_hit",
+            "cache",
             "event",
             "level",
             "result",
@@ -434,7 +445,8 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
     );
     assert_eq!(values[3]["source"], "system_best_route");
     assert_eq!(values[3]["result"], "failure");
-    assert_eq!(values[3]["cache_hit"], true);
+    assert_eq!(values[3]["cache"], "unobserved");
+    assert_eq!(values[3]["level"], "DEBUG");
 
     for sentinel in [INTERFACE, DESTINATION, PREFIX, FILTER_ID, ADAPTER] {
         assert!(!text.contains(sentinel), "leaked sentinel {sentinel}");
@@ -448,4 +460,72 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
     }
     assert!(!text.contains("route_conflict"));
     assert!(!text.contains("external_route"));
+}
+
+#[test]
+fn socket_and_reset_diagnostics_require_debug_logging() {
+    for level in [LogLevel::Info, LogLevel::Debug] {
+        let capture = Captured::default();
+        let dispatch = Dispatch::new(json_subscriber(capture.clone(), level));
+        tracing::dispatcher::with_default(&dispatch, || {
+            for (result, cache) in [
+                (
+                    InterfaceResolutionResult::Success,
+                    InterfaceResolutionCache::Hit,
+                ),
+                (
+                    InterfaceResolutionResult::Success,
+                    InterfaceResolutionCache::Miss,
+                ),
+                (
+                    InterfaceResolutionResult::Failure,
+                    InterfaceResolutionCache::Unobserved,
+                ),
+            ] {
+                emit_interface_resolution_diagnostic(
+                    Role::Server,
+                    InterfaceResolutionSource::SystemBestRoute,
+                    result,
+                    cache,
+                );
+            }
+            for result in [
+                NetworkLifecycleResult::Succeeded,
+                NetworkLifecycleResult::Failed,
+            ] {
+                emit_network_reset_diagnostic(Role::Server, NetworkResetReason::Retry, result, 17);
+            }
+        });
+        let text = capture.text();
+        let values = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        match level {
+            LogLevel::Info => assert!(values.is_empty()),
+            LogLevel::Debug => {
+                assert_eq!(values.len(), 5);
+                assert_eq!(
+                    values[..3]
+                        .iter()
+                        .map(|value| (
+                            value["result"].as_str().unwrap(),
+                            value["cache"].as_str().unwrap()
+                        ))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        ("success", "hit"),
+                        ("success", "miss"),
+                        ("failure", "unobserved")
+                    ]
+                );
+                assert_eq!(values[3]["result"], "succeeded");
+                assert_eq!(values[4]["result"], "failed");
+                for value in &values[3..] {
+                    assert_eq!(value["generation"], 17);
+                }
+            }
+            LogLevel::Error | LogLevel::Warn | LogLevel::Trace => unreachable!(),
+        }
+    }
 }

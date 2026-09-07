@@ -119,25 +119,22 @@ impl PreparedProcessRoot<RunError> for ClientNetworkChangeRoot {
                         NetworkResetReason::NetworkChange
                     };
                     self.reset
-                        .metrics
-                        .network_reset(reason, NetworkLifecycleResult::Started);
+                        .record_reset(reason, NetworkLifecycleResult::Started);
                     let result = tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => {
-                            self.reset.metrics.network_reset(reason, NetworkLifecycleResult::Failed);
+                            self.reset.record_reset(reason, NetworkLifecycleResult::Failed);
                             return Ok(());
                         }
                         result = reset_client_network(&self.sockets, &self.reset, retry) => result,
                     };
                     if result.is_ok() {
                         self.reset
-                            .metrics
-                            .network_reset(reason, NetworkLifecycleResult::Succeeded);
+                            .record_reset(reason, NetworkLifecycleResult::Succeeded);
                         break;
                     }
                     self.reset
-                        .metrics
-                        .network_reset(reason, NetworkLifecycleResult::Failed);
+                        .record_reset(reason, NetworkLifecycleResult::Failed);
                     retry = true;
                     tokio::select! {
                         biased;
@@ -255,6 +252,22 @@ pub(super) struct ClientNetworkResetRuntime {
 }
 
 impl ClientNetworkResetRuntime {
+    #[cfg(all(windows, not(test)))]
+    fn record_reset(&self, reason: NetworkResetReason, result: NetworkLifecycleResult) {
+        self.metrics.network_reset(reason, result);
+        match result {
+            NetworkLifecycleResult::Started => {}
+            NetworkLifecycleResult::Succeeded | NetworkLifecycleResult::Failed => {
+                ferrum2_observability::emit_network_reset_diagnostic(
+                    ferrum2_observability::Role::Client,
+                    reason,
+                    result,
+                    self.coordinator.snapshots().generation(),
+                )
+            }
+        }
+    }
+
     pub(super) fn new(
         context: &Arc<ClientContext>,
         coordinator: NetworkResetCoordinator,

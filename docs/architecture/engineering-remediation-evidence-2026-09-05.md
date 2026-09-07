@@ -1294,3 +1294,40 @@ TUN135/platform69, DNS interop, compile-only gates, GNU check, strict lint/fmt/d
 three finite M4 filters. Python candidate134/rule66/CI80/platform7 and PS nonmutating contract
 passed. WSL RuleSet35 passed with locked offline dependencies in Debian's separate target dir.
 These are ordinary contract results, not host qualification or performance acceptance.
+
+
+### M4i — C7 completed network diagnostics (2026-09-07)
+
+Both binary interface-observation owners now publish the existing denominator, cache-hit subset
+and typed debug diagnostic together. TCP, UDP and DNS failure callers use the same owner. The
+trace-only cache enum records Hit/Miss only from an actual resolved interface, and Unobserved
+when an error lacks that provenance. Unknown provenance is not a measured miss. The server source
+mapping is now private. Lightweight reset records started metrics but emits only at terminal
+success/failure, using the published coordinator generation. TUN invokes the generation provider
+only for these transitions, not for per-packet events. Full-rebuild counts and severity are retained.
+Removed the obsolete bool cache argument and unmeasured reset association-count parameters;
+updated all callers, exact trace metadata whitelist, redaction tests and the public TUN guide.
+
+Actual locked checks: observability26 (including exact whitelist/redaction and Info/Debug behavior),
+server60, client all-features compile-only, three-package all-targets/all-features strict clippy,
+both product bins build and fmt. Matching m0 TCP/UDP targets:10 passed/1 existing Linux-only
+IPv6 ignore (UDP suite65.82s, including process-spawn serialization). Logs: `target/remediation-audit/m6-network-diagnostics-*.log`.
+The client linker emitted its existing MSVC import-library informational warning; strict clippy
+passed without suppressions.
+
+`target/remediation-audit/check-c7-live.py` also drove four bounded ordinary Windows loopback cases:
+Info success, Debug success, Debug server interface failure and Debug client interface failure.
+Actual successful payload/echo or rejected target access was checked, along with exact diagnostic
+fields, closed cache values, role and identity sentinels. All eight children were forcibly stopped
+and reaped within five seconds; this probe is explicitly not graceful-shutdown evidence. Result:
+`target/remediation-audit/m6-network-diagnostic-live/result.json`. No adapter or network state
+mutation. Persistent crate contract tests cover trace behavior; this manual probe validates actual
+binary wiring. Real reset diagnostic fault injection is not claimed by the emitter test. Debug
+volume is proportional to attempts; no performance result or sampling table is introduced.
+
+D6 privileged correctness evidence from exact candidate `a2b53ebdfe270b1e0e7f8ab04066d833cc7bf1dc`
+was copied into ignored `profiles/remediation-d6-correctness-ca98576d5c3b/` (12 files). Archive
+manifest SHA-256: `937e11f40e9717b5f437d02666bb3ca20973284694b51d510e1be9c96cecd91e`.
+The dedicated acknowledged runner returned QUALIFIED, all eight checks passed, 102.6889579s
+supervisor duration, independent final adapter/routes/addresses/processes/ports counts all zero.
+This earlier source qualification does not prove the final candidate's performance.

@@ -73,7 +73,7 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         },
     ];
     for event in events {
-        record_tun_event(&metrics, event);
+        record_tun_event(&metrics, event, || 7);
     }
     let reject_reasons = [
         TunRejectReason::InvalidIpVersion,
@@ -102,7 +102,7 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         TunRejectReason::WintunRingFull,
     ];
     for reason in reject_reasons {
-        record_tun_event(&metrics, TunEvent::PacketRejected(reason));
+        record_tun_event(&metrics, TunEvent::PacketRejected(reason), || 7);
     }
 
     let output = metrics.encode_text().expect("TUN metrics");
@@ -173,9 +173,21 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
 #[test]
 fn deferred_then_injected_udp_response_keeps_rejected_metrics_at_zero() {
     let metrics = ferrum2_observability::Metrics::new();
-    record_tun_event(&metrics, ferrum2_tun::TunEvent::InternalEgressBackpressured);
-    record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(1));
-    record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(0));
+    record_tun_event(
+        &metrics,
+        ferrum2_tun::TunEvent::InternalEgressBackpressured,
+        || 7,
+    );
+    record_tun_event(
+        &metrics,
+        ferrum2_tun::TunEvent::UdpPendingResponses(1),
+        || 7,
+    );
+    record_tun_event(
+        &metrics,
+        ferrum2_tun::TunEvent::UdpPendingResponses(0),
+        || 7,
+    );
 
     let output = metrics.encode_text().expect("deferred TUN UDP metrics");
     assert!(
@@ -201,19 +213,33 @@ fn deferred_then_injected_udp_response_keeps_rejected_metrics_at_zero() {
 #[test]
 fn deferred_then_dropped_udp_response_counts_each_terminal_metric_once() {
     let metrics = ferrum2_observability::Metrics::new();
-    record_tun_event(&metrics, ferrum2_tun::TunEvent::InternalEgressBackpressured);
-    record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(1));
+    record_tun_event(
+        &metrics,
+        ferrum2_tun::TunEvent::InternalEgressBackpressured,
+        || 7,
+    );
+    record_tun_event(
+        &metrics,
+        ferrum2_tun::TunEvent::UdpPendingResponses(1),
+        || 7,
+    );
     record_tun_event(
         &metrics,
         ferrum2_tun::TunEvent::UdpResponseDropped(
             ferrum2_tun::UdpResponseDropReason::InjectionRejected,
         ),
+        || 7,
     );
     record_tun_event(
         &metrics,
         ferrum2_tun::TunEvent::PacketRejected(ferrum2_tun::TunRejectReason::InvalidIpChecksum),
+        || 7,
     );
-    record_tun_event(&metrics, ferrum2_tun::TunEvent::UdpPendingResponses(0));
+    record_tun_event(
+        &metrics,
+        ferrum2_tun::TunEvent::UdpPendingResponses(0),
+        || 7,
+    );
 
     let output = metrics.encode_text().expect("terminal TUN UDP metrics");
     assert!(output.lines().any(|line| {

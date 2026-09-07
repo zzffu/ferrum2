@@ -74,12 +74,14 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M4g / C6 | endpoint acquisition保留create/configure/bind/listen及closed IO kind；ServerRoots绑定role/index和插入次序，owned failure同时保留primary与全部cleanup prior；UDP显式socket2阶段，删除旧扁平诊断 | Windows server60、WSL server61、strictlint/fmt、m0 CLI3/config runtime4通过；7个占用位置验证精确role/index及回滚，两项supervisor故障测试验证完整owned对象和redaction。WSL首次bind冲突未隐藏：移除会竞争bind的普通readiness probe，改用真实owner registry激活状态，完整重跑通过；该次冲突不能唯一归因probe。依赖无升级，仅server继承已锁socket2边；新增诊断分配仅启动/失败路径 |
 
 | M4h / net具名状态 | 接口观测构造显式Operational/Unavailable与Connected/Disconnected；RouteNetworkOptions显式AutomaticInterfaceSelection；两个binary配置桥、平台采集及所有仓内调用同步迁移，无bool构造别名 | net/runtime完整包、platform safe69、五包strictlint及client compile-only通过；原priority/family/cache/availability行为测试保留，无纯常量测试。源迁移脚本第一次遇到Windows默认GBK读取错误，改显式UTF-8后完成；无功能或性能变化声明 |
+| M4i / C7 | 两端completed interface observation统一记录指标与Debug诊断；cache显式Hit/Miss/Unobserved；轻量reset仅终态发出实际published generation，删除未观测关联数字参数；TUN packet事件不读取generation锁 | observability26、server60、client compile-only、三包strictlint/fmt通过，m0 TCP/UDP10通过/1旧ignore；真实Windows loopback4场景覆盖默认Info抑制、两端成功及各自接口选择失败，8个子进程全reap，拒绝路径未到目标。该probe使用强制退出，不是优雅关闭证据；reset注入日志仅契约/compile覆盖，默认与Debug性能尚未测量 |
 
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门禁17项全部通过（含doc及3个M4有限filter）。
-剩余主要实施是network诊断接线。
-随后执行最终整合门禁、实际Windows资格和架构前后性能验收；当前仍未完成这些验收。
+
+所选架构实施批次已完成，最后的C7网络诊断接线已通过受影响包验证。
+下一步冻结源码运行最终整合门禁、native contract及架构前后性能验收。D6实际Windows资格已通过（见上表），不代替最终源码的性能验收；当前尚不能声称性能无回退。
 后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
 归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。
 

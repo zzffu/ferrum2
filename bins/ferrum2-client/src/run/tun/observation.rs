@@ -6,7 +6,11 @@ use ferrum2_observability::{
 };
 use ferrum2_runtime::ManagedNetworkDamage;
 
-pub(super) fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) {
+pub(super) fn record_tun_event(
+    metrics: &Metrics,
+    event: ferrum2_tun::TunEvent,
+    published_generation: impl FnOnce() -> u64,
+) {
     use ferrum2_tun::TunEvent;
 
     match event {
@@ -25,14 +29,26 @@ pub(super) fn record_tun_event(metrics: &Metrics, event: ferrum2_tun::TunEvent) 
             map_network_reset_reason(reason),
             NetworkLifecycleResult::Started,
         ),
-        TunEvent::NetworkResetSucceeded(reason) => metrics.network_reset(
-            map_network_reset_reason(reason),
-            NetworkLifecycleResult::Succeeded,
-        ),
-        TunEvent::NetworkResetFailed(reason) => metrics.network_reset(
-            map_network_reset_reason(reason),
-            NetworkLifecycleResult::Failed,
-        ),
+        TunEvent::NetworkResetSucceeded(reason) => {
+            let reason = map_network_reset_reason(reason);
+            metrics.network_reset(reason, NetworkLifecycleResult::Succeeded);
+            ferrum2_observability::emit_network_reset_diagnostic(
+                Role::Client,
+                reason,
+                NetworkLifecycleResult::Succeeded,
+                published_generation(),
+            );
+        }
+        TunEvent::NetworkResetFailed(reason) => {
+            let reason = map_network_reset_reason(reason);
+            metrics.network_reset(reason, NetworkLifecycleResult::Failed);
+            ferrum2_observability::emit_network_reset_diagnostic(
+                Role::Client,
+                reason,
+                NetworkLifecycleResult::Failed,
+                published_generation(),
+            );
+        }
         TunEvent::NetworkFullRebuildStarted {
             reason,
             generation,

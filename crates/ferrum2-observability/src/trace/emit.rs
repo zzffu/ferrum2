@@ -84,44 +84,25 @@ macro_rules! emit_network_lifecycle_at {
     };
 }
 
-/// Emits one redacted lightweight-network-reset diagnostic.
-///
-/// Association counts are numeric observations; no connection, interface, route, or peer identity
-/// is accepted by this API.
+/// Emits a debug-level reset transition with its actual published generation.
+/// No association counts are accepted when the caller has not measured a cohort.
 pub fn emit_network_reset_diagnostic(
     role: Role,
     reason: NetworkResetReason,
     result: NetworkLifecycleResult,
     generation: u64,
-    tcp_associations: usize,
-    udp_associations: usize,
 ) {
-    match result {
-        NetworkLifecycleResult::Started | NetworkLifecycleResult::Succeeded => {
-            emit_network_lifecycle_at!(
-                Level::INFO,
-                role,
-                NetworkLifecycleOperation::ResetNetwork,
-                reason,
-                result,
-                generation,
-                tcp_associations,
-                udp_associations
-            );
-        }
-        NetworkLifecycleResult::Failed => {
-            emit_network_lifecycle_at!(
-                Level::WARN,
-                role,
-                NetworkLifecycleOperation::ResetNetwork,
-                reason,
-                result,
-                generation,
-                tcp_associations,
-                udp_associations
-            );
-        }
-    }
+    tracing::event!(
+        target: CLOSED_TRACE_TARGET,
+        Level::DEBUG,
+        event = %Event::Lifecycle,
+        role = %role,
+        stage = %Stage::Tun,
+        operation = %NetworkLifecycleOperation::ResetNetwork,
+        reason = %reason,
+        result = %result,
+        generation,
+    );
 }
 
 /// Emits one redacted managed-plane full-rebuild diagnostic.
@@ -191,36 +172,23 @@ pub fn emit_strict_route_diagnostic(role: Role, status: StrictRouteDiagnosticSta
     }
 }
 
-/// Emits one redacted shared-interface-resolution diagnostic.
+/// Emits one debug-level interface-resolution diagnostic without identities.
 pub fn emit_interface_resolution_diagnostic(
     role: Role,
     source: InterfaceResolutionSource,
     result: InterfaceResolutionResult,
-    cache_hit: bool,
+    cache: super::schema::InterfaceResolutionCache,
 ) {
-    macro_rules! emit_at {
-        ($level:expr) => {
-            tracing::event!(
-                target: CLOSED_TRACE_TARGET,
-                $level,
-                event = %Event::Lifecycle,
-                role = %role,
-                stage = %Stage::Tun,
-                source = %source,
-                result = %result,
-                cache_hit = cache_hit,
-            );
-        };
-    }
-
-    match result {
-        InterfaceResolutionResult::Success => {
-            emit_at!(Level::DEBUG);
-        }
-        InterfaceResolutionResult::Failure => {
-            emit_at!(Level::WARN);
-        }
-    }
+    tracing::event!(
+        target: CLOSED_TRACE_TARGET,
+        Level::DEBUG,
+        event = %Event::Lifecycle,
+        role = %role,
+        stage = %Stage::Tun,
+        source = %source,
+        result = %result,
+        cache = %cache,
+    );
 }
 
 pub(crate) fn emit_sniff(

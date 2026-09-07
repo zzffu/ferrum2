@@ -11,8 +11,8 @@ pub use metrics::{
     TargetResolutionMode,
 };
 pub use trace::{
-    Event, InterfaceResolutionResult, InterfaceResolutionSource, LogLevel,
-    NetworkFullRebuildReason, NetworkLifecycleOperation, NetworkLifecycleResult,
+    Event, InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource,
+    LogLevel, NetworkFullRebuildReason, NetworkLifecycleOperation, NetworkLifecycleResult,
     NetworkResetReason, Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage,
     StrictRouteDiagnosticStatus, StrictRouteFilterInstallResult, TraceRecord, Transport,
     TunDiagnosticReason, TunIpFamily, TunPacketRejectReason, TunUdpAssociationRouteResult,

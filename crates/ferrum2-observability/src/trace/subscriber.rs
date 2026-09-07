@@ -42,10 +42,19 @@ const NETWORK_LIFECYCLE_TRACE_FIELDS: &[&str] = &[
     "tcp_associations",
     "udp_associations",
 ];
+const NETWORK_RESET_TRACE_FIELDS: &[&str] = &[
+    "event",
+    "role",
+    "stage",
+    "operation",
+    "reason",
+    "result",
+    "generation",
+];
 const STRICT_ROUTE_TRACE_FIELDS: &[&str] =
     &["event", "role", "stage", "requested", "effective", "status"];
 const INTERFACE_RESOLUTION_TRACE_FIELDS: &[&str] =
-    &["event", "role", "stage", "source", "result", "cache_hit"];
+    &["event", "role", "stage", "source", "result", "cache"];
 
 /// Builds a caller-owned newline JSON subscriber without installing it globally.
 pub fn json_subscriber<W>(writer: W, max_level: LogLevel) -> impl tracing::Subscriber + Send + Sync
@@ -79,6 +88,7 @@ fn approved_trace_metadata(metadata: &Metadata<'_>, max_level: LogLevel) -> bool
             || has_exact_fields(metadata, SNIFF_TRACE_FIELDS)
             || has_exact_fields(metadata, TUN_TRACE_FIELDS)
             || has_exact_fields(metadata, NETWORK_LIFECYCLE_TRACE_FIELDS)
+            || has_exact_fields(metadata, NETWORK_RESET_TRACE_FIELDS)
             || has_exact_fields(metadata, STRICT_ROUTE_TRACE_FIELDS)
             || has_exact_fields(metadata, INTERFACE_RESOLUTION_TRACE_FIELDS))
 }

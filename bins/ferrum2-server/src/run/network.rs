@@ -11,7 +11,9 @@ use ferrum2_core::ConnectErrorKind;
 use ferrum2_net::{InterfaceResolutionErrorKind, InterfaceSelectionSource};
 use ferrum2_observability::Metrics;
 #[cfg(any(windows, test))]
-use ferrum2_observability::{InterfaceResolutionResult, InterfaceResolutionSource};
+use ferrum2_observability::{
+    InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource,
+};
 #[cfg(all(windows, not(test)))]
 use ferrum2_observability::{NetworkLifecycleResult, NetworkResetReason};
 #[cfg(all(windows, not(test)))]
@@ -102,6 +104,24 @@ struct ServerNetworkChangeRoot {
     udp_reset: Option<Arc<super::udp::ServerUdpNetworkReset>>,
 }
 #[cfg(all(windows, not(test)))]
+impl ServerNetworkChangeRoot {
+    fn record_reset(&self, reason: NetworkResetReason, result: NetworkLifecycleResult) {
+        self.metrics.network_reset(reason, result);
+        match result {
+            NetworkLifecycleResult::Started => {}
+            NetworkLifecycleResult::Succeeded | NetworkLifecycleResult::Failed => {
+                ferrum2_observability::emit_network_reset_diagnostic(
+                    ferrum2_observability::Role::Server,
+                    reason,
+                    result,
+                    self.sockets.coordinator().snapshots().generation(),
+                )
+            }
+        }
+    }
+}
+
+#[cfg(all(windows, not(test)))]
 impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
     fn activate(&mut self) -> Result<(), RunError> {
         Ok(())
@@ -141,8 +161,7 @@ impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
                     } else {
                         NetworkResetReason::NetworkChange
                     };
-                    self.metrics
-                        .network_reset(metric_reason, NetworkLifecycleResult::Started);
+                    self.record_reset(metric_reason, NetworkLifecycleResult::Started);
                     let reason = if retry {
                         RuntimeNetworkResetReason::ExplicitRequest
                     } else {
@@ -151,7 +170,7 @@ impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
                     let result = tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => {
-                            self.metrics.network_reset(metric_reason, NetworkLifecycleResult::Failed);
+                            self.record_reset(metric_reason, NetworkLifecycleResult::Failed);
                             return Ok(());
                         }
                         result = reset_server_network(&self.sockets, &self.owner, self.udp_reset.as_deref(), reason) => result,
@@ -159,13 +178,10 @@ impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
                     match result {
                         Ok(generation) => {
                             self.metrics.set_network_generation(generation);
-                            self.metrics
-                                .network_reset(metric_reason, NetworkLifecycleResult::Succeeded);
+                            self.record_reset(metric_reason, NetworkLifecycleResult::Succeeded);
                             break;
                         }
-                        Err(()) => self
-                            .metrics
-                            .network_reset(metric_reason, NetworkLifecycleResult::Failed),
+                        Err(()) => self.record_reset(metric_reason, NetworkLifecycleResult::Failed),
                     }
                     retry = true;
                     tokio::select! {
@@ -330,19 +346,40 @@ pub(super) fn record_interface_resolution_success(
 ) {
     // Publish the denominator before its hit subset so concurrent scrapes cannot observe
     // cache hits greater than completed interface resolutions.
-    metrics.outbound_interface_resolution(
-        interface_resolution_source(resolved.selection_source()),
+    record_interface_resolution(
+        metrics,
+        resolved.selection_source(),
         InterfaceResolutionResult::Success,
+        if resolved.cache_hit() {
+            InterfaceResolutionCache::Hit
+        } else {
+            InterfaceResolutionCache::Miss
+        },
     );
-    if resolved.cache_hit() {
-        metrics.outbound_interface_resolution_cache_hit();
-    }
 }
 
 #[cfg(any(windows, test))]
-pub(super) fn interface_resolution_source(
+pub(super) fn record_interface_resolution(
+    metrics: &Metrics,
     source: InterfaceSelectionSource,
-) -> InterfaceResolutionSource {
+    result: InterfaceResolutionResult,
+    cache: InterfaceResolutionCache,
+) {
+    let source = interface_resolution_source(source);
+    metrics.outbound_interface_resolution(source, result);
+    if cache == InterfaceResolutionCache::Hit {
+        metrics.outbound_interface_resolution_cache_hit();
+    }
+    ferrum2_observability::emit_interface_resolution_diagnostic(
+        ferrum2_observability::Role::Server,
+        source,
+        result,
+        cache,
+    );
+}
+
+#[cfg(any(windows, test))]
+fn interface_resolution_source(source: InterfaceSelectionSource) -> InterfaceResolutionSource {
     match source {
         InterfaceSelectionSource::OutboundExplicit => InterfaceResolutionSource::OutboundExplicit,
         InterfaceSelectionSource::AutoDetected => InterfaceResolutionSource::AutoDetected,

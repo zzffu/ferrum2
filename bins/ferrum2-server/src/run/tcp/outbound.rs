@@ -19,7 +19,7 @@ use crate::run::network::connect_error_kind_from_io;
 use crate::run::network::{ServerNetworkSocketService, ServerPhysicalTcpStream};
 #[cfg(any(windows, test))]
 use crate::run::network::{
-    connect_error_from_network_service, interface_resolution_result, interface_resolution_source,
+    connect_error_from_network_service, interface_resolution_result, record_interface_resolution,
     record_interface_resolution_success,
 };
 use crate::run::routing::ServerRouting;
@@ -172,9 +172,11 @@ impl ServerNetworkTcpOutbound {
                 }
                 Err(error) => {
                     if let Some(source) = error.attempted_source() {
-                        self.metrics.outbound_interface_resolution(
-                            interface_resolution_source(source),
+                        record_interface_resolution(
+                            &self.metrics,
+                            source,
                             interface_resolution_result(&error),
+                            ferrum2_observability::InterfaceResolutionCache::Unobserved,
                         );
                     }
                     Err(connect_error_from_network_service(error))

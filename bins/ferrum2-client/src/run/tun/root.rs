@@ -53,6 +53,7 @@ pub(in crate::run) fn process_root(
         #[cfg(all(windows, not(test)))]
         network_socket_service,
     ));
+    let event_snapshots = network_reset.coordinator.snapshots();
     let handler_context = Arc::clone(&context);
     let udp_context = Arc::clone(&context);
     let tcp_routing = Arc::clone(&routing);
@@ -159,6 +160,8 @@ pub(in crate::run) fn process_root(
             let network_reset = Arc::clone(&reset_driver);
             Box::pin(async move { network_reset.transition(snapshot, lifecycle).await })
         }),
-        events: Arc::new(move |event| record_tun_event(&metrics, event)),
+        events: Arc::new(move |event| {
+            record_tun_event(&metrics, event, || event_snapshots.generation())
+        }),
     })
 }

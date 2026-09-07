@@ -15,7 +15,9 @@ use ferrum2_net::{DialOptions, RouteNetworkOptions};
 #[cfg(any(windows, test))]
 use ferrum2_net::{InterfaceResolutionErrorKind, InterfaceSelectionSource};
 #[cfg(any(windows, test))]
-use ferrum2_observability::{InterfaceResolutionResult, InterfaceResolutionSource, Metrics};
+use ferrum2_observability::{
+    InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource, Metrics,
+};
 #[cfg(all(windows, not(test)))]
 use ferrum2_runtime::NetworkResetCoordinator;
 #[cfg(any(windows, test))]
@@ -137,6 +139,7 @@ impl ClientNetworkSocketService {
                         &self.metrics,
                         source,
                         interface_resolution_result(error),
+                        InterfaceResolutionCache::Unobserved,
                     );
                 }
             }
@@ -170,6 +173,7 @@ impl ClientNetworkSocketService {
                         &self.metrics,
                         source,
                         interface_resolution_result(error),
+                        InterfaceResolutionCache::Unobserved,
                     );
                 }
             }
@@ -299,10 +303,12 @@ fn record_interface_resolution_success(
         metrics,
         resolved.selection_source(),
         InterfaceResolutionResult::Success,
+        if resolved.cache_hit() {
+            InterfaceResolutionCache::Hit
+        } else {
+            InterfaceResolutionCache::Miss
+        },
     );
-    if resolved.cache_hit() {
-        metrics.outbound_interface_resolution_cache_hit();
-    }
 }
 
 #[cfg(any(windows, test))]
@@ -310,8 +316,19 @@ pub(in crate::run) fn record_interface_resolution(
     metrics: &Metrics,
     source: InterfaceSelectionSource,
     result: InterfaceResolutionResult,
+    cache: InterfaceResolutionCache,
 ) {
-    metrics.outbound_interface_resolution(interface_resolution_source(source), result);
+    let source = interface_resolution_source(source);
+    metrics.outbound_interface_resolution(source, result);
+    if cache == InterfaceResolutionCache::Hit {
+        metrics.outbound_interface_resolution_cache_hit();
+    }
+    ferrum2_observability::emit_interface_resolution_diagnostic(
+        ferrum2_observability::Role::Client,
+        source,
+        result,
+        cache,
+    );
 }
 
 #[cfg(any(windows, test))]

@@ -15,7 +15,7 @@ use tokio::net::UdpSocket;
 use crate::run::network::ServerNetworkSocketService;
 #[cfg(any(windows, test))]
 use crate::run::network::{
-    interface_resolution_result, interface_resolution_source, record_interface_resolution_success,
+    interface_resolution_result, record_interface_resolution, record_interface_resolution_success,
 };
 #[derive(Clone)]
 pub(in crate::run) struct ServerUdpNetworkPolicy {
@@ -71,9 +71,11 @@ impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
                 }
                 Err(error) => {
                     if let Some(source) = error.attempted_source() {
-                        self.metrics.outbound_interface_resolution(
-                            interface_resolution_source(source),
+                        record_interface_resolution(
+                            &self.metrics,
+                            source,
                             interface_resolution_result(&error),
+                            ferrum2_observability::InterfaceResolutionCache::Unobserved,
                         );
                     }
                     Err(closed_udp_socket_error())

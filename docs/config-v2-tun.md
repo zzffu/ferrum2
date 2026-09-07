@@ -228,6 +228,15 @@ The principal counters and gauges are `ferrum2_network_reset_total{reason,result
 `ferrum2_outbound_interface_resolution_total{source,result}`. There are no route-detection,
 route-conflict, or aggregate TUN memory-budget metrics.
 
+Completed outbound interface observations emit a closed diagnostic at `debug` level alongside
+those counters. `cache` is `hit` or `miss` when the resolver supplies provenance, and `unobserved`
+when a failed socket attempt does not supply it. A failed attempt is never reported as a cache
+miss merely because provenance is unavailable. Lightweight reset completion emits one `debug`
+diagnostic containing its result and the actual published network generation; it does not invent
+TCP or UDP association counts. Default `info` logging suppresses these diagnostics. Debug log
+volume grows with socket attempts and reset completions, so measure debug logging separately.
+Neither diagnostic includes interface names, addresses, or raw operating-system errors.
+
 Internal egress backpressure is lossless: the owner retains the pending response and retries it
 after the occupied output is flushed. Its dedicated counter records retry observations, not
 permanent packet drops. The pending-response gauge is one while that response awaits retry and
