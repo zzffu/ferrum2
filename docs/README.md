@@ -33,6 +33,7 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 | [Invariant ledger](architecture/invariants.md) | Owner boundaries, behavioral contracts, evidence, and remaining gaps |
 | [2026-09-05 full engineering audit](architecture/engineering-audit-2026-09-05.md) | Current full-crate audit; architecture and profiling follow after review |
 | [2026-09-05 engineering design](architecture/engineering-design-2026-09-05.md) | Selected module ownership, interface changes, alternatives, costs, and implementation/qualification order |
+| [TUN system TCP design](architecture/tun-system-tcp-design.md) | Windows TCP conversion with native UDP unchanged; firewall policy and live qualification authorization remain implementation gates |
 | [2026-09-05 engineering remediation](architecture/engineering-remediation-2026-09-05.md) | Current review coverage, fixes, validation, and remaining gaps; [batch evidence](architecture/engineering-remediation-evidence-2026-09-05.md) retains failures and measurements |
 | [Gate ledger](architecture/gates.md) | Current workflows, triggers, commands, privilege boundaries, and required contexts |
 | [Fixture and evidence ledger](architecture/fixtures-and-evidence.md) | Reviewed inputs, vendor patches, hashes, and retention requirements |

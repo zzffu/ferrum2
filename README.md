@@ -67,6 +67,7 @@ SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 - [Rule 性能控制器](tools/performance_rule/README.md)：校准前置检查、请求绑定与有界证据保留。
 - [全量工程审查](docs/architecture/engineering-audit-2026-09-05.md)：当前按 crate 审查进度及后续架构/性能阶段。
 - [整改架构设计](docs/architecture/engineering-design-2026-09-05.md)：全量审查后的所有权、接口、取舍与实施验收顺序。
+- [TUN 系统 TCP 设计](docs/architecture/tun-system-tcp-design.md)：TCP 交给 Windows、UDP 保持原生；实施前需确定防火墙策略与宿主机验证授权。
 - [工程整改记录](docs/architecture/engineering-remediation-2026-09-05.md)：审查覆盖、故障修复与验证缺口；[逐批证据](docs/architecture/engineering-remediation-evidence-2026-09-05.md)保留失败、撤回和性能数据。
 
 ## 开发与验证
