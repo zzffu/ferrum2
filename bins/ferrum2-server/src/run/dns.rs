@@ -6,7 +6,6 @@ use ferrum2_runtime::{PreparedProcessRoot, ProcessCancellation, ProcessFuture};
 use tokio::sync::Notify;
 
 use super::RunError;
-use super::dns_egress;
 
 #[derive(Clone)]
 pub(super) struct ServerDnsDrain {
@@ -108,14 +107,14 @@ where
 }
 
 pub(super) struct ServerDnsRoot {
-    pub(super) state: Arc<dns_egress::ServerDnsState>,
+    // Keeps the installed weak Direct resolver handle alive until the actor is joined.
+    pub(super) _resolver: Arc<ferrum2_dns::TaggedResolver>,
     pub(super) owner: TaggedResolverOwner,
     pub(super) drain: ServerDnsDrain,
 }
 
 impl ServerDnsRoot {
     async fn close(&mut self) -> Result<(), RunError> {
-        self.state.take();
         self.owner
             .shutdown()
             .await

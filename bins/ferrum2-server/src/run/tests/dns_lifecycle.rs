@@ -135,7 +135,10 @@ async fn operational_dns_outlives_tcp_quiesce_drain() {
     let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(
-            crate::run::dns_egress::ServerDnsResolver::new(None),
+            crate::run::dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            ),
             Duration::from_secs(5),
         ),
     };

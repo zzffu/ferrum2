@@ -1,4 +1,4 @@
-use ferrum2_dns::{DnsCache, FixedEndpointMaterializeError};
+use ferrum2_dns::FixedEndpointMaterializeError;
 use ferrum2_ruleset::{RuleSetLoadError, RuleSetLoadErrorKind};
 
 use crate::run::RunError;
@@ -13,62 +13,43 @@ pub(super) enum MaterializedRuleSetPhase {
 pub(in crate::run) struct MaterializedServerV2 {
     config: ferrum2_config::ValidatedServerConfig,
     rule_sets: MaterializedRuleSetPhase,
-    cache: Option<DnsCache>,
 }
 
 pub(in crate::run) struct MaterializedRunParts {
     pub(in crate::run) config: ferrum2_config::ValidatedServerConfig,
     pub(in crate::run) materialization_root: Option<ServerV2RuntimeRoot>,
-    pub(in crate::run) cache: Option<DnsCache>,
 }
 
 impl MaterializedServerV2 {
-    pub(super) fn new(
+    pub(super) fn try_new(
         config: ferrum2_config::ValidatedServerConfig,
         rule_sets: MaterializedRuleSetPhase,
-        cache: Option<DnsCache>,
-    ) -> Self {
-        Self {
-            config,
-            rule_sets,
-            cache,
-        }
+    ) -> Result<Self, RunError> {
+        validate_server_dns_policy(&config)?;
+        Ok(Self { config, rule_sets })
     }
 
     pub(in crate::run) fn config(&self) -> &ferrum2_config::ValidatedServerConfig {
         &self.config
     }
 
-    pub(in crate::run) fn validate_only(
-        self,
-    ) -> Result<ferrum2_config::ValidatedServerConfig, RunError> {
-        let policy_validation = validate_dns_policy_adapter(&self.config);
-        let Self {
-            config,
-            rule_sets,
-            cache: _,
-        } = self;
+    pub(in crate::run) fn into_validated_config(self) -> ferrum2_config::ValidatedServerConfig {
+        let Self { config, rule_sets } = self;
         drop(rule_sets);
-        policy_validation?;
-        Ok(config)
+        config
     }
 
     pub(in crate::run) async fn into_run_parts(self) -> Result<MaterializedRunParts, RunError> {
-        let Self {
-            config,
-            rule_sets,
-            cache,
-        } = self;
+        let Self { config, rule_sets } = self;
         let materialization_root = rule_sets.into_runtime_root(&config).await?;
         Ok(MaterializedRunParts {
             config,
             materialization_root,
-            cache,
         })
     }
 }
 
-fn validate_dns_policy_adapter(
+pub(in crate::run) fn validate_server_dns_policy(
     config: &ferrum2_config::ValidatedServerConfig,
 ) -> Result<(), RunError> {
     let Some(binding) = config

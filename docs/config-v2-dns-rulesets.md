@@ -40,9 +40,10 @@ several defects, a structural error can therefore precede an endpoint error.
 The configuration layer finishes with a closed, runtime-neutral DNS policy
 blueprint: numeric server/query-type identities, shared compiled match sets,
 RuleSet IDs, and the exact `RuleEngineRegistry` are retained without Hickory or
-resolver runtime types. The client/server composition root consumes that
-blueprint through the DNS adapter to build the single execution program before
-any listener is prepared. This keeps `ferrum2-config` and `ferrum2-dns` as
+resolver runtime types. Client composition builds its execution program from
+that blueprint before preparing listeners. Server materialization compiles and
+validates the declaration, then releases the unused program; server Direct
+resolution uses the explicit resolver selection described below. This keeps `ferrum2-config` and `ferrum2-dns` as
 independent dependants of `ferrum2-rule` and prevents a configuration-to-DNS or
 DNS-to-configuration dependency edge.
 
@@ -81,6 +82,11 @@ calling that exact tagged server, bypassing `dns.route`. When those fields are
 omitted, Direct always uses the operating-system resolver, whether or not a
 `[dns]` section exists. An explicit resolution failure is terminal and never
 falls back to another resolver or detour.
+
+The server does not run a DNS policy proxy for Direct application lookups.
+Its DNS root owns the tagged transport resolver and joins it after dependent
+roots stop. Server DNS policy metadata describes validated declarations;
+it does not imply those rules executed for a Direct query.
 
 Every referenced egress has a prepared domain-target capability. Shadowsocks
 and Direct accept domains; a selector accepts them only when all members do; a
@@ -165,7 +171,9 @@ of power-loss durability.
 
 DNS A and AAAA entries are cached separately by DNS server, canonical name,
 query type, and resolver generation. Positive and negative TTLs are honored.
-TCP, UDP, fixed endpoints, and DNS response evaluation share this cache; UDP
+Client TCP, UDP, fixed endpoints, and DNS response evaluation share this cache. Server
+materialization and RuleSet resolution retain their cache where used; an unused
+policy proxy does not allocate or retain an application cache. UDP
 associations retain only the last successful candidate index, never an address
 TTL cache.
 

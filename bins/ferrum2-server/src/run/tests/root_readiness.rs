@@ -16,17 +16,13 @@ use super::super::*;
 use crate::run::test_support::*;
 
 #[test]
-fn dns_policy_and_state_failures_keep_closed_runtime_categories() {
+fn dns_policy_failures_keep_closed_runtime_categories() {
     for error in [
         ferrum2_dns::DnsPolicyCompileError::Allocation,
         ferrum2_dns::DnsPolicyCompileError::IndexOverflow,
     ] {
         assert_eq!(
             run_error_for_dns_policy_compile(error),
-            RunError::RuleAllocation
-        );
-        assert_eq!(
-            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::DnsPolicy(error)),
             RunError::RuleAllocation
         );
     }
@@ -43,19 +39,7 @@ fn dns_policy_and_state_failures_keep_closed_runtime_categories() {
             run_error_for_dns_policy_compile(error),
             RunError::RuleCompile
         );
-        assert_eq!(
-            run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::DnsPolicy(error)),
-            RunError::RuleCompile
-        );
     }
-    assert_eq!(
-        run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::CacheAllocation),
-        RunError::RuleAllocation
-    );
-    assert_eq!(
-        run_error_for_dns_state(dns_egress::ServerDnsStateBuildError::InvalidRuntime),
-        RunError::StartupProtocol
-    );
 }
 
 #[test]

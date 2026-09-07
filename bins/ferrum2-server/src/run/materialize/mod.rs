@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use ferrum2_config::{CompiledRuleSetResource, PreparedServerV2, ResolverRef, ServerV2Resources};
-use ferrum2_dns::{DnsCache, ResolverGeneration, materialize_fixed_endpoints};
+use ferrum2_dns::{ResolverGeneration, materialize_fixed_endpoints};
 use ferrum2_observability::{Metrics, RuleSetResult};
 use ferrum2_ruleset::{RuleSetDownloader, materialize_rule_sets};
 
@@ -30,6 +30,8 @@ use ruleset::{
 };
 
 pub(super) use outcome::MaterializedRunParts;
+#[cfg(test)]
+pub(super) use outcome::validate_server_dns_policy;
 pub(super) use ruleset::ServerV2RuntimeRoot;
 
 const INITIAL_RULESET_GENERATION: u64 = 1;
@@ -47,7 +49,6 @@ const UNRESOLVED_ENDPOINT: SocketAddr =
 struct MaterializedServerResources {
     resources: ServerV2Resources,
     rule_sets: MaterializedRuleSetPhase,
-    cache: Option<DnsCache>,
 }
 
 /// Single-use schema-v2 materialization context. Initial tagged resolver owners
@@ -132,7 +133,6 @@ impl ServerV2Materializer {
             return Ok(MaterializedServerResources {
                 resources: ServerV2Resources::new(dns_endpoints, None),
                 rule_sets: MaterializedRuleSetPhase::Absent,
-                cache,
             });
         }
 
@@ -217,7 +217,6 @@ impl ServerV2Materializer {
         Ok(MaterializedServerResources {
             resources: ServerV2Resources::new(dns_endpoints, rule_sets),
             rule_sets: MaterializedRuleSetPhase::Pending(Box::new(pending)),
-            cache,
         })
     }
 
@@ -228,12 +227,11 @@ impl ServerV2Materializer {
         let MaterializedServerResources {
             resources,
             rule_sets,
-            cache,
         } = self.materialize_resources(&prepared).await?;
         let config = match ferrum2_config::finish_server_v2(prepared, resources) {
             Ok(config) => config,
             Err(error) => return Err(classify_config_materialization_error(error)),
         };
-        Ok(MaterializedServerV2::new(config, rule_sets, cache))
+        MaterializedServerV2::try_new(config, rule_sets)
     }
 }

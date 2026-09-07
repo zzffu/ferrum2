@@ -5,31 +5,22 @@
 use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use ferrum2_config::{
-    DirectDomainResolver, DnsRuntimeConfig, DnsServerConfig, DnsTransport, ServerDnsRoute,
-};
+use ferrum2_config::{DirectDomainResolver, DnsServerConfig, DnsTransport};
 use ferrum2_core::route::EgressPlanSnapshot;
 use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_dns::ApplicationResolverAdapter;
 use ferrum2_dns::{
-    ApplicationResolveBackend, ApplicationResolveFuture, ApplicationResolveOutcome,
-    ApplicationResolveRequest, ApplicationResolver, ApplicationResolverMode, BoxedDnsDatagramIo,
-    BoxedDnsTcpIo, ChannelDnsDatagram, DnsCache, DnsCacheError, DnsEgress, DnsEgressResourceKind,
-    DnsEgressTaskKind, DnsError, DnsIoFuture, DnsPolicyCompileError, DnsPolicyMatchResult,
-    DnsPolicyMatchSource, DnsPolicyMatchType, DnsPolicyObservation, DnsPolicyObserver,
-    DnsPolicyProgram, DnsPolicyStage, DnsProxy, DnsStrategy, DnsTaskRegistrar, DnsUpstreamSpec,
-    DnsUpstreamTransport, TaggedResolver, TaggedServerApplicationResolveBackend,
+    ApplicationResolveOutcome, ApplicationResolver, ApplicationResolverMode, BoxedDnsDatagramIo,
+    BoxedDnsTcpIo, ChannelDnsDatagram, DnsEgress, DnsEgressResourceKind, DnsEgressTaskKind,
+    DnsIoFuture, DnsStrategy, DnsTaskRegistrar, DnsUpstreamSpec, DnsUpstreamTransport,
+    TaggedResolver, TaggedServerApplicationResolveBackend,
 };
 use ferrum2_net::{DialOptions, RouteNetworkOptions, TcpResolver, UdpResolver};
-use ferrum2_observability::{
-    DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics, RuleMatchResult, RuleMatchType,
-    RuleProgram, RuleSource,
-};
-use ferrum2_rule::RuleEngineRegistry;
+use ferrum2_observability::{DnsResolvePurpose, DnsResolveResult, DnsResolverKind, Metrics};
 use ferrum2_runtime::MAX_RESOLVED_CANDIDATES;
 #[cfg(all(not(windows), not(test)))]
 use ferrum2_runtime::RuntimeTcpStream;
@@ -82,174 +73,12 @@ pub(super) fn dns_runtime_specs(servers: &[DnsServerConfig]) -> Vec<DnsUpstreamS
         .collect()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) struct ServerDnsState {
-    strategy: DnsStrategy,
-    proxy_runtime: ServerProxyRuntime,
-    policy_observer: Option<Arc<dyn DnsPolicyObserver>>,
-    installed: Mutex<Option<InstalledServerDns>>,
-}
-
-struct ServerProxyPolicy {
-    program: Arc<DnsPolicyProgram>,
-    registry: Arc<RuleEngineRegistry>,
-    listener_count: usize,
-    ordinary_count: usize,
-}
-
-struct ServerProxyRuntime {
-    policy: ServerProxyPolicy,
-    cache: Option<DnsCache>,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-struct InstalledServerDns {
-    resolver: Arc<TaggedResolver>,
-    proxy: Arc<DnsProxy>,
-}
-
-/// Closed construction failures for server DNS state. Keeping the rule error
-/// intact lets the composition root distinguish scratch allocation/capacity
-/// failures from compiler consistency failures.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ServerDnsStateBuildError {
-    CacheAllocation,
-    InvalidRuntime,
-    DnsPolicy(DnsPolicyCompileError),
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl ServerDnsState {
-    pub(super) fn try_new(
-        policy: ServerDnsRoute,
-        runtime: DnsRuntimeConfig,
-    ) -> Result<Self, ServerDnsStateBuildError> {
-        let cache_config = runtime.cache();
-        let cache = if cache_config.enabled {
-            Some(
-                DnsCache::try_new(
-                    std::num::NonZeroUsize::new(cache_config.max_entries)
-                        .ok_or(ServerDnsStateBuildError::InvalidRuntime)?,
-                )
-                .map_err(|error| match error {
-                    DnsCacheError::Allocation => ServerDnsStateBuildError::CacheAllocation,
-                    DnsCacheError::Unavailable
-                    | DnsCacheError::TtlOverflow
-                    | DnsCacheError::AddressFamily => ServerDnsStateBuildError::InvalidRuntime,
-                })?,
-            )
-        } else {
-            None
-        };
-        Self::try_new_with_cache(policy, runtime, cache)
-    }
-
-    pub(super) fn try_new_with_cache(
-        mut policy: ServerDnsRoute,
-        runtime: DnsRuntimeConfig,
-        cache: Option<DnsCache>,
-    ) -> Result<Self, ServerDnsStateBuildError> {
-        let cache_config = runtime.cache();
-        if cache_config.enabled != cache.is_some() {
-            return Err(ServerDnsStateBuildError::InvalidRuntime);
-        }
-        let binding = policy
-            .take_policy_blueprint()
-            .ok_or(ServerDnsStateBuildError::InvalidRuntime)?;
-        let (blueprint, registry, listener_count, ordinary_count) = binding.into_parts();
-        let snapshot = registry.snapshot();
-        let program = DnsPolicyProgram::try_from_blueprint(blueprint, &snapshot)
-            .map_err(ServerDnsStateBuildError::DnsPolicy)?;
-        let proxy_runtime = ServerProxyRuntime {
-            policy: ServerProxyPolicy {
-                program: Arc::new(program),
-                registry,
-                listener_count,
-                ordinary_count,
-            },
-            cache,
-        };
-        Ok(Self {
-            strategy: dns_strategy(runtime.strategy()),
-            proxy_runtime,
-            policy_observer: None,
-            installed: Mutex::new(None),
-        })
-    }
-
-    pub(super) fn with_policy_observer(mut self, observer: Arc<dyn DnsPolicyObserver>) -> Self {
-        self.policy_observer = Some(observer);
-        self
-    }
-
-    pub(super) fn install(self: &Arc<Self>, resolver: Arc<TaggedResolver>) -> Result<(), ()> {
-        let runtime = &self.proxy_runtime;
-        let policy = &runtime.policy;
-        let mut proxy = DnsProxy::new(
-            Arc::clone(&resolver),
-            Arc::clone(&policy.program),
-            Arc::clone(&policy.registry),
-            policy.listener_count,
-            policy.ordinary_count,
-        );
-        if let Some(observer) = &self.policy_observer {
-            proxy = proxy.with_policy_observer(Arc::clone(observer));
-        }
-        if let Some(cache) = &runtime.cache {
-            proxy = proxy.with_cache(cache.clone());
-        }
-        let proxy = Arc::new(proxy);
-        let mut current = self.installed.lock().map_err(|_| ())?;
-        if current.is_some() {
-            return Err(());
-        }
-        *current = Some(InstalledServerDns { resolver, proxy });
-        Ok(())
-    }
-
-    pub(super) fn take(&self) -> Option<Arc<TaggedResolver>> {
-        self.installed.lock().ok()?.take().map(|dns| dns.resolver)
-    }
-
-    fn proxy(&self) -> io::Result<Arc<DnsProxy>> {
-        self.installed
-            .lock()
-            .map_err(|_| io::Error::other("DNS resolver state unavailable"))?
-            .as_ref()
-            .map(|dns| Arc::clone(&dns.proxy))
-            .ok_or_else(|| io::Error::other("DNS proxy is not active"))
-    }
-
-    const fn strategy(&self) -> DnsStrategy {
-        self.strategy
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct ServerDnsResolver {
     adapter: ApplicationResolverAdapter,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl ServerDnsResolver {
-    #[cfg(test)]
-    pub(super) fn new(state: Option<Arc<ServerDnsState>>) -> Self {
-        Self::new_inner(
-            Arc::new(crate::run::test_support::TestApplicationBackend),
-            state,
-            None,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_observed(state: Option<Arc<ServerDnsState>>, metrics: Arc<Metrics>) -> Self {
-        Self::new_inner(
-            Arc::new(crate::run::test_support::TestApplicationBackend),
-            state,
-            Some(metrics),
-        )
-    }
-
     #[cfg(test)]
     pub(super) fn for_direct(
         mode: DirectDomainResolver,
@@ -270,31 +99,6 @@ impl ServerDnsResolver {
         metrics: Arc<Metrics>,
     ) -> Self {
         Self::for_direct_inner(Arc::new(system), mode, tagged, Some(metrics))
-    }
-
-    #[cfg(test)]
-    fn new_inner(
-        system: Arc<dyn ferrum2_dns::ApplicationResolveBackend>,
-        state: Option<Arc<ServerDnsState>>,
-        metrics: Option<Arc<Metrics>>,
-    ) -> Self {
-        let strategy = state
-            .as_ref()
-            .map_or(DnsStrategy::PreferIpv4, |state| state.strategy());
-        let mut resolver = match state {
-            Some(state) => {
-                ApplicationResolver::configured(Arc::new(ServerConfiguredApplicationBackend {
-                    state,
-                }))
-            }
-            None => ApplicationResolver::system(system),
-        };
-        if let Some(metrics) = metrics {
-            resolver = observed_application_resolver(resolver, metrics);
-        }
-        Self {
-            adapter: ApplicationResolverAdapter::new(Arc::new(resolver), 0, strategy),
-        }
     }
 
     fn for_direct_inner(
@@ -327,16 +131,6 @@ impl ServerDnsResolver {
             adapter: self.adapter.for_ingress(inbound),
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn mode(&self) -> ApplicationResolverMode {
-        self.adapter.mode()
-    }
-
-    #[cfg(test)]
-    pub(super) fn shares_application_resolver_with(&self, other: &Self) -> bool {
-        self.adapter.shares_resolver_with(&other.adapter)
-    }
 }
 
 fn observed_application_resolver(
@@ -359,66 +153,6 @@ fn observed_application_resolver(
     }))
 }
 
-pub(super) fn dns_policy_observer(metrics: &Arc<Metrics>) -> Arc<dyn DnsPolicyObserver> {
-    let metrics = Arc::clone(metrics);
-    Arc::new(move |observation| observe_dns_policy(&metrics, observation))
-}
-
-fn observe_dns_policy(metrics: &Metrics, observation: DnsPolicyObservation) {
-    if observation.query_evaluated() {
-        metrics.observe_rule_program_candidate_count(
-            RuleProgram::DnsQuery,
-            observation.query_candidates(),
-        );
-        metrics.observe_rule_program_match_ns(RuleProgram::DnsQuery, observation.query_match_ns());
-    }
-    if observation.response_evaluated() {
-        metrics.observe_rule_program_candidate_count(
-            RuleProgram::DnsResponse,
-            observation.response_candidates(),
-        );
-        metrics.observe_rule_program_match_ns(
-            RuleProgram::DnsResponse,
-            observation.response_match_ns(),
-        );
-    }
-    for stage in DnsPolicyStage::ALL {
-        for source in DnsPolicyMatchSource::ALL {
-            for r#type in DnsPolicyMatchType::ALL {
-                for result in DnsPolicyMatchResult::ALL {
-                    let count = observation.match_count(stage, source, r#type, result);
-                    if count == 0 {
-                        continue;
-                    }
-                    let source = match source {
-                        DnsPolicyMatchSource::Inline => RuleSource::Inline,
-                        DnsPolicyMatchSource::RuleSet => RuleSource::RuleSet,
-                    };
-                    let r#type = match r#type {
-                        DnsPolicyMatchType::Domain => RuleMatchType::Domain,
-                        DnsPolicyMatchType::DomainSuffix => RuleMatchType::DomainSuffix,
-                        DnsPolicyMatchType::DomainKeyword => RuleMatchType::DomainKeyword,
-                        DnsPolicyMatchType::IpCidr => RuleMatchType::IpCidr,
-                        DnsPolicyMatchType::Scalar => RuleMatchType::Scalar,
-                    };
-                    let result = match result {
-                        DnsPolicyMatchResult::Matched => RuleMatchResult::Matched,
-                        DnsPolicyMatchResult::Missed => RuleMatchResult::Missed,
-                    };
-                    match stage {
-                        DnsPolicyStage::Query => {
-                            metrics.dns_rule_query_matches(source, r#type, result, count);
-                        }
-                        DnsPolicyStage::Response => {
-                            metrics.dns_rule_response_matches(source, r#type, result, count);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl TcpResolver for ServerDnsResolver {
     type Candidates = Vec<SocketAddr>;
 
@@ -432,26 +166,6 @@ impl UdpResolver for ServerDnsResolver {
 
     async fn resolve(&self, host: &str, port: u16) -> io::Result<Self::Candidates> {
         UdpResolver::resolve(&self.adapter, host, port).await
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-struct ServerConfiguredApplicationBackend {
-    state: Arc<ServerDnsState>,
-}
-
-impl ApplicationResolveBackend for ServerConfiguredApplicationBackend {
-    fn resolve<'a>(
-        &'a self,
-        request: ApplicationResolveRequest<'a>,
-    ) -> ApplicationResolveFuture<'a> {
-        Box::pin(async move {
-            self.state
-                .proxy()
-                .map_err(|_| DnsError::Runtime)?
-                .resolve_application(request)
-                .await
-        })
     }
 }
 

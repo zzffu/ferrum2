@@ -35,7 +35,11 @@ async fn listener_readiness_drain_yields_at_32_with_shutdown_priority() {
             mappings: Arc::new(UdpMappings::new(config.udp.max_sessions)),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            )]
+            .into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         },
@@ -132,7 +136,11 @@ async fn udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup()
             mappings,
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            )]
+            .into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         };
@@ -282,7 +290,11 @@ async fn direct_terminal_is_observed_while_listener_waits_without_another_packet
                 mappings: Arc::new(UdpMappings::new(config.udp.max_sessions)),
                 admission: Arc::new(tokio::sync::Mutex::new(())),
                 connect_timeout: config.runtime.connect_timeout,
-                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                    ferrum2_config::DirectDomainResolver::System,
+                    std::sync::Arc::new(std::sync::OnceLock::new()),
+                )]
+                .into(),
                 registry: registry.clone(),
                 metrics: Arc::clone(&metrics),
             },

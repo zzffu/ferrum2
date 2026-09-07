@@ -52,7 +52,11 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
             mappings: Arc::clone(&mappings),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            )]
+            .into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         },

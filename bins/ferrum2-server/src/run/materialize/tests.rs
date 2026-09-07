@@ -292,9 +292,7 @@ async fn minimal_v2_materializes_without_network_or_refresh_owner() {
         .await
         .expect("materialize minimal config");
     assert!(downloader.seen().is_empty());
-    let config = materialized
-        .validate_only()
-        .expect("validation-only cleanup");
+    let config = materialized.into_validated_config();
     assert_eq!(SocketAddr::V4(config.inbounds[0].listen), listen);
 
     system_owner
@@ -464,9 +462,7 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     assert!(
         !encoded.contains("ferrum2_dns_explicit_system_resolve_total{purpose=\"fixed_endpoint\"}")
     );
-    materialized
-        .validate_only()
-        .expect("domain DNS upstream validation-only cleanup");
+    drop(materialized.into_validated_config());
     let rebound = TcpListener::bind(listen).expect("server inbound remained unbound");
     drop(rebound);
     let _ = stop.send(());
@@ -704,6 +700,52 @@ fn validate_only_entrypoint_never_binds_listener() {
     drop(rebound);
 }
 
+#[test]
+fn materialized_dns_policy_is_validated_without_constructing_a_runtime_proxy() {
+    use ferrum2_config::{CompiledRuleSetResource, ServerV2Resources};
+    use ferrum2_rule::{MatchSetBuilder, RuleEngineRegistry, RuleEngineSnapshotBuilder};
+    let listen = reserve_address();
+    let file = TestConfig::new(|_| {
+        format!(
+            "{}\n[[route.rule_set]]\ntag = \"ads\"\ntype = \"remote\"\nurl = \"https://rules.example.invalid/ads.srs\"\ndownload_resolver = \"system\"\n[dns]\n[[dns.servers]]\ntag = \"local\"\ntransport = \"udp\"\naddress = \"127.0.0.1:5300\"\n[dns.route]\nfinal = \"local\"\n[[dns.route.rules]]\nrule_set = \"ads\"\naction = \"reject\"\n",
+            minimal_v2_source(listen)
+        )
+    });
+    let mut domains = MatchSetBuilder::new();
+    domains.add_exact_domain("blocked.example").unwrap();
+    let mut initial = RuleEngineSnapshotBuilder::new(1);
+    let set = initial.add_match_set(domains.build().unwrap()).unwrap();
+    let id = initial.add_rule_set("ads", set).unwrap();
+    let registry = Arc::new(RuleEngineRegistry::new(initial.build().unwrap()));
+    let prepared = ferrum2_config::prepare_server(&file.path).unwrap();
+    let config = ferrum2_config::finish_server_v2(
+        prepared,
+        ServerV2Resources::new(
+            Vec::new(),
+            Some(CompiledRuleSetResource::new(
+                Arc::clone(&registry),
+                Box::new([id]),
+            )),
+        ),
+    )
+    .unwrap();
+    validate_server_dns_policy(&config).unwrap();
+    let mut addresses = MatchSetBuilder::new();
+    addresses.add_ip("192.0.2.1".parse().unwrap()).unwrap();
+    let mut successor = RuleEngineSnapshotBuilder::new(2);
+    let set = successor.add_match_set(addresses.build().unwrap()).unwrap();
+    successor.add_rule_set("ads", set).unwrap();
+    registry.publish(successor.build().unwrap()).unwrap();
+    assert!(
+        matches!(
+            MaterializedServerV2::try_new(config, MaterializedRuleSetPhase::Absent),
+            Err(RunError::RuleCompile)
+        ),
+        "response-dependent reject must fail at the materialization handoff"
+    );
+    drop(TcpListener::bind(listen).expect("validation never acquired the endpoint"));
+}
+
 #[tokio::test]
 async fn real_srs_initial_snapshot_finishes_before_listener_bind() {
     let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
@@ -762,7 +804,7 @@ async fn real_srs_initial_snapshot_finishes_before_listener_bind() {
     drop(rebound);
     let encoded = metrics.encode_text().expect("metrics encode");
     assert!(encoded.contains("ferrum2_ruleset_generation 1"));
-    materialized.validate_only().expect("drop refresh plan");
+    drop(materialized.into_validated_config());
 
     system_owner
         .shutdown()
@@ -850,7 +892,6 @@ async fn refresh_failure_retains_generation_and_root_cleanup_is_explicit() {
     let MaterializedRunParts {
         config,
         materialization_root: root,
-        cache: _cache,
     } = materialized
         .into_run_parts()
         .await

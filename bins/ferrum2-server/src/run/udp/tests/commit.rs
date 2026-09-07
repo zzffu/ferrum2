@@ -51,7 +51,11 @@ async fn concurrent_same_session_rolls_back_losing_socket_before_protocol_commit
         mappings: Arc::clone(&mappings),
         admission: Arc::new(tokio::sync::Mutex::new(())),
         connect_timeout: config.runtime.connect_timeout,
-        direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+        direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+            ferrum2_config::DirectDomainResolver::System,
+            std::sync::Arc::new(std::sync::OnceLock::new()),
+        )]
+        .into(),
         registry: registry.clone(),
         metrics: Arc::clone(&metrics),
     };

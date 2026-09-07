@@ -59,7 +59,11 @@ async fn slow_socket_opens_for_distinct_sessions_run_concurrently() {
         mappings,
         admission: Arc::new(tokio::sync::Mutex::new(())),
         connect_timeout: config.runtime.connect_timeout,
-        direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+        direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+            ferrum2_config::DirectDomainResolver::System,
+            std::sync::Arc::new(std::sync::OnceLock::new()),
+        )]
+        .into(),
         registry: registry.clone(),
         metrics,
     };
@@ -166,7 +170,11 @@ async fn shutdown_cancels_stalled_socket_open_and_rolls_back_provisional_session
             mappings: Arc::clone(&mappings),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            )]
+            .into(),
             registry: registry.clone(),
             metrics: Arc::new(Metrics::new()),
         },
@@ -252,7 +260,11 @@ async fn post_open_session_limit_race_rolls_back_provisional_resources() {
             mappings: Arc::clone(&mappings),
             admission: Arc::clone(&admission),
             connect_timeout: config.runtime.connect_timeout,
-            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            )]
+            .into(),
             registry: registry.clone(),
             metrics: Arc::clone(&metrics),
         },
@@ -385,7 +397,11 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
             mappings: Arc::clone(&mappings),
             admission: Arc::new(tokio::sync::Mutex::new(())),
             connect_timeout: config.runtime.connect_timeout,
-            direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+            direct_resolvers: vec![dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            )]
+            .into(),
             registry: registry.clone(),
             metrics: Arc::new(Metrics::new()),
         },

@@ -91,7 +91,10 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(
-            crate::run::dns_egress::ServerDnsResolver::new(None),
+            crate::run::dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            ),
             Duration::from_secs(5),
         ),
     };
@@ -456,7 +459,10 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
     let keys = aes_keys();
     let connector = ProtocolClientConnector {
         inner: TcpConnector::new(
-            crate::run::dns_egress::ServerDnsResolver::new(None),
+            crate::run::dns_egress::ServerDnsResolver::for_direct(
+                ferrum2_config::DirectDomainResolver::System,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            ),
             Duration::from_secs(5),
         ),
     };

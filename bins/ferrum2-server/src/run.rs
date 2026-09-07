@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use ferrum2_config::{DnsConfig, PreparedServerV2, ValidatedServerConfig};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
-use ferrum2_dns::{DnsCache, TaggedResolver};
+use ferrum2_dns::TaggedResolver;
 use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_observability::{Metrics, RuleProgram, RuleProgramMode, json_subscriber};
 use ferrum2_rule::RuleCompileError;
@@ -133,16 +133,6 @@ const fn run_error_for_rule_compile(error: RuleCompileError) -> RunError {
     }
 }
 
-const fn run_error_for_dns_state(error: dns_egress::ServerDnsStateBuildError) -> RunError {
-    match error {
-        dns_egress::ServerDnsStateBuildError::CacheAllocation => RunError::RuleAllocation,
-        dns_egress::ServerDnsStateBuildError::InvalidRuntime => RunError::StartupProtocol,
-        dns_egress::ServerDnsStateBuildError::DnsPolicy(error) => {
-            run_error_for_dns_policy_compile(error)
-        }
-    }
-}
-
 const fn run_error_for_dns_policy_compile(error: ferrum2_dns::DnsPolicyCompileError) -> RunError {
     match error {
         ferrum2_dns::DnsPolicyCompileError::Allocation
@@ -202,13 +192,12 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
                     log_level(materialized.config().logging.level),
                 );
                 if tracing::subscriber::set_global_default(subscriber).is_err() {
-                    materialized.validate_only()?;
+                    drop(materialized.into_validated_config());
                     return Err(RunError::StartupObservability);
                 }
                 let materialize::MaterializedRunParts {
                     config,
                     materialization_root,
-                    cache: materialized_cache,
                 } = materialized.into_run_parts().await?;
                 let dns_specs = config
                     .dns
@@ -222,9 +211,7 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
                     metrics,
                     ServerRunResources {
                         materialization_root,
-                        materialized_cache,
                         dns_specs,
-                        materialized: true,
                         network: Some(network.run_parts()),
                     },
                 )
@@ -270,7 +257,10 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
                 network_sockets,
             );
             let result = match materializer.materialize(prepared).await {
-                Ok(materialized) => materialized.validate_only().map(drop),
+                Ok(materialized) => {
+                    drop(materialized.into_validated_config());
+                    Ok(())
+                }
                 Err(error) => Err(error),
             };
             network.shutdown().await?;
@@ -287,9 +277,7 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
 
 struct ServerRunResources {
     materialization_root: Option<materialize::ServerV2RuntimeRoot>,
-    materialized_cache: Option<DnsCache>,
     dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
-    materialized: bool,
     network: Option<network_owner::ServerNetworkRunParts>,
 }
 
@@ -298,9 +286,7 @@ impl ServerRunResources {
     const fn test_unmaterialized(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
         Self {
             materialization_root: None,
-            materialized_cache: None,
             dns_specs,
-            materialized: false,
             network: None,
         }
     }
@@ -342,9 +328,7 @@ where
 {
     let ServerRunResources {
         mut materialization_root,
-        materialized_cache,
         dns_specs,
-        materialized,
         network,
     } = resources;
     let result = async {
@@ -377,11 +361,11 @@ where
                     servers: _,
                     timeout,
                     max_inflight,
-                    runtime,
+                    runtime: _,
                 }),
-                Some(policy),
+                Some(_policy),
                 Some(servers),
-            ) => Some((servers, policy, timeout, max_inflight, runtime)),
+            ) => Some((servers, timeout, max_inflight)),
             (None, None, None) => None,
             _ => return Err(RunError::StartupProtocol),
         };
@@ -439,57 +423,35 @@ where
         let network_change_metrics = Arc::clone(&metrics);
         #[cfg(all(windows, not(test)))]
         let mut udp_network_reset = None;
-        let _dns = match dns {
-            Some((servers, policy, timeout, max_inflight, runtime)) => {
-                let state = if materialized {
-                    dns_egress::ServerDnsState::try_new_with_cache(
-                        policy,
-                        runtime,
-                        materialized_cache,
-                    )
-                } else {
-                    dns_egress::ServerDnsState::try_new(policy, runtime)
-                }
-                .map_err(run_error_for_dns_state)?
-                .with_policy_observer(dns_egress::dns_policy_observer(&metrics));
-                let state = Arc::new(state);
-                let root_state = Arc::clone(&state);
-                let root_direct_resolvers = Arc::clone(&direct_resolvers);
-                let root_physical_sockets = Arc::clone(&physical_sockets);
-                let root_tagged_dns = Arc::clone(&tagged_dns);
-                let root_dns_drain = dns_drain
-                    .as_ref()
-                    .cloned()
-                    .ok_or(RunError::StartupProtocol)?;
-                roots.push(ProcessRoot::new(move || async move {
-                    let egress = Arc::new(
-                        dns_egress::ServerDnsEgress::new(root_physical_sockets)
-                            .with_outbound_resolvers(
-                                root_direct_resolvers.iter().cloned().collect(),
-                            ),
-                    );
-                    let (resolver, mut owner) =
-                        TaggedResolver::new(servers, timeout, max_inflight, egress)
-                            .map_err(|_| RunError::StartupProtocol)?;
-                    owner.ready().await.map_err(|_| RunError::StartupProtocol)?;
-                    let resolver = Arc::new(resolver);
-                    root_tagged_dns
-                        .set(Arc::downgrade(&resolver))
+        if let Some((servers, timeout, max_inflight)) = dns {
+            let root_direct_resolvers = Arc::clone(&direct_resolvers);
+            let root_physical_sockets = Arc::clone(&physical_sockets);
+            let root_tagged_dns = Arc::clone(&tagged_dns);
+            let root_dns_drain = dns_drain
+                .as_ref()
+                .cloned()
+                .ok_or(RunError::StartupProtocol)?;
+            roots.push(ProcessRoot::new(move || async move {
+                let egress = Arc::new(
+                    dns_egress::ServerDnsEgress::new(root_physical_sockets)
+                        .with_outbound_resolvers(root_direct_resolvers.iter().cloned().collect()),
+                );
+                let (resolver, mut owner) =
+                    TaggedResolver::new(servers, timeout, max_inflight, egress)
                         .map_err(|_| RunError::StartupProtocol)?;
-                    root_state
-                        .install(resolver)
-                        .map_err(|_| RunError::StartupProtocol)?;
-                    Ok(ServerDnsRoot {
-                        state: root_state,
-                        owner,
-                        drain: root_dns_drain,
-                    })
-                }));
-                Some(state)
-            }
-            None if materialized_cache.is_none() => None,
-            None => return Err(RunError::StartupProtocol),
-        };
+                owner.ready().await.map_err(|_| RunError::StartupProtocol)?;
+                let resolver = Arc::new(resolver);
+                root_tagged_dns
+                    .set(Arc::downgrade(&resolver))
+                    .map_err(|_| RunError::StartupProtocol)?;
+                Ok(ServerDnsRoot {
+                    _resolver: resolver,
+                    owner,
+                    drain: root_dns_drain,
+                })
+            }));
+        }
+
         let mut tcp_listens = Vec::with_capacity(config.inbounds.len());
         let mut tcp_contexts = Vec::with_capacity(config.inbounds.len());
         for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
@@ -707,6 +669,7 @@ async fn run_with_registry_prepared<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    materialize::validate_server_dns_policy(&config)?;
     let (system, mut owner) = ferrum2_dns::SystemResolution::start(
         config.dns.as_ref().map_or_else(
             || {

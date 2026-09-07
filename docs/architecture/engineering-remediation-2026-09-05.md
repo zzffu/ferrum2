@@ -69,10 +69,12 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M3h host / `a2b53ebd` | 仓库唯一Windows正确性runner，已提升权限并使用已授权AcknowledgeHostNetworkMutation；run `ca98576d5c3b` | 8/8 PASS、QUALIFIED，supervisor102.689s；TUN TCP/UDP、窄路由、live WFP读回、通知保持WFP身份、强制进程树恢复、独立五类残留全0。bundle `dcbcbe96...`；未注入所有hook/stack构造失败，未测性能 |
 
+| M4f / unused server DNS proxy | 删除ServerDnsState/proxy/仅测试使用的configured backend与未使用runtime cache交接；真实DNS root直接拥有tagged resolver及owner；materialized类型构造前验证policy，实际bootstrap/RuleSet cache保留 | server58、strictlint/fmt/build通过；m0 materialize2及tagged UDP/TCP/system UDP各1通过。删除3个旧proxy路径测试，替换真实Direct observation及materialization拒绝边界；没有删真实Direct协议/生命周期覆盖。编译初轮暴露未迁移测试调用及unused import/helper，修正后未放宽lint；未测RSS或吞吐 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门禁17项全部通过（含doc及3个M4有限filter）。
-剩余主要实施是server startup诊断、未使用DNS proxy移除、network诊断接口及net具名状态。
+剩余主要实施是server startup诊断、network诊断接口及net具名状态。
 随后执行最终整合门禁、实际Windows资格和架构前后性能验收；当前仍未完成这些验收。
 后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
 归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。

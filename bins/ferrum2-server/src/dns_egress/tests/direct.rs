@@ -1,28 +1,5 @@
 use super::*;
 
-pub(super) async fn answer_a(socket: &UdpSocket, expected: &str, address: Ipv4Addr) {
-    let mut wire = [0_u8; 4096];
-    let (length, peer) = recv_udp(socket, &mut wire).await;
-    let request = Message::from_vec(&wire[..length]).expect("DNS query decode");
-    let [query] = request.queries.as_slice() else {
-        panic!("one DNS query");
-    };
-    assert_eq!(query.name().to_ascii(), expected);
-    assert_eq!(query.query_type(), RecordType::A);
-    let mut response = Message::response(request.id, OpCode::Query);
-    response.metadata.recursion_available = true;
-    response.add_query(query.clone());
-    response.add_answer(Record::from_rdata(
-        query.name().clone(),
-        60,
-        RData::A(A(address)),
-    ));
-    socket
-        .send_to(&response.to_vec().expect("DNS response encode"), peer)
-        .await
-        .expect("DNS response send");
-}
-
 fn a_response(request: &Message, addresses: &[Ipv4Addr]) -> Vec<u8> {
     let [query] = request.queries.as_slice() else {
         panic!("one DNS query");
