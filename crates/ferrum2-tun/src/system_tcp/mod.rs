@@ -310,7 +310,16 @@ impl SystemTcp {
         now_millis: i64,
     ) -> Result<(), TunRejectReason> {
         let now_millis = self.observe_time(now_millis);
-        self.expire(now_millis);
+        // The owner services accepts, publication and quarantine once per control
+        // rotation. Packets only force maintenance when a live mapping may have
+        // expired or a socket was dropped; neither may be revived by traffic.
+        if self
+            .active_deadline_millis
+            .is_some_and(|deadline| deadline <= now_millis)
+            || self.flow_changed.load(Ordering::Acquire)
+        {
+            self.expire(now_millis);
+        }
         if !parsed.metadata_matches(packet.len()) {
             return Err(TunRejectReason::InvalidIpLength);
         }
