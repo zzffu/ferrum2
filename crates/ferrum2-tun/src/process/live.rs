@@ -8,7 +8,7 @@ use super::limits::runtime_limits_are_exact;
 use crate::lifecycle::owner_main;
 use crate::{
     NativeLifecycleOwner, OwnerControl, OwnerExit, OwnerSessionServices, PreparationFailure,
-    TunEventSink, TunRoot,
+    RunOwner, TunEventSink, TunRoot,
 };
 
 pub(super) fn build<E>(request: TunRootRequest<E>) -> ProcessRoot<E>
@@ -81,7 +81,7 @@ where
         Ok(work) => {
             owner.work = work;
             Ok(Some(TunRoot {
-                owner,
+                owner: RunOwner::new(owner),
                 done,
                 runtime: Some(runtime),
                 cleanup: Some(cleanup),

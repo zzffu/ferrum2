@@ -6,12 +6,14 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use crate::OwnerRegistry;
+use crate::{OwnerRegistry, OwnerSnapshot};
 
+mod entry;
 mod report;
 mod shutdown;
 mod transaction;
 
+use entry::{ActiveEntry, RootEvent, poll_cleanup};
 use report::ProcessTimeline;
 pub use report::{
     ProcessCause, ProcessCleanupFailure, ProcessExitKind, ProcessReport, ProcessRootEvent,
@@ -20,9 +22,8 @@ pub use report::{
 };
 use shutdown::{FinishContext, abort_and_reap_remaining, finish_report};
 use transaction::{
-    ActiveEntry, PreparedEntry, UnstartedEntry, catch_process_future, future_is_ready,
-    next_root_event, record_cleanup_event, rollback_prepared, rollback_unstarted,
-    root_exit_category,
+    PreparedEntry, UnstartedEntry, catch_process_future, future_is_ready, next_root_event,
+    record_cleanup_event, rollback_prepared, rollback_unstarted, root_exit_category,
 };
 
 const FORCE_REAP_WATCHDOG: Duration = Duration::from_secs(5);
@@ -117,10 +118,26 @@ pub trait PreparedProcessRoot<E>: Send + 'static {
     /// unwind from this method.
     fn activate(&mut self) -> Result<(), E>;
 
+    /// Transfers an optional final cleanup future to the process supervisor.
+    ///
+    /// Called once before `run` is constructed. Use this when independently
+    /// scheduled children or native resources must survive cancellation or panic
+    /// of the run future. The returned future must retain their unique join
+    /// custody and finish only after all of them are reaped; it must tolerate
+    /// polling after run construction panics or before the run future is polled.
+    /// A pending poll waiter may be dropped and retried without dropping this
+    /// retained future. `None` means the root needs no separate cleanup owner.
+    /// This does not guarantee cleanup if the entire supervisor is dropped.
+    fn take_run_cleanup(&mut self) -> Option<ProcessFuture<Result<(), E>>> {
+        None
+    }
+
     /// Consumes the activated root into its public service future.
     ///
-    /// The returned future owns the root and all of its children. It must complete
-    /// only after its transitive children have been reaped. Per-flow and per-session
+    /// The returned future owns the root and its children unless their join custody
+    /// was transferred by `take_run_cleanup`. Other children must be reaped before
+    /// it completes. The supervisor also awaits transferred cleanup before it
+    /// reports the root reaped. Per-flow and per-session
     /// failures stay inside the adapter; only terminal required-root outcomes return.
     fn run(self: Box<Self>, cancellation: ProcessCancellation) -> ProcessFuture<Result<(), E>>;
 
@@ -223,12 +240,35 @@ impl std::fmt::Display for ProcessSupervisorConfigError {
 
 impl std::error::Error for ProcessSupervisorConfigError {}
 
+/// Shared process resources handed off with their original registry baseline.
+///
+/// Capture `baseline` from the same [`OwnerRegistry`] used by the supervisor,
+/// before creating the first resource owned by `cleanup`. The cleanup future must
+/// close admission and join actual work after all roots stop. Never substitute a
+/// later snapshot to hide resources that were not reaped.
+pub struct ProcessResources<E> {
+    pub baseline: OwnerSnapshot,
+    pub cleanup: ProcessFuture<Result<(), E>>,
+}
+
 /// Topology-neutral transaction over all required process roots.
-#[derive(Debug)]
 pub struct ProcessSupervisor<E> {
     roots: Vec<ProcessRoot<E>>,
     shutdown_grace: Duration,
     registry: OwnerRegistry,
+    resources: Option<ProcessResources<E>>,
+}
+
+impl<E> std::fmt::Debug for ProcessSupervisor<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessSupervisor")
+            .field("roots", &self.roots)
+            .field("shutdown_grace", &self.shutdown_grace)
+            .field("registry", &self.registry)
+            .field("has_process_resources", &self.resources.is_some())
+            .finish()
+    }
 }
 
 impl<E> ProcessSupervisor<E>
@@ -248,10 +288,28 @@ where
             roots,
             shutdown_grace,
             registry,
+            resources: None,
         })
     }
 
+    /// Takes ownership of shared resources and their pre-materialization baseline.
+    ///
+    /// Register once before preparation. Resource cleanup runs after every root
+    /// has rolled back or been reaped, including startup failures, and before the
+    /// final registry comparison against the supplied baseline. Cleanup failure
+    /// preserves earlier root/watchdog failures. Actual joins are not aborted to
+    /// simulate a hard cleanup deadline.
+    pub fn with_process_resources(mut self, resources: ProcessResources<E>) -> Self {
+        assert!(self.resources.is_none(), "one process resource handoff");
+        self.resources = Some(resources);
+        self
+    }
+
     /// Prepares every root, activates them atomically, then supervises until stop.
+    ///
+    /// Drive this future to completion to obtain the transitive cleanup guarantee.
+    /// Dropping the whole supervisor aborts roots, but cannot asynchronously join
+    /// them or their separately retained cleanup futures from synchronous Drop.
     pub async fn run_until<S>(self, shutdown: S) -> ProcessReport<E>
     where
         S: Future<Output = ()> + Send,
@@ -260,8 +318,12 @@ where
             roots,
             shutdown_grace,
             registry,
+            resources,
         } = self;
-        let baseline = registry.snapshot();
+        let (baseline, final_cleanup) = match resources {
+            Some(ProcessResources { baseline, cleanup }) => (baseline, Some(cleanup)),
+            None => (registry.snapshot(), None),
+        };
         let process_guard = registry.track_process_supervisor();
         let (cancellation_source, cancellation) = ProcessCancellationSource::new();
         let root_count = roots.len();
@@ -317,11 +379,12 @@ where
                                 0,
                                 cleanup_failure,
                                 FinishContext {
+                    final_cleanup,
                                     process_guard,
                                     baseline,
                                     registry: &registry,
                                 },
-                            );
+                            ).await;
                         }
                         result = &mut preparation => result,
                     }
@@ -347,11 +410,13 @@ where
                         0,
                         cleanup_failure,
                         FinishContext {
+                            final_cleanup,
                             process_guard,
                             baseline,
                             registry: &registry,
                         },
-                    );
+                    )
+                    .await;
                 }
                 Ok(PrepareOutcome::Cancelled) | Err(()) => {
                     cancellation_source.quiesce();
@@ -363,11 +428,13 @@ where
                         0,
                         cleanup_failure,
                         FinishContext {
+                            final_cleanup,
                             process_guard,
                             baseline,
                             registry: &registry,
                         },
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -384,11 +451,13 @@ where
                     0,
                     cleanup_failure,
                     FinishContext {
+                        final_cleanup,
                         process_guard,
                         baseline,
                         registry: &registry,
                     },
-                );
+                )
+                .await;
             }
             let root_id = prepared[position].id;
             let activation = catch_unwind(AssertUnwindSafe(|| prepared[position].root.activate()));
@@ -407,11 +476,13 @@ where
                         0,
                         cleanup_failure,
                         FinishContext {
+                            final_cleanup,
                             process_guard,
                             baseline,
                             registry: &registry,
                         },
-                    );
+                    )
+                    .await;
                 }
                 Err(_) => {
                     cancellation_source.quiesce();
@@ -423,11 +494,13 @@ where
                         0,
                         cleanup_failure,
                         FinishContext {
+                            final_cleanup,
                             process_guard,
                             baseline,
                             registry: &registry,
                         },
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -442,11 +515,13 @@ where
                 0,
                 cleanup_failure,
                 FinishContext {
+                    final_cleanup,
                     process_guard,
                     baseline,
                     registry: &registry,
                 },
-            );
+            )
+            .await;
         }
 
         let mut prepared = prepared.into_iter();
@@ -454,21 +529,33 @@ where
         while let Some(entry) = prepared.next() {
             let PreparedEntry {
                 id: root_id,
-                root,
+                mut root,
                 guard,
             } = entry;
-            match catch_unwind(AssertUnwindSafe(|| root.run(cancellation.clone()))) {
+            let mut cleanup = None;
+            match catch_unwind(AssertUnwindSafe(|| {
+                cleanup = root.take_run_cleanup();
+                root.run(cancellation.clone())
+            })) {
                 Ok(future) => unstarted.push(UnstartedEntry {
                     id: root_id,
                     future,
+                    cleanup,
                     guard,
                 }),
                 Err(_) => {
-                    drop(guard);
                     cancellation_source.quiesce();
                     timeline.push(ProcessState::Rollback);
+                    let owned_cleanup = std::future::poll_fn(|context| {
+                        poll_cleanup(root_id, &mut cleanup, context)
+                    })
+                    .await;
+                    drop(guard);
                     let mut cleanup_failure =
                         rollback_prepared(prepared.collect(), &registry).await;
+                    if owned_cleanup.is_some() {
+                        cleanup_failure = owned_cleanup;
+                    }
                     let handoff_cleanup = rollback_unstarted(unstarted, &registry).await;
                     if cleanup_failure.is_none() {
                         cleanup_failure = handoff_cleanup;
@@ -479,11 +566,13 @@ where
                         0,
                         cleanup_failure,
                         FinishContext {
+                            final_cleanup,
                             process_guard,
                             baseline,
                             registry: &registry,
                         },
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -496,6 +585,7 @@ where
                 ActiveEntry {
                     id: entry.id,
                     task: Some(tokio::spawn(entry.future)),
+                    cleanup: entry.cleanup,
                     guard: Some(active_guard),
                 }
             })
@@ -507,25 +597,21 @@ where
             biased;
             () = &mut shutdown => ProcessCause::ExternalShutdown,
             event = next_root_event(&mut active, &registry) => {
-                timeline.push_root_event(
-                    event.root,
-                    ProcessRootEventPhase::Active,
-                    root_exit_category(&event.exit),
-                );
+                let RootEvent::Exited { root, exit } = event else {
+                    unreachable!("cleanup cannot precede the first root exit");
+                };
+                timeline.push_root_event(root, ProcessRootEventPhase::Active, root_exit_category(&exit));
                 timeline.push(ProcessState::Fatal);
-                ProcessCause::RootStopped {
-                    root: event.root,
-                    exit: event.exit,
-                }
+                ProcessCause::RootStopped { root, exit }
             }
         };
+        let mut cleanup_failure = None;
 
         cancellation_source.quiesce();
         timeline.push(ProcessState::Quiescing);
         timeline.push(ProcessState::Draining);
         let deadline = Instant::now() + shutdown_grace;
         timeline.record_grace_deadline(deadline);
-        let mut cleanup_failure = None;
         let mut forced_roots = 0;
         let mut force_reap_deadline = None;
 
@@ -534,22 +620,22 @@ where
                 let timed_out = tokio::select! {
                     biased;
                     event = next_root_event(&mut active, &registry) => {
-                        timeline.push_root_event(
-                            event.root,
-                            ProcessRootEventPhase::Forced,
-                            root_exit_category(&event.exit),
-                        );
+                        if let RootEvent::Exited { root, exit } = &event {
+                            timeline.push_root_event(*root, ProcessRootEventPhase::Forced, root_exit_category(exit));
+                        }
                         record_cleanup_event(event, &mut cleanup_failure);
                         false
                     }
                     () = tokio::time::sleep_until(force_reap_deadline) => true,
                 };
                 if timed_out {
-                    let roots =
+                    let (roots, owned_cleanup) =
                         abort_and_reap_remaining(&mut active, &registry, &mut timeline).await;
                     cleanup_failure = Some(ProcessCleanupFailure::ForceReapTimedOut {
                         roots,
-                        prior: cleanup_failure.take().map(Box::new),
+                        prior: owned_cleanup
+                            .or_else(|| cleanup_failure.take())
+                            .map(Box::new),
                     });
                 }
                 continue;
@@ -557,11 +643,9 @@ where
             let timed_out = tokio::select! {
                 biased;
                 event = next_root_event(&mut active, &registry) => {
-                    timeline.push_root_event(
-                        event.root,
-                        ProcessRootEventPhase::Draining,
-                        root_exit_category(&event.exit),
-                    );
+                    if let RootEvent::Exited { root, exit } = &event {
+                        timeline.push_root_event(*root, ProcessRootEventPhase::Draining, root_exit_category(exit));
+                    }
                     record_cleanup_event(event, &mut cleanup_failure);
                     false
                 }
@@ -582,10 +666,12 @@ where
             forced_roots,
             cleanup_failure,
             FinishContext {
+                final_cleanup,
                 process_guard,
                 baseline,
                 registry: &registry,
             },
         )
+        .await
     }
 }

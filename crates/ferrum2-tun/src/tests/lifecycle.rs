@@ -312,12 +312,12 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
     let root_registry = registry.clone();
     let root = ProcessRoot::new(move || async move {
         Ok::<_, &'static str>(TunRoot {
-            owner: NativeLifecycleOwner {
+            owner: crate::RunOwner::new(NativeLifecycleOwner {
                 link: root_link,
                 control,
                 work: OwnerWake::default(),
                 thread: Some(thread),
-            },
+            }),
             done,
             runtime: Some("runtime"),
             cleanup: Some("cleanup"),
@@ -400,12 +400,12 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
     let root_registry = registry.clone();
     let root = ferrum2_runtime::ProcessRoot::new(move || async move {
         Ok::<_, &'static str>(TunRoot {
-            owner: NativeLifecycleOwner {
+            owner: crate::RunOwner::new(NativeLifecycleOwner {
                 link: crate::LifecycleLink::default(),
                 control,
                 work: OwnerWake::default(),
                 thread: Some(thread),
-            },
+            }),
             done: done_receiver,
             runtime: Some("runtime"),
             cleanup: Some("cleanup"),
@@ -560,12 +560,12 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         let root_flow_count = Arc::clone(&flow_count);
         let root = ferrum2_runtime::ProcessRoot::new(move || async move {
             Ok::<_, &'static str>(TunRoot {
-                owner: NativeLifecycleOwner {
+                owner: crate::RunOwner::new(NativeLifecycleOwner {
                     link: crate::LifecycleLink::default(),
                     control,
                     work: OwnerWake::default(),
                     thread: Some(thread),
-                },
+                }),
                 done: done_receiver,
                 runtime: Some("runtime"),
                 cleanup: Some("cleanup"),

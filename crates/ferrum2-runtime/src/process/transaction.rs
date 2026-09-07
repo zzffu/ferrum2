@@ -3,11 +3,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinError;
 
 use crate::OwnerRegistry;
 use crate::owner::OwnerGuard;
 
+use super::entry::{ActiveEntry, RootEvent};
 use super::{
     PreparedRootBox, ProcessCleanupFailure, ProcessFuture, ProcessRootExit,
     ProcessRootExitCategory, ProcessRootId,
@@ -22,32 +23,8 @@ pub(super) struct PreparedEntry<E> {
 pub(super) struct UnstartedEntry<E> {
     pub(super) id: ProcessRootId,
     pub(super) future: ProcessFuture<Result<(), E>>,
+    pub(super) cleanup: Option<ProcessFuture<Result<(), E>>>,
     pub(super) guard: OwnerGuard,
-}
-
-pub(super) struct ActiveEntry<E> {
-    pub(super) id: ProcessRootId,
-    pub(super) task: Option<JoinHandle<Result<(), E>>>,
-    pub(super) guard: Option<OwnerGuard>,
-}
-
-impl<E> ActiveEntry<E> {
-    pub(super) fn is_running(&self) -> bool {
-        self.task.is_some()
-    }
-}
-
-impl<E> Drop for ActiveEntry<E> {
-    fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
-    }
-}
-
-pub(super) struct RootEvent<E> {
-    pub(super) root: ProcessRootId,
-    pub(super) exit: ProcessRootExit<E>,
 }
 
 pub(super) async fn rollback_prepared<E: 'static>(
@@ -91,24 +68,23 @@ pub(super) async fn rollback_unstarted<E: Send + 'static>(
     while let Some(entry) = unstarted.pop() {
         let task = tokio::spawn(entry.future);
         task.abort();
-        let result = task.await;
-        drop(entry.guard);
-        registry.record_process_root_rollback();
-        let failure = match result {
-            Err(error) if error.is_cancelled() => None,
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(ProcessCleanupFailure::RootFailed {
-                root: entry.id,
-                error,
-            }),
-            Err(error) if error.is_panic() => {
-                Some(ProcessCleanupFailure::RootPanicked { root: entry.id })
-            }
-            Err(_) => Some(ProcessCleanupFailure::RootJoinFailed { root: entry.id }),
+        let mut active = ActiveEntry {
+            id: entry.id,
+            task: Some(task),
+            cleanup: entry.cleanup,
+            guard: Some(entry.guard),
         };
-        if cleanup_failure.is_none() {
-            cleanup_failure = failure;
+        while active.is_running() {
+            let mut event = std::future::poll_fn(|context| active.poll_event(context)).await;
+            // An intentionally aborted, never-started run has no primary failure.
+            if let RootEvent::Exited { exit, .. } = &mut event
+                && matches!(exit, ProcessRootExit::JoinFailed)
+            {
+                *exit = ProcessRootExit::Completed;
+            }
+            record_cleanup_event(event, &mut cleanup_failure);
         }
+        registry.record_process_root_rollback();
     }
     cleanup_failure
 }
@@ -144,21 +120,12 @@ fn poll_next_root<E>(
     context: &mut Context<'_>,
 ) -> Poll<RootEvent<E>> {
     for entry in active {
-        let Some(task) = entry.task.as_mut() else {
-            continue;
-        };
-        let result = match Pin::new(task).poll(context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => continue,
-        };
-        let exit = root_exit(result);
-        entry.task.take();
-        entry.guard.take();
-        registry.record_process_root_reap();
-        return Poll::Ready(RootEvent {
-            root: entry.id,
-            exit,
-        });
+        if let Poll::Ready(event) = entry.poll_event(context) {
+            if !entry.is_running() {
+                registry.record_process_root_reap();
+            }
+            return Poll::Ready(event);
+        }
     }
     Poll::Pending
 }
@@ -185,19 +152,23 @@ pub(super) fn record_cleanup_event<E>(
     event: RootEvent<E>,
     cleanup_failure: &mut Option<ProcessCleanupFailure<E>>,
 ) {
+    let (root, exit) = match event {
+        RootEvent::Exited { root, exit } => (root, exit),
+        RootEvent::Cleaned { failure } => {
+            if failure.is_some() {
+                *cleanup_failure = failure;
+            }
+            return;
+        }
+    };
     if cleanup_failure.is_some() {
         return;
     }
-    *cleanup_failure = match event.exit {
+    *cleanup_failure = match exit {
         ProcessRootExit::Completed => None,
-        ProcessRootExit::Failed(error) => Some(ProcessCleanupFailure::RootFailed {
-            root: event.root,
-            error,
-        }),
-        ProcessRootExit::Panicked => Some(ProcessCleanupFailure::RootPanicked { root: event.root }),
-        ProcessRootExit::JoinFailed => {
-            Some(ProcessCleanupFailure::RootJoinFailed { root: event.root })
-        }
+        ProcessRootExit::Failed(error) => Some(ProcessCleanupFailure::RootFailed { root, error }),
+        ProcessRootExit::Panicked => Some(ProcessCleanupFailure::RootPanicked { root }),
+        ProcessRootExit::JoinFailed => Some(ProcessCleanupFailure::RootJoinFailed { root }),
     };
 }
 

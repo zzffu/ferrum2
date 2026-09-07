@@ -36,8 +36,8 @@ pub use network_socket::{
 pub use owner::{OwnerRegistry, OwnerSnapshot, TunHandlerTaskOwner, TunTcpFlowOwner};
 pub use process::{
     PreparedProcessRoot, ProcessCancellation, ProcessCancellationPhase, ProcessCause,
-    ProcessCleanupFailure, ProcessExitKind, ProcessFuture, ProcessReport, ProcessRoot,
-    ProcessRootEvent, ProcessRootEventPhase, ProcessRootExit, ProcessRootExitCategory,
+    ProcessCleanupFailure, ProcessExitKind, ProcessFuture, ProcessReport, ProcessResources,
+    ProcessRoot, ProcessRootEvent, ProcessRootEventPhase, ProcessRootExit, ProcessRootExitCategory,
     ProcessRootId, ProcessState, ProcessSupervisor, ProcessSupervisorConfigError,
     ProcessTransition,
 };

@@ -1,7 +1,9 @@
 mod prepare;
+mod run_owner;
 mod thread;
 #[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
 pub(crate) use prepare::PreparationFailure;
+pub(crate) use run_owner::RunOwner;
 pub(crate) use thread::NativeLifecycleOwner;
 mod link;
 pub(crate) use link::{LifecycleEvent, LifecycleLink, NetworkResetRequest};
@@ -75,7 +77,7 @@ impl OwnerControl {
 }
 
 pub(crate) struct TunRoot<E> {
-    pub(crate) owner: NativeLifecycleOwner,
+    pub(crate) owner: Arc<RunOwner>,
     pub(crate) done: tokio::sync::oneshot::Receiver<OwnerExit>,
     pub(crate) runtime: Option<E>,
     pub(crate) cleanup: Option<E>,
@@ -103,7 +105,7 @@ pub(crate) enum NetworkResetBridgeOutcome {
 
 impl<E> PreparedProcessRoot<E> for TunRoot<E>
 where
-    E: Send + 'static,
+    E: Copy + Send + 'static,
 {
     fn activate(&mut self) -> Result<(), E> {
         self.owner.control.admitting.store(true, Ordering::Release);
@@ -112,12 +114,24 @@ where
         Ok(())
     }
 
+    fn take_run_cleanup(&mut self) -> Option<ProcessFuture<Result<(), E>>> {
+        let owner = self.owner.take_cleanup();
+        let runtime = self.runtime.expect("runtime error retained");
+        let cleanup = self.cleanup.expect("cleanup error retained");
+        Some(Box::pin(async move {
+            match owner.reap().await {
+                OwnerExit::Stopped => Ok(()),
+                OwnerExit::RuntimeFailed => Err(runtime),
+                OwnerExit::CleanupFailed => Err(cleanup),
+            }
+        }))
+    }
+
     fn run(
         mut self: Box<Self>,
         mut cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), E>> {
         Box::pin(async move {
-            let mut tasks = tokio::task::JoinSet::new();
             let mut forced = cancellation.clone();
             let mut network_resets_open = true;
             let reported = 'required: loop {
@@ -131,7 +145,7 @@ where
                     break OwnerExit::Stopped;
                 }
                 if cancellation.is_cancelled()
-                    && tasks.is_empty()
+                    && self.owner.is_empty()
                     && self.flow_count.load(Ordering::Acquire) == 0
                     && self.association_count.load(Ordering::Acquire) == 0
                 {
@@ -145,7 +159,7 @@ where
                             if session.is_cancelled() {
                                 continue;
                             }
-                            while let Some(result) = tasks.try_join_next() {
+                            while let Some(result) = self.owner.try_join_next() {
                                 if result.is_err() {
                                     break 'required OwnerExit::RuntimeFailed;
                                 }
@@ -153,7 +167,7 @@ where
                             let owner = self.registry.track_tun_handler_task();
                             let task_session = session.clone();
                             let handler = (self.handle_tcp)(flow, cancellation.clone(), session);
-                            tasks.spawn(async move {
+                            self.owner.spawn(async move {
                                 let _owner = owner;
                                 tokio::select! {
                                     biased;
@@ -169,7 +183,7 @@ where
                             if session.is_cancelled() {
                                 continue;
                             }
-                            while let Some(result) = tasks.try_join_next() {
+                            while let Some(result) = self.owner.try_join_next() {
                                 if result.is_err() {
                                     break 'required OwnerExit::RuntimeFailed;
                                 }
@@ -177,7 +191,7 @@ where
                             let owner = self.registry.track_tun_handler_task();
                             let task_session = session.clone();
                             let handler = (self.handle_udp)(candidate, cancellation.clone(), session);
-                            tasks.spawn(async move {
+                            self.owner.spawn(async move {
                                 let _owner = owner;
                                 tokio::select! {
                                     biased;
@@ -206,7 +220,7 @@ where
                         };
                         completion.complete(outcome);
                     }
-                    result = tasks.join_next(), if !tasks.is_empty() => {
+                    result = self.owner.join_next(), if !self.owner.is_empty() => {
                         if result.is_some_and(|result| result.is_err()) {
                             break OwnerExit::RuntimeFailed;
                         }
@@ -221,11 +235,8 @@ where
                 }
             };
             self.owner.signal();
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-            let reaped = self.owner.reap().await;
-            let exit = reconcile_owner_exit(reported, reaped);
-            match exit {
+            self.owner.report(reported);
+            match reported {
                 OwnerExit::Stopped => Ok(()),
                 OwnerExit::RuntimeFailed => {
                     Err(self.runtime.take().expect("runtime error retained"))
@@ -249,6 +260,12 @@ where
                 }
             }
         })
+    }
+}
+
+impl<E> Drop for TunRoot<E> {
+    fn drop(&mut self) {
+        self.owner.signal();
     }
 }
 

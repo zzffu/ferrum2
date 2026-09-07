@@ -97,6 +97,8 @@ impl RootExitCategory {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CleanupFailureKind {
+    FinalCleanupFailed,
+    FinalCleanupPanicked,
     RootFailed,
     RootPanicked,
     RootJoinFailed,
@@ -107,6 +109,8 @@ enum CleanupFailureKind {
 impl CleanupFailureKind {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::FinalCleanupFailed => "FinalCleanupFailed",
+            Self::FinalCleanupPanicked => "FinalCleanupPanicked",
             Self::RootFailed => "RootFailed",
             Self::RootPanicked => "RootPanicked",
             Self::RootJoinFailed => "RootJoinFailed",
@@ -235,6 +239,21 @@ impl CleanupDiagnostic {
 
     fn classify(failure: &ProcessCleanupFailure<RunError>, names: &ClientRootNames) -> Self {
         match failure {
+            ProcessCleanupFailure::FinalCleanupFailed { error, prior } => {
+                let mut diagnostic = Self::new(CleanupFailureKind::FinalCleanupFailed);
+                diagnostic.error_category = Some(*error);
+                diagnostic.prior = prior
+                    .as_ref()
+                    .map(|failure| Box::new(Self::classify(failure, names)));
+                diagnostic
+            }
+            ProcessCleanupFailure::FinalCleanupPanicked { prior } => {
+                let mut diagnostic = Self::new(CleanupFailureKind::FinalCleanupPanicked);
+                diagnostic.prior = prior
+                    .as_ref()
+                    .map(|failure| Box::new(Self::classify(failure, names)));
+                diagnostic
+            }
             ProcessCleanupFailure::RootFailed { root, error } => {
                 let mut diagnostic = Self::new(CleanupFailureKind::RootFailed);
                 diagnostic.root = Some(names.root(*root));

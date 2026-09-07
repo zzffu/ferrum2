@@ -66,6 +66,15 @@ pub enum ProcessCause<E> {
 /// Closed cleanup outcome observed after the primary process cause.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProcessCleanupFailure<E> {
+    /// Shared process resources failed cleanup after every root was reaped.
+    FinalCleanupFailed {
+        error: E,
+        prior: Option<Box<ProcessCleanupFailure<E>>>,
+    },
+    /// The shared process resource cleanup panicked; prior failures are retained.
+    FinalCleanupPanicked {
+        prior: Option<Box<ProcessCleanupFailure<E>>>,
+    },
     RootFailed {
         root: ProcessRootId,
         error: E,
@@ -115,7 +124,8 @@ impl ProcessTransition {
     }
 }
 
-/// Shutdown phase in which one active root was observed to have been reaped.
+/// Shutdown phase in which one active root task was observed to have exited.
+/// Separately retained cleanup may still be running at this observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessRootEventPhase {
     /// The root stopped before process quiescing began and became the primary cause.
