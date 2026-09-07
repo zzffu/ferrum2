@@ -49,6 +49,7 @@ pub(crate) struct RuleSetCacheWork {
     slots: Arc<Semaphore>,
     cancel: CancellationToken,
     directory: Arc<CacheDirectory>,
+    snapshot_limits: ferrum2_rule::RuleEngineSnapshotLimits,
 }
 
 struct WorkState {
@@ -87,6 +88,7 @@ impl RuleSetCacheWork {
             slots: Arc::new(Semaphore::new(MAX_OPERATIONS)),
             cancel: CancellationToken::new(),
             directory: Arc::new(CacheDirectory::new(config.cache_dir.clone())),
+            snapshot_limits: ferrum2_rule::RuleEngineSnapshotLimits::DEFAULT,
         }
     }
 
@@ -138,13 +140,22 @@ impl RuleSetCacheWork {
                 );
             let task_gate = Arc::clone(&gate);
             let directory = Arc::clone(&self.directory);
+            let snapshot_limits = self.snapshot_limits;
             let task = tokio::spawn(async move {
                 let gate = tokio::select! {
                     () = cancel.cancelled() => None,
                     gate = task_gate.lock_owned() => Some(gate),
                 };
                 let (output, failure) = if let Some(_gate) = gate {
-                    run_operation(operation, downloader, config, directory, cancel).await
+                    run_operation(
+                        operation,
+                        downloader,
+                        config,
+                        directory,
+                        cancel,
+                        snapshot_limits,
+                    )
+                    .await
                 } else {
                     (
                         Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Cancelled)),
@@ -260,6 +271,7 @@ async fn run_operation<D: RuleSetDownloader + 'static>(
     config: RuleSetLoaderConfig,
     directory: Arc<CacheDirectory>,
     cancel: CancellationToken,
+    snapshot_limits: ferrum2_rule::RuleEngineSnapshotLimits,
 ) -> (
     Result<OperationOutput, RuleSetLoadError>,
     Option<RuleSetLoadErrorKind>,
@@ -353,6 +365,7 @@ async fn run_operation<D: RuleSetDownloader + 'static>(
             generation,
         } => {
             let mut values = Vec::new();
+            let mut usage = ferrum2_rule::MatchSetResourceUsage::default();
             if values.try_reserve_exact(sources.len()).is_err() {
                 return (
                     Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Allocation)),
@@ -374,7 +387,17 @@ async fn run_operation<D: RuleSetDownloader + 'static>(
                 )
                 .await;
                 match loaded.result {
-                    Ok(value) => values.push(value.loaded),
+                    Ok(value) => {
+                        usage = match snapshot_limits
+                            .admit(usage, value.loaded.match_set.resource_usage())
+                        {
+                            Ok(usage) => usage,
+                            Err(error) => {
+                                return (Err(crate::error::rule_compile_load_error(error)), None);
+                            }
+                        };
+                        values.push(value.loaded);
+                    }
                     Err(error) => {
                         return (
                             Err(error),
@@ -392,7 +415,7 @@ async fn run_operation<D: RuleSetDownloader + 'static>(
             let built = tokio::task::spawn_blocking(move || {
                 let _directory = directory;
                 stop.check()?;
-                let built = build_materialized(sources, values, generation);
+                let built = build_materialized(sources, values, generation, snapshot_limits);
                 stop.check()?;
                 built
             })

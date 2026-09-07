@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::net::IpAddr;
 use std::num::NonZeroU16;
 
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use aho_corasick::AhoCorasick;
 use ferrum2_core::CanonicalDomain;
 use ipnet::IpNet;
 
@@ -141,15 +141,8 @@ struct KeywordCandidateIndex {
 impl KeywordCandidateIndex {
     fn build(builder: SparseValueIndexBuilder<Box<str>>) -> Result<Self, RuleCompileError> {
         let postings = builder.build()?.postings;
-        let matcher = if postings.is_empty() {
-            None
-        } else {
-            Some(
-                AhoCorasickBuilder::new()
-                    .build(postings.iter().map(|posting| posting.key.as_bytes()))
-                    .map_err(|_| RuleCompileError::Internal)?,
-            )
-        };
+        let matcher =
+            crate::keyword::compile_keywords(postings.iter().map(|posting| posting.key.as_ref()))?;
         Ok(Self { matcher, postings })
     }
 

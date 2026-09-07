@@ -1,4 +1,6 @@
-use crate::{RuleCompileError, SMALL_LINEAR_RULE_LIMIT};
+use crate::RuleCompileError;
+
+const SMALL_LINEAR_RULE_LIMIT: usize = 64;
 
 /// Selected compilation strategy for an ordered rule program.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

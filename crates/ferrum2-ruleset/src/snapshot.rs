@@ -82,8 +82,9 @@ pub(crate) fn build_materialized(
     sources: Vec<RuleSetRemoteSource>,
     loaded: Vec<LoadedRuleSet>,
     generation: u64,
+    limits: ferrum2_rule::RuleEngineSnapshotLimits,
 ) -> Result<MaterializedRuleSets, RuleSetLoadError> {
-    let mut builder = RuleEngineSnapshotBuilder::new(generation);
+    let mut builder = RuleEngineSnapshotBuilder::with_limits(generation, limits);
     let mut rule_set_ids = Vec::new();
     let mut dispositions = Vec::new();
     let mut degraded_failures = Vec::new();

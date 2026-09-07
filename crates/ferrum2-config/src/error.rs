@@ -383,7 +383,8 @@ impl ConfigError {
             RuleCompileError::Allocation | RuleCompileError::IndexOverflow => {
                 Self::new(ConfigErrorKind::RuleAllocation, field)
             }
-            RuleCompileError::InvalidId
+            RuleCompileError::ResourceLimit
+            | RuleCompileError::InvalidId
             | RuleCompileError::InvalidGeneration
             | RuleCompileError::Internal => Self::new(ConfigErrorKind::RuleCompile, field),
             RuleCompileError::EmptyMatcher
@@ -400,10 +401,6 @@ impl ConfigError {
 
     pub(super) const fn rule_allocation(field: ConfigField) -> Self {
         Self::new(ConfigErrorKind::RuleAllocation, field)
-    }
-
-    pub(super) const fn rule_compile(field: ConfigField) -> Self {
-        Self::new(ConfigErrorKind::RuleCompile, field)
     }
 
     pub(super) const fn dns_resolver_required(field: ConfigField) -> Self {

@@ -382,6 +382,9 @@ fn compile_field<P: Eq>(field: RouteMatchField<P>) -> Result<CompiledField<P>, R
             CompiledField::Protocol(values.into_boxed_slice())
         }
         RouteMatchField::Domain(values) => {
+            if values.is_empty() {
+                return Err(RuleCompileError::EmptyField);
+            }
             let mut builder = MatchSetBuilder::new();
             for value in &values {
                 builder.add_domain(value)?;
@@ -389,6 +392,9 @@ fn compile_field<P: Eq>(field: RouteMatchField<P>) -> Result<CompiledField<P>, R
             CompiledField::Domain(builder.build()?)
         }
         RouteMatchField::DomainSuffix(values) => {
+            if values.is_empty() {
+                return Err(RuleCompileError::EmptyField);
+            }
             let mut builder = MatchSetBuilder::new();
             for value in &values {
                 builder.add_domain_suffix_name(value)?;
@@ -396,6 +402,9 @@ fn compile_field<P: Eq>(field: RouteMatchField<P>) -> Result<CompiledField<P>, R
             CompiledField::DomainSuffix(builder.build()?)
         }
         RouteMatchField::DomainKeyword(values) => {
+            if values.is_empty() {
+                return Err(RuleCompileError::EmptyField);
+            }
             let mut builder = MatchSetBuilder::new();
             for value in &values {
                 builder.add_domain_keyword(value.as_str())?;
@@ -532,6 +541,25 @@ impl<'a, P> RouteMetadata<'a, P> {
         Self {
             protocol,
             detected_domain,
+        }
+    }
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+
+    #[test]
+    fn empty_domain_fields_fail_public_matcher_construction() {
+        for field in [
+            RouteMatchField::<()>::Domain(vec![]),
+            RouteMatchField::DomainSuffix(vec![]),
+            RouteMatchField::DomainKeyword(vec![]),
+        ] {
+            assert!(matches!(
+                RouteMatcher::try_new(vec![field]),
+                Err(RuleCompileError::EmptyField)
+            ));
         }
     }
 }

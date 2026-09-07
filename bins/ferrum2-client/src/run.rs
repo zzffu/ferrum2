@@ -213,6 +213,7 @@ const fn run_error_for_rule_compile(error: RuleCompileError) -> RunError {
         | RuleCompileError::InvalidTag
         | RuleCompileError::DuplicateRuleSet
         | RuleCompileError::InvalidGeneration
+        | RuleCompileError::ResourceLimit
         | RuleCompileError::Internal => RunError::RuleCompile,
     }
 }

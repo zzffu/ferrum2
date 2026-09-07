@@ -213,7 +213,20 @@ impl From<RuleCompileError> for SrsError {
     fn from(error: RuleCompileError) -> Self {
         let kind = match error {
             RuleCompileError::Allocation => SrsErrorKind::Allocation,
-            _ => SrsErrorKind::Compile,
+            RuleCompileError::ResourceLimit => SrsErrorKind::LimitExceeded,
+            RuleCompileError::EmptyMatcher
+            | RuleCompileError::EmptyField
+            | RuleCompileError::DuplicateField
+            | RuleCompileError::DuplicateValue
+            | RuleCompileError::ConflictingFields
+            | RuleCompileError::InvalidDomain
+            | RuleCompileError::NonCanonicalCidr
+            | RuleCompileError::IndexOverflow
+            | RuleCompileError::InvalidId
+            | RuleCompileError::InvalidTag
+            | RuleCompileError::DuplicateRuleSet
+            | RuleCompileError::InvalidGeneration
+            | RuleCompileError::Internal => SrsErrorKind::Compile,
         };
         Self::new(kind)
     }

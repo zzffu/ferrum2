@@ -319,3 +319,126 @@ async fn reaped_failure_stays_visible_while_shutdown_joins_another_worker() {
     );
     next.shutdown().await.expect("next shutdown");
 }
+
+#[tokio::test]
+async fn aggregate_excess_never_exposes_a_partial_initial_snapshot() {
+    use ferrum2_rule::srs::{SrsDecodeLimits, decode_srs};
+    let admitted = decode_srs(Cursor::new(AI), SrsDecodeLimits::default())
+        .unwrap()
+        .compile()
+        .unwrap();
+    let usage = admitted.resource_usage();
+    let cache = TempDir::new().unwrap();
+    let config = config(&cache);
+    let mut work = RuleSetCacheWork::new(&config);
+    work.snapshot_limits = ferrum2_rule::RuleEngineSnapshotLimits::new(
+        usage.entries(),
+        usage.expanded_bytes().max(1),
+        usage.keyword_bytes().max(1),
+    )
+    .unwrap();
+    let (sender, _receiver) = mpsc::unbounded_channel();
+    let downloader = Arc::new(ControlledDownloader {
+        entered: sender,
+        proceed: Semaphore::new(2),
+    });
+    let result = work
+        .execute(
+            Operation::Materialize {
+                sources: vec![source("first"), source("second")],
+                generation: 1,
+            },
+            Arc::clone(&downloader),
+            config.clone(),
+        )
+        .await;
+    assert!(matches!(result, Err(error) if error.kind() == RuleSetLoadErrorKind::CacheLimit));
+    work.shutdown().await.unwrap();
+    // Individually committed resources remain usable, but no Materialized output
+    // escaped when the complete declaration cohort could not be admitted.
+    let offline = RuleSetCacheWork::new(&config);
+    let result = offline
+        .execute(
+            Operation::Load {
+                source: source("first"),
+                generation: 2,
+            },
+            downloader,
+            RuleSetLoaderConfig::new(cache.path().to_owned(), Duration::from_millis(5), 2).unwrap(),
+        )
+        .await;
+    assert!(
+        matches!(result, Ok(OperationOutput::Loaded(value)) if value.disposition == RuleSetLoadDisposition::OfflineCache)
+    );
+    offline.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn aggregate_rejected_refresh_preserves_cache_bytes_and_live_snapshot() {
+    use ferrum2_rule::{MatchSetBuilder, RuleEngineSnapshotBuilder, RuleEngineSnapshotLimits};
+    let cache = TempDir::new().unwrap();
+    let config = config(&cache);
+    let work = RuleSetCacheWork::new(&config);
+    let (sender, _receiver) = mpsc::unbounded_channel();
+    let downloader = Arc::new(ControlledDownloader {
+        entered: sender,
+        proceed: Semaphore::new(2),
+    });
+    work.execute(
+        Operation::Load {
+            source: source("item"),
+            generation: 1,
+        },
+        Arc::clone(&downloader),
+        config.clone(),
+    )
+    .await
+    .unwrap();
+    let container = std::fs::read_dir(cache.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "frs-cache")
+        })
+        .unwrap()
+        .path();
+    let before = std::fs::read(&container).unwrap();
+    // A compatible complete old registry with deliberately tight admission.
+    // Its cache may contain a newer independently committed complete resource.
+    let mut set = MatchSetBuilder::new();
+    set.add_exact_domain("old.example").unwrap();
+    set.add_domain_suffix("old.example").unwrap();
+    set.add_domain_keyword("old").unwrap();
+    let mut builder = RuleEngineSnapshotBuilder::with_limits(
+        1,
+        RuleEngineSnapshotLimits::new(3, 64, 16).unwrap(),
+    );
+    let set = builder.add_match_set(set.build().unwrap()).unwrap();
+    let rule_set = builder.add_rule_set("item", set).unwrap();
+    let registry = Arc::new(RuleEngineRegistry::new(builder.build().unwrap()));
+    let current = registry.snapshot();
+    let result = work
+        .execute(
+            Operation::Refresh {
+                source: source("item"),
+                registry: Arc::clone(&registry),
+                rule_set,
+            },
+            downloader,
+            config,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        OperationOutput::Refreshed(RuleSetRefreshOutcome::RetainedCache(
+            RuleSetLoadDisposition::StaleCache
+        ))
+    ));
+    assert!(Arc::ptr_eq(&current, &registry.snapshot()));
+    assert_eq!(std::fs::read(container).unwrap(), before);
+    work.shutdown().await.unwrap();
+}

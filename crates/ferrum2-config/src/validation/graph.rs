@@ -107,19 +107,18 @@ pub(super) fn compile_graph_roots(
         &definitions,
         roots,
     )
-    .map_err(|error| match error {
-        SelectorCompileError::Allocation => ConfigError::rule_allocation(ConfigField::RouteRules),
-        SelectorCompileError::RuleCompile => ConfigError::rule_compile(ConfigField::RouteRules),
-        SelectorCompileError::ExtraRoot => ConfigError::semantic(ConfigField::DnsServersDetour),
-        _ => ConfigError::semantic(selector_error_field(error, explicit_route)),
+    .map_err(|error| {
+        let field = if error == SelectorCompileError::ExtraRoot {
+            ConfigField::DnsServersDetour
+        } else {
+            selector_error_field(error, explicit_route)
+        };
+        ConfigError::semantic(field)
     })
 }
 
 pub(super) const fn selector_error_field(error: SelectorCompileError, routed: bool) -> ConfigField {
     match error {
-        SelectorCompileError::Allocation | SelectorCompileError::RuleCompile => {
-            ConfigField::RouteRules
-        }
         SelectorCompileError::Inbounds => ConfigField::InboundsTag,
         SelectorCompileError::Outbounds => ConfigField::OutboundsTag,
         SelectorCompileError::Plans => ConfigField::Chains,
@@ -133,12 +132,7 @@ pub(super) const fn selector_error_field(error: SelectorCompileError, routed: bo
         }
         SelectorCompileError::SelectorOutbounds => ConfigField::SelectorsOutbounds,
         SelectorCompileError::SelectorDefault => ConfigField::SelectorsDefault,
-        SelectorCompileError::StaticBinding => ConfigField::InboundsOutbound,
-        SelectorCompileError::RouteRules => ConfigField::RouteRules,
-        SelectorCompileError::RouteRuleInbound => ConfigField::RouteRulesInbound,
-        SelectorCompileError::RouteRuleOutbound => ConfigField::RouteRulesOutbound,
         SelectorCompileError::ExtraRoot => ConfigField::RouteRulesOutbound,
-        SelectorCompileError::RouteFinal => ConfigField::RouteFinal,
         SelectorCompileError::UnreachableOutbound if routed => ConfigField::RouteRulesOutbound,
         SelectorCompileError::UnreachableOutbound => ConfigField::OutboundsTag,
     }

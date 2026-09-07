@@ -59,6 +59,7 @@ pub(crate) const fn rule_compile_load_error_kind(error: RuleCompileError) -> Rul
         RuleCompileError::Allocation | RuleCompileError::IndexOverflow => {
             RuleSetLoadErrorKind::Allocation
         }
+        RuleCompileError::ResourceLimit => RuleSetLoadErrorKind::CacheLimit,
         RuleCompileError::EmptyMatcher
         | RuleCompileError::EmptyField
         | RuleCompileError::DuplicateField

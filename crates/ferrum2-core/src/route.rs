@@ -3,6 +3,7 @@ use super::selector::{
     SelectorControl, SelectorDefinition, SelectorMember, SelectorState, TaggedInbound,
     TaggedOutbound, TaggedPlan,
 };
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -19,9 +20,15 @@ pub enum Network {
 }
 
 /// One selected immutable ordered plan of concrete outbound identities.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct EgressPlan<'a> {
     hops: &'a [usize],
+}
+
+impl fmt::Debug for EgressPlan<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EgressPlan([redacted])")
+    }
 }
 
 impl<'a> EgressPlan<'a> {

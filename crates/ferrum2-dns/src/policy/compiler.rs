@@ -171,7 +171,8 @@ const fn map_candidate_compile_error(error: RuleCompileError) -> DnsPolicyCompil
     match error {
         RuleCompileError::Allocation => DnsPolicyCompileError::Allocation,
         RuleCompileError::IndexOverflow => DnsPolicyCompileError::IndexOverflow,
-        RuleCompileError::EmptyMatcher
+        RuleCompileError::ResourceLimit
+        | RuleCompileError::EmptyMatcher
         | RuleCompileError::EmptyField
         | RuleCompileError::DuplicateField
         | RuleCompileError::DuplicateValue

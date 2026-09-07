@@ -104,8 +104,6 @@ impl<'a> SelectorDefinition<'a> {
 /// Closed selector compilation failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectorCompileError {
-    Allocation,
-    RuleCompile,
     Inbounds,
     Outbounds,
     Plans,
@@ -115,12 +113,7 @@ pub enum SelectorCompileError {
     SelectorTag,
     SelectorOutbounds,
     SelectorDefault,
-    StaticBinding,
-    RouteRules,
-    RouteRuleInbound,
-    RouteRuleOutbound,
     ExtraRoot,
-    RouteFinal,
     UnreachableOutbound,
     UnreachablePlan,
     UnreachableSelector,

@@ -1,3 +1,7 @@
+mod limits;
+
+pub use limits::RuleEngineSnapshotLimits;
+
 use std::error::Error;
 use std::fmt;
 use std::net::IpAddr;
@@ -93,6 +97,7 @@ pub struct RuleEngineSnapshot {
     ip_rule_sets: Box<[RuleSetId]>,
     candidates: MatchCandidateIndex,
     generation: u64,
+    limits: RuleEngineSnapshotLimits,
 }
 
 impl RuleEngineSnapshot {
@@ -154,6 +159,7 @@ impl RuleEngineSnapshot {
             match_sets,
             rule_sets,
             generation,
+            limits: self.limits,
         })
     }
 
@@ -226,6 +232,7 @@ pub struct RuleEngineSnapshotBuilder {
     match_sets: Vec<Arc<CompiledMatchSet>>,
     rule_sets: Vec<RuleSetDraft>,
     generation: u64,
+    limits: RuleEngineSnapshotLimits,
 }
 
 impl fmt::Debug for RuleEngineSnapshotBuilder {
@@ -236,10 +243,15 @@ impl fmt::Debug for RuleEngineSnapshotBuilder {
 
 impl RuleEngineSnapshotBuilder {
     pub const fn new(generation: u64) -> Self {
+        Self::with_limits(generation, RuleEngineSnapshotLimits::DEFAULT)
+    }
+
+    pub const fn with_limits(generation: u64, limits: RuleEngineSnapshotLimits) -> Self {
         Self {
             match_sets: Vec::new(),
             rule_sets: Vec::new(),
             generation,
+            limits,
         }
     }
 
@@ -344,6 +356,21 @@ impl RuleEngineSnapshotBuilder {
     }
 
     pub fn build(self) -> Result<RuleEngineSnapshot, RuleCompileError> {
+        // Count retained slots (including orphans) and descriptor-expanded input
+        // separately. Repeated aliases must not bypass duplicate-index admission.
+        let mut retained = crate::MatchSetResourceUsage::default();
+        for set in &self.match_sets {
+            retained = self.limits.admit(retained, set.resource_usage())?;
+        }
+        let mut indexed = crate::MatchSetResourceUsage::default();
+        for descriptor in &self.rule_sets {
+            let set = self
+                .match_sets
+                .get(descriptor.match_set.index())
+                .ok_or(RuleCompileError::InvalidId)?;
+            indexed = self.limits.admit(indexed, set.resource_usage())?;
+        }
+
         let mut descriptors = Vec::new();
         descriptors
             .try_reserve_exact(self.rule_sets.len())
@@ -381,6 +408,7 @@ impl RuleEngineSnapshotBuilder {
             ip_rule_sets: ip_rule_sets.into_boxed_slice(),
             candidates: candidates.build()?,
             generation: self.generation,
+            limits: self.limits,
         })
     }
 }

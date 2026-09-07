@@ -45,6 +45,7 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M2g / FND-05 | 私有listener owner统一同family通配/相等地址冲突；ordinary、DNS、metrics及finish后的endpoint loop使用同一关系；TUN pseudo inbound仍排除 | config90通过，严格clippy/格式通过；新3项行为测试覆盖两角色/两种声明顺序、metrics与DNS冲突、不同具体地址共享端口。未做真实bind，未主张跨family alias；首轮新增测试调用不存在getter编译失败已修正 |
 | M3d / PLAT-05/06/09/11 | 健康readback区分Exact/Mismatch/Unavailable，检查双family MTU及journal；查询失败只关准入并保留分类，字段私有化维护AdapterConfig构造不变量；补现有trait/FFI义务 | platform69 safe tests、allfeatures check/strictlint/fmt通过；新增Mtu闭合原因贯穿TUN/runtime/client/observability，observability24及严格lint通过。新增3个rebuild result组合，lazy注册；live host及binary整合待执行 |
 | M3c1 / D5 bridge | TunRootRequest替代12位置参数；NativeLifecycleOwner从spawn起保管可关闭单槽握手与native join；queued/inflight completion关闭后Stopped；Initialize及Prepared共享deadline | TUN134 safe tests、allfeature check/strictlint/fmt通过；client no-run初次受并行system接口迁移影响。D5仍有后续：强制drop run future时异步JoinSet仅abort未join，已确认supervisor watchdog触发链，正在实现parent-retained cleanup；不能称D5完成 |
+| M2f / aggregate及公开构造 | CompiledMatchSet持有用量；snapshot在复制index前分别限制retained slots和descriptor展开（含alias）；initial逐文件准入、refresh超限保留原cache/live；keyword显式NoncontiguousNFA；同步删除失效selector错误/公开常量，borrowed plan redaction及空字段拒绝 | rule47/ruleset35、config/DNS完整包、四包严格lint/fmt通过；新7个小输入边界及2个真实worker aggregate测试。复制suffix output粗界O(255×keyword bytes)，没有实测RSS/性能声明；core/protocol联合277测试覆盖构造和redaction调整 |
 
 继续位置（基准`07939e2d`）：M2c实现RuleSet单文件cache事务与实际worker所有权；M2d实现
 DNS parent-owned query cleanup及关闭后的资源注册拒绝；M3a通知staged rollback已完成

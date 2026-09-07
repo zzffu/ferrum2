@@ -1,6 +1,10 @@
+mod usage;
+
+pub use usage::MatchSetResourceUsage;
+
 use std::net::IpAddr;
 
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use aho_corasick::AhoCorasick;
 use ferrum2_core::{CanonicalDomain, DomainName};
 use ipnet::IpNet;
 
@@ -146,15 +150,42 @@ impl MatchSetBuilder {
             return Err(RuleCompileError::DuplicateValue);
         }
 
-        let keyword_matcher = if self.domain_keywords.is_empty() {
-            None
-        } else {
-            Some(
-                AhoCorasickBuilder::new()
-                    .build(self.domain_keywords.iter().map(|value| value.as_bytes()))
-                    .map_err(|_| RuleCompileError::Internal)?,
-            )
+        let keyword_bytes = self
+            .domain_keywords
+            .iter()
+            .try_fold(0_usize, |total, value| {
+                total
+                    .checked_add(value.len())
+                    .ok_or(RuleCompileError::ResourceLimit)
+            })?;
+        let expanded_bytes = self
+            .exact_domains
+            .iter()
+            .chain(&self.suffix_domains)
+            .try_fold(keyword_bytes, |total, value| {
+                total
+                    .checked_add(value.as_str().len())
+                    .ok_or(RuleCompileError::ResourceLimit)
+            })?;
+        let entries = [
+            self.exact_domains.len(),
+            self.suffix_domains.len(),
+            self.domain_keywords.len(),
+            self.ip_cidrs.len(),
+        ]
+        .into_iter()
+        .try_fold(0_usize, |total, count| {
+            total
+                .checked_add(count)
+                .ok_or(RuleCompileError::ResourceLimit)
+        })?;
+        let resource_usage = MatchSetResourceUsage {
+            entries,
+            expanded_bytes,
+            keyword_bytes,
         };
+        let keyword_matcher =
+            crate::keyword::compile_keywords(self.domain_keywords.iter().map(AsRef::as_ref))?;
         let ip_prefixes = IpPrefixIndex::build(&self.ip_cidrs)?;
         let capabilities = MatchSetCapabilities {
             exact_domain: !self.exact_domains.is_empty(),
@@ -177,6 +208,7 @@ impl MatchSetBuilder {
             ip_prefixes,
             capabilities,
             entry_counts,
+            resource_usage,
         })
     }
 }
@@ -200,9 +232,14 @@ pub struct CompiledMatchSet {
     ip_prefixes: IpPrefixIndex,
     capabilities: MatchSetCapabilities,
     entry_counts: MatchSetEntryCounts,
+    resource_usage: MatchSetResourceUsage,
 }
 
 impl CompiledMatchSet {
+    pub const fn resource_usage(&self) -> MatchSetResourceUsage {
+        self.resource_usage
+    }
+
     pub const fn capabilities(&self) -> MatchSetCapabilities {
         self.capabilities
     }

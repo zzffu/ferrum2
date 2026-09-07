@@ -18,3 +18,10 @@ fn target_and_domain_share_the_same_canonical_storage_contract() {
         target.canonical_domain().map(CanonicalDomain::as_str)
     );
 }
+
+#[test]
+fn borrowed_and_owned_egress_plans_redact_outbound_identities() {
+    let handle = ferrum2_core::route::EgressPlanHandle::direct(918273645);
+    assert_eq!(format!("{:?}", handle.snapshot()), "EgressPlan([redacted])");
+    assert!(!format!("{:?}", handle.snapshot_owned()).contains("918273645"));
+}
